@@ -30,10 +30,11 @@ import (
 )
 
 // insertSearchableConfig creates a monitoring asset plus one crypto
-// configuration on it, and returns the asset id.
+// configuration on it, and returns the configuration id.
 func insertSearchableConfig(t *testing.T, db *database.DB, tenant uuid.UUID, hostname, ip, protocol, version, cipher string, riskScore int) uuid.UUID {
 	t.Helper()
 	asset := uuid.New()
+	impl := uuid.New()
 	if _, err := db.Exec(`
 		INSERT INTO assets (id, tenant_id, hostname, primary_address, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
 			VALUES ($1, $2, $3, $4::inet, 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
@@ -45,10 +46,10 @@ func insertSearchableConfig(t *testing.T, db *database.DB, tenant uuid.UUID, hos
 			id, tenant_id, asset_id, protocol, protocol_version, cipher_suite,
 			discovery_method, risk_score, last_verified_at, first_discovered_at, created_at, updated_at
 		) VALUES ($1,$2,$3,$4::protocol_type,$5,$6,'passive',$7,NOW(),NOW(),NOW(),NOW())`,
-		uuid.New(), tenant, asset, protocol, version, cipher, riskScore); err != nil {
+		impl, tenant, asset, protocol, version, cipher, riskScore); err != nil {
 		t.Fatalf("insert crypto implementation on %s: %v", hostname, err)
 	}
-	return asset
+	return impl
 }
 
 // TestIntegration_CryptoImplementations_SearchDoesNotAbort is the direct
@@ -109,7 +110,10 @@ func TestIntegration_CryptoRisks_ListRisksSearchDoesNotAbort(t *testing.T) {
 	tenant := testdb.NewTenant(t, raw)
 	svc := &CryptoRisksService{db: db}
 
-	insertSearchableConfig(t, db, tenant, "weak-tls.example.test", "192.0.2.30", "TLS", "TLSv1.0", "TLS_RSA_WITH_RC4_128_SHA", 95)
+	ci := insertSearchableConfig(t, db, tenant, "weak-tls.example.test", "192.0.2.30", "TLS", "TLSv1.0", "TLS_RSA_WITH_RC4_128_SHA", 95)
+	if _, err := db.Exec(`INSERT INTO crypto_implementation_algorithms(crypto_implementation_id,algorithm_id,algorithm_type) SELECT $1,id,'protocol_version' FROM algorithms WHERE code='TLS1.0'`, ci); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, search := range []string{"tls", "192.0.2.30", "weak-tls", "RC4"} {
 		res, err := svc.ListRisks(tenant, CryptoRiskFilters{Search: search, Page: 1, PageSize: 20})
@@ -133,7 +137,7 @@ func TestIntegration_CryptoImplementations_RiskLevelFiltersInSQL(t *testing.T) {
 	tenant := testdb.NewTenant(t, raw)
 	svc := &CryptoImplementationService{db: db}
 
-	// 25 Informational rows (score 0) then 3 Critical (score 95). Default sort
+	// 25 assessed Informational rows (score 0) then 3 Critical (score 95). Default sort
 	// is last_verified_at DESC, so the Critical rows are inserted FIRST, giving
 	// them the oldest timestamps and pushing them off page 1 of a 10-row page.
 	for i := 0; i < 3; i++ {
@@ -144,10 +148,32 @@ func TestIntegration_CryptoImplementations_RiskLevelFiltersInSQL(t *testing.T) {
 	if _, err := db.Exec(`UPDATE crypto_implementations SET last_verified_at = NOW() - INTERVAL '10 days' WHERE tenant_id = $1`, tenant); err != nil {
 		t.Fatalf("age the critical rows: %v", err)
 	}
+	var originalAES256Score int
+	if err := db.QueryRow(`SELECT risk_score FROM algorithms WHERE code = 'AES256'`).Scan(&originalAES256Score); err != nil {
+		t.Fatalf("read AES256 catalogue score: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.Exec(`UPDATE algorithms SET risk_score = $1 WHERE code = 'AES256'`, originalAES256Score); err != nil {
+			t.Errorf("restore AES256 catalogue score: %v", err)
+		}
+	})
+	if _, err := db.Exec(`UPDATE algorithms SET risk_score = 0 WHERE code = 'AES256'`); err != nil {
+		t.Fatalf("make AES256 an explicit zero-score assessment: %v", err)
+	}
+	var aes256ID uuid.UUID
+	if err := db.QueryRow(`SELECT id FROM algorithms WHERE code = 'AES256'`).Scan(&aes256ID); err != nil {
+		t.Fatalf("read AES256 catalogue id: %v", err)
+	}
 	for i := 0; i < 25; i++ {
-		insertSearchableConfig(t, db, tenant,
+		impl := insertSearchableConfig(t, db, tenant,
 			fmt.Sprintf("ok-%d.example.test", i), fmt.Sprintf("198.51.100.%d", 1+i),
 			"TLS", "TLSv1.3", "TLS_AES_256_GCM_SHA384", 0)
+		if _, err := db.Exec(`
+			INSERT INTO crypto_implementation_algorithms
+				(crypto_implementation_id, algorithm_id, algorithm_type, is_inferred)
+			VALUES ($1, $2, 'symmetric', false)`, impl, aes256ID); err != nil {
+			t.Fatalf("link assessed zero configuration %d: %v", i, err)
+		}
 	}
 
 	// Page 1 of 10 contains only Informational rows under the default sort, so

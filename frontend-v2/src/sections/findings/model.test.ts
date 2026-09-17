@@ -7,7 +7,10 @@
 // that reads the subject as "the asset" is a place that renders the wrong
 // thing, or links a ticket to a row that does not exist.
 import { describe, expect, it } from 'vitest';
-import { assetOf, isOpenWf, sevLevel, sevRank, subjectContext, targetLabel, wfOf, type ComplianceFinding } from './model';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { RiskChip } from '../../components/ui';
+import { assetOf, categoriesOf, hasCategoryLabel, isOpenWf, sevLevel, sevRank, subjectContext, targetLabel, wfOf, type ComplianceFinding, type CryptoRisk } from './model';
 
 function finding(over: Partial<ComplianceFinding> = {}): ComplianceFinding {
   return {
@@ -121,6 +124,8 @@ describe('sevLevel', () => {
     expect(sevLevel('high')).toBe('High');
     expect(sevLevel('medium')).toBe('Medium');
     expect(sevLevel('low')).toBe('Low');
+    expect(sevLevel('info')).toBe('Informational');
+    expect(sevLevel('informational')).toBe('Informational');
   });
 
   it('still reads a control author’s `Med`, which reaches some surfaces unnormalized', () => {
@@ -128,18 +133,40 @@ describe('sevLevel', () => {
     expect(sevLevel('High')).toBe('High');
   });
 
-  it('treats an unknown or missing severity as Informational, not as Low', () => {
-    // Informational is the band at score 0 — "nothing was said about this" —
-    // and quietly promoting it to Low would invent a judgement.
-    expect(sevLevel(undefined)).toBe('Informational');
-    expect(sevLevel('')).toBe('Informational');
-    expect(sevLevel('catastrophic')).toBe('Informational');
+  it('keeps unknown or missing severity separate from measured Informational', () => {
+    // A missing grade is not an informational finding.
+    expect(sevLevel(null)).toBe('Unknown');
+    expect(sevLevel(undefined)).toBe('Unknown');
+    expect(sevLevel('')).toBe('Unknown');
+    expect(sevLevel('catastrophic')).toBe('Unknown');
+  });
+
+  it('renders an unscored crypto risk as a neutral unknown marker', () => {
+    const html = renderToStaticMarkup(createElement(RiskChip, { level: sevLevel(null) }));
+    expect(html).toContain('aria-label="Unknown"');
+    expect(html).toContain('>?</span>');
   });
 
   it('ranks worst-first, so a sort puts Critical at the top', () => {
     expect(sevRank('Critical')).toBeLessThan(sevRank('High'));
     expect(sevRank('High')).toBeLessThan(sevRank('Medium'));
     expect(sevRank('Informational')).toBeGreaterThan(sevRank('Low'));
+  });
+});
+
+describe('crypto risk categories', () => {
+  const risk = { category: 'key_size' } as CryptoRisk;
+
+  it('uses every applicable category for filtering while retaining the primary category', () => {
+    const mixed = { ...risk, categories: ['key_size', 'algorithm'] } as CryptoRisk;
+    expect(categoriesOf(mixed)).toEqual(['key_size', 'algorithm']);
+    expect(hasCategoryLabel(mixed, 'Algorithm')).toBe(true);
+    expect(hasCategoryLabel(mixed, 'Key size')).toBe(true);
+  });
+
+  it('falls back to the primary category for older responses', () => {
+    expect(categoriesOf(risk)).toEqual(['key_size']);
+    expect(hasCategoryLabel(risk, 'Key size')).toBe(true);
   });
 });
 
@@ -159,4 +186,3 @@ describe('workflow status', () => {
     expect(isOpenWf(finding({ workflow_status: 'SUPPRESSED' }))).toBe(false);
   });
 });
-

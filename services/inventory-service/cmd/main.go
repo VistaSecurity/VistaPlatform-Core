@@ -10,12 +10,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/autoscan"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/driftsettings"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/jobs"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/subscribers"
 	aiedition "github.com/vistasecurity/vistaplatform/shared/ai/edition"
 	seams "github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
@@ -109,7 +112,10 @@ func main() {
 	sbomIngest := services.NewSBOMIngestService(db, assetService)
 	sbomHandler := handlers.NewSBOMHandler(sbomIngest)
 	discoveryHandler := handlers.NewDiscoveryHandler(assetService, discoveryService)
-	discoveryHandler.SetDB(db)
+	// Settings -> Discovery -> Active Scanning: the tenant's automatic-scan
+	// policy plus the read-only account of what the sweep has been doing.
+	autoScanStore := autoscan.NewStore(db)
+	autoScanHandler := handlers.NewAutoScanHandler(autoScanStore)
 	cryptoAssetsHandler := handlers.NewCryptoAssetsHandler(assetService)
 	cryptoApplicationsHandler := handlers.NewCryptoApplicationsHandler(assetService)
 	integrationsHandler := handlers.NewIntegrationsHandler(assetService)
@@ -444,8 +450,18 @@ func main() {
 		api.POST("/inventory-service/network-spaces/classify-assets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSpaceHandler.ReclassifyAssets)
 
 		// Discovery endpoints
-		api.GET("/inventory-service/discovery/capabilities", discoveryHandler.GetCapabilities)
-		api.PUT("/inventory-service/discovery/capabilities", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryManage), discoveryHandler.UpdateCapabilities)
+		// Settings -> Discovery -> Active Scanning. The read is settings.read
+		// because the page shows what the platform is doing unasked and everyone
+		// who can see the inventory should be able to see that; the write is
+		// settings.update because it decides whether the platform probes the
+		// tenant's own network without being asked.
+		api.GET("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), autoScanHandler.GetAutoScan)
+		api.PUT("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), autoScanHandler.UpdateAutoScan)
+		// Gated the same as the auto-scan summary above (settings.read), not
+		// discovery.read: the unified Jobs page is reached the same way the
+		// Active Scanning settings summary is — a tenant admin's view onto
+		// scan activity — not a general discovery-data read.
+		api.GET("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), discoveryHandler.ListJobs)
 		api.POST("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
 		api.GET("/inventory-service/discovery/jobs/:id", discoveryHandler.GetJob)
 		api.GET("/inventory-service/discovery/jobs/:id/results", discoveryHandler.GetJobResults)
@@ -509,9 +525,15 @@ func main() {
 		// Discovery direct routes
 		// Register OPTIONS handlers for CORS preflight
 		// IMPORTANT: More specific routes must come before less specific ones
-		api.GET("/discovery/capabilities", discoveryHandler.GetCapabilities)
-		api.PUT("/discovery/capabilities", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryManage), discoveryHandler.UpdateCapabilities)
+		// Settings -> Discovery -> Active Scanning. The read is settings.read
+		// because the page shows what the platform is doing unasked and everyone
+		// who can see the inventory should be able to see that; the write is
+		// settings.update because it decides whether the platform probes the
+		// tenant's own network without being asked.
+		api.GET("/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), autoScanHandler.GetAutoScan)
+		api.PUT("/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), autoScanHandler.UpdateAutoScan)
 		api.OPTIONS("/discovery/jobs", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+		api.GET("/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), discoveryHandler.ListJobs)
 		api.POST("/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
 		// Specific routes first (with /results, /cancel, etc.)
 		api.GET("/discovery/jobs/:id/results", discoveryHandler.GetJobResults)
@@ -749,8 +771,14 @@ func main() {
 		apiv2.GET("/inventory-service/operational/remediation-templates", operationalHandler.GetRemediationTemplates)
 
 		// Discovery endpoints
-		apiv2.GET("/inventory-service/discovery/capabilities", discoveryHandler.GetCapabilities)
-		apiv2.PUT("/inventory-service/discovery/capabilities", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryManage), discoveryHandler.UpdateCapabilities)
+		// Settings -> Discovery -> Active Scanning. The read is settings.read
+		// because the page shows what the platform is doing unasked and everyone
+		// who can see the inventory should be able to see that; the write is
+		// settings.update because it decides whether the platform probes the
+		// tenant's own network without being asked.
+		apiv2.GET("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), autoScanHandler.GetAutoScan)
+		apiv2.PUT("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), autoScanHandler.UpdateAutoScan)
+		apiv2.GET("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), discoveryHandler.ListJobs)
 		apiv2.POST("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
 		apiv2.GET("/inventory-service/discovery/jobs/:id", discoveryHandler.GetJob)
 		apiv2.GET("/inventory-service/discovery/jobs/:id/results", discoveryHandler.GetJobResults)
@@ -904,6 +932,32 @@ func main() {
 	if hooks.StartNetBoxScheduler != nil {
 		go hooks.StartNetBoxScheduler(ctx, db, rawDB, bypassDB, assetService,
 			os.Getenv("ENCRYPTION_MASTER_KEY"), 5*time.Minute)
+	}
+
+	// Automatic active scanning: scan a newly observed internal host straight
+	// away, and rescan every internal host once the tenant's interval has
+	// elapsed. Kill switch DISCOVERY_AUTO_SCAN_WORKER_ENABLED=false.
+	//
+	// Two starts, and the second is the half that is easy to lose: without the
+	// subscriber the worker still runs, still rescans on schedule, and the
+	// "scan it the moment we first see it" half of the product definition
+	// silently does not happen. TestAutoActiveScan_MainStartsTheWorker pins
+	// both lines.
+	// The router is what sends an automatic scan to the tenant sensor
+	// that observed the host instead of the platform; without it every scan
+	// runs from the cluster and a host only a sensor can reach is never scanned.
+	autoScanJob := jobs.NewAutoActiveScanJob(autoScanStore, discoveryService, sensorrouting.NewStore(db), bypassDB)
+	go autoScanJob.Start(ctx)
+	if natsClient != nil {
+		autoScanSubscriber := subscribers.NewAutoScanSubscriber(natsClient, autoScanJob)
+		if err := autoScanSubscriber.Start(); err != nil {
+			// Not fatal: the scheduled sweep still selects every asset that has
+			// no scan stamp, so this costs promptness, not coverage.
+			log.Printf("WARNING: automatic-scan first-observation trigger not started: %v", err)
+		} else {
+			defer autoScanSubscriber.Stop()
+			log.Println("Automatic active scan: first-observation trigger subscribed")
+		}
 	}
 
 	// Start health check server (only when mTLS is enabled - API server on different port)

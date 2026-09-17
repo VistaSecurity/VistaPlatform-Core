@@ -28,6 +28,13 @@ Infrastructure). That is the whole rule, and it applies to every path into
 inventory — scans, sensors, cloud, manual creation, spreadsheet import and CMDB
 pull. See [Asset Approval](./asset-approval.md).
 
+**Scans you did not start.** Most discovery jobs are ones somebody asked for.
+Automatic active scanning is the exception: a new internal host is probed as
+soon as it appears, and every internal host is probed again on a schedule (24
+hours by default). Tenant admins control it — including turning it off — at
+**Settings → Discovery → Active Scanning**. Only your own internal addresses are
+ever scanned that way. See [Automatic Active Scanning](./active-scanning.md).
+
 **Observation rest period.** A passive sensor does not re-send the same
 observation on every connection it sees; it rests for **one hour** between
 repeats of the same sighting. That default is **not adjustable from the console
@@ -70,9 +77,12 @@ Create a discovery job with target networks, protocols, and ports, OR interrogat
 
 Monitor discovery job status and progress.
 
-**UI:** **Discovery → Discovery Jobs** lists every run with its status; click a
-row for the run's detail. **Discovery → Job Logs** carries the same detail for
-interrogation runs.
+**UI:** **Discovery → Discovery Jobs** lists every run — discovery jobs (Active
+Scan, the Discover wizard, the automatic-scan sweep) alongside device
+interrogations — with its kind, executor, status and duration; filter by Kind,
+Status or Executor. Click a discovery/automatic-scan row for its dispatch
+timeline, targets, and findings split; click an interrogation row for the same
+detail **Discovery → Job Logs** also carries.
 
 **API:** `GET /api/v2/inventory-service/discovery/jobs/:id`
 
@@ -298,6 +308,63 @@ Cancel a running discovery job.
 Rerun a completed or failed discovery job.
 
 **API:** `POST /api/v2/inventory-service/discovery/jobs/:id/rerun`
+
+## Active Scan: choosing where it runs
+
+An active scan has to run from somewhere that can reach the host. The platform
+sensor inside the cluster reaches what the platform can route to; a host that is
+only reachable from inside your own network is reachable only from a sensor you
+deployed there. **Discovery → Active Scan** lets you choose, with the **Run
+from** control beside the scan buttons:
+
+| Run from | What happens |
+|---|---|
+| **Auto (observing sensor)** — the default | Each asset is scanned from the sensor of yours that most recently observed it. If none of your sensors has, a sensor on the same network segment is used; failing that, the platform sensor. |
+| **Platform sensor** | Everything is scanned from inside the cluster — what every scan did before this control existed. |
+| *A named sensor* | Everything is scanned from that one sensor. |
+
+"The observing sensor" is the one of your sensors whose passive capture last
+recorded the host — the best evidence anything can reach it. Sensors that are
+offline are listed but cannot be chosen; the platform's own sensors are the
+"Platform sensor" entry and are never listed by name. If no sensor of yours is
+registered, the control offers the platform sensor only and points you to
+**Sensors & Agents**.
+
+The permission is the same whichever you pick: running a scan needs
+`assets.update`, and running it from a sensor needs nothing more. Choosing a
+sensor does not change the sensor's configuration and does not restart it.
+
+**When the sensor is offline.** A scan sent to a sensor that has not checked in
+recently fails immediately and says so — nothing is scanned, and the job is
+never run from the platform instead, because a scan from somewhere that cannot
+see the host would come back empty and look like an answer. Under **Auto**, an
+asset whose observing sensor is offline is left unscanned and reported in the
+result; scan it again when the sensor is back, or choose another executor. A
+sensor that was online when the scan was created and then went quiet before
+collecting it fails the job the same way, once the time the sensor's own
+reporting cadence allows has passed. The failure names the sensor and its last
+check-in.
+
+**Following a scan.** The Active Scan page keeps a **Scans started from this
+page** panel under the controls: each scan you start appears there with its
+executor — *Platform sensor* or the sensor's name — its state (*Queued*,
+*Awaiting <sensor>* while the sensor has not yet collected the job, *Running on
+<sensor>*, *Completed*, or *Failed: sensor offline* with the sensor's last
+check-in) and the timeline queued → dispatched → picked up → completed,
+updating while the scan runs. It is cleared when you leave the page. Automatic
+scans show the same executor and state in the run list on **Settings →
+Discovery → Active Scanning**. Every scan also lands on **Discovery →
+Discovery Jobs**, filterable by Kind (Discovery / Automatic scan), so it stays
+visible after you leave the page that started it.
+
+Results from a sensor take the same path as everything else that sensor sends
+(see [How a discovery reaches your inventory](#how-a-discovery-reaches-your-inventory))
+and land on the asset's Cryptography tab as **active** observations, exactly as
+a platform-run scan's do.
+
+Automatic scans choose the same way, governed by the **Prefer the observing
+sensor** switch on **Settings → Discovery → Active Scanning** — see
+[Automatic Active Scanning](./active-scanning.md).
 
 ## Re-validation of Existing Assets
 

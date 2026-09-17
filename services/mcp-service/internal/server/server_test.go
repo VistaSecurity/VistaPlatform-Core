@@ -246,9 +246,9 @@ func newFixture(t *testing.T) *fixture {
 	exchanger := platform.NewExchanger(authSrv.URL, nil, recorder)
 	client := platform.NewClient(nil, backend.URL, backend.URL, backend.URL)
 	mcpServer := NewMCPServer(&tools.Deps{Client: client, Audit: recorder})
-	handler := NewHandler(mcpServer, exchanger, recorder)
+	handler := NewHandler(mcpServer, exchanger, recorder, testDiscovery)
 
-	router := NewRouter(handler)
+	router := NewRouter(handler, testDiscovery)
 	f.ts = httptest.NewServer(router)
 	t.Cleanup(f.ts.Close)
 	return f

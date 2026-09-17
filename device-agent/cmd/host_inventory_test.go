@@ -52,7 +52,7 @@ func TestRunLocalHostInventoryLoop_CollectsOnStart(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 
-	go runLocalHostInventoryLoop(s, "agent-1", time.Hour, stop)
+	go runLocalHostInventoryLoop(s, "agent-1", newInterval(time.Hour), stop)
 
 	select {
 	case <-s.notify:
@@ -74,7 +74,7 @@ func TestRunLocalHostInventoryLoop_SurvivesAFailedSubmission(t *testing.T) {
 
 	// The floor is applied inside the loop, so ask for something small and
 	// confirm the loop still ticks rather than stalling on the first error.
-	go runLocalHostInventoryLoop(s, "agent-1", time.Hour, stop)
+	go runLocalHostInventoryLoop(s, "agent-1", newInterval(time.Hour), stop)
 
 	select {
 	case <-s.notify:
@@ -91,7 +91,7 @@ func TestRunLocalHostInventoryLoop_SurvivesAFailedSubmission(t *testing.T) {
 // A nil submitter must not panic — the loop is started from Start(), which runs
 // before anything guarantees a client exists.
 func TestRunLocalHostInventoryLoop_NilSubmitterIsANoOp(t *testing.T) {
-	runLocalHostInventoryLoop(nil, "agent-1", time.Hour, nil)
+	runLocalHostInventoryLoop(nil, "agent-1", newInterval(time.Hour), nil)
 }
 
 // The floor is enforced in the loop as well as in the config parser. A package
@@ -168,7 +168,7 @@ func TestRunLocalHostInventoryLoop_DoesNotRetryAnOverCapReport(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 
-	go runLocalHostInventoryLoop(s, "agent-1", time.Hour, stop)
+	go runLocalHostInventoryLoop(s, "agent-1", newInterval(time.Hour), stop)
 
 	select {
 	case <-s.notify:

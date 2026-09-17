@@ -140,8 +140,14 @@ func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, c
 	chassis := snmpCollectOps(ctx, conn, community, result, timeout)
 	snmpEmitVendorHint(result, chassis, sysInfo[snmpOIDSysObjectID])
 
+	// sysName is whatever the operator configured on the agent ("Server Room
+	// Switch #1") — not guaranteed to be a DNS name. It is already preserved
+	// for display in asset.Metadata under its OID key above; only promote it
+	// to Hostname when it is DNS-valid.
 	if name := sysInfo[snmpOIDSysName]; name != "" {
-		asset.Hostname = name
+		if hostname := canonicalHostnameOrEmpty(name); hostname != "" {
+			asset.Hostname = hostname
+		}
 	}
 	result.DeviceIdentity = snmpIdentity(chassis, sysInfo[snmpOIDSysObjectID], sysInfo[snmpOIDSysDescr])
 

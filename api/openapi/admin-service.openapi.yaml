@@ -3604,6 +3604,69 @@ paths:
           $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /admin/tenants/{id}/settings:
+    get:
+      operationId: getTenantSettings
+      x-edition: enterprise
+      tags:
+      - tenants
+      summary: A tenant's platform-admin overrides
+      description: 'The per-tenant overrides a platform admin may set for one tenant, plus the optimistic-locking version to echo back on PUT. Each field is THREE-valued: absent means "no override — follow the platform default", and only an explicit true/false overrides it. A tenant that has never been given an override returns an empty settings object with version 0.'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The tenant's overrides and the current settings version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantSettingsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: updateTenantSettings
+      x-edition: enterprise
+      tags:
+      - tenants
+      summary: Set a tenant's platform-admin overrides
+      description: 'Merges the supplied overrides into the tenant''s shared tenant_admin_settings.config document. Only the keys named in the request body are written; every other producer''s keys in that document (discovery auto-scan policy, drift, identity, AI controls) are left untouched, and a field omitted from `settings` keeps its stored value rather than being cleared. Send `version` from the preceding GET for optimistic locking; a stale version returns 409. Requires the `tenants.manage` platform permission.'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantSettingsRequest'
+      responses:
+        '200':
+          description: The overrides were merged; returns the new version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateTenantSettingsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /admin/tenants/{id}/purge:
     delete:
       operationId: purgeTenant
@@ -5697,6 +5760,61 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TenantEntitlement'
+    TenantSettings:
+      type: object
+      additionalProperties: false
+      description: |
+        A tenant's platform-admin overrides. Every property is optional and
+        THREE-valued: absent means "no override — follow the platform default",
+        true and false are explicit overrides. Absent is NOT the same as false.
+      properties:
+        email_verification_required:
+          type: boolean
+          description: 'Override whether this tenant''s new users must verify their email before they can sign in. Absent = follow the platform default (Settings ▸ Access, key email_verification_required); if that is unset too, auth-service falls back to whether the deployment can actually send mail.'
+        onboarding_required:
+          type: boolean
+          description: 'Override whether this tenant''s users are shown the onboarding walkthrough. Absent = follow the platform default, which is "required". The tenant''s own admins can also set this for themselves from the tenant UI; both write the same key, last write wins.'
+    TenantSettingsResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /admin/tenants/{id}/settings.'
+      required:
+      - settings
+      - version
+      properties:
+        settings:
+          $ref: '#/components/schemas/TenantSettings'
+        version:
+          type: integer
+          description: 'Optimistic-locking version of the tenant''s settings document. 0 when the tenant has no settings row yet. Echo this back as `version` on PUT.'
+    UpdateTenantSettingsRequest:
+      type: object
+      additionalProperties: false
+      description: 'Body for PUT /admin/tenants/{id}/settings.'
+      required:
+      - settings
+      properties:
+        settings:
+          $ref: '#/components/schemas/TenantSettings'
+        version:
+          type: integer
+          description: 'The version from the preceding GET. When supplied, the write is rejected with 409 if the stored version has moved on. Omit to write unconditionally.'
+    UpdateTenantSettingsResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for PUT /admin/tenants/{id}/settings. `settings` echoes the overrides as supplied in the request, not the merged document — re-read with GET for the full resolved set.'
+      required:
+      - message
+      - settings
+      - version
+      properties:
+        message:
+          type: string
+        settings:
+          $ref: '#/components/schemas/TenantSettings'
+        version:
+          type: integer
+          description: 'The settings document version AFTER the merge.'
     EffectiveLimits:
       type: object
       additionalProperties: false

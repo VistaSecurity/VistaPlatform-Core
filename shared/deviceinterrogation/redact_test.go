@@ -214,8 +214,18 @@ func TestConvertDeviceToAsset_ProjectsOntoAllowlist(t *testing.T) {
 			t.Errorf("field %q was collected; it is not on the inventory allowlist", dropped)
 		}
 	}
-	if asset.Hostname != "AC LR" || asset.IPAddress != "192.0.2.250" {
+	// "AC LR" is the controller's DISPLAY name — a label, not a hostname (it
+	// has a space). It must survive in Metadata for the UI but must NOT become
+	// asset.Hostname: the identity layer treats Hostname as a DNS name and
+	// rejects a value with a space, which is exactly the reject this test used
+	// to require. Identity is not lost — the IP address still identifies the
+	// device — see TestConvertDeviceToAsset_DisplayNameNotPromotedToHostname
+	// (unifi_ops_test.go) for the dedicated regression test.
+	if asset.Hostname != "" || asset.IPAddress != "192.0.2.250" {
 		t.Errorf("identity lost: %+v", asset)
+	}
+	if asset.Metadata["name"] != "AC LR" {
+		t.Errorf("display name was not preserved in Metadata: %#v", asset.Metadata["name"])
 	}
 	if asset.Metadata["model"] != "U7LR" || asset.Metadata["firmware_version"] != "6.6.77.15402" {
 		t.Errorf("inventory fields lost: %#v", asset.Metadata)

@@ -287,7 +287,12 @@ func (s *FrameworkContextService) calculateFrameworkStats(tenantID, frameworkID 
 		func(c controlRow) uuid.UUID { return c.ID },
 		func(c controlRow) string { return c.BaselineSeverity },
 		assessments)
-	return frameworkScore(outcomes)
+	breakdown, err := frameworkScore(outcomes)
+	if err != nil {
+		log.Printf("invalid framework severity: %v", err)
+		return scoreBreakdown{Total: len(controls), NotAssessed: len(controls)}
+	}
+	return breakdown
 }
 
 // unlimitedFrameworkLimit is how an unlimited cap is reported on the wire.
@@ -635,7 +640,11 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 	// Score through the ONE model — severity-weighted, over the assessed subset.
 	// This used to be a local flat control count, which is precisely the
 	// divergence framework_score.go exists to prevent.
-	result.Score = frameworkScore(outcomes).Score
+	breakdown, err := frameworkScore(outcomes)
+	if err != nil {
+		return nil, err
+	}
+	result.Score = breakdown.Score
 
 	result.AffectedAssets = len(affectedAssetSet)
 

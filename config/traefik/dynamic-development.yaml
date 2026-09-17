@@ -389,6 +389,12 @@ http:
         - rewrite-mcp-service-api-v1-health
         - retry
       priority: 950
+    mcp_protected_resource_metadata:
+      rule: Path(`/.well-known/oauth-protected-resource`) || PathPrefix(`/.well-known/oauth-protected-resource/`)
+      entryPoints: *a1
+      service: mcp_service
+      middlewares: *a2
+      priority: 9000
     pcap_processor_v1:
       rule: PathPrefix(`/api/v1/pcap-processor/`)
       entryPoints: *a1

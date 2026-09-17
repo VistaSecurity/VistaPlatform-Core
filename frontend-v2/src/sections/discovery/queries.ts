@@ -66,6 +66,41 @@ export function useJobs(pageSize = 50) {
   });
 }
 
+// The tenant's discovery jobs — Active Scans, the automatic-scan sweep,
+// Discover wizard runs — with each job's executor and dispatch timeline
+//. A different table from the interrogation jobs above: those are
+// device interrogations (device-interrogation-service), these are scans
+// (cluster-sensor-service, proxied through inventory-service). The unified
+// Discovery → Discovery Jobs page (morning-notes decision 7b) merges both.
+export function useDiscoveryJobs(pageSize = 100) {
+  return useQuery({
+    queryKey: ['discovery', 'scan-jobs', pageSize],
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/discovery/jobs', { params: { query: { page: 1, page_size: pageSize } } });
+      if (error || !data) throw new Error('Failed to load discovery jobs');
+      return data;
+    },
+  });
+}
+
+// One discovery job (an Active Scan the operator just started), for the Active
+// Scan page's own job feedback: its executor and dispatch state. Polls
+// while the job is still in flight and stops once it has settled.
+const SETTLED = new Set(['completed', 'failed', 'cancelled', 'success', 'error']);
+
+export function useScanJob(jobId?: string | null) {
+  return useQuery({
+    queryKey: ['discovery', 'scan-job', jobId],
+    enabled: !!jobId,
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/discovery/jobs/{id}', { params: { path: { id: jobId! } } });
+      if (error || !data) throw new Error('Failed to load the scan');
+      return data;
+    },
+    refetchInterval: (query) => (SETTLED.has((query.state.data?.status ?? '').toLowerCase()) ? false : 5000),
+  });
+}
+
 // One job's discovered assets + the post-processing verdict, for the job detail
 // modal. Enabled only when a job is selected so opening the page costs nothing.
 // The payload is projected and scrubbed server-side (see JobResultsResponse).
@@ -78,6 +113,23 @@ export function useJobResults(jobId?: string | null) {
         params: { path: { id: jobId! } },
       });
       if (error || !data) throw new Error('Failed to load job results');
+      return data;
+    },
+  });
+}
+
+// A discovery job's findings + materialization split, for the unified Jobs
+// page's discovery-job detail panel. Enabled only when a discovery/automatic
+// row is selected.
+export function useDiscoveryJobResults(jobId?: string | null) {
+  return useQuery({
+    queryKey: ['discovery', 'scan-job-results', jobId],
+    enabled: !!jobId,
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/discovery/jobs/{id}/results', {
+        params: { path: { id: jobId! } },
+      });
+      if (error || !data) throw new Error("Failed to load this scan's results");
       return data;
     },
   });

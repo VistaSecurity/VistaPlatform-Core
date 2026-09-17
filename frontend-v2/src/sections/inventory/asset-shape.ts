@@ -15,6 +15,8 @@
 // a field the service does not know renders as an explicit absence, never as a
 // confident-looking value.
 import { ASSET_CLASSES, ATTRIBUTE_SCHEMAS, type AssetClassKey } from '@vistasecurity/primitives/assets';
+import { riskLevelFromScore } from '@vistasecurity/primitives/ratings';
+import { probabilityConfidencePercent, percentLabel } from '../../components/ui/ratings';
 
 /** One network face of an asset. Mirrors the AssetEndpoint schema, narrowed to
  *  what display needs, so these stay testable with plain literals. */
@@ -270,7 +272,7 @@ export function assetRisk(a: AssetLike): AssetRiskView {
   // A producer having looked is what "assessed" means. A non-zero score implies
   // one looked even on a payload that omitted the array (an older list row).
   const assessed = assessedBy.length > 0 || score > 0;
-  const level = assessed ? (clean(a.risk_level) || riskBand(score)) : 'Informational';
+  const level = assessed ? (clean(a.risk_level) || riskLevelFromScore(score)) : 'Informational';
   return {
     score,
     level,
@@ -281,16 +283,6 @@ export function assetRisk(a: AssetLike): AssetRiskView {
       ? `Risk score ${score} · ${level}${assessedBy.length > 0 ? ` · assessed by ${assessedBy.join(', ')}` : ''}`
       : 'Not assessed — no producer has evaluated this asset',
   };
-}
-
-/** The CVSS-anchored ladder, mirroring models.RiskBands (see CLAUDE.md, "Risk
- *  severity bands"). Kept local so this module stays React-free. */
-export function riskBand(score: number): string {
-  if (score >= 90) return 'Critical';
-  if (score >= 70) return 'High';
-  if (score >= 40) return 'Medium';
-  if (score >= 1) return 'Low';
-  return 'Informational';
 }
 
 /** The identifier kinds, as words a user can read. */
@@ -347,7 +339,6 @@ export function relativeSeen(iso?: string | null): string {
 /** Confidence as a percentage string, or '' when ABSENT — which means nothing
  *  classified it, not "classified with low confidence". */
 export function confidenceLabel(v?: number | null): string {
-  if (typeof v !== 'number' || !Number.isFinite(v)) return '';
-  const pct = v <= 1 ? Math.round(v * 100) : Math.round(v);
-  return `${pct}%`;
+  const pct = probabilityConfidencePercent(v);
+  return pct === null ? '' : percentLabel(pct);
 }

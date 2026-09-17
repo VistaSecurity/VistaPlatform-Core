@@ -25,21 +25,24 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { Icon, RiskChip, LevelDot, Pill, byLevel, worstLevel, LEVELS, riskColor, type RiskLevel } from '../../components/ui';
 import { AssetDrawer } from '../inventory/drawers';
-import { GroupBand, EmptyState, CatChip, ColLabel, Loading } from './bits';
-import { WorkflowActions } from './workflow';
+import { GroupBand, EmptyState, CatChip, ColLabel, Loading, CryptoLoadedPrefixNotice } from './bits';
+import { bulkCryptoTicketBody, WorkflowActions } from './workflow';
 import { RemediationSection } from './remediation-draft';
 import { useBatchEvaluate, useCryptoRisks, useFindingsList, useFrameworkContext } from './queries';
-import { assetOf, catOf, findingCitation, isOpenWf, issueLabel, parseSeverityFilter, segOwnsSeverityAxis, sevLevel, sevRank, subjectContext, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
+import { assetOf, catOf, findingCitation, hasCategoryLabel, isOpenWf, issueLabel, parseSeverityFilter, segOwnsSeverityAxis, sevLevel, sevRank, subjectContext, targetLabel, wfOf, WF_COLOR, WF_LABEL, type ComplianceFinding, type ControlRef, type CryptoRisk } from './model';
 import { classLabel } from '../inventory/asset-shape';
 import { DEFAULT_FINDINGS_LENS, isFindingsLens } from './lenses';
 import { FINDING_PRODUCERS } from '@vistasecurity/primitives/findings';
+import { riskLevelFromScore } from '@vistasecurity/primitives/ratings';
 import { configurationEvidence, cryptoEvidence, cveCount, cveList, driftEvidence, eolEvidence, hygieneEvidence, kindLabel, producerLabel, subjectAssetID } from './producer-evidence';
+import { AssessmentLimitNotice } from './assessment-limit';
+import { CryptoAssessment } from './crypto-assessment';
 import type { FindingSubjectFilter } from './queries';
 import { coverageLine, formatScore, normalizeControlStatus, notAssessedReasonText, CONTROL_STATUS_LABEL, NOT_ASSESSED_LABEL } from './control-status';
 import { downloadCsv, buildCryptoRiskCsvRows, buildComplianceFindingCsvRows, CRYPTO_RISK_CSV_HEADER, COMPLIANCE_FINDING_CSV_HEADER, type ControlMeta } from './export-csv';
 
 const GRID = '12px minmax(0,1.7fr) 118px minmax(0,1.5fr) minmax(0,1.25fr) 122px';
-const SEVS: RiskLevel[] = [...LEVELS];
+const SEVS: (RiskLevel | 'Unknown')[] = [...LEVELS, 'Unknown'];
 
 type Sel =
   | { kind: 'crypto'; risk: CryptoRisk }
@@ -66,7 +69,7 @@ function groupBy(risks: CryptoRisk[], keyOf: (r: CryptoRisk) => string, subOf: (
   return [...m.entries()]
     .map(([key, items]) => {
       const b = byLevel(items, (r) => sevLevel(r.severity));
-      return { key, label: key, sub: subOf(items), items, byLevel: b, worst: worstLevel(b), count: items.length };
+      return { key, label: key, sub: subOf(items), items, byLevel: b, worst: worstLevel(b, 'Unknown'), count: items.length };
     })
     .sort((a, b) => sevRank(a.worst) - sevRank(b.worst) || b.count - a.count);
 }
@@ -183,10 +186,11 @@ export function FindingsPage() {
 
   // ---- crypto-risk stream, filtered ----
   const allRisks = useMemo(() => risksQ.data?.risks ?? [], [risksQ.data]);
+  const cryptoTruncated = risksQ.data?.truncated ?? false;
   const filtered = useMemo(() => {
     let r = allRisks;
     if (seg === 'crit') r = r.filter((x) => { const l = sevLevel(x.severity); return l === 'Critical' || l === 'High'; });
-    if (catF !== 'All') r = r.filter((x) => catOf(x).label === catF);
+    if (catF !== 'All') r = r.filter((x) => hasCategoryLabel(x, catF));
     if (q.trim()) {
       const ql = q.toLowerCase();
       r = r.filter((x) =>
@@ -217,6 +221,8 @@ export function FindingsPage() {
     g.forEach((grp) => { grp.label = grp.items[0].asset_hostname || grp.items[0].asset_ip_address || grp.key.slice(0, 8); });
     return g;
   }, [filtered]);
+  // A row appears once under its primary category. The category FILTER above
+  // uses every applicable category, matching the backend facet semantics.
   const categoryGroups = useMemo(
     () => groupBy(filtered, (r) => catOf(r).label, (items) => {
       const assets = new Set(items.map((i) => i.asset_id)).size;
@@ -317,7 +323,7 @@ export function FindingsPage() {
     return [...m.values()]
       .map((g) => {
         const b = byLevel(g.items, (f) => sevLevel(f.severity));
-        return { ...g, byLevel: b, worst: worstLevel(b), count: g.items.length };
+        return { ...g, byLevel: b, worst: worstLevel(b, 'Unknown'), count: g.items.length };
       })
       .sort((a, b) => sevRank(a.worst) - sevRank(b.worst) || b.count - a.count);
   }, [complianceFiltered, controlMeta]);
@@ -339,7 +345,7 @@ export function FindingsPage() {
           key,
           label: producerLabel(key),
           sub: [...kinds].map(kindLabel).sort().join(' · ') || '—',
-          items, byLevel: b, worst: worstLevel(b), count: items.length,
+          items, byLevel: b, worst: worstLevel(b, 'Unknown'), count: items.length,
         };
       })
       .sort((a, b) => sevRank(a.worst) - sevRank(b.worst) || b.count - a.count);
@@ -476,7 +482,7 @@ export function FindingsPage() {
         </Pill>
         {!findingsLens && ([['open', 'Open'], ['crit', 'Critical + High']] as const).map(([k, l]) => (
           <button key={k} onClick={() => selectSeg(k)} className={'chip' + (seg === k ? ' active' : '')}>
-            {l}<span className="mono" style={{ marginLeft: 5, opacity: 0.7 }}>{counts[k]}</span>
+            {l}{cryptoTruncated ? ' loaded' : ''}<span className="mono" style={{ marginLeft: 5, opacity: 0.7 }}>{counts[k]}</span>
           </button>
         ))}
         {findingsLens && ([['open', 'Open'], ['crit', 'Critical + High'], ['mine', 'Mine'], ['unassigned', 'Unassigned']] as const).map(([k, l]) => (
@@ -574,6 +580,10 @@ export function FindingsPage() {
             Show all severities
           </button>
         </div>
+      )}
+
+      {!findingsLens && (
+        <CryptoLoadedPrefixNotice loaded={risksQ.data?.loaded ?? allRisks.length} total={risksQ.data?.total ?? allRisks.length} />
       )}
 
       {/* L-6: device-interrogation / discovery findings never appear on this page —
@@ -724,9 +734,9 @@ export function FindingsPage() {
         // crypto-risk stream lenses
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 18px', fontSize: 11, color: 'var(--app-t3)', borderBottom: '1px solid var(--app-border)' }}>
-            <span className="mono" style={{ color: 'var(--app-t2)' }}>{filtered.length}</span> findings
+            <span className="mono" style={{ color: 'var(--app-t2)' }}>{filtered.length}</span> {cryptoTruncated ? 'loaded findings' : 'findings'}
             {lens === 'asset' && <span>across <span className="mono" style={{ color: 'var(--app-t2)' }}>{assetGroups.length}</span> assets</span>}
-            {lens === 'category' && <span>across <span className="mono" style={{ color: 'var(--app-t2)' }}>{categoryGroups.length}</span> categories</span>}
+            {lens === 'category' && <span>across <span className="mono" style={{ color: 'var(--app-t2)' }}>{categoryGroups.length}</span> primary categories</span>}
             {lens === 'severity' && <span>across <span className="mono" style={{ color: 'var(--app-t2)' }}>{severityGroups.length}</span> severity levels</span>}
             {lens === 'date' && <span>· newest first</span>}
           </div>
@@ -742,7 +752,7 @@ export function FindingsPage() {
                 ? <EmptyState variant="all-clear" title="No crypto risk findings" message="Nothing weak, deprecated, or undersized was detected across your inventory." />
                 : <EmptyState variant="no-results" title="No findings match" message="No findings match these filters. Try widening your search or clearing a filter." />
             )}
-            {!cryptoLoading && lens === 'date' && dateRows.slice(0, 200).map((f) => <Row key={f.id} f={f} ctx="flat" />)}
+            {!cryptoLoading && lens === 'date' && dateRows.map((f) => <Row key={f.id} f={f} ctx="flat" />)}
             {!cryptoLoading && lens === 'asset' && renderGroups(assetGroups, 'asset')}
             {!cryptoLoading && lens === 'category' && renderGroups(categoryGroups, 'group', 'layers')}
             {!cryptoLoading && lens === 'severity' && renderGroups(severityGroups, 'group')}
@@ -805,29 +815,14 @@ function Inspector({ sel, allRisks, onClose, onSelect, onOpenAsset, go }: {
   const qc = useQueryClient();
   const bulkTicket = useMutation({
     mutationFn: async () => {
-      const worst = worstLevel(byLevel(sameIssue, (r) => sevLevel(r.severity)));
-      const sev = worst.toLowerCase();
-      const assets = sameIssue
-        .map((r) => `• ${r.asset_hostname || r.asset_ip_address || r.asset_id.slice(0, 8)} — ${r.current_value}`)
-        .join('\n');
       const { data, error } = await clients.compliance.POST('/tickets', {
-        body: {
-          category: 'remediation',
-          title: `${issueLabel(risk!)} — ${sameIssue.length} assets`.slice(0, 200),
-          description: `${risk!.recommendation}\n\nAffected assets (${sameIssue.length}):\n${assets}`,
-          priority: sev === 'informational' ? 'low' : sev,
-          severity: sev,
-          asset_id: risk!.asset_id,
-          crypto_implementation_id: risk!.crypto_implementation_id,
-          source: 'manual',
-          tags: ['findings', risk!.category, 'bulk-remediation'],
-        },
+        body: bulkCryptoTicketBody(risk!, sameIssue),
       });
       if (error || !data) throw new Error('Failed to create remediation ticket');
       return data.ticket;
     },
     onSuccess: () => {
-      toast.success(`Ticket created for ${sameIssue.length} findings`);
+      toast.success(`Ticket created for ${sameIssue.length} configurations`);
       qc.invalidateQueries({ queryKey: ['remediation'] });
       go('/remediation/queue');
     },
@@ -899,6 +894,7 @@ function Inspector({ sel, allRisks, onClose, onSelect, onOpenAsset, go }: {
 
         {isCrypto && (
           <>
+            <CryptoAssessment risk={risk!} />
             <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--app-border)' }}>
               <div className="eyebrow-app" style={{ marginBottom: 7 }}>What was observed</div>
               <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--app-t2)' }}>{risk!.description}</p>
@@ -930,7 +926,7 @@ function Inspector({ sel, allRisks, onClose, onSelect, onOpenAsset, go }: {
                     <Icon name="ticket" size={13} />
                     {bulkTicket.isPending
                       ? 'Creating ticket…'
-                      : `Remediate all ${sameIssue.length} ${issueLabel(risk!)} findings as one ticket`}
+                      : `Remediate all ${sameIssue.length} configurations as one ticket`}
                   </button>
                 </PermissionGate>
               )}
@@ -955,7 +951,7 @@ function Inspector({ sel, allRisks, onClose, onSelect, onOpenAsset, go }: {
 // So: the shape each producer actually writes, read once in producer-evidence.ts
 // and rendered here. A producer with no panel of its own falls through to the
 // citation-and-nothing-else block, which is honest rather than empty.
-function ProducerEvidence({ f, fw, control }: { f: ComplianceFinding; fw: string; control?: ControlRef }) {
+export function ProducerEvidence({ f, fw, control }: { f: ComplianceFinding; fw: string; control?: ControlRef }) {
   const producer = f.producer ?? 'compliance';
   const cite = findingCitation(f);
 
@@ -1011,6 +1007,7 @@ function ProducerEvidence({ f, fw, control }: { f: ComplianceFinding; fw: string
           <div className="eyebrow-app">Advisories</div>
           <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{claimed}</span>
         </div>
+        <AssessmentLimitNotice findings={[f]} />
         {cves.length === 0 ? (
           <p style={{ margin: 0, fontSize: 12.5, color: 'var(--app-t2)' }}>This finding lists no advisories.</p>
         ) : cves.map((c) => (
@@ -1147,6 +1144,7 @@ function ProducerEvidence({ f, fw, control }: { f: ComplianceFinding; fw: string
           </p>
         ) : (
           <>
+            <AssessmentLimitNotice findings={[f]} />
             <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '5px 12px', fontSize: 12.5 }}>
               {e.score !== null && <><dt style={dtStyle}>Score</dt><dd style={ddStyle} className="mono">{e.score}</dd></>}
               {disagree && (
@@ -1307,13 +1305,8 @@ function Citation({ cite, fallbackID, fallbackKind = 'catalogue row' }: {
 }
 
 /** CVSS base score → the risk band its x10 score falls in (models.RiskBands). */
-function cvssLevel(cvss: number | null): RiskLevel {
-  if (cvss === null) return 'Informational';
-  if (cvss >= 9) return 'Critical';
-  if (cvss >= 7) return 'High';
-  if (cvss >= 4) return 'Medium';
-  if (cvss >= 0.1) return 'Low';
-  return 'Informational';
+function cvssLevel(cvss: number | null): RiskLevel | 'Unknown' {
+  return cvss === null ? 'Unknown' : riskLevelFromScore(cvss * 10);
 }
 
 const dtStyle: React.CSSProperties = { color: 'var(--app-t3)', fontSize: 11.5 };

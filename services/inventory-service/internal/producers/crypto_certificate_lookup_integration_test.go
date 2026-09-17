@@ -52,44 +52,13 @@ func TestIntegration_CryptoProducer_RSACertificateResolvesThroughItsSizedRow(t *
 
 	f.mustRun(t, ctx)
 
-	// The weak_certificate finding, if any, carries the SIZED row's score and
-	// names the sized row in its evidence. A sized row with risk 0 raises no
-	// finding at all; either way the bare row's 70 must be nowhere.
-	var score int
-	var evidence []byte
-	err := f.owner.QueryRow(`
-		SELECT score, evidence FROM findings
-		WHERE tenant_id = $1 AND producer = 'crypto' AND kind = 'weak_certificate' AND subject_id = $2`,
-		f.tenant, certID).Scan(&score, &evidence)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if sizedRisk > 0 {
-			t.Fatalf("no weak_certificate finding for an RSA-4096 certificate whose sized catalogue row scores %d", sizedRisk)
-		}
-	case err != nil:
-		t.Fatalf("read the weak_certificate finding: %v", err)
-	default:
-		if score != sizedRisk {
-			t.Errorf("weak_certificate score = %d, want the RSA-4096 row's %d (the bare RSA row scores %d)", score, sizedRisk, bareRisk)
-		}
-		var ev struct {
-			Matches []struct {
-				Field string `json:"field"`
-				Code  string `json:"code"`
-			} `json:"catalogue_matches"`
-		}
-		if err := json.Unmarshal(evidence, &ev); err != nil {
-			t.Fatalf("evidence is not the expected shape: %v\n%s", err, evidence)
-		}
-		var keyCodes []string
-		for _, m := range ev.Matches {
-			if m.Field == "public_key_algorithm" {
-				keyCodes = append(keyCodes, m.Code)
-			}
-		}
-		if len(keyCodes) != 1 || keyCodes[0] != "RSA-4096" {
-			t.Errorf("public_key_algorithm resolved to %v, want exactly [RSA-4096]", keyCodes)
-		}
+	// A strong sized row contributes a numeric assessment but no weak finding.
+	var count int
+	if err := f.owner.QueryRow(`SELECT count(*) FROM findings WHERE tenant_id=$1 AND kind='weak_certificate' AND subject_id=$2`, f.tenant, certID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("strong RSA-4096 raised %d weak findings", count)
 	}
 
 	// The PQC classification comes from the same resolution, so it names the

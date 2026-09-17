@@ -75,10 +75,8 @@ func TestIntegration_CryptoRisksSummary_NullCipherSuiteIsStillCounted(t *testing
 			"which is why the buckets and the total disagreed)", summary.TotalAffected)
 	}
 
-	// The Informational counter carries the same negated chain. A second SSH
-	// host with no weak signature at all — NULL cipher_suite, NULL
-	// protocol_version, modern kex/hash — but a positive risk_score belongs in
-	// Informational, and vanished for the same reason.
+	// A positive stored score with no weak/acceptable component or applicable
+	// rule cannot invent an informational review row. NULL evidence remains a gap.
 	infoAsset := insertAsset("ssh-modern.example.test")
 	if _, err := db.Exec(`
 		INSERT INTO crypto_implementations (
@@ -94,9 +92,9 @@ func TestIntegration_CryptoRisksSummary_NullCipherSuiteIsStillCounted(t *testing
 	if err != nil {
 		t.Fatalf("GetSummary (2): %v", err)
 	}
-	if summary.Informational != 1 {
-		t.Errorf("Informational = %d, want 1 — an SSH configuration with NULL "+
-			"cipher_suite and a positive risk_score must land in the bucket (B-39)",
+	if summary.Informational != 0 {
+		t.Errorf("Informational = %d, want 0 — unresolved modern SSH with NULL "+
+			"cipher_suite must not invent a qualitative finding",
 			summary.Informational)
 	}
 	if summary.High != 1 {

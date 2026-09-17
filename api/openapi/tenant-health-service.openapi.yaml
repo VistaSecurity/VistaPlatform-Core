@@ -155,7 +155,7 @@ paths:
         - name: status
           in: query
           required: false
-          description: Filter by health_status (excellent / good / fair / poor / critical / unknown).
+          description: Filter by health_status (excellent / good / fair / poor / failing / unknown; critical is a legacy stored value).
           schema:
             type: string
         - name: min_score
@@ -419,6 +419,16 @@ paths:
                 $ref: '#/components/schemas/LegacyError'
 components:
   schemas:
+    TenantHealthStatus:
+      type: string
+      enum: [excellent, good, fair, poor, failing, unknown, critical]
+      description: >-
+        Tenant health index band: excellent >=90, good >=75, fair >=60,
+        poor >=40, failing <40. Unknown means no valid health index is available.
+        When no factor could be measured, overall_score 0 is a sentinel, not
+        a measured score; nonfinite or out-of-range indices are also unbanded.
+        Critical is accepted only for stored pre-ADR-0016 historical responses;
+        new assessments write failing. Stored history is not relabelled.
     HealthBreakdown:
       type: object
       additionalProperties: false
@@ -507,7 +517,7 @@ components:
         score:
           type: number
         status:
-          type: string
+          $ref: '#/components/schemas/TenantHealthStatus'
     HealthTrends:
       type: object
       additionalProperties: false
@@ -556,8 +566,7 @@ components:
         overall_score:
           type: number
         health_status:
-          type: string
-          description: "excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score)."
+          $ref: '#/components/schemas/TenantHealthStatus'
         last_calculated:
           type: string
           format: date-time
@@ -742,8 +751,7 @@ components:
         overall_score:
           type: number
         health_status:
-          type: string
-          description: "excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score)."
+          $ref: '#/components/schemas/TenantHealthStatus'
         score_breakdown:
           $ref: '#/components/schemas/HealthBreakdown'
         recommendations:
@@ -777,8 +785,7 @@ components:
         overall_score:
           type: number
         health_status:
-          type: string
-          description: "excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score)."
+          $ref: '#/components/schemas/TenantHealthStatus'
         last_calculated:
           type: string
           format: date-time

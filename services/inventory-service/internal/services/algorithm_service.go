@@ -171,7 +171,7 @@ type Algorithm struct {
 	Strength                 string                 `json:"strength" db:"strength"`
 	DeprecationStatus        string                 `json:"deprecation_status" db:"deprecation_status"`
 	DeprecationDate          *string                `json:"deprecation_date,omitempty" db:"deprecation_date"`
-	RiskScore                int                    `json:"risk_score" db:"risk_score"`
+	RiskScore                *int                   `json:"risk_score" db:"risk_score"`
 	RecommendedAlternatives  []string               `json:"recommended_alternatives,omitempty" db:"recommended_alternatives"`
 	MigrationGuidance        *string                `json:"migration_guidance,omitempty" db:"migration_guidance"`
 	RemediationGuidance      map[string]interface{} `json:"remediation_guidance,omitempty" db:"remediation_guidance"`
@@ -475,8 +475,9 @@ func (s *AlgorithmService) UpdateAlgorithmAssessment(code string, upd AlgorithmA
 }
 
 // AlgorithmCreate carries all fields for creating a new algorithm row through the
-// platform-admin editor. code/name/category are required; everything else is
-// optional and falls back to the table's column defaults when nil/empty.
+// platform-admin editor. code/name/category and risk_score are required;
+// everything else is optional and falls back to the table's column defaults
+// when nil/empty.
 type AlgorithmCreate struct {
 	// Identity / classification
 	Code                     string   `json:"code"`
@@ -497,7 +498,7 @@ type AlgorithmCreate struct {
 	IsStandard               *bool    `json:"is_standard,omitempty"`
 	// Assessment
 	Strength                 *string                `json:"strength,omitempty"`
-	RiskScore                *int                   `json:"risk_score,omitempty"`
+	RiskScore                *int                   `json:"risk_score"`
 	DeprecationStatus        *string                `json:"deprecation_status,omitempty"`
 	DeprecationDate          *string                `json:"deprecation_date,omitempty"`
 	IsPQC                    *bool                  `json:"is_pqc,omitempty"`
@@ -510,12 +511,23 @@ type AlgorithmCreate struct {
 
 // ErrAlgorithmExists is returned by CreateAlgorithm when an algorithm with the
 // requested code already exists (the handler maps it to 409).
-var ErrAlgorithmExists = fmt.Errorf("algorithm already exists")
+var (
+	ErrAlgorithmExists           = fmt.Errorf("algorithm already exists")
+	ErrAlgorithmRiskScoreMissing = fmt.Errorf("algorithm risk_score is required")
+	ErrAlgorithmRiskScoreRange   = fmt.Errorf("algorithm risk_score must be between 0 and 100")
+)
 
 // CreateAlgorithm inserts a brand-new algorithm row. Returns ErrAlgorithmExists
-// if the code is already taken. Optional fields fall back to the column defaults
-// when nil. The created Algorithm is returned fully hydrated.
+// if the code is already taken. risk_score is always explicit; optional fields
+// fall back to the column defaults when nil. The created Algorithm is returned
+// fully hydrated.
 func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, error) {
+	if in.RiskScore == nil {
+		return nil, ErrAlgorithmRiskScoreMissing
+	}
+	if *in.RiskScore < 0 || *in.RiskScore > 100 {
+		return nil, ErrAlgorithmRiskScoreRange
+	}
 	// Guard duplicate code up-front (the unique index would also reject it, but
 	// this gives a clean ErrAlgorithmExists instead of a raw pq error).
 	existing, err := s.GetAlgorithmByCode(in.Code)
@@ -554,8 +566,10 @@ func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, erro
 		depDate = *in.DeprecationDate
 	}
 
-	// COALESCE($n, <default>) lets every optional column fall back to its schema
-	// default when the caller omits it.
+	// COALESCE($n, <default>) lets optional columns fall back to their schema
+	// defaults when the caller omits them. risk_score deliberately has no
+	// COALESCE: accepting an absent assessment here would recreate the old,
+	// fabricated 50 through an internal caller.
 	insertQuery := `
 		INSERT INTO algorithms (
 			code, name, category, subcategory, description,
@@ -567,7 +581,7 @@ func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, erro
 			parameter_set_identifier, curve
 		) VALUES (
 			$1, $2, $3, $4, $5,
-			COALESCE($6, 'acceptable'), COALESCE($7, 50), COALESCE($8, 'current'), $9::date,
+			COALESCE($6, 'acceptable'), $7, COALESCE($8, 'current'), $9::date,
 			COALESCE($10, false), COALESCE($11, 'none'), $12,
 			COALESCE($13, ARRAY[]::text[]), COALESCE($14::jsonb, '{}'::jsonb), COALESCE($15::jsonb, '{}'::jsonb),
 			COALESCE($16, true), $17, $18, $19, $20, $21,
@@ -579,7 +593,7 @@ func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, erro
 	var algID uuid.UUID
 	err = s.db.QueryRow(insertQuery,
 		in.Code, in.Name, in.Category, in.Subcategory, in.Description,
-		in.Strength, in.RiskScore, in.DeprecationStatus, depDate,
+		in.Strength, *in.RiskScore, in.DeprecationStatus, depDate,
 		in.IsPQC, in.PQCStandardizationStatus, in.MigrationGuidance,
 		recAlts, remediationJSON, complianceJSON,
 		in.IsStandard, in.AlgorithmFamily, in.Primitive, in.Mode, in.Padding, in.OID,

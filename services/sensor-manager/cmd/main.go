@@ -255,8 +255,17 @@ func main() {
 		sensors.POST("/commands/:command_id/ack", handler.AcknowledgeCommand)
 		sensors.GET("/webhook-config", handler.GetWebhookConfig)
 
-		// Discovery submission
+		// Discovery submission. A dispatched discovery job's results come in
+		// here too — tagged discovery_method=active and carrying the job_id —
+		// so they flow StoreDiscoveries → sensor_discoveries → discovery-
+		// processor exactly like passive data.
 		sensors.POST("/discoveries", handler.SubmitDiscoveries)
+
+		// Dispatched discovery job completion. Sensor-authenticated,
+		// because the sensor is the caller: it marks the job the platform
+		// handed it as completed/failed with counts. The results themselves
+		// travelled through /discoveries above.
+		sensors.POST("/discovery-jobs/:job_id/complete", handler.CompleteDiscoveryJob)
 
 		// Autonomous certificate rotation (sensor renews its own cert before
 		// expiry). Sensor-authenticated, NOT tenant-JWT — this is what the sensor
@@ -302,19 +311,20 @@ func main() {
 		sensorManager.GET("/admin/settings", handler.GetAdminSettings)
 		sensorManager.PUT("/admin/settings", sharedrbac.RequireTenantPermission(db, rbac.PermissionSettingsUpdate), handler.UpdateAdminSettings)
 
-		// Discovery results callback (JWT auth here is legacy; the sensor-auth
-		// path is preferred for new callers).
+		// REMOVED: POST /discovery/jobs and POST /discovery/jobs/:id/results.
 		//
-		// REMOVED: POST /discovery/jobs. It was a second, inert way to create a
-		// discovery job — it inserted a queued discovery_jobs row carrying an
-		// execution_mode and requested_sensor_ids but NO targets, and nothing
-		// dispatched it. cluster-sensor-service's stuck-job sweep then picked the
-		// row up and ran it through the in-cluster nmap path with zero targets,
-		// so every job created here finished `completed` having scanned nothing.
-		// Discovery jobs are created through inventory-service
-		// (POST /api/v1/inventory-service/discovery/jobs), which proxies to
-		// cluster-sensor-service and writes the targets.
-		sensorManager.POST("/discovery/jobs/:id/results", handler.ReceiveDiscoveryResults)
+		// The first was a second, inert way to create a discovery job — a
+		// queued discovery_jobs row with no targets that nothing dispatched.
+		// The second was the tenant-JWT results intake a sensor could never
+		// call (sensors authenticate by mTLS/HMAC on the `sensors` group, not
+		// by a user's JWT), which wrote discovery_findings but never
+		// sensor_discoveries — so even a caller that reached it produced
+		// results inventory never saw. Discovery jobs are created through
+		// inventory-service (POST /api/v1/inventory-service/discovery/jobs),
+		// a dispatched job's results arrive through the sensor's ordinary
+		// POST /sensors/:sensor_id/discoveries batch route, and its completion
+		// through POST /sensors/:sensor_id/discovery-jobs/:job_id/complete
+		// above.
 
 		// PCAP upload endpoints (tenant RBAC)
 		pcap := sensorManager.Group("/pcap")
@@ -346,6 +356,24 @@ func main() {
 
 		// Tenant-wide capture defaults (applies to all active sensors for the tenant)
 		sensorManager.PUT("/admin/capture-defaults", sharedrbac.RequireTenantPermission(db, rbac.PermissionSettingsUpdate), handler.UpdateTenantCaptureDefaults)
+
+		// Desired-state configuration. Distinct from the
+		// UpdateSensorConfig route above, which queues a one-shot command and
+		// persists nothing: these record what the sensor SHOULD be and
+		// reconcile it against what the sensor reports.
+		//
+		// Gated on sensors.read to view and sensors.update to change — the line
+		// this repo already draws between configuration and destructive or
+		// credential operations, and the same gating the agent routes use, so
+		// one fleet on one page has one permission model.
+		sensorConfig := handlers.NewSensorConfigHandler(db)
+		sensorManager.GET("/sensors/config/defaults", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), sensorConfig.GetSensorFleetDefaults)
+		sensorManager.PUT("/sensors/config/defaults", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsUpdate), sensorConfig.PutSensorFleetDefaults)
+		sensorManager.GET("/sensors/:sensor_id/desired-config", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), sensorConfig.GetSensorDesiredConfig)
+		sensorManager.PUT("/sensors/:sensor_id/desired-config", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsUpdate), sensorConfig.PutSensorDesiredConfig)
+		// A read of configuration, gated like the other reads: the operator most
+		// likely to ask "why is this on" is the one who cannot change it.
+		sensorManager.GET("/sensors/:sensor_id/desired-config/history", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), sensorConfig.GetSensorConfigHistory)
 
 		// Certificate management endpoints. Rotation is the sensor's own
 		// autonomous renewal and lives on the SensorAuth group above; admins force

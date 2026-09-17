@@ -7,7 +7,7 @@ import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { QueryChip } from '../inventory/query-editor';
 import { clients } from '../../lib/clients';
-import { Icon } from '../../components/ui';
+import { frameworkPercentageColor, Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, GREEN, AMBER } from './kit';
 import { coverageLine, formatScore, isUnscored } from '../findings/control-status';
 import { ScopeEditModal, ScopeDeleteModal } from './scope-modals';
@@ -119,13 +119,6 @@ export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
   );
 }
 
-// Preview-score colour ramp — mirrors the posture FwRing thresholds. An
-// unscored framework is muted, not coloured.
-function fwScoreColor(pct: number | null | undefined): string {
-  if (isUnscored(pct)) return 'var(--app-t3)';
-  return pct! >= 85 ? 'var(--ok)' : pct! >= 70 ? 'var(--warn)' : pct! >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
-}
-
 export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
@@ -222,7 +215,7 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
           <div style={{ textAlign: 'center', flex: 'none' }} title={previewUnscored
             ? 'No control could be assessed against your current inventory, so there is no score to preview.'
             : `Compliance score against your current inventory${isActive ? '' : ' — preview before activating'}`}>
-            <div className="mono" style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: fwScoreColor(f.preview_score) }}>
+            <div className="mono" style={{ fontSize: 20, fontWeight: 800, lineHeight: 1, color: frameworkPercentageColor(f.preview_score) }}>
               {formatScore(f.preview_score)}{!previewUnscored && '%'}
             </div>
             <div style={{ fontSize: 9, color: 'var(--app-t3)', marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.4 }}>{isActive ? 'posture' : 'preview'}</div>

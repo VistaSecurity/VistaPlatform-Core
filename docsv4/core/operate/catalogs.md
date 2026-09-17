@@ -20,6 +20,21 @@ is proposed as.
 All five are **Core** — free, present in every edition, with no entitlement to
 check.
 
+## Rating an algorithm
+
+Catalog ▸ Algorithms is the source of truth for cryptographic algorithm
+assessments. Creating a row requires a **Risk score** from 0 through 100. Enter
+the score the catalogue curator actually assessed; the form has no preselected
+score and the API rejects a blank value. Zero remains a valid, deliberate
+assessment and is distinct from leaving the score unknown.
+
+Older or operator-created rows can still have no score. They remain unscored
+until a curator supplies one: schema upgrades do not replace missing evidence
+with 0, 50, or another inferred value. Opening one of those rows for editing
+also leaves the field blank. Curators can update its metadata without assigning
+a score; the console omits the unchanged blank score from that update. Once a
+row has a numeric score, the console does not allow it to be cleared.
+
 Every tenant's inventory is matched against these catalogues nightly (and
 after an SBOM upload): an asset's OS and hardware resolve against the
 end-of-life catalogue, and its installed software resolves against the
@@ -29,11 +44,13 @@ look like and how to triage them.
 
 ## Who can see and change them
 
-All three pages are gated on the platform permission **`catalogs.manage`**, granted to
+The three feed and classification pages are gated on the platform permission **`catalogs.manage`**, granted to
 `super_admin` and `platform_admin` by the seed. It is separate from
 `algorithms.manage` on purpose: curating crypto ratings and re-pointing the
 platform at a vulnerability source are different trust decisions, even though the
 same two roles hold both today.
+
+Catalog ▸ Algorithms uses **`algorithms.manage`** for its write controls.
 
 The routes live under the admin plane (`/api/v1/admin-service/admin/catalogs/**`),
 so they are served on the admin host only — never on the tenant host.

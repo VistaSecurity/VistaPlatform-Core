@@ -326,11 +326,12 @@ function DiscoveryCertModal({ certs, data, onClose }: {
 type DiscoveryFinding = inventoryComponents['schemas']['DiscoveryFinding'];
 
 const PROTOCOLS = ['TLS', 'SSH'];
-// "Sensors — tenant-deployed" was removed: nothing dispatches a discovery job to
-// a tenant-deployed sensor. Picking it produced a scan that ran from the platform
-// cluster instead, could not reach a target only the sensor can see, and reported
-// `completed` with zero findings. The API now rejects execution_mode "sensors"
-// outright; the option comes back when dispatch is actually built.
+// "Sensors — tenant-deployed" is not offered here. Dispatch to a tenant sensor
+// exists now and needs ONE named sensor per job; the wizard takes free
+// targets, and the place to choose the sensor for a host is Discovery → Active
+// Scan's "Run from", where the platform can also route by which sensor
+// observed the host. Adding a sensor picker to the wizard is a separate
+// decision, not an oversight.
 export const EXEC_MODES: { value: string; label: string }[] = [
   { value: 'auto', label: 'Auto — platform decides' },
   { value: 'cloud', label: 'Cloud — platform sensor' },

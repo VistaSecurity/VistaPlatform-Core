@@ -78,6 +78,19 @@ type Resolution struct {
 	// rather than dropped: an identifier that vanishes without a trace is how
 	// an inventory quietly becomes wrong.
 	Unattached []Identifier `json:"unattached,omitempty"`
+
+	// FloatingAddress is set on a match the floating-address rule decided:
+	// the observation's MAC belongs to one asset and its address to another,
+	// and it was L2-only, so it landed on the address's asset with the MAC
+	// unattached and an announcement recorded between the two. No proposal
+	// was opened. See floating.go.
+	FloatingAddress *FloatingAddress `json:"floating_address,omitempty"`
+
+	// Suppressed is set on a match that WOULD have been a conflict, had a
+	// reviewer not already resolved a proposal for the same assets on the
+	// same kinds of evidence as `kept_separate`. Candidates carries the
+	// assets the proposal would have named. See floating.go.
+	Suppressed *SuppressedProposal `json:"suppressed_proposal,omitempty"`
 }
 
 // Config configures an [Engine].
@@ -280,6 +293,7 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 		decided      string
 		decidedBy    Kind
 		conflicting  bool
+		corrupt      bool // one identifier value owned by several assets
 		conflictWhy  string
 		evidence     = map[string][]Identifier{} // asset id → identifiers that matched it
 		candidateSeq []string                    // candidate ids in discovery order
@@ -309,6 +323,7 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 				// means the store has lost the invariant. That is precisely
 				// why FindByIdentifier returns a slice.
 				conflicting = true
+				corrupt = true
 				conflictWhy = fmt.Sprintf("%s=%q resolves to %d assets", id.Kind, id.Value, len(refs))
 				continue
 			}
@@ -323,6 +338,17 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 					conflictWhy = fmt.Sprintf("%s matched one asset and %s another", decidedBy, id.Kind)
 				}
 			}
+		}
+	}
+
+	// The floating-address rule, BEFORE the conflict path (floating.go). A MAC
+	// resolving to one asset and an address to another is a cross-kind
+	// conflict in every case but one: when that is ALL the observation says,
+	// it is a node announcing an address that floats — and the floor below
+	// would otherwise turn it into a merge proposal on every gratuitous ARP.
+	if conflicting && !corrupt {
+		if pair, ok := e.floatingAddress(obs, ids, owners, decided, decidedBy, candidateSeq); ok {
+			return e.resolveFloating(ctx, obs, at, ids, owners, pair)
 		}
 	}
 
@@ -523,6 +549,15 @@ func (e *Engine) resolveContested(
 	}
 	why := fmt.Sprintf("every identifier this observation carries already belongs to another asset, and none of them may decide for class %q", obs.ClassHint)
 
+	// Decision memory, before ranking and before the auto-accept: a pair a
+	// human already kept separate is neither re-proposed nor auto-merged on a
+	// model's score.
+	if d, err := e.priorDecision(ctx, obs, candidates); err != nil {
+		return Resolution{}, err
+	} else if d != nil {
+		return e.resolveSuppressed(ctx, obs, at, ids, owners, candidates, *d, why)
+	}
+
 	r, err := e.rank(ctx, obs, at, candidates)
 	if err != nil {
 		return Resolution{}, err
@@ -572,14 +607,20 @@ func (e *Engine) proposeWithoutCreating(
 	if err != nil {
 		return Resolution{}, fmt.Errorf("identity: opening the merge proposal for a fully-owned observation: %w", err)
 	}
-	if err := e.history(ctx, candidates[0].Ref, obs, at, ActionMergeProposed, map[string]any{
-		"proposal_id": proposal.ID,
-		"candidates":  candidateIDs(candidates),
-		"reason":      why,
-		"contested":   identifierKeys(ids),
-		"created":     false,
-	}); err != nil {
-		return Resolution{}, err
+	// The pointer entry is written ONCE per question. A proposal the store
+	// found already pending has its note already; re-noting it on every
+	// observation is how one contested host wrote a history row per
+	// coalescing window against an asset it does not belong to.
+	if !proposal.Reused {
+		if err := e.history(ctx, candidates[0].Ref, obs, at, ActionMergeProposed, map[string]any{
+			"proposal_id": proposal.ID,
+			"candidates":  candidateIDs(candidates),
+			"reason":      why,
+			"contested":   identifierKeys(ids),
+			"created":     false,
+		}); err != nil {
+			return Resolution{}, err
+		}
 	}
 	return Resolution{
 		Outcome:    OutcomeConflict,
@@ -701,6 +742,15 @@ func (e *Engine) resolveConflict(
 		})
 	}
 
+	// Decision memory (floating.go), before the matcher sees the pair: a
+	// reviewer who already kept these apart is not asked again, and no score
+	// overrides their answer.
+	if d, err := e.priorDecision(ctx, obs, candidates); err != nil {
+		return Resolution{}, err
+	} else if d != nil {
+		return e.resolveSuppressed(ctx, obs, at, ids, owners, candidates, *d, why)
+	}
+
 	// The matcher seam ranks; it does not decide. A null matcher leaves every
 	// score at zero and the order as found, and the proposal is identical.
 	r, err := e.rank(ctx, obs, at, candidates)
@@ -789,12 +839,17 @@ func (e *Engine) conflictOutcome(
 	if err != nil {
 		return Resolution{}, fmt.Errorf("identity: opening merge proposal: %w", err)
 	}
-	if err := e.history(ctx, ref, obs, at, ActionMergeProposed, map[string]any{
-		"proposal_id": proposal.ID,
-		"candidates":  candidateIDs(candidates),
-		"reason":      why,
-	}); err != nil {
-		return Resolution{}, err
+	// Never reused in practice — the observation asset was just created, so
+	// the fingerprint is new — but the rule is the same as the floor's, and a
+	// guard that exists on one path and not the other is no guard.
+	if !proposal.Reused {
+		if err := e.history(ctx, ref, obs, at, ActionMergeProposed, map[string]any{
+			"proposal_id": proposal.ID,
+			"candidates":  candidateIDs(candidates),
+			"reason":      why,
+		}); err != nil {
+			return Resolution{}, err
+		}
 	}
 
 	return Resolution{
@@ -860,16 +915,19 @@ func (e *Engine) acceptMerge(
 	// auto-accept path is the ONE outcome whose history cannot be joined to its
 	// proposal: `merged_from` names the candidates and the score but not the
 	// row a reviewer would open, so "why is this asset like this?" dead-ends at
-	// exactly the outcome a model decided.
-	if err := e.history(ctx, top.Ref, obs, at, ActionMergeProposed, map[string]any{
-		"proposal_id":   proposal.ID,
-		"candidates":    candidateIDs(candidates),
-		"reason":        why,
-		"auto_accepted": true,
-		"score":         top.Score,
-		"model_id":      top.modelID,
-	}); err != nil {
-		return Resolution{}, err
+	// exactly the outcome a model decided. Once per proposal, as on the other
+	// paths: `merged_from` above already records this observation.
+	if !proposal.Reused {
+		if err := e.history(ctx, top.Ref, obs, at, ActionMergeProposed, map[string]any{
+			"proposal_id":   proposal.ID,
+			"candidates":    candidateIDs(candidates),
+			"reason":        why,
+			"auto_accepted": true,
+			"score":         top.Score,
+			"model_id":      top.modelID,
+		}); err != nil {
+			return Resolution{}, err
+		}
 	}
 
 	return Resolution{
@@ -1194,6 +1252,15 @@ func stampEndpoints(eps []EndpointObservation, src Source, at time.Time) []Endpo
 	out := make([]EndpointObservation, 0, len(eps))
 	seen := make(map[string]bool, len(eps))
 	for _, ep := range eps {
+		// Defense in depth: [Observation.Sanitize] already does this for a
+		// caller that ran it, but stampEndpoints is the one funnel every
+		// endpoint passes through on the way to [Repository.UpsertEndpoints]
+		// regardless — Engine.Resolve does not require Sanitize to have been
+		// called first (Sanitize's own strictness is about identifiers, which
+		// DO error; an endpoint never does). An IP literal left in FQDN here
+		// would otherwise survive to become a second row for an address
+		// already recorded.
+		ep = ep.Sanitized()
 		if ep.Address == "" && ep.FQDN == "" {
 			continue
 		}

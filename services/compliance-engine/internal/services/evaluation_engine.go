@@ -519,5 +519,9 @@ func (s *FindingsService) recomputeFrameworkScore(ctx context.Context, tenantID,
 		func(c models.Control) uuid.UUID { return c.ID },
 		func(c models.Control) string { return c.BaselineSeverity },
 		assessments)
-	return s.upsertFrameworkScore(ctx, tenantID, frameworkID, frameworkScore(outcomes))
+	breakdown, err := frameworkScore(outcomes)
+	if err != nil {
+		return err
+	}
+	return s.upsertFrameworkScore(ctx, tenantID, frameworkID, breakdown)
 }

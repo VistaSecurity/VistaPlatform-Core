@@ -6,6 +6,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // Imported as `sharedfindings` because `findings` is a local variable name all
@@ -58,24 +59,17 @@ func nonComplianceProducerScope(alias string) string {
 // else used — models.RiskBands, the alert registry and the crypto producer all
 // say `medium` — so the two vocabularies could not both survive.
 const (
-	SeverityInfo     = "info"
-	SeverityLow      = "low"
-	SeverityMedium   = "medium"
-	SeverityHigh     = "high"
-	SeverityCritical = "critical"
+	SeverityInfo     = string(sharedseverity.Info)
+	SeverityLow      = string(sharedseverity.Low)
+	SeverityMedium   = string(sharedseverity.Medium)
+	SeverityHigh     = string(sharedseverity.High)
+	SeverityCritical = string(sharedseverity.Critical)
 )
 
-// normalizeSeverity maps any spelling a control's baseline_severity or a
-// measurement rule might carry onto the registry ladder.
-//
-// It defaults to `low` rather than erroring, and that default is the one the
-// writer already had (insertFinding's `severity := "Low"`): a control whose
-// author left the field blank still produces a finding, because a violation
-// nobody graded is a violation. It is NOT defaulted to `info` — `info` is the
-// Informational band models.RiskBands reports at score 0, and quietly demoting
-// an ungraded failure into it would be the "not assessed rendered as passed"
-// shape.
-func normalizeSeverity(s string) string {
+// legacySeverityFilter is a read-only compatibility boundary for bookmarked
+// finding queries. It accepts old spellings; invalid values match no findings.
+// Authoring and persistence never call this adapter.
+func legacySeverityFilter(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "critical", "crit":
 		return SeverityCritical
@@ -88,7 +82,7 @@ func normalizeSeverity(s string) string {
 	case "info", "informational", "none":
 		return SeverityInfo
 	default:
-		return SeverityLow
+		return ""
 	}
 }
 
@@ -96,31 +90,16 @@ func normalizeSeverity(s string) string {
 // once so a second ladder cannot appear in a query and disagree with this one,
 // which is exactly how the risk badges came to band High at ≥60 while the
 // facets used ≥70.
-func severityRankSQL(col string) string {
-	return "CASE " + col +
-		" WHEN '" + SeverityCritical + "' THEN 5" +
-		" WHEN '" + SeverityHigh + "' THEN 4" +
-		" WHEN '" + SeverityMedium + "' THEN 3" +
-		" WHEN '" + SeverityLow + "' THEN 2" +
-		" WHEN '" + SeverityInfo + "' THEN 1 ELSE 0 END"
-}
+func severityRankSQL(col string) string { return sharedseverity.RankSQL(col) }
 
 // severityFromRank maps severityRankSQL's number back to the stored label.
 func severityFromRank(rank int) string {
-	switch rank {
-	case 5:
-		return SeverityCritical
-	case 4:
-		return SeverityHigh
-	case 3:
-		return SeverityMedium
-	case 2:
-		return SeverityLow
-	case 1:
-		return SeverityInfo
-	default:
-		return SeverityLow
+	for _, d := range sharedseverity.Definitions() {
+		if d.Rank == rank {
+			return string(d.Value)
+		}
 	}
+	return ""
 }
 
 // Subject types, in the registry's vocabulary. The compliance producer emits
@@ -276,30 +255,17 @@ func quoteSubjectType(subjectType string) string {
 
 // findingSeverityRank is severityRankSQL's Go twin — the same ladder, so a Go-side
 // "which is worse" can never disagree with an ORDER BY.
-func findingSeverityRank(s string) int {
-	switch s {
-	case SeverityCritical:
-		return 5
-	case SeverityHigh:
-		return 4
-	case SeverityMedium:
-		return 3
-	case SeverityLow:
-		return 2
-	case SeverityInfo:
-		return 1
-	default:
-		return 0
-	}
+func findingSeverityRank(value string) int {
+	rank, _ := sharedseverity.Rank(sharedseverity.Severity(value))
+	return rank
 }
 
 // worseSeverity returns whichever of two severities is worse, normalizing both
-// first so a caller holding an author's spelling ("Med") and a caller holding a
+// first so a caller holding an author's spelling ("medium") and a caller holding a
 // stored value ("medium") compare on the same ladder.
 func worseSeverity(a, b string) string {
-	na, nb := normalizeSeverity(a), normalizeSeverity(b)
-	if findingSeverityRank(nb) > findingSeverityRank(na) {
-		return nb
+	if findingSeverityRank(b) > findingSeverityRank(a) {
+		return b
 	}
-	return na
+	return a
 }

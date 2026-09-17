@@ -1979,6 +1979,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/tenants/{id}/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A tenant's platform-admin overrides
+         * @description The per-tenant overrides a platform admin may set for one tenant, plus the optimistic-locking version to echo back on PUT. Each field is THREE-valued: absent means "no override — follow the platform default", and only an explicit true/false overrides it. A tenant that has never been given an override returns an empty settings object with version 0.
+         */
+        get: operations["getTenantSettings"];
+        /**
+         * Set a tenant's platform-admin overrides
+         * @description Merges the supplied overrides into the tenant's shared tenant_admin_settings.config document. Only the keys named in the request body are written; every other producer's keys in that document (discovery auto-scan policy, drift, identity, AI controls) are left untouched, and a field omitted from `settings` keeps its stored value rather than being cleared. Send `version` from the preceding GET for optimistic locking; a stale version returns 409. Requires the `tenants.manage` platform permission.
+         */
+        put: operations["updateTenantSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/tenants/{id}/purge": {
         parameters: {
             query?: never;
@@ -3169,6 +3193,36 @@ export interface components {
             /** Format: uuid */
             tenant_id: string;
             entitlements: components["schemas"]["TenantEntitlement"][];
+        };
+        /**
+         * @description A tenant's platform-admin overrides. Every property is optional and
+         *     THREE-valued: absent means "no override — follow the platform default",
+         *     true and false are explicit overrides. Absent is NOT the same as false.
+         */
+        TenantSettings: {
+            /** @description Override whether this tenant's new users must verify their email before they can sign in. Absent = follow the platform default (Settings ▸ Access, key email_verification_required); if that is unset too, auth-service falls back to whether the deployment can actually send mail. */
+            email_verification_required?: boolean;
+            /** @description Override whether this tenant's users are shown the onboarding walkthrough. Absent = follow the platform default, which is "required". The tenant's own admins can also set this for themselves from the tenant UI; both write the same key, last write wins. */
+            onboarding_required?: boolean;
+        };
+        /** @description Envelope for GET /admin/tenants/{id}/settings. */
+        TenantSettingsResponse: {
+            settings: components["schemas"]["TenantSettings"];
+            /** @description Optimistic-locking version of the tenant's settings document. 0 when the tenant has no settings row yet. Echo this back as `version` on PUT. */
+            version: number;
+        };
+        /** @description Body for PUT /admin/tenants/{id}/settings. */
+        UpdateTenantSettingsRequest: {
+            settings: components["schemas"]["TenantSettings"];
+            /** @description The version from the preceding GET. When supplied, the write is rejected with 409 if the stored version has moved on. Omit to write unconditionally. */
+            version?: number;
+        };
+        /** @description Envelope for PUT /admin/tenants/{id}/settings. `settings` echoes the overrides as supplied in the request, not the merged document — re-read with GET for the full resolved set. */
+        UpdateTenantSettingsResponse: {
+            message: string;
+            settings: components["schemas"]["TenantSettings"];
+            /** @description The settings document version AFTER the merge. */
+            version: number;
         };
         /**
          * @description A tenant's effective numeric limits — tier values overlaid with active
@@ -8009,6 +8063,61 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getTenantSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's overrides and the current settings version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantSettingsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    updateTenantSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateTenantSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description The overrides were merged; returns the new version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateTenantSettingsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };

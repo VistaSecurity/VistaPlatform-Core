@@ -58,6 +58,7 @@ import (
 var sharedFixtureTestFiles = []string{
 	"asset_approval_test.go",
 	"network_space_test.go",
+	"network_space_settings_integration_test.go",
 	// These two do not use getTestDBAndTenant; they apply the schema inline
 	// (testdb.ApplySchemaAndSeed), which is the SAME exposure by a different
 	// spelling — the deadlock comes from applying the schema, not from the

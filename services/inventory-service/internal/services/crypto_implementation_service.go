@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 )
@@ -53,8 +54,9 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 		SELECT
 			ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
 			ci.key_exchange_algorithm, ci.signature_algorithm, ci.symmetric_encryption,
-			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method,
+			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method, ci.discovery_methods,
 			ci.confidence_score, ci.source_sensor_id, ci.raw_data, ci.risk_score,
+			` + cryptoRiskScoreAssessedSQL("$2") + ` AS risk_score_assessed,
 			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
 			ci.created_at, ci.updated_at, ci.deleted_at,
 			-- Asset information
@@ -68,8 +70,8 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 	`
 
-	args := []interface{}{tenantID}
-	argCount := 1
+	args := []interface{}{tenantID, pq.Array(cryptoassess.CatalogueRiskRoles)}
+	argCount := 2
 	whereConditions := []string{}
 
 	// Apply filters
@@ -164,8 +166,8 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	if len(filters.RiskLevel) > 0 {
 		riskConds := []string{}
 		for _, rl := range filters.RiskLevel {
-			if cond, ok := models.RiskBandSQL("COALESCE(ci.risk_score, 0)", rl); ok {
-				riskConds = append(riskConds, "("+cond+")")
+			if cond, ok := models.RiskBandSQL("ci.risk_score", rl); ok {
+				riskConds = append(riskConds, "("+cryptoRiskScoreAssessedSQL("$2")+" AND ("+cond+"))")
 			}
 		}
 		if len(riskConds) > 0 {
@@ -184,15 +186,11 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	}
 	query += whereClause
 
-	// Get total count
-	countQuery := `
-		SELECT COUNT(*)
-		FROM crypto_implementations ci
-		INNER JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
-		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
-		LEFT JOIN certificates c ON ci.certificate_id = c.id
-		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
-	` + whereClause
+	// Count the exact unpaginated projection so every placeholder has the same
+	// meaning in both statements. In particular, $2 binds the catalogue roles
+	// used by risk_score_assessed even when no risk filter is active; rebuilding
+	// a reduced COUNT query used to leave that argument unused or untyped.
+	countQuery := "SELECT COUNT(*) FROM (" + query + ") matched_crypto_implementations"
 
 	var total int
 
@@ -257,8 +255,8 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 
 			err := rows.Scan(
 				&impl.ID, &impl.TenantID, &impl.AssetID, &impl.Protocol, &protocolVersion, &cipherSuite,
-				&keyExchangeAlg, &sigAlg, &symEnc, &hashAlg, &keySize, &certID, &impl.DiscoveryMethod,
-				&confidenceScore, &sourceSensorID, &rawDataJSON, &riskScore,
+				&keyExchangeAlg, &sigAlg, &symEnc, &hashAlg, &keySize, &certID, &impl.DiscoveryMethod, &impl.DiscoveryMethods,
+				&confidenceScore, &sourceSensorID, &rawDataJSON, &riskScore, &impl.RiskScoreAssessed,
 				&complianceStatusJSON, &impl.FirstDiscoveredAt, &impl.LastVerifiedAt,
 				&impl.CreatedAt, &impl.UpdatedAt, &deletedAt,
 				&assetHostname, &assetIPAddress, &assetType, &assetEnvironment, &assetBusinessUnit,
@@ -308,6 +306,9 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 				score := int(riskScore.Int64)
 				impl.RiskScore = &score
 			}
+			if !impl.RiskScoreAssessed {
+				impl.RiskScore = nil
+			}
 			if deletedAt.Valid {
 				impl.DeletedAt = &deletedAt.Time
 			}
@@ -354,10 +355,12 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 
 			// Calculate risk level from risk score
 			score := 0
-			if impl.RiskScore != nil {
+			if impl.RiskScoreAssessed && impl.RiskScore != nil {
 				score = *impl.RiskScore
+				impl.RiskLevel = models.GetRiskLevel(score)
+			} else {
+				impl.RiskLevel = "Unknown"
 			}
-			impl.RiskLevel = models.GetRiskLevel(score)
 
 			implementations = append(implementations, impl)
 		}
@@ -380,8 +383,9 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 		SELECT
 			ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
 			ci.key_exchange_algorithm, ci.signature_algorithm, ci.symmetric_encryption,
-			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method,
+			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method, ci.discovery_methods,
 			ci.confidence_score, ci.source_sensor_id, ci.raw_data, ci.risk_score,
+			` + cryptoRiskScoreAssessedSQL("$3") + ` AS risk_score_assessed,
 			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
 			ci.created_at, ci.updated_at, ci.deleted_at,
 			-- Asset information
@@ -405,10 +409,10 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 
 	// RLS-scoped read over crypto_implementations (JOIN assets).
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(query, id, tenantID).Scan(
+		return tx.QueryRow(query, id, tenantID, pq.Array(cryptoassess.CatalogueRiskRoles)).Scan(
 			&impl.ID, &impl.TenantID, &impl.AssetID, &impl.Protocol, &protocolVersion, &cipherSuite,
-			&keyExchangeAlg, &sigAlg, &symEnc, &hashAlg, &keySize, &certID, &impl.DiscoveryMethod,
-			&confidenceScore, &sourceSensorID, &rawDataJSON, &riskScore,
+			&keyExchangeAlg, &sigAlg, &symEnc, &hashAlg, &keySize, &certID, &impl.DiscoveryMethod, &impl.DiscoveryMethods,
+			&confidenceScore, &sourceSensorID, &rawDataJSON, &riskScore, &impl.RiskScoreAssessed,
 			&complianceStatusJSON, &impl.FirstDiscoveredAt, &impl.LastVerifiedAt,
 			&impl.CreatedAt, &impl.UpdatedAt, &deletedAt,
 			&assetHostname, &assetIPAddress, &assetType, &assetEnvironment, &assetBusinessUnit,
@@ -419,6 +423,10 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 			return nil, fmt.Errorf("crypto implementation not found")
 		}
 		return nil, fmt.Errorf("failed to get crypto implementation: %w", err)
+	}
+
+	if impl.DiscoveryMethods == nil {
+		impl.DiscoveryMethods = pq.StringArray{}
 	}
 
 	// Handle nullable fields
@@ -460,6 +468,9 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 	if riskScore.Valid {
 		score := int(riskScore.Int64)
 		impl.RiskScore = &score
+	}
+	if !impl.RiskScoreAssessed {
+		impl.RiskScore = nil
 	}
 	if deletedAt.Valid {
 		impl.DeletedAt = &deletedAt.Time
@@ -507,10 +518,12 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 
 	// Calculate risk level
 	score := 0
-	if impl.RiskScore != nil {
+	if impl.RiskScoreAssessed && impl.RiskScore != nil {
 		score = *impl.RiskScore
+		impl.RiskLevel = models.GetRiskLevel(score)
+	} else {
+		impl.RiskLevel = "Unknown"
 	}
-	impl.RiskLevel = models.GetRiskLevel(score)
 
 	implementations := []models.CryptoImplementation{impl}
 	if err := enrichCryptoImplementationsWithRelations(s.db, tenantID, implementations); err != nil {

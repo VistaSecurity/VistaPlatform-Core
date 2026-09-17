@@ -460,6 +460,37 @@ function buildApiRoutes(services) {
       );
     }
 
+    // mcp-service: RFC 9728 protected-resource metadata, at the well-known
+    // root rather than under /api/v1/. This is the document the MCP endpoint's
+    // 401 challenge points at via `WWW-Authenticate: ... resource_metadata=`,
+    // and the only way a hosted client (Claude.ai, ChatGPT) can discover which
+    // authorization server guards the endpoint — those clients offer no field
+    // for an operator to type one in.
+    //
+    // It MUST be routed explicitly. Without a rule, `/.well-known/…` falls
+    // through to the web-UI catch-all, which answers HTTP 200 with the SPA's
+    // index.html — a false success that a client cannot distinguish from a
+    // working endpoint until it tries to parse HTML as JSON.
+    //
+    // The match is `Path(exact) || PathPrefix(with trailing slash)`, not a bare
+    // PathPrefix: Traefik's PathPrefix(`/x/`) does NOT match `/x`, and both the
+    // bare root and the RFC 9728 §3.1 path-suffixed form
+    // (/.well-known/oauth-protected-resource/api/v1/mcp-service/mcp) have to
+    // reach the service. No rate limit — discovery runs before any credential
+    // exists, and 429-ing it breaks the connect flow rather than protecting
+    // anything.
+    if (svc.name === 'mcp-service') {
+      routes.push(
+        makeRoute(
+          'Path(`/.well-known/oauth-protected-resource`) || ' +
+            'PathPrefix(`/.well-known/oauth-protected-resource/`)',
+          svc.name,
+          noRateLimitChain(svc.name),
+          { priority: 200 }
+        )
+      );
+    }
+
     // Cluster-sensor-service: split /api/v1/discovery/* between
     // inventory-service (the import endpoint) and itself (everything else).
     if (svc.name === 'cluster-sensor-service') {

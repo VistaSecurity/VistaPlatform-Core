@@ -3,6 +3,8 @@ package services
 import (
 	"strings"
 	"testing"
+
+	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 )
 
 // TestShouldProbeTLSHonoursRequestedPorts pins DISC-7: the TLS probe was hard
@@ -33,6 +35,14 @@ func TestShouldProbeTLSHonoursRequestedPorts(t *testing.T) {
 		// Neither explicit nor well-known: no speculative TLS handshake.
 		{"generic protocol on an arbitrary port", "tcp", "tcp", 31337, false},
 		{"SSH on 22", "ssh", "ssh", 22, false},
+
+		// A finding that exists because the job asked for ANOTHER protocol
+		// gets no TLS probe even on a well-known TLS port. The SSH finding on
+		// 443 used to receive the TLS handshake and reach the inventory as
+		// "SSH, TLS 1.3, TLS_AES_256_GCM_SHA384".
+		{"SSH requested on 443", "SSH", "SSH", 443, false},
+		{"SSH requested on 8443", "ssh", "ssh", 8443, false},
+		{"Modbus requested on 443", "modbus", "modbus", 443, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,6 +67,10 @@ func TestShouldProbeSSHHonoursRequestedPorts(t *testing.T) {
 		{"well-known 2222 with generic protocol", "tcp", "tcp", 2222, true},
 		{"generic protocol on an arbitrary port", "tcp", "tcp", 9000, false},
 		{"TLS on 443", "tls", "tls", 443, false},
+		// The mirror of the SSH-on-443 case: a TLS finding on 22 is not
+		// handed the SSH probe just because 22 is a well-known SSH port.
+		{"TLS requested on 22", "TLS", "TLS", 22, false},
+		{"HTTPS requested on 22", "https", "https", 22, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -145,6 +159,53 @@ func TestValidateNmapTargetRejectsHostPort(t *testing.T) {
 		t.Run(target, func(t *testing.T) {
 			if err := validateNmapTarget(target); err != nil {
 				t.Errorf("validateNmapTarget(%q) = %v, want nil", target, err)
+			}
+		})
+	}
+}
+
+// TestProbeRefutedDropsAProtocolThePortDoesNotSpeak pins the second half of the
+// SSH-on-443 fix: once the SSH finding on 443 no longer receives the TLS data,
+// it is an open-port row carrying only `ssh_probe_error`, and storing that
+// materialises an "SSH on 443" crypto configuration with nothing in it. A
+// specific request refuted by its own probe on a port it is not known on
+// records no finding; the same failure on a well-known port keeps it.
+func TestProbeRefutedDropsAProtocolThePortDoesNotSpeak(t *testing.T) {
+	failed := func(key string) models.DiscoveryFinding {
+		return models.DiscoveryFinding{Data: map[string]interface{}{key: "handshake failed"}}
+	}
+	ok := models.DiscoveryFinding{Data: map[string]interface{}{"ssh_host_key_type": "ssh-ed25519"}}
+
+	tests := []struct {
+		name        string
+		finding     models.DiscoveryFinding
+		reqProtocol string
+		port        int
+		want        bool
+	}{
+		{"SSH refuted on 443", failed("ssh_probe_error"), "SSH", 443, true},
+		{"SSH refuted on 8443", failed("ssh_probe_error"), "ssh", 8443, true},
+		{"TLS refuted on 22", failed("tls_probe_error"), "TLS", 22, true},
+		{"HTTPS refuted on 3306", failed("tls_probe_error"), "https", 3306, true},
+
+		// A well-known port keeps its finding: the error is the finding.
+		{"SSH failed on 22", failed("ssh_probe_error"), "SSH", 22, false},
+		{"TLS failed on 443", failed("tls_probe_error"), "TLS", 443, false},
+
+		// A probe that answered is never refuted, wherever it answered.
+		{"SSH answered on 443", ok, "SSH", 443, false},
+
+		// A generic finding has no protocol to be refuted about.
+		{"generic with a TLS error on 9000", failed("tls_probe_error"), "tcp", 9000, false},
+		{"generic with an SSH error on 9000", failed("ssh_probe_error"), "", 9000, false},
+
+		// Another protocol's error says nothing about this one.
+		{"SSH finding carrying only a TLS error", failed("tls_probe_error"), "SSH", 443, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := probeRefuted(tt.finding, tt.reqProtocol, tt.port); got != tt.want {
+				t.Errorf("probeRefuted(%v, %q, %d) = %v, want %v", tt.finding.Data, tt.reqProtocol, tt.port, got, tt.want)
 			}
 		})
 	}

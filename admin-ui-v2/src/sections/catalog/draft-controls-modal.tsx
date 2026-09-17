@@ -11,6 +11,7 @@
 // shared with frontend-v2's copy of this in
 // @vistasecurity/primitives/authoring; what lives here is the chrome and the
 // admin endpoints.
+import { severityLabel } from '@vistasecurity/primitives/ratings';
 import { useMemo, useReducer, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -296,10 +297,10 @@ export function DraftControlsModal({
 }
 
 const SEVERITY_COLOR: Record<string, string> = {
-  Critical: 'var(--danger)',
-  High: 'var(--warn-strong)',
-  Med: 'var(--warn)',
-  Low: 'var(--ok-lime)',
+  critical: 'var(--danger)',
+  high: 'var(--warn-strong)',
+  medium: 'var(--warn)',
+  low: 'var(--ok-lime)',
 };
 
 function DraftCard({
@@ -333,7 +334,7 @@ function DraftCard({
         {draft.control_id && <span className="mono" style={{ fontSize: 11, fontWeight: 600, color: 'var(--op-t2)' }}>{draft.control_id}</span>}
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: 'var(--op-t1)' }}>{draft.title}</span>
         {draft.severity && (
-          <span style={{ fontSize: 11, fontWeight: 600, color: SEVERITY_COLOR[draft.severity] ?? 'var(--op-t3)' }}>{draft.severity}</span>
+          <span style={{ fontSize: 11, fontWeight: 600, color: SEVERITY_COLOR[draft.severity] ?? 'var(--op-t3)' }}>{severityLabel(draft.severity)}</span>
         )}
         <Tag color="var(--info)">unpublished</Tag>
       </div>

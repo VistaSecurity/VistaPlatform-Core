@@ -20,7 +20,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import {
-  catOf, issueLabel, sevLevel, wfOf, WF_COLOR, WF_LABEL, WF_STATUSES,
+  catOf, issueLabel, sevLevel, cryptoTicketRating, sevRank, wfOf, WF_COLOR, WF_LABEL, WF_STATUSES,
   type ComplianceFinding, type ControlRef, type CryptoRisk,
 } from './model';
 import { producerLabel } from './producer-evidence';
@@ -30,15 +30,14 @@ export type TicketTarget =
   | { kind: 'crypto'; risk: CryptoRisk }
   | { kind: 'compliance'; finding: ComplianceFinding; fw: string; control?: ControlRef; host: string };
 
-function ticketBody(t: TicketTarget) {
+export function ticketBody(t: TicketTarget) {
   if (t.kind === 'crypto') {
     const r = t.risk;
     return {
       category: 'remediation',
       title: `${issueLabel(r)} — ${r.asset_hostname || r.asset_ip_address || r.asset_id.slice(0, 8)}`.slice(0, 200),
       description: `${r.description}\n\nObserved: ${r.current_value} (${catOf(r).label.toLowerCase()})\nRecommendation: ${r.recommendation}`,
-      priority: sevLevel(r.severity).toLowerCase() === 'informational' ? 'low' : sevLevel(r.severity).toLowerCase(),
-      severity: (r.severity || 'medium').toLowerCase(),
+      ...cryptoTicketRating(r.severity),
       asset_id: r.asset_id,
       crypto_implementation_id: r.crypto_implementation_id,
       source: 'manual',
@@ -82,6 +81,27 @@ function ticketBody(t: TicketTarget) {
       : {}),
     source: 'manual',
     tags: ['findings', f.producer || 'compliance'],
+  };
+}
+
+/** One ticket for every configuration carrying the same legacy issue type. */
+export function bulkCryptoTicketBody(primary: CryptoRisk, sameIssue: CryptoRisk[]) {
+  const worst = sameIssue
+    .map((risk) => sevLevel(risk.severity))
+    .sort((a, b) => sevRank(a) - sevRank(b))[0] ?? 'Unknown';
+  const configurations = sameIssue
+    .map((risk) => `• ${risk.asset_hostname || risk.asset_ip_address || risk.asset_id.slice(0, 8)} — ${risk.current_value}`)
+    .join('\n');
+
+  return {
+    category: 'remediation',
+    title: `${issueLabel(primary)} — ${sameIssue.length} configurations`.slice(0, 200),
+    description: `${primary.recommendation}\n\nAffected configurations (${sameIssue.length}):\n${configurations}`,
+    ...cryptoTicketRating(worst === 'Unknown' ? null : worst),
+    asset_id: primary.asset_id,
+    crypto_implementation_id: primary.crypto_implementation_id,
+    source: 'manual',
+    tags: ['findings', primary.category, 'bulk-remediation'],
   };
 }
 

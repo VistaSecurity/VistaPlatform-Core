@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/vistasecurity/vistaplatform/shared/findings/producer"
+	"github.com/vistasecurity/vistaplatform/shared/riskbands"
 )
 
 // CVSS → severity and score, per the registry's `score_source: cvss_x10`.
@@ -53,22 +54,7 @@ func cvssSeverity(cvss *float64) (severity string, score int, scored bool) {
 	// is 79 exactly and floating-point representation must not turn it into 78.
 	score = int(math.Round(v * 10))
 
-	switch {
-	case score >= 90:
-		return producer.SeverityCritical, score, true
-	case score >= 70:
-		return producer.SeverityHigh, score, true
-	case score >= 40:
-		return producer.SeverityMedium, score, true
-	case score >= 1:
-		return producer.SeverityLow, score, true
-	default:
-		// CVSS 0.0 is the "None" rating, which models.RiskBands displays as
-		// Informational. It is a real grade — somebody looked and said this
-		// scores nothing — and is distinct from the nil case above, which is
-		// "nobody has graded it".
-		return producer.SeverityInfo, 0, true
-	}
+	return string(riskbands.Severity(score)), score, true
 }
 
 // worseCVSS picks the more severe of two advisories, worst-wins.

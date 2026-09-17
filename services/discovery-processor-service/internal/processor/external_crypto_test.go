@@ -32,10 +32,10 @@ func TestExtractCryptoDetails_PassiveCapture(t *testing.T) {
 	}
 
 	raw := map[string]interface{}{
-		"version":      "1.3",
-		"cipher_suite": "TLS_AES_256_GCM_SHA384",
-		"key_size":     2048,
-		"certificates": certificates,
+		"version":               "1.3",
+		"cipher_suite":          "TLS_AES_256_GCM_SHA384",
+		"key_exchange_key_size": 2048,
+		"certificates":          certificates,
 	}
 	metadata, _ := json.Marshal(raw)
 
@@ -327,4 +327,15 @@ func assertIntPtr(t *testing.T, label string, got *int, want int) {
 	if *got != want {
 		t.Errorf("%s: expected %d, got %d", label, want, *got)
 	}
+}
+
+func TestExtractCryptoDetails_DoesNotInventExchangeSize(t *testing.T) {
+	for _, raw := range []string{`{"cipher_suite":"TLS_AES_128_GCM_SHA256"}`, `{"cipher_suite":"TLS_AES_128_GCM_SHA256","key_size":128}`, `{"cipher_suite":"TLS_AES_256_GCM_SHA384","key_size":2048}`} {
+		got := extractCryptoDetails([]byte(raw))
+		if got.KeySize != nil {
+			t.Fatalf("ambiguous cipher/cert bits became exchange bits: %s => %d", raw, *got.KeySize)
+		}
+	}
+	got := extractCryptoDetails([]byte(`{"key_exchange_algorithm":"ECDHE","key_exchange_key_size":224}`))
+	assertIntPtr(t, "measured exchange size", got.KeySize, 224)
 }

@@ -72,10 +72,18 @@ func countImplementations(t *testing.T, svc *AssetService, tenant, asset uuid.UU
 // RawData as a per-observation timestamp: real producers stamp one, and it is
 // exactly why the deferred dedup cannot compare whole findings.
 func tlsFinding(observedAt time.Time) IngestFinding {
+	// A measured key size is part of the baseline: the "different key size"
+	// variant in DistinctConfigurationsStaySeparate has to CONFLICT with it
+	// (2048 vs 4096). Against a baseline with no key size, a variant that adds
+	// one is a strict superset — the same configuration measured more
+	// completely — and is absorbed by design (crypto_dedup.go, "Subset
+	// absorption").
+	keySize := 2048
 	return IngestFinding{
 		Protocol:        "TLS",
 		ProtocolVersion: strPtr("TLS 1.2"),
 		CipherSuite:     strPtr("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"),
+		KeySize:         &keySize,
 		RawData: map[string]interface{}{
 			"source":           "sensor",
 			"discovery_method": "passive",
@@ -160,7 +168,7 @@ func TestIntegration_CryptoMaterialization_DistinctConfigurationsStaySeparate(t 
 			return f
 		},
 		"different key size": func(f IngestFinding) IngestFinding {
-			size := 2048
+			size := 4096 // conflicts with the baseline's 2048
 			f.KeySize = &size
 			return f
 		},
@@ -217,12 +225,26 @@ func TestIntegration_CryptoMaterialization_DedupsWhenComponentsAreNull(t *testin
 			"(NULL never equals NULL — the lookup must use IS NOT DISTINCT FROM)", got)
 	}
 
-	// And a NULL-component row must not swallow a fully-measured one.
+	// And a fully-measured observation of the same protocol on the same
+	// (asset, endpoint) COMPLETES the unmeasured row rather than sitting beside
+	// it: the bare row's components are all NULL, so it is a strict subset of
+	// the measured one — the same configuration seen less completely (subset
+	// absorption, crypto_dedup.go). This used to assert 2 rows, which was the
+	// partial+complete duplication verified in the observed deployment.
 	if err := svc.processDiscoveryCryptoData(tenant, asset, tlsFinding(time.Now()), nil, nil, nil); err != nil {
 		t.Fatalf("measured observation: %v", err)
 	}
-	if got := countImplementations(t, svc, tenant, asset); got != 2 {
-		t.Fatalf("a measured configuration alongside an unmeasured one gave %d rows, want 2", got)
+	if got := countImplementations(t, svc, tenant, asset); got != 1 {
+		t.Fatalf("a measured configuration alongside an unmeasured one gave %d rows, want 1 (the unmeasured row enriched in place)", got)
+	}
+	var version *string
+	if err := svc.db.QueryRow(
+		`SELECT protocol_version FROM crypto_implementations WHERE tenant_id = $1 AND asset_id = $2 AND deleted_at IS NULL`,
+		tenant, asset).Scan(&version); err != nil {
+		t.Fatalf("read enriched row: %v", err)
+	}
+	if version == nil || *version != "TLS 1.2" {
+		t.Fatalf("the unmeasured row was not enriched: protocol_version = %v, want TLS 1.2", version)
 	}
 }
 

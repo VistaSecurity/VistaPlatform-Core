@@ -182,10 +182,10 @@ producers:
         score_source: catalogue
         subject_types: [crypto_configuration, endpoint]
         feeds_risk: true
-        title_template: "Weak cryptographic configuration on {subject}"
+        title_template: "{subject} {detail}"
         guidance: >-
-          Reconfigure the service to stop offering the weak component the
-          catalogue flagged: disable the obsolete protocol version, remove the
+          Review the component or rule named in the finding. Move weak or
+          acceptable components to strong or recommended alternatives: disable the obsolete protocol version, remove the
           cipher suite from the server's list, or move the key exchange to a
           modern curve. Change it on the service itself, not on the client — a
           client-side workaround leaves the endpoint willing to negotiate the
@@ -194,9 +194,11 @@ producers:
         description: >-
           A crypto configuration negotiates a protocol version, cipher suite,
           key exchange, signature, symmetric or hash algorithm the catalogue
-          rates as weak or deprecated. Score is the algorithms.risk_score of
-          the worst linked component (worst-component-wins); severity follows
-          from banding that score. Never hardcode a second opinion here — edit
+          rates weak or acceptable, or an applicable key-size/hash rule fails.
+          Weakness chooses the weak title; acceptable-only names that rating.
+          Strong/recommended components alone emit nothing. The numeric score
+          retains the maximum catalogue, persisted configuration and applicable
+          rule assessment; severity follows from banding that score. Never hardcode a second opinion here — edit
           the catalogue row.
       - key: weak_certificate
         severity_model: fixed
@@ -205,16 +207,18 @@ producers:
         score_source: catalogue
         subject_types: [certificate]
         feeds_risk: true
-        title_template: "Certificate {subject} uses weak cryptography"
+        title_template: "{subject} {detail}"
         guidance: >-
           Reissue the certificate with a key and signature algorithm the
-          catalogue rates acceptable — for RSA that means at least 2048 bits,
-          and SHA-256 or better for the signature. Replace it everywhere it is
+          catalogue rates strong or recommended. Address any key-size/hash failure,
+          and use SHA-256 or better for the signature. Replace it everywhere it is
           deployed, then revoke the old one so a copy left on another host
           cannot still be used.
         description: >-
           A certificate's key algorithm, key size or signature algorithm is
-          rated weak by the catalogue, or falls below an SP 800-131A floor.
+          rated weak or acceptable by the catalogue, or fails a size/hash rule.
+          The title follows strength independently of numeric risk; incomplete
+          historical evidence retains the prior finding pending reassessment.
           Expiry is an alert (certificate_expiring), not a finding.
       - key: pqc_vulnerable
         severity_model: fixed

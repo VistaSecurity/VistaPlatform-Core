@@ -34,6 +34,17 @@ type Repository struct {
 	history []identity.HistoryEntry           // append-only
 	props   map[string]identity.MergeProposal // tenant|id
 	propSeq []string                          // proposal ids in creation order
+	// propState is a proposal's resolution: absent means pending. Only
+	// [Repository.ResolveProposal] — a test hook standing in for the approvals
+	// path — writes it, exactly as only the approvals service stamps the SQL
+	// row.
+	propState map[string]proposalState // tenant|id
+
+	// announcements are the floating-address edges
+	// [Repository.RecordAnnouncement] wrote, keyed tenant|announcer|holder,
+	// in first-observation order.
+	announcements map[string]*identity.AnnouncementRecord
+	announceSeq   []string
 
 	// multi holds the extra owners [Repository.Corrupt] planted, so a lost
 	// uniqueness invariant can be simulated. Always empty in normal use.
@@ -113,13 +124,22 @@ func (r *Repository) SetStatus(ref identity.AssetRef, status string) {
 	}
 }
 
+// proposalState is how a proposal was resolved, and by whom.
+type proposalState struct {
+	status     string
+	resolvedAt time.Time
+	resolvedBy string
+}
+
 // New builds an empty repository.
 func New() *Repository {
 	return &Repository{
-		assets:   make(map[string]*asset),
-		owners:   make(map[string]identity.AssetRef),
-		props:    make(map[string]identity.MergeProposal),
-		segments: make(map[string][]memSegment),
+		assets:        make(map[string]*asset),
+		owners:        make(map[string]identity.AssetRef),
+		props:         make(map[string]identity.MergeProposal),
+		propState:     make(map[string]proposalState),
+		announcements: make(map[string]*identity.AnnouncementRecord),
+		segments:      make(map[string][]memSegment),
 	}
 }
 
@@ -242,6 +262,19 @@ func (a *asset) putEndpoint(ep identity.EndpointObservation) {
 		if ep.SeenAt.Before(prev.SeenAt) {
 			ep.SeenAt = prev.SeenAt
 		}
+		// "Empty never wins": FQDN is an attribute of the endpoint, not part
+		// of its identity (ep.Key() already ignores it once an address is
+		// set). A later observation that does not know the name — or one
+		// whose IP-literal FQDN [EndpointObservation.Sanitized] just
+		// stripped — must not blank a name a prior observation established.
+		// This is the same rule [postgres.Repository.UpsertEndpoints] applies
+		// when it matches an existing row by address rather than by the full
+		// (address, fqdn, port, transport) tuple; the two implementations
+		// must agree, or shared/identity/identitytest's contract would pass
+		// one backend and fail the other for the same sequence of calls.
+		if ep.FQDN == "" && prev.FQDN != "" {
+			ep.FQDN = prev.FQDN
+		}
 	} else {
 		a.epOrder = append(a.epOrder, k)
 	}
@@ -277,6 +310,11 @@ func (r *Repository) UpsertEndpoints(_ context.Context, ref identity.AssetRef, e
 		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
 	}
 	for _, ep := range eps {
+		// Defense in depth, mirroring postgres.Repository.UpsertEndpoints: a
+		// caller of the repository directly (bypassing the engine's
+		// stampEndpoints, as the identitytest contract itself does) must get
+		// the same "an IP is never a name" treatment.
+		ep = ep.Sanitized()
 		if ep.Address == "" && ep.FQDN == "" {
 			return fmt.Errorf("memory: UpsertEndpoints: endpoint has neither address nor fqdn")
 		}
@@ -321,14 +359,20 @@ func (r *Repository) OpenMergeProposal(_ context.Context, tenantID string, p ide
 	// same proposal a hundred times" is precisely the kind of difference that
 	// makes a test suite green about a queue nobody can clear.
 	//
-	// Nothing here resolves proposals, so every proposal held is pending.
+	// Only a PENDING proposal suppresses a new one, exactly as the SQL
+	// index's partial predicate says: a resolved proposal drops out, and a
+	// later recurrence of the question is the engine's decision memory's
+	// business, not this method's.
 	fp := identity.MergeProposalFingerprint(p)
 	for _, k := range r.propSeq {
 		if !strings.HasPrefix(k, tenantID+"|") {
 			continue
 		}
+		if _, resolved := r.propState[k]; resolved {
+			continue
+		}
 		if identity.MergeProposalFingerprint(r.props[k]) == fp {
-			return identity.ProposalRef{TenantID: tenantID, ID: strings.TrimPrefix(k, tenantID+"|")}, nil
+			return identity.ProposalRef{TenantID: tenantID, ID: strings.TrimPrefix(k, tenantID+"|"), Reused: true}, nil
 		}
 	}
 	ref := identity.ProposalRef{TenantID: tenantID, ID: r.nextID("proposal")}
@@ -336,6 +380,99 @@ func (r *Repository) OpenMergeProposal(_ context.Context, tenantID string, p ide
 	r.props[key] = p
 	r.propSeq = append(r.propSeq, key)
 	return ref, nil
+}
+
+// LastKeptSeparate implements identity.Repository.
+//
+// Newest first, as the SQL implementation orders by `seq DESC`: when a pair
+// was kept separate twice, the later decision carries the later evidence.
+func (r *Repository) LastKeptSeparate(_ context.Context, tenantID string, assetIDs []string) (identity.PriorDecision, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if tenantID == "" {
+		return identity.PriorDecision{}, false, fmt.Errorf("memory: LastKeptSeparate: no tenant")
+	}
+	for i := len(r.propSeq) - 1; i >= 0; i-- {
+		k := r.propSeq[i]
+		if !strings.HasPrefix(k, tenantID+"|") {
+			continue
+		}
+		st, resolved := r.propState[k]
+		if !resolved || st.status != "kept_separate" {
+			continue
+		}
+		d := priorDecisionOf(strings.TrimPrefix(k, tenantID+"|"), r.props[k], st)
+		if d.Covers(assetIDs) {
+			return d, true, nil
+		}
+	}
+	return identity.PriorDecision{}, false, nil
+}
+
+func priorDecisionOf(id string, p identity.MergeProposal, st proposalState) identity.PriorDecision {
+	d := identity.PriorDecision{
+		ProposalID:         id,
+		ObservationAssetID: p.ObservationAssetID,
+		DecidedAt:          st.resolvedAt,
+		DecidedBy:          st.resolvedBy,
+	}
+	seen := map[identity.Kind]bool{}
+	for _, c := range p.Candidates {
+		d.Candidates = append(d.Candidates, c.Ref.ID)
+		for _, mid := range c.MatchedIdentifiers {
+			if !seen[mid.Kind] {
+				seen[mid.Kind] = true
+				d.MatchedKinds = append(d.MatchedKinds, mid.Kind)
+			}
+		}
+	}
+	return d
+}
+
+// ResolveProposal stamps a proposal's outcome — `kept_separate` or `merged` —
+// the way the approvals path stamps the SQL row.
+//
+// A TEST HOOK, not part of identity.Repository: the engine never resolves a
+// proposal (ADR-0002 D5). It exists so the decision-memory contract can put a
+// human's answer where [Repository.LastKeptSeparate] will find it. It refuses
+// an unknown proposal rather than inventing one.
+func (r *Repository) ResolveProposal(ref identity.ProposalRef, status, actor string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := assetKey(ref.TenantID, ref.ID)
+	if _, ok := r.props[key]; !ok {
+		return fmt.Errorf("memory: ResolveProposal: no proposal %s in tenant %s", ref.ID, ref.TenantID)
+	}
+	r.propState[key] = proposalState{status: status, resolvedAt: at, resolvedBy: actor}
+	return nil
+}
+
+// RecordAnnouncement implements identity.Repository.
+func (r *Repository) RecordAnnouncement(_ context.Context, announcer, holder identity.AssetRef, a identity.Announcement) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if announcer.TenantID != holder.TenantID {
+		return fmt.Errorf("memory: RecordAnnouncement: announcer and holder are in different tenants")
+	}
+	if announcer.ID == holder.ID {
+		return fmt.Errorf("memory: RecordAnnouncement: %s cannot announce its own address as floating", announcer.ID)
+	}
+	for _, ref := range []identity.AssetRef{announcer, holder} {
+		if _, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; !ok {
+			return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+		}
+	}
+	key := announcer.TenantID + "|" + announcer.ID + "|" + holder.ID
+	if rec, ok := r.announcements[key]; ok {
+		rec.Count++
+		if !a.At.Before(rec.Latest.At) {
+			rec.Latest = a
+		}
+		return nil
+	}
+	r.announcements[key] = &identity.AnnouncementRecord{Announcer: announcer, Holder: holder, Latest: a, Count: 1}
+	r.announceSeq = append(r.announceSeq, key)
+	return nil
 }
 
 // ── test accessors ─────────────────────────────────────────────────────────
@@ -357,6 +494,24 @@ func (r *Repository) HistoryFor(ref identity.AssetRef) []identity.HistoryEntry {
 	for _, e := range r.history {
 		if e.AssetID == ref.ID && e.TenantID == ref.TenantID {
 			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// Announcements returns the floating-address records naming this asset as
+// announcer or holder, in first-observation order.
+func (r *Repository) Announcements(ref identity.AssetRef) []identity.AnnouncementRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []identity.AnnouncementRecord
+	for _, k := range r.announceSeq {
+		rec := r.announcements[k]
+		if rec.Announcer.TenantID != ref.TenantID {
+			continue
+		}
+		if rec.Announcer.ID == ref.ID || rec.Holder.ID == ref.ID {
+			out = append(out, *rec)
 		}
 	}
 	return out

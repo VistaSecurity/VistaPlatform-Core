@@ -1,14 +1,13 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
@@ -16,23 +15,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 )
 
 // DiscoveryHandler provides endpoints for discovery jobs.
 type DiscoveryHandler struct {
 	svc    *services.DiscoveryService
 	assets *services.AssetService
-	db     *database.DB
 }
 
 func NewDiscoveryHandler(assetSvc *services.AssetService, discoverySvc *services.DiscoveryService) *DiscoveryHandler {
 	return &DiscoveryHandler{svc: discoverySvc, assets: assetSvc}
-}
-
-// SetDB sets the database connection for capability policy queries.
-func (h *DiscoveryHandler) SetDB(db *database.DB) {
-	h.db = db
 }
 
 // CreateJob handles POST /api/v1/inventory/discovery/jobs
@@ -58,19 +50,15 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 		return
 	}
 
-	// Tenant-sensor dispatch does not exist. Rejecting here (rather than only at
-	// cluster-sensor-service, which also rejects it) keeps the message specific:
-	// this proxy collapses every downstream error into "failed to create
-	// discovery job", and "we ran your scan from somewhere else" is exactly the
-	// outcome this guard exists to prevent.
-	if strings.EqualFold(strings.TrimSpace(input.ExecutionMode), "sensors") || len(input.PreferredSensorIDs) > 0 {
-		log.Printf("[DiscoveryHandler] Rejected unsupported sensor dispatch: execution_mode=%q preferred_sensor_ids=%d",
-			input.ExecutionMode, len(input.PreferredSensorIDs))
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "validation_error",
-			"details": "execution_mode \"sensors\" is not supported: discovery jobs cannot be dispatched to " +
-				"tenant-deployed sensors. Use \"cloud\" (platform sensor) or \"auto\"",
-		})
+	// Tenant-sensor dispatch. cluster-sensor-service dispatches a
+	// `sensors` job to the one tenant sensor it names and decides whether that
+	// sensor exists, is the tenant's and is live. What is refused HERE is the
+	// request shape no dispatcher can honour, so the message stays specific:
+	// this proxy otherwise collapses downstream errors into one line.
+	if details := validateSensorDispatchShape(input.ExecutionMode, input.PreferredSensorIDs); details != "" {
+		log.Printf("[DiscoveryHandler] Rejected sensor dispatch request: execution_mode=%q preferred_sensor_ids=%d: %s",
+			input.ExecutionMode, len(input.PreferredSensorIDs), details)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "details": details})
 		return
 	}
 
@@ -107,6 +95,15 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	job, err := h.svc.CreateJob(tenantIDStr, userIDStr, input, clusterAuthHeader(c))
 	if err != nil {
 		log.Printf("[DiscoveryHandler] CreateJob service error: %v", err)
+		// A downstream 4xx is a verdict the caller can act on — the sensor
+		// they named is unknown (404), offline (409) or the platform's own
+		// (400) — so it passes through with its reason. Anything else stays
+		// the generic line: a 5xx body is not a reason a caller can act on.
+		var downstream *services.DownstreamError
+		if errors.As(err, &downstream) && downstream.Status >= 400 && downstream.Status < 500 {
+			c.JSON(downstream.Status, gin.H{"error": "validation_error", "details": downstream.Message})
+			return
+		}
 		sharedapi.BadRequest(c, "failed to create discovery job")
 		return
 	}
@@ -127,7 +124,26 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"job": job})
 }
 
-// GetJob handles GET /api/v1/inventory/discovery/jobs/:id
+// validateSensorDispatchShape returns a reason when the request asks for a
+// tenant sensor in a shape no dispatcher can honour, and "" when it is either
+// not a sensor request or a well-formed one. Whether the sensor exists, is the
+// tenant's and is live is cluster-sensor-service's decision, not this proxy's.
+func validateSensorDispatchShape(executionMode string, preferredSensorIDs []string) string {
+	sensors := strings.EqualFold(strings.TrimSpace(executionMode), "sensors")
+	switch {
+	case !sensors && len(preferredSensorIDs) > 0:
+		return "preferred_sensor_ids only applies to execution_mode \"sensors\""
+	case !sensors:
+		return ""
+	case len(preferredSensorIDs) != 1:
+		return "execution_mode \"sensors\" needs exactly one preferred_sensor_id — the tenant sensor to run from"
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(preferredSensorIDs[0])); err != nil {
+		return "preferred_sensor_id \"" + preferredSensorIDs[0] + "\" is not a UUID"
+	}
+	return ""
+}
+
 // clusterAuthHeader returns a Bearer token suitable for forwarding to cluster-sensor-service.
 // It prefers an explicit Authorization header and falls back to the access_token cookie,
 // which is how cookie-based browser sessions authenticate.
@@ -141,6 +157,43 @@ func clusterAuthHeader(c *gin.Context) string {
 	return ""
 }
 
+// ListJobs handles GET /discovery/jobs — the tenant's discovery jobs (Active
+// Scan, the Discover wizard, and the automatic-scan sweep) with their
+// executor and dispatch timeline, proxied from cluster-sensor-service. This is
+// what the unified Discovery → Discovery Jobs page merges with
+// device-interrogation-service's device_jobs (morning-notes decision 7b).
+//
+// A near-identical proxy existed briefly under and was removed same-day
+// (93edc38b) because nothing rendered it yet — that was a reachability
+// violation, not a design flaw in the endpoint itself. It is restored here
+// with its consumer landing in the same change.
+func (h *DiscoveryHandler) ListJobs(c *gin.Context) {
+	url := h.svc.GetClusterSensorURL() + "/api/v1/discovery/jobs"
+	if q := c.Request.URL.Query(); len(q) > 0 {
+		url += "?" + q.Encode()
+	}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create request"})
+		return
+	}
+	req.Header.Set("Authorization", clusterAuthHeader(c))
+
+	resp, err := h.svc.GetHTTPClient().Do(req)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to call cluster-sensor-service"})
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read response"})
+		return
+	}
+	c.Data(resp.StatusCode, "application/json", body)
+}
+
+// GetJob handles GET /api/v1/inventory/discovery/jobs/:id
 func (h *DiscoveryHandler) GetJob(c *gin.Context) {
 	jobID := c.Param("id")
 
@@ -321,13 +374,19 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 	}
 
 	findings := make([]services.IngestFinding, 0, len(rawBody.Findings))
-	for _, raw := range rawBody.Findings {
+	// Where each accepted finding sat in the REQUEST. A malformed one is
+	// skipped, so the two slices are not the same length, and the caller reads
+	// the per-finding statuses below by its own index — an off-by-one here would
+	// stamp one discovery row with another's outcome.
+	requestIndex := make([]int, 0, len(rawBody.Findings))
+	for i, raw := range rawBody.Findings {
 		var csf services.ClusterSensorFinding
 		if err := json.Unmarshal(raw, &csf); err != nil {
 			log.Printf("[DiscoveryHandler] IngestPipelineFindings: skipping malformed finding: %v", err)
 			continue
 		}
 		findings = append(findings, csf.ToIngestFinding())
+		requestIndex = append(requestIndex, i)
 	}
 
 	// tenantID is stored as uuid.UUID in context by JWT middleware
@@ -346,12 +405,13 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 
 	assetStatus := resolveIngestedAssetStatus(rawBody.AssetStatus)
 
-	imported, err := h.assets.IngestFindings(tenantUUID, findings, assetStatus)
+	report, err := h.assets.IngestFindingsReport(tenantUUID, findings, assetStatus)
 	if err != nil {
 		log.Printf("[DiscoveryHandler] IngestPipelineFindings failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ingest_failed"})
 		return
 	}
+	imported := report.Imported
 
 	log.Printf("[DiscoveryHandler] IngestPipelineFindings: ingested %d findings (status=%s)", imported, assetStatus)
 
@@ -365,7 +425,31 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 		}, []string{}, nil)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"imported": imported})
+	// `asset_statuses` is index-aligned with the REQUEST's findings, and is what
+	// lets discovery-processor stamp a discovery row with what actually happened
+	// to it rather than with what it asked for. A finding that landed on no
+	// asset — skipped, held by a merge proposal, routed to external_connections
+	// — reports the empty string, which the caller leaves alone.
+	c.JSON(http.StatusOK, gin.H{
+		"imported":       imported,
+		"asset_statuses": alignToRequest(len(rawBody.Findings), requestIndex, report.EffectiveStatus),
+	})
+}
+
+// alignToRequest maps a per-finding result from the slice IngestFindingsReport
+// saw back onto the slice the caller sent, filling the gaps left by findings
+// this handler could not parse.
+func alignToRequest(requested int, requestIndex []int, statuses []string) []string {
+	out := make([]string, requested)
+	for i, status := range statuses {
+		if i >= len(requestIndex) {
+			break
+		}
+		if at := requestIndex[i]; at >= 0 && at < requested {
+			out[at] = status
+		}
+	}
+	return out
 }
 
 // CancelJob handles POST /api/v1/inventory/discovery/jobs/:id/cancel
@@ -389,196 +473,5 @@ func (h *DiscoveryHandler) CancelJob(c *gin.Context) {
 func (h *DiscoveryHandler) RerunJob(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{
 		"message": "Job rerun initiated",
-	})
-}
-
-// GetCapabilities returns the tenant's capability policy for the discovery
-// wizard. Regular tenant users can call this to determine which scanning
-// features their tenant admin has enabled or disabled.
-func (h *DiscoveryHandler) GetCapabilities(c *gin.Context) {
-	tenantIDVal, _ := c.Get("tenantID")
-	tenantIDStr := ""
-	if tenantID, ok := tenantIDVal.(uuid.UUID); ok {
-		tenantIDStr = tenantID.String()
-	} else if s, ok := tenantIDVal.(string); ok {
-		tenantIDStr = s
-	}
-	if tenantIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "tenant ID required"})
-		return
-	}
-
-	// Default capabilities — everything enabled
-	capabilities := map[string]interface{}{
-		"active_scanning":         true,
-		"tls_version_enumeration": true,
-		"ssh_probing":             true,
-	}
-
-	if h.db == nil {
-		// No DB available — return defaults
-		c.JSON(http.StatusOK, gin.H{"capabilities": capabilities})
-		return
-	}
-
-	// Read tenant_admin_settings (RLS-scoped, filtered by tenant_id) to check for
-	// capability policy overrides — scope the read to this tenant under RLS.
-	tenantUUID, parseErr := uuid.Parse(tenantIDStr)
-	if parseErr != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant ID"})
-		return
-	}
-	var configJSON []byte
-	err := database.WithTenantTx(c.Request.Context(), h.db, tenantUUID, func(tx *sqlx.Tx) error {
-		row := tx.QueryRow(`SELECT config FROM tenant_admin_settings WHERE tenant_id = $1`, tenantIDStr)
-		if scanErr := row.Scan(&configJSON); scanErr != nil && scanErr != sql.ErrNoRows {
-			return scanErr
-		}
-		return nil
-	})
-
-	if err == nil && len(configJSON) > 0 {
-		var config map[string]interface{}
-		if json.Unmarshal(configJSON, &config) == nil {
-			if policy, ok := config["capability_policy"].(map[string]interface{}); ok {
-				// Override defaults with tenant policy values
-				for key, val := range policy {
-					switch v := val.(type) {
-					case bool:
-						capabilities[key] = v
-					case []interface{}:
-						capabilities[key] = v
-					}
-				}
-			}
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"capabilities": capabilities})
-}
-
-// userCanUpdateCapabilityPolicy returns true if the caller may change tenant discovery capabilities.
-func (h *DiscoveryHandler) userCanUpdateCapabilityPolicy(c *gin.Context, tenantID, userID uuid.UUID) (bool, error) {
-	if internal, ok := c.Get("isInternalCall"); ok {
-		if b, ok := internal.(bool); ok && b {
-			return true, nil
-		}
-	}
-	if roleVal, ok := c.Get("role"); ok {
-		if roleStr, ok := roleVal.(string); ok {
-			rl := strings.ToLower(roleStr)
-			if strings.Contains(rl, "platform") || strings.Contains(rl, "super_admin") {
-				return true, nil
-			}
-		}
-	}
-	// RLS-scoped tables (user_tenant_roles, tenant_roles) filtered by r.tenant_id —
-	// scope the read to this tenant under RLS.
-	var allowed bool
-	err := database.WithTenantTx(c.Request.Context(), h.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(`
-			SELECT EXISTS (
-				SELECT 1
-				FROM user_tenant_roles ur
-				JOIN tenant_roles r ON r.id = ur.role_id
-				WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true
-				  AND r.name IN ('tenant_admin', 'security_admin')
-			)`, userID, tenantID).Scan(&allowed)
-	})
-	if err != nil {
-		return false, err
-	}
-	return allowed, nil
-}
-
-// UpdateCapabilities saves the tenant's capability policy. This is called
-// from the sensor configuration page by tenant admins.
-func (h *DiscoveryHandler) UpdateCapabilities(c *gin.Context) {
-	tenantIDVal, _ := c.Get("tenantID")
-	userIDVal, _ := c.Get("userID")
-	tenantUUID, tenantOK := tenantIDVal.(uuid.UUID)
-	userUUID, userOK := userIDVal.(uuid.UUID)
-	if !tenantOK || !userOK {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "tenant ID and user ID required"})
-		return
-	}
-	tenantIDStr := tenantUUID.String()
-	userIDStr := userUUID.String()
-
-	if h.db == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database not available"})
-		return
-	}
-
-	allowed, err := h.userCanUpdateCapabilityPolicy(c, tenantUUID, userUUID)
-	if err != nil {
-		log.Printf("[DiscoveryHandler] capability policy auth check failed: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify permissions"})
-		return
-	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions to update capability policy"})
-		return
-	}
-
-	var req struct {
-		Capabilities map[string]interface{} `json:"capabilities"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
-		return
-	}
-
-	// Read current config — tenant_admin_settings is RLS-scoped (filtered by
-	// tenant_id); scope the read to this tenant under RLS.
-	var configJSON []byte
-	var currentVersion int
-	err = database.WithTenantTx(c.Request.Context(), h.db, tenantUUID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(
-			`SELECT config, version FROM tenant_admin_settings WHERE tenant_id = $1`,
-			tenantIDStr,
-		).Scan(&configJSON, &currentVersion)
-	})
-
-	config := map[string]interface{}{}
-	if err == nil && len(configJSON) > 0 {
-		_ = json.Unmarshal(configJSON, &config)
-	}
-
-	// Merge capabilities into capability_policy
-	config["capability_policy"] = req.Capabilities
-
-	newConfigJSON, err := json.Marshal(config)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal config"})
-		return
-	}
-
-	// Upsert with version bump — tenant_admin_settings is RLS-scoped; scope the
-	// write to this tenant so the INSERT satisfies the RLS WITH CHECK predicate.
-	var newVersion int
-	upsertQuery := `
-		INSERT INTO tenant_admin_settings (tenant_id, config, version, updated_by, created_at, updated_at)
-		VALUES ($1, $2, 1, $3, NOW(), NOW())
-		ON CONFLICT (tenant_id) DO UPDATE
-		SET config = EXCLUDED.config,
-			version = tenant_admin_settings.version + 1,
-			updated_by = EXCLUDED.updated_by,
-			updated_at = NOW()
-		RETURNING version`
-
-	err = database.WithTenantTx(c.Request.Context(), h.db, tenantUUID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(upsertQuery, tenantIDStr, newConfigJSON, userIDStr).Scan(&newVersion)
-	})
-	if err != nil {
-		log.Printf("[DiscoveryHandler] Failed to save capability policy: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save capability policy"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message":      "capability policy updated",
-		"capabilities": req.Capabilities,
-		"version":      newVersion,
 	})
 }

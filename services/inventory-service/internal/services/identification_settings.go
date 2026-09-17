@@ -4,7 +4,7 @@ package services
 // matcher's auto-accept threshold (workstream 4.6, ADR-0002 D3).
 //
 // It lives in `tenant_admin_settings.config` under the `identity` key, beside
-// `capability_policy` and `network_spaces`, because that is where this
+// `discovery_auto_scan` and `network_spaces`, because that is where this
 // platform's tenant-admin settings live and a second home for one number would
 // be a second thing to back up, migrate and reason about. The table carries an
 // audit trigger (`log_tenant_admin_settings_change`), so a change to the
@@ -102,7 +102,7 @@ func (s *IdentificationSettingsService) Set(ctx context.Context, tenantID, actor
 	var version int
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		// Read-modify-write inside ONE transaction. `config` is a single jsonb
-		// document several features share (capability_policy, network_spaces,
+		// document several features share (discovery_auto_scan, network_spaces,
 		// onboarding_required), so a read outside the transaction and a write
 		// inside it would drop whichever of them changed in between.
 		//

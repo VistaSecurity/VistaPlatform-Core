@@ -57,6 +57,12 @@ func Confidence(o *HostObservation) float64 {
 			c = 0.85
 		case SourceMDNS:
 			c = 0.80
+			if o.Relayed() {
+				// A reflected announcement is hearsay about a third party —
+				// the same claim a resolver's answer makes — and grades
+				// like one. See DecodeMDNS.
+				c = 0.60
+			}
 		case SourceDNS:
 			c = 0.60
 		}

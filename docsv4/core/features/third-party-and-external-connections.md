@@ -34,8 +34,12 @@ internal / 3rd-party split is a guess.
      badge, certificate expiry and when it was last seen.
    - The strength badge carries the reason. A connection marked *weak* that looks
      fine at a glance — TLS 1.3, a strong cipher — has something else behind it,
-     such as a certificate that was never logged to Certificate Transparency.
+     such as an undersized certificate key or a weak signature hash. Certificate Transparency and trust observations appear separately as certificate hygiene.
      Hover the badge to read what.
+
+Strength uses **Weak, Acceptable, Strong, Recommended**. The weakest assessed component wins, even when the cipher suite itself is recommended. **Not assessed** means evidence is insufficient; it does not mean the connection is safe. **Reassessment required** means an earlier weakness was recorded but its supporting facts are incomplete. Hover for the retained reason. Some older observations stored cipher size where exchange-key size was expected; these retain the original number for review and require a fresh exchange-key measurement. Rows with a proven weak component retain their **Weak** badge and show any unresolved evidence in its hover details; unresolved rows without a proven grade appear under the **Not assessed** filter. The **Reassessment required** dashboard count includes both groups and can overlap **Weak crypto**. A partial observation cannot clear prior key-size, signature or offered-protocol weakness.
+
+Existing observations are reassessed at service startup and during the regular nightly assessment. Historical ratings retain their original vocabulary: an old “good” label does not tell us whether the connection meets today's Strong or Recommended rating.
 
 ## Typical workflow: weak crypto on a 3rd party
 

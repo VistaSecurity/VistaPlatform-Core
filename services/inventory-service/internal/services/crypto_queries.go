@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 )
@@ -19,29 +20,37 @@ import (
 func (s *AssetService) GetCryptoImplementations(tenantID, assetID uuid.UUID) ([]models.CryptoImplementation, error) {
 	query := `
 		SELECT
-			id, tenant_id, asset_id, protocol, protocol_version, cipher_suite,
-			key_exchange_algorithm, signature_algorithm, symmetric_encryption,
-			hash_algorithm, key_size, certificate_id, discovery_method,
-			confidence_score, source_sensor_id, raw_data, risk_score,
-			compliance_status, first_discovered_at, last_verified_at,
-			created_at, updated_at, deleted_at
-		FROM crypto_implementations
-		WHERE asset_id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		ORDER BY risk_score DESC, created_at DESC
+			ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
+			ci.key_exchange_algorithm, ci.signature_algorithm, ci.symmetric_encryption,
+			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method, ci.discovery_methods,
+			ci.confidence_score, ci.source_sensor_id, ci.raw_data, ci.risk_score,
+			` + cryptoRiskScoreAssessedSQL("$3") + ` AS risk_score_assessed,
+			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
+			ci.created_at, ci.updated_at, ci.deleted_at
+		FROM crypto_implementations ci
+		WHERE ci.asset_id = $1 AND ci.tenant_id = $2 AND ci.deleted_at IS NULL
+		ORDER BY ci.risk_score DESC NULLS LAST, ci.created_at DESC
 	`
 	var cryptoImpls []models.CryptoImplementation
 	// RLS-scoped read over crypto_implementations.
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.Select(&cryptoImpls, query, assetID, tenantID)
+		return tx.Select(&cryptoImpls, query, assetID, tenantID, pq.Array(cryptoassess.CatalogueRiskRoles))
 	}); err != nil {
 		return nil, fmt.Errorf("failed to get crypto implementations: %w", err)
 	}
 	for i := range cryptoImpls {
+		if !cryptoImpls[i].RiskScoreAssessed {
+			cryptoImpls[i].RiskScore = nil
+		}
 		riskScore := 0
 		if cryptoImpls[i].RiskScore != nil {
 			riskScore = *cryptoImpls[i].RiskScore
 		}
-		cryptoImpls[i].RiskLevel = models.GetRiskLevel(riskScore)
+		if cryptoImpls[i].RiskScoreAssessed {
+			cryptoImpls[i].RiskLevel = models.GetRiskLevel(riskScore)
+		} else {
+			cryptoImpls[i].RiskLevel = "Unknown"
+		}
 		cryptoImpls[i].RiskFactors = s.AnalyzeCryptoRisk(&cryptoImpls[i])
 	}
 	if err := enrichCryptoImplementationsWithRelations(s.db, tenantID, cryptoImpls); err != nil {

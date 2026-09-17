@@ -14,7 +14,7 @@
 // the merge row was written to avoid.
 import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
-import { Icon, MiniBar } from '../../components/ui';
+import { Icon, probabilityConfidencePercent, MiniBar, percentLabel } from '../../components/ui';
 import { classLabel } from '../inventory/asset-shape';
 import {
   SOURCE_KIND_HELP, SOURCE_KIND_LABEL, TYPE_HELP, TYPE_LABEL, peerName,
@@ -22,13 +22,18 @@ import {
 } from '../inventory/relationships';
 import { relTime } from './kit';
 
+// Relationship observations retain their existing zero-as-unscored boundary.
+function relationshipConfidencePercent(confidence: number | undefined): number | null {
+  return confidence === 0 ? null : probabilityConfidencePercent(confidence);
+}
+
 /** The producer's confidence as a percentage, or null when it is unscored.
  *
  *  Zero means UNSCORED, not "certainly wrong" — the same distinction the merge
  *  row makes, and the same reason: a 0% bar reads as a confident rejection. */
 export function confidencePct(confidence: number | undefined): string | null {
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence <= 0) return null;
-  return `${Math.round(confidence <= 1 ? confidence * 100 : confidence)}%`;
+  const value = relationshipConfidencePercent(confidence);
+  return value === null ? null : percentLabel(value);
 }
 
 function EndCard({ peer, role }: { peer: RelationshipPeer | undefined; role: string }) {
@@ -71,6 +76,7 @@ export function RelationshipProposalRow({ proposal, busy, onAccept, onReject }: 
   onReject: () => void;
 }) {
   const pct = confidencePct(proposal.confidence);
+  const confidencePercent = relationshipConfidencePercent(proposal.confidence);
   const kind = proposal.source_kind;
 
   return (
@@ -100,11 +106,11 @@ export function RelationshipProposalRow({ proposal, busy, onAccept, onReject }: 
         >
           {SOURCE_KIND_LABEL[kind]}
         </span>
-        {pct && (
+        {pct && confidencePercent !== null && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 36 }}>
               <MiniBar
-                pct={Math.round(proposal.confidence <= 1 ? proposal.confidence * 100 : proposal.confidence)}
+                pct={confidencePercent}
                 color={proposal.confidence >= 0.7 ? 'var(--ok)' : 'var(--warn)'}
               />
             </span>

@@ -115,15 +115,18 @@ type scoreBreakdown struct {
 // A framework with no ASSESSED controls — including one with no controls at all —
 // has no score. It used to return 100, which is the loudest possible way of
 // saying "we did not look".
-func frameworkScore(outcomes []controlOutcome) scoreBreakdown {
+func frameworkScore(outcomes []controlOutcome) (scoreBreakdown, error) {
 	b := scoreBreakdown{Total: len(outcomes)}
 	var totalWeight, passWeight int
 	for _, o := range outcomes {
+		w, err := severityToWeight(o.BaselineSeverity)
+		if err != nil {
+			return scoreBreakdown{}, fmt.Errorf("control weight: %w", err)
+		}
 		if o.Status == statusNotAssessed {
 			b.NotAssessed++
 			continue
 		}
-		w := severityToWeight(o.BaselineSeverity)
 		totalWeight += w
 		if o.Status == statusPass {
 			b.Passing++
@@ -133,11 +136,11 @@ func frameworkScore(outcomes []controlOutcome) scoreBreakdown {
 		}
 	}
 	if totalWeight == 0 {
-		return b // nothing assessed → no score
+		return b, nil // nothing assessed → no score
 	}
 	score := (passWeight * 100) / totalWeight
 	b.Score = &score
-	return b
+	return b, nil
 }
 
 // statusForFindings is the whole of the pass/fail rule: a control FAILS iff it

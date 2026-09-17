@@ -411,8 +411,8 @@ func TestCBOMAlgorithmEnrichmentUsesCanonicalData(t *testing.T) {
 	if aesComp.AlgorithmDetails.Strength != "recommended" {
 		t.Errorf("AES-256-GCM strength = %q, want recommended (from canonical table, not heuristic 'strong')", aesComp.AlgorithmDetails.Strength)
 	}
-	if aesComp.AlgorithmDetails.RiskScore != 5 {
-		t.Errorf("AES-256-GCM risk_score = %d, want 5 (from canonical table)", aesComp.AlgorithmDetails.RiskScore)
+	if aesComp.AlgorithmDetails.RiskScore == nil || *aesComp.AlgorithmDetails.RiskScore != 5 {
+		t.Errorf("AES-256-GCM risk_score = %v, want 5 (from canonical table)", aesComp.AlgorithmDetails.RiskScore)
 	}
 
 	_ = byID // suppress unused warning
@@ -499,4 +499,134 @@ func containsAll(have, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestCBOMCatalogueRatingsPreserveZeroAndUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		score interface{}
+		want  *int
+	}{
+		{"zero", 0, new(int)}, {"missing", nil, nil}, {"negative", -1, nil},
+		{"out of range", 101, nil}, {"fractional", 2.5, nil}, {"text", "5", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details := enrichAlgorithmDetails(cbomAlgorithmSource{Code: "CUSTOM"}, buildAlgorithmLookup([]map[string]interface{}{{"code": "CUSTOM", "risk_score": tc.score}}))
+			raw, err := json.Marshal(details)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire map[string]interface{}
+			if err := json.Unmarshal(raw, &wire); err != nil {
+				t.Fatal(err)
+			}
+			score, present := wire["risk_score"]
+			if tc.want == nil && present {
+				t.Fatalf("unassessed score was invented: %s", raw)
+			}
+			if tc.want != nil && (!present || score != float64(*tc.want)) {
+				t.Fatalf("explicit zero lost: %s", raw)
+			}
+			if details.Strength != "" {
+				t.Fatalf("missing strength was invented: %s", details.Strength)
+			}
+		})
+	}
+	for _, code := range []string{"CUSTOM", "RSA", "AES-256-GCM", "ML-KEM-768"} {
+		details := enrichAlgorithmDetails(cbomAlgorithmSource{Code: code}, nil)
+		if details.RiskScore != nil || details.Strength != "" {
+			t.Fatalf("%s received an invented catalogue rating: %+v", code, details)
+		}
+	}
+	// Existing frozen reports retain their explicit historical values on read.
+	var historical models.CBOMAlgorithmDetails
+	if err := json.Unmarshal([]byte(`{"risk_score":25,"strength":"acceptable"}`), &historical); err != nil {
+		t.Fatal(err)
+	}
+	if historical.RiskScore == nil || *historical.RiskScore != 25 || historical.Strength != "acceptable" {
+		t.Fatal("historical report changed")
+	}
+}
+
+// Exercise the inventory fetch, component assembly, summary and JSON export as
+// one report flow. Enrichment gaps must not invent ratings or lose a real zero.
+func TestGenerateCBOMReportPreservesCatalogueCoverageAndZero(t *testing.T) {
+	assets := []map[string]interface{}{{"id": "asset-1", "name": "test host"}}
+	cryptos := []map[string]interface{}{}
+	for _, code := range []string{"CUSTOM-ZERO", "CUSTOM-UNKNOWN", "CUSTOM-WEAK"} {
+		cryptos = append(cryptos, map[string]interface{}{"id": code, "asset_id": "asset-1", "symmetric_encryption": code})
+	}
+	algorithms := []map[string]interface{}{{"code": "CUSTOM-ZERO", "strength": "strong", "risk_score": 0}, {"code": "CUSTOM-WEAK", "strength": "weak", "risk_score": 90}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload := map[string]interface{}{"pagination": map[string]interface{}{"has_next": false}}
+		switch r.URL.Path {
+		case "/api/v1/inventory-service/assets":
+			payload["assets"] = assets
+		case "/api/v1/inventory-service/crypto-implementations":
+			payload["crypto_implementations"] = cryptos
+		case "/api/v1/inventory-service/certificates":
+			payload["certificates"] = []map[string]interface{}{}
+		case "/api/v1/inventory-service/algorithms":
+			payload["algorithms"] = algorithms
+			payload["total"] = len(algorithms)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+	}))
+	defer server.Close()
+	source, err := datasources.NewInventoryDataSource(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := NewCBOMReportHandler(source).GenerateCBOMData(context.Background(), map[string]interface{}{"includeAlgorithms": true, "includeCertificates": false, "includeProtocols": false, "includeKeys": false, "includeLibraries": false}, "test-token", "00000000-0000-0000-0000-000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Summary.AlgorithmCount != 3 || report.Summary.WeakAlgorithms != 1 {
+		t.Fatalf("coverage/counts changed: %+v", report.Summary)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Components []struct {
+			AlgorithmDetails map[string]interface{} `json:"algorithm_details"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, component := range wire.Components {
+		d := component.AlgorithmDetails
+		if d == nil {
+			continue
+		}
+		code, _ := d["code"].(string)
+		seen[code] = true
+		switch code {
+		case "CUSTOM-ZERO":
+			if d["risk_score"] != float64(0) || d["strength"] != "strong" {
+				t.Fatalf("authoritative zero lost: %v", d)
+			}
+		case "CUSTOM-UNKNOWN":
+			if _, ok := d["risk_score"]; ok {
+				t.Fatalf("invented unknown risk: %v", d)
+			}
+			if _, ok := d["strength"]; ok {
+				t.Fatalf("invented unknown strength: %v", d)
+			}
+		case "CUSTOM-WEAK":
+			if d["risk_score"] != float64(90) || d["strength"] != "weak" {
+				t.Fatalf("known weakness lost: %v", d)
+			}
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("export omitted components: %v", seen)
+	}
 }

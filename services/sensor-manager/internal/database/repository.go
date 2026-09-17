@@ -111,7 +111,7 @@ func (r *sensorRepository) GetSensorByID(ctx context.Context, id uuid.UUID) (*mo
 	return r.getSensorBy(ctx, r.bypassDB,
 		`SELECT id, tenant_id, name, description, platform, version, profile, status,
 		        network_interfaces, tags, last_heartbeat, created_at, updated_at, deleted_at,
-		        air_gapped, available_interfaces, ip_address, reporting_interval
+		        air_gapped, available_interfaces, ip_address, reporting_interval, asset_id
 		 FROM sensors
 		 WHERE id = $1 AND deleted_at IS NULL`, id)
 }
@@ -127,7 +127,7 @@ func (r *sensorRepository) GetSensorByIDForTenant(ctx context.Context, id, tenan
 		s, e := r.getSensorBy(ctx, tx,
 			`SELECT id, tenant_id, name, description, platform, version, profile, status,
 			        network_interfaces, tags, last_heartbeat, created_at, updated_at, deleted_at,
-			        air_gapped, available_interfaces, ip_address, reporting_interval
+			        air_gapped, available_interfaces, ip_address, reporting_interval, asset_id
 			 FROM sensors
 			 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`, id, tenantID)
 		if e != nil {
@@ -150,13 +150,14 @@ func (r *sensorRepository) getSensorBy(ctx context.Context, q rowQuerier, query 
 	var profile sql.NullString
 	var ipAddress sql.NullString
 	var reportingInterval sql.NullInt64
+	var assetID uuid.NullUUID
 
 	err := q.QueryRowContext(ctx, query, args...).Scan(
 		&sensor.ID, &sensor.TenantID, &sensor.Name, &description,
 		&platform, &version, &profile, &sensor.Status,
 		pq.Array(&sensor.NetworkInterfaces), pq.Array(&sensor.Tags), &sensor.LastHeartbeat,
 		&sensor.CreatedAt, &sensor.UpdatedAt, &sensor.DeletedAt,
-		&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &ipAddress, &reportingInterval,
+		&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &ipAddress, &reportingInterval, &assetID,
 	)
 
 	if err != nil {
@@ -191,6 +192,10 @@ func (r *sensorRepository) getSensorBy(ctx context.Context, q rowQuerier, query 
 		v := int(reportingInterval.Int64)
 		sensor.ReportingInterval = &v
 	}
+	if assetID.Valid {
+		v := assetID.UUID
+		sensor.AssetID = &v
+	}
 
 	return sensor, nil
 }
@@ -203,7 +208,7 @@ func (r *sensorRepository) ListSensorsByTenant(ctx context.Context, tenantID uui
 	query := `
 		SELECT id, tenant_id, name, description, platform, version, profile, status,
 		       network_interfaces, tags, ip_address, last_heartbeat, created_at, updated_at, deleted_at,
-		       air_gapped, available_interfaces, reporting_interval
+		       air_gapped, available_interfaces, reporting_interval, asset_id
 		FROM sensors
 		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC`
@@ -226,13 +231,14 @@ func (r *sensorRepository) ListSensorsByTenant(ctx context.Context, tenantID uui
 			var profile sql.NullString
 			var ipAddress sql.NullString
 			var reportingInterval sql.NullInt64
+			var assetID uuid.NullUUID
 
 			if e := rows.Scan(
 				&sensor.ID, &sensor.TenantID, &sensor.Name, &description,
 				&platform, &version, &profile, &sensor.Status,
 				pq.Array(&sensor.NetworkInterfaces), pq.Array(&sensor.Tags), &ipAddress, &sensor.LastHeartbeat,
 				&sensor.CreatedAt, &sensor.UpdatedAt, &sensor.DeletedAt,
-				&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &reportingInterval,
+				&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &reportingInterval, &assetID,
 			); e != nil {
 				return e
 			}
@@ -261,6 +267,10 @@ func (r *sensorRepository) ListSensorsByTenant(ctx context.Context, tenantID uui
 			if reportingInterval.Valid {
 				v := int(reportingInterval.Int64)
 				sensor.ReportingInterval = &v
+			}
+			if assetID.Valid {
+				v := assetID.UUID
+				sensor.AssetID = &v
 			}
 
 			sensors = append(sensors, sensor)

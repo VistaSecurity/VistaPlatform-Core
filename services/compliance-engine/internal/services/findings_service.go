@@ -17,6 +17,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 var ErrFindingNotFound = errors.New("finding not found")
@@ -553,12 +554,12 @@ func findingListWhere(tenantID uuid.UUID, filters FindingListFilters, includePro
 		idx++
 	}
 	if filters.Severity != "" {
-		// normalizeSeverity, not a LOWER() comparison: `medium`, `med` and
+		// Explicit legacy read-filter boundary, not a writer normalizer: `medium`, `med` and
 		// `Medium` all name one rung of the registry ladder, and a caller that
 		// still says `Med` (the old compliance_findings spelling) must get the
 		// rows rather than an empty page.
 		where = append(where, fmt.Sprintf("cf.severity = $%d", idx))
-		args = append(args, normalizeSeverity(filters.Severity))
+		args = append(args, legacySeverityFilter(filters.Severity))
 		idx++
 	}
 	if filters.AssignedTo != nil {
@@ -1786,6 +1787,9 @@ func loadExistingFindings(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, i
 // would be counted by workstream 3.2's recompute and would swamp it.
 func (s *FindingsService) insertFinding(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, item findingUpsert, now time.Time, stats *findingWriteStats) error {
 	finding := item.Finding
+	if finding == nil {
+		return fmt.Errorf("cannot insert an ungraded compliance finding")
+	}
 	findingID := uuid.New()
 	severity := SeverityLow
 	summary := "Compliance violation detected"
@@ -1796,7 +1800,10 @@ func (s *FindingsService) insertFinding(ctx context.Context, tx *sql.Tx, tenantI
 
 	if finding != nil {
 		findingID = finding.ID
-		severity = normalizeSeverity(finding.Severity)
+		if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(finding.Severity)); err != nil {
+			return err
+		}
+		severity = finding.Severity
 		summary = finding.Summary
 		subjectType = normalizeSubjectType(finding.SubjectType)
 		subjectLabel = finding.SubjectLabel
@@ -1871,7 +1878,10 @@ func (s *FindingsService) updateFinding(ctx context.Context, tx *sql.Tx, item fi
 	var severity, summary any
 	var evidence any
 	if item.Finding != nil {
-		severity = normalizeSeverity(item.Finding.Severity)
+		if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(item.Finding.Severity)); err != nil {
+			return err
+		}
+		severity = item.Finding.Severity
 		summary = item.Finding.Summary
 		evidence = normalizeFindingEvidence(item.Finding)
 	}

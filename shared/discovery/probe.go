@@ -31,12 +31,40 @@ type ProbeResult struct {
 	CertValidationStatus string                         `json:"cert_validation_status,omitempty"`
 	CertValidationError  string                         `json:"cert_validation_error,omitempty"`
 
-	// SSH
+	// SSH — the host key comes from completing the key exchange; everything
+	// below it comes from the server's SSH_MSG_KEXINIT (probe_ssh_kexinit.go).
 	SSHBanner             string   `json:"ssh_banner,omitempty"`
 	SSHKeyTypes           []string `json:"ssh_key_types,omitempty"`
 	SSHHostKeyType        string   `json:"ssh_host_key_type,omitempty"`
 	SSHHostKeyFingerprint string   `json:"ssh_host_key_fingerprint,omitempty"`
-	SSHKexAlgorithm       string   `json:"ssh_kex_algorithm,omitempty"`
+	SSHProtocolVersion    string   `json:"ssh_protocol_version,omitempty"`
+	SSHSoftwareVersion    string   `json:"ssh_software_version,omitempty"`
+
+	// SSH negotiated — what RFC 4253 §7.1 selects from the server's offer
+	// against the probe's own strong-first name-lists. Derived exactly, not
+	// guessed: both name-lists are known, so this is what an SSH handshake
+	// with a well-configured modern client would actually use.
+	SSHKexAlgorithm     string `json:"ssh_kex_algorithm,omitempty"`
+	SSHHostKeyAlgorithm string `json:"ssh_host_key_algorithm,omitempty"`
+	SSHEncryptionAlgC2S string `json:"ssh_encryption_alg_c2s,omitempty"`
+	SSHEncryptionAlgS2C string `json:"ssh_encryption_alg_s2c,omitempty"`
+	SSHMACAlgC2S        string `json:"ssh_mac_alg_c2s,omitempty"`
+	SSHMACAlgS2C        string `json:"ssh_mac_alg_s2c,omitempty"`
+	SSHCompressionAlg   string `json:"ssh_compression_alg,omitempty"`
+
+	// SSH offered — the server's KEXINIT name-lists verbatim. An offer is not
+	// a choice, and the ingest links these as is_inferred=true for exactly
+	// that reason; but a server that offers diffie-hellman-group1-sha1 will
+	// use it the moment a client asks, so the offer is the finding that
+	// matters most in an audit.
+	SSHServerKexAlgorithms     []string `json:"ssh_server_kex_algorithms,omitempty"`
+	SSHServerHostKeyAlgorithms []string `json:"ssh_server_host_key_algorithms,omitempty"`
+	SSHServerEncryptionC2S     []string `json:"ssh_server_encryption_c2s,omitempty"`
+	SSHServerEncryptionS2C     []string `json:"ssh_server_encryption_s2c,omitempty"`
+	SSHServerMACsC2S           []string `json:"ssh_server_macs_c2s,omitempty"`
+	SSHServerMACsS2C           []string `json:"ssh_server_macs_s2c,omitempty"`
+	SSHServerCompressionC2S    []string `json:"ssh_server_compression_c2s,omitempty"`
+	SSHServerCompressionS2C    []string `json:"ssh_server_compression_s2c,omitempty"`
 
 	// Metadata is freeform protocol-specific detail (also carries the TLS raw
 	// fields, cert quality flags, and OCSP status for TLS probes).

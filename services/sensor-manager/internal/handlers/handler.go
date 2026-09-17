@@ -47,6 +47,13 @@ type legacySensorService interface {
 	UpdateSensorHealthWithIP(sensorID string, health *models.SensorHealth, ipAddress *string) error
 	ReconcileSensorAddresses(ctx context.Context, sensorID string, addrs []sharednetwork.InterfaceAddress) error
 	ListSensorAddresses(ctx context.Context, tenantID, sensorID uuid.UUID) ([]models.AgentAddress, error)
+	// EmitSelfObservationIfDue turns a sensor's self-reported Host block
+	// (asset-inventory decision 9) into a host_observation discovery through
+	// the same StoreDiscoveries pipeline, throttled. See
+	// services/self_observation.go. host may be nil (older sensor, or a
+	// throttled heartbeat that omitted it); implementations must treat that as
+	// a no-op, never an error.
+	EmitSelfObservationIfDue(sensorID uuid.UUID, host *models.HostIdentity)
 }
 
 // pcapStore is the slice of *services.PcapService the pcap handlers depend on.
@@ -72,13 +79,22 @@ type Handler struct {
 	// cross-tenant handlers (platform-wide stats, the admin roll-up). Those
 	// queries have no tenant in scope, so they cannot set app.tenant_id and fail
 	// closed on the RLS-scoped handle.
-	bypassDB            *sql.DB
-	s3Downloader        *services.S3Downloader
-	discoveryJobService *services.DiscoveryJobService
-	pcapService         pcapStore
-	natsClient          *events.NATSClient
-	encryptionKey       string // Encryption master key for CA certificate encryption
-	log                 *logrus.Logger
+	bypassDB *sql.DB
+	// sensorConfig serves the desired-state exchange on the heartbeat.
+	// Nil leaves the heartbeat exactly as it was, which is what makes the
+	// exchange additive for an existing deployment.
+	sensorConfig *SensorConfigHandler
+	s3Downloader *services.S3Downloader
+	// jobCompleter and sensorTenant serve the dispatched-job completion
+	// callback. jobCompleter is the discovery job service behind an
+	// interface; sensorTenant is nil in production (TenantForSensor over
+	// bypassDB) and a stub in the contract test.
+	jobCompleter  sensorJobCompleter
+	sensorTenant  sensorTenantResolver
+	pcapService   pcapStore
+	natsClient    *events.NATSClient
+	encryptionKey string // Encryption master key for CA certificate encryption
+	log           *logrus.Logger
 }
 
 // NewHandler creates a new handler instance with old service (for fallback)
@@ -106,17 +122,23 @@ func NewHandlerWithService(sensorServiceV2 *services.SensorServiceV2, repo datab
 func NewHandlerWithBoth(sensorService *services.SensorService, sensorServiceV2 *services.SensorServiceV2, repo database.SensorRepository, db, bypassDB *sql.DB) *Handler {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
-	return &Handler{
-		sensorService:       sensorService,
-		sensorServiceV2:     sensorServiceV2,
-		repo:                repo,
-		db:                  db,
-		bypassDB:            bypassDB,
-		s3Downloader:        nil, // Will be set via SetS3Downloader
-		discoveryJobService: nil, // Will be set via SetDiscoveryJobService
-		encryptionKey:       "",  // Will be set via SetEncryptionKey
-		log:                 logger,
+	h := &Handler{
+		sensorService:   sensorService,
+		sensorServiceV2: sensorServiceV2,
+		repo:            repo,
+		db:              db,
+		bypassDB:        bypassDB,
+		s3Downloader:    nil, // Will be set via SetS3Downloader
+		encryptionKey:   "",  // Will be set via SetEncryptionKey
+		log:             logger,
 	}
+	// Wired here rather than left to a setter the caller might forget: the
+	// heartbeat is the ONLY way a sensor is told its desired state, so a nil
+	// here is not a degraded mode, it is the feature silently absent.
+	if db != nil {
+		h.sensorConfig = NewSensorConfigHandler(db)
+	}
+	return h
 }
 
 // SetEncryptionKey sets the encryption master key for the handler
@@ -124,9 +146,12 @@ func (h *Handler) SetEncryptionKey(key string) {
 	h.encryptionKey = key
 }
 
-// SetDiscoveryJobService sets the discovery job service for the handler
+// SetDiscoveryJobService wires the discovery job service behind the
+// dispatched-job completion callback.
 func (h *Handler) SetDiscoveryJobService(service *services.DiscoveryJobService) {
-	h.discoveryJobService = service
+	if service != nil {
+		h.jobCompleter = service
+	}
 }
 
 // SetS3Downloader sets the S3 downloader for the handler

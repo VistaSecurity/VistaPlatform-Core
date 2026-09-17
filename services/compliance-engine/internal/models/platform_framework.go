@@ -110,7 +110,7 @@ type PlatformFrameworkControlInput struct {
 	ControlID        string     `json:"control_id" binding:"required"`
 	Title            string     `json:"title" binding:"required"`
 	Description      string     `json:"description"`
-	BaselineSeverity string     `json:"baseline_severity" binding:"required,oneof=Low Med High Critical"`
+	BaselineSeverity string     `json:"baseline_severity" binding:"required,oneof=low medium high critical"`
 	CryptoRelevant   bool       `json:"crypto_relevant"`
 
 	// SourceKind / SourceRef record where this control came from, and are read

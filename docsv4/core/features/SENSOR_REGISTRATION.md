@@ -138,6 +138,13 @@ reporting interval, version, IP address, every address the host holds when there
 is more than one, whether the deployment is air-gapped, uptime, the monitored
 interfaces, the description and the tags.
 
+**Host**, once it appears: a link to the Inventory asset for the machine the
+sensor itself runs on. The sensor reports its own hostname and interfaces so
+that machine is a named, classed asset instead of an anonymous entry — and so
+an automatic active scan never targets the sensor's own host. The row is
+absent until the sensor's first self-report resolves (or on a sensor build old
+enough to predate the feature).
+
 **The certificate lives here too**, as a card at the bottom: its state (Active /
 Expiring soon / Expired / Revoked), days remaining, serial, issue and expiry
 dates, a **Download** button for the certificate itself, and — with **Full sensor

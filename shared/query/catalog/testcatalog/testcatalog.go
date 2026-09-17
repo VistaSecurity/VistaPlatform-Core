@@ -19,6 +19,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/query/ast"
 	"github.com/vistasecurity/vistaplatform/shared/query/catalog"
+	"github.com/vistasecurity/vistaplatform/shared/query/catalog/ladder"
 )
 
 // Catalog is the static catalogue.
@@ -27,22 +28,10 @@ type Catalog struct{}
 // New returns the static catalogue.
 func New() *Catalog { return &Catalog{} }
 
-// CVSSLadder is the risk/severity ladder: the CVSS v3.1/v4.0 qualitative
-// ratings ×10, which is what models.RiskBands holds. The production caller
-// passes models.RiskBands itself; this copy exists so shared/ can be tested
-// without importing a service.
+// CVSSLadder adapts the shared owner for conformance fixtures.
 type CVSSLadder struct{}
 
-// Bands implements catalog.BandLadder.
-func (CVSSLadder) Bands() []catalog.Band {
-	return []catalog.Band{
-		{Label: "Critical", Min: 90},
-		{Label: "High", Min: 70},
-		{Label: "Medium", Min: 40},
-		{Label: "Low", Min: 1},
-		{Label: "Informational", Min: 0},
-	}
-}
+func (CVSSLadder) Bands() []catalog.Band { return ladder.CVSS.Bands() }
 
 // Ladder is the ladder instance callers pass to the translator.
 var Ladder = CVSSLadder{}

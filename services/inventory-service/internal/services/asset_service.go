@@ -321,6 +321,9 @@ func (s *AssetService) applyCertQualityFlags(certData *models.CertificateData, r
 	if v, ok := rawData["cert_has_sct"].(bool); ok {
 		certData.HasSCT = &v
 	}
+	if v, ok := rawData["cert_sct_source"].(string); ok && v != "" {
+		certData.SCTSource = v
+	}
 	if v, ok := rawData["cert_known_bad_ca"].(string); ok && v != "" {
 		certData.KnownBadCA = v
 	}
@@ -726,11 +729,44 @@ func isCloudManagedPlaceholder(f IngestFinding) bool {
 	return false
 }
 
+// IngestReport is what one ingest batch DID, beyond the count of rows it
+// touched.
+//
+// It exists because the caller — discovery-processor-service — decided a
+// requested status per discovery row and then had no way to learn what actually
+// happened to it. A finding whose row matched no auto-approval rule but landed
+// on an asset the tenant approved long ago is fully materialized here and was
+// still being stamped `approval_status = 'pending'` over there, where nothing
+// ever looks at it again: the Approvals page lists pending ASSETS, and there is
+// no pending asset for an already-approved one.
+type IngestReport struct {
+	// Imported is the count IngestFindings has always returned: assets
+	// created, assets refreshed, and findings routed to external_connections.
+	Imported int
+
+	// EffectiveStatus is index-aligned with the findings passed in.
+	// EffectiveStatus[i] is the asset_status the i-th finding's asset ACTUALLY
+	// has — not the one the batch asked for — and is empty when the finding
+	// landed on no asset at all: skipped for want of an identifier, held by a
+	// merge proposal, or routed to external_connections.
+	EffectiveStatus []string
+}
+
 // IngestFindings upserts assets and attaches crypto configurations for each finding
-// assetStatus is optional and defaults to "pending_approval" if not provided
+// assetStatus is optional and defaults to "pending_approval" if not provided.
+//
+// It is the count-only form of [AssetService.IngestFindingsReport], kept because
+// most callers only ever wanted the count.
 func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFinding, assetStatus ...string) (int, error) {
+	report, err := s.IngestFindingsReport(tenantID, findings, assetStatus...)
+	return report.Imported, err
+}
+
+// IngestFindingsReport is IngestFindings with the per-finding outcome the
+// transport needs. See [IngestReport].
+func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []IngestFinding, assetStatus ...string) (IngestReport, error) {
 	if len(findings) == 0 {
-		return 0, nil
+		return IngestReport{}, nil
 	}
 
 	// Determine asset_status: use provided value or default to "pending_approval"
@@ -740,6 +776,13 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 	}
 
 	inserted := 0
+	// The per-finding answer the caller gets back, index-aligned with findings.
+	// A finding that reaches none of the branches below keeps its empty string,
+	// which the transport reads as "no asset, leave the row alone".
+	effective := make([]string, len(findings))
+	result := func() IngestReport {
+		return IngestReport{Imported: inserted, EffectiveStatus: effective}
+	}
 	// Observability counters for the end-of-run import summary ().
 	// Without these, a third-party route that persists nothing looks identical to a
 	// successful import — which is exactly how a vendor discovery silently vanished.
@@ -768,7 +811,7 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 		}
 	}
 
-	for _, f := range findings {
+	for i, f := range findings {
 		// Host observations branch FIRST, before anything reads a crypto field
 		// off the finding.
 		//
@@ -810,8 +853,9 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 			}
 			assetID, idErr := uuid.Parse(res.Asset.ID)
 			if idErr != nil {
-				return inserted, fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, idErr)
+				return result(), fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, idErr)
 			}
+			logIdentityDecisions(label, res)
 			changedAssetIDs = append(changedAssetIDs, assetID)
 			inserted++
 			// The status the asset actually HAS, which on a conflict is not the
@@ -827,6 +871,22 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 			if res.Outcome == identity.OutcomeConflict {
 				effectiveStatus = identity.StatusPendingApproval
 			}
+			if res.Outcome == identity.OutcomeMatched {
+				// A MATCHED asset already has a status, and it is not the
+				// batch's to overrule. The rule the batch ran decides what a
+				// NEW asset lands as; an observation of a host the tenant
+				// approved months ago does not put it back in Approvals, and
+				// reporting `pending_approval` for it is how eighty of these
+				// rows sat unprocessed while their assets were monitoring.
+				//
+				// Read on EVERY match, including a batch that asked for
+				// monitoring: the asset may be archived, and
+				// setStatusUnlessArchived has just declined to promote it, so
+				// the requested status would be a report of something that did
+				// not happen.
+				effectiveStatus = s.matchedAssetStatus(tenantID, assetID, effectiveStatus)
+			}
+			effective[i] = effectiveStatus
 			switch res.Outcome {
 			case identity.OutcomeCreated, identity.OutcomeConflict:
 				createdManaged++
@@ -891,11 +951,34 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 
 		existingID, existingStatus, found, lookupErr := s.lookupExistingAsset(ctx, tenantID, obs)
 		if lookupErr != nil {
-			return inserted, fmt.Errorf("failed to find existing asset: %w", lookupErr)
+			return result(), fmt.Errorf("failed to find existing asset: %w", lookupErr)
 		}
 		if found && existingStatus == "denied" {
 			// A denied asset stays denied; a re-discovery does not undo the
-			// tenant's decision.
+			// tenant's decision, and its crypto is never (re-)materialized —
+			// same as `archived` below. But the re-observation model applies
+			// here too: the device is still being seen, so last-seen still
+			// moves even though nothing is enriched.
+			//
+			// Deliberately NOT routed through the full identity-engine resolve
+			// (resolveDiscoveryObservation) the way `archived` is: that path
+			// can ATTACH new identifiers (a fresh MAC, a new hostname alias) to
+			// a denied asset, and — since ownership here is reclassified fresh
+			// from the current observation, not read off the asset's stored
+			// column — can reroute the observation to external_connections
+			// when the fresh classification says third_party. Both are new
+			// evidence accruing to a decision the tenant already made; a
+			// denied asset should grow none. A minimal Touch (advance
+			// last_seen_at only, never identifiers/endpoints) is the honest
+			// amount of work for a decision that is not being reopened.
+			if touchErr := s.identityRepo.Touch(ctx, identity.AssetRef{TenantID: tenantID.String(), ID: existingID.String()}, findingObservedAt(f)); touchErr != nil {
+				log.Printf("[AssetService] IngestFindings: touching denied asset %s failed (batch continues): %v", existingID, touchErr)
+			}
+			// Same as the matched-path assignment below: the caller (discovery-
+			// processor's BatchProcessor) reads EffectiveStatus per finding to
+			// decide the discovery row's approval_status, and needs to know this
+			// landed on a denied asset rather than whatever the batch asked for.
+			effective[i] = identity.StatusDenied
 			continue
 		}
 
@@ -942,7 +1025,7 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 
 		res, resErr := s.resolveDiscoveryObservation(tenantID, f, effectiveIP, ownership, status)
 		if resErr != nil {
-			return inserted, fmt.Errorf("failed to upsert asset: %w", resErr)
+			return result(), fmt.Errorf("failed to upsert asset: %w", resErr)
 		}
 		if res.Asset.Zero() {
 			// The identity floor: every identifier this finding carries already
@@ -962,7 +1045,7 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 		}
 		assetID, idErr := uuid.Parse(res.Asset.ID)
 		if idErr != nil {
-			return inserted, fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, idErr)
+			return result(), fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, idErr)
 		}
 		assetStatus := status
 		if res.Outcome == identity.OutcomeConflict {
@@ -970,6 +1053,33 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 			// merge, whatever the segment rule said.
 			assetStatus = identity.StatusPendingApproval
 		}
+		if res.Outcome == identity.OutcomeMatched {
+			// The status the MATCHED asset actually has, which is not the one
+			// the batch requested. `status` is discovery-processor's answer for
+			// a row it ran the tenant's auto-approval rules over; it decides
+			// what a NEW asset lands as, and it says nothing about an asset that
+			// already exists.
+			//
+			// Deferring on that answer is how an access point the tenant
+			// approved months ago kept its TLS-on-8443 certificates and crypto
+			// configuration in `assets.metadata->'deferred_findings'` forever:
+			// the same host seen on an address in no registered segment matches
+			// no rule, so the row arrives `pending_approval` — and nothing ever
+			// replays a deferred finding except ApproveAssets, which only runs
+			// when a PENDING asset is approved. The asset was already
+			// monitoring, so that never happened again.
+			//
+			// Read AFTER the resolve and on every match, including a batch that
+			// asked for monitoring. After, because a rule that fired legitimately
+			// promotes a pending asset and this must report the promotion. On
+			// every match, because the asset may be ARCHIVED, which
+			// setStatusUnlessArchived has just declined to promote — reading only
+			// when the batch asked for something else would leave that case
+			// reporting an approval that did not happen, and materializing the
+			// crypto of a device the tenant retired.
+			assetStatus = s.matchedAssetStatus(tenantID, assetID, assetStatus)
+		}
+		effective[i] = assetStatus
 		changedAssetIDs = append(changedAssetIDs, assetID)
 		inserted++
 		switch res.Outcome {
@@ -1076,11 +1186,28 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 			})
 		}
 
-		// When asset is pending approval, defer certificate and crypto configuration
-		// creation. Store the raw finding data in the asset's metadata so it can be
-		// processed when the asset is approved. This prevents unapproved discoveries
-		// from leaking data into the certificates and crypto_implementations tables.
-		if assetStatus == "pending_approval" {
+		// Three answers, not two, and they are decided on the status the asset
+		// HAS (see the effective-status block above) rather than the one the
+		// batch requested.
+		//
+		//   monitoring       materialize now, whatever the batch asked for
+		//   pending_approval defer into the asset's metadata, to be replayed
+		//                    when a human approves it — this is what keeps
+		//                    unapproved discoveries out of the certificates and
+		//                    crypto_implementations tables
+		//   archived         neither
+		//
+		// Archived is neither because both alternatives are wrong. Materializing
+		// puts a retired device's crypto back into the live inventory; deferring
+		// parks it where only an approval will replay it, and an archived asset
+		// is not in Approvals — that is the same dead end this whole change is
+		// about. Skipping matches what the `denied` branch above does, for the
+		// same reason: the tenant decided, and a re-discovery does not re-open it.
+		if assetStatus != identity.StatusMonitoring {
+			if assetStatus == identity.StatusArchived {
+				log.Printf("[AssetService] IngestFindings: %s matched archived asset %s; its crypto is neither materialized nor deferred", findingLabel(f), assetID)
+				continue
+			}
 			s.storeDeferredFinding(tenantID, assetID, f)
 			continue
 		}
@@ -1160,7 +1287,7 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 	log.Printf("[AssetService] IngestFindings summary%s: %d findings → managed created=%d, managed updated=%d, routed to external_connections=%d, held by merge proposal=%d, route failures=%d (status=%s)",
 		failureNote, len(findings), createdManaged, updatedManaged, routedExternal, heldByProposal, failedRoute, status)
 
-	return inserted, nil
+	return result(), nil
 }
 
 // findingLabel renders a stable, human-readable identifier for a discovery finding
@@ -1179,6 +1306,28 @@ func findingLabel(f IngestFinding) string {
 		port = fmt.Sprintf(":%d", *f.Port)
 	}
 	return host + ip + port
+}
+
+// logIdentityDecisions says, in the ingest log, when the engine resolved an
+// observation by a rule a reader would not otherwise be able to see: a
+// floating address (a node announcing another asset's address — no proposal,
+// the MAC deliberately not attached), or a proposal suppressed because a
+// reviewer already kept the pair separate. Without these lines the outcome
+// reads as a plain match, and "why did the VIP asset just get updated from a
+// cluster node's MAC?" has no answer in the log.
+func logIdentityDecisions(label string, res identity.Resolution) {
+	if fa := res.FloatingAddress; fa != nil {
+		log.Printf("[AssetService] IngestFindings: %s is a floating address: asset %s announces %v for asset %s (gratuitous_arp=%v); resolved to the address's asset, the announcer's MAC %v was not attached, and no merge proposal was opened",
+			label, fa.AnnouncerAssetID, fa.Announcement.Addresses, res.Asset.ID, fa.Announcement.Gratuitous, fa.Announcement.MACs)
+	}
+	if s := res.Suppressed; s != nil {
+		when := "at an unrecorded time"
+		if !s.DecidedAt.IsZero() {
+			when = "on " + s.DecidedAt.UTC().Format("2006-01-02")
+		}
+		log.Printf("[AssetService] IngestFindings: %s would conflict between %d asset(s) (%s), but merge proposal %s was kept separate %s; suppressed, resolved to asset %s by %s",
+			label, len(s.Candidates), s.Reason, s.ProposalID, when, res.Asset.ID, res.DecidedBy)
+	}
 }
 
 // RefreshOperationalViews runs the database function refresh_operational_views()
@@ -1318,7 +1467,9 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 	upsert.ProtocolVersion = f.ProtocolVersion
 	upsert.CipherSuite = f.CipherSuite
 	upsert.KeyExchangeAlgorithm = f.KeyExchangeAlgorithm
-	upsert.KeySize = f.KeySize
+	// Generic discovery KeySize can be cipher or certificate bits. Preserve
+	// only explicitly attributed exchange measurements and offered versions.
+	upsert.KeySize, upsert.SupportedTLSVersions = externalDiscoveryEvidence(f.RawData)
 
 	// Extract certificate data from raw_data for the external_connections cert snapshot
 	if f.RawData != nil {
@@ -1528,18 +1679,22 @@ func buildElevationFinding(conn *models.ExternalConnection) IngestFinding {
 // `?discovery_method=passive|active|manual` filter returned nothing for any
 // other value, and the wrong provenance was baked into exported CBOM evidence.
 // It is now bound to $15 — see findingDiscoveryMethod.
+//
+// discovery_methods starts as the one-element array of that same method: it
+// is the row's full provenance, and a fresh row has exactly one contributor.
+// The subset-absorption paths in crypto_dedup.go append to it.
 const insertCryptoImplementationSQL = `
 		INSERT INTO crypto_implementations (
 			id, tenant_id, asset_id, endpoint_id, protocol, protocol_version, cipher_suite,
 			key_exchange_algorithm, signature_algorithm, symmetric_encryption,
-			hash_algorithm, key_size, certificate_id, discovery_method,
+			hash_algorithm, key_size, certificate_id, discovery_method, discovery_methods,
 			confidence_score, source_sensor_id, raw_data, risk_score,
 			compliance_status, first_discovered_at, last_verified_at,
 			created_at, updated_at
 		) VALUES (
 			$1,$2,$3,$16::uuid,$4,$5,$6,
 			$12,$13,$14,
-			$7,$8,$9,$15::public.discovery_method,
+			$7,$8,$9,$15::public.discovery_method,ARRAY[$15::public.discovery_method],
 			NULL,$10,$11,NULL,
 			'{}'::jsonb, NOW(), NOW(),
 			NOW(), NOW()
@@ -1889,7 +2044,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	}
 
 	var cryptoID uuid.UUID
-	var cryptoCreated bool
+	var cryptoOutcome cryptoUpsertOutcome
 	// RLS-scoped write over crypto_implementations. The advisory lock is what
 	// stands in for the unique constraint this table deliberately does not have:
 	// it serializes the find-then-write for this asset across every replica, so
@@ -1898,11 +2053,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
 			return fmt.Errorf("lock asset materialization: %w", e)
 		}
-		id, created, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON)
+		id, outcome, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON)
 		if e != nil {
 			return e
 		}
-		cryptoID, cryptoCreated = id, created
+		cryptoID, cryptoOutcome = id, outcome
 		return nil
 	}); err != nil {
 		// Everything below writes against cryptoID — junction links, algorithm
@@ -1958,8 +2113,26 @@ func (s *AssetService) processDiscoveryCryptoData(
 		}
 	}
 
-	// Classify and link algorithms
+	// Classify and link algorithms.
+	//
+	// This runs for an ENRICHED row exactly as for a created one, and against
+	// the same finding, so the junction an enriched row ends up with is the
+	// junction a fresh insert of this observation would have — the links a
+	// partial row already held are a subset of these and the insert is
+	// ON CONFLICT DO NOTHING.
 	s.classifyAndLinkAlgorithms(cryptoID, f)
+
+	// A less complete re-observation of a configuration already held is NOT
+	// scored. The row's score was computed from a fuller observation than this
+	// one; the detector below judges the finding it is handed, and handing it a
+	// finding with no cipher suite and no key size would let a passive glimpse
+	// of a protocol banner overwrite a verdict that had actually measured the
+	// key. Nothing about the configuration changed, so nothing is written — the
+	// same "no opinion, no write" rule persistCryptoRiskScore already applies
+	// to a pass that resolved nothing. The next complete observation (the
+	// daily active scan) re-scores as usual, so catalogue corrections still
+	// propagate.
+	scoreThisPass := cryptoOutcome != cryptoUpsertPartialReobserved
 
 	// Populate the cryptographic-key inventory from the certificate public keys
 	// on this implementation (metadata only; never key material). Best-effort:
@@ -1991,22 +2164,24 @@ func (s *AssetService) processDiscoveryCryptoData(
 	cryptoRiskAssessed := false
 
 	// RLS-scoped read; runs even when the detector is absent.
-	_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		worst, all, ok, e := catalogueRiskForImplementation(tx, cryptoID)
-		if e != nil {
-			log.Printf("[AssetService] Warning: catalogue risk lookup failed for %s: %v", cryptoID, e)
+	if scoreThisPass {
+		_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+			worst, all, ok, e := catalogueRiskForImplementation(tx, cryptoID)
+			if e != nil {
+				log.Printf("[AssetService] Warning: catalogue risk lookup failed for %s: %v", cryptoID, e)
+				return nil
+			}
+			if ok {
+				cryptoRiskScore = *worst.RiskScore
+				riskSource = "algorithm_catalogue"
+				catalogueFactors = catalogueRiskFactors(all)
+				cryptoRiskAssessed = true
+			}
 			return nil
-		}
-		if ok {
-			cryptoRiskScore = worst.RiskScore
-			riskSource = "algorithm_catalogue"
-			catalogueFactors = catalogueRiskFactors(all)
-			cryptoRiskAssessed = true
-		}
-		return nil
-	})
+		})
+	}
 
-	if s.weakCryptoDetector != nil {
+	if scoreThisPass && s.weakCryptoDetector != nil {
 		impl := &models.CryptoImplementation{
 			ID:              cryptoID,
 			TenantID:        tenantID,
@@ -2085,7 +2260,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// already existed is a false event, and before the upsert every hourly
 	// re-observation raised one — the same burst the duplicate rows came from,
 	// delivered to notification consumers.
-	if s.eventPublisher != nil && lifecycleCryptoAdded != nil && cryptoCreated {
+	if s.eventPublisher != nil && lifecycleCryptoAdded != nil && cryptoOutcome == cryptoUpsertCreated {
 		*lifecycleCryptoAdded = append(*lifecycleCryptoAdded, &events.CryptoConfigurationAddedPayload{
 			AssetID:                assetID,
 			CryptoImplementationID: cryptoID,
@@ -2717,7 +2892,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 			return cerr
 		}
 		if res.Outcome != identity.OutcomeConflict && assetStatus != "" && assetStatus != identity.StatusPendingApproval {
-			return s.setAssetStatus(tx, tenantID, assetID, assetStatus, obs.Source)
+			return s.setStatusUnlessArchived(tx, tenantID, assetID, assetStatus, obs.Source)
 		}
 		return nil
 	})
@@ -2738,6 +2913,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		log.Printf("[AssetService] IngestFindings: %s conflicts with %d existing asset(s); opened merge proposal %s and left asset %s pending",
 			findingLabel(f), len(res.Candidates), res.Proposal.ID, assetID)
 	}
+	logIdentityDecisions(findingLabel(f), res)
 	for _, un := range res.Unattached {
 		// An identifier the engine declined to write belongs to another asset.
 		// Reporting it is the difference between "we saw this and could not use

@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -104,12 +105,53 @@ type EndpointObservation struct {
 // Key is the dependent-identity tuple of an endpoint within its asset:
 // address-or-fqdn, port, transport. It matches the unique index of
 // DATA_MODEL §2 and is what [Repository.UpsertEndpoints] upserts on.
+//
+// Note that when Address is set, FQDN plays no part in this key at all — the
+// same rule [EndpointObservation.Sanitized] enforces at the field level. An
+// endpoint identified by an address is one thing regardless of what name (if
+// any) travels alongside it.
 func (e EndpointObservation) Key() string {
 	addr := e.Address
 	if addr == "" {
 		addr = e.FQDN
 	}
 	return EndpointKey(addr, e.Port, e.Transport)
+}
+
+// Sanitized returns a copy of the endpoint observation with an FQDN that is
+// actually an IP literal folded away: "an IP is never a name" is already the
+// rule [normalizeDNSName] enforces for the identifier kinds ("use ip_address"),
+// and an endpoint needs the same rule plus one more — an endpoint identified
+// by an address is identified by (address, port, transport); FQDN is an
+// ATTRIBUTE of that endpoint, not part of what identifies it.
+//
+// A scan target that happens to be an IP literal ("192.0.2.230") used to be
+// written into FQDN unchanged by every builder that assumed "the target
+// string" was a name, because it has dots and passes a naive hostname check.
+// That produced a second asset_endpoints row for a listener already recorded
+// with fqdn NULL from a passive observation — same address, same port, same
+// transport, "duplicate" only because one row's name field held an address
+// spelled as text.
+//
+// The fix: if FQDN parses as an IP address, it is dropped. If the endpoint had
+// no address of its own, the literal is promoted to Address instead — the
+// observation still describes a real socket, just not a named one.
+func (e EndpointObservation) Sanitized() EndpointObservation {
+	fqdn := strings.TrimSpace(e.FQDN)
+	if fqdn == "" {
+		return e
+	}
+	addr, err := netip.ParseAddr(fqdn)
+	if err != nil {
+		// Not an IP literal — an ordinary name, left alone.
+		return e
+	}
+	out := e
+	out.FQDN = ""
+	if strings.TrimSpace(out.Address) == "" {
+		out.Address = addr.Unmap().WithZone("").String()
+	}
+	return out
 }
 
 // Observation is one sighting handed to the engine by an intake path.
@@ -255,6 +297,16 @@ func (o Observation) Sanitize() (Observation, []RejectedIdentifier) {
 			continue
 		}
 		out.Identifiers = append(out.Identifiers, n)
+	}
+	if len(o.Endpoints) > 0 {
+		// Endpoints never error (there is nothing to reject — an IP-literal
+		// FQDN is not malformed, it is just misfiled, and [Sanitized] refiles
+		// it), so this is a plain map rather than the identifier loop's
+		// reject-and-continue.
+		out.Endpoints = make([]EndpointObservation, 0, len(o.Endpoints))
+		for _, ep := range o.Endpoints {
+			out.Endpoints = append(out.Endpoints, ep.Sanitized())
+		}
 	}
 	return out, rejected
 }

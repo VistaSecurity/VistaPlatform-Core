@@ -8,7 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { CircleDollarSign, Building2, Activity, AlertTriangle, ChevronRight } from 'lucide-react';
 import { clients } from '../../lib/clients';
-import { Avatar, AreaChart, MiniBar, PlanTag, StatTile, StatusTag, healthColor, initialsFromName, moneyK, num } from '../../components/ui/primitives';
+import { Avatar, AreaChart, MiniBar, PlanTag, StatTile, StatusTag, healthIndexPresentation, initialsFromName, moneyK, num } from '../../components/ui/primitives';
 import { useTenants, useTenantHealthMap, tenantStatus } from '../tenants/queries';
 import { usePlatformEdition } from '../../lib/edition';
 
@@ -81,7 +81,13 @@ export function OverviewPage() {
       const h = healthMap?.get(t.id);
       if (st === 'suspended') return 100;
       if (st === 'past_due') return 80;
-      if (h && h.overall_score < 55) return 60 + (55 - h.overall_score);
+      // `unknown` is stored as score 0 for compatibility, but it means no
+      // health factor could be measured. Use the same availability/range
+      // adapter as the rendered Health cell so the sentinel cannot become a
+      // false failing-health alert. The <55 attention threshold remains this
+      // dashboard's own policy, independent of the shared health bands.
+      const healthIndex = healthIndexPresentation(h?.overall_score, h?.health_status !== 'unknown');
+      if (healthIndex && healthIndex.score < 55) return 60 + (55 - healthIndex.score);
       return 0;
     };
     return [...all].map((t) => ({ t, s: sev(t) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map((x) => x.t);
@@ -131,14 +137,14 @@ export function OverviewPage() {
           <tbody>
             {attention.map((t) => {
               const h = healthMap?.get(t.id);
-              const score = h ? Math.round(h.overall_score) : null;
+              const healthIndex = healthIndexPresentation(h?.overall_score, h?.health_status !== 'unknown');
               const plan = t.subscription_tier ?? 'Trial';
               return (
                 <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => navigate('/tenants')}>
                   <td><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><Avatar initials={initialsFromName(t.name)} size={26} brand={plan === 'Sovereign'} square /><span style={{ fontWeight: 600, color: 'var(--op-t1)' }}>{t.name}</span></div></td>
                   <td><PlanTag plan={plan} /></td>
                   <td><StatusTag status={tenantStatus(t)} /></td>
-                  <td>{score === null ? <span className="t-muted">—</span> : <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span className="op-num" style={{ color: healthColor(score), fontWeight: 700, width: 20 }}>{score}</span><div style={{ width: 40 }}><MiniBar pct={score} color={healthColor(score)} h={5} /></div></div>}</td>
+                  <td>{healthIndex === null ? <span className="t-muted">—</span> : <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span className="op-num" style={{ color: healthIndex.color, fontWeight: 700, whiteSpace: 'nowrap' }}>{healthIndex.text}</span><div style={{ width: 40 }}><MiniBar pct={healthIndex.score} color={healthIndex.color} h={5} /></div></div>}</td>
                   <td><ChevronRight size={15} style={{ color: 'var(--op-t3)' }} /></td>
                 </tr>
               );

@@ -1,0 +1,2352 @@
+# ADR-0016 explicit API contracts. Caller behavior is verified by separate tests/guards.
+version: 1
+concepts:
+  risk:
+    unit: points_0_100
+    direction: higher_is_worse
+    unknown: Use risk_assessed_by for asset coverage and existing finding evidence
+      for unscored results; numeric zero alone is insufficient.
+    owner: shared/riskbands
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  risk_band:
+    unit: ordinal
+    direction: higher_is_worse
+    unknown: Absent/unassessed is separate from Informational.
+    owner: shared/riskbands
+    enum_source: risk_display
+    types:
+      - string
+  severity:
+    unit: ordinal
+    direction: higher_is_worse
+    unknown: Missing is not info; invalid values must not silently become Medium.
+    owner: shared/severity
+    enum_source: severity
+    types:
+      - string
+  control_severity:
+    unit: ordinal
+    direction: higher_is_worse
+    unknown: Optional override may be absent; required baseline has four valid values.
+    owner: shared/severity
+    enum_source: control_severity
+    types:
+      - string
+  algorithm_strength:
+    unit: ordinal
+    direction: higher_is_better
+    unknown: Unresolved current external strength is null; other producers retain
+      their documented absent/empty sentinel. Never infer recommended.
+    owner: shared/strength and algorithms catalogue
+    types:
+      - string
+    enum_source: algorithm_strength
+  external_strength_legacy:
+    unit: ordinal
+    direction: higher_is_better
+    unknown: unknown is the legacy missing assessment; historical good has no exact
+      four-band mapping.
+    owner: inventory-service external connections
+    values:
+      - good
+      - weak
+      - unknown
+    types:
+      - string
+  cvss:
+    unit: points_0_10
+    direction: higher_is_worse
+    unknown: null means no published score; zero is CVSS None.
+    owner: vulnerability catalogue
+    range:
+      - 0
+      - 10
+    types:
+      - number
+      - integer
+  cvss_severity:
+    unit: ordinal
+    direction: higher_is_worse
+    unknown: null means unscored; none is a measured CVSS zero.
+    owner: CVSS source vocabulary
+    values:
+      - none
+      - low
+      - medium
+      - high
+      - critical
+    types:
+      - string
+  compliance:
+    unit: weighted_percent
+    direction: higher_is_better
+    unknown: null when no assessed control weight; display coverage separately.
+    owner: compliance-engine
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  health:
+    unit: index_0_100
+    direction: higher_is_better
+    unknown: Factor null or health_status unknown; history lacking availability
+      cannot prove measurement.
+    owner: tenant-health-service
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  health_status:
+    unit: ordinal
+    direction: higher_is_better
+    unknown: unknown means no measured factors; critical can remain in historical
+      records.
+    owner: shared/healthbands
+    enum_source: health_with_history
+    types:
+      - string
+  resource_index:
+    unit: index_0_100
+    direction: higher_is_better
+    unknown: Existing backend fallback values registered, cleanup deferred unless a
+      visible dependency proves need.
+    owner: resource-tracker-service
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  confidence_fraction:
+    unit: fraction
+    direction: higher_is_better
+    unknown: Preserve field-specific absent/null convention; no unit guessing.
+    owner: identity/classification producer
+    range:
+      - 0
+      - 1
+    types:
+      - number
+      - integer
+  confidence_percent:
+    unit: percent
+    direction: higher_is_better
+    unknown: Absent/null; stored percentage is not a 0..1 fraction.
+    owner: asset observation adapter
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  match_confidence:
+    unit: fraction
+    direction: higher_is_better
+    unknown: Existing matcher zero means unscored, including omitted accepted_score.
+    owner: identity matcher
+    range:
+      - 0
+      - 1
+    types:
+      - number
+      - integer
+  no_estimate_confidence:
+    unit: fraction
+    direction: context_dependent
+    unknown: Current seam reports zero to mean no estimate; do not fabricate confidence.
+    owner: AI/source seam
+    range:
+      - 0
+      - 1
+    types:
+      - number
+      - integer
+  service_confidence:
+    unit: ordinal
+    direction: higher_is_better
+    unknown: Absent means no service classification.
+    owner: service classification
+    values:
+      - low
+      - medium
+      - high
+    types:
+      - string
+  attainment:
+    unit: percent
+    direction: higher_is_better
+    unknown: Absent or unmeasured denominator is not a completed assessment;
+      preserve documented current contract.
+    owner: owning progress API
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  population_share:
+    unit: percent
+    direction: context_dependent
+    unknown: No population means no meaningful distribution; no security judgment
+      implied.
+    owner: admin distribution API
+    range:
+      - 0
+      - 100
+    types:
+      - number
+      - integer
+  utilization:
+    unit: percent
+    direction: target_range
+    unknown: Preserve source availability; zero is a possible measurement, optimal
+      target depends on resource.
+    owner: resource/monitoring API
+    range:
+      - 0
+      - null
+    types:
+      - number
+      - integer
+  relative_change:
+    unit: percent
+    direction: context_dependent
+    unknown: Keep current zero-baseline convention; correction deferred before UI
+      adoption.
+    owner: inventory trends
+    range:
+      - null
+      - null
+    types:
+      - number
+      - integer
+  quantum_level:
+    unit: nist_level
+    direction: higher_is_better
+    unknown: Preserve source null/sentinel; never convert absence into a risk grade.
+    owner: NIST algorithm metadata
+    range:
+      - 0
+      - 5
+    types:
+      - number
+      - integer
+  security_bits:
+    unit: bits
+    direction: higher_is_better
+    unknown: Absent/null when catalogue lacks this metadata.
+    owner: algorithm metadata
+    range:
+      - 0
+      - null
+    types:
+      - number
+      - integer
+  operational_severity:
+    unit: ordinal
+    direction: higher_is_worse
+    unknown: Operational severity has its own vocabulary, not finding severity.
+    owner: resource-tracker-service
+    values:
+      - info
+      - warning
+      - critical
+    types:
+      - string
+  metadata:
+    unit: structure
+    direction: not_applicable
+    unknown: Container, boolean, count map or policy discriminator, not a numeric grade.
+    owner: enclosing contract
+    types:
+      - object
+      - array
+      - string
+      - boolean
+      - number
+      - integer
+      - unspecified
+  quota_consumption:
+    unit: percent_of_limit
+    direction: higher_is_worse
+    unknown: Missing limit/usage is not zero consumption; interpret unlimited/zero
+      limits at the quota boundary.
+    owner: quota/alert policy
+    range:
+      - 0
+      - null
+    types:
+      - number
+      - integer
+  evidence_completeness:
+    unit: categorical
+    types:
+      - string
+    direction: not_applicable
+    unknown: Missing does not establish complete; source reports complete or partial.
+    owner: inventory-service certificate evidence
+    values:
+      - complete
+      - partial
+  external_strength_filter:
+    unit: query_selection
+    direction: not_applicable
+    unknown: unassessed selects NULL strength, including unresolved prior weakness;
+      omitted selects all.
+    owner: inventory-service external connections
+    enum_source: algorithm_strength_filter
+    types:
+      - string
+  strength_vocabulary_version:
+    unit: vocabulary_discriminator
+    direction: not_applicable
+    unknown: "Required on historical external connection rows: 1 is original
+      good/weak/unknown, 2 is canonical nullable strength."
+    owner: inventory-service external connections
+    values:
+      - 1
+      - 2
+    types:
+      - integer
+bindings:
+  admin-service.openapi.yaml#/paths/~1admin~1catalogs~1vulnerabilities/get/parameters/1/schema:
+    concept: cvss_severity
+    delivery: external
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - none
+        - low
+        - medium
+        - high
+        - critical
+  admin-service.openapi.yaml#/components/schemas/SubscriptionDistributionEntry/properties/percentage:
+    concept: population_share
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing admin-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      population_share concept declares the intended scale; this audit does not
+      prove runtime validation.
+  admin-service.openapi.yaml#/components/schemas/EolFact/properties/confidence:
+    concept: no_estimate_confidence
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing admin-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      no_estimate_confidence concept declares the intended scale; this audit
+      does not prove runtime validation.
+  admin-service.openapi.yaml#/components/schemas/EolProposal/properties/confidence:
+    concept: no_estimate_confidence
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing admin-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      no_estimate_confidence concept declares the intended scale; this audit
+      does not prove runtime validation.
+  admin-service.openapi.yaml#/components/schemas/ClassificationRule/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+      minimum: 0.5
+      maximum: 0.95
+  admin-service.openapi.yaml#/components/schemas/ClassificationRuleInput/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+      minimum: 0.5
+      maximum: 0.95
+  admin-service.openapi.yaml#/components/schemas/VulnerabilityCatalogueEntry/properties/cvss_score:
+    concept: cvss
+    delivery: external
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 10
+  admin-service.openapi.yaml#/components/schemas/VulnerabilityCatalogueEntry/properties/severity:
+    concept: cvss_severity
+    delivery: external
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - none
+        - low
+        - medium
+        - high
+        - critical
+        - null
+  audit-service.openapi.yaml#/paths/~1alert-rules/get/parameters/3/schema:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing audit-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  audit-service.openapi.yaml#/components/schemas/AlertRule/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing audit-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  audit-service.openapi.yaml#/components/schemas/AlertRuleInput/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing audit-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  auth-service.openapi.yaml#/components/schemas/ProgressInfo/properties/percentage:
+    concept: attainment
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing auth-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      attainment concept declares the intended scale; this audit does not prove
+      runtime validation.
+  auth-service.openapi.yaml#/components/schemas/UsageInfo/properties/percentages:
+    concept: quota_consumption
+    delivery: register_only
+    contract:
+      type: object
+      nullable: false
+      required: true
+      additionalProperties:
+        type: number
+        nullable: false
+        required: false
+    schema_exception: Existing auth-service.openapi.yaml contract omits minimum
+      constraints; preserve current wire compatibility. The quota_consumption
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  cbom-service.openapi.yaml#/components/schemas/NarrativeDetail/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing cbom-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  compliance-engine.openapi.yaml#/paths/~1findings/get/parameters/4/schema:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/parameters/AlertSeverityFilter/schema:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/parameters/TicketSeverityFilter/schema:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/SeamProvenance/properties/confidence:
+    concept: no_estimate_confidence
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      no_estimate_confidence concept declares the intended scale; this audit
+      does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/RemediationPlanDraft/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/PlanProgress/properties/by_severity:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type:
+        - object
+        - "null"
+      nullable: true
+      required: true
+      additionalProperties:
+        type: integer
+        nullable: false
+        required: false
+  compliance-engine.openapi.yaml#/components/schemas/PlanProgress/properties/percent_resolved:
+    concept: attainment
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      attainment concept declares the intended scale; this audit does not prove
+      runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/RemediationPlanItem/properties/finding_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/Override/properties/severity_from:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+        - null
+  compliance-engine.openapi.yaml#/components/schemas/Override/properties/severity_to:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+        - null
+  compliance-engine.openapi.yaml#/components/schemas/ComplianceFinding/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/ComplianceFinding/properties/score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
+  compliance-engine.openapi.yaml#/components/schemas/FindingsByControlGroup/properties/worst_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/FindingsByControlGroup/properties/severity_counts:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: object
+      nullable: false
+      required: true
+  compliance-engine.openapi.yaml#/components/schemas/FindingStatistics/properties/severity_counts:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: object
+      nullable: false
+      required: true
+  compliance-engine.openapi.yaml#/components/schemas/FindingStatistics/properties/all_producer_severity_counts:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: object
+      nullable: false
+      required: true
+  compliance-engine.openapi.yaml#/components/schemas/PublishedFrameworkControl/properties/baseline_severity:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/ControlMeasurement/properties/severity_override:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/TenantFrameworkControl/properties/baseline_severity:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/TenantControlMeasurement/properties/severity_override:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/TenantFrameworkControlInput/properties/baseline_severity:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/ControlMeasurementInput/properties/severity_override:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/FrameworkScoreDetail/properties/score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      compliance concept declares the intended scale; this audit does not prove
+      runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/ComplianceScoreResponse/properties/score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      compliance concept declares the intended scale; this audit does not prove
+      runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/FrameworkStatusDetail/properties/compliance_percent:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      compliance concept declares the intended scale; this audit does not prove
+      runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/FrameworkStatusResponse/properties/overall_score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: number
+      nullable: true
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      compliance concept declares the intended scale; this audit does not prove
+      runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/FrameworkStatusItem/properties/compliance_percent:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: integer
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  compliance-engine.openapi.yaml#/components/schemas/FrameworkContextStatus/properties/overall_score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: number
+      nullable: true
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      compliance concept declares the intended scale; this audit does not prove
+      runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/MultiFrameworkEvaluationResult/properties/score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: integer
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  compliance-engine.openapi.yaml#/components/schemas/BatchFindingSummary/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/BatchControlStatus/properties/severity:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The control_severity
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  compliance-engine.openapi.yaml#/components/schemas/BatchEvaluateResult/properties/score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: integer
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  compliance-engine.openapi.yaml#/components/schemas/PlatformFrameworkControlInput/properties/baseline_severity:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/ControlDraft/properties/confidence:
+    concept: no_estimate_confidence
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      no_estimate_confidence concept declares the intended scale; this audit
+      does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/ControlDraft/properties/severity:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/AvailableFramework/properties/preview_score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: integer
+      nullable: true
+      required: false
+      minimum: 0
+      maximum: 100
+  compliance-engine.openapi.yaml#/components/schemas/CreateOverrideRequest/properties/severity_from:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/CreateOverrideRequest/properties/severity_to:
+    concept: control_severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - critical
+  compliance-engine.openapi.yaml#/components/schemas/Alert/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/AlertCatalogRung/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/AlertCatalogFixedRung/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/AlertCatalogEntry/properties/severity_model:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: string
+      nullable: false
+      required: true
+  compliance-engine.openapi.yaml#/components/schemas/AlertCatalogEntry/properties/default_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/AlertCatalogEntry/properties/baseline_percent:
+    concept: quota_consumption
+    delivery: register_only
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits minimum
+      constraints; preserve current wire compatibility. The quota_consumption
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  compliance-engine.openapi.yaml#/components/schemas/AlertCatalogEntry/properties/baseline_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/Ticket/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/CreateTicketRequest/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  compliance-engine.openapi.yaml#/components/schemas/UpdateTicketRequest/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+    schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/paths/~1infrastructure-assets/get/parameters/28/schema:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The risk_band concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/paths/~1crypto-configurations/get/parameters/7/schema:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The risk_band concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/paths/~1external-connections/get/parameters/3/schema:
+    concept: external_strength_filter
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - unassessed
+  inventory-service.openapi.yaml#/components/schemas/RemediationQueueRow/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/RemediationStatsResponse/properties/by_severity:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type:
+        - object
+        - "null"
+      nullable: true
+      required: true
+      additionalProperties:
+        type: integer
+        nullable: false
+        required: false
+  inventory-service.openapi.yaml#/components/schemas/RemediationTemplate/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/Algorithm/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The algorithm_strength
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/Algorithm/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/Algorithm/properties/classical_security_level:
+    concept: security_bits
+    delivery: register_only
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits minimum
+      constraints; preserve current wire compatibility. The security_bits
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/Algorithm/properties/nist_quantum_security_level:
+    concept: quantum_level
+    delivery: register_only
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      quantum_level concept declares the intended scale; this audit does not
+      prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/UpdateAlgorithmRequest/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+  inventory-service.openapi.yaml#/components/schemas/UpdateAlgorithmRequest/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: false
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/CreateAlgorithmRequest/properties/classical_security_level:
+    concept: security_bits
+    delivery: register_only
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits minimum
+      constraints; preserve current wire compatibility. The security_bits
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/CreateAlgorithmRequest/properties/nist_quantum_security_level:
+    concept: quantum_level
+    delivery: register_only
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      quantum_level concept declares the intended scale; this audit does not
+      prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/CreateAlgorithmRequest/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+  inventory-service.openapi.yaml#/components/schemas/CreateAlgorithmRequest/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/AlgorithmRecommendationsResponse/properties/recommendations/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/AlgorithmRecommendationsResponse/properties/recommendations/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The algorithm_strength
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/BatchRecommendationItem/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/BatchRecommendationItem/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The algorithm_strength
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/CryptoRisk/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - critical
+        - high
+        - medium
+        - low
+        - info
+        - null
+  inventory-service.openapi.yaml#/components/schemas/CryptoApplication/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/CryptoApplication/properties/risk_level:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The risk_band concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/AssetIdentifier/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/AssetEndpoint/properties/service_confidence:
+    concept: service_confidence
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The service_confidence
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/Asset/properties/class_confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/Asset/properties/confidence_score:
+    concept: confidence_percent
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_percent concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/Asset/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/Asset/properties/risk_level:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The risk_band concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/Asset/properties/protocol_summary/items/properties/max_risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/Certificate/properties/data_completeness:
+    concept: evidence_completeness
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The
+      evidence_completeness concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/AskProvenance/properties/confidence:
+    concept: no_estimate_confidence
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      no_estimate_confidence concept declares the intended scale; this audit
+      does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/MergeCandidate/properties/score:
+    concept: match_confidence
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      match_confidence concept declares the intended scale; this audit does not
+      prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/MergeProposal/properties/accepted_score:
+    concept: match_confidence
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      match_confidence concept declares the intended scale; this audit does not
+      prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/RelationshipPeer/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/Relationship/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/ClassProposal/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/ClassificationRuleRef/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/RelationshipCreateRequest/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+      minimum: 0
+      maximum: 1
+  inventory-service.openapi.yaml#/components/schemas/GraphNode/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/AssetStats/properties/change_percent:
+    concept: relative_change
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+  inventory-service.openapi.yaml#/components/schemas/SoftwareInstall/properties/eol_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - null
+  inventory-service.openapi.yaml#/components/schemas/SoftwareInstall/properties/vulnerability_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+        - null
+  inventory-service.openapi.yaml#/components/schemas/SoftwareProduct/properties/eol_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+        - null
+  inventory-service.openapi.yaml#/components/schemas/SoftwareProduct/properties/vulnerability_severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+        - null
+  inventory-service.openapi.yaml#/components/schemas/PQCReadinessSummary/properties/readiness_percent:
+    concept: attainment
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      attainment concept declares the intended scale; this audit does not prove
+      runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/PQCProgress/properties/pqc_percentage:
+    concept: attainment
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      attainment concept declares the intended scale; this audit does not prove
+      runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnection/properties/service_confidence:
+    concept: service_confidence
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The service_confidence
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/CryptoImplementation/properties/confidence_score:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/CryptoImplementation/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/CryptoImplementation/properties/risk_score_assessed:
+    concept: metadata
+    delivery: implement
+    contract:
+      type: boolean
+      nullable: false
+      required: true
+  inventory-service.openapi.yaml#/components/schemas/CryptoImplementation/properties/risk_level:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The risk_band concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/CryptoComponentAssessment/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The algorithm_strength
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/CryptoComponentAssessment/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/CryptoComponentAssessment/properties/risk_level:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - Critical
+        - High
+        - Medium
+        - Low
+        - Informational
+        - null
+  inventory-service.openapi.yaml#/components/schemas/CryptoComponentAssessment/properties/sets_score:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: boolean
+      nullable: false
+      required: true
+  inventory-service.openapi.yaml#/components/schemas/RemediationIssue/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/RemediationSummary/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  inventory-service.openapi.yaml#/components/schemas/AssetCertificateLink/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: false
+    schema_exception: Existing inventory-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The risk
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  monitoring-service.openapi.yaml#/components/schemas/AlertThreshold/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing monitoring-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  monitoring-service.openapi.yaml#/components/schemas/AlertHistory/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing monitoring-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  monitoring-service.openapi.yaml#/components/schemas/CreateAlertThresholdRequest/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing monitoring-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  monitoring-service.openapi.yaml#/components/schemas/UpdateAlertThresholdRequest/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Existing monitoring-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  notification-service.openapi.yaml#/components/schemas/TenantNotificationRule/properties/severity_filter:
+    concept: severity
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+    schema_exception: Existing notification-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  notification-service.openapi.yaml#/components/schemas/CreateRuleRequest/properties/severity_filter:
+    concept: severity
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+    schema_exception: Existing notification-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  notification-service.openapi.yaml#/components/schemas/UpdateRuleRequest/properties/severity_filter:
+    concept: severity
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+    schema_exception: Existing notification-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  notification-service.openapi.yaml#/components/schemas/PlatformNotificationRule/properties/severity_filter:
+    concept: severity
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+    schema_exception: Existing notification-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  notification-service.openapi.yaml#/components/schemas/NotificationHistory/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing notification-service.openapi.yaml contract omits enum
+      constraints; preserve current wire compatibility. The severity concept
+      declares the intended scale; this audit does not prove runtime validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/ResourceMetricsRequest/properties/cpu_usage_percent:
+    concept: utilization
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: false
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum constraints; preserve current wire compatibility. The utilization
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/ResourceAlert/properties/severity:
+    concept: operational_severity
+    delivery: register_only
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      enum constraints; preserve current wire compatibility. The
+      operational_severity concept declares the intended scale; this audit does
+      not prove runtime validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/ResourceUsageResponse/properties/avg_cpu_percent:
+    concept: utilization
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum constraints; preserve current wire compatibility. The utilization
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/ResourceDataPoint/properties/cpu_usage_percent:
+    concept: utilization
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum constraints; preserve current wire compatibility. The utilization
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/TenantResourceSummary/properties/optimization_score:
+    concept: resource_index
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      resource_index concept declares the intended scale; this audit does not
+      prove runtime validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/PlatformStatsBlock/properties/avg_cpu_percent:
+    concept: utilization
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum constraints; preserve current wire compatibility. The utilization
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/TenantResourceHealthSummary/properties/avg_cpu_percent:
+    concept: utilization
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum constraints; preserve current wire compatibility. The utilization
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  resource-tracker-service.openapi.yaml#/components/schemas/TenantResourceHealthSummary/properties/resource_efficiency_score:
+    concept: resource_index
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      resource_index concept declares the intended scale; this audit does not
+      prove runtime validation.
+  sensor-manager.openapi.yaml#/components/schemas/SensorDiscovery/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing sensor-manager.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  sensor-manager.openapi.yaml#/components/schemas/SensorHealthMetrics/properties/cpu_usage_percent:
+    concept: utilization
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing sensor-manager.openapi.yaml contract omits minimum
+      constraints; preserve current wire compatibility. The utilization concept
+      declares the intended scale; this audit does not prove runtime validation.
+  tenant-health-service.openapi.yaml#/paths/~1tenants/get/parameters/3/schema:
+    concept: health
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/paths/~1tenants/get/parameters/4/schema:
+    concept: health
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBreakdown/properties/resource_efficiency:
+    concept: health
+    delivery: implement
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBreakdown/properties/performance_metrics:
+    concept: health
+    delivery: implement
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBreakdown/properties/security_posture:
+    concept: health
+    delivery: implement
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBreakdown/properties/business_activity:
+    concept: health
+    delivery: implement
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBreakdown/properties/cost_optimization:
+    concept: health
+    delivery: implement
+    contract:
+      type:
+        - number
+        - "null"
+      nullable: true
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBreakdown/properties/data_completeness:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthDataPoint/properties/score:
+    concept: health
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthTrends/properties/score_history:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type:
+        - array
+        - "null"
+      nullable: true
+      required: true
+      items:
+        type: object
+        nullable: false
+        required: false
+  tenant-health-service.openapi.yaml#/components/schemas/HealthTrends/properties/trend_strength:
+    concept: confidence_fraction
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthTrends/properties/predicted_score:
+    concept: health
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/TenantHealth/properties/overall_score:
+    concept: health
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/TenantHealth/properties/health_status:
+    concept: health_status
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum: &a1
+        - excellent
+        - good
+        - fair
+        - poor
+        - failing
+        - unknown
+        - critical
+  tenant-health-service.openapi.yaml#/components/schemas/TenantHealth/properties/score_breakdown:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: object
+      nullable: false
+      required: true
+  tenant-health-service.openapi.yaml#/components/schemas/HealthMetrics/properties/compliance_score:
+    concept: compliance
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      compliance concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthAlert/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      enum constraints; preserve current wire compatibility. The severity
+      concept declares the intended scale; this audit does not prove runtime
+      validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthScoreResponse/properties/overall_score:
+    concept: health
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthScoreResponse/properties/health_status:
+    concept: health_status
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum: *a1
+  tenant-health-service.openapi.yaml#/components/schemas/HealthScoreResponse/properties/score_breakdown:
+    concept: metadata
+    delivery: register_only
+    contract:
+      type: object
+      nullable: false
+      required: true
+  tenant-health-service.openapi.yaml#/components/schemas/TenantHealthSummary/properties/overall_score:
+    concept: health
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/TenantHealthSummary/properties/health_status:
+    concept: health_status
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum: *a1
+  tenant-health-service.openapi.yaml#/components/schemas/HealthComparison/properties/score:
+    concept: health
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthComparison/properties/percentile:
+    concept: attainment
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      attainment concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthBenchmark/properties/benchmark_score:
+    concept: health
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      health concept declares the intended scale; this audit does not prove
+      runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/Insight/properties/confidence:
+    concept: confidence_fraction
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  tenant-health-service.openapi.yaml#/components/schemas/HealthInsights/properties/confidence:
+    concept: confidence_fraction
+    delivery: register_only
+    contract:
+      type: number
+      nullable: false
+      required: true
+    schema_exception: Existing tenant-health-service.openapi.yaml contract omits
+      minimum/maximum constraints; preserve current wire compatibility. The
+      confidence_fraction concept declares the intended scale; this audit does
+      not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnection/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnectionHistory/properties/strength_vocabulary_version:
+    concept: strength_vocabulary_version
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      enum:
+        - 1
+        - 2
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnectionHistory/properties/previous_strength_legacy:
+    concept: external_strength_legacy
+    delivery: external
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Version 1 historical labels remain lossless free text; known
+      original producer values were good/weak/unknown. No conversion to
+      canonical grades.
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnectionHistory/properties/new_strength_legacy:
+    concept: external_strength_legacy
+    delivery: external
+    contract:
+      type: string
+      nullable: false
+      required: false
+    schema_exception: Version 1 historical labels remain lossless free text; known
+      original producer values were good/weak/unknown. No conversion to
+      canonical grades.
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnectionHistory/properties/previous_strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/ExternalConnectionHistory/properties/new_strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/CryptoRisk/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: false
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/paths/~1crypto-risks/get/parameters/2/schema:
+    concept: severity
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+        enum: &a2
+          - critical
+          - high
+          - medium
+          - low
+          - info
+          - informational
+          - unscored
+    legacy_enum: *a2
+    compatibility_reason: Read-only query selector accepts historical informational
+      as info; unscored selects null and is not a severity rung.
+  inventory-service.openapi.yaml#/paths/~1crypto-risks~1export/get/parameters/0/schema:
+    concept: severity
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+        enum: &a3
+          - critical
+          - high
+          - medium
+          - low
+          - info
+          - informational
+          - unscored
+    legacy_enum: *a3
+    compatibility_reason: Read-only query selector accepts historical informational
+      as info; unscored selects null and is not a severity rung.
+  inventory-service.openapi.yaml#/components/schemas/CryptoRisksSummary/properties/unscored:
+    concept: metadata
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+  inventory-service.openapi.yaml#/components/schemas/CryptoRisk/properties/score_sources:
+    concept: metadata
+    delivery: implement
+    contract:
+      type: array
+      nullable: false
+      required: false
+      items:
+        type: string
+        nullable: false
+        required: false
+
+# Supplemental storage inventory. These experimental routes are outside the
+# OpenAPI surface; audit-rating-scales checks API bindings, not these SQL defaults.
+# See ADR-0016 implementation ledger for the traced writers/readers and follow-up.
+storage_followups:
+  database_encryption_states.risk_score:
+    concept: risk
+    delivery: register_only
+    owner: services/device-interrogation-service/internal/services/database_interrogation_service.go
+    schema: scripts/database/schema.sql
+    default: 50
+    unknown: Default alone does not establish assessment; current writer supplies a computed score.
+    visible_dependency: No current UI, finding-producer or CBOM table reader found; experimental API only.
+  kms_keys.risk_score:
+    concept: risk
+    delivery: register_only
+    owner: services/device-interrogation-service/internal/services/kms_discovery_service.go
+    schema: scripts/database/schema.sql
+    default: 50
+    unknown: Current KMS writer consumes this default; it is not an explicit measured assessment.
+    visible_dependency: No current UI, finding-producer or CBOM table reader found; experimental API only.
+  ssh_keys.risk_score:
+    concept: risk
+    delivery: register_only
+    owner: services/device-interrogation-service/internal/handlers/experimental_actions.go
+    schema: scripts/database/schema.sql
+    default: 50
+    unknown: Default alone does not establish assessment; active writer supplies a computed score.
+    visible_dependency: No current UI, finding-producer or CBOM table reader found; experimental API only.

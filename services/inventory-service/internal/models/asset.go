@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"github.com/lib/pq"
 	"time"
 
 	"github.com/google/uuid"
@@ -211,18 +212,28 @@ type CryptoImplementation struct {
 	KeySize              *int       `json:"key_size" db:"key_size"`
 	CertificateID        *uuid.UUID `json:"certificate_id" db:"certificate_id"`
 	DiscoveryMethod      string     `json:"discovery_method" db:"discovery_method"`
-	ConfidenceScore      *float64   `json:"confidence_score" db:"confidence_score"`
-	SourceSensorID       *uuid.UUID `json:"source_sensor_id" db:"source_sensor_id"`
-	RawData              JSONB      `json:"raw_data" db:"raw_data"`
-	RiskScore            *int       `json:"risk_score" db:"risk_score"`
-	ComplianceStatus     JSONB      `json:"compliance_status" db:"compliance_status"`
-	FirstDiscoveredAt    time.Time  `json:"first_discovered_at" db:"first_discovered_at"`
-	LastVerifiedAt       time.Time  `json:"last_verified_at" db:"last_verified_at"`
-	CreatedAt            time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt            *time.Time `json:"deleted_at" db:"deleted_at"`
-	RiskLevel            string     `json:"risk_level" db:"risk_level"`
-	RiskFactors          []string   `json:"risk_factors,omitempty"`
+	// DiscoveryMethods is the row's full provenance: every method that has
+	// contributed an observation to it, DiscoveryMethod first. A row a passive
+	// sensor wrote and an active probe then completed carries both (subset
+	// absorption, crypto_dedup.go). Never nil on the wire — readers normalise
+	// it to an empty array — so a consumer can iterate it without a guard.
+	DiscoveryMethods pq.StringArray `json:"discovery_methods" db:"discovery_methods"`
+	ConfidenceScore  *float64       `json:"confidence_score" db:"confidence_score"`
+	SourceSensorID   *uuid.UUID     `json:"source_sensor_id" db:"source_sensor_id"`
+	RawData          JSONB          `json:"raw_data" db:"raw_data"`
+	RiskScore        *int           `json:"risk_score" db:"risk_score"`
+	// RiskScoreAssessed distinguishes an explicit numeric zero from the legacy
+	// storage default. It is derived on reads from an existing positive stored
+	// score or a stored zero corroborated by a worst numeric catalogue score of zero.
+	RiskScoreAssessed bool       `json:"risk_score_assessed" db:"risk_score_assessed"`
+	ComplianceStatus  JSONB      `json:"compliance_status" db:"compliance_status"`
+	FirstDiscoveredAt time.Time  `json:"first_discovered_at" db:"first_discovered_at"`
+	LastVerifiedAt    time.Time  `json:"last_verified_at" db:"last_verified_at"`
+	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
+	DeletedAt         *time.Time `json:"deleted_at" db:"deleted_at"`
+	RiskLevel         string     `json:"risk_level" db:"risk_level"`
+	RiskFactors       []string   `json:"risk_factors,omitempty"`
 	// The six `device_*` fields are GONE. They were never set by any query in
 	// this service, so they serialised as absent on every crypto configuration
 	// the API has ever returned — six documented fields that could only ever be
@@ -639,7 +650,11 @@ type Certificate struct {
 	DataSource            *string    `json:"data_source,omitempty" db:"data_source"`
 	LastDataUpdate        *time.Time `json:"last_data_update,omitempty" db:"last_data_update"`
 	// Certificate quality flags
-	HasSCT        *bool     `json:"has_sct,omitempty" db:"has_sct"`
+	HasSCT *bool `json:"has_sct,omitempty" db:"has_sct"`
+	// SCTSource is which RFC 6962 delivery route carried the SCT (embedded |
+	// tls_extension | ocsp | none). Absent means the route wasn't observable
+	// (e.g. a passive-capture-only observation) — never a false "none".
+	SCTSource     *string   `json:"sct_source,omitempty" db:"sct_source"`
 	KnownBadCA    *string   `json:"known_bad_ca,omitempty" db:"known_bad_ca"`
 	IsEV          *bool     `json:"is_ev,omitempty" db:"is_ev"`
 	OCSPStatus    *string   `json:"ocsp_status,omitempty" db:"ocsp_status"`
@@ -690,7 +705,8 @@ type CertificateData struct {
 	ACMMetadata             map[string]interface{} // AWS ACM-specific metadata (ARN, renewal status, etc.)
 
 	// Certificate quality flags (computed during active TLS probing/enrichment)
-	HasSCT     *bool  // Certificate Transparency: embedded SCTs present
+	HasSCT     *bool  // Certificate Transparency: SCT present (any RFC 6962 route)
+	SCTSource  string // Which route carried it: embedded | tls_extension | ocsp | none
 	KnownBadCA string // Known-bad CA name (e.g., Superfish, eDellRoot)
 	IsEV       bool   // Extended Validation certificate
 	OCSPStatus string // OCSP revocation status: good, revoked, unknown

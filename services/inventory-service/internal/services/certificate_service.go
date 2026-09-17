@@ -48,7 +48,7 @@ const certificateColumns = `
 	data_completeness, data_source, last_data_update,
 	created_at, updated_at,
 	known_bad_ca, cert_ownership,
-	has_sct, is_ev, ocsp_status, ocsp_detail`
+	has_sct, sct_source, is_ev, ocsp_status, ocsp_detail`
 
 // effectiveOwnershipExpr resolves the SAME "which ownership bucket does this
 // certificate belong to" answer for both the `?ownership=` filter and the
@@ -103,6 +103,7 @@ func scanCertificateRowFull(scanner interface {
 	var certStateReason, sigAlgOID, pubKeyAlgOID sql.NullString
 	var knownBadCA, certOwnership sql.NullString
 	var ocspStatus, ocspDetail sql.NullString
+	var sctSource sql.NullString
 	var hasSCT, isEV sql.NullBool
 	var pubKeySize sql.NullInt64
 	var notBefore, notAfter, revokedAt, revocationDiscoveredAt, lastDataUpdate sql.NullTime
@@ -124,7 +125,7 @@ func scanCertificateRowFull(scanner interface {
 		&cert.DataCompleteness, &dataSource, &lastDataUpdate,
 		&cert.CreatedAt, &cert.UpdatedAt,
 		&knownBadCA, &certOwnership,
-		&hasSCT, &isEV, &ocspStatus, &ocspDetail,
+		&hasSCT, &sctSource, &isEV, &ocspStatus, &ocspDetail,
 	}
 	if withDeploymentCount {
 		dest = append(dest, &deploymentCount)
@@ -169,6 +170,10 @@ func scanCertificateRowFull(scanner interface {
 	if hasSCT.Valid {
 		v := hasSCT.Bool
 		cert.HasSCT = &v
+	}
+	if sctSource.Valid && sctSource.String != "" {
+		v := sctSource.String
+		cert.SCTSource = &v
 	}
 	if isEV.Valid {
 		v := isEV.Bool
@@ -680,10 +685,11 @@ func (s *CertificateService) CalculateFingerprint(certData models.CertificateDat
 	return "", fmt.Errorf("insufficient data to calculate fingerprint")
 }
 
-// updateCertQualityFlags persists certificate quality flags (SCT, known-bad CA,
-// OCSP, EV) if any are present in the CertificateData.
+// updateCertQualityFlags persists certificate quality flags (SCT + its RFC
+// 6962 delivery route, known-bad CA, OCSP, EV) if any are present in the
+// CertificateData.
 func (s *CertificateService) updateCertQualityFlags(tenantID, certID uuid.UUID, certData models.CertificateData) {
-	hasFlags := certData.HasSCT != nil || certData.KnownBadCA != "" || certData.IsEV || certData.OCSPStatus != ""
+	hasFlags := certData.HasSCT != nil || certData.SCTSource != "" || certData.KnownBadCA != "" || certData.IsEV || certData.OCSPStatus != ""
 	if !hasFlags {
 		return
 	}
@@ -692,13 +698,14 @@ func (s *CertificateService) updateCertQualityFlags(tenantID, certID uuid.UUID, 
 		_, _ = tx.Exec(`
 			UPDATE certificates SET
 				has_sct = COALESCE($2, has_sct),
-				known_bad_ca = COALESCE(NULLIF($3, ''), known_bad_ca),
-				is_ev = COALESCE($4, is_ev),
-				ocsp_status = COALESCE(NULLIF($5, ''), ocsp_status),
-				ocsp_detail = COALESCE(NULLIF($6, ''), ocsp_detail),
+				sct_source = COALESCE(NULLIF($3, ''), sct_source),
+				known_bad_ca = COALESCE(NULLIF($4, ''), known_bad_ca),
+				is_ev = COALESCE($5, is_ev),
+				ocsp_status = COALESCE(NULLIF($6, ''), ocsp_status),
+				ocsp_detail = COALESCE(NULLIF($7, ''), ocsp_detail),
 				updated_at = NOW()
 			WHERE id = $1`,
-			certID, certData.HasSCT, certData.KnownBadCA, certData.IsEV, certData.OCSPStatus, certData.OCSPDetail,
+			certID, certData.HasSCT, certData.SCTSource, certData.KnownBadCA, certData.IsEV, certData.OCSPStatus, certData.OCSPDetail,
 		)
 		return nil
 	})

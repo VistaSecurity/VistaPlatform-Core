@@ -26,6 +26,28 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 )
 
+// cryptoRiskScoreAssessedSQL derives whether ci.risk_score has numeric
+// evidence. A positive stored value is already a numeric assessment. Stored
+// zero needs the worst linked numeric catalogue contribution to be exactly
+// zero. A non-zero catalogue contribution cannot certify that a legacy stored
+// zero is a deliberate assessment. Stored NULL always remains unassessed.
+//
+// rolesParam is a trusted SQL placeholder supplied by callers and bound to
+// cryptoassess.CatalogueRiskRoles, so unrelated/future junction roles cannot
+// accidentally certify the number.
+func cryptoRiskScoreAssessedSQL(rolesParam string) string {
+	return `(ci.risk_score IS NOT NULL AND (
+		ci.risk_score > 0 OR (ci.risk_score = 0 AND EXISTS (
+			SELECT 1
+			FROM crypto_implementation_algorithms risk_cia
+			JOIN algorithms risk_alg ON risk_alg.id = risk_cia.algorithm_id
+			WHERE risk_cia.crypto_implementation_id = ci.id
+			  AND risk_cia.algorithm_type = ANY(` + rolesParam + `)
+			HAVING MAX(risk_alg.risk_score) = 0
+		))
+	))`
+}
+
 // componentAssessmentsQuery joins the junction to the catalogue for one
 // implementation.
 //
@@ -50,7 +72,7 @@ const componentAssessmentsQuery = `
 	       a.category,
 	       COALESCE(a.strength, '')          AS strength,
 	       COALESCE(a.deprecation_status, '') AS deprecation_status,
-	       COALESCE(a.risk_score, 0)          AS risk_score,
+	       a.risk_score,
 	       a.migration_guidance,
 	       COALESCE(a.recommended_alternatives, ARRAY[]::text[]) AS recommended_alternatives,
 	       COALESCE(a.is_pqc, false)          AS is_pqc
@@ -60,17 +82,16 @@ const componentAssessmentsQuery = `
 	 WHERE cia.crypto_implementation_id = $1
 	   AND ci.tenant_id = $2
 	   AND ci.deleted_at IS NULL
-	 ORDER BY COALESCE(a.risk_score, 0) DESC, a.code
+	 ORDER BY a.risk_score DESC NULLS LAST, a.code
 `
 
 // GetCryptoImplementationComponents returns the catalogue assessment of every
 // algorithm linked to a crypto configuration, worst first, banded and with the
 // score-setting component marked.
 //
-// An EMPTY (non-nil) slice means NOT ASSESSED — nothing on this configuration
-// resolved against the catalogue. Callers must not render that as a clean bill
-// of health; score 0 has always meant unassessed, and so does an empty
-// component list.
+// An EMPTY (non-nil) slice means nothing on this configuration resolved against
+// the catalogue. A non-empty slice can still have no numeric score when a row
+// carries only a qualitative strength; callers must preserve that distinction.
 func (s *CryptoImplementationService) GetCryptoImplementationComponents(tenantID, implID uuid.UUID) ([]models.CryptoComponentAssessment, error) {
 	components := make([]models.CryptoComponentAssessment, 0, 8)
 

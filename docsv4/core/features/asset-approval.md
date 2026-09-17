@@ -143,7 +143,7 @@ product.
 - Its **class** (Server, Switch, Object storage …), from the class taxonomy
 - Its network segment or business unit
 - Its **source** — see below
-- The platform's confidence, when it recorded one
+- The platform's confidence, when it recorded one. Asset confidence is stored as a 0–100 percentage, so a stored value of `1` is displayed as 1%, not guessed to mean 100%.
 - When it was found
 
 Each row also has an **open-page** button, so you can look at the whole asset
@@ -184,7 +184,7 @@ Each candidate carries a **score** — a percentage bar on its card — and,
 underneath it, **the three signals that moved that score most**, with an arrow
 saying whether each counted for the merge or against it.
 
-The score is a probability, and **50% means "as likely as not"**. It is produced
+The matcher score is a 0–1 probability displayed as a percentage, and **50% means "as likely as not"**. A raw matcher value of `0.01` therefore displays as 1%; this is a different field contract from the asset confidence percentage above. It is produced
 by a small model that ships inside the platform: it runs locally, sends nothing
 anywhere, and looks at nothing but comparisons between the two records. The
 signals it weighs are things like:

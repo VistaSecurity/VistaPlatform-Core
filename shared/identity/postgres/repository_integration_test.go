@@ -10,6 +10,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -466,7 +467,101 @@ func (c *contractRepo) OpenMergeProposal(ctx context.Context, tenantID string, p
 	if err != nil {
 		return identity.ProposalRef{}, err
 	}
-	return identity.ProposalRef{TenantID: c.logicalTenant(ref.TenantID), ID: ref.ID}, nil
+	return identity.ProposalRef{TenantID: c.logicalTenant(ref.TenantID), ID: ref.ID, Reused: ref.Reused}, nil
+}
+
+func (c *contractRepo) LastKeptSeparate(ctx context.Context, tenantID string, assetIDs []string) (identity.PriorDecision, bool, error) {
+	mapped := make([]string, 0, len(assetIDs))
+	for _, id := range assetIDs {
+		mapped = append(mapped, c.assetID(id))
+	}
+	return c.inner.LastKeptSeparate(ctx, c.tenantID(tenantID), mapped)
+}
+
+func (c *contractRepo) RecordAnnouncement(ctx context.Context, announcer, holder identity.AssetRef, a identity.Announcement) error {
+	return c.inner.RecordAnnouncement(ctx, c.ref(announcer), c.ref(holder), a)
+}
+
+// ResolveProposal is identitytest.ProposalResolver: the patch the approvals
+// path (inventory-service's MergeProposalService.resolveProposal) applies to a
+// proposal row, written out here so a change to that shape fails this contract
+// loudly rather than being silently followed.
+func (c *contractRepo) ResolveProposal(ref identity.ProposalRef, status, actor string, at time.Time) error {
+	patch := map[string]any{
+		"status":      status,
+		"resolved_at": at.UTC().Format(time.RFC3339),
+	}
+	if actor != "" {
+		patch["resolved_by"] = actor
+	}
+	payload, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	res, err := c.db.Exec(`
+		UPDATE public.asset_history
+		   SET changes_json = changes_json || $3::jsonb
+		 WHERE tenant_id = $1 AND id = $2 AND action = 'merge_proposed'`,
+		c.tenantID(ref.TenantID), ref.ID, payload)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("ResolveProposal: %d rows matched proposal %s, want 1", n, ref.ID)
+	}
+	return nil
+}
+
+// Announcements is identitytest.AnnouncementReader, read straight from
+// asset_relationships so the contract asserts the row and not this package's
+// own reading of it.
+func (c *contractRepo) Announcements(ref identity.AssetRef) []identity.AnnouncementRecord {
+	in := c.ref(ref)
+	rows, err := c.db.Query(`
+		SELECT from_asset_id, to_asset_id, attributes, observation_count, last_seen_at
+		  FROM public.asset_relationships
+		 WHERE tenant_id = $1 AND type = 'hosted_on'
+		   AND attributes ? 'floating_address'
+		   AND (from_asset_id = $2 OR to_asset_id = $2)
+		 ORDER BY first_seen_at`, in.TenantID, in.ID)
+	if err != nil {
+		c.t.Fatalf("read announcements: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []identity.AnnouncementRecord
+	for rows.Next() {
+		var (
+			from, to uuid.UUID
+			raw      []byte
+			count    int
+			lastSeen time.Time
+		)
+		if err := rows.Scan(&from, &to, &raw, &count, &lastSeen); err != nil {
+			c.t.Fatalf("scan announcement: %v", err)
+		}
+		var attrs struct {
+			Floating struct {
+				MACs       []string `json:"macs"`
+				Addresses  []string `json:"addresses"`
+				Gratuitous bool     `json:"gratuitous_arp"`
+			} `json:"floating_address"`
+		}
+		if err := json.Unmarshal(raw, &attrs); err != nil {
+			c.t.Fatalf("decode announcement attributes: %v", err)
+		}
+		out = append(out, identity.AnnouncementRecord{
+			// The edge is holder → announcer (the VIP's asset is hosted_on
+			// the node), so `to` is the announcer.
+			Announcer: identity.AssetRef{TenantID: ref.TenantID, ID: to.String()},
+			Holder:    identity.AssetRef{TenantID: ref.TenantID, ID: from.String()},
+			Latest: identity.Announcement{
+				MACs: attrs.Floating.MACs, Addresses: attrs.Floating.Addresses,
+				Gratuitous: attrs.Floating.Gratuitous, At: lastSeen.UTC(),
+			},
+			Count: count,
+		})
+	}
+	return out
 }
 
 func (c *contractRepo) ScopeForAddress(ctx context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (string, bool, error) {
@@ -535,4 +630,75 @@ func (c *contractRepo) HistoryFor(ref identity.AssetRef) []identity.HistoryEntry
 		entries[i].TenantID = c.logicalTenant(entries[i].TenantID)
 	}
 	return entries
+}
+
+func (c *contractRepo) Endpoints(ref identity.AssetRef) []identity.EndpointObservation {
+	return c.inner.Endpoints(c.ref(ref))
+}
+
+// TestIntegration_PostgresIdentityRepository_ZonedLinkLocalEndpoint is the
+// regression for the Windows host-inventory failure.
+//
+// A host agent reports its listening sockets as the host sees them, and a
+// socket bound to an IPv6 link-local address carries a zone: `%6` on Windows
+// (the interface index), `%eth0` on Linux. netip parses that; Postgres `inet`
+// rejects it with 22P02. The value therefore passed nullInet's validation and
+// failed at the cast — and because the endpoints of one host go in as a batch,
+// one zoned socket failed the whole statement and the entire host inventory
+// was rejected as unmaterialisable.
+//
+// This has to be an integration test: the unit test on nullInet pins what the
+// function RETURNS, and the whole bug was that Go's opinion of a valid address
+// is not the database's. Only a real inet column can say so.
+//
+// Mutation check: return `s` unchanged from nullInet's ParseAddr branch (its
+// behaviour before the fix) and this fails with 22P02.
+func TestIntegration_PostgresIdentityRepository_ZonedLinkLocalEndpoint(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+	tenant := testdb.NewTenant(t, admin).String()
+	ctx := context.Background()
+
+	repo := pgrepo.New(admin)
+	ref, err := repo.CreateAsset(ctx, tenant, newAsset("zoned-endpoint-host",
+		identity.Identifier{Kind: identity.KindSerialNumber, Value: "SN-ZONED-1", Confidence: 1}))
+	if err != nil {
+		t.Fatalf("CreateAsset: %v", err)
+	}
+
+	// Two endpoints in ONE call, the zoned one first, so a statement that
+	// aborts on it takes the ordinary one with it — which is what made the
+	// whole report unmaterialisable rather than one socket.
+	eps := []identity.EndpointObservation{
+		{Address: "fe80::dd63:32d5:6809:dde3%6", Port: 64657, Transport: "udp",
+			Source: identity.Source{Kind: identity.SourceMeasured, Ref: "host-inventory"}},
+		{Address: "192.0.2.10", Port: 443, Transport: "tcp",
+			Source: identity.Source{Kind: identity.SourceMeasured, Ref: "host-inventory"}},
+	}
+	if err := repo.UpsertEndpoints(ctx, ref, eps); err != nil {
+		t.Fatalf("UpsertEndpoints with a zoned link-local address: %v\n"+
+			"A host's own socket table is where zoned addresses come from; rejecting the "+
+			"batch loses every endpoint on the host, not just this one.", err)
+	}
+
+	var stored string
+	err = admin.QueryRowContext(ctx, `
+		SELECT host(address) FROM public.asset_endpoints
+		 WHERE tenant_id = $1 AND asset_id = $2 AND port = 64657`, tenant, ref.ID).Scan(&stored)
+	if err != nil {
+		t.Fatalf("reading the zoned endpoint back: %v", err)
+	}
+	if stored != "fe80::dd63:32d5:6809:dde3" {
+		t.Errorf("stored address = %q, want the address with its zone stripped", stored)
+	}
+
+	var total int
+	if err := admin.QueryRowContext(ctx, `
+		SELECT count(*) FROM public.asset_endpoints
+		 WHERE tenant_id = $1 AND asset_id = $2`, tenant, ref.ID).Scan(&total); err != nil {
+		t.Fatalf("counting endpoints: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("endpoint count = %d, want 2 — the ordinary endpoint in the batch must survive", total)
+	}
 }

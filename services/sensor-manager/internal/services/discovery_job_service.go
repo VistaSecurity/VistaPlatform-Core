@@ -4,14 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
-	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // DiscoveryJobService handles discovery job operations
@@ -69,177 +70,116 @@ func (s *DiscoveryJobService) GetDiscoveryJob(tenantID, jobID uuid.UUID) (*model
 	return job, nil
 }
 
-// ReceiveDiscoveryResults processes discovery results for a job
-func (s *DiscoveryJobService) ReceiveDiscoveryResults(tenantID, jobID uuid.UUID, results *models.DiscoveryJobResult) error {
-	// Verify job exists and belongs to tenant
-	job, err := s.GetDiscoveryJob(tenantID, jobID)
+// ErrJobNotAssignedToSensor is returned when a sensor reports completion of a
+// job that is not the one the platform handed it: unknown id, another
+// tenant's job, a job assigned to a different sensor, or one the platform ran
+// itself. Same answer for all of them, so a sensor cannot probe which is which.
+var ErrJobNotAssignedToSensor = errors.New("discovery job is not assigned to this sensor")
+
+// ErrJobNotAwaitingSensor is returned when the job exists and is this sensor's
+// but is no longer waiting on it — the sweep already failed it as expired, or
+// it was cancelled, or the sensor is reporting twice. The late report is
+// recorded in the job's metadata but the status is not rewritten: a job the
+// platform told the tenant "failed: sensor offline" must not quietly flip to
+// completed an hour later.
+var ErrJobNotAwaitingSensor = errors.New("discovery job is no longer awaiting this sensor")
+
+// CompleteSensorJob records a tenant sensor's report that a dispatched job has
+// finished. The job must belong to tenantID and be assigned to
+// sensorID; its results arrived separately through the discovery batch route.
+//
+// started_at is set from the command's delivered_at (when the sensor collected
+// it) when nothing set it earlier, so the job's timeline reads queued →
+// dispatched → picked up → completed like every other executor's.
+func (s *DiscoveryJobService) CompleteSensorJob(ctx context.Context, tenantID, sensorID, jobID uuid.UUID, c sensordispatch.Completion) error {
+	if err := c.Validate(); err != nil {
+		return fmt.Errorf("invalid completion: %w", err)
+	}
+	result, err := json.Marshal(map[string]interface{}{
+		"status":                c.Status,
+		"total_targets":         c.TotalTargets,
+		"successful_targets":    c.SuccessfulTargets,
+		"failed_targets":        c.FailedTargets,
+		"discoveries_submitted": c.DiscoveriesSubmitted,
+		"error_message":         c.ErrorMessage,
+		"reported_at":           time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("encode completion: %w", err)
+	}
+
+	// RLS-scoped: discovery_jobs carries tenant_id and the explicit predicates
+	// stay as the primary control.
+	//
+	// The late-report case writes evidence AND answers with an error, so the
+	// closure returns nil (commit the evidence) and the error is raised after.
+	late := false
+	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		var status string
+		var assigned sql.NullString
+		err := tx.QueryRowContext(ctx,
+			`SELECT status, assigned_sensor_id FROM discovery_jobs WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+			jobID, tenantID).Scan(&status, &assigned)
+		if err == sql.ErrNoRows {
+			return ErrJobNotAssignedToSensor
+		}
+		if err != nil {
+			return fmt.Errorf("read job: %w", err)
+		}
+		if !assigned.Valid || assigned.String != sensorID.String() {
+			return ErrJobNotAssignedToSensor
+		}
+		if status != sensordispatch.StatusAwaitingSensor {
+			// Keep the late report — it is evidence — without rewriting the
+			// verdict already given.
+			if _, e := tx.ExecContext(ctx, `
+				UPDATE discovery_jobs
+				SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('sensor_result_late', $3::jsonb), updated_at = NOW()
+				WHERE id = $1 AND tenant_id = $2`, jobID, tenantID, string(result)); e != nil {
+				return fmt.Errorf("record late completion: %w", e)
+			}
+			late = true
+			return nil
+		}
+
+		var errMsg interface{}
+		if c.Status == "failed" {
+			msg := c.ErrorMessage
+			if msg == "" {
+				msg = "sensor reported the job failed"
+			}
+			errMsg = msg
+		}
+		if _, e := tx.ExecContext(ctx, `
+			UPDATE discovery_jobs
+			SET status = $3,
+			    error_message = $4,
+			    completed_at = NOW(),
+			    updated_at = NOW(),
+			    started_at = COALESCE(started_at, (
+			        SELECT c.delivered_at FROM sensor_commands c
+			        WHERE c.command_type = $5 AND c.payload ->> 'job_id' = $1::text
+			        ORDER BY c.created_at DESC LIMIT 1), NOW()),
+			    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('sensor_result', $6::jsonb)
+			WHERE id = $1 AND tenant_id = $2`,
+			jobID, tenantID, c.Status, errMsg, sensordispatch.CommandType, string(result)); e != nil {
+			return fmt.Errorf("complete job: %w", e)
+		}
+		// Every target the job carried is finished with it; the sensor's
+		// per-target outcome travelled with its discoveries.
+		if _, e := tx.ExecContext(ctx, `
+			UPDATE discovery_targets SET status = $3, completed_at = NOW(), updated_at = NOW()
+			WHERE job_id = $1 AND tenant_id = $2 AND status = 'pending'`,
+			jobID, tenantID, c.Status); e != nil {
+			return fmt.Errorf("finish targets: %w", e)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-
-	// RLS-scoped unit of work on `discovery_jobs` + `discovery_findings` (both
-	// carry tenant_id). Run the status flips and the finding inserts in ONE
-	// WithTenantTx so app.tenant_id is set for every statement. context.Background()
-	// because this method has no ctx parameter.
-	//
-	// FLAG: the discovery_findings INSERT previously OMITTED the NOT NULL tenant_id
-	// column, which would fail the insert outright (and certainly fail RLS WITH
-	// CHECK once enforced). tenant_id is now added — it is the same tenant already
-	// verified above, so this is a correctness fix, not a behavior change for any
-	// path that was actually succeeding.
-	ctx := context.Background()
-	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		// Update job status to running if it's queued
-		if job.Status == "queued" {
-			now := time.Now()
-			if _, e := tx.ExecContext(ctx, `
-				UPDATE discovery_jobs
-				SET status = 'running', started_at = $1, updated_at = $1
-				WHERE id = $2 AND tenant_id = $3
-			`, now, jobID, tenantID); e != nil {
-				return fmt.Errorf("failed to update job status: %w", e)
-			}
-		}
-
-		// Process each finding
-		for _, finding := range results.Findings {
-			// Create or get target (simplified - in real implementation, would match targets)
-			targetID := uuid.New()
-			if finding.TargetID != uuid.Nil {
-				targetID = finding.TargetID
-			}
-
-			// Insert finding
-			query := `
-				INSERT INTO discovery_findings (
-					id, job_id, tenant_id, target_id, executed_via, protocol, port,
-					resolved_ip, hostname, details, raw_blob_ref, raw_blob_size,
-					error_code, confidence_score, created_at
-				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			`
-
-			confidenceScore := 0.0
-			if finding.ConfidenceScore != nil {
-				confidenceScore = *finding.ConfidenceScore
-			}
-
-			// discovery_findings.raw_blob_size is `integer DEFAULT 0 NOT NULL`,
-			// but the model carries it as *int and this INSERT names the column
-			// explicitly — and an explicitly-bound NULL does NOT fall back to
-			// the column default. A submitter that omitted raw_blob_size (every
-			// producer that stores no raw blob) therefore violated the NOT NULL
-			// constraint, and because all findings share one transaction, that
-			// aborted the WHOLE batch: one field-less finding discarded every
-			// finding in the same submission. Resolved the same way
-			// confidence_score already is — the column's own default, applied
-			// in Go. raw_blob_size is the only column here whose Go field is
-			// nullable while the column is not; the rest (resolved_ip,
-			// hostname, details, raw_blob_ref, error_code) are nullable in both.
-			rawBlobSize := 0
-			if finding.RawBlobSize != nil {
-				rawBlobSize = *finding.RawBlobSize
-			}
-
-			// Build a combined details JSON that includes all TLS/crypto probe
-			// data (tls_versions, cipher_suite, certificates, etc.) so downstream
-			// processors can extract it from discovery_findings.details JSONB.
-			details := buildFindingDetails(&finding)
-
-			if _, e := tx.ExecContext(
-				ctx,
-				query,
-				// Protocol is canonicalized on the way in so every discovery path
-				// stores one spelling — see cryptoparse.NormalizeProtocol.
-				uuid.New(), jobID, tenantID, targetID, finding.ExecutedVia,
-				cryptoparse.NormalizeProtocol(finding.Protocol), finding.Port,
-				finding.ResolvedIP, finding.Hostname, details, finding.RawBlobRef, rawBlobSize,
-				finding.ErrorCode, confidenceScore, time.Now(),
-			); e != nil {
-				return fmt.Errorf("failed to insert finding: %w", e)
-			}
-		}
-
-		// Update job status to completed
-		now := time.Now()
-		if _, e := tx.ExecContext(ctx, `
-			UPDATE discovery_jobs
-			SET status = 'completed', completed_at = $1, updated_at = $1
-			WHERE id = $2 AND tenant_id = $3
-		`, now, jobID, tenantID); e != nil {
-			return fmt.Errorf("failed to update job status: %w", e)
-		}
-
-		return nil
-	})
-}
-
-// buildFindingDetails merges any existing Details string with the rich TLS/crypto
-// fields from the sensor's DiscoveryFinding into a single JSON string for storage
-// in discovery_findings.details JSONB. This ensures tls_versions, certificates,
-// cipher_suite, and other probe data are preserved for downstream processing.
-func buildFindingDetails(f *models.DiscoveryFinding) *string {
-	// Start with existing details if present
-	merged := make(map[string]interface{})
-	if f.Details != nil && *f.Details != "" {
-		_ = json.Unmarshal([]byte(*f.Details), &merged)
+	if late {
+		return ErrJobNotAwaitingSensor
 	}
-
-	// Merge Metadata
-	for k, v := range f.Metadata {
-		merged[k] = v
-	}
-
-	// Add TLS probe fields (non-empty only)
-	if len(f.TLSVersions) > 0 {
-		merged["tls_versions"] = f.TLSVersions
-	}
-	if f.TLSVersion != "" {
-		merged["tls_version"] = f.TLSVersion
-	}
-	if f.CipherSuite != "" {
-		merged["cipher_suite"] = f.CipherSuite
-	}
-	if f.SelectedCipher != "" {
-		merged["selected_cipher"] = f.SelectedCipher
-	}
-	if len(f.SupportedCiphers) > 0 {
-		merged["supported_ciphers"] = f.SupportedCiphers
-	}
-	if len(f.ALPN) > 0 {
-		merged["alpn"] = f.ALPN
-	}
-	if len(f.Certificates) > 0 {
-		merged["certificates"] = f.Certificates
-	}
-	if f.CertValidationStatus != "" {
-		merged["cert_validation_status"] = f.CertValidationStatus
-	}
-	if f.CertValidationError != "" {
-		merged["cert_validation_error"] = f.CertValidationError
-	}
-	if f.KeyExchangeAlgorithm != "" {
-		merged["key_exchange_algorithm"] = f.KeyExchangeAlgorithm
-	}
-
-	// SSH fields
-	if f.SSHHostKeyType != "" {
-		merged["ssh_host_key_type"] = f.SSHHostKeyType
-	}
-	if f.SSHHostKeyFingerprint != "" {
-		merged["ssh_host_key_fingerprint"] = f.SSHHostKeyFingerprint
-	}
-	if f.SSHKexAlgorithm != "" {
-		merged["ssh_kex_algorithm"] = f.SSHKexAlgorithm
-	}
-
-	if len(merged) == 0 {
-		return f.Details
-	}
-
-	b, err := json.Marshal(merged)
-	if err != nil {
-		return f.Details
-	}
-	s := string(b)
-	return &s
+	return nil
 }

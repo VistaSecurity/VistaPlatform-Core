@@ -332,6 +332,13 @@ func TestDecodeMDNS(t *testing.T) {
 		t.Errorf("mDNS service instance name reached the observation: %s", blob)
 	}
 
+	if got.Relayed() {
+		t.Errorf("a self-announcement was marked relayed: %v", got.Attributes)
+	}
+	if c := Confidence(got); c != 0.80 {
+		t.Errorf("Confidence = %v, want 0.80 for a self-announcement", c)
+	}
+
 	t.Run("a query with known answers is refused", func(t *testing.T) {
 		// Same load-bearing case as the DNS side: QR clear, answer section
 		// populated. An mDNS decoder that read answers out of a query would be
@@ -344,6 +351,98 @@ func TestDecodeMDNS(t *testing.T) {
 		if !errors.Is(err, ErrNotApplicable) {
 			t.Fatalf("err = %v, want ErrNotApplicable (got %#v)", err, got)
 		}
+	})
+
+	// The reflector case. The SAME announcement, re-originated by a gateway
+	// running an mDNS reflector: the frame now carries the gateway's MAC and
+	// the gateway's address on this VLAN, and the printer's A record no longer
+	// names the address the frame came from. Under the old sender rule the
+	// gateway was inventoried as the printer — and, on a real network, as
+	// every other host on every other VLAN too.
+	t.Run("a relayed response is hearsay about the named host", func(t *testing.T) {
+		got, err := DecodeMDNS(Frame{
+			Payload: mustHex(t, mdnsResponseHex),
+			SrcMAC:  "d8:b3:70:91:3b:87",              // the reflector's MAC
+			SrcAddr: netip.MustParseAddr("192.0.2.1"), // the reflector's address
+			At:      fixedTime,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		check(t, got, want{
+			mac:       "", // NOT the reflector's
+			vendor:    "",
+			addresses: addrs(t, "192.168.10.77"), // the record's, not the frame's
+			fqdns:     []string{"hp-printer.local"},
+			hostnames: []string{"hp-printer"},
+			services:  []string{"_ipp._tcp"},
+			attrs:     map[string]any{"mdns_relayed": true},
+		})
+		if !got.Relayed() {
+			t.Error("Relayed() = false for a relayed response")
+		}
+		if c := Confidence(got); c != 0.60 {
+			t.Errorf("Confidence = %v, want 0.60 (hearsay) for a relayed response", c)
+		}
+		if got.Key() != "ip:192.168.10.77" {
+			t.Errorf("Key = %q; a relayed observation must coalesce on the named host, never on the reflector", got.Key())
+		}
+	})
+
+	t.Run("no IP layer cannot prove self-origin", func(t *testing.T) {
+		// A frame the caller could not attach a source address to gives the
+		// decoder nothing to check the records against, and "unverifiable"
+		// must land on the safe side: hearsay, not attribution.
+		got, err := DecodeMDNS(Frame{
+			Payload: mustHex(t, mdnsResponseHex),
+			SrcMAC:  "00:1e:8f:aa:bb:cc",
+			At:      fixedTime,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.MAC != "" {
+			t.Errorf("MAC = %q attached without a source address to verify against", got.MAC)
+		}
+		if !got.Relayed() {
+			t.Error("unverifiable response was not marked relayed")
+		}
+	})
+
+	t.Run("a relayed response naming two hosts is refused, not merged", func(t *testing.T) {
+		// Two owner names in one relayed message: the DNS rule applies. One
+		// observation has one subject, and folding two hosts' addresses into
+		// one hearsay observation would create a host that does not exist.
+		got, err := DecodeMDNS(Frame{
+			Payload: mustHex(t, dnsMultiOwnerHex),
+			SrcMAC:  "d8:b3:70:91:3b:87",
+			SrcAddr: netip.MustParseAddr("192.0.2.1"),
+			At:      fixedTime,
+		})
+		if !errors.Is(err, ErrNotApplicable) {
+			t.Fatalf("err = %v, want ErrNotApplicable (got %#v)", err, got)
+		}
+	})
+
+	t.Run("a self-announcement naming two hosts keeps both", func(t *testing.T) {
+		// The same two-owner message sent by a host whose address one of the
+		// records names: the sender vouches for the message, and a host that
+		// answers to two names is a host with two names.
+		got, err := DecodeMDNS(Frame{
+			Payload: mustHex(t, dnsMultiOwnerHex),
+			SrcMAC:  "00:1e:8f:aa:bb:cc",
+			SrcAddr: netip.MustParseAddr("10.1.2.3"),
+			At:      fixedTime,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		check(t, got, want{
+			mac:       "00:1e:8f:aa:bb:cc",
+			vendor:    "Canon",
+			addresses: addrs(t, "10.1.2.3", "10.1.2.4"),
+			fqdns:     []string{"a.corp.example", "b.corp.example"},
+		})
 	})
 }
 

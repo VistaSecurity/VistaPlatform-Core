@@ -503,6 +503,38 @@ func TestConvertDeviceToAsset_AllowlistStaysScalar(t *testing.T) {
 	}
 }
 
+func TestConvertDeviceToAsset_DisplayNameNotPromotedToHostname(t *testing.T) {
+	c := &unifiClient{}
+
+	// unifiSwitchFixture's "name" is "Office Switch" — a controller display
+	// name with a space, exactly what a tenant sees in the UniFi UI (and the
+	// shape of a real-world name like "U6+ Living Room" or "Back Porch #1").
+	// It must never become the asset's Hostname: the identity layer treats
+	// Hostname as a DNS name and rejects a value with a space, silently
+	// losing the identifier and flooding the log with the reject on every
+	// interrogation run.
+	spaced := c.convertDeviceToAsset(unifiSwitchFixture(), "default")
+	if spaced.Hostname != "" {
+		t.Errorf("Hostname = %q, want empty — a display name with a space is not a DNS name", spaced.Hostname)
+	}
+	if spaced.Metadata["name"] != "Office Switch" {
+		t.Errorf("display name was not preserved in Metadata for the UI: %#v", spaced.Metadata["name"])
+	}
+
+	// A device whose controller-assigned name happens to ALSO be DNS-valid
+	// (no space, no vendor punctuation) must still become the Hostname — the
+	// fix rejects invalid names, it does not blanket-suppress this field.
+	dnsSafe := unifiSwitchFixture()
+	dnsSafe["name"] = "office-switch-1"
+	valid := c.convertDeviceToAsset(dnsSafe, "default")
+	if valid.Hostname != "office-switch-1" {
+		t.Errorf("Hostname = %q, want %q for a DNS-valid device name", valid.Hostname, "office-switch-1")
+	}
+	if valid.Metadata["name"] != "office-switch-1" {
+		t.Errorf("display name was not preserved in Metadata: %#v", valid.Metadata["name"])
+	}
+}
+
 func TestUnifiManagementProtocol(t *testing.T) {
 	if proto, plaintext := unifiManagementProtocol("https://unifi.example.net:8443"); proto != "https" || plaintext {
 		t.Errorf("https controller reported as %q plaintext=%v", proto, plaintext)

@@ -82,13 +82,39 @@ func (f catRiskFixture) score(t *testing.T, implID uuid.UUID) (int, []string, bo
 		if e != nil {
 			return e
 		}
-		s, factors, ok = worst.RiskScore, catalogueRiskFactors(all), found
+		if worst.RiskScore != nil {
+			s = *worst.RiskScore
+		}
+		factors, ok = catalogueRiskFactors(all), found
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("catalogue risk: %v", err)
 	}
 	return s, factors, ok
+}
+
+func TestIntegration_CatalogueRisk_UnassessedComponentIsNotRegradedAsZero(t *testing.T) {
+	f := newCatRiskFixture(t)
+	code := "CUSTOM-UNASSESSED-" + uuid.NewString()
+	if _, err := f.db.Exec(`
+		INSERT INTO algorithms (code, category, name, risk_score)
+		VALUES ($1, 'hash', 'Custom unassessed algorithm', 50)`, code); err != nil {
+		t.Fatalf("insert custom algorithm: %v", err)
+	}
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM algorithms WHERE code = $1`, code) })
+	if _, err := f.db.Exec(`UPDATE algorithms SET risk_score = NULL WHERE code = $1`, code); err != nil {
+		t.Fatalf("make historical algorithm unassessed: %v", err)
+	}
+
+	impl := f.implWith(t, map[string]string{"hash": code})
+	_, factors, ok := f.score(t, impl)
+	if ok {
+		t.Fatal("unassessed component was reported as a numeric catalogue assessment")
+	}
+	if len(factors) != 1 || !strings.Contains(factors[0], "no catalogue risk assessment") {
+		t.Fatalf("unassessed evidence was hidden or regraded: %#v", factors)
+	}
 }
 
 // The worst component sets the score: an AES-256 cipher must not offset an RC4

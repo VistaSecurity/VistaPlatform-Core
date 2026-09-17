@@ -707,7 +707,7 @@ func (s *NetworkSegmentService) MigrateAutoApprovalRulesToSegments(tenantID uuid
 	if err := json.Unmarshal(configJSON, &config); err != nil {
 		return 0, err
 	}
-	spacesRaw, ok := config["network_spaces"]
+	spacesRaw, ok := config[NetworkSpacesSettingsKey]
 	if !ok {
 		return 0, nil
 	}
@@ -822,7 +822,7 @@ func (s *NetworkSegmentService) MigrateFromNetworkSpaces(tenantID uuid.UUID) (in
 	if err := json.Unmarshal(configJSON, &config); err != nil {
 		return 0, err
 	}
-	spacesRaw, ok := config["network_spaces"]
+	spacesRaw, ok := config[NetworkSpacesSettingsKey]
 	if !ok {
 		return 0, nil
 	}

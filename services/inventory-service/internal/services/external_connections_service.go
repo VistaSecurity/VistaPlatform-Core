@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
+	cryptostrength "github.com/vistasecurity/vistaplatform/shared/strength"
 )
 
 // ExternalConnectionsService manages the external_connections and
@@ -20,14 +22,18 @@ import (
 // 3rd party public internet connections observed by sensors.
 type ExternalConnectionsService struct {
 	db                       *database.DB
-	algorithms               *AlgorithmService
+	algorithms               externalAlgorithmLookup
 	serviceIdentificationSvc *ServiceIdentificationService
 }
 
 // NewExternalConnectionsService creates a new service wired to the algorithm service
 // for crypto strength assessment.
 func NewExternalConnectionsService(db *database.DB, algorithms *AlgorithmService) *ExternalConnectionsService {
-	return &ExternalConnectionsService{db: db, algorithms: algorithms}
+	service := &ExternalConnectionsService{db: db}
+	if algorithms != nil {
+		service.algorithms = algorithms
+	}
+	return service
 }
 
 // SetServiceIdentificationService injects the service identification dependency.
@@ -50,16 +56,11 @@ func (s *ExternalConnectionsService) Upsert(tenantID uuid.UUID, input models.Ext
 	// service lookup below see the same canonical value the row stores.
 	input.Protocol = cryptoparse.NormalizeProtocol(input.Protocol)
 
-	// --- Crypto assessment ---
-	cryptoStrength, isPQC, kexAlgorithm, weakReasons := s.assessCrypto(input)
-	if input.KeyExchangeAlgorithm == nil && kexAlgorithm != "" {
-		input.KeyExchangeAlgorithm = &kexAlgorithm
-	}
-
-	var weakReasonsArr pq.StringArray
-	if len(weakReasons) > 0 {
-		weakReasonsArr = pq.StringArray(weakReasons)
-	}
+	// Ratings are computed only after merging persisted facts inside the tenant
+	// transaction. Assessing the incoming fragment first can erase known weakness.
+	var cryptoStrength *string
+	var isPQC bool
+	var weakReasonsArr, hygieneFlagsArr pq.StringArray
 
 	// source_asset_id is resolved best-effort inside the tenant tx below (the
 	// assets lookup, the external_connections upsert, and the history
@@ -95,11 +96,11 @@ upserted AS (
         dest_ip, dest_hostname, dest_port, protocol, protocol_version,
         cipher_suite, key_exchange_algorithm, key_size,
         supported_tls_versions,
-        crypto_strength, is_pqc_resistant, weak_reasons,
+        crypto_strength, is_pqc_resistant, weak_reasons, cert_hygiene_flags,
         cert_subject, cert_issuer, cert_san,
         cert_not_before, cert_not_after, cert_fingerprint_sha256,
         cert_public_key_algorithm, cert_public_key_size, cert_signature_algorithm,
-        cert_is_expired, cert_validation_status, cert_pem,
+        cert_is_expired, cert_validation_status, cert_sct_source, cert_pem,
         first_seen_at, last_seen_at, observation_count, sensor_id,
         created_at, updated_at
     ) VALUES (
@@ -107,11 +108,11 @@ upserted AS (
         $3::inet, $8, $4, $5, $9,
         $10, $11, $12,
         $29,
-        $13, $14, $30,
+        $13, $14, $30, $31,
         $15, $16, $17,
         $18, $19, $20,
         $21, $22, $23,
-        $24, $25, $26,
+        $24, $25, $32, $26,
         $27, $27, 1, $28,
         $27, $27
     )
@@ -124,18 +125,10 @@ upserted AS (
         key_exchange_algorithm  = COALESCE(EXCLUDED.key_exchange_algorithm, external_connections.key_exchange_algorithm),
         key_size                = COALESCE(EXCLUDED.key_size, external_connections.key_size),
         supported_tls_versions  = COALESCE(EXCLUDED.supported_tls_versions, external_connections.supported_tls_versions),
-        crypto_strength         = CASE
-                                      WHEN EXCLUDED.crypto_strength <> 'unknown' THEN EXCLUDED.crypto_strength
-                                      ELSE external_connections.crypto_strength
-                                  END,
-        is_pqc_resistant        = CASE
-                                      WHEN EXCLUDED.crypto_strength <> 'unknown' THEN EXCLUDED.is_pqc_resistant
-                                      ELSE external_connections.is_pqc_resistant
-                                  END,
-        weak_reasons            = CASE
-                                      WHEN EXCLUDED.crypto_strength <> 'unknown' THEN EXCLUDED.weak_reasons
-                                      ELSE external_connections.weak_reasons
-                                  END,
+        crypto_strength         = EXCLUDED.crypto_strength,
+        is_pqc_resistant        = EXCLUDED.is_pqc_resistant,
+        weak_reasons            = EXCLUDED.weak_reasons,
+        cert_hygiene_flags       = EXCLUDED.cert_hygiene_flags,
         cert_subject            = COALESCE(EXCLUDED.cert_subject, external_connections.cert_subject),
         cert_issuer             = COALESCE(EXCLUDED.cert_issuer, external_connections.cert_issuer),
         cert_san                = COALESCE(EXCLUDED.cert_san, external_connections.cert_san),
@@ -147,6 +140,7 @@ upserted AS (
         cert_signature_algorithm = COALESCE(EXCLUDED.cert_signature_algorithm, external_connections.cert_signature_algorithm),
         cert_is_expired         = EXCLUDED.cert_is_expired,
         cert_validation_status  = COALESCE(EXCLUDED.cert_validation_status, external_connections.cert_validation_status),
+        cert_sct_source         = COALESCE(EXCLUDED.cert_sct_source, external_connections.cert_sct_source),
         cert_pem                = COALESCE(EXCLUDED.cert_pem, external_connections.cert_pem),
         last_seen_at            = EXCLUDED.last_seen_at,
         observation_count       = external_connections.observation_count + 1,
@@ -160,11 +154,11 @@ SELECT
     u.dest_ip::text, u.dest_hostname, u.dest_port,
     u.protocol, u.protocol_version, u.cipher_suite, u.key_exchange_algorithm, u.key_size,
     u.supported_tls_versions,
-    u.crypto_strength, u.is_pqc_resistant, u.weak_reasons,
+    u.crypto_strength, u.is_pqc_resistant, u.weak_reasons, u.cert_hygiene_flags,
     u.cert_subject, u.cert_issuer, u.cert_san,
     u.cert_not_before, u.cert_not_after, u.cert_fingerprint_sha256,
     u.cert_public_key_algorithm, u.cert_public_key_size, u.cert_signature_algorithm,
-    u.cert_is_expired, u.cert_validation_status, u.cert_pem,
+    u.cert_is_expired, u.cert_validation_status, u.cert_sct_source, u.cert_pem,
     u.first_seen_at, u.last_seen_at, u.observation_count, u.sensor_id,
     u.created_at, u.updated_at,
     (prev.id IS NULL) AS is_new,
@@ -186,12 +180,56 @@ LEFT JOIN prev ON true
 	var scanCertSAN pq.StringArray
 	var scanSupportedTLSVersions pq.StringArray
 	var scanWeakReasons pq.StringArray
+	var scanCertHygieneFlags pq.StringArray
 
 	// RLS-scoped unit: resolve source_asset_id (assets), upsert the row
 	// (external_connections), and write the history row (external_connection_history)
 	// all inside one WithTenantTx so app.tenant_id is set for every statement and
 	// the upsert + its history land atomically.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		// Serialize this observation tuple, including the first insert: a
+		// row lock alone does not protect two concurrent first observations.
+		if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1::text||':'||$2::inet::text||':'||$3::inet::text||':'||$4::text||':'||$5,1616))`, tenantID, input.SourceIP, input.DestIP, input.DestPort, input.Protocol); err != nil {
+			return err
+		}
+		freshComplete := completeExternalObservation(input)
+		measuredExchange := input.KeyExchangeAlgorithm != nil && strings.TrimSpace(*input.KeyExchangeAlgorithm) != "" && input.KeySize != nil && *input.KeySize > 0
+		var priorJSON []byte
+		var prior models.ExternalConnection
+		err := tx.QueryRow(`SELECT to_jsonb(ec) FROM external_connections ec WHERE tenant_id=$1 AND source_ip=$2::inet AND dest_ip=$3::inet AND dest_port=$4 AND protocol=$5 FOR UPDATE`, tenantID, input.SourceIP, input.DestIP, input.DestPort, input.Protocol).Scan(&priorJSON)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			if err := json.Unmarshal(priorJSON, &prior); err != nil {
+				return err
+			}
+			var stored struct {
+				Strength *string `json:"crypto_strength"`
+			}
+			if err := json.Unmarshal(priorJSON, &stored); err != nil {
+				return err
+			}
+			prior.Strength = stored.Strength
+			var facts models.ExternalConnectionUpsert
+			if err := json.Unmarshal(priorJSON, &facts); err != nil {
+				return err
+			}
+			input = mergeExternalObservation(input, facts)
+		}
+		assessmentInput, priorReasons := prepareExternalAssessment(input, prior.WeakReasons, measuredExchange)
+		rating, pqcRating, parsedKEX, reasons, hygiene := assessExternalCryptoTx(context.Background(), tx, assessmentInput)
+		if input.KeyExchangeAlgorithm == nil && parsedKEX != "" {
+			input.KeyExchangeAlgorithm = &parsedKEX
+		}
+		rating, reasons = preserveExternalAssessment(rating, reasons, prior.Strength, priorReasons, freshComplete && rating != "")
+		cryptoStrength = nullableStrength(rating)
+		isPQC = pqcRating
+		weakReasonsArr = pq.StringArray(reasons)
+		hygieneFlagsArr = pq.StringArray(appendUnique(hygiene, prior.CertHygieneFlags...))
+		certIsExpired = input.CertNotAfter != nil && input.CertNotAfter.Before(now)
+		certSAN = pq.StringArray(input.CertSAN)
+		supportedTLSVersions = pq.StringArray(input.SupportedTLSVersions)
 		// --- Resolve source_asset_id best-effort ---
 		{
 			var id uuid.UUID
@@ -230,17 +268,21 @@ LEFT JOIN prev ON true
 			supportedTLSVersions,
 			// $30: weak_reasons
 			weakReasonsArr,
+			// $31: cert_hygiene_flags
+			hygieneFlagsArr,
+			// $32: cert_sct_source
+			input.CertSCTSource,
 		).Scan(
 			&conn.ID, &conn.TenantID,
 			&conn.SourceIP, &conn.SourceHostname, &conn.SourceAssetID,
 			&conn.DestIP, &conn.DestHostname, &conn.DestPort,
 			&conn.Protocol, &conn.ProtocolVersion, &conn.CipherSuite, &conn.KeyExchangeAlgorithm, &conn.KeySize,
 			&scanSupportedTLSVersions,
-			&conn.CryptoStrength, &conn.IsPQCResistant, &scanWeakReasons,
+			&conn.Strength, &conn.IsPQCResistant, &scanWeakReasons, &scanCertHygieneFlags,
 			&conn.CertSubject, &conn.CertIssuer, &scanCertSAN,
 			&conn.CertNotBefore, &conn.CertNotAfter, &conn.CertFingerprintSHA256,
 			&conn.CertPublicKeyAlgorithm, &conn.CertPublicKeySize, &conn.CertSignatureAlgorithm,
-			&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertPEM,
+			&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertSCTSource, &conn.CertPEM,
 			&conn.FirstSeenAt, &conn.LastSeenAt, &conn.ObservationCount, &conn.SensorID,
 			&conn.CreatedAt, &conn.UpdatedAt,
 			&isNew,
@@ -251,6 +293,9 @@ LEFT JOIN prev ON true
 		}
 		if len(scanWeakReasons) > 0 {
 			conn.WeakReasons = []string(scanWeakReasons)
+		}
+		if len(scanCertHygieneFlags) > 0 {
+			conn.CertHygieneFlags = []string(scanCertHygieneFlags)
 		}
 		if len(scanCertSAN) > 0 {
 			conn.CertSAN = []string(scanCertSAN)
@@ -292,26 +337,29 @@ LEFT JOIN prev ON true
 				histPrevFP = &prevCertFingerprint.String
 			}
 
-			newCS := conn.CryptoStrength
-			_, _ = tx.Exec(`
+			newCS := conn.Strength
+			_, historyErr := tx.Exec(`
 				INSERT INTO external_connection_history (
-					id, external_connection_id, tenant_id, change_type,
+					id, external_connection_id, tenant_id, change_type, strength_vocabulary_version,
 					previous_protocol_version, previous_cipher_suite, previous_crypto_strength,
 					previous_is_pqc_resistant, previous_cert_fingerprint_sha256, previous_cert_not_after,
 					new_protocol_version, new_cipher_suite, new_crypto_strength,
 					new_is_pqc_resistant, new_cert_fingerprint_sha256, new_cert_not_after,
 					created_at
 				) VALUES (
-					gen_random_uuid(), $1, $2, $3,
+					gen_random_uuid(), $1, $2, $3, 2,
 					$4, $5, $6, $7, $8, $9,
 					$10, $11, $12, $13, $14, $15,
 					NOW()
 				)`,
 				conn.ID, tenantID, changeType,
 				histPrevProto, histPrevCipher, histPrevStrength, prevPQC, histPrevFP, prevCA,
-				conn.ProtocolVersion, conn.CipherSuite, &newCS, &conn.IsPQCResistant,
+				conn.ProtocolVersion, conn.CipherSuite, newCS, &conn.IsPQCResistant,
 				conn.CertFingerprintSHA256, conn.CertNotAfter,
 			)
+			if historyErr != nil {
+				return fmt.Errorf("record external connection history: %w", historyErr)
+			}
 		}
 		return nil
 	})
@@ -390,7 +438,7 @@ func normalizeCipherComponent(parsed string) string {
 //     (handles AES-256-GCM → AES256, CHACHA20-POLY1305 → ChaCha20, etc.)
 //
 // Returns nil without error if no matching row exists; that component is simply
-// not counted in the assessment rather than causing a failure.
+// represented as unassessed rather than silently counted as healthy.
 func (s *ExternalConnectionsService) resolveAlgorithmForComponent(parsed string) (*Algorithm, error) {
 	if strings.TrimSpace(parsed) == "" {
 		return nil, nil
@@ -411,172 +459,158 @@ func (s *ExternalConnectionsService) resolveAlgorithmForComponent(parsed string)
 	return s.algorithms.GetAlgorithmByCodeCI(normalized)
 }
 
-// assessCrypto evaluates the cipher suite and protocol against the algorithms table
-// and returns (cryptoStrength, isPQCResistant, parsedKEX, weakReasons).
-func (s *ExternalConnectionsService) assessCrypto(input models.ExternalConnectionUpsert) (strength string, isPQC bool, kex string, weakReasons []string) {
-	strength = "unknown"
-	isPQC = false
-	kex = ""
-
-	var components *CipherSuiteComponents
-	if input.CipherSuite != nil && strings.TrimSpace(*input.CipherSuite) != "" {
-		if c, err := s.algorithms.ParseCipherSuite(*input.CipherSuite); err == nil && c != nil {
-			components = c
-			kex = c.KeyExchange
-		}
+// assessCrypto evaluates the cipher suite and protocol against the algorithms
+// table and returns (cryptoStrength, isPQCResistant, parsedKEX, weakReasons,
+// hygieneFlags). weakReasons drives crypto_strength and reflects ONLY
+// protocol version, cipher suite, key exchange, key size and signature
+// algorithm — the things the algorithms catalogue rates (CLAUDE.md "Crypto
+// Assessment Source of Truth"). Certificate-hygiene observations (CT logging,
+// chain trust, missing Subject DN) are returned separately in hygieneFlags
+// and never influence crypto_strength — see assessCertHygiene.
+func (s *ExternalConnectionsService) assessCrypto(input models.ExternalConnectionUpsert) (rating string, isPQC bool, kex string, weakReasons []string, hygieneFlags []string) {
+	hygieneFlags = assessCertHygiene(input)
+	hygieneFlags = append(hygieneFlags, assessCertValidationStatus(input)...)
+	hygieneFlags = append(hygieneFlags, assessSensorCertFlags(input)...)
+	var values []string
+	if input.CipherSuite == nil && input.KeyExchangeAlgorithm == nil && input.CertPublicKeyAlgorithm == nil && input.CertSignatureAlgorithm == nil {
+		values = append(values, "")
 	}
-
-	// Weak protocol versions are an immediate indicator of weakness.
-	// Check both the negotiated version and the enumerated supported versions.
-	if isWeakProtocol(input.Protocol, input.ProtocolVersion) {
-		v := ""
-		if input.ProtocolVersion != nil {
-			v = " " + *input.ProtocolVersion
+	add := func(code, role string) {
+		if strings.TrimSpace(code) == "" {
+			return
 		}
-		weakReasons = append(weakReasons, fmt.Sprintf("Weak protocol: %s%s", input.Protocol, v))
-	}
-	if hasWeakTLSVersion(input.SupportedTLSVersions) {
-		legacy := legacyTLSVersions(input.SupportedTLSVersions)
-		weakReasons = append(weakReasons, fmt.Sprintf("Server accepts legacy TLS: %s", strings.Join(legacy, ", ")))
-	}
-
-	// --- DH/RSA key size gate ---
-	// When key_exchange is DHE/DH and a key_size is reported, check thresholds
-	// regardless of what the algorithms table says about the generic "DHE" code.
-	weakReasons = append(weakReasons, s.assessKeyExchangeSize(input)...)
-
-	// --- Certificate public key size gate ---
-	weakReasons = append(weakReasons, assessCertPublicKeySize(input)...)
-
-	// --- Certificate signature algorithm check ---
-	weakReasons = append(weakReasons, assessCertSignatureAlgorithm(input)...)
-
-	// --- Certificate validation status check ---
-	weakReasons = append(weakReasons, assessCertValidationStatus(input)...)
-
-	// --- Sensor-level certificate quality flags ---
-	weakReasons = append(weakReasons, assessSensorCertFlags(input)...)
-
-	// If we already found weak reasons from protocol or key size, mark weak
-	// but continue checking for additional reasons to give a complete report.
-	hasWeakFlag := len(weakReasons) > 0
-
-	// Whole cipher suite as a single algorithms.code (seed includes many IANA names).
-	// Prefer this path because the full suite row carries the authoritative assessment
-	// without needing to compose component-level verdicts.
-	if input.CipherSuite != nil {
-		raw := strings.TrimSpace(*input.CipherSuite)
-		if raw != "" {
-			if suiteAlg, err := s.algorithms.GetAlgorithmByCodeCI(raw); err == nil && suiteAlg != nil {
-				if isWeakAlgorithm(suiteAlg) {
-					weakReasons = append(weakReasons, fmt.Sprintf("Weak cipher suite: %s", raw))
-					return "weak", suiteAlg.IsPQC && suiteAlg.PQCStandardizationStatus == "standardized", kex, weakReasons
-				}
-				if hasWeakFlag {
-					return "weak", false, kex, weakReasons
-				}
-				if suiteAlg.IsPQC && suiteAlg.PQCStandardizationStatus == "standardized" {
-					isPQC = true
-				}
-				return "good", isPQC, kex, weakReasons
-			}
+		var alg *Algorithm
+		if s.algorithms != nil {
+			alg, _ = s.resolveAlgorithmForComponent(code)
 		}
-	}
-
-	if components == nil {
-		if hasWeakFlag {
-			return "weak", false, kex, weakReasons
+		if alg == nil {
+			values = append(values, "")
+			return
 		}
-		return strength, isPQC, kex, weakReasons
-	}
-
-	goodCount := 0
-	totalChecked := 0
-
-	for _, code := range []string{components.KeyExchange, components.Signature, components.Symmetric, components.Hash} {
-		if code == "" {
-			continue
-		}
-		alg, err := s.resolveAlgorithmForComponent(code)
-		if err != nil || alg == nil {
-			// No matching row — skip rather than treating as weak/good
-			continue
-		}
-		totalChecked++
-		if isWeakAlgorithm(alg) {
-			weakReasons = append(weakReasons, fmt.Sprintf("Weak %s: %s (%s, %s)", alg.Category, code, alg.Strength, alg.DeprecationStatus))
-			hasWeakFlag = true
-			continue // keep checking for more reasons
+		values = append(values, alg.Strength)
+		if alg.Strength == "weak" {
+			weakReasons = append(weakReasons, fmt.Sprintf("Weak %s: %s", role, code))
 		}
 		if alg.IsPQC && alg.PQCStandardizationStatus == "standardized" {
 			isPQC = true
 		}
-		goodCount++
 	}
-
-	if hasWeakFlag {
-		return "weak", false, kex, weakReasons
+	value := func(v *string) string {
+		if v == nil {
+			return ""
+		}
+		return *v
 	}
-	if totalChecked > 0 && goodCount == totalChecked {
-		strength = "good"
+	if input.ProtocolVersion != nil {
+		code := externalProtocolCode(input.Protocol, *input.ProtocolVersion)
+		add(code, "protocol version")
 	}
-	return strength, isPQC, kex, weakReasons
+	for _, v := range input.SupportedTLSVersions {
+		code := externalProtocolCode(input.Protocol, v)
+		add(code, "offered protocol version")
+	}
+	if input.CipherSuite != nil && strings.TrimSpace(*input.CipherSuite) != "" {
+		components, _ := cryptoparse.ParseCipherSuite(*input.CipherSuite)
+		// A whole-suite row contributes, but never short-circuits the individual
+		// components or an explicitly observed key/certificate below.
+		var suite *Algorithm
+		if s.algorithms != nil {
+			suite, _ = s.algorithms.GetAlgorithmByCodeCI(*input.CipherSuite)
+		}
+		if suite != nil {
+			add(*input.CipherSuite, "cipher suite")
+		} else if components == nil {
+			values = append(values, "")
+		}
+		if components != nil {
+			kex = components.KeyExchange
+			for _, part := range []struct{ code, role string }{{components.KeyExchange, "key exchange"}, {components.Signature, "signature"}, {components.Symmetric, "symmetric"}, {components.Hash, "hash"}} {
+				if part.role == "signature" && cryptoparse.KeyAlgorithmFamily(part.code) == cryptoparse.KexFamilyFiniteField {
+					// RSA authentication is a certificate key, not static RSA
+					// key transport. Only a measured matching leaf key can
+					// resolve this inferred role through the sized-key path.
+					if input.CertPublicKeyAlgorithm == nil || !strings.EqualFold(part.code, *input.CertPublicKeyAlgorithm) || input.CertPublicKeySize == nil {
+						values = append(values, "")
+					}
+					continue
+				}
+				add(part.code, part.role)
+			}
+		}
+	}
+	add(value(input.KeyExchangeAlgorithm), "observed key exchange")
+	if input.KeyExchangeAlgorithm == nil && kex != "" {
+		input.KeyExchangeAlgorithm = &kex
+	}
+	if input.CertPublicKeyAlgorithm != nil {
+		key := *input.CertPublicKeyAlgorithm
+		if cryptoparse.KeyAlgorithmFamily(key) == cryptoparse.KexFamilyFiniteField {
+			var alg *Algorithm
+			if input.CertPublicKeySize != nil && s.algorithms != nil {
+				alg, _ = s.algorithms.GetAlgorithmByCodeCI(fmt.Sprintf("%s-%d", strings.ToUpper(key), *input.CertPublicKeySize))
+			}
+			if alg != nil {
+				add(alg.Code, "certificate public key")
+			} else {
+				// A bare RSA key-transport row is not a certificate-key assessment.
+				if s.algorithms != nil {
+					alg, _ = s.resolveAlgorithmForComponent(key)
+				}
+				if alg != nil && alg.Category != "key_exchange" {
+					add(alg.Code, "certificate public key")
+				} else {
+					values = append(values, "")
+				}
+			}
+		} else {
+			add(key, "certificate public key")
+		}
+	}
+	add(value(input.CertSignatureAlgorithm), "certificate signature")
+	if isWeakProtocol(input.Protocol, input.ProtocolVersion) {
+		weakReasons = append(weakReasons, "Weak protocol: "+input.Protocol+" "+value(input.ProtocolVersion))
+	}
+	if hasWeakTLSVersion(input.SupportedTLSVersions) {
+		weakReasons = append(weakReasons, "Server accepts legacy TLS: "+strings.Join(legacyTLSVersions(input.SupportedTLSVersions), ", "))
+	}
+	weakReasons = append(weakReasons, s.assessKeyExchangeSize(input)...)
+	weakReasons = append(weakReasons, assessCertPublicKeySize(input)...)
+	weakReasons = append(weakReasons, assessCertSignatureAlgorithm(input)...)
+	for _, key := range []struct {
+		alg  *string
+		bits *int
+	}{{input.KeyExchangeAlgorithm, input.KeySize}, {input.CertPublicKeyAlgorithm, input.CertPublicKeySize}} {
+		if key.alg != nil && (key.bits == nil || *key.bits <= 0) {
+			family := cryptoparse.KeyAlgorithmFamily(*key.alg)
+			if family == cryptoparse.KexFamilyFiniteField || family == cryptoparse.KexFamilyEllipticCurve {
+				values = append(values, "")
+			}
+		}
+	}
+	if len(weakReasons) > 0 {
+		return "weak", isPQC, kex, weakReasons, hygieneFlags
+	}
+	rating, complete := cryptostrength.Weakest(values...)
+	if !complete {
+		rating = ""
+	}
+	return rating, isPQC, kex, weakReasons, hygieneFlags
 }
 
 // assessKeyExchangeSize checks the key exchange key size against NIST thresholds.
 // Returns weak reasons for sub-standard key sizes on DH and RSA key exchanges.
 func (s *ExternalConnectionsService) assessKeyExchangeSize(input models.ExternalConnectionUpsert) []string {
-	if input.KeySize == nil || *input.KeySize == 0 {
+	if input.KeyExchangeAlgorithm == nil || input.KeySize == nil {
 		return nil
 	}
-	keySize := *input.KeySize
-
-	// Determine the key exchange type from explicit field or parsed cipher suite
-	kexType := ""
-	if input.KeyExchangeAlgorithm != nil {
-		kexType = strings.ToUpper(strings.TrimSpace(*input.KeyExchangeAlgorithm))
+	if severity := cryptoparse.WeakKeySizeSeverity(*input.KeyExchangeAlgorithm, *input.KeySize); severity != "" {
+		label := "Weak"
+		if severity == cryptoparse.SeverityCritical {
+			label = "Critical"
+		}
+		return []string{fmt.Sprintf(label+" key exchange: %s %d-bit key is below the NIST SP 800-131A floor", *input.KeyExchangeAlgorithm, *input.KeySize)}
 	}
-
-	var reasons []string
-
-	switch {
-	case strings.HasPrefix(kexType, "DH") && !strings.HasPrefix(kexType, "ECDHE"):
-		// DH, DHE, DH-*, etc. (not ECDHE)
-		reasons = s.checkDHKeySize(kexType, keySize)
-	case strings.HasPrefix(kexType, "RSA"):
-		reasons = s.checkRSAKeySize(kexType, keySize)
-	case kexType == "STATIC-RSA":
-		reasons = append(reasons, "No forward secrecy: static RSA key exchange")
-		reasons = append(reasons, s.checkRSAKeySize(kexType, keySize)...)
-	}
-
-	return reasons
-}
-
-// checkDHKeySize evaluates Diffie-Hellman key exchange key sizes.
-func (s *ExternalConnectionsService) checkDHKeySize(kexType string, keySize int) []string {
-	var reasons []string
-
-	if keySize < 1024 {
-		reasons = append(reasons, fmt.Sprintf("Critical: %s key exchange with %d-bit modulus (trivially factorable, Logjam CVE-2015-4000)", kexType, keySize))
-	} else if keySize < 2048 {
-		reasons = append(reasons, fmt.Sprintf("Weak: %s key exchange with %d-bit modulus (below NIST SP 800-131A minimum of 2048 bits)", kexType, keySize))
-	}
-
-	return reasons
-}
-
-// checkRSAKeySize evaluates RSA key exchange key sizes.
-func (s *ExternalConnectionsService) checkRSAKeySize(kexType string, keySize int) []string {
-	var reasons []string
-
-	if keySize < 1024 {
-		reasons = append(reasons, fmt.Sprintf("Critical: %s key exchange with %d-bit key (trivially factorable)", kexType, keySize))
-	} else if keySize < 2048 {
-		reasons = append(reasons, fmt.Sprintf("Weak: %s key exchange with %d-bit key (below NIST SP 800-131A minimum of 2048 bits)", kexType, keySize))
-	}
-
-	return reasons
+	return nil
 }
 
 // legacyTLSVersions extracts the weak versions from a supported versions list.
@@ -592,54 +626,41 @@ func legacyTLSVersions(versions []string) []string {
 
 // assessCertPublicKeySize checks the certificate's public key size against NIST thresholds.
 func assessCertPublicKeySize(input models.ExternalConnectionUpsert) []string {
-	if input.CertPublicKeySize == nil || *input.CertPublicKeySize == 0 {
+	if input.CertPublicKeyAlgorithm == nil || input.CertPublicKeySize == nil {
 		return nil
 	}
-	keySize := *input.CertPublicKeySize
-	alg := ""
-	if input.CertPublicKeyAlgorithm != nil {
-		alg = strings.ToUpper(strings.TrimSpace(*input.CertPublicKeyAlgorithm))
-	}
-
-	var reasons []string
-	switch {
-	case strings.Contains(alg, "RSA"):
-		if keySize < 1024 {
-			reasons = append(reasons, fmt.Sprintf("Critical: certificate RSA public key is %d bits (trivially factorable)", keySize))
-		} else if keySize < 2048 {
-			reasons = append(reasons, fmt.Sprintf("Weak: certificate RSA public key is %d bits (below NIST minimum of 2048)", keySize))
+	if severity := cryptoparse.WeakKeySizeSeverity(*input.CertPublicKeyAlgorithm, *input.CertPublicKeySize); severity != "" {
+		label := "Weak"
+		if severity == cryptoparse.SeverityCritical {
+			label = "Critical"
 		}
-	case strings.Contains(alg, "EC") || strings.Contains(alg, "ECDSA"):
-		if keySize < 224 {
-			reasons = append(reasons, fmt.Sprintf("Weak: certificate ECDSA public key is %d bits (below NIST minimum of 224)", keySize))
-		}
+		return []string{fmt.Sprintf(label+" certificate public key: %s %d bits is below the NIST SP 800-131A floor", *input.CertPublicKeyAlgorithm, *input.CertPublicKeySize)}
 	}
-	return reasons
+	return nil
 }
 
-// assessCertSignatureAlgorithm checks for weak certificate signature algorithms.
 func assessCertSignatureAlgorithm(input models.ExternalConnectionUpsert) []string {
-	if input.CertSignatureAlgorithm == nil {
-		return nil
+	if input.CertSignatureAlgorithm != nil && cryptoparse.WeakHashSeverity(*input.CertSignatureAlgorithm) != "" {
+		name := *input.CertSignatureAlgorithm
+		if cryptoparse.WeakHashSeverity(name) == cryptoparse.SeverityHigh {
+			name = "SHA-1 (" + name + ")"
+		}
+		return []string{"Weak certificate signature hash: " + name}
 	}
-	sig := strings.ToUpper(strings.TrimSpace(*input.CertSignatureAlgorithm))
-	if sig == "" {
-		return nil
-	}
-
-	var reasons []string
-	switch {
-	case strings.Contains(sig, "MD5"):
-		reasons = append(reasons, "Critical: certificate signed with MD5 (collision attacks demonstrated)")
-	case strings.Contains(sig, "MD2"):
-		reasons = append(reasons, "Critical: certificate signed with MD2 (cryptographically broken)")
-	case strings.Contains(sig, "SHA1") || strings.Contains(sig, "SHA-1"):
-		reasons = append(reasons, "Weak: certificate signed with SHA-1 (deprecated, collision attacks demonstrated)")
-	}
-	return reasons
+	return nil
 }
 
-// assessCertValidationStatus adds weak reasons for certificate trust issues.
+// assessCertValidationStatus reports certificate trust issues as hygiene.
+//
+// "untrusted_ca" and "incomplete_chain" are deliberately NOT here: neither
+// says anything about protocol version, cipher suite, key exchange, key size
+// or signature algorithm — the things crypto_strength must reflect (CLAUDE.md
+// "Crypto Assessment Source of Truth"). A service that pins its own CA (e.g.
+// Signal) validates as "untrusted_ca" even over TLS 1.3/AES-256-GCM, and
+// counting that as "weak crypto" is exactly the bug this split fixes. Those
+// two are certificate-HYGIENE observations, reported separately by
+// assessCertHygiene so the information isn't lost — just not conflated with
+// cryptographic weakness.
 func assessCertValidationStatus(input models.ExternalConnectionUpsert) []string {
 	if input.CertValidationStatus == nil {
 		return nil
@@ -657,35 +678,61 @@ func assessCertValidationStatus(input models.ExternalConnectionUpsert) []string 
 		reasons = append(reasons, "Certificate has expired or is not yet valid")
 	case "hostname_mismatch":
 		reasons = append(reasons, "Certificate hostname does not match the server")
-	case "untrusted_ca":
-		reasons = append(reasons, "Certificate signed by an untrusted certificate authority")
-	case "incomplete_chain":
-		reasons = append(reasons, "Incomplete certificate chain (missing intermediate certificates)")
 	case "revoked":
 		reasons = append(reasons, "Certificate has been revoked")
+	case "untrusted_ca", "incomplete_chain":
+		// Certificate hygiene, not crypto weakness — see assessCertHygiene.
 	default:
 		reasons = append(reasons, fmt.Sprintf("Certificate validation issue: %s", status))
 	}
 	return reasons
 }
 
-// assessSensorCertFlags checks sensor-level certificate quality flags and produces
-// weak_reasons for issues that the structured field checks above can't detect.
+// assessCertHygiene reports certificate-hygiene observations: signals that
+// affect confidence in the certificate chain (CT logging, a self-issued or
+// pinned trust root, an incomplete chain, a missing Subject DN) but say
+// nothing about cryptographic strength — protocol version, cipher suite, key
+// exchange, key size, signature algorithm (the things the algorithms
+// catalogue rates). These are recorded on CertHygieneFlags, separate from
+// WeakReasons/CryptoStrength, so a TLS 1.3 / AES-256-GCM connection with a
+// missing SCT is not counted as "weak crypto" on the dashboard (CLAUDE.md
+// "Certificate quality flags" / "Crypto Assessment Source of Truth").
+func assessCertHygiene(input models.ExternalConnectionUpsert) []string {
+	var flags []string
+
+	if input.CertHasSCT != nil && !*input.CertHasSCT {
+		flags = append(flags, "Certificate missing Signed Certificate Timestamps (SCTs) — not logged in Certificate Transparency")
+	}
+
+	if input.CertNoSubject {
+		flags = append(flags, "Certificate has no Subject DN")
+	} else if input.CertNoCommonName {
+		flags = append(flags, "Certificate has no Common Name in Subject DN")
+	}
+
+	if input.CertValidationStatus != nil {
+		switch strings.ToLower(strings.TrimSpace(*input.CertValidationStatus)) {
+		case "untrusted_ca":
+			flags = append(flags, "Certificate signed by an untrusted certificate authority (not in the system trust store — may be a private or pinned CA)")
+		case "incomplete_chain":
+			flags = append(flags, "Incomplete certificate chain (missing intermediate certificates)")
+		}
+	}
+
+	return flags
+}
+
+// assessSensorCertFlags checks sensor-level certificate quality flags that
+// indicate genuine risk — a known-malicious CA in the chain, OCSP-confirmed
+// revocation — and produces weak_reasons for issues the structured field
+// checks above can't detect. Certificate-hygiene flags (missing SCT, no
+// Subject DN, untrusted/pinned CA, incomplete chain) are handled by
+// assessCertHygiene instead; they are not cryptographic weakness.
 func assessSensorCertFlags(input models.ExternalConnectionUpsert) []string {
 	var reasons []string
 
 	if input.CertKnownBadCA != nil && *input.CertKnownBadCA != "" {
 		reasons = append(reasons, fmt.Sprintf("Critical: certificate chain includes known-bad CA: %s", *input.CertKnownBadCA))
-	}
-
-	if input.CertHasSCT != nil && !*input.CertHasSCT {
-		reasons = append(reasons, "Certificate missing Signed Certificate Timestamps (SCTs) — not logged in Certificate Transparency")
-	}
-
-	if input.CertNoSubject {
-		reasons = append(reasons, "Certificate has no Subject DN")
-	} else if input.CertNoCommonName {
-		reasons = append(reasons, "Certificate has no Common Name in Subject DN")
 	}
 
 	if input.OCSPStatus != nil && *input.OCSPStatus == "revoked" {
@@ -726,18 +773,6 @@ func hasWeakTLSVersion(versions []string) bool {
 		if isLegacyProtocolVersion(v) {
 			return true
 		}
-	}
-	return false
-}
-
-// isWeakAlgorithm returns true if the algorithm should be considered weak.
-func isWeakAlgorithm(alg *Algorithm) bool {
-	if alg.Strength == "weak" {
-		return true
-	}
-	switch alg.DeprecationStatus {
-	case "deprecated", "obsolete":
-		return true
 	}
 	return false
 }
@@ -785,7 +820,7 @@ func (s *ExternalConnectionsService) determineChangeType(
 	}
 
 	// Crypto strength changed
-	if prevStrength != "" && conn.CryptoStrength != prevStrength {
+	if stringValue(conn.Strength) != prevStrength {
 		return "crypto_strength_changed", true
 	}
 
@@ -820,12 +855,18 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 	}
 	sortCol := "last_seen_at"
 	switch f.SortBy {
-	case "last_seen_at", "dest_hostname", "dest_ip", "source_ip", "protocol", "crypto_strength", "observation_count":
+	case "strength":
+		sortCol = externalStrengthSortSQL()
+	case "last_seen_at", "dest_hostname", "dest_ip", "source_ip", "protocol", "observation_count":
 		sortCol = f.SortBy
 	}
 	sortOrder := "DESC"
 	if strings.ToUpper(f.SortOrder) == "ASC" {
 		sortOrder = "ASC"
+	}
+
+	if f.SortBy == "strength" {
+		sortOrder += " NULLS LAST, id"
 	}
 
 	args := []interface{}{tenantID}
@@ -837,9 +878,11 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 		args = append(args, "%"+f.Search+"%")
 		argIdx++
 	}
-	if f.CryptoStrength != "" {
+	if f.Strength == "unassessed" {
+		where = append(where, "crypto_strength IS NULL")
+	} else if f.Strength != "" {
 		where = append(where, fmt.Sprintf("crypto_strength = $%d", argIdx))
-		args = append(args, f.CryptoStrength)
+		args = append(args, f.Strength)
 		argIdx++
 	}
 	if f.IsPQCResistant != nil {
@@ -879,11 +922,11 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 			dest_ip::text, dest_hostname, dest_port,
 			protocol, protocol_version, cipher_suite, key_exchange_algorithm, key_size,
 			supported_tls_versions,
-			crypto_strength, is_pqc_resistant, weak_reasons,
+			crypto_strength, is_pqc_resistant, weak_reasons, cert_hygiene_flags,
 			cert_subject, cert_issuer, cert_san,
 			cert_not_before, cert_not_after, cert_fingerprint_sha256,
 			cert_public_key_algorithm, cert_public_key_size, cert_signature_algorithm,
-			cert_is_expired, cert_validation_status, cert_pem,
+			cert_is_expired, cert_validation_status, cert_sct_source, cert_pem,
 			first_seen_at, last_seen_at, observation_count, sensor_id,
 			created_at, updated_at, elevated_asset_id
 		FROM external_connections
@@ -911,17 +954,18 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 			var certSAN pq.StringArray
 			var scanSTV pq.StringArray
 			var scanWR pq.StringArray
+			var scanCHF pq.StringArray
 			if e := rows.Scan(
 				&conn.ID, &conn.TenantID,
 				&conn.SourceIP, &conn.SourceHostname, &conn.SourceAssetID,
 				&conn.DestIP, &conn.DestHostname, &conn.DestPort,
 				&conn.Protocol, &conn.ProtocolVersion, &conn.CipherSuite, &conn.KeyExchangeAlgorithm, &conn.KeySize,
 				&scanSTV,
-				&conn.CryptoStrength, &conn.IsPQCResistant, &scanWR,
+				&conn.Strength, &conn.IsPQCResistant, &scanWR, &scanCHF,
 				&conn.CertSubject, &conn.CertIssuer, &certSAN,
 				&conn.CertNotBefore, &conn.CertNotAfter, &conn.CertFingerprintSHA256,
 				&conn.CertPublicKeyAlgorithm, &conn.CertPublicKeySize, &conn.CertSignatureAlgorithm,
-				&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertPEM,
+				&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertSCTSource, &conn.CertPEM,
 				&conn.FirstSeenAt, &conn.LastSeenAt, &conn.ObservationCount, &conn.SensorID,
 				&conn.CreatedAt, &conn.UpdatedAt, &conn.ElevatedAssetID,
 			); e != nil {
@@ -935,6 +979,9 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 			}
 			if len(scanWR) > 0 {
 				conn.WeakReasons = []string(scanWR)
+			}
+			if len(scanCHF) > 0 {
+				conn.CertHygieneFlags = []string(scanCHF)
 			}
 			list = append(list, conn)
 		}
@@ -955,6 +1002,7 @@ func (s *ExternalConnectionsService) GetByID(tenantID, id uuid.UUID) (*models.Ex
 	var certSAN pq.StringArray
 	var scanSTV pq.StringArray
 	var scanWR pq.StringArray
+	var scanCHF pq.StringArray
 	// RLS-scoped read over external_connections — WithTenantTx returns fn's error
 	// verbatim, so the sql.ErrNoRows check below still works.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -972,11 +1020,11 @@ func (s *ExternalConnectionsService) GetByID(tenantID, id uuid.UUID) (*models.Ex
 				host(dest_ip), dest_hostname, dest_port,
 				protocol, protocol_version, cipher_suite, key_exchange_algorithm, key_size,
 				supported_tls_versions,
-				crypto_strength, is_pqc_resistant, weak_reasons,
+				crypto_strength, is_pqc_resistant, weak_reasons, cert_hygiene_flags,
 				cert_subject, cert_issuer, cert_san,
 				cert_not_before, cert_not_after, cert_fingerprint_sha256,
 				cert_public_key_algorithm, cert_public_key_size, cert_signature_algorithm,
-				cert_is_expired, cert_validation_status, cert_pem,
+				cert_is_expired, cert_validation_status, cert_sct_source, cert_pem,
 				first_seen_at, last_seen_at, observation_count, sensor_id,
 				created_at, updated_at, elevated_asset_id
 			FROM external_connections
@@ -988,11 +1036,11 @@ func (s *ExternalConnectionsService) GetByID(tenantID, id uuid.UUID) (*models.Ex
 			&conn.DestIP, &conn.DestHostname, &conn.DestPort,
 			&conn.Protocol, &conn.ProtocolVersion, &conn.CipherSuite, &conn.KeyExchangeAlgorithm, &conn.KeySize,
 			&scanSTV,
-			&conn.CryptoStrength, &conn.IsPQCResistant, &scanWR,
+			&conn.Strength, &conn.IsPQCResistant, &scanWR, &scanCHF,
 			&conn.CertSubject, &conn.CertIssuer, &certSAN,
 			&conn.CertNotBefore, &conn.CertNotAfter, &conn.CertFingerprintSHA256,
 			&conn.CertPublicKeyAlgorithm, &conn.CertPublicKeySize, &conn.CertSignatureAlgorithm,
-			&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertPEM,
+			&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertSCTSource, &conn.CertPEM,
 			&conn.FirstSeenAt, &conn.LastSeenAt, &conn.ObservationCount, &conn.SensorID,
 			&conn.CreatedAt, &conn.UpdatedAt, &conn.ElevatedAssetID,
 		)
@@ -1011,6 +1059,9 @@ func (s *ExternalConnectionsService) GetByID(tenantID, id uuid.UUID) (*models.Ex
 	}
 	if len(scanWR) > 0 {
 		conn.WeakReasons = []string(scanWR)
+	}
+	if len(scanCHF) > 0 {
+		conn.CertHygieneFlags = []string(scanCHF)
 	}
 	return &conn, nil
 }
@@ -1069,7 +1120,7 @@ func (s *ExternalConnectionsService) GetHistory(tenantID, connectionID uuid.UUID
 				previous_is_pqc_resistant, previous_cert_fingerprint_sha256, previous_cert_not_after,
 				new_protocol_version, new_cipher_suite, new_crypto_strength,
 				new_is_pqc_resistant, new_cert_fingerprint_sha256, new_cert_not_after,
-				created_at
+                strength_vocabulary_version, created_at
 			FROM external_connection_history
 			WHERE external_connection_id = $1 AND tenant_id = $2
 			ORDER BY created_at DESC
@@ -1085,13 +1136,17 @@ func (s *ExternalConnectionsService) GetHistory(tenantID, connectionID uuid.UUID
 			var h models.ExternalConnectionHistory
 			if e := rows.Scan(
 				&h.ID, &h.ExternalConnectionID, &h.TenantID, &h.ChangeType,
-				&h.PreviousProtocolVersion, &h.PreviousCipherSuite, &h.PreviousCryptoStrength,
+				&h.PreviousProtocolVersion, &h.PreviousCipherSuite, &h.PreviousStrength,
 				&h.PreviousIsPQCResistant, &h.PreviousCertFingerprintSHA256, &h.PreviousCertNotAfter,
-				&h.NewProtocolVersion, &h.NewCipherSuite, &h.NewCryptoStrength,
+				&h.NewProtocolVersion, &h.NewCipherSuite, &h.NewStrength,
 				&h.NewIsPQCResistant, &h.NewCertFingerprintSHA256, &h.NewCertNotAfter,
-				&h.CreatedAt,
+				&h.StrengthVocabularyVersion, &h.CreatedAt,
 			); e != nil {
 				return fmt.Errorf("scan history: %w", e)
+			}
+			if h.StrengthVocabularyVersion != 2 {
+				h.PreviousStrengthLegacy, h.NewStrengthLegacy = h.PreviousStrength, h.NewStrength
+				h.PreviousStrength, h.NewStrength = nil, nil
 			}
 			history = append(history, h)
 		}
@@ -1112,14 +1167,16 @@ func (s *ExternalConnectionsService) GetSummary(tenantID uuid.UUID) (*models.Ext
 			SELECT
 				COUNT(*) AS total,
 				COUNT(*) FILTER (WHERE crypto_strength = 'weak') AS weak_crypto,
+				COUNT(*) FILTER (WHERE (crypto_strength IS NULL AND cardinality(weak_reasons)>0)
+					OR $2 = ANY(weak_reasons) OR $3 = ANY(weak_reasons)) AS reassessment_required,
 				COUNT(*) FILTER (WHERE is_pqc_resistant = true) AS pqc_resistant,
 				COUNT(*) FILTER (WHERE cert_is_expired = true) AS expired_certs,
 				COUNT(*) FILTER (WHERE `+legacyTLSVersionsArraySQL("supported_tls_versions")+`) AS legacy_tls,
 				COUNT(DISTINCT source_ip) AS source_hosts
 			FROM external_connections
 			WHERE tenant_id = $1`,
-			tenantID,
-		).Scan(&summary.Total, &summary.WeakCrypto, &summary.PQCResistant, &summary.ExpiredCerts, &summary.LegacyTLS, &summary.SourceHosts)
+			tenantID, externalReassessmentReason, externalKeySizeRoleReason,
+		).Scan(&summary.Total, &summary.WeakCrypto, &summary.ReassessmentRequired, &summary.PQCResistant, &summary.ExpiredCerts, &summary.LegacyTLS, &summary.SourceHosts)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get external connections summary: %w", err)

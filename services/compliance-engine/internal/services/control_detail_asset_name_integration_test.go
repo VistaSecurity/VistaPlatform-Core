@@ -22,7 +22,6 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
-
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 )
 
@@ -30,7 +29,7 @@ import (
 // case: an asset with a hostname must be named by it.
 func TestIntegration_GetControlDetails_NamesTheAssetByHostname(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
-	controlID := f.newControl(t, "CDN-1", "High")
+	controlID := f.newControl(t, "CDN-1", "high")
 	f.seedMeasurementRow(t, controlID)
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
 
@@ -71,7 +70,7 @@ func TestIntegration_GetControlDetails_NamesTheAssetByHostname(t *testing.T) {
 // has to be rendered as an address and not as inet's CIDR text.
 func TestIntegration_GetControlDetails_FallsBackToTheAssetAddress(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
-	controlID := f.newControl(t, "CDN-2", "High")
+	controlID := f.newControl(t, "CDN-2", "high")
 	f.seedMeasurementRow(t, controlID)
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
 

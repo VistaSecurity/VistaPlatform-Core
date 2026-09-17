@@ -301,6 +301,16 @@ func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.Discove
 	validation := discovery.ValidateAndClassifyCertChain(state.PeerCertificates, verifyHost, state.OCSPResponse)
 	finding.CertValidationStatus = validation.ValidationStatus
 	finding.CertValidationError = validation.ValidationError
+
+	// Refine cert_has_sct/cert_sct_source with the TLS extension + OCSP routes
+	// only this live handshake can see (the embedded route was already
+	// checked inside ValidateAndClassifyCertChain).
+	var sctIssuer *x509.Certificate
+	if len(state.PeerCertificates) > 1 {
+		sctIssuer = state.PeerCertificates[1]
+	}
+	discovery.RefineSCTFlags(validation.QualityFlags, state.SignedCertificateTimestamps, state.OCSPResponse, sctIssuer)
+
 	meta := make(map[string]interface{})
 	if validation.QualityFlags != nil {
 		for k, v := range validation.QualityFlags {
@@ -336,29 +346,10 @@ func tlsEnrichmentVerifyDNSName(leaf *x509.Certificate, ipStr string) string {
 func (e *TLSEnricher) buildEnrichmentDiscovery(req enrichRequest, finding *models.DiscoveryFinding) *models.CryptoDiscovery {
 	now := time.Now()
 
-	// Build structured certificates array for RawMetadata.
-	// The discovery-processor's extractCryptoDetails() handles this shape.
-	certsSlice := make([]interface{}, len(finding.Certificates))
-	for i, cert := range finding.Certificates {
-		certsSlice[i] = map[string]interface{}{
-			"serial_number":             cert.SerialNumber,
-			"subject_dn":                cert.SubjectDN,
-			"issuer_dn":                 cert.IssuerDN,
-			"not_before":                cert.NotBefore.Format(time.RFC3339),
-			"not_after":                 cert.NotAfter.Format(time.RFC3339),
-			"key_algorithm":             cert.KeyAlgorithm,
-			"signature_alg":             cert.SignatureAlg,
-			"is_ca":                     cert.IsCA,
-			"certificate_pem":           cert.CertificatePEM,
-			"fingerprint_sha256":        cert.FingerprintSHA256,
-			"fingerprint_sha1":          cert.FingerprintSHA1,
-			"subject_alternative_names": cert.SubjectAlternativeNames,
-			"key_usage":                 cert.KeyUsage,
-			"extended_key_usage":        cert.ExtendedKeyUsage,
-			"key_size":                  cert.KeySize,
-			"chain_order":               cert.ChainOrder,
-		}
-	}
+	// Build structured certificates array for RawMetadata, in the canonical
+	// shape the discovery-processor's extractCryptoDetails() handles — shared
+	// with the dispatched-job results path so the two active paths cannot drift.
+	certsSlice := discovery.CertificateInfoMaps(finding.Certificates)
 
 	metadata := map[string]interface{}{}
 	if finding.RawMetadata != nil {

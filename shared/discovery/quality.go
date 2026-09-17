@@ -63,15 +63,24 @@ func ClassifyCertificateFlags(leaf *x509.Certificate, chain []*x509.Certificate)
 	}
 
 	// --- Certificate Transparency: embedded SCTs (OID 1.3.6.1.4.1.11129.2.4.2) ---
-	hasSCT := false
-	sctOID := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}
-	for _, ext := range leaf.Extensions {
-		if ext.Id.Equal(sctOID) {
-			hasSCT = true
-			break
-		}
+	// RFC 6962 §3.3 defines three SCT delivery mechanisms: embedded in the
+	// certificate (checked here — the only one visible from cert bytes alone),
+	// the TLS "signed_certificate_timestamp" extension, and OCSP stapling. A
+	// live handshake can check all three; see RefineSCTFlags, which callers
+	// with a *tls.ConnectionState (the active probers) call afterwards to
+	// upgrade cert_has_sct/cert_sct_source with those two additional routes.
+	//
+	// cert_has_sct is always set here, true or false — false is a real
+	// measurement ("no embedded SCT"), not an absence. cert_sct_source is set
+	// ONLY when true: this function has no visibility into the other two
+	// routes, so it must not claim "none" (which asserts all three were
+	// checked) — see RefineSCTFlags for where a genuine "none" is recorded.
+	if hasEmbeddedSCT(leaf) {
+		flags["cert_has_sct"] = true
+		flags["cert_sct_source"] = SCTSourceEmbedded
+	} else {
+		flags["cert_has_sct"] = false
 	}
-	flags["cert_has_sct"] = hasSCT
 
 	// --- Known-bad CA fingerprints (Superfish, eDellRoot, etc.) ---
 	for _, cert := range chain {
@@ -98,6 +107,77 @@ func ClassifyCertificateFlags(leaf *x509.Certificate, chain []*x509.Certificate)
 	}
 
 	return flags
+}
+
+// SCT delivery-mechanism labels for cert_sct_source, per RFC 6962 §3.3.
+const (
+	SCTSourceEmbedded     = "embedded"      // X.509v3 extension in the certificate itself
+	SCTSourceTLSExtension = "tls_extension" // TLS "signed_certificate_timestamp" extension
+	SCTSourceOCSP         = "ocsp"          // OCSP response extension (stapled or queried)
+	SCTSourceNone         = "none"          // all three routes checked; no SCT found anywhere
+)
+
+// sctOID is the X.509v3 extension OID for SCTs embedded in a certificate.
+var sctOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 2}
+
+// ocspSCTOID is the OCSP single-response extension OID that carries SCTs
+// delivered via OCSP (RFC 6962 §3.3) — set on a stapled OR directly-queried
+// response, since the delivery mechanism is the OCSP response format itself,
+// not specifically how it reached the client.
+var ocspSCTOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 11129, 2, 4, 5}
+
+// hasEmbeddedSCT reports whether leaf carries an embedded SCT list extension.
+func hasEmbeddedSCT(leaf *x509.Certificate) bool {
+	for _, ext := range leaf.Extensions {
+		if ext.Id.Equal(sctOID) {
+			return true
+		}
+	}
+	return false
+}
+
+// RefineSCTFlags upgrades the cert_has_sct/cert_sct_source flags already
+// computed by ClassifyCertificateFlags (embedded route only) using the two
+// delivery mechanisms only a live TLS handshake can observe: the TLS
+// "signed_certificate_timestamp" extension (tlsExtensionSCTs — Go's
+// tls.ConnectionState.SignedCertificateTimestamps) and OCSP (ocspResponse —
+// ConnectionState.OCSPResponse; issuer is needed to parse it and may be nil
+// for a single-cert chain, in which case the OCSP route is skipped).
+//
+// Call this ONLY from a genuine live handshake, where the caller actually
+// has a *tls.ConnectionState — that is what makes "checked, found nothing"
+// a true statement. Passive-capture and PEM-only paths (no ConnectionState)
+// must not call this: they cannot observe the TLS extension or OCSP staple
+// at all, so asserting cert_sct_source="none" for them would claim a check
+// that never happened. Leaving cert_sct_source absent in that case is the
+// correct "not observable" answer — an absent value, never a false "none".
+func RefineSCTFlags(flags map[string]interface{}, tlsExtensionSCTs [][]byte, ocspResponse []byte, issuer *x509.Certificate) {
+	if flags == nil {
+		return
+	}
+	if alreadyHasSCT, _ := flags["cert_has_sct"].(bool); alreadyHasSCT {
+		return // embedded SCT already found; cert_sct_source is already "embedded"
+	}
+	if len(tlsExtensionSCTs) > 0 {
+		flags["cert_has_sct"] = true
+		flags["cert_sct_source"] = SCTSourceTLSExtension
+		return
+	}
+	if len(ocspResponse) > 0 {
+		if resp, err := ocsp.ParseResponse(ocspResponse, issuer); err == nil {
+			for _, ext := range resp.Extensions {
+				if ext.Id.Equal(ocspSCTOID) {
+					flags["cert_has_sct"] = true
+					flags["cert_sct_source"] = SCTSourceOCSP
+					return
+				}
+			}
+		}
+	}
+	// Every route this handshake could observe was checked and none carried
+	// an SCT. This is the only place a definite "none" is legitimate.
+	flags["cert_has_sct"] = false
+	flags["cert_sct_source"] = SCTSourceNone
 }
 
 // knownBadCAFingerprints maps SHA-256 fingerprints of known-bad CA certificates

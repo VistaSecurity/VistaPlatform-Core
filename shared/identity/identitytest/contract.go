@@ -59,6 +59,16 @@ type (
 	HistoryReader interface {
 		HistoryFor(ref identity.AssetRef) []identity.HistoryEntry
 	}
+	// EndpointReader returns the endpoints under an asset, oldest first. Like
+	// HistoryReader, it exists only so the contract can assert what
+	// [identity.Repository.UpsertEndpoints] does not expose through the
+	// interface itself: in particular, that an address-bearing endpoint
+	// upserted twice under two different fqdn spellings converges to ONE row
+	// rather than accumulating a second — the IP-literal-fqdn defect this
+	// method's subtest is named for.
+	EndpointReader interface {
+		Endpoints(ref identity.AssetRef) []identity.EndpointObservation
+	}
 )
 
 // RunRepositoryContract exercises an implementation against the contract in
@@ -66,7 +76,7 @@ type (
 //
 // newRepo must return a FRESH, empty repository on every call: each subtest
 // gets its own so a failure in one cannot cascade. The implementation must
-// also satisfy [LastSeenReader] and [HistoryReader].
+// also satisfy [LastSeenReader], [HistoryReader] and [EndpointReader].
 func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 	t.Helper()
 
@@ -266,9 +276,78 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{later}); err != nil {
 			t.Fatalf("UpsertEndpoints again: %v", err)
 		}
-		// No assertion on count here — the interface has no endpoint reader.
-		// The in-memory implementation's own test checks the count; what the
-		// contract pins is that a repeat upsert is not an error.
+		reader, ok := r.(EndpointReader)
+		if !ok {
+			t.Fatalf("%T does not implement identitytest.EndpointReader, so the contract cannot check that the second upsert merged rather than added a row", r)
+		}
+		if eps := reader.Endpoints(ref); len(eps) != 1 {
+			t.Errorf("endpoints after a repeat upsert = %v, want exactly 1", eps)
+		}
+	})
+
+	t.Run("UpsertEndpoints folds an IP-literal fqdn into one row, name wins", func(t *testing.T) {
+		// The defect: an active-scan path that does not know a name writes
+		// its scan target into fqdn even when the target is an IP literal.
+		// Three observations of the SAME listener arrive over time — first a
+		// passive one with no name, then an active scan that only knows the
+		// address (and, before the fix, spelled that address into fqdn), then
+		// something that finally resolves a real name — and all three must
+		// converge on ONE asset_endpoints row: an endpoint identified by an
+		// address is identified by (address, port, transport), and fqdn is an
+		// attribute of it, not part of what identifies it.
+		r := newRepo()
+		reader, ok := r.(EndpointReader)
+		if !ok {
+			t.Fatalf("%T does not implement identitytest.EndpointReader, so this subtest cannot check what it exists to check", r)
+		}
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-1"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+
+		// 1. Passive observation: address known, no name.
+		passive := identity.EndpointObservation{Address: "192.0.2.230", Port: 443, Transport: "tcp", SeenAt: now}
+		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{passive}); err != nil {
+			t.Fatalf("UpsertEndpoints (passive): %v", err)
+		}
+
+		// 2. Active scan: no name resolved, so the intake path that has not
+		// been fixed would hand back the scan target itself as the "hostname"
+		// — an IP literal, spelled into FQDN here to simulate exactly that
+		// unfixed caller. A correct repository must not let this survive as a
+		// name, and must not create a second row for it either.
+		activeScanNoName := identity.EndpointObservation{
+			Address: "192.0.2.230", FQDN: "192.0.2.230", Port: 443, Transport: "tcp",
+			SeenAt: now.Add(time.Minute),
+		}
+		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{activeScanNoName}); err != nil {
+			t.Fatalf("UpsertEndpoints (active scan, ip-literal fqdn): %v", err)
+		}
+		if eps := reader.Endpoints(ref); len(eps) != 1 {
+			t.Fatalf("endpoints after the ip-literal-fqdn observation = %v, want exactly 1", eps)
+		} else if eps[0].FQDN == "192.0.2.230" {
+			t.Errorf("endpoint fqdn = %q, an IP literal is never a name — it must be dropped, not stored", eps[0].FQDN)
+		}
+
+		// 3. Something resolves a real name for the same listener.
+		named := identity.EndpointObservation{
+			Address: "192.0.2.230", FQDN: "host.corp.example", Port: 443, Transport: "tcp",
+			SeenAt: now.Add(2 * time.Minute),
+		}
+		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{named}); err != nil {
+			t.Fatalf("UpsertEndpoints (named): %v", err)
+		}
+
+		eps := reader.Endpoints(ref)
+		if len(eps) != 1 {
+			t.Fatalf("endpoints after all three observations = %v, want exactly 1 row for one listener", eps)
+		}
+		if eps[0].FQDN != "host.corp.example" {
+			t.Errorf("endpoint fqdn = %q, want %q", eps[0].FQDN, "host.corp.example")
+		}
+		if eps[0].Address != "192.0.2.230" {
+			t.Errorf("endpoint address = %q, want %q", eps[0].Address, "192.0.2.230")
+		}
 	})
 
 	t.Run("Touch never moves last-seen backwards", func(t *testing.T) {
@@ -796,6 +875,283 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 		if scope != "seg-lan" {
 			t.Errorf("scope = %q, want seg-lan — an unscoped segment belongs to no network and so excludes none", scope)
+		}
+	})
+
+	runDecisionMemoryContract(t, newRepo, tenant, now, ident, newAsset)
+	runAnnouncementContract(t, newRepo, tenant, now, ident, newAsset)
+}
+
+// ProposalResolver stamps a proposal's outcome the way the approvals path does
+// in production. REQUIRED of an implementation under test: the decision-memory
+// subtests cannot put a human's answer where [identity.Repository.LastKeptSeparate]
+// looks without it, and a contract that skipped itself for lack of a hook would
+// be a check that cannot fail. It is not part of identity.Repository — the
+// engine never resolves a proposal (ADR-0002 D5).
+type ProposalResolver interface {
+	ResolveProposal(ref identity.ProposalRef, status, actor string, at time.Time) error
+}
+
+// AnnouncementReader reads back what [identity.Repository.RecordAnnouncement]
+// wrote for one asset, as announcer or holder. Also required.
+type AnnouncementReader interface {
+	Announcements(ref identity.AssetRef) []identity.AnnouncementRecord
+}
+
+// runDecisionMemoryContract is the contract for [identity.ProposalRef.Reused]
+// and [identity.Repository.LastKeptSeparate]: the two halves of "a human's no
+// has to stick".
+func runDecisionMemoryContract(
+	t *testing.T,
+	newRepo func() identity.Repository,
+	tenant string,
+	now time.Time,
+	ident func(identity.Kind, string, string) identity.Identifier,
+	newAsset func(string, ...identity.Identifier) identity.NewAsset,
+) {
+	t.Helper()
+	ctx := context.Background()
+	src := identity.Source{Kind: identity.SourceMeasured, Ref: "contract"}
+
+	// A floor-shaped proposal between two candidates: no observation asset,
+	// evidence a serial on one and a hostname on the other.
+	openPair := func(t *testing.T, r identity.Repository) (a, b identity.AssetRef, p identity.MergeProposal) {
+		t.Helper()
+		serial := ident(identity.KindSerialNumber, "SN-DM-1", "")
+		host := ident(identity.KindHostname, "dm-host", identity.ScopeTenantDefault)
+		var err error
+		if a, err = r.CreateAsset(ctx, tenant, newAsset("dm-a", serial)); err != nil {
+			t.Fatalf("CreateAsset(a): %v", err)
+		}
+		if b, err = r.CreateAsset(ctx, tenant, newAsset("dm-b", host)); err != nil {
+			t.Fatalf("CreateAsset(b): %v", err)
+		}
+		p = identity.MergeProposal{
+			Candidates: []identity.MergeCandidate{
+				{Ref: a, MatchedIdentifiers: []identity.Identifier{serial}},
+				{Ref: b, MatchedIdentifiers: []identity.Identifier{host}},
+			},
+			Source: src, Reason: "contract", ProposedAt: now,
+		}
+		return a, b, p
+	}
+	resolver := func(t *testing.T, r identity.Repository) ProposalResolver {
+		t.Helper()
+		pr, ok := r.(ProposalResolver)
+		if !ok {
+			t.Fatalf("%T does not implement identitytest.ProposalResolver; the decision-memory contract cannot run without a way to record a reviewer's answer", r)
+		}
+		return pr
+	}
+
+	t.Run("OpenMergeProposal reports a pending proposal it reused, and stops once it is resolved", func(t *testing.T) {
+		r := newRepo()
+		_, _, p := openPair(t, r)
+		first, err := r.OpenMergeProposal(ctx, tenant, p)
+		if err != nil {
+			t.Fatalf("OpenMergeProposal: %v", err)
+		}
+		if first.Reused {
+			t.Error("the first proposal for a question reports Reused; nothing existed to reuse")
+		}
+		again, err := r.OpenMergeProposal(ctx, tenant, p)
+		if err != nil {
+			t.Fatalf("OpenMergeProposal(again): %v", err)
+		}
+		if again.ID != first.ID {
+			t.Fatalf("re-asking the same question opened proposal %s beside %s; a pending proposal is idempotent by fingerprint", again.ID, first.ID)
+		}
+		if !again.Reused {
+			t.Error("the reused proposal does not say so; the engine uses Reused to write its pointer entry once, not once per observation")
+		}
+
+		if err := resolver(t, r).ResolveProposal(first, "kept_separate", "reviewer-1", now.Add(time.Hour)); err != nil {
+			t.Fatalf("ResolveProposal: %v", err)
+		}
+		third, err := r.OpenMergeProposal(ctx, tenant, p)
+		if err != nil {
+			t.Fatalf("OpenMergeProposal(after resolution): %v", err)
+		}
+		if third.ID == first.ID || third.Reused {
+			t.Errorf("after resolution, re-asking returned %+v; a RESOLVED proposal drops out of the idempotency predicate (whether to re-ask is decision memory's call, not this method's)", third)
+		}
+	})
+
+	t.Run("LastKeptSeparate remembers the pair, unordered, only once resolved kept_separate", func(t *testing.T) {
+		r := newRepo()
+		a, b, p := openPair(t, r)
+		ref, err := r.OpenMergeProposal(ctx, tenant, p)
+		if err != nil {
+			t.Fatalf("OpenMergeProposal: %v", err)
+		}
+
+		if _, found, err := r.LastKeptSeparate(ctx, tenant, []string{a.ID, b.ID}); err != nil {
+			t.Fatalf("LastKeptSeparate(pending): %v", err)
+		} else if found {
+			t.Fatal("a PENDING proposal was returned as a decision; nobody has decided anything yet")
+		}
+
+		decidedAt := now.Add(2 * time.Hour)
+		if err := resolver(t, r).ResolveProposal(ref, "kept_separate", "reviewer-7", decidedAt); err != nil {
+			t.Fatalf("ResolveProposal: %v", err)
+		}
+		for _, order := range [][]string{{a.ID, b.ID}, {b.ID, a.ID}} {
+			d, found, err := r.LastKeptSeparate(ctx, tenant, order)
+			if err != nil {
+				t.Fatalf("LastKeptSeparate(%v): %v", order, err)
+			}
+			if !found {
+				t.Fatalf("LastKeptSeparate(%v) found nothing; the pair is unordered and was kept separate", order)
+			}
+			if d.ProposalID != ref.ID {
+				t.Errorf("decision names proposal %s, want %s", d.ProposalID, ref.ID)
+			}
+			if !d.Covers([]string{a.ID, b.ID}) || len(d.Candidates) != 2 {
+				t.Errorf("decision candidates = %v, want both of %s and %s", d.Candidates, a.ID, b.ID)
+			}
+			if len(d.MatchedKinds) != 2 || !d.SameEvidence([]identity.Kind{identity.KindSerialNumber, identity.KindHostname}) {
+				t.Errorf("decision matched kinds = %v, want serial_number and hostname — the engine compares today's evidence against them", d.MatchedKinds)
+			}
+			if d.SameEvidence([]identity.Kind{identity.KindSSHHostKeyFingerprint}) {
+				t.Error("a kind the reviewer never saw counts as the same evidence")
+			}
+			if !d.DecidedAt.Equal(decidedAt) {
+				t.Errorf("DecidedAt = %v, want %v", d.DecidedAt, decidedAt)
+			}
+			if d.DecidedBy != "reviewer-7" {
+				t.Errorf("DecidedBy = %q, want reviewer-7", d.DecidedBy)
+			}
+		}
+
+		// A third asset the proposal never named is not covered.
+		c, err := r.CreateAsset(ctx, tenant, newAsset("dm-c", ident(identity.KindSerialNumber, "SN-DM-3", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(c): %v", err)
+		}
+		if _, found, err := r.LastKeptSeparate(ctx, tenant, []string{a.ID, c.ID}); err != nil {
+			t.Fatalf("LastKeptSeparate(a, c): %v", err)
+		} else if found {
+			t.Error("a decision about (a, b) was returned for (a, c)")
+		}
+		// And another tenant sees nothing.
+		if _, found, err := r.LastKeptSeparate(ctx, "tenant-b", []string{a.ID, b.ID}); err != nil {
+			t.Fatalf("LastKeptSeparate(other tenant): %v", err)
+		} else if found {
+			t.Error("another tenant can read this tenant's decisions")
+		}
+	})
+
+	t.Run("LastKeptSeparate counts the observation asset as one of the pair, and ignores a merge", func(t *testing.T) {
+		r := newRepo()
+		a, _, p := openPair(t, r)
+		z, err := r.CreateAsset(ctx, tenant, newAsset("dm-z", ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:d1", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(z): %v", err)
+		}
+		// Z is the pending asset a conflict created; A is the one candidate.
+		withObs := identity.MergeProposal{
+			ObservationAssetID: z.ID,
+			Candidates:         p.Candidates[:1],
+			Source:             p.Source, Reason: "contract", ProposedAt: now,
+		}
+		ref, err := r.OpenMergeProposal(ctx, tenant, withObs)
+		if err != nil {
+			t.Fatalf("OpenMergeProposal: %v", err)
+		}
+		if err := resolver(t, r).ResolveProposal(ref, "kept_separate", "", now.Add(time.Hour)); err != nil {
+			t.Fatalf("ResolveProposal: %v", err)
+		}
+		d, found, err := r.LastKeptSeparate(ctx, tenant, []string{a.ID, z.ID})
+		if err != nil {
+			t.Fatalf("LastKeptSeparate: %v", err)
+		}
+		if !found {
+			t.Fatal("the pair (observation asset, candidate) was not found; the observation asset is one end of the decision")
+		}
+		if d.ObservationAssetID != z.ID {
+			t.Errorf("ObservationAssetID = %q, want %s — the engine resolves a suppressed recurrence to it", d.ObservationAssetID, z.ID)
+		}
+
+		// A MERGE is not a kept-separate decision.
+		merged, err := r.OpenMergeProposal(ctx, tenant, p)
+		if err != nil {
+			t.Fatalf("OpenMergeProposal(pair): %v", err)
+		}
+		if err := resolver(t, r).ResolveProposal(merged, "merged", "", now.Add(time.Hour)); err != nil {
+			t.Fatalf("ResolveProposal(merged): %v", err)
+		}
+		if _, found, err := r.LastKeptSeparate(ctx, tenant, []string{p.Candidates[0].Ref.ID, p.Candidates[1].Ref.ID}); err != nil {
+			t.Fatalf("LastKeptSeparate(merged pair): %v", err)
+		} else if found {
+			t.Error("a proposal resolved `merged` was returned as a kept-separate decision")
+		}
+	})
+}
+
+// runAnnouncementContract is the contract for
+// [identity.Repository.RecordAnnouncement].
+func runAnnouncementContract(
+	t *testing.T,
+	newRepo func() identity.Repository,
+	tenant string,
+	now time.Time,
+	ident func(identity.Kind, string, string) identity.Identifier,
+	newAsset func(string, ...identity.Identifier) identity.NewAsset,
+) {
+	t.Helper()
+	ctx := context.Background()
+	src := identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:contract", Mode: identity.ModePassive}
+
+	t.Run("RecordAnnouncement is idempotent per pair and readable from both ends", func(t *testing.T) {
+		r := newRepo()
+		reader, ok := r.(AnnouncementReader)
+		if !ok {
+			t.Fatalf("%T does not implement identitytest.AnnouncementReader; the announcement contract cannot assert what was written", r)
+		}
+		node, err := r.CreateAsset(ctx, tenant, newAsset("node", ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:a1", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(node): %v", err)
+		}
+		vip, err := r.CreateAsset(ctx, tenant, newAsset("vip", ident(identity.KindIPAddress, "192.0.2.230", identity.ScopeTenantDefault)))
+		if err != nil {
+			t.Fatalf("CreateAsset(vip): %v", err)
+		}
+		a := identity.Announcement{
+			MACs: []string{"aa:bb:cc:dd:ee:a1"}, Addresses: []string{"192.0.2.230"},
+			Gratuitous: true, Source: src, At: now,
+		}
+		if err := r.RecordAnnouncement(ctx, node, vip, a); err != nil {
+			t.Fatalf("RecordAnnouncement: %v", err)
+		}
+		later := a
+		later.At = now.Add(time.Minute)
+		if err := r.RecordAnnouncement(ctx, node, vip, later); err != nil {
+			t.Fatalf("RecordAnnouncement(again): %v", err)
+		}
+
+		for _, end := range []identity.AssetRef{node, vip} {
+			recs := reader.Announcements(end)
+			if len(recs) != 1 {
+				t.Fatalf("Announcements(%s) = %d records, want 1 — a re-observation bumps the record, it does not add one", end.ID, len(recs))
+			}
+			rec := recs[0]
+			if rec.Announcer.ID != node.ID || rec.Holder.ID != vip.ID {
+				t.Errorf("record joins %s → %s, want announcer %s and holder %s", rec.Announcer.ID, rec.Holder.ID, node.ID, vip.ID)
+			}
+			if rec.Count != 2 {
+				t.Errorf("Count = %d, want 2", rec.Count)
+			}
+			if len(rec.Latest.Addresses) != 1 || rec.Latest.Addresses[0] != "192.0.2.230" || !rec.Latest.Gratuitous {
+				t.Errorf("latest evidence = %+v, want the announced address and the gratuitous flag", rec.Latest)
+			}
+		}
+
+		if err := r.RecordAnnouncement(ctx, node, node, a); err == nil {
+			t.Error("an asset announcing its own address was recorded as a floating address; that is a self-edge")
+		}
+		ghost := identity.AssetRef{TenantID: tenant, ID: "asset-that-does-not-exist"}
+		if err := r.RecordAnnouncement(ctx, node, ghost, a); err == nil {
+			t.Error("an announcement to an asset that does not exist was recorded")
 		}
 	})
 }

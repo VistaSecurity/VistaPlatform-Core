@@ -67,8 +67,20 @@ risk". If an answer sounds too clean, ask what has not been assessed.
 
 ## Connect a GUI assistant (Claude.ai, ChatGPT, Gemini)
 
-No token copy-paste required. The AI client handles authentication via OAuth —
-it opens the Vista login page, you sign in, and then approve read-only access.
+> **Known limitation — the automatic sign-in flow does not work yet.**
+> Hosted AI clients register themselves with an OAuth server on the fly, using
+> [dynamic client registration](https://www.rfc-editor.org/rfc/rfc7591) (RFC
+> 7591). Vista's authorization server does not implement it yet, so a client
+> that requires it stops before the login page appears. Verified against Claude
+> Code, which reports *"Incompatible auth server: does not support dynamic
+> client registration."* Claude.ai and ChatGPT register the same way.
+>
+> Until that lands, connect with a **Personal Access Token** instead — see
+> [Personal Access Tokens](#personal-access-tokens-advanced) below. The steps in
+> this section describe the intended flow and are kept for reference.
+
+The AI client handles authentication via OAuth — it opens the Vista login page,
+you sign in, and then approve read-only access.
 
 **Step 1 — Copy your MCP URL**
 
@@ -112,17 +124,19 @@ Good starting points:
 
 ## Connect Claude Code (CLI)
 
-Claude Code can use the same OAuth flow automatically when you run
-`claude mcp add`. It opens a browser for authorization and stores the token in
-your local Claude config — no manual token copy required:
+Use a **Personal Access Token**. The bare `claude mcp add` form below is the
+intended flow, but it does not work today — Claude Code requires dynamic client
+registration, which Vista's authorization server does not yet implement, and the
+connection fails before a browser opens:
 
 ```bash
+# Does NOT work yet — see the note above.
 claude mcp add --transport http vistaplatform \
   https://<your-vista-host>/api/v1/mcp-service/mcp
 ```
 
-If you prefer to use a Personal Access Token directly (useful for scripts or
-environments without a browser):
+This form works, and is also what you want for scripts and for environments
+without a browser:
 
 ```bash
 claude mcp add --transport http vistaplatform \

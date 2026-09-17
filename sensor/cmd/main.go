@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,10 +30,13 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/discovery"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/enrichment"
+	"github.com/vistasecurity/vistaplatform/sensor/internal/hostid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/testmode"
+	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=<tag>"
@@ -41,6 +45,26 @@ import (
 var Version = "dev"
 
 type Sensor struct {
+	// discoveriesMade and errorsCount are cumulative, process-lifetime counters
+	// reported on every heartbeat. They must stay the first fields in the struct
+	// so atomic.AddInt64/LoadInt64 get 64-bit alignment on 32-bit platforms
+	// (sensor ships a windows/386 build) — see sync/atomic's "bug-prone" note.
+	//
+	// discoveriesMade counts discoveries at ACCEPTANCE into a submit batch (the
+	// point handleDiscovery, and the two "drain a stopped capture" call sites,
+	// add to s.discoveries / a shutdown-flush batch) — not at successful upload.
+	// s.discoveries itself is only the CURRENT, not-yet-reported batch: it drains
+	// every report interval, so reading len(s.discoveries) here made a sensor
+	// that had stored hundreds of discoveries report discoveries_made: 0 on every
+	// heartbeat after its first successful report. Counting at acceptance keeps
+	// the value monotonic across drains/retries/outages and still reflects real
+	// capture activity even while submission is failing.
+	discoveriesMade int64
+	// errorsCount counts real operational failures the sensor already logs:
+	// capture errors/restarts, discovery submission failures, heartbeat send
+	// failures, and registration failures/rejections. See recordError.
+	errorsCount int64
+
 	config        *config.Config
 	configPath    string // Path to the config file for saving updates
 	packetCapture *capture.PacketCapture
@@ -55,8 +79,11 @@ type Sensor struct {
 	// unbounded memory growth during extended outages.
 	pendingRetry []*models.CryptoDiscovery
 	retryCount   int
-	mu           sync.RWMutex
-	startTime    time.Time // Track when sensor started for uptime calculation
+	// applier holds the control-plane-managed settings. Nil leaves the
+	// heartbeat exactly as it was, which is what makes the exchange additive.
+	applier   *desiredstate.Applier
+	mu        sync.RWMutex
+	startTime time.Time // Track when sensor started for uptime calculation
 	// discoveryTicker is the live data-send ticker, published by the run loop so
 	// an operator's reporting-interval change can Reset() it without a restart.
 	discoveryTicker *time.Ticker
@@ -66,6 +93,49 @@ type Sensor struct {
 	registered   bool
 	restartChan  chan struct{}
 	restartDelay time.Duration
+	// jobQueue holds dispatched discovery jobs for the single job
+	// worker. Bounded: a platform that queues more than the sensor can hold
+	// gets a failed acknowledgement for the overflow rather than an
+	// unbounded backlog of scans the operator never asked to run at once.
+	jobQueue chan models.Command
+
+	// lastHostHash and lastHostSentAt are the heartbeat's own host-block
+	// throttle (asset-inventory decision 9): the block is resent only when it
+	// has changed (lastHostHash) or an hour has passed (lastHostSentAt), never
+	// on every 30s beat. Zero values mean "never sent", which always sends.
+	lastHostHash   string
+	lastHostSentAt time.Time
+}
+
+// hostReportInterval is the minimum time between two sends of an UNCHANGED
+// host block, so a fleet of sensors does not re-ingest its own host-observation
+// row on every heartbeat. A changed block (hash differs) is always sent
+// immediately regardless of this — see shouldReportHost.
+const hostReportInterval = time.Hour
+
+// shouldReportHost decides whether this beat's Host block should be attached.
+// Read-only: it does NOT commit the throttle state, because that must happen
+// only after the heartbeat actually sends successfully — see
+// commitHostReport and its call site in sendHeartbeat. Committing here
+// unconditionally would mean a heartbeat that failed to send (network blip,
+// control plane unreachable) still marked the block as delivered, silently
+// suppressing a retry for up to an hour.
+func (s *Sensor) shouldReportHost(hash string, now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	changed := hash != s.lastHostHash
+	stale := s.lastHostSentAt.IsZero() || now.Sub(s.lastHostSentAt) >= hostReportInterval
+	return changed || stale
+}
+
+// commitHostReport records that hash was successfully delivered at now, so
+// the next beat's shouldReportHost compares against it. Call only after the
+// heartbeat carrying it has actually been accepted.
+func (s *Sensor) commitHostReport(hash string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastHostHash = hash
+	s.lastHostSentAt = now
 }
 
 // isRegisteredNow reports whether registration has completed.
@@ -79,6 +149,25 @@ func (s *Sensor) setRegistered(v bool) {
 	s.mu.Lock()
 	s.registered = v
 	s.mu.Unlock()
+}
+
+// recordDiscoveriesAccepted adds n to the cumulative discoveries-made counter.
+// Call it at the point a discovery is accepted into a submit batch (see the
+// field comment on Sensor.discoveriesMade for why acceptance, not upload, is
+// the right point). No-op for n<=0 so callers can pass len() of a possibly
+// empty slice without a guard.
+func (s *Sensor) recordDiscoveriesAccepted(n int) {
+	if n <= 0 {
+		return
+	}
+	atomic.AddInt64(&s.discoveriesMade, int64(n))
+}
+
+// recordError increments the cumulative errors-count counter. Call it at an
+// existing failure log site (capture, submission, heartbeat, registration) —
+// see the field comment on Sensor.errorsCount.
+func (s *Sensor) recordError() {
+	atomic.AddInt64(&s.errorsCount, 1)
 }
 
 // Registration retry schedule. Doubling from 30s to a 15-minute ceiling: quick
@@ -126,6 +215,7 @@ func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan
 			log.Fatalf("❌ Refusing to start: a sensor that cannot register can capture but can never submit anything.")
 		}
 		log.Printf("⚠️  Registration FAILED: %v", err)
+		s.recordError()
 		log.Printf("⚠️  This sensor is NOT registered and can submit NOTHING until it is.")
 		log.Printf("⚠️  Retrying in the background (first retry in %v, backing off to %v) — no restart needed if the control plane comes back.",
 			registrationRetryInitial, registrationRetryMax)
@@ -181,9 +271,11 @@ func (s *Sensor) retryRegistrationUntilSuccess(stop <-chan struct{}) {
 				log.Printf("⛔ This will not resolve on its own — the registration key is invalid, expired, or already used.")
 				log.Printf("⛔ Generate a new key in the web UI (Discovery → Sensors & Agents → Register), put it in the sensor's config, and restart.")
 				log.Printf("⛔ Giving up on registration. This sensor will keep capturing but can submit NOTHING.")
+				s.recordError()
 				return
 			}
 			log.Printf("⚠️  Registration retry failed (next attempt in %v): %v", delay, err)
+			s.recordError()
 			delay *= 2
 			if delay > registrationRetryMax {
 				delay = registrationRetryMax
@@ -333,6 +425,10 @@ func main() {
 		startTime:   time.Now(), // Track start time for uptime
 	}
 
+	// Control-plane-managed settings. The config file seeds them; from
+	// the first heartbeat the platform owns them.
+	sensor.setupAgentConfig(Version)
+
 	// Initialize components
 	log.Println("🔧 Initializing sensor components...")
 	if err := sensor.initialize(); err != nil {
@@ -457,6 +553,7 @@ func main() {
 			}
 		case err := <-sensor.packetCapture.GetErrors():
 			log.Printf("❌ Capture error: %v", err)
+			sensor.recordError()
 		case sig := <-signalChan:
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()
@@ -473,6 +570,13 @@ func main() {
 func (s *Sensor) initialize() error {
 	log.Println("🔧 Initializing sensor components...")
 
+	// Kick off the one background FQDN lookup this binary ever does (never on
+	// the heartbeat's own critical path — see hostid.StartFQDNResolution).
+	// Started here, before the first registration/heartbeat, so the cache has
+	// the best chance of being warm by the time hostid.Build reads it; a
+	// lookup still in flight is not an error, just a "" FQDN this beat.
+	hostid.StartFQDNResolution()
+
 	// Initialize packet capture
 	packetCapture := capture.NewPacketCapture(s.config)
 	s.packetCapture = packetCapture
@@ -488,6 +592,8 @@ func (s *Sensor) initialize() error {
 	// Initialize discovery job executor (sensor ID may be updated after registration)
 	jobExecutor := discovery.NewJobExecutor(30*time.Second, s.config.SensorID)
 	s.jobExecutor = jobExecutor
+	//...and the worker that runs dispatched jobs one at a time.
+	s.startDiscoveryJobWorker()
 
 	// Initialize TLS enricher — uses the packet capture discoveries channel
 	// so enrichment results flow through the same submission pipeline.
@@ -738,6 +844,7 @@ func (s *Sensor) checkAndRotateCertificate() {
 		log.Printf("🔄 Certificate expires on %s, rotating...", expiresAt.Format(time.RFC3339))
 		if err := s.sensorManager.RotateCertificate(); err != nil {
 			log.Printf("❌ Failed to rotate certificate: %v", err)
+			s.recordError()
 			return
 		}
 
@@ -786,6 +893,7 @@ func (s *Sensor) handleDiscovery(discovery *models.CryptoDiscovery) {
 	// Add to in-memory list. This buffer is the only copy until submitDiscoveries
 	// ships it upstream; it is drained on success and re-queued on failure.
 	s.discoveries = append(s.discoveries, discovery)
+	s.recordDiscoveriesAccepted(1)
 	if len(s.discoveries) > retryCapLimit {
 		dropped := len(s.discoveries) - retryCapLimit
 		log.Printf("⚠️  Discovery buffer overflow: dropping %d oldest discoveries (buffer was %d, cap %d)", dropped, len(s.discoveries), retryCapLimit)
@@ -845,6 +953,7 @@ func (s *Sensor) processDiscoveries() {
 	// Send discoveries to control plane
 	if err := s.apiClient.SubmitDiscoveries(batch); err != nil {
 		log.Printf("❌ Failed to submit %d discoveries (attempt %d): %v", len(batch), s.retryCount+1, err)
+		s.recordError()
 		// Move current discoveries into retry queue (do NOT clear them)
 		s.pendingRetry = append(s.pendingRetry, s.discoveries...)
 		s.discoveries = s.discoveries[:0]
@@ -897,9 +1006,12 @@ func (s *Sensor) drainStoppedCaptureDiscoveries() []*models.CryptoDiscovery {
 // It runs independently of discovery submission so the control plane always receives
 // regular health signals even when there are no new discoveries.
 func (s *Sensor) sendHeartbeat() {
-	s.mu.RLock()
-	discoveriesMade := int64(len(s.discoveries))
-	s.mu.RUnlock()
+	// Cumulative, process-lifetime counters — see the field comments on
+	// Sensor.discoveriesMade / Sensor.errorsCount. Deliberately NOT
+	// len(s.discoveries): that buffer drains every report interval, so a sensor
+	// with hundreds of discoveries already reported would show 0 here forever.
+	discoveriesMade := atomic.LoadInt64(&s.discoveriesMade)
+	errorsCount := atomic.LoadInt64(&s.errorsCount)
 
 	// Get cache stats for health metrics
 	var cacheStats map[string]interface{}
@@ -953,7 +1065,7 @@ func (s *Sensor) sendHeartbeat() {
 	metrics["cpu_usage_percent"] = cpuUsage
 	metrics["packets_captured"] = totalPackets
 	metrics["discoveries_made"] = discoveriesMade
-	metrics["errors_count"] = 0 // TODO: Track actual error count
+	metrics["errors_count"] = errorsCount
 	metrics["degraded"] = degraded
 	if len(ifaceStats) > 0 {
 		metrics["interface_stats"] = ifaceStats
@@ -986,7 +1098,7 @@ func (s *Sensor) sendHeartbeat() {
 		CPUUsage:            cpuUsage,
 		PacketsCaptured:     totalPackets,
 		DiscoveriesMade:     discoveriesMade,
-		Errors:              0, // TODO: Track actual error count
+		Errors:              errorsCount,
 		Metrics:             metrics,
 		InterfaceStats:      ifaceStats,
 		AvailableInterfaces: api.AvailableInterfaceNames(),
@@ -1001,6 +1113,19 @@ func (s *Sensor) sendHeartbeat() {
 		Timestamp:  time.Now(),
 	}
 
+	// The sensor's own host identity, throttled: attached only when it is new,
+	// has changed since the last send, or an hour has passed — never on every
+	// 30s beat (see shouldReportHost). Built fresh every call regardless (it
+	// is cheap — no DNS) so the throttle always compares against current
+	// reality, not a stale snapshot. The throttle state itself is committed
+	// only after the heartbeat carrying it actually sends (see below).
+	hostBlock := hostid.Build(primaryIP)
+	hostHash := hostid.Hash(hostBlock)
+	reportHost := s.shouldReportHost(hostHash, health.Timestamp)
+	if reportHost {
+		health.Host = hostBlock
+	}
+
 	if s.config.TestMode {
 		// In test mode, log heartbeat to file instead of sending to control plane
 		if err := s.testLogger.LogHeartbeat(health); err != nil {
@@ -1009,10 +1134,35 @@ func (s *Sensor) sendHeartbeat() {
 			log.Printf("💓 Logged heartbeat to test file")
 		}
 	} else {
+		// The desired-state report rides up with the beat. Only when an
+		// applier is wired, so a build without one sends the body it always
+		// sent.
+		if s.applier != nil {
+			revision, failures, pendingRestart := s.applier.Report()
+			health.ConfigRevision = revision
+			health.ConfigFailures = failures
+			health.ConfigPendingRestart = pendingRestart
+			// What this sensor is running RIGHT NOW, file configuration
+			// included. On the first beat from a sensor the platform has never
+			// been told anything about, this is what stops the answer being
+			// built-in defaults that silently revert the operator's file.
+			health.ConfigRunning = s.applier.Running()
+		}
+
 		commands, err := s.apiClient.Heartbeat(health)
 		if err != nil {
 			log.Printf("❌ Failed to send heartbeat: %v", err)
+			s.recordError()
 		} else {
+			if reportHost {
+				s.commitHostReport(hostHash, health.Timestamp)
+			}
+			// What the platform says this sensor should be running. A reply
+			// without a config block is an older platform, and its silence is
+			// not an instruction to revert.
+			if s.applier != nil && commands != nil && commands.Config != nil {
+				s.applier.Apply(commands.Config.Revision, commands.Config.Values)
+			}
 			// Process received commands
 			s.processCommands(commands)
 		}
@@ -1086,6 +1236,7 @@ func (s *Sensor) cleanup() {
 	if flushedDiscoveries := s.drainStoppedCaptureDiscoveries(); len(flushedDiscoveries) > 0 {
 		log.Printf("📤 Captured %d discoveries emitted during shutdown flush", len(flushedDiscoveries))
 		remainingDiscoveries = append(remainingDiscoveries, flushedDiscoveries...)
+		s.recordDiscoveriesAccepted(len(flushedDiscoveries))
 	}
 	if len(remainingDiscoveries) > 0 {
 		// Validate sensor ID before submitting (must be valid UUID)
@@ -1097,6 +1248,7 @@ func (s *Sensor) cleanup() {
 			log.Printf("📤 Submitting %d remaining discoveries...", len(remainingDiscoveries))
 			if err := s.apiClient.SubmitDiscoveries(remainingDiscoveries); err != nil {
 				log.Printf("❌ Failed to submit remaining discoveries: %v", err)
+				s.recordError()
 			} else {
 				log.Printf("✅ Successfully submitted %d remaining discoveries", len(remainingDiscoveries))
 			}
@@ -1178,6 +1330,13 @@ func (s *Sensor) processCommand(command models.Command) {
 		result = s.handleSetLogLevel(command)
 	case "export_logs":
 		result = s.handleExportLogs(command)
+	case sensordispatch.CommandType:
+		// A discovery job the platform handed to this sensor. Runs on
+		// the job worker, one at a time, so a thousand-target sweep cannot
+		// starve capture or this heartbeat loop; the acknowledgement is sent
+		// by the worker when the job finishes. A nil result here means "not
+		// yet" — a malformed command is acknowledged as failed immediately.
+		result = s.handleDiscoveryJob(command)
 	default:
 		log.Printf("⚠️ Unknown command type: %s", command.Type)
 		result = &models.CommandResponse{
@@ -1434,10 +1593,12 @@ func (s *Sensor) handleUpdateInterfaces(command models.Command) *models.CommandR
 		// New set failed to start (e.g. invalid interface) — revert so the
 		// sensor keeps capturing on the previous set.
 		log.Printf("❌ Failed to start capture on %v: %v — reverting to %v", requested, err, previous)
+		s.recordError()
 		s.config.Capture.Interfaces = previous
 		_ = s.persistMonitoredInterfaces(previous)
 		if revErr := s.reinitCapture(); revErr != nil {
 			log.Printf("❌ Revert to previous interfaces also failed: %v", revErr)
+			s.recordError()
 		}
 		return &models.CommandResponse{
 			ID:        uuid.New(),
@@ -1493,6 +1654,7 @@ func (s *Sensor) reinitCapture() error {
 			s.mu.Lock()
 			s.discoveries = append(s.discoveries, flushedDiscoveries...)
 			s.mu.Unlock()
+			s.recordDiscoveriesAccepted(len(flushedDiscoveries))
 		}
 	}
 
@@ -2466,6 +2628,10 @@ func startSensorWithConfig(verbose bool) {
 		startTime:   time.Now(), // Track start time for uptime
 	}
 
+	// Control-plane-managed settings. The config file seeds them; from
+	// the first heartbeat the platform owns them.
+	sensor.setupAgentConfig(Version)
+
 	// Initialize components
 	log.Println("🔧 Initializing sensor components...")
 	if err := sensor.initialize(); err != nil {
@@ -2586,6 +2752,7 @@ func startSensorWithConfig(verbose bool) {
 			}
 		case err := <-sensor.packetCapture.GetErrors():
 			log.Printf("❌ Capture error: %v", err)
+			sensor.recordError()
 		case sig := <-signalChan:
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()

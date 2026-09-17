@@ -474,8 +474,16 @@ func (c *unifiClient) convertDeviceToAsset(device map[string]interface{}, site s
 		Metadata: metadata,
 	}
 
+	// device["name"] is the controller's DISPLAY name for the device ("U6+
+	// Living Room", "Back Porch #1") — a label, not a hostname. It is already
+	// preserved for display via unifiDeviceInventoryFields above (asset.Metadata
+	// still carries it under "name"); only assign it to Hostname when it is
+	// also a valid DNS name, so a name with a space never reaches the identity
+	// layer to be rejected there.
 	if name, ok := device["name"].(string); ok {
-		asset.Hostname = name
+		if hostname := canonicalHostnameOrEmpty(name); hostname != "" {
+			asset.Hostname = hostname
+		}
 	}
 	if ip, ok := device["ip"].(string); ok {
 		asset.IPAddress = ip

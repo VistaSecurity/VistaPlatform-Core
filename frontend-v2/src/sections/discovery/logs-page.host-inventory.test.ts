@@ -64,4 +64,20 @@ describe('hostInventorySummary', () => {
       facts: 1, endpoints: 1, packages: 1, installs_created: 1, installs_removed: 0,
     })).toBe('1 package, 1 listener, 1 fact');
   });
+  it('leads with the failure when the consumer could not materialise the run', () => {
+    // The dev-lab shape: the consumer resolved the host, counted 91
+    // listeners, then died writing them. The job row said `completed`, the
+    // counts block was written beside the error, and this line read
+    // "91 listeners" — a success, for a host that was not in the inventory.
+    // Nothing after the failure is true of the inventory, so nothing after it
+    // is printed.
+    expect(hostInventorySummary({
+      facts: 0, endpoints: 91, installs_created: 0, installs_removed: 0,
+      failed: 'host inventory: resolving xps16-bob: identity: upserting endpoints: pq: invalid input syntax for type inet',
+    })).toBe('host inventory NOT materialised — host inventory: resolving xps16-bob: identity: upserting endpoints: pq: invalid input syntax for type inet');
+  });
+
+  it('does not treat an absent failure as one', () => {
+    expect(hostInventorySummary({ facts: 1, endpoints: 0, installs_created: 0, installs_removed: 0 })).toBe('1 fact');
+  });
 });

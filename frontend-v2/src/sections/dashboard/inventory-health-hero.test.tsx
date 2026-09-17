@@ -120,6 +120,9 @@ describe('the data-quality score', () => {
     const html = render(healthy, scored);
     expect(html).toContain('data-testid="hygiene-score"');
     expect(html).not.toContain('data-testid="hygiene-not-assessed"');
+    expect(html).toContain('82%');
+    expect(html).toContain('stroke="var(--warn)"');
+    expect(html).not.toMatch(/>Critical<|>Medium<|>Low</);
     // The coverage split, including the third bucket at whatever it is: a
     // coverage line that omitted "not assessed" would read as "everything was
     // checked".

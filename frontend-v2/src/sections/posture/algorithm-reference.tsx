@@ -8,6 +8,7 @@ import { useSearchParams } from 'react-router';
 import { Icon, Pill, RiskChip, DrawerShell, DrawerCloseBtn, SectionLabel, MetaRow, levelFromScore } from '../../components/ui';
 import { EmptyState, Loading } from '../findings/bits';
 import { useAlgorithms, type AlgorithmRow } from './queries';
+import { compareAlgorithmRiskDescending, formatAlgorithmRiskScore } from './algorithm-reference-risk';
 
 const STRENGTH_COLOR: Record<string, string> = {
   recommended: 'var(--ok)', strong: 'var(--ok)', acceptable: 'var(--warn)', weak: 'var(--danger)',
@@ -64,7 +65,7 @@ export function AlgorithmReference() {
         if (!hay.includes(needle)) return false;
       }
       return true;
-    }).sort((a, b) => (b.risk_score ?? 0) - (a.risk_score ?? 0));
+    }).sort(compareAlgorithmRiskDescending);
   }, [data, q, strength, status, pqc]);
 
   const selected = useMemo(() => (data ?? []).find((a) => a.code === selectedCode) ?? null, [data, selectedCode]);
@@ -141,8 +142,8 @@ export function AlgorithmReference() {
                   </td>
                   <td style={{ padding: '10px 14px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7 }}>
-                      <RiskChip level={levelFromScore(a.risk_score ?? 0)} size={20} />
-                      <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)' }}>{a.risk_score ?? 0}</span>
+                      {typeof a.risk_score === 'number' && <RiskChip level={levelFromScore(a.risk_score)} size={20} />}
+                      <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)' }}>{formatAlgorithmRiskScore(a.risk_score)}</span>
                     </div>
                   </td>
                 </tr>
@@ -181,7 +182,7 @@ function AlgorithmDrawer({ algo, onClose }: { algo: AlgorithmRow; onClose: () =>
         <MetaRow k="Strength" v={cap(algo.strength)} />
         <MetaRow k="Deprecation status" v={cap(algo.deprecation_status)} />
         {algo.deprecation_date && <MetaRow k="Deprecation date" v={algo.deprecation_date} />}
-        <MetaRow k="Risk score" v={`${algo.risk_score ?? 0} / 100`} mono />
+        <MetaRow k="Risk score" v={formatAlgorithmRiskScore(algo.risk_score, true)} mono />
         {algo.is_pqc && <MetaRow k="PQC standardization" v={cap(algo.pqc_standardization_status)} />}
         {typeof algo.is_standard === 'boolean' && <MetaRow k="Standardized" v={algo.is_standard ? 'Yes' : 'No'} />}
 

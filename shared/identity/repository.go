@@ -342,16 +342,129 @@ type MergeProposal struct {
 type ProposalRef struct {
 	TenantID string `json:"tenant_id"`
 	ID       string `json:"id"`
+
+	// Reused is true when [Repository.OpenMergeProposal] found a PENDING
+	// proposal asking the same question ([MergeProposalFingerprint]) and
+	// returned it instead of opening another.
+	//
+	// The engine reads it to decide whether to write its `merge_proposed`
+	// pointer entry: a question already in the queue does not get a fresh
+	// history row on every observation that re-asks it. Before this flag the
+	// proposal itself was deduplicated but the note about it was not, so a
+	// contested host on a one-minute coalescing window wrote 1,440 identical
+	// history rows a day against the first candidate.
+	Reused bool `json:"reused,omitempty"`
+}
+
+// Announcement is the evidence behind a floating address (see
+// [Resolution.FloatingAddress]): one asset's NIC announced an address that
+// belongs to another asset.
+type Announcement struct {
+	// MACs are the announcer's hardware addresses as observed — the
+	// identifiers the engine deliberately did NOT write onto the holder. One
+	// in practice; a slice because an observation may carry several.
+	MACs []string `json:"macs"`
+	// Addresses are the floating addresses announced, canonical form.
+	Addresses []string `json:"addresses"`
+	// Gratuitous is true when the frame was a gratuitous ARP — the announcer
+	// claiming the address as its own, rather than answering a request for
+	// it. Corroborating, not required: a plain ARP reply for the VIP from the
+	// node's MAC is the same fact.
+	Gratuitous bool `json:"gratuitous,omitempty"`
+
+	Source Source    `json:"source"`
+	At     time.Time `json:"at"`
+}
+
+// AnnouncementRecord is what a store holds for one announcer/holder pair after
+// [Repository.RecordAnnouncement]: the pair, the latest evidence and how many
+// times it was observed. Read back by tests through
+// identitytest.AnnouncementReader; nothing in production reads it through this
+// package.
+type AnnouncementRecord struct {
+	Announcer AssetRef     `json:"announcer"`
+	Holder    AssetRef     `json:"holder"`
+	Latest    Announcement `json:"latest"`
+	Count     int          `json:"count"`
+}
+
+// PriorDecision is a human's earlier answer about a set of assets: a merge
+// proposal naming them that a reviewer resolved `kept_separate`.
+type PriorDecision struct {
+	ProposalID string `json:"proposal_id"`
+	// ObservationAssetID is the pending asset that proposal was opened FOR,
+	// empty when it was a floor proposal that created nothing.
+	ObservationAssetID string `json:"observation_asset_id,omitempty"`
+	// Candidates are the assets the proposal named, in the order it named
+	// them.
+	Candidates []string `json:"candidates"`
+	// MatchedKinds are the identifier kinds that were the proposal's
+	// evidence — the kinds whose values matched a candidate. The engine treats
+	// a later conflict carrying a kind NOT in this set as a NEW question.
+	MatchedKinds []Kind `json:"matched_kinds"`
+	// DecidedAt and DecidedBy are when and by whom, as the proposal recorded
+	// them. DecidedBy is empty when the proposal did not record an actor.
+	DecidedAt time.Time `json:"decided_at,omitzero"`
+	DecidedBy string    `json:"decided_by,omitempty"`
+}
+
+// Covers reports whether the decision was about every one of these assets —
+// each is either the proposal's observation asset or one of its candidates.
+// Order is irrelevant: the same two assets found the other way round are the
+// same pair.
+func (d PriorDecision) Covers(assetIDs []string) bool {
+	if len(assetIDs) == 0 {
+		return false
+	}
+	named := make(map[string]bool, len(d.Candidates)+1)
+	for _, c := range d.Candidates {
+		named[c] = true
+	}
+	if d.ObservationAssetID != "" {
+		named[d.ObservationAssetID] = true
+	}
+	for _, id := range assetIDs {
+		if !named[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// SameEvidence reports whether every kind in kinds was already part of the
+// decision's evidence. A kind the reviewer never saw — an SSH host key where
+// they weighed a MAC against an address — is new evidence, and a decision made
+// without it does not answer the question it raises.
+func (d PriorDecision) SameEvidence(kinds []Kind) bool {
+	seen := make(map[Kind]bool, len(d.MatchedKinds))
+	for _, k := range d.MatchedKinds {
+		seen[k] = true
+	}
+	for _, k := range kinds {
+		if !seen[k] {
+			return false
+		}
+	}
+	return true
 }
 
 // Repository is the storage the engine needs, and nothing else.
 //
-// It is small on purpose: phase 1 (workstream 1.2) has to supply only a
-// Postgres implementation of these eight methods, and
+// It is small on purpose: phase 1 (workstream 1.2) had to supply only a
+// Postgres implementation of eight methods, and
 // identitytest.RunRepositoryContract holds it to the same behaviour the
 // in-memory one has. Everything with an opinion — precedence, scope rules,
 // conflict detection, reconciliation — is in the engine, where it is testable
 // without a database.
+//
+// Two methods joined the eight with the floating-address rule
+// ([Resolution.FloatingAddress]) and decision memory
+// ([Resolution.Suppressed]): [Repository.RecordAnnouncement] and
+// [Repository.LastKeptSeparate]. They are on the interface rather than
+// behind an optional type assertion because an optional seam that silently
+// no-ops when an implementation forgets it is a check that cannot fail —
+// exactly the shape that let seven services' revocation check compile, pass
+// its tests and never run.
 type Repository interface {
 	// FindByIdentifier returns the assets carrying this identifier value.
 	//
@@ -401,7 +514,39 @@ type Repository interface {
 
 	// OpenMergeProposal records a merge proposal for the Approvals queue and
 	// returns its ref.
+	//
+	// It is idempotent over [MergeProposalFingerprint] while the proposal is
+	// PENDING: re-asking a question a human already has in the queue returns
+	// the existing ref with [ProposalRef.Reused] set. A RESOLVED proposal does
+	// not suppress a new one — the engine consults [Repository.LastKeptSeparate]
+	// for that.
 	OpenMergeProposal(ctx context.Context, tenantID string, p MergeProposal) (ProposalRef, error)
+
+	// LastKeptSeparate returns the most recent merge proposal a reviewer
+	// resolved `kept_separate` that named EVERY one of these assets — as its
+	// observation asset or among its candidates — and false when there is
+	// none. Order of assetIDs is irrelevant. It is the engine's decision
+	// memory: without it a human's "no" is write-only, and the same proposal
+	// is re-raised on the next observation of unchanged evidence.
+	//
+	// A pending or merged proposal is never returned: pending is handled by
+	// OpenMergeProposal's idempotency, and after a merge one of the assets is
+	// gone.
+	LastKeptSeparate(ctx context.Context, tenantID string, assetIDs []string) (PriorDecision, bool, error)
+
+	// RecordAnnouncement records that announcer's NIC announced an address
+	// belonging to holder — the floating-address fact — as a relationship
+	// between the two assets, idempotently: a re-observation bumps the edge's
+	// last-seen and count rather than adding a row. The engine calls it
+	// INSTEAD of attaching the announcer's MAC to the holder; the knowledge
+	// has to land somewhere, and an identifier it must not be.
+	//
+	// The SQL implementation writes `asset_relationships` type `hosted_on`,
+	// holder → announcer (the VIP's asset rests on the node that currently
+	// announces it; reverse label "hosts"). It returns an error for
+	// announcer == holder: that is not a floating address, it is the same
+	// asset, and the engine never asks.
+	RecordAnnouncement(ctx context.Context, announcer, holder AssetRef, a Announcement) error
 
 	// ScopeForAddress answers the one question every observation builder has
 	// to ask before it can produce a hostname or ip_address identifier: WHERE

@@ -11,8 +11,8 @@
 // MAPPING — which column each subject kind writes — rather than any behaviour
 // you could have seen on screen.
 import { describe, expect, it } from 'vitest';
-import { subjectLink } from './workflow';
-import type { ComplianceFinding } from './model';
+import { bulkCryptoTicketBody, subjectLink, ticketBody } from './workflow';
+import type { ComplianceFinding, CryptoRisk } from './model';
 
 const SUBJECT = '0198fb2c-1111-2222-3333-444455556666';
 const CONFIG_A = '0198fb2c-aaaa-2222-3333-444455556666';
@@ -21,6 +21,69 @@ const CONFIG_B = '0198fb2c-bbbb-2222-3333-444455556666';
 function finding(subject_type: string, evidence?: unknown): ComplianceFinding {
   return { subject_type, subject_id: SUBJECT, evidence } as ComplianceFinding;
 }
+
+function cryptoRisk(severity: string | null, over: Record<string, unknown> = {}): CryptoRisk {
+  return {
+    id: CONFIG_A,
+    tenant_id: 'tenant-1',
+    asset_id: SUBJECT,
+    crypto_implementation_id: CONFIG_A,
+    severity,
+    category: 'algorithm',
+    issue_type: 'weak_hash',
+    current_value: 'SHA-1',
+    description: 'A weak hash was observed.',
+    recommendation: 'Move to SHA-256.',
+    detected_at: '2026-09-17T00:00:00Z',
+    asset_hostname: 'edge.example.test',
+    ...over,
+  } as CryptoRisk;
+}
+
+describe('crypto ticket payloads', () => {
+  it.each([
+    ['critical', 'critical'],
+    ['high', 'high'],
+    ['medium', 'medium'],
+    ['low', 'low'],
+    ['info', 'low'],
+    ['informational', 'low'],
+  ])('bridges crypto severity %s onto the ticket scale as %s', (input, expected) => {
+    const body = ticketBody({ kind: 'crypto', risk: cryptoRisk(input) });
+    expect(body).toMatchObject({
+      priority: expected,
+      severity: expected,
+      asset_id: SUBJECT,
+      crypto_implementation_id: CONFIG_A,
+    });
+  });
+
+  it.each([null, '', 'unknown'])('does not fabricate ticket severity or priority for %s', (severity) => {
+    const body = ticketBody({ kind: 'crypto', risk: cryptoRisk(severity) });
+    expect(body).not.toHaveProperty('priority');
+    expect(body).not.toHaveProperty('severity');
+    expect(body).toMatchObject({ crypto_implementation_id: CONFIG_A });
+  });
+
+  it('uses the same bridge for a bulk ticket and keeps the primary configuration link', () => {
+    const primary = cryptoRisk(null);
+    const high = cryptoRisk('high', { id: CONFIG_B, crypto_implementation_id: CONFIG_B });
+    const bulk = bulkCryptoTicketBody(primary, [primary, high]);
+    expect(bulk).toMatchObject({
+      priority: 'high',
+      severity: 'high',
+      asset_id: SUBJECT,
+      crypto_implementation_id: CONFIG_A,
+    });
+    expect(bulk.title).toContain('2 configurations');
+    expect(bulk.description).toContain('Affected configurations (2)');
+    expect(bulk.description).not.toContain('Affected assets');
+
+    const unknownOnly = bulkCryptoTicketBody(primary, [primary]);
+    expect(unknownOnly).not.toHaveProperty('priority');
+    expect(unknownOnly).not.toHaveProperty('severity');
+  });
+});
 
 describe('subjectLink', () => {
   it('links an asset subject through asset_id', () => {

@@ -18,7 +18,7 @@ tags:
     web-ui/src/services/cmdb-api.ts. Settings → Integrations.'
 - name: discovery
   description: 'Active-discovery jobs — scan targets (IPs/CIDRs/hostnames) for
-    crypto assets and poll status/findings, plus the tenant capability policy.
+    crypto assets and poll status/findings.
     Findings reach inventory server-side (cluster-sensor mirrors them into the
     ingestion queue every sensor feeds) — there is no client-side import step,
     and no API accepts an approval status. UI consumer: frontend-v2 Discovery →
@@ -1027,6 +1027,39 @@ paths:
       parameters:
       - $ref: '#/components/parameters/Page'
       - $ref: '#/components/parameters/PageSize'
+      - name: severity
+        in: query
+        description: Repeated canonical severity values; informational is accepted as a legacy alias for info, and unscored selects null severity.
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+            enum: [critical, high, medium, low, info, informational, unscored]
+      - name: category
+        in: query
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+            enum: [protocol, algorithm, key_size, certificate]
+      - name: search
+        in: query
+        schema:
+          type: string
+      - name: sort_by
+        in: query
+        schema:
+          type: string
+          enum: [severity, detected_at, hostname, protocol]
+      - name: sort_order
+        in: query
+        schema:
+          type: string
+          enum: [asc, desc]
       responses:
         '200':
           description: A page of crypto risk findings.
@@ -1047,7 +1080,7 @@ paths:
       - crypto-risks
       summary: Aggregate crypto risk severity summary
       description: |
-        Returns severity counts (critical/high/medium/informational), total
+        Returns mutually exclusive worst-per-asset severity counts (critical/high/medium/low/informational), unscored assets, total
         affected assets, and issue-category counts for the tenant.
       responses:
         '200':
@@ -1069,13 +1102,47 @@ paths:
       description: |
         Streams the tenant's crypto risk findings as a CSV file attachment
         (`Content-Disposition: attachment; filename=crypto-risks.csv`). Unlike
-        the paginated list, export returns up to 10,000 rows in a single
+        the paginated list, export returns up to 50,000 rows in a single
         response. Accepts the same filter query params as `GET /crypto-risks`.
 
         This is the one crypto-risks endpoint whose 200 body is NOT JSON — it is
         a `text/csv` document, so the contract test asserts the status and
         content type rather than a JSON schema. The error responses remain the
         standard JSON `{ "error": "..." }` shape.
+      parameters:
+      - name: severity
+        in: query
+        description: Repeated canonical severity values; informational is accepted as a legacy alias for info, and unscored selects null severity.
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+            enum: [critical, high, medium, low, info, informational, unscored]
+      - name: category
+        in: query
+        style: form
+        explode: true
+        schema:
+          type: array
+          items:
+            type: string
+            enum: [protocol, algorithm, key_size, certificate]
+      - name: search
+        in: query
+        schema:
+          type: string
+      - name: sort_by
+        in: query
+        schema:
+          type: string
+          enum: [severity, detected_at, hostname, protocol]
+      - name: sort_order
+        in: query
+        schema:
+          type: string
+          enum: [asc, desc]
       responses:
         '200':
           description: CSV export of the tenant's crypto risk findings.
@@ -1084,7 +1151,7 @@ paths:
               schema:
                 type: string
               example: |
-                ID,Severity,Category,Issue Type,Current Value,Description,Recommendation,Asset Hostname,Asset IP,Asset Port,Protocol,Protocol Version,Detected At
+                ID,Severity,Category,Issue Type,Current Value,Description,Recommendation,Asset Hostname,Asset IP,Asset Port,Protocol,Protocol Version,Detected At,Risk Score,Assessment Basis,Score Sources,Assessment Limitations
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
@@ -2667,14 +2734,14 @@ paths:
       summary: List the tenant's external connections
       description: >
         Returns a paginated page of deduplicated third-party connections, with
-        optional filters (search, crypto_strength, is_pqc_resistant, cert_expired,
+        optional filters (search, strength, is_pqc_resistant, cert_expired,
         cert_trust_issue, has_legacy_tls, source_asset_id). Wrapped under
         `connections` with a sibling `pagination` block.
       parameters:
         - { name: page, in: query, required: false, schema: { type: integer } }
         - { name: page_size, in: query, required: false, schema: { type: integer } }
         - { name: search, in: query, required: false, schema: { type: string } }
-        - { name: crypto_strength, in: query, required: false, schema: { type: string, enum: [good, weak, unknown] } }
+        - { name: strength, in: query, required: false, schema: { type: string, enum: [weak, acceptable, strong, recommended, unassessed] } }
         - { name: is_pqc_resistant, in: query, required: false, schema: { type: boolean } }
         - { name: cert_expired, in: query, required: false, schema: { type: boolean } }
         - { name: cert_trust_issue, in: query, required: false, schema: { type: boolean } }
@@ -2941,27 +3008,48 @@ paths:
       description: >
         Active Scan (issue #866). Approves the targeted assets (so the discovery
         pipeline catalogs their crypto rather than deferring it), stamps scan
-        freshness, and dispatches an active TLS probe whose results flow back
-        through the discovery pipeline. RBAC-gated `assets.update`. Returns the
-        dispatched job id and the count of assets scanned. Invalid UUIDs are
-        skipped; an all-invalid list returns 400.
+        freshness, and dispatches an active probe whose results flow back
+        through the discovery pipeline. RBAC-gated `assets.update` — the
+        permission follows the action, not the executor, so running from a
+        tenant sensor needs nothing more than running from the platform.
+
+        `run_from` chooses the executor: `auto` (default) routes each asset to
+        the tenant sensor that most recently observed it, else one bound to
+        its network segment, else the platform sensor; `platform` runs
+        everything from the platform sensor; `sensor` runs everything from the
+        one tenant sensor named by `sensor_id`. A named sensor that is not the
+        tenant's answers 404, the platform's own sensor or an air-gapped one
+        400, and one that is offline 409 — nothing is scanned in those cases.
+        Under `auto`, an asset whose observing sensor is offline is reported
+        under `skipped` and left unscanned rather than scanned from the wrong
+        place. Returns every job dispatched with its executor; `job_id` and
+        `count` summarize the first job and the assets scanned. Invalid UUIDs
+        are skipped; an all-invalid list returns 400.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AssetIdsRequest'
+              $ref: '#/components/schemas/ActiveScanRequest'
       responses:
         '200':
           description: Active scan started.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RevalidationJobResponse'
+                $ref: '#/components/schemas/ActiveScanResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          description: The named sensor is offline; nothing was scanned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
@@ -5006,52 +5094,81 @@ paths:
               schema:
                 $ref: '#/components/schemas/LegacyError'
 
-  /discovery/capabilities:
+  /discovery/auto-scan:
     get:
-      operationId: getDiscoveryCapabilities
+      operationId: getAutoScanPolicy
       tags:
       - discovery
-      summary: Get the tenant's effective discovery capability policy
-      description: |
-        Returns the scanning features the tenant admin has enabled for the
-        discovery wizard (active scanning, TLS-version enumeration, SSH probing).
-        Defaults to everything enabled; tenant-admin overrides in
-        `tenant_admin_settings.config.capability_policy` are merged on top.
+      summary: The tenant's automatic active-scanning policy, and what it has been doing
+      description: >
+        Automatic active scanning probes a newly observed INTERNAL host as soon
+        as it appears in the inventory, and probes every internal host again once
+        the tenant's rescan interval has elapsed. Nobody presses a button.
+
+
+        The response carries three things the Settings → Discovery → Active
+        Scanning page needs: the policy, the bounds the server will accept for it
+        (so the page validates against the server's numbers rather than its own
+        copy of them), and a read-only summary of what the sweep has done —
+        because a capability that acts unasked and reports nowhere is
+        indistinguishable from a bug.
+
+
+        Requires the `settings.read` permission.
       responses:
         '200':
-          description: The tenant's effective discovery capabilities.
+          description: The policy, its bounds, and the sweep summary.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DiscoveryCapabilitiesResponse'
+                $ref: '#/components/schemas/AutoScanResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
     put:
-      operationId: updateDiscoveryCapabilities
+      operationId: updateAutoScanPolicy
       tags:
       - discovery
-      summary: Update the tenant's discovery capability policy
-      description: |
-        Saves the tenant capability policy (sensor-configuration / tenant-admin
-        surface). Requires a tenant_admin or security_admin role; other callers
-        get 403.
+      summary: Set the automatic active-scanning policy
+      description: >
+        Requires the `settings.update` permission: this decides whether the
+        platform probes the tenant's own network without being asked.
+
+
+        Every field is required. A partial update would be a trap here — the
+        difference between "leave the ports alone" and "scan no ports" is one
+        absent key, and the tenant would have no way to tell which they had
+        asked for.
+
+
+        Values outside the bounds are REFUSED rather than clamped, and the
+        refusal names the bound that was broken. Protocols are restricted to
+        `TLS` and `SSH`: the OT/ICS probes are gated by the `ot_active_probing`
+        entitlement through a discovery job's separate field, and accepting one
+        here would be a way to probe a PLC unattended, on a schedule, past that
+        gate.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UpdateDiscoveryCapabilitiesRequest'
+              $ref: '#/components/schemas/AutoScanUpdateRequest'
       responses:
         '200':
-          description: Capability policy updated.
+          description: The policy as saved.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UpdateDiscoveryCapabilitiesResponse'
+                $ref: '#/components/schemas/AutoScanResponse'
         '400':
-          $ref: '#/components/responses/LegacyBadRequest'
+          description: A field is missing, or a value is outside its bounds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '403':
@@ -5059,6 +5176,59 @@ paths:
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /discovery/jobs:
+    get:
+      operationId: listDiscoveryJobs
+      tags:
+      - discovery
+      summary: List the tenant's discovery jobs
+      description: |
+        The tenant's discovery jobs (Active Scans, the #1814 automatic-scan
+        sweep, Discover wizard runs), newest first, with each job's executor
+        and — for a job handed to a tenant sensor — its dispatch timeline.
+        Proxied from cluster-sensor-service. This is what the unified
+        Discovery → Discovery Jobs page merges with device-interrogation
+        jobs (`GET /jobs` on device-interrogation-service).
+      parameters:
+      - name: page
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+      - name: page_size
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+      - name: status
+        in: query
+        schema:
+          type: string
+      - name: kind
+        in: query
+        description: >-
+          `automatic` (the #1814 sweep) or `manual` (Active Scan / Discover
+          wizard / any operator-started run). Omit for both.
+        schema:
+          type: string
+          enum: [automatic, manual]
+      responses:
+        '200':
+          description: A page of discovery jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryJobsResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '502':
+          description: cluster-sensor-service could not be reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
     post:
       operationId: createDiscoveryJob
       tags:
@@ -6070,7 +6240,12 @@ components:
         deprecation_date:
           type: string
         risk_score:
-          type: integer
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+          maximum: 100
+          description: Null only for a historical or operator-created row that has not been assessed.
         recommended_alternatives:
           type: array
           items:
@@ -6274,14 +6449,17 @@ components:
       type: object
       additionalProperties: false
       description: |
-        Request body for POST /algorithms (createAlgorithm). `code`, `name` and
-        `category` are required; every other field is optional and falls back to
-        the algorithms-table column default. Enum-bearing fields validate against
-        the same schema CHECK constraints as UpdateAlgorithmRequest.
+        Request body for POST /algorithms (createAlgorithm). `code`, `name`,
+        `category` and `risk_score` are required. The score is a deliberate
+        catalogue assessment: the API and database do not invent a default.
+        Other fields are optional and fall back to their algorithms-table
+        column defaults. Enum-bearing fields validate against the same schema
+        CHECK constraints as UpdateAlgorithmRequest.
       required:
       - code
       - name
       - category
+      - risk_score
       properties:
         code:
           type: string
@@ -6337,6 +6515,7 @@ components:
           type: integer
           minimum: 0
           maximum: 100
+          description: Explicit catalogue risk assessment. Zero is a valid assessed score.
         deprecation_status:
           type: string
           enum:
@@ -6404,7 +6583,11 @@ components:
               - string
               - 'null'
             risk_score:
-              type: integer
+              type:
+              - integer
+              - 'null'
+              minimum: 0
+              maximum: 100
             strength:
               type: string
             deprecation_status:
@@ -6454,14 +6637,20 @@ components:
           - string
           - 'null'
         risk_score:
-          type: integer
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+          maximum: 100
         strength:
           type: string
         deprecation_status:
           type: string
         priority:
-          type: string
-          description: high / medium / low (derived from risk_score).
+          type:
+          - string
+          - 'null'
+          description: high / medium / low when risk_score is assessed; null otherwise.
         reason:
           type: string
     BatchRecommendationsResponse:
@@ -6515,8 +6704,33 @@ components:
           type: string
           format: uuid
         severity:
+          type: [string, "null"]
+          enum: [critical, high, medium, low, info, null]
+          description: Canonical numeric risk band, or separate certificate lifecycle severity. Null when a qualitative issue has no numeric assessment.
+        risk_score:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+          description: Available configuration numeric assessment; certificate lifecycle severity does not invent a numeric score.
+        assessment_basis:
           type: string
-          description: critical / high / medium / informational.
+          enum: [configuration, certificate_lifecycle, retained_finding]
+        assessment_limitations:
+          type: array
+          items:
+            type: string
+        score_sources:
+          type: array
+          description: Actual tied numeric contributors; a persisted score explicitly has unavailable original rule provenance.
+          items:
+            type: string
+        categories:
+          type: array
+          uniqueItems: true
+          description: All matching categories; category remains the deterministic representative for titles and grouping.
+          items:
+            type: string
+            enum: [protocol, algorithm, key_size, certificate]
         category:
           type: string
         issue_type:
@@ -6534,6 +6748,13 @@ components:
           type: string
         asset_ip_address:
           type: string
+        endpoint_id:
+          type: string
+          format: uuid
+        endpoint_address:
+          type: string
+        endpoint_port:
+          type: integer
         asset_port:
           type: integer
         asset_class_key:
@@ -6555,6 +6776,8 @@ components:
       - critical
       - high
       - medium
+      - low
+      - unscored
       - informational
       - total_assets_affected
       - protocol_issues
@@ -6568,6 +6791,11 @@ components:
           type: integer
         medium:
           type: integer
+        low:
+          type: integer
+        unscored:
+          type: integer
+          description: Affected assets with no graded emitted issue; separate from the five severity buckets.
         informational:
           type: integer
         total_assets_affected:
@@ -7450,6 +7678,13 @@ components:
           format: date-time
         has_sct:
           type: boolean
+        sct_source:
+          type: string
+          enum: [embedded, tls_extension, ocsp, none]
+          description: >
+            Which RFC 6962 delivery route carried the Signed Certificate
+            Timestamp, or "none" when a live handshake checked all three
+            routes and found none. Absent when the route wasn't observable.
         known_bad_ca:
           type: string
         is_ev:
@@ -9655,6 +9890,84 @@ components:
             $ref: '#/components/schemas/StaleAsset'
         pagination:
           $ref: '#/components/schemas/PaginationMeta'
+    ActiveScanRequest:
+      type: object
+      additionalProperties: false
+      description: Body for POST /infrastructure-assets/scan.
+      required:
+      - asset_ids
+      properties:
+        asset_ids:
+          type: array
+          items:
+            type: string
+          description: Asset UUIDs as strings. Unparseable entries are silently dropped.
+        run_from:
+          type: string
+          enum: [auto, platform, sensor]
+          description: Which executor scans the assets. Defaults to `auto`.
+        sensor_id:
+          type: string
+          format: uuid
+          description: The tenant sensor to run from. Required when `run_from` is `sensor`; ignored otherwise.
+    ActiveScanJob:
+      type: object
+      additionalProperties: false
+      description: One discovery job an Active Scan dispatched.
+      required:
+      - job_id
+      - executor
+      - count
+      properties:
+        job_id:
+          type: string
+        executor:
+          type: string
+          enum: [platform, sensor]
+        sensor_id:
+          type: string
+          format: uuid
+        sensor_name:
+          type: string
+        count:
+          type: integer
+          description: Assets this job scans.
+    ActiveScanSkip:
+      type: object
+      additionalProperties: false
+      description: An asset the scan could not dispatch anywhere, and why.
+      required:
+      - asset_id
+      - reason
+      properties:
+        asset_id:
+          type: string
+        reason:
+          type: string
+    ActiveScanResponse:
+      type: object
+      additionalProperties: false
+      description: >
+        Result of an Active Scan. `job_id` and `count` keep the original shape
+        (the first job and every asset scanned); `jobs` lists each dispatched
+        job with its executor; `skipped` lists assets left unscanned because
+        their observing sensor is offline.
+      required: [message, job_id, count, jobs, skipped]
+      properties:
+        message:
+          type: string
+        job_id:
+          type: string
+        count:
+          type: integer
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveScanJob'
+        skipped:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveScanSkip'
     RevalidationJobResponse:
       type: object
       additionalProperties: false
@@ -9742,7 +10055,7 @@ components:
         - dest_ip
         - dest_port
         - protocol
-        - crypto_strength
+        - strength
         - is_pqc_resistant
         - cert_is_expired
         - first_seen_at
@@ -9767,13 +10080,26 @@ components:
         supported_tls_versions:
           type: array
           items: { type: string }
-        crypto_strength:
-          type: string
-          enum: [good, weak, unknown]
+        strength:
+          type: [string, "null"]
+          enum: [weak, acceptable, strong, recommended, null]
         is_pqc_resistant: { type: boolean }
         weak_reasons:
           type: array
           items: { type: string }
+          description: >
+            Reasons strength is "weak" — protocol version, cipher
+            suite, key exchange, key size, signature algorithm ONLY. Never
+            certificate-hygiene observations; see cert_hygiene_flags.
+        cert_hygiene_flags:
+          type: array
+          items: { type: string }
+          description: >
+            Certificate-hygiene observations (missing SCT, an untrusted or
+            pinned CA, an incomplete chain, a missing Subject DN) that affect
+            confidence in the chain but say nothing about cryptographic
+            strength. Never influences strength/weak_reasons — see
+            CLAUDE.md "Certificate quality flags".
         cert_subject: { type: string }
         cert_issuer: { type: string }
         cert_san:
@@ -9787,6 +10113,14 @@ components:
         cert_signature_algorithm: { type: string }
         cert_is_expired: { type: boolean }
         cert_validation_status: { type: string }
+        cert_sct_source:
+          type: string
+          enum: [embedded, tls_extension, ocsp, none]
+          description: >
+            Which RFC 6962 delivery route carried the Signed Certificate
+            Timestamp, or "none" when a live handshake checked all three
+            routes and found none. Absent when the route wasn't observable
+            (e.g. a passive-capture-only observation) — never a false "none".
         cert_pem: { type: string }
         service_name: { type: string }
         service_version: { type: string }
@@ -9813,6 +10147,9 @@ components:
         - external_connection_id
         - tenant_id
         - change_type
+        - previous_strength
+        - new_strength
+        - strength_vocabulary_version
         - created_at
       properties:
         id: { type: string, format: uuid }
@@ -9821,13 +10158,16 @@ components:
         change_type: { type: string }
         previous_protocol_version: { type: string }
         previous_cipher_suite: { type: string }
-        previous_crypto_strength: { type: string }
+        strength_vocabulary_version: { type: integer, enum: [1, 2] }
+        previous_strength_legacy: { type: string, description: Original historical vocabulary; never inferred into a current grade. }
+        new_strength_legacy: { type: string, description: Original historical vocabulary; never inferred into a current grade. }
+        previous_strength: { type: [string, "null"], enum: [weak, acceptable, strong, recommended, null] }
         previous_is_pqc_resistant: { type: boolean }
         previous_cert_fingerprint_sha256: { type: string }
         previous_cert_not_after: { type: string, format: date-time }
         new_protocol_version: { type: string }
         new_cipher_suite: { type: string }
-        new_crypto_strength: { type: string }
+        new_strength: { type: [string, "null"], enum: [weak, acceptable, strong, recommended, null] }
         new_is_pqc_resistant: { type: boolean }
         new_cert_fingerprint_sha256: { type: string }
         new_cert_not_after: { type: string, format: date-time }
@@ -9836,10 +10176,11 @@ components:
       type: object
       additionalProperties: false
       description: Aggregate counts for the connections summary card (models.ExternalConnectionsSummary).
-      required: [total, weak_crypto, pqc_resistant, expired_certs, legacy_tls, source_hosts]
+      required: [total, weak_crypto, reassessment_required, pqc_resistant, expired_certs, legacy_tls, source_hosts]
       properties:
         total: { type: integer }
         weak_crypto: { type: integer }
+        reassessment_required: { type: integer, description: Connections with unresolved historical evidence, including known weak connections. Overlaps weak_crypto. }
         pqc_resistant: { type: integer }
         expired_certs: { type: integer }
         legacy_tls: { type: integer }
@@ -10019,10 +10360,12 @@ components:
       - key_size
       - certificate_id
       - discovery_method
+      - discovery_methods
       - confidence_score
       - source_sensor_id
       - raw_data
       - risk_score
+      - risk_score_assessed
       - compliance_status
       - first_discovered_at
       - last_verified_at
@@ -10077,6 +10420,21 @@ components:
           format: uuid
         discovery_method:
           type: string
+          description: >-
+            The method that FIRST observed this configuration. Kept as the
+            primary attribution; the full provenance is `discovery_methods`.
+        discovery_methods:
+          type: array
+          items:
+            type: string
+          description: >-
+            Every discovery method that has contributed an observation to this
+            configuration, `discovery_method` first. A configuration a passive
+            sensor glimpsed and an active probe then measured in full is ONE
+            row carrying both — the partial observation is absorbed into the
+            complete one rather than kept as a second row. Always present;
+            empty only for a row written before provenance was recorded and
+            not yet backfilled.
         confidence_score:
           type:
           - number
@@ -10094,6 +10452,12 @@ components:
           type:
           - integer
           - 'null'
+          minimum: 0
+          maximum: 100
+          description: Numeric risk score when risk_score_assessed is true; null when no numeric scorer contributed.
+        risk_score_assessed:
+          type: boolean
+          description: True for an existing positive stored score, or when a stored zero is corroborated by a worst linked numeric catalogue contribution of zero. A non-zero catalogue contribution cannot certify a stored zero. Stored null and qualitative-only evidence do not make this true.
         compliance_status:
           type: object
           additionalProperties: true
@@ -10217,12 +10581,18 @@ components:
           type: string
           description: Catalogue deprecation status. Empty string when unrecorded.
         risk_score:
-          type: integer
-          description: The catalogue row's 0-100 risk score.
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+          maximum: 100
+          description: The catalogue row's explicit 0-100 risk score, or null when the row records only a qualitative assessment.
         risk_level:
-          type: string
-          description: The score banded with the canonical ladder (models.RiskBands). Computed server-side — do not re-derive.
-          enum: [Critical, High, Medium, Low, Informational]
+          type:
+          - string
+          - 'null'
+          description: The score banded with the canonical ladder (models.RiskBands), or null when risk_score is null. Computed server-side — do not re-derive.
+          enum: [Critical, High, Medium, Low, Informational, null]
         migration_guidance:
           type: string
           description: Catalogue migration guidance. Omitted when the row records none.
@@ -10233,7 +10603,7 @@ components:
         is_pqc: { type: boolean }
         sets_score:
           type: boolean
-          description: True on the worst component — the one worst-component-wins selected. Exactly one entry per non-empty list.
+          description: True on the worst numerically scored component. False for every component when the resolved catalogue rows have no numeric score.
     CryptoComponentAssessmentListResponse:
       type: object
       additionalProperties: false
@@ -11004,10 +11374,20 @@ components:
         execution_mode:
           type: string
           description: >-
-            How the scan is dispatched: `auto` (platform decides) or `cloud`
-            (platform sensor). `sensors` is REJECTED with 400 — discovery jobs
-            cannot be dispatched to tenant-deployed sensors; no dispatcher
-            exists, and such jobs used to run from the platform cluster instead.
+            How the scan is dispatched: `auto` (platform decides), `cloud`
+            (platform sensor), or `sensors` — run from the one tenant sensor
+            named in `preferred_sensor_ids`, which must be live; an unknown
+            sensor answers 404, the platform's own or an air-gapped one 400,
+            an offline one 409, and the job is not created. A `sensors` job
+            is never run from the platform instead.
+        preferred_sensor_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: >-
+            With `execution_mode: sensors`, exactly one tenant sensor id. Not
+            accepted with any other mode.
         protocols:
           type: array
           items:
@@ -11058,7 +11438,9 @@ components:
           type: string
         status:
           type: string
-          description: e.g. pending, in_progress, completed, failed, cancelled.
+          description: >-
+            queued · awaiting_sensor (handed to a tenant sensor, not yet
+            reported back) · running · completed · failed · cancelled.
         targets:
           type: array
           items:
@@ -11069,6 +11451,47 @@ components:
           type: array
           items:
             type: string
+        executor:
+          type: string
+          enum: [platform, sensor]
+          description: Who runs (or ran) the job.
+        assigned_sensor_id:
+          type:
+          - string
+          - 'null'
+          description: The tenant sensor a `sensors` job was handed to.
+        assigned_sensor_name:
+          type: string
+        assigned_sensor_last_heartbeat:
+          type: string
+          format: date-time
+          description: When that sensor last checked in — what a "sensor offline" failure shows beside the error.
+        dispatched_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When the job's command was written for the sensor.
+        picked_up_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: When the sensor collected the command on a heartbeat.
+        started_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        completed_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        error_message:
+          type:
+          - string
+          - 'null'
         fanout:
           type: boolean
         retention_cap_mb:
@@ -11081,6 +11504,34 @@ components:
         updated_at:
           type: string
           format: date-time
+        origin:
+          type: string
+          description: >-
+            `auto_scan` when the #1814 automatic-scan sweep created this job;
+            empty for an operator-started run (Active Scan, Discover wizard).
+            Drives the "Automatic scan" kind on the unified Jobs page.
+    DiscoveryJobsResponse:
+      type: object
+      additionalProperties: true
+      description: 'GET /discovery/jobs — a page of the tenant''s discovery jobs, newest first.'
+      required:
+      - jobs
+      - total
+      - page
+      - page_size
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveryJob'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total_pages:
+          type: integer
     DiscoveryJobResponse:
       type: object
       additionalProperties: true
@@ -11184,55 +11635,263 @@ components:
             network segment with auto-approve enabled.
         pending_approval:
           type: integer
-          description: Queue rows no rule matched — the asset is in Discovery → Approvals.
+          description: |
+            Queue rows genuinely awaiting a human — no rule matched, and the
+            asset is in Discovery → Approvals. Excludes `observed` (host
+            observations, which never await approval) and `suppressed` (the
+            matched asset is archived or denied), which are not
+            auto-approved either but are not pending anything.
         awaiting_processing:
           type: integer
           description: Queue rows the pipeline has not dispositioned yet.
-    DiscoveryCapabilities:
-      type: object
-      additionalProperties: true
-      description: |
-        Discovery scanning features available to the tenant. Defaults to all
-        enabled; tenant admins can disable individual capabilities.
-      properties:
-        active_scanning:
-          type: boolean
-        tls_version_enumeration:
-          type: boolean
-        ssh_probing:
-          type: boolean
-    DiscoveryCapabilitiesResponse:
-      type: object
-      additionalProperties: false
-      description: 'GET /discovery/capabilities envelope — `{ "capabilities": {...} }`.'
-      required:
-      - capabilities
-      properties:
-        capabilities:
-          $ref: '#/components/schemas/DiscoveryCapabilities'
-    UpdateDiscoveryCapabilitiesRequest:
-      type: object
-      additionalProperties: false
-      description: PUT /discovery/capabilities body.
-      required:
-      - capabilities
-      properties:
-        capabilities:
-          $ref: '#/components/schemas/DiscoveryCapabilities'
-    UpdateDiscoveryCapabilitiesResponse:
-      type: object
-      additionalProperties: true
-      description: PUT /discovery/capabilities result.
-      required:
-      - message
-      - capabilities
-      properties:
-        message:
-          type: string
-        capabilities:
-          $ref: '#/components/schemas/DiscoveryCapabilities'
-        version:
+        suppressed:
           type: integer
+          description: |
+            Queue rows that matched an asset the tenant has taken off the
+            table — archived or denied. Nothing was materialized and no
+            approval decision will ever be made about them.
+    AutoScanPolicy:
+      type: object
+      additionalProperties: false
+      description: >
+        The tenant's automatic active-scanning policy. Stored in
+        `tenant_admin_settings.config.discovery_auto_scan`.
+      required:
+      - enabled
+      - scan_on_first_observation
+      - rescan_interval_hours
+      - protocols
+      - ports
+      properties:
+        enabled:
+          type: boolean
+          description: >
+            The master switch. Off means neither trigger fires and no host is
+            scanned unless somebody asks for it. On by default.
+        scan_on_first_observation:
+          type: boolean
+          description: >
+            Scan a newly observed internal address as soon as it appears, rather
+            than waiting for the next scheduled sweep. Independent of the
+            rescan schedule — a tenant can keep the daily rescan and decline to
+            be scanned the instant something appears.
+        rescan_interval_hours:
+          type: integer
+          description: >
+            How stale an asset's last automatic scan may get before it is
+            scanned again. 24 by default.
+        protocols:
+          type: array
+          items:
+            type: string
+          description: Restricted to the values in `limits.supported_protocols`.
+        prefer_observing_sensor:
+          type: boolean
+          description: >
+            Route each automatic scan to the tenant sensor that most recently
+            observed the host (or one bound to its network segment) instead of
+            the platform sensor, so a host reachable only from inside the
+            organization's network is scanned from where it can be reached.
+            On by default. Off runs every automatic scan from the platform
+            sensor. Optional on PUT: a client that omits it leaves the stored
+            value unchanged. Manual scans choose per run via `run_from` and
+            are not governed by this.
+        ports:
+          type: array
+          items:
+            type: integer
+          description: >
+            The ports each automatic scan probes. Defaults to the well-known
+            TLS and SSH ports — deliberately narrower than the Discover
+            wizard's crypto/OT set, because file-sharing (139/445) and
+            industrial-control ports (502, 4840, 44818, 47808) are reasonable
+            for a scan a person chose once and not for one that repeats against
+            every host on every interval. A tenant who wants them adds them.
+    AutoScanLimits:
+      type: object
+      additionalProperties: false
+      description: >
+        The bounds the server accepts, carried in the response so the page
+        validates against the server's numbers. Without them a change to the
+        limits would leave a control accepting values the server refuses.
+      required:
+      - min_rescan_interval_hours
+      - max_rescan_interval_hours
+      - max_ports
+      - supported_protocols
+      - default_ports
+      properties:
+        min_rescan_interval_hours:
+          type: integer
+        max_rescan_interval_hours:
+          type: integer
+        max_ports:
+          type: integer
+          description: The most ports one policy may list.
+        supported_protocols:
+          type: array
+          items:
+            type: string
+        default_ports:
+          type: array
+          items:
+            type: integer
+          description: The curated default port set, so the page can offer "reset to defaults".
+    AutoScanRecentJob:
+      type: object
+      additionalProperties: false
+      description: One automatic scan the platform ran.
+      required:
+      - id
+      - status
+      - target_count
+      - created_at
+      - executor
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        target_count:
+          type: integer
+          description: How many distinct addresses the job covered.
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        executor:
+          type: string
+          enum: [platform, sensor]
+          description: Who ran (or is running) the scan — the platform sensor, or a tenant sensor.
+        executor_name:
+          type: string
+          description: The tenant sensor's name when `executor` is `sensor`.
+        executor_last_heartbeat:
+          type: string
+          format: date-time
+          description: When that sensor last checked in — shown beside a "sensor offline" failure.
+        dispatched_at:
+          type: string
+          format: date-time
+          description: When the job's command was written for the sensor.
+        picked_up_at:
+          type: string
+          format: date-time
+          description: When the sensor collected the command on a heartbeat.
+        error_message:
+          type: string
+          description: Why the scan failed, when it did.
+    AutoScanNotScanned:
+      type: object
+      additionalProperties: false
+      description: >
+        One reason the last sweep left hosts out, and how many. The reason is
+        the address classification verbatim — `public`, `carrier_grade_nat`
+        (RFC 6598, 100.64.0.0/10), `excluded` (the platform's own addresses),
+        `link_local`, `loopback`, `multicast`, `unspecified`, `zoned`,
+        `unparseable`. The page owns the plain-language label and, for the
+        first two, the call to action: register the range as a network
+        segment to bring those hosts into scope.
+      required:
+      - reason
+      - count
+      properties:
+        reason:
+          type: string
+        count:
+          type: integer
+    AutoScanSummary:
+      type: object
+      additionalProperties: false
+      description: >
+        What automatic scanning has been doing. Read-only — the worker writes
+        it, and it lives under its own key so saving the policy cannot rewrite
+        the platform's account of its own runs.
+      required:
+      - last_sweep_jobs
+      - last_sweep_assets
+      - assets_in_scope
+      - recent_jobs
+      - not_scanned
+      properties:
+        not_scanned:
+          type: array
+          description: >
+            Hosts the last sweep looked at and refused, by reason. Empty means
+            every eligible host was scanned — which is a different answer from
+            "no sweep has run", carried by `last_sweep_at` being absent. This
+            exists because a tenant whose estate is in carrier-grade NAT space
+            would otherwise see "Automatic scanning: on" over a sweep that
+            scans nothing.
+          items:
+            $ref: '#/components/schemas/AutoScanNotScanned'
+        last_sweep_at:
+          type: string
+          format: date-time
+          description: >
+            Absent means no sweep has been recorded for this tenant yet — which
+            is a different answer from a sweep that found nothing due.
+        next_sweep_at:
+          type: string
+          format: date-time
+        last_sweep_jobs:
+          type: integer
+        last_sweep_assets:
+          type: integer
+        assets_in_scope:
+          type: integer
+          description: >
+            Every asset automatic scanning COVERS, whether or not it is due
+            right now — internal address, not archived or denied, not
+            third-party. Computed from the same rule the sweep selects by.
+        recent_jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AutoScanRecentJob'
+    AutoScanResponse:
+      type: object
+      additionalProperties: false
+      description: 'GET/PUT /discovery/auto-scan envelope.'
+      required:
+      - auto_scan
+      - limits
+      - summary
+      properties:
+        auto_scan:
+          $ref: '#/components/schemas/AutoScanPolicy'
+        limits:
+          $ref: '#/components/schemas/AutoScanLimits'
+        summary:
+          $ref: '#/components/schemas/AutoScanSummary'
+    AutoScanUpdateRequest:
+      type: object
+      additionalProperties: false
+      description: PUT /discovery/auto-scan body. Every field is required.
+      required:
+      - enabled
+      - scan_on_first_observation
+      - rescan_interval_hours
+      - protocols
+      - ports
+      properties:
+        enabled:
+          type: boolean
+        scan_on_first_observation:
+          type: boolean
+        rescan_interval_hours:
+          type: integer
+          minimum: 1
+          maximum: 720
+        protocols:
+          type: array
+          items:
+            type: string
+        ports:
+          type: array
+          items:
+            type: integer
     DiscoveryMessageResponse:
       type: object
       additionalProperties: false

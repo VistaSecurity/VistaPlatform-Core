@@ -47,7 +47,14 @@ func (sp *SSHProber) ProbeSSH(hostname string, port int) (map[string]interface{}
 // the rest of the platform reads. The key names are load-bearing:
 // inventory-service's SSH ingest reads ssh_banner, ssh_host_key_type and
 // ssh_key_types, and asset identity resolution reads
-// ssh_host_key_fingerprint. The banner is always present (possibly empty);
+// ssh_host_key_fingerprint.
+//
+// The server's SSH_MSG_KEXINIT offer and the algorithms it negotiates
+// (ssh_kex_algorithm, ssh_encryption_alg_c2s, ssh_mac_alg_c2s,
+// ssh_*_algs_*_server) ride along in res.Metadata under those same ingest key
+// names — the shared prober names them that way precisely so this function
+// needs no per-field mapping and the two runtimes cannot drift. The banner is
+// always present (possibly empty);
 // the host-key keys appear only when a kex actually delivered one, so a
 // banner-only fallback does not manufacture an empty key type or a
 // one-element list holding "".

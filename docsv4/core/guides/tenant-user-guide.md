@@ -588,10 +588,11 @@ view.
   which counts the assets using it ("Unlinked" when none). The drawer drills
   through to the using asset. See
   [Cryptographic Keys](../features/cryptographic-keys.md).
-- **Configuration** — negotiated cryptographic configurations, grouped by
-  strength: Weak, Acceptable, Strong, and **Not assessed** — which is its own
-  group so that unresolved configurations are never quietly counted as strong.
-  Filters for Environment, Risk and Strength.
+- **Configuration** — negotiated cryptographic configurations, grouped by the
+  numeric risk bands Critical, High, Medium, Low and Informational, with **Not
+  assessed** as its own group when no numeric evidence establishes a score.
+  Filters for Environment and Risk band. The catalogue's qualitative strength
+  is separate evidence and is not derived from the numeric score.
 - **TLS** and **SSH** — the same configuration lens, narrowed to one protocol.
 - **Data Protection** — at-rest posture across the resources that store data,
   with **Resource type**, **Assessment** and **Risk** filters. Each row names the

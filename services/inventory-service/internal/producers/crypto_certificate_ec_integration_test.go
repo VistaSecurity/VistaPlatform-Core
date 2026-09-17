@@ -62,7 +62,7 @@ func seededCryptoFixture(t *testing.T, code string) (*cryptoFixture, int) {
 //     no catalogue match, no pqc_vulnerable finding, and every assertion below
 //     fails.
 func TestIntegration_CryptoProducer_ECDSACertificateIsPQCVulnerable(t *testing.T) {
-	f, risk := seededCryptoFixture(t, "ECDSA")
+	f, _ := seededCryptoFixture(t, "ECDSA")
 	ctx := context.Background()
 
 	cfg := f.configuration(t, "TLS 1.3", 0)
@@ -88,28 +88,13 @@ func TestIntegration_CryptoProducer_ECDSACertificateIsPQCVulnerable(t *testing.T
 		t.Errorf("run counted %d PQC-vulnerable subjects, want at least the certificate", run.PQCVulnerable)
 	}
 
-	// The same resolution scores it: the row's own risk, and the evidence names
-	// the row. A row rated 0 raises nothing, which is also fine.
-	var score int
-	var evidence []byte
-	err := f.owner.QueryRow(`
-		SELECT score, evidence FROM findings
-		WHERE tenant_id = $1 AND producer = 'crypto' AND kind = 'weak_certificate' AND subject_id = $2`,
-		f.tenant, certID).Scan(&score, &evidence)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		if risk > 0 {
-			t.Fatalf("no weak_certificate finding for an ECDSA certificate whose catalogue row scores %d", risk)
-		}
-	case err != nil:
-		t.Fatalf("read the weak_certificate finding: %v", err)
-	default:
-		if score != risk {
-			t.Errorf("weak_certificate score = %d, want the ECDSA row's %d", score, risk)
-		}
-		if got := keyCatalogueCodes(t, evidence); len(got) != 1 || got[0] != "ECDSA" {
-			t.Errorf("public_key_algorithm resolved to %v, want exactly [ECDSA]", got)
-		}
+	// The recommended EC row's nonzero score is not a weak judgment.
+	var count int
+	if err := f.owner.QueryRow(`SELECT count(*) FROM findings WHERE tenant_id=$1 AND kind='weak_certificate' AND subject_id=$2`, f.tenant, certID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("recommended ECDSA raised %d weak findings", count)
 	}
 
 	var covered bool

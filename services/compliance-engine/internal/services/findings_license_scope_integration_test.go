@@ -121,8 +121,8 @@ func newLicenseScopeFixture(t *testing.T) *licenseScopeFixture {
 
 	f := &licenseScopeFixture{
 		svc: &FindingsService{db: db}, eval: NewEvaluationService(db), db: db, tenant: tenant,
-		licensedFwID: licensedFwID, licensedControl: newLicensedControl("Critical"),
-		unlicensedFwID: unlicensedFwID, unlicensedControl: newUnlicensedControl("Critical"),
+		licensedFwID: licensedFwID, licensedControl: newLicensedControl("critical"),
+		unlicensedFwID: unlicensedFwID, unlicensedControl: newUnlicensedControl("critical"),
 		assetID: uuid.New(),
 	}
 
@@ -346,7 +346,7 @@ func TestIntegration_Findings_TenantCustomPolicyFindingsStayVisible(t *testing.T
 
 	if _, err := f.db.Exec(`
 		INSERT INTO tenant_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant)
-		VALUES ($1, $2, 'TC-1', 'Custom control', 'integration fixture control', 'Critical', true)`,
+		VALUES ($1, $2, 'TC-1', 'Custom control', 'integration fixture control', 'critical', true)`,
 		tenantControlID, tenantFwID); err != nil {
 		t.Fatalf("seed tenant control: %v", err)
 	}

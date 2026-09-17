@@ -3,6 +3,8 @@ package network
 import (
 	"net"
 	"net/url"
+
+	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 )
 
 // InterfaceAddress is one IP bound to one interface on an agent host.
@@ -21,6 +23,15 @@ type InterfaceAddress struct {
 	// IsPrimary marks the address the agent reaches the control plane from.
 	// At most one address per agent carries it.
 	IsPrimary bool `json:"is_primary,omitempty"`
+	// MAC is the hardware address of the interface this address is bound to,
+	// lowercase colon-separated, or "" when the interface has none, a
+	// locally-administered one (randomised Wi-Fi, a virtual NIC), or a
+	// first-hop-redundancy virtual-router one (VRRP/HSRP/GLBP). Those three
+	// are excluded here for the same reason shared/hostobs excludes them from
+	// an observation's identifier: none of them names a stable chassis, and a
+	// rotating or floating address would make the agent's own host look like a
+	// new asset every time it changed.
+	MAC string `json:"mac,omitempty"`
 }
 
 // HostAddresses enumerates every usable IP bound on this host, marking the one
@@ -44,6 +55,7 @@ func HostAddresses(primaryIP string) []InterfaceAddress {
 		if err != nil {
 			continue
 		}
+		mac := usableInterfaceMAC(iface)
 		for _, addr := range addrs {
 			ipNet, ok := addr.(*net.IPNet)
 			if !ok || ipNet.IP == nil {
@@ -60,10 +72,30 @@ func HostAddresses(primaryIP string) []InterfaceAddress {
 				Address:       ip,
 				PrefixLength:  prefix,
 				IsPrimary:     primaryIP != "" && ip == primaryIP,
+				MAC:           mac,
 			})
 		}
 	}
 	return out
+}
+
+// usableInterfaceMAC renders an interface's hardware address, or "" when it
+// has none or the address is not a stable identifier of this chassis — the
+// same exclusions shared/hostobs applies to a passively observed MAC before
+// treating it as an identifier (locally-administered / randomised, or a
+// first-hop-redundancy virtual-router address).
+func usableInterfaceMAC(iface net.Interface) string {
+	mac := hostobs.MACFromBytes(iface.HardwareAddr)
+	if mac == "" {
+		return ""
+	}
+	if _, virtual := hostobs.VirtualMACProtocol(mac); virtual {
+		return ""
+	}
+	if hostobs.MACLocallyAdministered(mac) {
+		return ""
+	}
+	return mac
 }
 
 // PrimarySourceIPv4 returns the local address the kernel would use to reach

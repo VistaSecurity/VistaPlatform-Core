@@ -5,7 +5,7 @@
 // go through the typed clients.tenantHealth.
 import { useMemo, useState } from 'react';
 import { Activity, ChevronUp, ChevronDown, AlertTriangle, Lightbulb } from 'lucide-react';
-import { MiniBar, StatusTag, Tag, healthColor, relTime } from '../../components/ui/primitives';
+import { MiniBar, Tag, healthColor, healthIndexPresentation, relTime } from '../../components/ui/primitives';
 import { Modal } from '../../components/ui/modal';
 import {
   useTenantHealthList,
@@ -16,13 +16,6 @@ import {
 
 type SortKey = 'tenant' | 'score' | 'status' | 'alerts';
 type SortDir = 'asc' | 'desc';
-
-// health_status → the design StatusTag key (StatusTag falls back to the raw key,
-// so map the health vocabulary onto known operational signals where it helps).
-const STATUS_KEY: Record<string, string> = {
-  excellent: 'healthy', good: 'active', fair: 'degraded', poor: 'past_due', critical: 'failed',
-};
-const statusKey = (s: string) => STATUS_KEY[s] ?? s;
 
 const SEVERITY_COLOR: Record<string, string> = {
   critical: 'var(--danger)', high: 'var(--warn-strong)', medium: 'var(--warn)', low: 'var(--neutral)',
@@ -57,6 +50,7 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
   // 0 for want of data, not because the tenant is unwell. Never render it as a
   // score.
   const unmeasured = summary.health_status === 'unknown';
+  const healthIndex = healthIndexPresentation(summary.overall_score, !unmeasured);
   const unavailableSources = detail?.score_breakdown.unavailable_sources ?? [];
 
   return (
@@ -70,11 +64,11 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
     >
       {/* score header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 30, color: unmeasured ? 'var(--op-t3)' : healthColor(summary.overall_score), lineHeight: 1 }}>
-          {unmeasured ? '—' : Math.round(summary.overall_score)}
+        <div data-testid="tenant-health-index" style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 30, color: healthIndex?.color ?? 'var(--op-t3)', lineHeight: 1 }}>
+          {healthIndex ? `${healthIndex.score}/100` : '—'}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <StatusTag status={statusKey(summary.health_status)} />
+          {healthIndex ? <Tag color={healthIndex.color}>{healthIndex.label}</Tag> : <Tag color="var(--neutral)">Unknown</Tag>}
           <span className="t-muted" style={{ fontSize: 11.5 }}>Last calculated {relTime(detail?.last_calculated ?? summary.last_calculated)}</span>
         </div>
       </div>
@@ -96,7 +90,7 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
                     ? <MiniBar pct={v} color={healthColor(v)} />
                     : <span style={{ flex: 1, fontSize: 11.5, color: 'var(--op-t3)', fontStyle: 'italic' }}>{UNAVAILABLE}</span>}
                   <span className="mono" style={{ fontSize: 11.5, color: measured ? 'var(--op-t1)' : 'var(--op-t3)', width: 32, textAlign: 'right', flex: 'none' }}>
-                    {measured ? Math.round(v) : '—'}
+                    {measured ? `${Math.round(v)}/100` : '—'}
                   </span>
                 </div>
               );
@@ -209,15 +203,17 @@ export function TenantHealthPage() {
           <thead>
             <tr>
               <SortHeader label="Tenant" k="tenant" sort={sort} dir={dir} onSort={onSort} />
-              <SortHeader label="Score" k="score" sort={sort} dir={dir} onSort={onSort} align="right" />
-              <SortHeader label="Status" k="status" sort={sort} dir={dir} onSort={onSort} />
+              <SortHeader label="Health index" k="score" sort={sort} dir={dir} onSort={onSort} align="right" />
+              <SortHeader label="Band" k="status" sort={sort} dir={dir} onSort={onSort} />
               <SortHeader label="Active alerts" k="alerts" sort={sort} dir={dir} onSort={onSort} align="right" />
               <th>Trend</th>
               <th>Last calculated</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.map((t) => (
+            {sorted.map((t) => {
+              const index = healthIndexPresentation(t.overall_score, t.health_status !== 'unknown');
+              return (
               <tr key={t.tenant_id} onClick={() => setSelected(t)} style={{ cursor: 'pointer' }}>
                 <td style={{ fontWeight: 500, color: 'var(--op-t1)' }}>
                   {t.tenant_name || <span className="mono" style={{ fontSize: 11 }}>{t.tenant_id.slice(0, 8)}</span>}
@@ -226,11 +222,11 @@ export function TenantHealthPage() {
                   {/* 'unknown' = no factor could be measured. Showing 0 would
                       read as "critically unhealthy" for a tenant we simply
                       failed to poll. */}
-                  {t.health_status === 'unknown'
+                  {!index
                     ? <span className="mono t-muted" title="No health factor could be measured">—</span>
-                    : <span className="mono" style={{ fontWeight: 700, color: healthColor(t.overall_score) }}>{Math.round(t.overall_score)}</span>}
+                    : <span className="mono" style={{ fontWeight: 700, color: index.color }}>{index.score}/100</span>}
                 </td>
-                <td><StatusTag status={statusKey(t.health_status)} /></td>
+                <td>{index ? <Tag color={index.color}>{index.label}</Tag> : <Tag color="var(--neutral)">Unknown</Tag>}</td>
                 <td style={{ textAlign: 'right' }}>
                   {t.critical_alerts > 0
                     ? <Tag color="var(--danger)">{t.critical_alerts}</Tag>
@@ -239,7 +235,8 @@ export function TenantHealthPage() {
                 <td className="t-muted" style={{ fontSize: 12, textTransform: 'capitalize' }}>{t.trend_direction || '—'}</td>
                 <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(t.last_calculated)}</td>
               </tr>
-            ))}
+              );
+            })}
             {isLoading && <tr><td colSpan={6} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>Loading tenant health…</td></tr>}
             {isError && !isLoading && <tr><td colSpan={6} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>Couldn't load tenant health. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => refetch()}>Retry</button></td></tr>}
             {!isLoading && !isError && sorted.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>No tenant health records yet.</td></tr>}

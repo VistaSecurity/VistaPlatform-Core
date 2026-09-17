@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
@@ -48,15 +50,138 @@ func boundSSHBanner(s string) string {
 	return s
 }
 
-// probeSSH performs an SSH handshake to collect algorithm negotiation data.
-// It completes the key exchange using golang.org/x/crypto/ssh, capturing:
-//   - server software banner
-//   - host key type and SHA256 fingerprint
+// probeSSH collects an SSH server's cryptographic posture in two passes:
 //
-// The connection is closed immediately after kex; no authentication is
-// attempted. Ported from the sensor's active prober; returns the neutral
-// ProbeResult. The hostname argument is unused for SSH.
+//  1. sshprobeKexInit reads the server's SSH_MSG_KEXINIT — its offered key
+//     exchange, host key, cipher, MAC and compression name-lists — plus the
+//     identification banner, and derives what would be negotiated against the
+//     probe's own strong-first offer (probe_ssh_kexinit.go).
+//  2. sshprobeHandshake completes the key exchange with
+//     golang.org/x/crypto/ssh to obtain the host key type and its SHA256
+//     fingerprint, which KEXINIT alone cannot give.
+//
+// Neither pass authenticates and neither derives or retains key material. The
+// host key type and fingerprint are posture, not material.
+//
+// The two passes are independent on purpose: pass 1 needs no algorithm in
+// common with the server, so a legacy-only appliance that pass 2 cannot
+// handshake with is still fully inventoried, and a pass-2 failure no longer
+// costs the whole finding. The hostname argument is unused for SSH.
 func probeSSH(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error) {
+	address := conn.RemoteAddr().String()
+	kex, kexErr := sshprobeKexInit(p, address)
+
+	// The banner-only fallback is worth a third connection only when the
+	// KEXINIT pass failed. It reads the identification string with no
+	// knowledge of what follows it, whereas the KEXINIT pass has already
+	// parsed that line structurally — so when the KEXINIT pass succeeded, the
+	// fallback can only produce a worse answer for the one field it supplies.
+	result, err := sshprobeHandshake(p, conn, port, kexErr != nil)
+	if err != nil {
+		if kexErr != nil {
+			return nil, err
+		}
+		// The handshake yielded nothing, but the KEXINIT capture did — which
+		// is the ordinary outcome against a server whose algorithms x/crypto
+		// refuses. Keep what was measured rather than discarding it.
+		result = &ProbeResult{Protocol: "SSH", Port: port, Metadata: map[string]interface{}{}}
+	}
+	if kexErr == nil {
+		applySSHKexInit(result, kex)
+	}
+	return result, nil
+}
+
+// applySSHKexInit folds a KEXINIT capture into a ProbeResult.
+//
+// The metadata key names are load-bearing: inventory-service's SSH ingest
+// (services/inventory-service/internal/services/ssh_ingest.go) reads
+// ssh_kex_algorithms_server, ssh_encryption_algs_{c2s,s2c}_server and
+// ssh_mac_algs_c2s_server — the SAME names the passive sensor's SSH assembler
+// emits — so the active probe's offer lands in the same columns and junction
+// rows as a passive observation, with no second mapping to keep in step.
+//
+// The banner is only overwritten when the handshake did not produce one: both
+// passes read the same identification string, so they agree, and preferring
+// the existing value keeps the handshake authoritative where it spoke.
+func applySSHKexInit(result *ProbeResult, kex *sshKexInitCapture) {
+	if kex == nil {
+		return
+	}
+	if result.Metadata == nil {
+		result.Metadata = map[string]interface{}{}
+	}
+
+	if result.SSHBanner == "" && kex.Banner != "" {
+		result.SSHBanner = kex.Banner
+		result.Metadata["banner"] = kex.Banner
+		result.Metadata["ssh_banner"] = kex.Banner
+	}
+
+	// Derive the version fields from whichever banner won, rather than from
+	// the KEXINIT pass unconditionally. Both passes read the same
+	// identification string so they normally agree, but deriving from the
+	// banner that was actually kept is what guarantees ssh_banner,
+	// ssh_protocol_version and ssh_software_version always describe one
+	// string — an invariant worth having for free rather than a coincidence
+	// worth relying on.
+	result.SSHProtocolVersion = cryptoparse.SSHProtocolVersionCode(result.SSHBanner)
+	result.SSHSoftwareVersion = sshSoftwareVersion(result.SSHBanner)
+
+	result.SSHKexAlgorithm = kex.Kex
+	result.SSHHostKeyAlgorithm = kex.HostKey
+	result.SSHEncryptionAlgC2S = kex.EncryptionC2S
+	result.SSHEncryptionAlgS2C = kex.EncryptionS2C
+	result.SSHMACAlgC2S = kex.MACC2S
+	result.SSHMACAlgS2C = kex.MACS2C
+	result.SSHCompressionAlg = kex.CompressionC2S
+
+	result.SSHServerKexAlgorithms = kex.ServerKex
+	result.SSHServerHostKeyAlgorithms = kex.ServerHostKey
+	result.SSHServerEncryptionC2S = kex.ServerEncryptionC2S
+	result.SSHServerEncryptionS2C = kex.ServerEncryptionS2C
+	result.SSHServerMACsC2S = kex.ServerMACC2S
+	result.SSHServerMACsS2C = kex.ServerMACS2C
+	result.SSHServerCompressionC2S = kex.ServerCompressionC2S
+	result.SSHServerCompressionS2C = kex.ServerCompressionS2C
+
+	setString := func(key, value string) {
+		if value != "" {
+			result.Metadata[key] = value
+		}
+	}
+	setList := func(key string, value []string) {
+		if len(value) > 0 {
+			result.Metadata[key] = value
+		}
+	}
+
+	setString("ssh_protocol_version", result.SSHProtocolVersion)
+	setString("ssh_software_version", result.SSHSoftwareVersion)
+
+	setString("ssh_kex_algorithm", kex.Kex)
+	setString("ssh_host_key_algorithm", kex.HostKey)
+	setString("ssh_encryption_alg_c2s", kex.EncryptionC2S)
+	setString("ssh_encryption_alg_s2c", kex.EncryptionS2C)
+	setString("ssh_mac_alg_c2s", kex.MACC2S)
+	setString("ssh_mac_alg_s2c", kex.MACS2C)
+	setString("ssh_compression_alg", kex.CompressionC2S)
+
+	setList("ssh_kex_algorithms_server", kex.ServerKex)
+	setList("ssh_host_key_algs_server", kex.ServerHostKey)
+	setList("ssh_encryption_algs_c2s_server", kex.ServerEncryptionC2S)
+	setList("ssh_encryption_algs_s2c_server", kex.ServerEncryptionS2C)
+	setList("ssh_mac_algs_c2s_server", kex.ServerMACC2S)
+	setList("ssh_mac_algs_s2c_server", kex.ServerMACS2C)
+	setList("ssh_compression_algs_c2s_server", kex.ServerCompressionC2S)
+	setList("ssh_compression_algs_s2c_server", kex.ServerCompressionS2C)
+}
+
+// sshprobeHandshake completes the SSH key exchange with
+// golang.org/x/crypto/ssh to capture the server banner, the host key type and
+// its SHA256 fingerprint. The connection is closed immediately after kex; no
+// authentication is attempted.
+func sshprobeHandshake(p *Prober, conn net.Conn, port int, allowBannerFallback bool) (*ProbeResult, error) {
 	if err := conn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
 		return nil, fmt.Errorf("failed to set SSH probe deadline: %w", err)
 	}
@@ -120,7 +245,7 @@ func probeSSH(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error
 		// Authentication failure is expected and acceptable — kex already succeeded.
 		// For non-auth handshake failures (e.g. no common algorithms), fall back to
 		// a banner-only read so we still capture basic SSH metadata.
-		if sshprobeShouldFallbackToBanner(err, sshConn != nil, hostKeyType != "") {
+		if allowBannerFallback && sshprobeShouldFallbackToBanner(err, sshConn != nil, hostKeyType != "") {
 			// NewClientConn has already consumed the version banner from this
 			// stream AND closed conn on its way out, so the fallback must open
 			// a fresh connection — a read on conn here can only ever fail.
@@ -146,10 +271,11 @@ func probeSSH(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error
 		result.SSHKeyTypes = []string{hostKeyType}
 	}
 
-	// Note: golang.org/x/crypto/ssh does not expose the negotiated algorithms
-	// via a public API after the handshake. We record what the server version
-	// string says and the host key type, which IS the negotiated key type and
-	// the most security-relevant piece of information.
+	// golang.org/x/crypto/ssh exposes no negotiated algorithm and neither
+	// side's KEXINIT name-lists, so this pass records only the banner and the
+	// host key — the key type IS negotiated, and its fingerprint is what asset
+	// identity resolution keys on. Everything else about the server's
+	// algorithms comes from the KEXINIT pass (probe_ssh_kexinit.go).
 	result.Metadata["banner"] = result.SSHBanner
 	result.Metadata["ssh_banner"] = result.SSHBanner
 	result.Metadata["host_key_type"] = hostKeyType
@@ -201,12 +327,19 @@ func sshprobeBannerOnly(p *Prober, address string, port int) (*ProbeResult, erro
 	if err := conn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
 		return nil, fmt.Errorf("failed to set SSH banner read deadline: %w", err)
 	}
-	banner := make([]byte, 1024)
-	n, err := conn.Read(banner)
+	// Read the identification LINE, not a blob of whatever arrived first.
+	// A plain Read of 1024 bytes is what this used to do, and an SSH server
+	// sends its SSH_MSG_KEXINIT packet immediately behind the identification
+	// string — usually in the same TCP segment — so the read returned the
+	// version line with the binary packet stapled to it, and that went into
+	// ssh_banner and on to the asset record. sshReadIdentification stops at
+	// the newline RFC 4253 §4.2 terminates the line with, and skips any
+	// preamble lines before it.
+	raw, err := sshReadIdentification(bufio.NewReader(conn))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read SSH banner: %w", err)
 	}
-	bannerStr := boundSSHBanner(string(banner[:n]))
+	bannerStr := boundSSHBanner(raw)
 	return &ProbeResult{
 		Protocol:  "SSH",
 		Port:      port,

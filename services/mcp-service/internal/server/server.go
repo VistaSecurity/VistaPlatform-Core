@@ -41,15 +41,15 @@ func NewMCPServer(deps *tools.Deps) *mcp.Server {
 // authentication. Stateless JSON mode: every request is self-contained, no
 // session affinity, no SSE — the right shape for a horizontally scaled
 // service behind a gateway.
-func NewHandler(mcpServer *mcp.Server, ex *platform.Exchanger, rec *auditlog.Recorder) http.Handler {
+func NewHandler(mcpServer *mcp.Server, ex *platform.Exchanger, rec *auditlog.Recorder, disc Discovery) http.Handler {
 	streamable := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
 	)
-	return authMiddleware(ex, rec, streamable)
+	return authMiddleware(ex, rec, disc, streamable)
 }
 
-func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, next http.Handler) http.Handler {
+func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, disc Discovery, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Capture provenance before anything else: it is needed by the auth
 		// records below AND by every tool record downstream, which has no
@@ -66,7 +66,7 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, next http.Ha
 				Outcome: auditlog.OutcomeTokenMissing,
 				Request: reqCtx,
 			})
-			unauthorized(w, "Missing bearer token. Pass a Vista Platform API token (qvpat_...) in the Authorization header; mint one in Settings → API Tokens.")
+			unauthorized(w, disc.ResourceMetadataURL(r), "Missing bearer token. Pass a Vista Platform API token (qvpat_...) in the Authorization header; mint one in Settings → API Tokens.")
 			return
 		}
 		// Exchange records its own outcome — accepted, rejected or backend
@@ -75,7 +75,7 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, next http.Ha
 		grant, err := ex.Exchange(ctx, token)
 		if err != nil {
 			if err == platform.ErrUnauthorized {
-				unauthorized(w, "Invalid, expired or revoked API token.")
+				unauthorized(w, disc.ResourceMetadataURL(r), "Invalid, expired or revoked API token.")
 				return
 			}
 			logrus.WithError(err).Error("PAT exchange failed")
@@ -98,15 +98,22 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, true
 }
 
-func unauthorized(w http.ResponseWriter, msg string) {
-	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata=""`)
+// unauthorized emits the RFC 9728 §5.1 challenge. `resourceMetadata` MUST be
+// the absolute URL of this resource's protected-resource metadata document:
+// it is the only hop an MCP client has from "401" to "which authorization
+// server do I talk to". This shipped as a literal empty string for one
+// release; a client reading `resource_metadata=""` has learned nothing and
+// abandons the flow. TestChallengeCarriesAResolvableResourceMetadataURL pins
+// it non-empty.
+func unauthorized(w http.ResponseWriter, resourceMetadata, msg string) {
+	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+resourceMetadata+`"`)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // NewRouter builds the Gin router: health endpoints plus the MCP endpoint.
-func NewRouter(handler http.Handler) *gin.Engine {
+func NewRouter(handler http.Handler, disc Discovery) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Recovery())
 
@@ -119,6 +126,14 @@ func NewRouter(handler http.Handler) *gin.Engine {
 	}
 	router.GET("/health", health)
 	router.GET("/ready", health)
+
+	// RFC 9728 protected-resource metadata, the target of the 401 challenge's
+	// resource_metadata parameter. Unauthenticated by necessity — a client
+	// reads it before it has any credential. Both the spec-exact path-suffixed
+	// URI and the bare root are served; see ProtectedResourceMetadataRoot.
+	prm := gin.WrapF(disc.ServeProtectedResourceMetadata)
+	router.GET(ProtectedResourceMetadataPath, prm)
+	router.GET(ProtectedResourceMetadataRoot, prm)
 
 	// MCP streamable HTTP: POST carries JSON-RPC; GET/DELETE are part of
 	// the transport surface (rejected appropriately in stateless mode).

@@ -1783,8 +1783,10 @@ export interface components {
             /** Format: uuid */
             control_id: string;
             override_type: string;
-            severity_from: string | null;
-            severity_to: string | null;
+            /** @enum {string|null} */
+            severity_from: "low" | "medium" | "high" | "critical" | null;
+            /** @enum {string|null} */
+            severity_to: "low" | "medium" | "high" | "critical" | null;
             rationale: string;
             /** @description "platform" or "tenant". */
             framework_type: string;
@@ -2058,7 +2060,7 @@ export interface components {
             title: string;
             description: string;
             /** @enum {string} */
-            baseline_severity: "Low" | "Med" | "High" | "Critical";
+            baseline_severity: "low" | "medium" | "high" | "critical";
             crypto_relevant: boolean;
             /**
              * @description ADR-0008 D4.1 provenance: where this control came from. ABSENT means the row predates the column — deliberately distinct from `declared`, because we do not know who wrote a historical control and guessing would invent the fact this field exists to record.
@@ -2092,7 +2094,8 @@ export interface components {
             predicate: {
                 [key: string]: unknown;
             };
-            severity_override?: string;
+            /** @enum {string} */
+            severity_override?: "low" | "medium" | "high" | "critical";
             weight: number;
             /** Format: date-time */
             created_at: string;
@@ -2136,7 +2139,7 @@ export interface components {
             title: string;
             description: string;
             /** @enum {string} */
-            baseline_severity: "Low" | "Med" | "High" | "Critical";
+            baseline_severity: "low" | "medium" | "high" | "critical";
             crypto_relevant: boolean;
             /**
              * @description ADR-0008 D4.1 provenance: where this control came from. ABSENT means the row predates the column — deliberately distinct from `declared`, because we do not know who wrote a historical control and guessing would invent the fact this field exists to record.
@@ -2172,7 +2175,7 @@ export interface components {
              * @description Optional per-mapping severity override; omitted when unset.
              * @enum {string}
              */
-            severity_override?: "Low" | "Med" | "High" | "Critical";
+            severity_override?: "low" | "medium" | "high" | "critical";
             weight: number;
             /** Format: date-time */
             created_at: string;
@@ -2197,7 +2200,7 @@ export interface components {
             title: string;
             description?: string;
             /** @enum {string} */
-            baseline_severity: "Low" | "Med" | "High" | "Critical";
+            baseline_severity: "low" | "medium" | "high" | "critical";
             crypto_relevant?: boolean;
             /**
              * @description Where this control came from. READ ON CREATE ONLY — provenance records origin, and editing a drafted control does not make it a hand-written one. Omitted, it defaults to `declared`. A client accepting an Author-seam draft sends `inferred`.
@@ -2217,7 +2220,7 @@ export interface components {
                 [key: string]: unknown;
             };
             /** @enum {string} */
-            severity_override?: "Low" | "Med" | "High" | "Critical";
+            severity_override?: "low" | "medium" | "high" | "critical";
             weight?: number;
         };
         /** @description Envelope for GET /frameworks/tenant — `{ "frameworks": [...] }`. */
@@ -2476,7 +2479,7 @@ export interface components {
             title: string;
             description?: string;
             /** @enum {string} */
-            baseline_severity: "Low" | "Med" | "High" | "Critical";
+            baseline_severity: "low" | "medium" | "high" | "critical";
             crypto_relevant?: boolean;
             /**
              * @description Where this control came from. READ ON CREATE ONLY — provenance records origin, and editing a drafted control does not make it a hand-written one. Omitted, it defaults to `declared`. A client accepting an Author-seam draft sends `inferred`.
@@ -2538,7 +2541,7 @@ export interface components {
             title: string;
             description?: string;
             /** @enum {string} */
-            severity?: "Low" | "Med" | "High" | "Critical";
+            severity?: "low" | "medium" | "high" | "critical";
             citations?: components["schemas"]["DraftCitation"][];
             measurements?: components["schemas"]["MeasurementDraft"][];
             /** @description Plain-language remarks for the reviewer — a rule that was dropped, a severity the passage did not state, or that this control has no rule and will therefore evaluate to "not assessed" rather than to a pass. Addressed to a human; nothing parses them. */
@@ -2548,7 +2551,7 @@ export interface components {
         /** @description One thing the model produced that was discarded before anyone saw it. */
         DraftDrop: {
             /** @enum {string} */
-            reason: "no_citation" | "unresolvable_citation" | "missing_title" | "unknown_measurement_type" | "invalid_predicate" | "over_limit";
+            reason: "no_citation" | "unresolvable_citation" | "missing_title" | "invalid_severity" | "unknown_measurement_type" | "invalid_predicate" | "over_limit";
             /**
              * @description Whether a whole draft was discarded or only one of its rules.
              * @enum {string}
@@ -2738,8 +2741,10 @@ export interface components {
             /** Format: uuid */
             control_id: string;
             override_type: string;
-            severity_from?: string;
-            severity_to?: string;
+            /** @enum {string} */
+            severity_from?: "low" | "medium" | "high" | "critical";
+            /** @enum {string} */
+            severity_to?: "low" | "medium" | "high" | "critical";
             rationale: string;
             /** @description platform or tenant (defaults to platform). */
             framework_type?: string;

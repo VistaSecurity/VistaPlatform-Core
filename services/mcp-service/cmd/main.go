@@ -67,9 +67,21 @@ func main() {
 	exchanger := platform.NewExchanger(cfg.AuthServiceURL, httpc, recorder)
 	client := platform.NewClient(httpc, cfg.InventoryServiceURL, cfg.ComplianceEngineURL, cfg.CBOMServiceURL)
 
+	// Public identity advertised to OAuth clients: the resource identifier and
+	// the authorization-server pointer are both built from this origin.
+	discovery := server.Discovery{PublicBaseURL: cfg.PublicBaseURL}
+	if cfg.PublicBaseURL == "" {
+		// Not fatal — the metadata falls back to the request's own origin — but
+		// an operator should know the advertised URL is inferred rather than
+		// declared, because a client that follows it to the wrong host simply
+		// fails to connect with no explanation.
+		log.Printf("⚠️  neither OAUTH_CALLBACK_BASE_URL nor WEB_UI_BASE_URL is set — " +
+			"OAuth discovery URLs will be derived from the inbound request's Host header")
+	}
+
 	mcpServer := server.NewMCPServer(&tools.Deps{Client: client, Audit: recorder})
-	handler := server.NewHandler(mcpServer, exchanger, recorder)
-	router := server.NewRouter(handler)
+	handler := server.NewHandler(mcpServer, exchanger, recorder, discovery)
+	router := server.NewRouter(handler, discovery)
 
 	// Health-only listener on the plain port when mTLS serves the API on 8443
 	// (kubelet probes need plaintext) — same dual-listener shape as every

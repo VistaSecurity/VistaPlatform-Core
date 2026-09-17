@@ -17,7 +17,7 @@
 import { Fragment, useState } from 'react';
 import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
-import { Icon, MiniBar } from '../../components/ui';
+import { Icon, MiniBar, matcherConfidencePercent, percentLabel } from '../../components/ui';
 import { classLabel, identifierKindLabel, sourceKindLabel } from '../inventory/asset-shape';
 import { SOURCE_LABEL, sourceOfProposal } from './approval-sources';
 import type { MergeCandidate, MergeProposal, MergeScoreFactor } from '../inventory/asset-queries';
@@ -40,8 +40,8 @@ export function readIdentifier(raw: unknown): MatchedIdentifier {
  *  wrong" — so it is shown as an absence rather than as a 0% bar that reads as
  *  a confident rejection. */
 export function scoreLabel(score: number): string | null {
-  if (!Number.isFinite(score) || score <= 0) return null;
-  return `${Math.round(score <= 1 ? score * 100 : score)}%`;
+  const pct = matcherConfidencePercent(score);
+  return pct === null ? null : percentLabel(pct);
 }
 
 /** The best human label for a candidate. */
@@ -111,7 +111,8 @@ function CandidateCard({ candidate, selected, onSelect, selectable }: {
   selectable: boolean;
 }) {
   const idents = (candidate.matched_identifiers ?? []).map(readIdentifier);
-  const pct = scoreLabel(candidate.score);
+  const confidence = matcherConfidencePercent(candidate.score);
+  const pct = confidence === null ? null : percentLabel(confidence);
   // A candidate that can no longer be merged into is SHOWN, not dropped: "a
   // proposal that silently loses a candidate reads as if it only ever had one".
   const dead = candidate.deleted;
@@ -161,10 +162,10 @@ function CandidateCard({ candidate, selected, onSelect, selectable }: {
         </div>
       )}
 
-      {pct && (
+      {confidence !== null && (
         <div style={{ marginTop: 7 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <div style={{ width: 44 }}><MiniBar pct={Math.round(candidate.score <= 1 ? candidate.score * 100 : candidate.score)} color={candidate.score >= 0.8 ? 'var(--ok)' : 'var(--warn)'} /></div>
+            <div style={{ width: 44 }}><MiniBar pct={confidence} color={candidate.score >= 0.8 ? 'var(--ok)' : 'var(--warn)'} /></div>
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }} title="How likely the matcher thinks it is that these are the same thing. 50% means as likely as not.">{pct}</span>
           </div>
           {/* The score's working. A number on its own can only be agreed with;

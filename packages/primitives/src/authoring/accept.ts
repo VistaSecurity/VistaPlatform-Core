@@ -13,13 +13,14 @@
 // [AcceptDeps] and this owns the order and the partial-failure rules.
 import type { ControlDraft, MeasurementDraft } from './drafts';
 import { sourceRefFor } from './drafts';
+import { parseSeverity, controlWeight, type ControlSeverity } from '../ratings';
 
 /** The control body both create-control endpoints take. */
 export interface ControlBody {
   control_id: string;
   title: string;
   description: string;
-  baseline_severity: 'Low' | 'Med' | 'High' | 'Critical';
+  baseline_severity: ControlSeverity;
   crypto_relevant: boolean;
   source_kind: 'inferred';
   source_ref: string;
@@ -53,25 +54,24 @@ export interface AcceptOutcome {
   ruleErrors: string[];
 }
 
-const SEVERITIES = ['Low', 'Med', 'High', 'Critical'] as const;
-
 /**
  * Build the create-control body for a draft.
  *
  * Two fields are decided here rather than by the model:
  *
- * - `baseline_severity` is coerced into the four the column's CHECK admits. The
+ * - `baseline_severity` is validated against the four the column's CHECK admits. The
  *   server already normalises it, so this is the second lock rather than the
- *   first, and it defaults to Med the same way.
+ *   first. Invalid or missing severity prevents acceptance.
  * - `crypto_relevant` is true exactly when the draft carries at least one rule
  *   over the cryptographic measurement catalogue. A control with no rule is not
  *   evidence of cryptographic relevance, and flagging every draft as relevant
  *   would quietly inflate the crypto-control count on every framework.
  */
 export function controlBodyFor(draft: ControlDraft, modelId: string): ControlBody {
-  const severity = (SEVERITIES as readonly string[]).includes(draft.severity ?? '')
-    ? (draft.severity as ControlBody['baseline_severity'])
-    : 'Med';
+  const severity = parseSeverity(draft.severity ?? '');
+  if (!severity || severity === 'info' || controlWeight(severity) == null) {
+    throw new Error('Choose a valid control severity before accepting this draft.');
+  }
   return {
     control_id: draft.control_id?.trim() || draft.title.slice(0, 100),
     title: draft.title,

@@ -177,7 +177,7 @@ func TestIntegration_ControlMutations_EnqueueReconcile(t *testing.T) {
 
 	// CreateControl
 	f.reset()
-	controlID := f.newControl(t, "AUTH-1", "Critical")
+	controlID := f.newControl(t, "AUTH-1", "critical")
 	if len(f.scopedJobs()) == 0 {
 		t.Fatal("CreateControl on a PUBLISHED framework enqueued no reconcile — " +
 			"the new control will never be evaluated for any tenant")
@@ -189,7 +189,7 @@ func TestIntegration_ControlMutations_EnqueueReconcile(t *testing.T) {
 		ControlID:        "AUTH-1",
 		Title:            "Control AUTH-1 (retitled)",
 		Description:      "integration fixture control",
-		BaselineSeverity: "High",
+		BaselineSeverity: "high",
 		CryptoRelevant:   true,
 	}); err != nil {
 		t.Fatalf("UpdateControl: %v", err)
@@ -248,7 +248,7 @@ func TestIntegration_ControlMutations_EnqueueReconcile(t *testing.T) {
 func TestIntegration_ControlMutations_DraftFrameworkDoesNotFanOut(t *testing.T) {
 	f := newAuthoringFixture(t, "draft")
 
-	controlID := f.newControl(t, "DRAFT-1", "High")
+	controlID := f.newControl(t, "DRAFT-1", "high")
 	measurementID := f.seedMeasurementRow(t, controlID)
 	if err := f.svc.DeleteControlMeasurement(measurementID); err != nil {
 		t.Fatalf("DeleteControlMeasurement: %v", err)
@@ -282,7 +282,7 @@ func TestIntegration_NewControl_IsNotAssessedUntilEvaluated(t *testing.T) {
 	ctx := context.Background()
 
 	// An established control, evaluated, and violated: the tenant's real posture.
-	existing := f.newControl(t, "EST-1", "Low")
+	existing := f.newControl(t, "EST-1", "low")
 	f.seedMeasurementRow(t, existing)
 	seedTenantInventory(t, f.db, f.tenant)
 	if _, err := f.db.Exec(`
@@ -296,7 +296,7 @@ func TestIntegration_NewControl_IsNotAssessedUntilEvaluated(t *testing.T) {
 
 	// Now a platform admin adds a Critical control to the live framework.
 	// Its created_at is after the rollup's computed_at, so nothing has run it.
-	added := f.newControl(t, "NEW-1", "Critical")
+	added := f.newControl(t, "NEW-1", "critical")
 	f.seedMeasurementRow(t, added)
 
 	assessments, err := loadControlAssessments(ctx, f.db.DB, f.tenant,
@@ -317,9 +317,9 @@ func TestIntegration_NewControl_IsNotAssessedUntilEvaluated(t *testing.T) {
 	// Critical control scored as a pass (weight 4) beside the failing Low control
 	// (weight 1), which pushed the framework from 0 to 4*100/5 = 80. It must
 	// stay 0: nothing about the tenant's posture improved.
-	b := frameworkScore([]controlOutcome{
-		{BaselineSeverity: "Low", Status: assessments[existing].Status},
-		{BaselineSeverity: "Critical", Status: assessments[added].Status},
+	b := scoreForTest(t, []controlOutcome{
+		{BaselineSeverity: "low", Status: assessments[existing].Status},
+		{BaselineSeverity: "critical", Status: assessments[added].Status},
 	})
 	if b.Score == nil || *b.Score != 0 {
 		t.Fatalf("framework score = %v, want 0 — adding an unevaluated Critical control "+
@@ -339,7 +339,7 @@ func TestIntegration_ThresholdChange_IsNotAssessedUntilReEvaluated(t *testing.T)
 	ctx := context.Background()
 	seedTenantInventory(t, f.db, f.tenant)
 
-	controlID := f.newControl(t, "THR-1", "High")
+	controlID := f.newControl(t, "THR-1", "high")
 	measurementID := f.seedMeasurementRow(t, controlID)
 
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
@@ -389,7 +389,7 @@ func TestIntegration_ControlMetadataEdit_StaysAssessed(t *testing.T) {
 	ctx := context.Background()
 	seedTenantInventory(t, f.db, f.tenant)
 
-	controlID := f.newControl(t, "META-1", "High")
+	controlID := f.newControl(t, "META-1", "high")
 	f.seedMeasurementRow(t, controlID)
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
 
@@ -420,7 +420,7 @@ func TestIntegration_NoRollupRow_FailsOpen(t *testing.T) {
 	ctx := context.Background()
 	seedTenantInventory(t, f.db, f.tenant)
 
-	controlID := f.newControl(t, "OPEN-1", "High")
+	controlID := f.newControl(t, "OPEN-1", "high")
 	f.seedMeasurementRow(t, controlID)
 	// Deliberately no tenant_framework_scores row.
 
@@ -439,7 +439,7 @@ func TestIntegration_NoRollupRow_FailsOpen(t *testing.T) {
 func TestIntegration_FrameworkIDResolvers(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
 
-	controlID := f.newControl(t, "RES-1", "High")
+	controlID := f.newControl(t, "RES-1", "high")
 	measurementID := f.seedMeasurementRow(t, controlID)
 
 	got, err := f.svc.frameworkIDForControl(controlID)
@@ -489,7 +489,7 @@ func TestIntegration_FrameworkIDResolvers(t *testing.T) {
 // operators that exclude `!=`.
 func TestIntegration_MeasurementTypeRead_PopulatesJSONBFields(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
-	controlID := f.newControl(t, "MTR-1", "High")
+	controlID := f.newControl(t, "MTR-1", "high")
 
 	m, err := f.svc.AddControlMeasurement(controlID, &models.ControlMeasurementInput{
 		MeasurementTypeID: f.typeID,
@@ -548,7 +548,7 @@ func TestIntegration_MeasurementTypeRead_PopulatesJSONBFields(t *testing.T) {
 // every real row while passing against a fully-populated fixture.
 func TestIntegration_MeasurementTypeRead_ToleratesNullColumns(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
-	controlID := f.newControl(t, "MTR-2", "High")
+	controlID := f.newControl(t, "MTR-2", "high")
 
 	// Mirrors seed.sql's `cert_algorithm`: enum, no units, no valid_range, no
 	// valid_operators, no predicate_schema.
@@ -584,7 +584,7 @@ func TestIntegration_MeasurementTypeRead_ToleratesNullColumns(t *testing.T) {
 // the RETURNING clause then scanned a NULL back into a plain string.
 func TestIntegration_ControlMeasurement_SeverityOverrideIsOptional(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
-	controlID := f.newControl(t, "SEV-1", "High")
+	controlID := f.newControl(t, "SEV-1", "high")
 
 	blank, err := f.svc.AddControlMeasurement(controlID, &models.ControlMeasurementInput{
 		MeasurementTypeID: f.typeID,
@@ -604,13 +604,13 @@ func TestIntegration_ControlMeasurement_SeverityOverrideIsOptional(t *testing.T)
 		MeasurementTypeID: f.typeID,
 		RuleType:          "threshold",
 		Predicate:         map[string]interface{}{"operator": ">=", "value": float64(60)},
-		SeverityOverride:  "Critical",
+		SeverityOverride:  "critical",
 		Weight:            1,
 	})
 	if err != nil {
 		t.Fatalf("AddControlMeasurement with a severity override: %v", err)
 	}
-	if set.SeverityOverride != "Critical" {
+	if set.SeverityOverride != "critical" {
 		t.Fatalf("SeverityOverride = %q, want Critical", set.SeverityOverride)
 	}
 
@@ -658,5 +658,20 @@ func TestIntegration_ListMeasurementTypes_ReadsEverySeededRow(t *testing.T) {
 	if withRuleTypes == 0 {
 		t.Fatal("every measurement type came back with an empty allowed_rule_types — " +
 			"seed.sql sets it on all of them, so the jsonb read is dropping the value")
+	}
+}
+
+func TestIntegration_ControlWritersRejectNoncanonicalSeverity(t *testing.T) {
+	f := newAuthoringFixture(t, "draft")
+	for _, value := range []string{"Med", "High", "info", "invalid", ""} {
+		if _, err := f.svc.CreateControl(f.frameworkID, &models.PlatformFrameworkControlInput{ControlID: "INVALID", Title: "Invalid", BaselineSeverity: value}); err == nil {
+			t.Fatalf("CreateControl accepted %q", value)
+		}
+	}
+	control := f.newControl(t, "VALID", "high")
+	for _, value := range []string{"Med", "info", "invalid"} {
+		if _, err := f.svc.UpdateControl(control, &models.PlatformFrameworkControlInput{ControlID: "VALID", Title: "Invalid", BaselineSeverity: value}); err == nil {
+			t.Fatalf("UpdateControl accepted %q", value)
+		}
 	}
 }

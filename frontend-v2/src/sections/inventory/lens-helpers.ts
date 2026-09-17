@@ -2,8 +2,8 @@
 // inventory-page.tsx so they can be unit-tested directly (mirrors
 // sections/dashboard/dashboard-metrics.ts). No React, no network — every
 // function here takes plain data and returns plain data.
-import { levelFromScore } from '../../components/ui';
 import type { CryptoConfig } from './drawers';
+import { cryptoRiskPresentation } from './crypto-risk-presentation';
 
 // ---- Connections lens: raw-value cleanup (#L-1) ---------------------------
 // Connection rows render raw source/dest IPs, which come back from the
@@ -26,33 +26,32 @@ export function stripEmptyParens(v?: string | null): string | undefined {
   return v.replace(/\s*\(\s*\)\s*$/, '');
 }
 
-// ---- Configuration lens: strength grouping (#M-4) --------------------------
-export type Strength = 'Weak' | 'Acceptable' | 'Strong' | 'Not assessed';
-export const STRENGTH_META: Record<Strength, { color: string; icon: string }> = {
-  Weak: { color: 'var(--danger)', icon: 'shield-x' },
-  Acceptable: { color: 'var(--warn)', icon: 'shield' },
-  Strong: { color: 'var(--ok)', icon: 'shield-check' },
+// ---- Configuration lens: numeric risk grouping (#M-4) ----------------------
+export type ConfigurationRiskGroup = 'Critical' | 'High' | 'Medium' | 'Low' | 'Informational' | 'Not assessed';
+export const CONFIGURATION_RISK_META: Record<ConfigurationRiskGroup, { color: string; icon: string }> = {
+  Critical: { color: 'var(--danger)', icon: 'shield-x' },
+  High: { color: 'var(--warn-strong)', icon: 'shield-x' },
+  Medium: { color: 'var(--warn)', icon: 'shield' },
+  Low: { color: 'var(--ok-lime)', icon: 'shield-check' },
+  Informational: { color: 'var(--info)', icon: 'info' },
   'Not assessed': { color: 'var(--app-t3)', icon: 'help-circle' },
 };
-export function strengthOfLevel(level: string): Exclude<Strength, 'Not assessed'> {
-  const l = level.toLowerCase();
-  if (l === 'critical' || l === 'high') return 'Weak';
-  if (l === 'medium') return 'Acceptable';
-  return 'Strong';
+export function configurationRiskGroup(c: CryptoConfig): ConfigurationRiskGroup {
+  const risk = cryptoRiskPresentation(c);
+  return risk.assessed ? risk.level : 'Not assessed';
 }
-// A config with no resolved risk_score never went through the catalogue —
-// score 0/null means NOT ASSESSED, not "safe" (see CLAUDE.md crypto-assessment
-// source-of-truth section). levelFromScore(0) → 'Informational' →
-// strengthOfLevel → 'Strong' used to fold these into the "Strong
-// configurations" group alongside genuinely-assessed strong configs.
-export function configStrength(c: CryptoConfig): Strength {
-  const raw = (c as unknown as Record<string, unknown>).risk_score;
-  if (typeof raw !== 'number' || raw === 0) return 'Not assessed';
-  return strengthOfLevel(levelFromScore(raw));
+const CONFIGURATION_RISK_ORDER: ConfigurationRiskGroup[] = ['Critical', 'High', 'Medium', 'Low', 'Informational', 'Not assessed'];
+export function groupConfigurationsByRisk(configs: CryptoConfig[]) {
+  return CONFIGURATION_RISK_ORDER
+    .map((riskGroup) => ({ riskGroup, list: configs.filter((config) => configurationRiskGroup(config) === riskGroup) }))
+    .filter((group) => group.list.length > 0);
 }
 export const ENV_OPTS = ['All', 'Production', 'Staging', 'Development', 'Test'];
 export const RISK_OPTS = ['All', 'Critical', 'High', 'Medium', 'Low', 'Informational'];
-export const STRENGTH_OPTS = ['All', 'Weak', 'Acceptable', 'Strong', 'Not assessed'];
+export const CONFIGURATION_RISK_OPTS = [...RISK_OPTS, 'Not assessed'];
+export function effectiveInventoryRiskFilter(stored: string, isConfigurationLens: boolean): string {
+  return stored === 'Not assessed' && !isConfigurationLens ? 'All' : stored;
+}
 
 // ---- Keys lens: Algorithm cell fallback (#L-8) -----------------------------
 // algorithm_ref (the joined catalogue algorithm name) is null for keys the

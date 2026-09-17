@@ -136,9 +136,9 @@ func TestIntegration_CriticalTile_AndTheRowsItsLinkOpens_AreOneSet(t *testing.T)
 	// applies to. Without it, "every producer" would be proven for the
 	// producers that have no gate to fail.
 	_, newLicensedControl := seedPublishedFramework(t, ownerDB, tenant, "tile-set-lic", true)
-	licControl, licSubject := newLicensedControl("Critical"), uuid.New()
+	licControl, licSubject := newLicensedControl("critical"), uuid.New()
 	licFinding := activeViolation(licControl, licSubject)
-	licFinding.Severity = "Critical"
+	licFinding.Severity = "critical"
 	mustUpsert(t, ownerSvc, tenant, licControl, licSubject, licFinding, "ACTIVE")
 	want["compliance/NEW"] = licFinding.ID
 

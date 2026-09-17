@@ -13,7 +13,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { Asset } from '@vistasecurity/api-contract';
-import { Icon, MetaRow, RiskGauge, RiskChip, SectionLabel, levelFromScore } from '../../components/ui';
+import { parseSeverity, severityRank } from '@vistasecurity/primitives/ratings';
+import { Icon, MetaRow, RiskGauge, RiskChip, SectionLabel } from '../../components/ui';
 import { ASSET_TABS, DEFAULT_ASSET_TAB, assetTabPath, findAssetTab, type AssetTab } from './asset-tabs';
 import {
   useAsset, useAssetClassHistory, useAssetConfigs, useAssetEndpoints, useAssetHistory, useAssetIdentifiers,
@@ -40,6 +41,8 @@ import { AssetFormModal } from './asset-form-modal';
 // vocabulary from the Risk & Compliance section, rather than restating either.
 import { useAssetFindings } from '../findings/queries';
 import { findingCitation, isOpenWf, sevLevel, type ComplianceFinding } from '../findings/model';
+import { AssessmentLimitNotice } from '../findings/assessment-limit';
+import { CryptoRiskChip } from './crypto-risk-presentation';
 import { RelationshipsTab } from './relationships-tab';
 
 // ------------------------------------------------------------------ states --
@@ -141,11 +144,13 @@ function IdentifierRow({ ident }: { ident: AssetIdentifier }) {
 export function topRiskFinding(findings: ComplianceFinding[]): ComplianceFinding | null {
   const open = findings.filter((f) => isOpenWf(f) && (f.score ?? 0) > 0);
   if (open.length === 0) return null;
-  const rank: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
   return open.reduce((best, f) => {
     const ds = (f.score ?? 0) - (best.score ?? 0);
     if (ds !== 0) return ds > 0 ? f : best;
-    const dr = (rank[f.severity] ?? 0) - (rank[best.severity] ?? 0);
+    const currentSeverity = parseSeverity(f.severity);
+    const bestSeverity = parseSeverity(best.severity);
+    const dr = (currentSeverity ? severityRank(currentSeverity) ?? 0 : 0)
+      - (bestSeverity ? severityRank(bestSeverity) ?? 0 : 0);
     if (dr !== 0) return dr > 0 ? f : best;
     return f.summary < best.summary ? f : best;
   });
@@ -307,6 +312,7 @@ function OverviewTab({ asset }: { asset: Asset }) {
             )}
           </div>
         </div>
+        <AssessmentLimitNotice findings={findingsQ.data ?? []} assetContext />
 
         <SectionLabel icon="building-2">Context</SectionLabel>
         <MetaRow k="Environment" v={asset.environment} />
@@ -546,6 +552,33 @@ export function exposureChip(e: Pick<AssetEndpoint, 'bound_local'>): { label: st
 
 // ------------------------------------------------------------ cryptography --
 
+/**
+ * Every discovery method that contributed to a configuration, primary first.
+ * `discovery_methods` is the full provenance (a passive glimpse and the active
+ * probe that completed it are ONE row carrying both); rows written before it
+ * was recorded fall back to the single `discovery_method`.
+ */
+export function configProvenance(c: Pick<CryptoConfig, 'discovery_method' | 'discovery_methods'>): string[] {
+  const methods = Array.isArray(c.discovery_methods) ? c.discovery_methods.filter((m) => typeof m === 'string' && m !== '') : [];
+  if (methods.length > 0) return methods;
+  return c.discovery_method ? [c.discovery_method] : [];
+}
+
+function ProvenanceChips({ methods }: { methods: string[] }) {
+  if (methods.length === 0) return null;
+  return (
+    <span
+      className="mono"
+      title={`Observed by: ${methods.join(', ')}`}
+      style={{ display: 'inline-flex', gap: 4, flex: 'none', fontSize: 10, color: 'var(--app-t3)' }}
+    >
+      {methods.map((m) => (
+        <span key={m} style={{ padding: '1px 6px', borderRadius: 999, border: '1px solid var(--app-border)' }}>{m.replace(/_/g, ' ')}</span>
+      ))}
+    </span>
+  );
+}
+
 function CryptographyTab({ asset, onOpenConfig }: { asset: Asset; onOpenConfig: OpenConfig }) {
   const q = useAssetConfigs(asset.id);
   const configs = q.data ?? [];
@@ -565,8 +598,6 @@ function CryptographyTab({ asset, onOpenConfig }: { asset: Asset; onOpenConfig: 
     <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
       {configs.map((cfg) => {
         const c = cfg as Record<string, unknown> & CryptoConfig;
-        const score = typeof c.risk_score === 'number' ? c.risk_score : 0;
-        const lvl = (c.risk_level as string) || levelFromScore(score);
         return (
           <button
             key={c.id as string}
@@ -574,11 +605,12 @@ function CryptographyTab({ asset, onOpenConfig }: { asset: Asset; onOpenConfig: 
             className="row-hover"
             style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', padding: '10px 8px', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: 8, textAlign: 'left' }}
           >
-            <RiskChip level={lvl} size={22} title={score > 0 ? `Risk score ${score} · ${lvl}` : 'Not assessed — nothing resolved against the algorithm catalogue'} />
+            <CryptoRiskChip config={c} size={22} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)' }}>{c.protocol as string} · {c.protocol_version as string}</div>
               <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.cipher_suite as string}</div>
             </div>
+            <ProvenanceChips methods={configProvenance(c)} />
             <Icon name="chevron-right" size={15} style={{ color: 'var(--app-t3)', flex: 'none' }} />
           </button>
         );
@@ -671,6 +703,7 @@ function FindingsTab({ asset }: { asset: Asset }) {
   return (
     <div>
       {producerNote}
+      <AssessmentLimitNotice findings={findings} assetContext />
       {findings.map((f) => (
         <div
           key={f.id}

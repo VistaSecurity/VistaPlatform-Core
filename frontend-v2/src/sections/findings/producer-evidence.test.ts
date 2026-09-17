@@ -9,7 +9,7 @@
 // satisfy all the defensive cases on its own.
 import { describe, expect, it } from 'vitest';
 import {
-  configurationEvidence, cryptoEvidence, cveCount, cveList, driftEvidence, eolEvidence,
+  assessmentLimitations, assessmentLimitText, configurationEvidence, cryptoEvidence, cveCount, cveList, driftEvidence, eolEvidence,
   hygieneEvidence, isHttpURL, kindFeedsRisk, kindLabel, producerLabel, subjectAssetID,
 } from './producer-evidence';
 import type { ComplianceFinding } from './model';
@@ -177,6 +177,11 @@ describe('cveList', () => {
     expect(scored.cvss).toBe(4.3);
   });
 
+  it('honours an explicit unscored flag even if malformed evidence also carries a number', () => {
+    const contradictory = finding({ evidence: { cves: [{ cve_id: 'CVE-2026-X', cvss_score: 9.9, cvss_scored: false }] } });
+    expect(cveList(contradictory)[0]).toMatchObject({ cvss: null, scored: false });
+  });
+
   it('treats a genuine CVSS 0.0 as SCORED', () => {
     // 0.0 is the CVSS "None" rating — somebody looked and said it scores
     // nothing. Distinct from nobody having looked.
@@ -200,6 +205,58 @@ describe('cveList', () => {
     expect(cveCount(vuln)).toBe(3);
     expect(cveCount(finding({ evidence: { cves: [{ cve_id: 'CVE-1' }] } }))).toBe(1);
     expect(cveCount(finding({ evidence: {} }))).toBe(0);
+  });
+});
+
+describe('assessmentLimitations', () => {
+  it('inspects every CVE so a scored worst entry cannot hide an unscored one', () => {
+    const mixed = finding({
+      producer: 'vulnerability',
+      evidence: {
+        worst_cvss_scored: true,
+        cves: [
+          { cve_id: 'CVE-2026-1', cvss_score: 9.8 },
+          { cve_id: 'CVE-2026-2', cvss_scored: false },
+        ],
+      },
+    });
+    const limit = assessmentLimitations([mixed]);
+    expect(limit).toEqual({ unscoredCves: 1, totalCves: 2, unscoredSummaries: 0, crypto: [] });
+    expect(assessmentLimitText(limit!)).toBe('Assessment incomplete: 1 of 2 matching CVEs has no CVSS score.');
+  });
+
+  it('reports unscored-only CVEs and no limitation when every entry is scored', () => {
+    expect(assessmentLimitations([finding({ producer: 'vulnerability', evidence: { cves: [
+      { cve_id: 'CVE-2026-1', cvss_scored: false },
+      { cve_id: 'CVE-2026-2', cvss_scored: false },
+    ] } })])).toEqual({ unscoredCves: 2, totalCves: 2, unscoredSummaries: 0, crypto: [] });
+    expect(assessmentLimitations([finding({ producer: 'vulnerability', evidence: { cves: [
+      { cve_id: 'CVE-2026-3', cvss_score: 0 },
+    ] } })])).toBeNull();
+  });
+
+  it('does not infer crypto completeness from resolved-only component evidence', () => {
+    expect(assessmentLimitations([finding({
+      producer: 'crypto',
+      evidence: { linked_component_count: 1, components: [{ code: 'AES-256' }] },
+    })])).toBeNull();
+  });
+
+  it('uses only explicit crypto limitations and preserves their details', () => {
+    expect(assessmentLimitations([finding({
+      producer: 'crypto',
+      evidence: {
+        linked_component_count: 1,
+        components: [{ code: 'AES-256' }],
+        reassessment_required: true,
+        assessment_limitations: ['observed hash "mystery" has no resolved catalogue component'],
+      },
+    })])).toEqual({
+      unscoredCves: 0,
+      unscoredSummaries: 0,
+      totalCves: 0,
+      crypto: ['observed hash "mystery" has no resolved catalogue component'],
+    });
   });
 });
 
@@ -477,6 +534,8 @@ describe('cryptoEvidence', () => {
     expect(e!.components[0]).toEqual({
       code: 'RC4', role: 'symmetric', riskScore: 85, strength: 'weak', deprecationStatus: 'deprecated',
     });
+    expect(e!.assessmentLimitations).toEqual([]);
+    expect(e!.reassessmentRequired).toBe(false);
   });
 
   it('reads a weak_certificate: the algorithms judged and why they failed', () => {
@@ -519,6 +578,18 @@ describe('cryptoEvidence', () => {
     expect(cryptoEvidence(finding({ evidence: {} }))).toBeNull();
     expect(cryptoEvidence(finding({ evidence: null }))).toBeNull();
     expect(cryptoEvidence(finding({ evidence: { catalogue_id: 'x' } }))).toBeNull();
+  });
+
+  it('reads explicit reassessment limitations without guessing from component counts', () => {
+    const e = cryptoEvidence(finding({ producer: 'crypto', evidence: {
+      reassessment_required: true,
+      assessment_limitations: ['missing key size', 'unknown strength for FOO'],
+      current_reassessment: { score: 0, components: [] },
+    } }));
+    expect(e).toMatchObject({
+      reassessmentRequired: true,
+      assessmentLimitations: ['missing key size', 'unknown strength for FOO'],
+    });
   });
 
   it('tolerates a malformed document rather than throwing and taking the page with it', () => {

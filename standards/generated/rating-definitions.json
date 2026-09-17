@@ -1,0 +1,110 @@
+{
+  "strength": [
+    {
+      "value": "weak",
+      "label": "Weak",
+      "rank": 0
+    },
+    {
+      "value": "acceptable",
+      "label": "Acceptable",
+      "rank": 1
+    },
+    {
+      "value": "strong",
+      "label": "Strong",
+      "rank": 2
+    },
+    {
+      "value": "recommended",
+      "label": "Recommended",
+      "rank": 3
+    }
+  ],
+  "risk": [
+    {
+      "label": "Critical",
+      "min": 90,
+      "severity": "critical"
+    },
+    {
+      "label": "High",
+      "min": 70,
+      "severity": "high"
+    },
+    {
+      "label": "Medium",
+      "min": 40,
+      "severity": "medium"
+    },
+    {
+      "label": "Low",
+      "min": 1,
+      "severity": "low"
+    },
+    {
+      "label": "Informational",
+      "min": 0,
+      "severity": "info"
+    }
+  ],
+  "severity": [
+    {
+      "value": "critical",
+      "label": "Critical",
+      "rank": 5,
+      "controlWeight": 4
+    },
+    {
+      "value": "high",
+      "label": "High",
+      "rank": 4,
+      "controlWeight": 3
+    },
+    {
+      "value": "medium",
+      "label": "Medium",
+      "rank": 3,
+      "controlWeight": 2
+    },
+    {
+      "value": "low",
+      "label": "Low",
+      "rank": 2,
+      "controlWeight": 1
+    },
+    {
+      "value": "info",
+      "label": "Informational",
+      "rank": 1,
+      "controlWeight": 0
+    }
+  ],
+  "health": [
+    {
+      "value": "excellent",
+      "label": "Excellent",
+      "min": 90
+    },
+    {
+      "value": "good",
+      "label": "Good",
+      "min": 75
+    },
+    {
+      "value": "fair",
+      "label": "Fair",
+      "min": 60
+    },
+    {
+      "value": "poor",
+      "label": "Poor",
+      "min": 40
+    },
+    {
+      "value": "failing",
+      "label": "Failing",
+      "min": 0
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // JobExecutor handles discovery job execution
@@ -157,59 +158,19 @@ func (e *JobExecutor) ExecuteJob(job *models.DiscoveryJobRequest) *models.Discov
 	return response
 }
 
-// ProcessDiscoveryJobCommand processes a discovery job command
-func (e *JobExecutor) ProcessDiscoveryJobCommand(command *models.Command) (*models.DiscoveryJobResponse, error) {
-	// Extract job details from command payload
-	jobID, ok := command.Payload["job_id"].(string)
-	if !ok {
-		return nil, fmt.Errorf("missing job_id in command payload")
+// ParseDiscoveryJobCommand validates a discovery_job command's payload and
+// turns it into the job request the executor runs. It is the sensor's half of
+// the contract in shared/sensordispatch: a payload the dispatcher wrote, the
+// sensor can read, and one nothing can run is refused with
+// sensordispatch.ErrMalformedPayload so the caller acknowledges it as FAILED —
+// never scans nothing and reports success.
+func ParseDiscoveryJobCommand(command *models.Command) (*models.DiscoveryJobRequest, error) {
+	if command == nil {
+		return nil, fmt.Errorf("%w: no command", sensordispatch.ErrMalformedPayload)
 	}
-
-	tenantID, ok := command.Payload["tenant_id"].(string)
-	if !ok {
-		return nil, fmt.Errorf("missing tenant_id in command payload")
-	}
-
-	targets, ok := command.Payload["targets"].([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("missing targets in command payload")
-	}
-
-	protocols, ok := command.Payload["protocols"].([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("missing protocols in command payload")
-	}
-
-	ports, ok := command.Payload["ports"].([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("missing ports in command payload")
-	}
-
-	// Convert targets
-	var targetStrings []string
-	for _, t := range targets {
-		if ts, ok := t.(string); ok {
-			targetStrings = append(targetStrings, ts)
-		}
-	}
-
-	// Convert protocols
-	var protocolStrings []string
-	for _, p := range protocols {
-		if ps, ok := p.(string); ok {
-			protocolStrings = append(protocolStrings, ps)
-		}
-	}
-
-	// Convert ports
-	var portInts []int
-	for _, p := range ports {
-		switch v := p.(type) {
-		case int:
-			portInts = append(portInts, v)
-		case float64:
-			portInts = append(portInts, int(v))
-		}
+	payload, err := sensordispatch.ParsePayload(command.Payload)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract options
@@ -222,7 +183,7 @@ func (e *JobExecutor) ProcessDiscoveryJobCommand(command *models.Command) (*mode
 		FollowDNS:      true,
 	}
 
-	if opts, ok := command.Payload["options"].(map[string]interface{}); ok {
+	if opts := payload.Options; opts != nil {
 		if c, ok := opts["concurrency"].(float64); ok {
 			options.Concurrency = int(c)
 		}
@@ -246,20 +207,24 @@ func (e *JobExecutor) ProcessDiscoveryJobCommand(command *models.Command) (*mode
 		}
 	}
 
-	// Create job request
-	job := &models.DiscoveryJobRequest{
-		JobID:             jobID,
-		TenantID:          tenantID,
-		Targets:           targetStrings,
-		Protocols:         protocolStrings,
-		Ports:             portInts,
+	return &models.DiscoveryJobRequest{
+		JobID:             payload.JobID,
+		TenantID:          payload.TenantID,
+		Targets:           payload.Targets,
+		Protocols:         payload.Protocols,
+		Ports:             payload.Ports,
 		Options:           options,
 		RetentionCapMB:    25,
 		RetentionTTLHours: 24,
 		CreatedAt:         time.Now(),
-	}
+	}, nil
+}
 
-	// Execute job
-	response := e.ExecuteJob(job)
-	return response, nil
+// ProcessDiscoveryJobCommand parses and runs a discovery_job command.
+func (e *JobExecutor) ProcessDiscoveryJobCommand(command *models.Command) (*models.DiscoveryJobResponse, error) {
+	job, err := ParseDiscoveryJobCommand(command)
+	if err != nil {
+		return nil, err
+	}
+	return e.ExecuteJob(job), nil
 }

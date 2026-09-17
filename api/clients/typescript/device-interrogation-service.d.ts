@@ -260,6 +260,151 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/config/defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tenant's fleet-wide default settings for discovery agents
+         * @description Every settable agent setting with the value that applies fleet-wide, and
+         *     an `origin` saying whether the tenant has set it (`fleet`) or is
+         *     inheriting the agent binary's own default (`built_in`). Resolved rather
+         *     than raw, so the page never has to invent the settings the tenant has
+         *     not touched. Gated at SensorsRead.
+         */
+        get: operations["getAgentFleetDefaults"];
+        /**
+         * Replace the tenant's fleet-wide default settings for discovery agents
+         * @description Replaces the whole set: a key left out is cleared, because a partial
+         *     write cannot express "remove this one". Every agent without its own
+         *     override converges on the new values at its next check-in, with nothing
+         *     having to notify them individually — the desired revision is a content
+         *     hash, so a changed default makes every inheriting agent disagree.
+         *
+         *     Gated at SensorsManage. Values are validated against the registry in
+         *     `shared/agentconfig`; a value below a setting's floor is RAISED rather
+         *     than rejected, and the response says so in `adjusted`.
+         */
+        put: operations["putAgentFleetDefaults"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{id}/restart": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask one agent to restart at its next check-in
+         * @description Records the moment an operator asked. The agent is sent how long AGO
+         *     that was and compares it with its own uptime — two durations, never two
+         *     clocks, because an agent whose clock disagrees with the platform's would
+         *     otherwise restart on every check-in for ever. It is idempotent by
+         *     construction: an agent that has already restarted has been running for
+         *     less time than the request is old, so it does not restart again. There is nothing to
+         *     acknowledge and nothing to expire, a missed check-in costs nothing, and
+         *     ten clicks are one restart rather than ten.
+         *
+         *     A restart is NOT a setting: it is deliberately outside the desired
+         *     revision, or every agent ever restarted would disagree with its own
+         *     configuration for ever.
+         *
+         *     **The agent exits and something else starts it again.** Installed as a
+         *     service that is automatic; on a host where one was launched by hand,
+         *     this stops it. The response says so.
+         *
+         *     Gated at SensorsManage, and audited with the acting user: a restart is
+         *     an action taken on somebody's host.
+         */
+        post: operations["requestAgentRestart"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{id}/config/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Who changed this agent's configuration, when, and what moved
+         * @description The recorded change history, newest first, covering this agent's own
+         *     overrides AND the tenant's fleet defaults for its runtime — an operator
+         *     asking "why is this on" is not served by a history that can only answer
+         *     half the time.
+         *
+         *     Gated at SensorsRead rather than behind update or manage: reading who
+         *     changed something is a read, and the person most likely to ask is the
+         *     one who cannot change it.
+         */
+        get: operations["getAgentConfigHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{id}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One agent's effective settings and how far it has converged
+         * @description The effective value of every agent setting, each with the `origin` it
+         *     came from (`built_in`, `fleet` or `device`), plus a `status` block
+         *     reconciling what the platform wants against what the agent last
+         *     reported.
+         *
+         *     The status distinguishes five outcomes, and the distinctions are
+         *     load-bearing: `never_reported` (the agent has not checked in),
+         *     `not_reporting` (it checked in but names no revision — a build older
+         *     than desired state, which will never converge), `pending`,
+         *     `awaiting_restart` (accepted, adopted on restart) and `applied`.
+         *     A `failed` state carries the agent's own reason per setting.
+         *
+         *     Gated at SensorsRead. Another tenant's agent id is answered 404,
+         *     identically to an unknown id.
+         */
+        get: operations["getAgentConfig"];
+        /**
+         * Replace one agent's settings override
+         * @description Sets what THIS agent should be, over and above the fleet defaults. An
+         *     explicit `false` is an override and beats a fleet default of `true`; an
+         *     omitted key inherits. Send `{"values": {}}` to clear the override
+         *     entirely and return the agent to the fleet defaults.
+         *
+         *     Gated at SensorsManage. The agent adopts the change at its next
+         *     heartbeat; settings marked `apply: restart` are listed in
+         *     `needs_restart` and are adopted when the agent restarts.
+         */
+        put: operations["putAgentConfig"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/devices": {
         parameters: {
             query?: never;
@@ -784,6 +929,201 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        RestartRequestAccepted: {
+            /**
+             * Format: date-time
+             * @description When the request was recorded, on the platform's clock. Display
+             *     material — "requested 5 minutes ago". A device must NOT compare it
+             *     with its own clock: the two disagreeing is a restart loop, so the
+             *     device is told the request's AGE and compares that with its own
+             *     uptime.
+             */
+            restart_requested_at: string;
+            /**
+             * @description States plainly that the device exits and something else must start
+             *     it — the one way this can disappoint, so it is in the response
+             *     rather than only in the documentation.
+             */
+            note: string;
+        };
+        /**
+         * @description One recorded configuration change. Both the device's own overrides and
+         *     the tenant's fleet defaults appear, because a device's effective
+         *     configuration moves when either does.
+         */
+        AgentConfigChange: {
+            /** Format: date-time */
+            changed_at: string;
+            /** @description The account that made the change. Empty when it was not made by a user. */
+            changed_by: string;
+            /** @enum {string} */
+            scope: "device" | "fleet";
+            /** @description The setting keys whose value actually moved, derived server-side so no client re-implements the comparison. */
+            keys: string[];
+            values_before: {
+                [key: string]: unknown;
+            };
+            values_after: {
+                [key: string]: unknown;
+            };
+        };
+        AgentConfigHistory: {
+            /** @description Newest first. Always present, never null — a device nobody has configured has an empty history, not an unknown one. */
+            changes: components["schemas"]["AgentConfigChange"][];
+        };
+        /**
+         * @description What the device runs, what this platform release ships, and whether they
+         *     differ. The expected version is the release the PLATFORM is running,
+         *     because the device binaries ship from the same tag — so the platform can
+         *     only report a device as behind once it has itself been upgraded, and it
+         *     never queries an external service to find out.
+         */
+        AgentConfigVersion: {
+            /** @description What the device last reported. Empty when it has never reported one. */
+            device: string;
+            /** @description The version shipping with this platform release. Empty when the platform does not know its own. */
+            expected: string;
+            /**
+             * @description `unknown` when the comparison could not be made — either side
+             *     missing or unparseable. Deliberately distinct from `current`: a
+             *     comparison that was not made must never render as up to date.
+             *     `ahead` is a device newer than the platform, which happens mid-
+             *     rollout and also when the wrong binary was installed.
+             * @enum {string}
+             */
+            state: "unknown" | "current" | "behind" | "ahead";
+        };
+        /**
+         * @description One setting: its effective value, where that value came from, and enough
+         *     of its registry entry for a client to render a control for it without
+         *     hard-coding a second copy of the rules.
+         */
+        AgentConfigSetting: {
+            /**
+             * @description The setting's name, spelled as the device's own config file spells it.
+             * @example host_inventory_enabled
+             */
+            key: string;
+            /** @description The effective value — a boolean, a whole number or a string. */
+            value: boolean | number | string;
+            /**
+             * @description Where the effective value came from. `built_in` is the device's own
+             *     default (nobody has set it), `fleet` the tenant default, `device` an
+             *     override on this device. Without this the console cannot offer
+             *     "revert to fleet default", or say whether a value is deliberate.
+             * @enum {string}
+             */
+            origin: "built_in" | "fleet" | "device";
+            /** @enum {string} */
+            kind: "bool" | "int" | "enum";
+            /**
+             * @description When the device adopts a change. `restart` settings sit at
+             *     `awaiting_restart` until the process restarts; showing them as
+             *     applied on the next check-in would be false.
+             * @enum {string}
+             */
+            apply: "immediate" | "restart";
+            /** @description Operator-facing explanation of what the setting does. */
+            description: string;
+            /**
+             * @description Present when turning this setting ON requires explicit
+             *     confirmation, and states what begins to be collected. Only settings
+             *     that start a new kind of collection carry one.
+             */
+            confirm?: string;
+            /** Format: int64 */
+            min?: number;
+            /** Format: int64 */
+            max?: number;
+            allowed?: string[];
+        };
+        /** @description How far the device has converged on the desired settings. */
+        AgentConfigStatus: {
+            /** @enum {string} */
+            state: "never_reported" | "not_reporting" | "pending" | "awaiting_restart" | "applied" | "failed";
+            /**
+             * @description Content hash of the effective settings. The device reports the
+             *     revision it has adopted; equality is what "applied" means. A hash
+             *     rather than a counter, so a changed fleet default moves every
+             *     inheriting device with nothing having to notify them.
+             */
+            desired_revision: string;
+            /**
+             * Format: date-time
+             * @description When the device last reported. Absent if it never has.
+             */
+            reported_at?: string;
+            /** @description The device's own reason, per setting it could not apply. */
+            failures?: {
+                [key: string]: string;
+            };
+            /** @description Settings accepted but not adopted until the device restarts. */
+            pending_restart?: string[];
+        };
+        AgentConfigResponse: {
+            /** @enum {string} */
+            runtime: "agent";
+            settings: components["schemas"]["AgentConfigSetting"][];
+            status: components["schemas"]["AgentConfigStatus"];
+            version: components["schemas"]["AgentConfigVersion"];
+        };
+        AgentConfigDefaultsResponse: {
+            /** @enum {string} */
+            runtime: "agent";
+            settings: components["schemas"]["AgentConfigSetting"][];
+        };
+        AgentConfigWriteRequest: {
+            /**
+             * @description The settings to store, keyed by setting name. The whole set is
+             *     replaced: a key left out is cleared. A null value clears that one
+             *     key. An explicit `false` is a value, not an absence.
+             * @example {
+             *       "host_inventory_enabled": true,
+             *       "host_inventory_interval_seconds": 21600
+             *     }
+             */
+            values: {
+                [key: string]: boolean | number | string | null;
+            };
+            /**
+             * @description Acknowledges any setting whose registry entry demands confirmation.
+             *     The server decides whether one is needed; omitting the flag cannot
+             *     waive it.
+             */
+            confirmed?: boolean;
+        };
+        AgentConfigWriteResponse: {
+            /**
+             * @description One line per setting that actually changed, rendered as key, then the old and new values.
+             * @example [
+             *       "host_inventory_enabled: false → true"
+             *     ]
+             */
+            changed: string[];
+            /**
+             * @description Values silently raised to a setting's floor. The device does this on
+             *     its own today and logs it locally, so whoever typed the value never
+             *     learns it was changed; saying so here is the point.
+             * @example [
+             *       "host_inventory_interval_seconds: raised 300 to the minimum of 3600"
+             *     ]
+             */
+            adjusted: string[];
+            /**
+             * @description Changed settings the device can only adopt on restart. An operator
+             *     who is not told will read the resulting `awaiting_restart` as a
+             *     failure.
+             */
+            needs_restart: string[];
+        };
+        AgentConfigConfirmationRequired: {
+            error: string;
+            needs_confirming: {
+                key: string;
+                /** @description What begins to be collected if this is turned on. */
+                confirm: string;
+            }[];
+        };
         /** @description Request body for POST /cloud/discover — triggers an ad-hoc cloud discovery run. */
         CloudDiscoverRequest: {
             /**
@@ -1424,6 +1764,15 @@ export interface components {
              *     success: a person has to say which host this is.
              */
             contested?: boolean;
+            /**
+             * @description The consumer's fatal error when the collection reached it and was
+             *     NOT materialised. The report is on the job row and nothing was
+             *     lost, but nothing below landed either: the counts are what the
+             *     consumer had assembled when it failed. ABSENT on a run that
+             *     materialised. Present, it changes what every other field means,
+             *     and a log line must lead with it.
+             */
+            failed?: string;
         };
         Last24hStats: {
             completed: number;
@@ -2236,6 +2585,179 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             403: components["responses"]["LegacyForbidden"];
             404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getAgentFleetDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The fleet defaults. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigDefaultsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putAgentFleetDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentConfigWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description The defaults were saved. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigWriteResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description A setting in this change needs explicit confirmation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigConfirmationRequired"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    requestAgentRestart: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The request was recorded. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestartRequestAccepted"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getAgentConfigHistory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The change history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigHistory"];
+                };
+            };
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getAgentConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The agent's configuration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putAgentConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentConfigWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description The override was saved. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigWriteResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description A setting in this change needs explicit confirmation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigConfirmationRequired"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };

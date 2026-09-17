@@ -2,6 +2,7 @@
 // (control CRUD) plus the measurement rule builder per control. Mirrors the admin
 // platform-framework authoring (admin-ui-v2 catalog-page + measurement-rules-modal)
 // in the frontend-v2 idiom, over the /frameworks/tenant/* endpoints.
+import { CONTROL_SEVERITIES, severityLabel, type ControlSeverity } from '@vistasecurity/primitives/ratings';
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { draftingOffered } from '@vistasecurity/primitives/authoring';
@@ -17,10 +18,10 @@ type ControlInput = complianceEngineComponents['schemas']['TenantFrameworkContro
 type MeasurementType = complianceEngineComponents['schemas']['MeasurementType'];
 type ControlMeasurement = complianceEngineComponents['schemas']['ControlMeasurement'];
 type MeasurementInput = complianceEngineComponents['schemas']['ControlMeasurementInput'];
-type Severity = 'Low' | 'Med' | 'High' | 'Critical';
+type Severity = ControlSeverity;
 type RuleType = 'threshold' | 'presence' | 'pattern' | 'range';
 
-const SEVERITY_COLOR: Record<string, string> = { Critical: 'var(--danger)', High: 'var(--warn-strong)', Med: 'var(--warn)', Low: 'var(--ok-lime)' };
+const SEVERITY_COLOR: Record<string, string> = { critical: 'var(--danger)', high: 'var(--warn-strong)', medium: 'var(--warn)', low: 'var(--ok-lime)' };
 const ALL_RULE_TYPES: RuleType[] = ['threshold', 'presence', 'pattern', 'range'];
 const DEFAULT_OPERATORS = ['<=', '>=', '<', '>', '==', '!='];
 
@@ -68,7 +69,7 @@ function ControlModal({ policyId, control, onClose, qc }: { policyId: string; co
   const [controlId, setControlId] = useState(control?.control_id ?? '');
   const [title, setTitle] = useState(control?.title ?? '');
   const [description, setDescription] = useState(control?.description ?? '');
-  const [severity, setSeverity] = useState<Severity>((control?.baseline_severity as Severity) ?? 'Med');
+  const [severity, setSeverity] = useState<Severity>((control?.baseline_severity as Severity) ?? 'medium');
   const [cryptoRelevant, setCryptoRelevant] = useState(control?.crypto_relevant ?? false);
   const [error, setError] = useState<string | null>(null);
   const invalid = !controlId.trim() || !title.trim();
@@ -105,7 +106,7 @@ function ControlModal({ policyId, control, onClose, qc }: { policyId: string; co
       <ModalField label="Title"><ModalInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Control title" /></ModalField>
       <ModalField label="Baseline severity">
         <ModalSelect value={severity} onChange={(e) => setSeverity(e.target.value as Severity)}>
-          {(['Low', 'Med', 'High', 'Critical'] as Severity[]).map((s) => <option key={s} value={s}>{s}</option>)}
+          {CONTROL_SEVERITIES.map((s) => <option key={s} value={s}>{severityLabel(s)}</option>)}
         </ModalSelect>
       </ModalField>
       <ModalField label="Description"><ModalInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this control requires" /></ModalField>
@@ -302,7 +303,7 @@ function RulesModal({ control, onClose }: { control: Control; onClose: () => voi
             <ModalField label="Severity override">
               <ModalSelect value={form.severity} onChange={(e) => setForm({ ...form, severity: e.target.value as RuleForm['severity'] })}>
                 <option value="">Use control baseline</option>
-                {(['Low', 'Med', 'High', 'Critical'] as Severity[]).map((s) => <option key={s} value={s}>{s}</option>)}
+                {CONTROL_SEVERITIES.map((s) => <option key={s} value={s}>{severityLabel(s)}</option>)}
               </ModalSelect>
             </ModalField>
           </div>
@@ -372,7 +373,7 @@ export function CustomPolicyControls({ policyId, policyName, canManage }: { poli
               )}
               {ctrl.crypto_relevant && <STag color="var(--info)">crypto</STag>}
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--app-t3)' }}>
-                <span style={{ width: 6, height: 6, borderRadius: 50, background: SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--app-t3)' }} />{ctrl.baseline_severity}
+                <span style={{ width: 6, height: 6, borderRadius: 50, background: SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--app-t3)' }} />{severityLabel(ctrl.baseline_severity)}
               </span>
               {canManage && (
                 <>

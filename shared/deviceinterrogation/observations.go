@@ -617,6 +617,30 @@ func canonicalDNSName(v string, requireDot bool) (string, error) {
 	return s, nil
 }
 
+// canonicalHostnameOrEmpty returns name canonicalised as a short DNS hostname,
+// or "" when it is not one.
+//
+// Several collectors (UniFi managed devices and VPN networks, Fortinet IPSec
+// tunnels, PAN-OS SSL-decrypt profiles and security rules, F5 virtual
+// servers, an SNMP agent's sysName) read a human-chosen display name or
+// config-object label straight off the vendor API and used to assign it
+// directly to CryptoAsset.Hostname. A name like "U6+ Living Room" or
+// "Back Porch #1" is a fine display string but is not a DNS name, and
+// assigning it to Hostname sends it downstream to the identity layer, which
+// rejects it as an invalid hostname identifier — silently losing the
+// identifier and, run after run, flooding the log with the same reject.
+//
+// The caller keeps the raw value in Metadata for display and calls this
+// guard before ever writing to Hostname, so an invalid name never leaves the
+// collector in the first place.
+func canonicalHostnameOrEmpty(name string) string {
+	canon, err := canonicalDNSName(name, false)
+	if err != nil {
+		return ""
+	}
+	return canon
+}
+
 // canonicalIP parses with net/netip, unmaps IPv4-in-IPv6 and drops the zone: a
 // %eth0 on one host is not the same interface as on another.
 func canonicalIP(v string) (string, error) {

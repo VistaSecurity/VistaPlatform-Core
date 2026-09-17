@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,25 +13,17 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 const controlNoncompliantAlertType = "control_noncompliant"
 
-// controlSeverityToAlert maps a control's baseline_severity (Low/Med/High/
-// Critical) to the alert severity vocabulary (low/medium/high/critical).
-func controlSeverityToAlert(baseline string) string {
-	switch strings.ToLower(strings.TrimSpace(baseline)) {
-	case "critical":
-		return "critical"
-	case "high":
-		return "high"
-	case "med", "medium":
-		return "medium"
-	case "low":
-		return "low"
-	default:
-		return "medium"
+// controlSeverityToAlert validates the four-value control subset before alerting.
+func controlSeverityToAlert(value string) (string, error) {
+	if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(value)); err != nil {
+		return "", err
 	}
+	return value, nil
 }
 
 // ControlNoncompliantScanJob raises one stateful alert per control that has
@@ -211,7 +202,10 @@ func (j *ControlNoncompliantScanJob) scanTenant(ctx context.Context, tenantID uu
 		// moved the alert's `updated_at` (and last_event_at) for nothing.
 		// Nothing de-escalates: the engine never lowers an open alert's
 		// severity, and this job does not ask it to.
-		severity := controlSeverityToAlert(c.baseline)
+		severity, err := controlSeverityToAlert(c.baseline)
+		if err != nil {
+			return err
+		}
 		if existing, isOpen := openAlerts[c.controlUUID]; isOpen && !severityWorse(severity, existing) {
 			continue
 		}
@@ -229,7 +223,11 @@ func (j *ControlNoncompliantScanJob) scanTenant(ctx context.Context, tenantID uu
 
 func (j *ControlNoncompliantScanJob) raise(ctx context.Context, tenantID uuid.UUID, c noncompliantControl) {
 	controlUUID := c.controlUUID
-	severity := controlSeverityToAlert(c.baseline)
+	severity, err := controlSeverityToAlert(c.baseline)
+	if err != nil {
+		log.Printf("[ControlNoncompliantScan] invalid severity: %v", err)
+		return
+	}
 	title := fmt.Sprintf("Control noncompliant: %s", c.controlCode)
 	message := fmt.Sprintf("Control %s (%s) is noncompliant — %d asset(s) affected.",
 		c.controlCode, c.framework, c.assets)

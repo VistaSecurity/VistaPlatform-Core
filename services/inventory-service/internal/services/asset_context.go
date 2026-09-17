@@ -12,7 +12,9 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -200,6 +202,42 @@ func (s *AssetService) setAssetStatus(tx *sqlx.Tx, tenantID, assetID uuid.UUID, 
 	}
 	s.recordAssetHistory(tx, tenantID, assetID, action, source, map[string]any{"asset_status": status})
 	return nil
+}
+
+// setStatusUnlessArchived applies a DISCOVERY-derived status, except to an
+// asset the tenant has ARCHIVED.
+//
+// Archiving is a decision, and a re-discovery does not undo it — the same rule
+// ingest already applies to `denied`, and for the same reason. Without this, a
+// device the tenant deliberately archived and that later reappeared on a segment
+// with an auto-approval rule was silently promoted back to `monitoring` (with an
+// `approved` history entry naming no person), and its certificates and crypto
+// configuration materialized on the next observation. An auto-approval rule
+// matching the segment something reappeared on is not a person changing their
+// mind.
+//
+// It reads inside the CALLER's transaction, so what it tests is the status this
+// same unit of work will overwrite — not one another transaction may have moved
+// since.
+func (s *AssetService) setStatusUnlessArchived(tx *sqlx.Tx, tenantID, assetID uuid.UUID, status string, source identity.Source) error {
+	var current string
+	if err := s.exec(tx, tenantID, func(tx *sqlx.Tx) error {
+		return tx.QueryRow(`
+			SELECT asset_status FROM assets
+			WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`, tenantID, assetID).Scan(&current)
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No such live asset. Nothing to move, and nothing to report: the
+			// caller's own write would have matched no row either.
+			return nil
+		}
+		return fmt.Errorf("reading asset status before applying %q: %w", status, err)
+	}
+	if current == identity.StatusArchived {
+		log.Printf("[AssetService] asset %s is archived; a discovery does not restore it to %q", assetID, status)
+		return nil
+	}
+	return s.setAssetStatus(tx, tenantID, assetID, status, source)
 }
 
 // recordAssetHistory appends one asset_history row.

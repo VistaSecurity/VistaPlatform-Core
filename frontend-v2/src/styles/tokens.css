@@ -148,6 +148,26 @@ body {
 @keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes popIn { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
 
+/* ---------- rail drawer (Settings / My Profile nav layer) ----------
+   Slides up over the primary rail's nav list. It deliberately does NOT cover
+   the rail's brand block or the Settings toggle + profile chip beneath it, so
+   the rail keeps its anchors and the same button that opened the layer closes
+   it. Kept mounted and moved with `transform` so it animates both ways;
+   `visibility` (not `display`) is what takes it out of the tab order when
+   closed, and it steps to hidden only after the slide finishes. */
+.rail-drawer {
+  position: absolute; inset: 0; z-index: 30;
+  display: flex; flex-direction: column;
+  background: var(--app-rail);
+  border-top: 1px solid var(--app-rail-border);
+  box-shadow: 0 -12px 28px var(--app-scrim, rgba(0, 0, 0, .28));
+  transform: translateY(100%);
+  visibility: hidden;
+  transition: transform .22s cubic-bezier(.2, .8, .2, 1), visibility .22s linear;
+}
+.rail-drawer.open { transform: none; visibility: visible; }
+@media (prefers-reduced-motion: reduce) { .rail-drawer { transition-duration: .01ms; } }
+
 /* ---------- ported from the mock's global <style> (Findings/Posture port) ---------- */
 .ui-btn.sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
 .ui-btn.icon { width: 34px; padding: 0; justify-content: center; }

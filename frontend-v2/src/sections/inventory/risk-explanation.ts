@@ -92,46 +92,49 @@ export interface RiskExplanation {
 /** Build everything the panel renders from the API response plus the stored
  *  score, without ever converting an absence of data into a verdict.
  *
- *  `score` is the configuration's persisted `risk_score` (0 when unset). */
+ *  `score` is the configuration's persisted `risk_score`, or null when the
+ *  read-side evidence projection cannot establish a numeric assessment. */
 export function explainRisk(components: CryptoComponent[] | undefined, score: number | null | undefined): RiskExplanation {
   const list = Array.isArray(components) ? components : [];
   const assessed = list.length > 0;
-  const worst = list.find((c) => c.sets_score) ?? (assessed ? list[0] : null);
+  const worst = list.find((c) => c.sets_score) ?? list.find((c) => typeof c.risk_score === 'number') ?? null;
   const offeredCount = list.filter((c) => c.is_inferred).length;
   const s = typeof score === 'number' && Number.isFinite(score) ? score : 0;
 
   if (!assessed) {
+    const hasStoredScore = typeof score === 'number' && Number.isFinite(score);
     return {
       assessed: false,
       components: [],
       worst: null,
       offeredCount: 0,
-      headline: 'Not assessed',
-      // Deliberately says what we DON'T know. "No risk factors found" would be
-      // a clean bill of health we have not earned.
-      caption:
-        'Nothing on this configuration resolved against the algorithm catalogue, so it has not been assessed. ' +
-        'This is not the same as being safe.',
+      headline: 'No catalogue evidence',
+      // A detector can supply a stored score even when no catalogue component
+      // resolves. State only the evidence gap; do not turn it into a claim that
+      // nobody assessed the configuration.
+      caption: hasStoredScore
+        ? `No catalogue components resolved; the existing risk score ${score} is not explained by this catalogue evidence.`
+        : 'No catalogue components resolved, so this panel cannot explain a numeric risk score.',
       unexplainedRemainder: null,
     };
   }
 
-  const worstScore = worst?.risk_score ?? 0;
+  const worstScore = worst?.risk_score;
   // Only report a remainder when the stored score genuinely exceeds what the
   // catalogue explains. A stored score BELOW the catalogue's worst just means
   // the catalogue moved since ingest — the panel shows live catalogue values
   // and does not need to editorialize about that.
-  const remainder = s > worstScore ? s - worstScore : null;
+  const remainder = typeof worstScore === 'number' && s > worstScore ? s - worstScore : null;
 
   return {
     assessed: true,
     components: list,
     worst: worst ?? null,
     offeredCount,
-    headline: worst ? `${componentTypeLabel(worst.algorithm_type)}: ${worst.code}` : 'Contributing components',
+    headline: worst ? `${componentTypeLabel(worst.algorithm_type)}: ${worst.code}` : 'Catalogue components resolved',
     caption: worst
       ? `Worst component — catalogue risk ${worst.risk_score} (${worst.risk_level}), ${PROVENANCE_LABEL[provenanceOf(worst)]}.`
-      : '',
+      : 'The catalogue records qualitative judgments for these components, but no numeric risk score.',
     unexplainedRemainder: remainder,
   };
 }

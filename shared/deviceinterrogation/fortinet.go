@@ -262,8 +262,14 @@ func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) Crypto
 		Metadata:  projectFortinet(vpn, fortinetSSLVPNFields),
 	}
 
+	// server_hostname is genuinely meant as a hostname, but it is still
+	// operator-entered FortiOS config and not guaranteed to be a valid DNS
+	// name; guard it the same as every other collector-supplied Hostname so a
+	// malformed value never reaches the identity layer to be rejected there.
 	if hostname, ok := vpn["server_hostname"].(string); ok {
-		asset.Hostname = hostname
+		if canon := canonicalHostnameOrEmpty(hostname); canon != "" {
+			asset.Hostname = canon
+		}
 	}
 	if ip, ok := vpn["server_ip"].(string); ok {
 		asset.IPAddress = ip
@@ -302,8 +308,13 @@ func (c *fortinetClient) convertIPSecToAsset(tunnel map[string]interface{}) Cryp
 		Metadata:  projectFortinet(tunnel, fortinetIPSecTunnelFields),
 	}
 
+	// tunnel["name"] is the admin-chosen IPSec phase-1 config name
+	// ("Site-A-VPN"), not a hostname — kept for display via
+	// fortinetIPSecTunnelFields, only promoted to Hostname when DNS-valid.
 	if name, ok := tunnel["name"].(string); ok {
-		asset.Hostname = name
+		if hostname := canonicalHostnameOrEmpty(name); hostname != "" {
+			asset.Hostname = hostname
+		}
 	}
 	if remoteGw, ok := tunnel["remote-gw"].(string); ok {
 		asset.IPAddress = remoteGw

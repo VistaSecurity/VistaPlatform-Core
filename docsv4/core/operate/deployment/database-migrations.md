@@ -131,6 +131,16 @@ docker exec crypto-postgres psql -U crypto_user -d crypto_inventory \
 
 **Note:** The consolidated schema uses `CREATE TABLE IF NOT EXISTS` and similar idempotent statements, so it's safe to run on existing databases. All schema changes should be made to `schema.sql` directly.
 
+The ADR-0016 catalogue migration removes the old `algorithms.risk_score`
+database default of 50. Applying it does not re-grade any existing row: explicit
+scores, old rows that previously received 50, and `NULL` scores are preserved.
+New algorithm rows must include a deliberate integer score from 0 through 100
+through the catalogue API. An insert-only database guard also rejects direct
+inserts without one. `NULL` remains allowed for historical or operator-created
+rows because the migration has no authoritative evidence with which to grade
+them; those rows can still receive unrelated corrections until a curator
+supplies the missing score.
+
 ### Docker Compose "production-style" stack
 
 A production-style Compose stack (`docker-compose.prod.yml` — not part of the

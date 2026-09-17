@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -320,6 +321,11 @@ func TestFixturesDecode(t *testing.T) {
 			obs, err := hostobs.Decode(tc.kind, hostobs.Frame{
 				Payload: mustHex(t, tc.hex),
 				SrcMAC:  tc.mac,
+				// The frame's own source address, which is what lets the mDNS
+				// decoder attribute the announcement to the sender at all: a
+				// response whose records do not name the address it came from
+				// was relayed, and its MAC belongs to the reflector.
+				SrcAddr: netip.MustParseAddr("192.168.10.77"),
 				At:      time.Unix(1789000000, 0).UTC(),
 			})
 			if err != nil {

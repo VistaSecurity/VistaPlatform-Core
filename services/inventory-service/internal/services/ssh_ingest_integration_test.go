@@ -304,6 +304,18 @@ func TestIntegration_SSHCatalogue_WireNamesResolveExactly(t *testing.T) {
 		{"diffie-hellman-group-exchange-sha1", "key_exchange", "diffie-hellman-group-exchange-sha1"},
 		{"sntrup761x25519-sha512@openssh.com", "key_exchange", "sntrup761x25519-sha512@openssh.com"},
 		{"mlkem768x25519-sha256", "key_exchange", "mlkem768x25519-sha256"},
+
+		// Names a current sshd puts on the wire that the catalogue gained
+		// alongside active KEXINIT capture. The bare sntrup761x25519-sha512
+		// is the one to watch: it differs from the vendor-prefixed row only
+		// by the "@openssh.com" suffix, so an exact-match regression would
+		// show up as the substring fallback picking the wrong one, or as an
+		// "ambiguous" result resolving to nothing.
+		{"sntrup761x25519-sha512", "key_exchange", "sntrup761x25519-sha512"},
+		{"mlkem768nistp256-sha256", "key_exchange", "mlkem768nistp256-sha256"},
+		{"curve448-sha512", "key_exchange", "curve448-sha512"},
+		{"hmac-sha1-96-etm@openssh.com", "hash", "hmac-sha1-96-etm@openssh.com"},
+		{"hmac-md5-etm@openssh.com", "hash", "hmac-md5-etm@openssh.com"},
 		{"aes256-gcm@openssh.com", "symmetric", "aes256-gcm@openssh.com"},
 		{"chacha20-poly1305@openssh.com", "symmetric", "chacha20-poly1305@openssh.com"},
 		{"aes256-ctr", "symmetric", "aes256-ctr"},

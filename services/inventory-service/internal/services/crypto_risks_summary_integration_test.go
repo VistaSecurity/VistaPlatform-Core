@@ -1,127 +1,98 @@
 package services
 
-// Guards for L-9a: GetSummary's Informational bucket used to be dead code
-// (never assigned, always the Go zero value), so /crypto-risks/summary
-// reported all-zero severity buckets for a tenant while the unfiltered
-// /crypto-risks list returned non-zero rows classified "informational" by
-// classifyRisk. This pins that GetSummary.Informational now agrees with
-// ListRisks' own `severity=informational` filter for the same data.
-//
-// Skips without TEST_DATABASE_URL (nightly test-backend / make
-// test-integration-db).
-
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
-func TestIntegration_CryptoRisksSummary_InformationalMatchesList(t *testing.T) {
+func TestIntegration_CryptoRisksSummary_CanonicalJudgments(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	tenant := testdb.NewTenant(t, raw)
-	svc := &CryptoRisksService{db: db}
-
+	svc := NewCryptoRisksService(db)
 	asset := uuid.New()
-	if _, err := db.Exec(`
-		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, 'strong.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`, asset, tenant); err != nil {
-		t.Fatalf("insert asset: %v", err)
+	if _, err := db.Exec(`INSERT INTO assets(id,tenant_id,hostname,class_key,class_path,asset_status,created_at,updated_at) VALUES($1,$2,'bands.test','server','hardware.computer.server','monitoring',NOW(),NOW())`, asset, tenant); err != nil {
+		t.Fatal(err)
 	}
-	// A strong, modern configuration (TLS1.3 / AES256-GCM / SHA384 / 4096-bit)
-	// with a positive risk_score but nothing that matches any Critical/High/
-	// Medium weak-crypto signature — classifyRisk's default bucket.
-	implID := uuid.New()
-	if _, err := db.Exec(`
-		INSERT INTO crypto_implementations (
-			id, tenant_id, asset_id, protocol, protocol_version, cipher_suite,
-			hash_algorithm, key_size, discovery_method, risk_score, created_at, updated_at
-		) VALUES ($1,$2,$3,'TLS','TLSv1.3','TLS_AES_256_GCM_SHA384','SHA384',4096,'passive',10,NOW(),NOW())`,
-		implID, tenant, asset); err != nil {
-		t.Fatalf("insert strong implementation: %v", err)
+	for _, score := range []int{90, 70, 40, 1, 0} {
+		alg, ci := uuid.New(), uuid.New()
+		if _, err := db.Exec(`INSERT INTO algorithms(id,code,name,category,strength,risk_score) VALUES($1,$2,'test','symmetric','weak',$3)`, alg, "READ-"+alg.String(), score); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM algorithms WHERE id=$1`, alg) })
+		if _, err := db.Exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,discovery_method,risk_score,created_at,updated_at) VALUES($1,$2,$3,'TLS','passive',0,NOW(),NOW())`, ci, tenant, asset); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO crypto_implementation_algorithms(crypto_implementation_id,algorithm_id,algorithm_type) VALUES($1,$2,'symmetric')`, ci, alg); err != nil {
+			t.Fatal(err)
+		}
 	}
-
 	summary, err := svc.GetSummary(tenant)
 	if err != nil {
-		t.Fatalf("GetSummary: %v", err)
+		t.Fatal(err)
 	}
-	if summary.Critical != 0 || summary.High != 0 || summary.Medium != 0 {
-		t.Fatalf("strong config classified into a weak bucket: %+v", summary)
+	if summary.Critical != 1 || summary.TotalAffected != 1 || summary.High+summary.Medium+summary.Low+summary.Informational+summary.Unscored != 0 {
+		t.Fatalf("not worst-per-asset: %+v", summary)
 	}
-	if summary.Informational != 1 {
-		t.Errorf("Informational = %d, want 1 — GetSummary must count the same "+
-			"row ListRisks(severity=informational) returns", summary.Informational)
-	}
-
-	listed, err := svc.ListRisks(tenant, CryptoRiskFilters{Severity: []string{"informational"}, Page: 1, PageSize: 20})
-	if err != nil {
-		t.Fatalf("ListRisks: %v", err)
-	}
-	if listed.Total != summary.Informational {
-		t.Errorf("ListRisks(informational).Total = %d, GetSummary.Informational = %d — must agree",
-			listed.Total, summary.Informational)
+	for _, band := range []string{"critical", "high", "medium", "low", "info", "informational"} {
+		page, err := svc.ListRisks(tenant, CryptoRiskFilters{Severity: []string{band}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Total != 1 {
+			t.Fatalf("%s total=%d", band, page.Total)
+		}
 	}
 }
 
-// TestIntegration_CryptoRisksSummary_BucketsAreMutuallyExclusive pins the rule
-// CLAUDE.md states and this summary used to break: roll up per ASSET first,
-// then band once.
-//
-// Each counter used to be its own `COUNT(DISTINCT ci.asset_id)` with the band
-// decided per CONFIGURATION, so a host with a TLS 1.0 endpoint and a TLS 1.1
-// endpoint was counted in Critical AND in High. The buckets summed past the
-// number of affected assets and the dashboard's distribution bar exceeded 100%.
-//
-// Two assertions, because either alone can be satisfied by the wrong query: the
-// worst band wins, and the bands sum to the total.
-func TestIntegration_CryptoRisksSummary_BucketsAreMutuallyExclusive(t *testing.T) {
+func TestIntegration_CryptoRisks_StreamedPageSelection(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
-	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	tenant := testdb.NewTenant(t, raw)
-	svc := &CryptoRisksService{db: db}
-
-	asset := uuid.New()
-	if _, err := db.Exec(`
-		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, 'two-bands.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
-		asset, tenant); err != nil {
-		t.Fatalf("insert asset: %v", err)
-	}
-	// One host, two configurations: TLS 1.0 is Critical, TLS 1.1 is High. This
-	// is the ordinary shape of a host serving two ports, not a contrived one.
-	for _, version := range []string{"TLSv1.0", "TLSv1.1"} {
-		if _, err := db.Exec(`
-			INSERT INTO crypto_implementations (
-				id, tenant_id, asset_id, protocol, protocol_version, cipher_suite,
-				hash_algorithm, key_size, discovery_method, risk_score, created_at, updated_at
-			) VALUES ($1,$2,$3,'TLS',$4,'TLS_RSA_WITH_AES_128_CBC_SHA256','SHA256',2048,'passive',70,NOW(),NOW())`,
-			uuid.New(), tenant, asset, version); err != nil {
-			t.Fatalf("insert %s implementation: %v", version, err)
+	db := &database.DB{DB: sqlx.NewDb(testdb.ConnectAsAppRole(t, raw), "postgres")}
+	asset, algorithm := uuid.New(), uuid.New()
+	must := func(q string, args ...any) {
+		t.Helper()
+		if _, err := raw.Exec(q, args...); err != nil {
+			t.Fatal(err)
 		}
 	}
-
-	summary, err := svc.GetSummary(tenant)
+	must(`INSERT INTO assets(id,tenant_id,hostname,class_key,class_path,asset_status) VALUES($1,$2,'stream.test','server','hardware.computer.server','monitoring')`, asset, tenant)
+	must(`INSERT INTO algorithms(id,code,name,category,strength,risk_score) VALUES($1,$2,'stream','symmetric','weak',0)`, algorithm, "STREAM-"+algorithm.String())
+	t.Cleanup(func() { _, _ = raw.Exec(`DELETE FROM algorithms WHERE id=$1`, algorithm) })
+	must(`WITH inserted AS (
+ INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,discovery_method,risk_score)
+ SELECT gen_random_uuid(),$1,$2,'TLS','passive',0 FROM generate_series(1,2000) RETURNING id)
+ INSERT INTO crypto_implementation_algorithms(crypto_implementation_id,algorithm_id,algorithm_type)
+ SELECT id,$3,'symmetric' FROM inserted`, tenant, asset, algorithm)
+	svc := NewCryptoRisksService(db)
+	started := time.Now()
+	page, err := svc.ListRisks(tenant, CryptoRiskFilters{Page: 3, PageSize: 100})
 	if err != nil {
-		t.Fatalf("GetSummary: %v", err)
+		t.Fatal(err)
 	}
-	if summary.Critical != 1 {
-		t.Errorf("Critical = %d, want 1 — the worst band an asset has is the band it is in", summary.Critical)
+	t.Logf("2000 candidates, keep <=300 rows: page selection %s", time.Since(started))
+	if len(page.Risks) != 100 || page.Total != 2000 {
+		t.Fatalf("page count %+v", page)
 	}
-	if summary.High != 0 {
-		t.Errorf("High = %d, want 0 — counting the same asset in two bands is what made the "+
-			"distribution exceed 100%%", summary.High)
+	started = time.Now()
+	exported, err := svc.ExportRisks(tenant, CryptoRiskFilters{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if summary.Medium != 0 || summary.Informational != 0 {
-		t.Errorf("Medium = %d, Informational = %d, want 0 and 0", summary.Medium, summary.Informational)
+	t.Logf("2000 candidates, single-pass export: %s", time.Since(started))
+	if len(exported) != 2000 {
+		t.Fatalf("exported %d", len(exported))
 	}
-	if sum := summary.Critical + summary.High + summary.Medium + summary.Informational; sum != summary.TotalAffected {
-		t.Errorf("the bands sum to %d but TotalAffected is %d; they must partition the affected assets",
-			sum, summary.TotalAffected)
+	for i, r := range page.Risks {
+		if r.ID != exported[i+200].ID {
+			t.Fatalf("page/export order drift at %d", i)
+		}
 	}
 }

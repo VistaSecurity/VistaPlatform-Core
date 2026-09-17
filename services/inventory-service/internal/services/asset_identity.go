@@ -288,6 +288,30 @@ func (s *AssetService) assetStatusOf(tenantID, assetID uuid.UUID) (string, bool,
 	return status, true, nil
 }
 
+// matchedAssetStatus answers "what status does this asset actually HAVE?" for
+// an ingest that matched an EXISTING asset.
+//
+// The ingest's own `status` is the decision discovery-processor reached by
+// running the tenant's auto-approval rules over one discovery row. That decides
+// what a NEW asset lands as and nothing more: an asset that already exists has
+// a status a human or a rule already gave it, and a later observation of it is
+// not a re-application for approval.
+//
+// fallback is returned when the status cannot be read — a soft-deleted asset,
+// or a failed read. Both are reasons to keep the caller's conservative answer
+// rather than to invent a more permissive one.
+func (s *AssetService) matchedAssetStatus(tenantID, assetID uuid.UUID, fallback string) string {
+	status, ok, err := s.assetStatusOf(tenantID, assetID)
+	if err != nil {
+		log.Printf("[AssetService] reading the status of matched asset %s failed; treating it as %s: %v", assetID, fallback, err)
+		return fallback
+	}
+	if !ok {
+		return fallback
+	}
+	return status
+}
+
 // resolveEndpointForFinding returns the id of the endpoint a finding was
 // measured on, creating it if the asset does not have it yet.
 //
@@ -327,17 +351,38 @@ func (s *AssetService) resolveEndpointForFinding(ctx context.Context, tenantID, 
 	// IS NOT DISTINCT FROM rather than coalesce(): it is null-safe without
 	// inventing a sentinel, and NULL address / NULL port are real values here —
 	// an at-rest endpoint has both.
+	//
+	// The address branch below deliberately does NOT also require fqdn to
+	// match. identity/postgres.Repository.UpsertEndpoints, just called above,
+	// matches an address-bearing endpoint on (address, port, transport) alone
+	// and merges fqdn into the existing row ("empty never wins" — see its
+	// mergeEndpointByAddress) rather than requiring an exact match. A read-back
+	// that still demanded fqdn equality would miss the very row that call just
+	// wrote or updated whenever the existing row already carried a DIFFERENT
+	// (non-empty) fqdn than this observation's — which is exactly the case an
+	// active scan with no resolved name hits against a passively-discovered,
+	// already-named endpoint.
 	var id uuid.UUID
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		if ep.Address != "" {
+			return tx.QueryRow(`
+				SELECT id FROM asset_endpoints
+				WHERE tenant_id = $1 AND asset_id = $2
+				  AND address = $3::text::inet
+				  AND port IS NOT DISTINCT FROM $4::int
+				  AND transport = $5`,
+				tenantID, assetID,
+				ep.Address, nullablePort(ep.Port), endpointTransport(ep)).Scan(&id)
+		}
 		return tx.QueryRow(`
 			SELECT id FROM asset_endpoints
 			WHERE tenant_id = $1 AND asset_id = $2
-			  AND address IS NOT DISTINCT FROM $3::text::inet
-			  AND coalesce(fqdn, '') = coalesce($4::text, '')
-			  AND port IS NOT DISTINCT FROM $5::int
-			  AND transport = $6`,
+			  AND address IS NULL
+			  AND coalesce(fqdn, '') = coalesce($3::text, '')
+			  AND port IS NOT DISTINCT FROM $4::int
+			  AND transport = $5`,
 			tenantID, assetID,
-			nullableText(ep.Address), nullableText(ep.FQDN), nullablePort(ep.Port), endpointTransport(ep)).Scan(&id)
+			nullableText(ep.FQDN), nullablePort(ep.Port), endpointTransport(ep)).Scan(&id)
 	})
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("read back endpoint %s: %w", ep.Key(), err)
@@ -915,6 +960,15 @@ func findingEndpoint(f IngestFinding, effectiveIP *string) (identity.EndpointObs
 	if strings.Contains(strings.TrimSuffix(host, "."), ".") {
 		ep.FQDN = strings.ToLower(host)
 	}
+	// `host` is whatever the intake path called the scan target, and an
+	// active-scan path that resolves nothing gives it back the literal
+	// address it was told to probe — which still "contains a dot" and so
+	// passed the check above as an FQDN. Sanitized() folds that back into
+	// Address (a no-op when addr already carries the same value, since
+	// Address is already set) rather than leaving a fake name that produces a
+	// second asset_endpoints row for a listener already recorded under
+	// addr's own address.
+	ep = ep.Sanitized()
 	if ep.Address == "" && ep.FQDN == "" {
 		// A single-label hostname with no address: `asset_endpoints` requires an
 		// address or an FQDN, and a bare label is neither. The asset still

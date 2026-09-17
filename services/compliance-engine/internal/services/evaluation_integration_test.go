@@ -87,8 +87,8 @@ func newEvalFixture(t *testing.T) *evalFixture {
 		code     string
 		severity string
 	}{
-		{critical, "IT-1", "Critical"},
-		{low, "IT-2", "Low"},
+		{critical, "IT-1", "critical"},
+		{low, "IT-2", "low"},
 	} {
 		if _, err := db.Exec(`
 			INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant)

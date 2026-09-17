@@ -65,6 +65,16 @@ const Marker = "[redacted]"
 var pemPrivateKey = regexp.MustCompile(
 	`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 
+// pemPrivateKeyHeadless matches a BEGIN header with no END line after it —
+// what is left of a key when the text it sat in was cut at a line or a length
+// bound before it reached this function (an SSH identification string is read
+// one line at a time; a banner is truncated). The block regex above cannot
+// match a fragment with no END, so without this rule the header and whatever
+// follows it shipped. Everything from the header to the end of the string is
+// the key's territory and is redacted as one.
+var pemPrivateKeyHeadless = regexp.MustCompile(
+	`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*$`)
+
 // TextPEM replaces every PEM private-key block in s with [Marker], leaving the
 // text around it — and every public artefact — alone.
 //
@@ -86,7 +96,8 @@ func TextPEM(s string) string {
 	if !strings.Contains(s, "PRIVATE KEY") {
 		return s
 	}
-	return pemPrivateKey.ReplaceAllString(s, Marker)
+	s = pemPrivateKey.ReplaceAllString(s, Marker)
+	return pemPrivateKeyHeadless.ReplaceAllString(s, Marker)
 }
 
 // secretNameFragments mark a field as secret material wherever they appear in

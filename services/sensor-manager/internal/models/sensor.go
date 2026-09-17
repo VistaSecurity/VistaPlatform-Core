@@ -1,6 +1,7 @@
 package models
 
 import (
+	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,10 +35,15 @@ type Sensor struct {
 	// reported by the sensor at registration and on every heartbeat. Nil until
 	// the sensor reports it (older sensors, or before first check-in). Operators
 	// change it via an update_config command (see IsAllowedReportingInterval).
-	ReportingInterval *int       `json:"reporting_interval" db:"reporting_interval"`
-	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt         *time.Time `json:"deleted_at" db:"deleted_at"`
+	ReportingInterval *int `json:"reporting_interval" db:"reporting_interval"`
+	// AssetID is the asset the HOST THIS SENSOR RUNS ON resolved to, from the
+	// sensor's own self-reported host_observation ingest (asset-inventory
+	// decision 9). nil until the first successful self-observation, and
+	// forever nil for a sensor build old enough to send none.
+	AssetID   *uuid.UUID `json:"asset_id" db:"asset_id"`
+	CreatedAt time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
+	DeletedAt *time.Time `json:"deleted_at" db:"deleted_at"`
 	// Legacy fields for backward compatibility
 	Type         string                 `json:"type,omitempty" db:"type"`
 	LastSeen     *time.Time             `json:"last_seen,omitempty" db:"last_seen"`
@@ -374,6 +380,24 @@ type SensorRegistration struct {
 	// ReportingInterval (seconds) the sensor reports at registration, so the
 	// platform stores its real cadence immediately (nil if not reported).
 	ReportingInterval *int `json:"reporting_interval,omitempty"`
+	// Host is the sensor's own host identity, always sent at registration
+	// (registration happens once, so the sensor applies no throttle there).
+	// See [HostIdentity].
+	Host *HostIdentity `json:"host,omitempty"`
+}
+
+// HostIdentity mirrors the sensor's own sensor/internal/models.HostIdentity
+// wire shape exactly (asset-inventory decision 9, morning notes).
+// It is what the sensor knows about the machine it runs ON, reported on
+// registration and (throttled) on heartbeat so the Heartbeat/RegisterSensor
+// handlers can turn it into a host observation through the SAME ingest path
+// every other passive observation already uses (see outbound.go).
+type HostIdentity struct {
+	Hostname   string                           `json:"hostname,omitempty"`
+	FQDN       string                           `json:"fqdn,omitempty"`
+	OS         string                           `json:"os,omitempty"`
+	Arch       string                           `json:"arch,omitempty"`
+	Interfaces []sharednetwork.InterfaceAddress `json:"interfaces,omitempty"`
 }
 
 // SensorHealth represents sensor health status
@@ -395,6 +419,22 @@ type SensorHealth struct {
 	// heartbeat so the platform can keep the sensor's available-interface list
 	// current for the UI picker.
 	AvailableInterfaces []string `json:"available_interfaces"`
+	// ConfigRevision, ConfigFailures and ConfigPendingRestart are the sensor's
+	// desired-state report: the revision it has applied, anything it
+	// could not apply and why, and anything it will adopt on restart. All
+	// optional — an older sensor sends none of them, and an empty revision
+	// reads as "this build does not speak desired state", which is true.
+	ConfigRevision       string            `json:"config_revision"`
+	ConfigFailures       map[string]string `json:"config_failures"`
+	ConfigPendingRestart []string          `json:"config_pending_restart"`
+	// ConfigRunning is what the sensor says its managed settings are set to
+	// right now, including whatever came from its own configuration file. It is
+	// how a sensor that enrolled before the control plane existed establishes
+	// its starting position on its first report, instead of being handed
+	// built-in defaults that undo its local configuration. Absent from an older
+	// sensor, which is distinct from "running nothing" — see
+	// agentconfig.ExchangeReport.Running.
+	ConfigRunning agentconfig.Values `json:"config_running"`
 	// ReportingInterval (seconds) is the sensor's current data-send cadence,
 	// reported on every heartbeat so the platform's stored value tracks what the
 	// sensor is actually doing (including after an operator change is applied).
@@ -419,7 +459,12 @@ type SensorHealth struct {
 	// capture host watches several segments at once, which IPAddress alone
 	// cannot express. Empty leaves the recorded set untouched.
 	Interfaces []sharednetwork.InterfaceAddress `json:"interfaces,omitempty" db:"-"`
-	CreatedAt  time.Time                        `json:"created_at" db:"created_at"`
+	// Host is the sensor's own host identity, sent only when the sensor's own
+	// throttle decided to (new, changed, or an hour since the last send) — see
+	// [HostIdentity] and outbound.go's Heartbeat handler. nil is the common
+	// case and does not mean "no host was ever reported."
+	Host      *HostIdentity `json:"host,omitempty" db:"-"`
+	CreatedAt time.Time     `json:"created_at" db:"created_at"`
 }
 
 // SensorCommands represents a collection of commands for a sensor
@@ -427,6 +472,15 @@ type SensorCommands struct {
 	SensorID string                 `json:"sensor_id"`
 	Commands []Command              `json:"commands"`
 	Metadata map[string]interface{} `json:"metadata"`
+	// Config is the sensor's desired state: what it SHOULD be running,
+	// answered on every heartbeat. Omitted when the exchange could not be
+	// served, which an older sensor and a sensor whose lookup failed both read
+	// as "no change" rather than as an instruction to revert.
+	//
+	// Typed rather than interface{}: the wire shape is the contract between two
+	// independently-built binaries, and a field that documents itself is worth
+	// more here than one that accepts anything.
+	Config *agentconfig.ExchangePayload `json:"config,omitempty"`
 }
 
 // SensorCommand model matching our database schema
@@ -556,52 +610,4 @@ type DiscoveryJob struct {
 	StartedAt          *time.Time `json:"started_at" db:"started_at"`
 	CompletedAt        *time.Time `json:"completed_at" db:"completed_at"`
 	ErrorMessage       *string    `json:"error_message" db:"error_message"`
-}
-
-// DiscoveryJobResult represents results submitted for a discovery job
-type DiscoveryJobResult struct {
-	Findings []DiscoveryFinding `json:"findings"`
-}
-
-// DiscoveryFinding represents a single discovery finding
-type DiscoveryFinding struct {
-	TargetID        uuid.UUID              `json:"target_id"`
-	ExecutedVia     string                 `json:"executed_via"` // 'cloud', 'sensor', 'manual'
-	Protocol        string                 `json:"protocol"`
-	Port            int                    `json:"port"`
-	ResolvedIP      *string                `json:"resolved_ip"`
-	ResolvedIPs     []string               `json:"resolved_ips"`
-	Hostname        *string                `json:"hostname"`
-	Details         *string                `json:"details"`
-	RawBlobRef      *string                `json:"raw_blob_ref"`
-	RawBlobSize     *int                   `json:"raw_blob_size"`
-	ErrorCode       *string                `json:"error_code"`
-	ConfidenceScore *float64               `json:"confidence_score"`
-	Metadata        map[string]interface{} `json:"metadata"`
-
-	// TLS probe results (from sensor active probe or cluster-sensor TLS prober)
-	TLSVersions      []string                 `json:"tls_versions,omitempty"`
-	TLSVersion       string                   `json:"tls_version,omitempty"`
-	SelectedCipher   string                   `json:"selected_cipher,omitempty"`
-	CipherSuite      string                   `json:"cipher_suite,omitempty"`
-	SupportedCiphers []string                 `json:"supported_ciphers,omitempty"`
-	ALPN             []string                 `json:"alpn,omitempty"`
-	Certificates     []map[string]interface{} `json:"certificates,omitempty"`
-
-	// TLS certificate validation fields
-	CertValidationStatus string `json:"cert_validation_status,omitempty"` // "valid", "self_signed", "expired", "hostname_mismatch", "untrusted_ca"
-	CertValidationError  string `json:"cert_validation_error,omitempty"`
-
-	// Key exchange algorithm parsed from cipher suite
-	KeyExchangeAlgorithm string `json:"key_exchange_algorithm,omitempty"`
-
-	// SSH algorithm negotiation fields (active probe only)
-	SSHHostKeyType        string `json:"ssh_host_key_type,omitempty"`
-	SSHHostKeyFingerprint string `json:"ssh_host_key_fingerprint,omitempty"`
-	SSHKexAlgorithm       string `json:"ssh_kex_algorithm,omitempty"`
-	SSHEncryptionAlgC2S   string `json:"ssh_encryption_alg_c2s,omitempty"`
-	SSHEncryptionAlgS2C   string `json:"ssh_encryption_alg_s2c,omitempty"`
-	SSHMACAlgC2S          string `json:"ssh_mac_alg_c2s,omitempty"`
-	SSHMACAlgS2C          string `json:"ssh_mac_alg_s2c,omitempty"`
-	SSHCompressionAlg     string `json:"ssh_compression_alg,omitempty"`
 }

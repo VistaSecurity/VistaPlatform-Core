@@ -73,7 +73,7 @@ func newDeletionFixture(t *testing.T) *deletionFixture {
 
 	if _, err := db.Exec(`
 		INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant)
-		VALUES ($1, $2, 'DEL-1', 'No deprecated TLS', 'integration fixture control', 'High', true)`,
+		VALUES ($1, $2, 'DEL-1', 'No deprecated TLS', 'integration fixture control', 'high', true)`,
 		controlID, frameworkID); err != nil {
 		t.Fatalf("seed control: %v", err)
 	}

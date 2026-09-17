@@ -430,7 +430,7 @@ type ControlDraft struct {
 	Description string `json:"description,omitempty"`
 
 	// Severity is the control's baseline severity in the existing vocabulary
-	// (Low / Med / High / Critical).
+	// (low / medium / high / critical).
 	Severity string `json:"severity,omitempty"`
 
 	// Citations are the passages of the source text this draft came from.

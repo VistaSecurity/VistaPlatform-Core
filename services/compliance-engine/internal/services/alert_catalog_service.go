@@ -180,9 +180,13 @@ func (s *AlertCatalogService) CertPolicyRungs(ctx context.Context, tenantID uuid
 			if predicate.Operator != ">=" && predicate.Operator != ">" {
 				continue
 			}
+			controlSeverity, err := alertcatalog.ControlSeverity(severity)
+			if err != nil {
+				return err
+			}
 			rungs = append(rungs, alertcatalog.Rung{
 				Days:     int(predicate.Value),
-				Severity: alertcatalog.NormalizeControlSeverity(severity),
+				Severity: controlSeverity,
 				Source:   "policy:" + frameworkName,
 			})
 		}

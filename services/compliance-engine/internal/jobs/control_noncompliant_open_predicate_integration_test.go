@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -47,7 +46,7 @@ func TestIntegration_ControlNoncompliantScan_UsesTheOpenFindingPredicate(t *test
 		id := uuid.New()
 		controls[state] = id
 		h.exec(t, `INSERT INTO platform_framework_controls (id, framework_id, control_id, title, baseline_severity)
-		           VALUES ($1,$2,$3,'Control','High')`, id, frameworkID, fmt.Sprintf("OPF-%d", i+1))
+		           VALUES ($1,$2,$3,'Control','high')`, id, frameworkID, fmt.Sprintf("OPF-%d", i+1))
 		detection, workflow := "ACTIVE", state
 		if state == "INACTIVE" {
 			detection, workflow = "INACTIVE", "NEW"

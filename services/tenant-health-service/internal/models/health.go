@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/healthbands"
 )
 
 // TenantHealth represents the overall health score and metrics for a tenant
@@ -11,7 +12,7 @@ type TenantHealth struct {
 	ID              uuid.UUID        `json:"id" db:"id"`
 	TenantID        uuid.UUID        `json:"tenant_id" db:"tenant_id"`
 	OverallScore    float64          `json:"overall_score" db:"overall_score"`
-	HealthStatus    string           `json:"health_status" db:"health_status"` // "excellent", "good", "fair", "poor", "critical", "unknown"
+	HealthStatus    string           `json:"health_status" db:"health_status"` // "excellent", "good", "fair", "poor", "failing", "unknown"
 	LastCalculated  time.Time        `json:"last_calculated" db:"last_calculated"`
 	ScoreBreakdown  HealthBreakdown  `json:"score_breakdown" db:"score_breakdown"`
 	Recommendations []Recommendation `json:"recommendations" db:"recommendations"`
@@ -35,11 +36,11 @@ const (
 	SourceResourceTracker = "resource-tracker-service"
 )
 
-// HealthStatusUnknown is the health status stored when NO factor could be
-// measured. Consumers (the admin-ui board and compliance-engine's
+// HealthStatusUnknown is stored when no valid health index is available,
+// normally because no factor could be measured. Consumers (the admin-ui board and compliance-engine's
 // tenant_health_degraded scan) must treat it as "no data", never as a low
 // score.
-const HealthStatusUnknown = "unknown"
+const HealthStatusUnknown = healthbands.Unknown
 
 // SourceFactors maps a metric source to the health factors it feeds. Used by
 // the scorer to decide which factors are unknown when a peer is unreachable.

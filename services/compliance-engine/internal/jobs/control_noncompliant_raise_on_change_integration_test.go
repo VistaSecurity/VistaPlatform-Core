@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -39,7 +38,7 @@ func TestIntegration_ControlNoncompliantScan_RaiseOnChange(t *testing.T) {
 
 	controlID := uuid.New()
 	h.exec(t, `INSERT INTO platform_framework_controls (id, framework_id, control_id, title, baseline_severity)
-	           VALUES ($1,$2,$3,'Control','Low')`, controlID, frameworkID, "ROC-1")
+	           VALUES ($1,$2,$3,'Control','low')`, controlID, frameworkID, "ROC-1")
 	h.exec(t, `INSERT INTO findings
 	             (tenant_id, producer, kind, control_id, subject_id, subject_type,
 	              severity, summary, detection_state, workflow_status)
@@ -85,7 +84,7 @@ func TestIntegration_ControlNoncompliantScan_RaiseOnChange(t *testing.T) {
 
 	// The control's baseline severity is raised (an admin edit in the Catalog):
 	// the same alert escalates, and the escalation DOES append an event.
-	h.exec(t, `UPDATE platform_framework_controls SET baseline_severity = 'Critical' WHERE id = $1`, controlID)
+	h.exec(t, `UPDATE platform_framework_controls SET baseline_severity = 'critical' WHERE id = $1`, controlID)
 	job.ScanAll()
 	if got := h.alertCount(t, tenant, "control_noncompliant"); got != 1 {
 		t.Fatalf("escalation opened a second alert: got %d, want 1", got)

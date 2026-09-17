@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
 type DiscoveryService struct {
@@ -73,7 +74,34 @@ func NewDiscoveryService(cfg *config.Config) (*DiscoveryService, error) {
 	}, nil
 }
 
+// CreateJobInternal dispatches a discovery job with no person behind it.
+//
+// The automatic active-scan sweep runs on a ticker in this service: there is no
+// browser, no cookie and no Authorization header to forward. It authenticates
+// with the platform's HMAC service-auth instead (the same
+// `serviceauth.SignRequestFromEnv` every other peer-to-peer call uses) and
+// names the tenant in `X-Tenant-ID`, which is how cluster-sensor-service's auth
+// middleware resolves the tenant for an internal call.
+//
+// It fails CLOSED at the other end: with INTERNAL_AUTH_SECRET unset,
+// cluster-sensor builds no internal verifier and the call is rejected as
+// unauthenticated rather than let through.
+func (s *DiscoveryService) CreateJobInternal(tenantID string, input models.CreateDiscoveryJobInput) (*models.DiscoveryJob, error) {
+	return s.createJob(tenantID, input, func(req *http.Request) {
+		req.Header.Set("X-Tenant-ID", tenantID)
+		serviceauth.SignRequestFromEnv(req)
+	})
+}
+
 func (s *DiscoveryService) CreateJob(tenantID string, userID string, input models.CreateDiscoveryJobInput, authHeader string) (*models.DiscoveryJob, error) {
+	return s.createJob(tenantID, input, func(req *http.Request) {
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+	})
+}
+
+func (s *DiscoveryService) createJob(tenantID string, input models.CreateDiscoveryJobInput, authorize func(*http.Request)) (*models.DiscoveryJob, error) {
 	if len(input.Targets) == 0 {
 		return nil, fmt.Errorf("at least one target is required")
 	}
@@ -122,9 +150,9 @@ func (s *DiscoveryService) CreateJob(tenantID string, userID string, input model
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
-	}
+	// Headers that are part of the signed message must be set BEFORE signing —
+	// serviceauth folds X-Tenant-ID and the body hash into the HMAC.
+	authorize(req)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -134,7 +162,7 @@ func (s *DiscoveryService) CreateJob(tenantID string, userID string, input model
 
 	if resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("cluster-sensor-service returned status %d: %s", resp.StatusCode, string(body))
+		return nil, &DownstreamError{Status: resp.StatusCode, Message: downstreamMessage(body), Body: string(body)}
 	}
 
 	// Parse response - cluster-sensor-service returns { "job": {...} }
@@ -146,6 +174,38 @@ func (s *DiscoveryService) CreateJob(tenantID string, userID string, input model
 	}
 
 	return &response.Job, nil
+}
+
+// DownstreamError is cluster-sensor-service's non-2xx answer to a job request,
+// kept with its status so a 4xx verdict — an unknown, offline or undispatchable
+// sensor — can reach the caller with the reason instead of collapsing
+// into "failed to create discovery job".
+type DownstreamError struct {
+	Status  int
+	Message string
+	Body    string
+}
+
+func (e *DownstreamError) Error() string {
+	return fmt.Sprintf("cluster-sensor-service returned status %d: %s", e.Status, e.Body)
+}
+
+// downstreamMessage pulls the `error` line out of a cluster-sensor error body,
+// falling back to the raw body when it is not that shape.
+func downstreamMessage(body []byte) string {
+	var parsed struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &parsed) == nil {
+		if parsed.Error != "" {
+			return parsed.Error
+		}
+		if parsed.Message != "" {
+			return parsed.Message
+		}
+	}
+	return string(body)
 }
 
 func valueOrDefault[T ~int](v *T, d T) T {

@@ -17,6 +17,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -105,7 +106,8 @@ func IsGREASE(v uint16) bool {
 
 // SanitizeHostname bounds and screens an SNI value read from an untrusted
 // capture before it is stored as a hostname. Returns "" when the value is not
-// a plausible hostname.
+// a plausible hostname. The result is lower-cased so it compares equal to the
+// same name captured with different letter casing across observations.
 func SanitizeHostname(s string) string {
 	if s == "" || len(s) > maxHostnameLen {
 		return ""
@@ -125,7 +127,14 @@ func SanitizeHostname(s string) string {
 	if strings.Trim(s, ".") == "" {
 		return ""
 	}
-	return s
+	// The character class above admits digits and dots, so a bare IPv4
+	// literal (e.g. "203.0.113.10") passes it. RFC 6066 server_name is a DNS
+	// identity, not an address, and net.ParseIP is the standard way to reject
+	// one before it lands in a hostname column.
+	if net.ParseIP(s) != nil {
+		return ""
+	}
+	return strings.ToLower(s)
 }
 
 // HandshakeMessage is one complete handshake message: its type byte and its

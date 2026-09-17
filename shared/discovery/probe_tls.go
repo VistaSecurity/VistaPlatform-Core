@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"time"
@@ -67,6 +68,16 @@ func probeTLS(p *Prober, conn net.Conn, hostname string, port int) (*ProbeResult
 	validation := ValidateAndClassifyCertChain(state.PeerCertificates, verifyHost, state.OCSPResponse)
 	result.CertValidationStatus = validation.ValidationStatus
 	result.CertValidationError = validation.ValidationError
+
+	// Refine cert_has_sct/cert_sct_source using the two SCT delivery routes
+	// only this live handshake can see (TLS extension + OCSP) — the embedded
+	// route above already checked the certificate bytes.
+	var sctIssuer *x509.Certificate
+	if len(state.PeerCertificates) > 1 {
+		sctIssuer = state.PeerCertificates[1]
+	}
+	RefineSCTFlags(validation.QualityFlags, state.SignedCertificateTimestamps, state.OCSPResponse, sctIssuer)
+
 	for k, v := range validation.QualityFlags {
 		result.Metadata[k] = v
 	}

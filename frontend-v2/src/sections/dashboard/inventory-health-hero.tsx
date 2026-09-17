@@ -16,7 +16,7 @@
 // of null must never render as 100.
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
-import { Icon, RiskGauge } from '../../components/ui';
+import { Icon, PercentageGauge, hygienePercentageColor } from '../../components/ui';
 import { clients } from '../../lib/clients';
 import { useAssetFacets, type FacetLevel } from '../inventory/asset-queries';
 import { CLASS_GROUP_STYLES, classGroupOf } from '../inventory/map-model';
@@ -72,7 +72,7 @@ export function InventoryHealthHero() {
       className="fade-up panel"
       data-testid="inventory-health-hero"
       style={{
-        position: 'relative', overflow: 'hidden', padding: '22px 30px', margin: '18px 0',
+        position: 'relative', overflow: 'hidden', padding: '22px 30px', margin: '0 0 18px',
         background: 'var(--hero-bg)', border: '1px solid var(--hero-border)',
       }}
     >
@@ -274,10 +274,9 @@ function HygieneBlock({ hygiene, loading }: { hygiene: HygieneScore | null; load
       </div>
     );
   }
-  const level = hygiene.score >= 90 ? 'Low' : hygiene.score >= 70 ? 'Medium' : 'Critical';
   return (
     <div data-testid="hygiene-score" style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-      <RiskGauge score={hygiene.score} level={level} size={86} label="" stroke={7} />
+      <PercentageGauge value={hygiene.score} color={hygienePercentageColor(hygiene.score)} size={86} label="" stroke={7} />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7, fontSize: 11 }}>
         <Stat n={hygiene.passing} label="checks passing" color="var(--ok)" />
         <Stat n={hygiene.failing} label="failing" color="var(--warn-strong)" />

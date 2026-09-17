@@ -10,6 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // OverrideService handles compliance override CRUD operations
@@ -44,7 +45,9 @@ func (s *OverrideService) CreateOverride(tenantID, userID uuid.UUID, scenarioID 
 		if severityFrom == nil || severityTo == nil {
 			return nil, fmt.Errorf("severity_from and severity_to are required for severity overrides")
 		}
-		if !isValidSeverity(*severityFrom) || !isValidSeverity(*severityTo) {
+	}
+	for _, value := range []*string{severityFrom, severityTo} {
+		if value != nil && !isValidSeverity(*value) {
 			return nil, fmt.Errorf("invalid severity value")
 		}
 	}
@@ -309,12 +312,7 @@ func (s *OverrideService) GetActiveOverrideForControl(tenantID, controlID uuid.U
 }
 
 // isValidSeverity checks if a severity value is valid
-func isValidSeverity(severity string) bool {
-	validSeverities := []string{"Low", "Med", "High", "Critical"}
-	for _, valid := range validSeverities {
-		if severity == valid {
-			return true
-		}
-	}
-	return false
+func isValidSeverity(value string) bool {
+	_, err := sharedseverity.ControlWeight(sharedseverity.Severity(value))
+	return err == nil
 }

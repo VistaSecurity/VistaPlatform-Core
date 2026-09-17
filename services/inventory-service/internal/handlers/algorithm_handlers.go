@@ -6,12 +6,12 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
+	"github.com/vistasecurity/vistaplatform/shared/riskbands"
 )
 
 // algorithmReader is the slice of *services.AlgorithmService the algorithm
@@ -239,14 +239,12 @@ func (h *AlgorithmHandler) GetBatchRecommendations(c *gin.Context) {
 			}
 		}
 
-		// Determine priority
-		priority := "low"
-		if alg.RiskScore >= 80 {
-			priority = "high"
-		} else if alg.RiskScore >= 60 {
-			priority = "high"
-		} else if alg.RiskScore >= 40 {
-			priority = "medium"
+		// Workflow priority deliberately keeps its three-value API vocabulary.
+		// An unassessed historical row has no priority until it is rated.
+		priority := algorithmRecommendationPriority(alg.RiskScore)
+		reason := fmt.Sprintf("Risk score: unassessed, Strength: %s", alg.Strength)
+		if alg.RiskScore != nil {
+			reason = fmt.Sprintf("Risk score: %d, Strength: %s", *alg.RiskScore, alg.Strength)
 		}
 
 		recommendationsList = append(recommendationsList, gin.H{
@@ -258,7 +256,7 @@ func (h *AlgorithmHandler) GetBatchRecommendations(c *gin.Context) {
 			"strength":                 alg.Strength,
 			"deprecation_status":       alg.DeprecationStatus,
 			"priority":                 priority,
-			"reason":                   fmt.Sprintf("Risk score: %d, Strength: %s", alg.RiskScore, alg.Strength),
+			"reason":                   reason,
 		})
 	}
 
@@ -579,9 +577,9 @@ func (h *AlgorithmHandler) UpdateAlgorithm(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"algorithm": updated})
 }
 
-// createAlgorithmRequest is the request body for CreateAlgorithm. code, name and
-// category are required; all other fields are optional and fall back to the
-// algorithms-table column defaults.
+// createAlgorithmRequest is the request body for CreateAlgorithm. code, name,
+// category and risk_score are required; all other fields are optional and fall
+// back to the algorithms-table column defaults.
 type createAlgorithmRequest struct {
 	// Identity / classification
 	Code                     string   `json:"code"`
@@ -618,9 +616,10 @@ type createAlgorithmRequest struct {
 //
 // Gated on the algorithms.manage platform permission and audited. Creates a new
 // row in the global crypto rating catalog (the algorithms table). code/name/
-// category are required; a duplicate code returns 409. The same enum validation
-// as UpdateAlgorithm applies to the assessment fields, plus category and
-// pqc_standardization_status validation against their schema CHECK constraints.
+// category and an explicit risk_score are required; a duplicate code returns
+// 409. The same enum validation as UpdateAlgorithm applies to the assessment
+// fields, plus category and pqc_standardization_status validation against their
+// schema CHECK constraints.
 func (h *AlgorithmHandler) CreateAlgorithm(c *gin.Context) {
 	var req createAlgorithmRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -658,7 +657,11 @@ func (h *AlgorithmHandler) CreateAlgorithm(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "deprecation_status must be one of: current, deprecated, obsolete"})
 		return
 	}
-	if req.RiskScore != nil && (*req.RiskScore < 0 || *req.RiskScore > 100) {
+	if req.RiskScore == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "risk_score is required"})
+		return
+	}
+	if *req.RiskScore < 0 || *req.RiskScore > 100 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "risk_score must be between 0 and 100"})
 		return
 	}
@@ -730,4 +733,20 @@ func (h *AlgorithmHandler) CreateAlgorithm(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusCreated, gin.H{"algorithm": created})
+}
+
+// algorithmRecommendationPriority maps canonical risk into workflow urgency.
+// Critical/High require high priority; Medium maps to medium; Low/Info to low.
+func algorithmRecommendationPriority(score *int) *string {
+	if score == nil {
+		return nil
+	}
+	priority := "low"
+	switch riskbands.GetRiskLevel(*score) {
+	case "Critical", "High":
+		priority = "high"
+	case "Medium":
+		priority = "medium"
+	}
+	return &priority
 }

@@ -16,6 +16,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse/cryptoparsetest"
 )
 
+func scorePtr(score int) *int { return &score }
+
 // TestParseCipherSuite_MatchesSharedGolden holds inventory-service's parser
 // surface to the shared fixture. If this and cbom-service's counterpart are
 // both green, the two services cannot disagree about a suite.
@@ -50,7 +52,7 @@ func protocolCatalogue() []Algorithm {
 	mk := func(code string, risk int, strength, deprecation string) Algorithm {
 		return Algorithm{
 			ID: uuid.New(), Code: code, Category: "protocol_version",
-			RiskScore: risk, Strength: strength, DeprecationStatus: deprecation,
+			RiskScore: scorePtr(risk), Strength: strength, DeprecationStatus: deprecation,
 		}
 	}
 	return []Algorithm{
@@ -113,7 +115,7 @@ func TestClassifyAlgorithm_ResolvesSpacedProtocolVersions(t *testing.T) {
 			if alg.Code != tc.wantCode {
 				t.Fatalf("ClassifyAlgorithm(%q) = %q, want %q", tc.observed, alg.Code, tc.wantCode)
 			}
-			if alg.RiskScore != tc.wantRisk {
+			if alg.RiskScore == nil || *alg.RiskScore != tc.wantRisk {
 				t.Errorf("%q resolved to catalogue risk %d, want %d", tc.observed, alg.RiskScore, tc.wantRisk)
 			}
 		})

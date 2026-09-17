@@ -123,9 +123,9 @@ describe('the merge row\u2019s pure helpers', () => {
     expect(readIdentifier({ kind: 7 })).toEqual({ kind: undefined, value: undefined, scope: undefined });
   });
 
-  it('renders a score as a percentage from either 0..1 or 0..100', () => {
+  it('renders matcher scores from the declared 0..1 unit only', () => {
     expect(scoreLabel(0.86)).toBe('86%');
-    expect(scoreLabel(86)).toBe('86%');
+    expect(scoreLabel(86)).toBeNull();
   });
 
   it('renders an UNSCORED candidate as no score, never as 0%', () => {

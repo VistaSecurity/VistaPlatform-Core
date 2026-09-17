@@ -4,7 +4,7 @@
 // it here — edit assessment fields, create new algorithms, and deprecate (mark
 // obsolete; no hard delete, since assets reference algorithms). User-facing
 // severity is still derived deterministically from strength + deprecation +
-// risk_score (severityOf). Writes are gated server-side; 403s surface as toasts.
+// risk_score. Writes are gated server-side; 403s surface as toasts.
 //
 // Reads come from the tenant-facing /algorithms paths (the tenant UI shows the
 // same catalogue). Writes go to /inventory-service/admin/algorithms, which is a
@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { Search, Pencil, Plus, Archive } from 'lucide-react';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
+import { riskLevelFromScore, type RiskLevel } from '@vistasecurity/primitives/ratings';
 import { clients } from '../../lib/clients';
 import { relTime } from '../../components/ui/primitives';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
@@ -24,8 +25,7 @@ type Algorithm = inventoryComponents['schemas']['Algorithm'];
 type CreateAlgorithmRequest = inventoryComponents['schemas']['CreateAlgorithmRequest'];
 type UpdateAlgorithmRequest = inventoryComponents['schemas']['UpdateAlgorithmRequest'];
 
-type Severity = 'Critical' | 'High' | 'Medium' | 'Low' | 'Informational';
-const RATING_COLOR: Record<Severity, string> = {
+const RATING_COLOR: Record<RiskLevel, string> = {
   Critical: 'var(--danger)', High: 'var(--warn-strong)', Medium: 'var(--warn)', Low: 'var(--ok-lime)', Informational: 'var(--info)',
 };
 
@@ -34,18 +34,20 @@ const DEP_STATUSES = ['current', 'deprecated', 'obsolete'];
 const PQC_STATUSES = ['none', 'standardized', 'candidate', 'alternative'];
 const CATEGORIES = ['hash', 'symmetric', 'key_exchange', 'signature', 'protocol_version', 'cipher_suite'];
 
-// ADR-0003 severity mapping: severity is derived from the existing assessment
-// fields (one vocabulary, not a second independent scale).
-function severityOf(a: { strength?: string | null; deprecation_status?: string | null; risk_score?: number | null }): Severity {
-  if (a.strength === 'weak' || a.deprecation_status === 'obsolete') return 'Critical';
-  if (a.deprecation_status === 'deprecated') return 'High';
-  if (a.strength === 'recommended') return 'Informational';
-  if (a.strength === 'strong') return 'Low';
-  const r = a.risk_score ?? 50;
-  if (r >= 75) return 'High';
-  if (r >= 50) return 'Medium';
-  if (r >= 25) return 'Low';
-  return 'Informational';
+export function catalogueRiskLevel(score: number | null | undefined): RiskLevel | null {
+  return typeof score === 'number' && Number.isFinite(score) ? riskLevelFromScore(score) : null;
+}
+
+export function compareCatalogueRisk(a: Pick<Algorithm, 'risk_score' | 'name'>, b: Pick<Algorithm, 'risk_score' | 'name'>): number {
+  const aScore = typeof a.risk_score === 'number' ? a.risk_score : null;
+  const bScore = typeof b.risk_score === 'number' ? b.risk_score : null;
+  if (aScore === null || bScore === null) {
+    if (aScore === null && bScore !== null) return 1;
+    if (aScore !== null && bScore === null) return -1;
+  } else if (aScore !== bScore) {
+    return bScore - aScore;
+  }
+  return (a.name ?? '').localeCompare(b.name ?? '');
 }
 
 function useAlgorithms() {
@@ -82,7 +84,7 @@ function useCreateAlgorithm() {
       if (error) {
         if (response?.status === 409) throw new Error('An algorithm with this code already exists');
         if (response?.status === 403) throw new Error('You do not have permission to create algorithms (algorithms.manage required)');
-        if (response?.status === 400) throw new Error('Check the required fields (code, name, category) and enum values');
+        if (response?.status === 400) throw new Error('Check the required fields (code, name, category, risk score) and enum values');
         throw new Error('Create failed');
       }
     },
@@ -115,9 +117,51 @@ function ReadOnlyField({ label, value }: { label: string; value?: string | numbe
   );
 }
 
+// Blank is unassessed, not zero. Keep this as one parser for both create and
+// edit so neither path can silently turn an empty field or decimal into a
+// catalogue assessment.
+export function explicitRiskScore(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  const score = Number(trimmed);
+  return Number.isInteger(score) && score >= 0 && score <= 100 ? score : null;
+}
+
+interface AlgorithmEditFields {
+  strength: string;
+  risk: string;
+  deprecationStatus: string;
+  deprecationDate: string;
+  isPqc: boolean;
+  pqcStatus: string;
+  migrationGuidance: string;
+  recommendedAlternatives: string;
+}
+
+export function algorithmUpdateBody(
+  originalRiskScore: number | null,
+  fields: AlgorithmEditFields,
+): UpdateAlgorithmRequest | null {
+  const riskBlank = fields.risk.trim() === '';
+  const riskScore = explicitRiskScore(fields.risk);
+  if (riskScore === null && !(riskBlank && originalRiskScore === null)) return null;
+
+  const body: UpdateAlgorithmRequest = {
+    strength: fields.strength as UpdateAlgorithmRequest['strength'],
+    deprecation_status: fields.deprecationStatus as UpdateAlgorithmRequest['deprecation_status'],
+    deprecation_date: fields.deprecationDate,
+    is_pqc: fields.isPqc,
+    pqc_standardization_status: fields.pqcStatus as UpdateAlgorithmRequest['pqc_standardization_status'],
+    migration_guidance: fields.migrationGuidance,
+    recommended_alternatives: fields.recommendedAlternatives.split(',').map((value) => value.trim()).filter(Boolean),
+  };
+  if (riskScore !== null) body.risk_score = riskScore;
+  return body;
+}
+
 function EditAlgorithmModal({ algo, onClose, mut }: { algo: Algorithm; onClose: () => void; mut: ReturnType<typeof useUpdateAlgorithm> }) {
   const [strength, setStrength] = useState(algo.strength ?? 'acceptable');
-  const [risk, setRisk] = useState(String(algo.risk_score ?? 50));
+  const [risk, setRisk] = useState(algo.risk_score == null ? '' : String(algo.risk_score));
   const [dep, setDep] = useState(algo.deprecation_status ?? 'current');
   const [depDate, setDepDate] = useState(algo.deprecation_date ?? '');
   const [isPqc, setIsPqc] = useState(!!algo.is_pqc);
@@ -125,18 +169,14 @@ function EditAlgorithmModal({ algo, onClose, mut }: { algo: Algorithm; onClose: 
   const [guidance, setGuidance] = useState(algo.migration_guidance ?? '');
   const [alts, setAlts] = useState((algo.recommended_alternatives ?? []).join(', '));
   const usageQ = useAlgorithmUsage(algo.code);
-  const riskN = Number(risk);
-  const invalid = Number.isNaN(riskN) || riskN < 0 || riskN > 100;
+  const body = algorithmUpdateBody(algo.risk_score, {
+    strength, risk, deprecationStatus: dep, deprecationDate: depDate, isPqc,
+    pqcStatus, migrationGuidance: guidance, recommendedAlternatives: alts,
+  });
+  const invalid = body === null;
 
   const save = () => {
-    const altsArr = alts.split(',').map((s) => s.trim()).filter(Boolean);
-    const body: UpdateAlgorithmRequest = {
-      strength: strength as UpdateAlgorithmRequest['strength'], risk_score: riskN,
-      deprecation_status: dep as UpdateAlgorithmRequest['deprecation_status'],
-      deprecation_date: depDate, is_pqc: isPqc,
-      pqc_standardization_status: pqcStatus as UpdateAlgorithmRequest['pqc_standardization_status'],
-      migration_guidance: guidance, recommended_alternatives: altsArr,
-    };
+    if (body === null) return;
     mut.mutate(
       { code: algo.code, body },
       { onSuccess: () => { toast.success(`Updated ${algo.name || algo.code}`); onClose(); }, onError: (e) => toast.error(e instanceof Error ? e.message : 'Update failed') },
@@ -172,7 +212,7 @@ function EditAlgorithmModal({ algo, onClose, mut }: { algo: Algorithm; onClose: 
         </select>
       </ModalField>
       <ModalField label="Risk score (0–100)">
-        <input type="number" min={0} max={100} value={risk} onChange={(e) => setRisk(e.target.value)} style={{ ...modalInputStyle, borderColor: invalid ? 'var(--danger)' : 'var(--op-border2)' }} />
+        <input type="number" min={0} max={100} step={1} required={algo.risk_score !== null} value={risk} onChange={(e) => setRisk(e.target.value)} style={{ ...modalInputStyle, borderColor: invalid ? 'var(--danger)' : 'var(--op-border2)' }} />
       </ModalField>
       <ModalField label="Deprecation status">
         <select value={dep} onChange={(e) => setDep(e.target.value)} style={modalInputStyle}>
@@ -210,15 +250,16 @@ function CreateAlgorithmModal({ onClose, mut }: { onClose: () => void; mut: Retu
   const [primitive, setPrimitive] = useState('');
   const [oid, setOid] = useState('');
   const [strength, setStrength] = useState('acceptable');
-  const [risk, setRisk] = useState('50');
+  const [risk, setRisk] = useState('');
   const [dep, setDep] = useState('current');
   const [isPqc, setIsPqc] = useState(false);
   const [pqcStatus, setPqcStatus] = useState('none');
   const [guidance, setGuidance] = useState('');
-  const riskN = Number(risk);
-  const invalid = !code.trim() || !name.trim() || Number.isNaN(riskN) || riskN < 0 || riskN > 100;
+  const riskN = explicitRiskScore(risk);
+  const invalid = !code.trim() || !name.trim() || riskN === null;
 
   const save = () => {
+    if (riskN === null) return;
     const body: CreateAlgorithmRequest = {
       code: code.trim(), name: name.trim(), category: category as CreateAlgorithmRequest['category'],
       strength: strength as CreateAlgorithmRequest['strength'], risk_score: riskN,
@@ -265,8 +306,8 @@ function CreateAlgorithmModal({ onClose, mut }: { onClose: () => void; mut: Retu
           {STRENGTHS.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </ModalField>
-      <ModalField label="Risk score (0–100)">
-        <input type="number" min={0} max={100} value={risk} onChange={(e) => setRisk(e.target.value)} style={{ ...modalInputStyle, borderColor: Number.isNaN(riskN) || riskN < 0 || riskN > 100 ? 'var(--danger)' : 'var(--op-border2)' }} />
+      <ModalField label="Risk score (0–100) *">
+        <input type="number" min={0} max={100} step={1} required value={risk} onChange={(e) => setRisk(e.target.value)} style={{ ...modalInputStyle, borderColor: invalid ? 'var(--danger)' : 'var(--op-border2)' }} />
       </ModalField>
       <ModalField label="Deprecation status">
         <select value={dep} onChange={(e) => setDep(e.target.value)} style={modalInputStyle}>
@@ -313,11 +354,10 @@ export function RatingsPage() {
 
   const rows = useMemo(() => {
     const ql = q.trim().toLowerCase();
-    const order: Severity[] = ['Critical', 'High', 'Medium', 'Low', 'Informational'];
     return (algosQ.data ?? [])
-      .map((a) => ({ a, sev: severityOf(a), type: a.primitive || a.algorithm_family || a.category || '—' }))
+      .map((a) => ({ a, sev: catalogueRiskLevel(a.risk_score), type: a.primitive || a.algorithm_family || a.category || '—' }))
       .filter((r) => !ql || (r.a.name ?? '').toLowerCase().includes(ql) || (r.a.code ?? '').toLowerCase().includes(ql) || r.type.toLowerCase().includes(ql))
-      .sort((x, y) => order.indexOf(x.sev) - order.indexOf(y.sev) || (x.a.name ?? '').localeCompare(y.a.name ?? ''));
+      .sort((x, y) => compareCatalogueRisk(x.a, y.a));
   }, [algosQ.data, q]);
 
   return (
@@ -342,7 +382,7 @@ export function RatingsPage() {
               <tr key={a.code || a.name}>
                 <td><span className="mono" style={{ fontWeight: 600, color: 'var(--op-t1)' }}>{a.name || a.code}</span></td>
                 <td className="t-muted" style={{ textTransform: 'capitalize' }}>{type}</td>
-                <td><span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 600, color: RATING_COLOR[sev] }}><span style={{ width: 7, height: 7, borderRadius: 50, background: RATING_COLOR[sev] }} />{sev}</span></td>
+                <td><span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 600, color: sev ? RATING_COLOR[sev] : 'var(--op-t3)' }}><span style={{ width: 7, height: 7, borderRadius: 50, background: sev ? RATING_COLOR[sev] : 'var(--op-t3)' }} />{sev ?? 'Unassessed'}</span></td>
                 <td className="t-muted" style={{ whiteSpace: 'normal', maxWidth: 360 }}>{a.migration_guidance || '—'}</td>
                 <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(a.updated_at)}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>

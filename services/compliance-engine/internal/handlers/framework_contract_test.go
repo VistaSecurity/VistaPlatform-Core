@@ -367,7 +367,7 @@ func TestContract_ViewPublishedFramework_200_unlicensed(t *testing.T) {
 		ControlID:        "1.1",
 		Title:            "Strong key sizes",
 		Description:      "RSA keys must be at least 2048 bits.",
-		BaselineSeverity: "High",
+		BaselineSeverity: "high",
 		CryptoRelevant:   true,
 		CreatedAt:        now,
 		UpdatedAt:        now,

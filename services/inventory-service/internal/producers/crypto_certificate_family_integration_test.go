@@ -85,6 +85,19 @@ func TestIntegration_CryptoProducer_RSACertificatesScoreByTheirOwnSize(t *testin
 	f.mustRun(t, ctx)
 
 	for i, c := range cases {
+		if c.bits == 4096 {
+			var count int
+			if err := f.owner.QueryRow(`SELECT count(*) FROM findings WHERE tenant_id=$1 AND kind='weak_certificate' AND subject_id=$2`, f.tenant, certIDs[i]).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("strong RSA-4096 raised %d weak findings", count)
+			}
+			if codes := pqcCodes(t, f, certIDs[i]); len(codes) != 1 || codes[0] != c.code {
+				t.Fatalf("PQC codes=%v", codes)
+			}
+			continue
+		}
 		var score int
 		var evidence []byte
 		if err := f.owner.QueryRow(`

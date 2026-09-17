@@ -163,7 +163,7 @@ func TestIntegration_FrameworkScore_SurvivesTheTableMove(t *testing.T) {
 		func(c models.Control) uuid.UUID { return c.ID },
 		func(c models.Control) string { return c.BaselineSeverity },
 		assessments)
-	got := frameworkScore(outcomes)
+	got := scoreForTest(t, outcomes)
 
 	if got.Total != 2 || got.Failing != 1 || got.Passing != 1 || got.NotAssessed != 0 {
 		t.Fatalf("breakdown = %+v, want 2 total / 1 failing / 1 passing / 0 not assessed — the "+

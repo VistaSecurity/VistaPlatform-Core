@@ -83,6 +83,6 @@ type ControlMeasurementInput struct {
 	MeasurementTypeID uuid.UUID              `json:"measurement_type_id" binding:"required"`
 	RuleType          string                 `json:"rule_type" binding:"required,oneof=threshold presence pattern range"`
 	Predicate         map[string]interface{} `json:"predicate" binding:"required"`
-	SeverityOverride  string                 `json:"severity_override,omitempty" binding:"omitempty,oneof=Low Med High Critical"`
+	SeverityOverride  string                 `json:"severity_override,omitempty" binding:"omitempty,oneof=low medium high critical"`
 	Weight            int                    `json:"weight" binding:"omitempty,min=1,max=10"`
 }

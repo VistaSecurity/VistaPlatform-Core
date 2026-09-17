@@ -5,8 +5,9 @@ import toast from 'react-hot-toast';
 import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon, Modal, RiskChip, LevelDot, levelFromScore, type RiskLevel } from '../../components/ui';
+import { Icon, Modal, RiskChip, levelFromScore, type RiskLevel } from '../../components/ui';
 import { findLens, resolveLensAlias, type InventoryLens } from './lenses';
+import { connectionStrengthFilter, connectionStrengthLabel, connectionStrengthTone, CONNECTION_STRENGTH_OPTIONS, type ConnectionStrengthFilter } from './connection-strength';
 import { STALE_DAYS } from './stale-threshold';
 import { AssetsLens } from './assets-lens';
 import { useMergeProposals } from './asset-queries';
@@ -26,9 +27,11 @@ import {
 } from './data-protection';
 import { DP_GRID, DataProtectionDrawer, DataProtectionRow, useCryptoApplications } from './data-protection-view';
 import {
-  type Strength, STRENGTH_META, STRENGTH_OPTS, ENV_OPTS, RISK_OPTS, configStrength,
+  type ConfigurationRiskGroup, CONFIGURATION_RISK_META, CONFIGURATION_RISK_OPTS,
+  ENV_OPTS, RISK_OPTS, configurationRiskGroup, effectiveInventoryRiskFilter, groupConfigurationsByRisk,
   stripInetMask, stripEmptyParens, keyAlgorithmLabel,
 } from './lens-helpers';
+import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
 // lens comes from the URL (`?lens=`); the switcher lives in the LEFT SIDEBAR.
@@ -154,12 +157,12 @@ function useConfigs(page: number, search: string, enabled: boolean, protocol?: s
   });
 }
 
-function useConnections(page: number, search: string, enabled: boolean) {
+function useConnections(page: number, search: string, enabled: boolean, strength: ConnectionStrengthFilter) {
   return useQuery({
-    queryKey: ['inventory', 'connections', page, search],
+    queryKey: ['inventory', 'connections', page, search, strength],
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/external-connections', {
-        params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}) } },
+        params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(strength ? { strength } : {}) } },
       });
       if (error || !data) throw new Error('Failed to load external connections');
       return data;
@@ -281,15 +284,16 @@ export function InventoryPage() {
   const [search, setSearch] = useState(() => params.get('q') ?? '');
   const [fEnv, setFEnv] = useState('All');
   const [fRisk, setFRisk] = useState('All');
-  const [fStrength, setFStrength] = useState('All');
+  const [fConnectionStrength, setFConnectionStrength] = useState('All');
+  const effectiveRisk = effectiveInventoryRiskFilter(fRisk, isConfig);
   // Cert-lens ownership filter: All | 3rd-party | Internal.
   const [fCertOwner, setFCertOwner] = useState('All');
   // Data Protection lens filters — both are SERVER-side params
   // (resource_type, determined) so counts and paging cover the whole set.
   const [fResourceType, setFResourceType] = useState('All');
   const [fAssessment, setFAssessment] = useState('All');
-  const hasFilters = fEnv !== 'All' || fRisk !== 'All' || fStrength !== 'All';
-  const clearFilters = () => { setFEnv('All'); setFRisk('All'); setFStrength('All'); };
+  const hasFilters = fEnv !== 'All' || effectiveRisk !== 'All';
+  const clearFilters = () => { setFEnv('All'); setFRisk('All'); };
   const [stack, setStack] = useState<DrawerEntry[]>([]);
   // Elevate-connection confirm: holds the connection pending confirmation.
   const elevate = useElevateConnection();
@@ -367,7 +371,7 @@ export function InventoryPage() {
   const certsQ = useCerts(page, search, isCert, isCert ? certOwnership : undefined);
   const keysQ = useKeys(isKey);
   const configsQ = useConfigs(page, search, isConfig, def.protocol);
-  const connsQ = useConnections(page, search, isConn);
+  const connsQ = useConnections(page, search, isConn, connectionStrengthFilter(fConnectionStrength));
   // Data Protection: at-rest crypto applications (buckets, databases). The risk
   // filter is pushed to the server as `risk_at_least`, built from the SHARED
   // band minimums (LEVEL_MIN) rather than a hand-typed threshold.
@@ -375,16 +379,15 @@ export function InventoryPage() {
     page, pageSize: PAGE_SIZE, search,
     resourceType: resourceTypeParam(fResourceType),
     determined: determinedParam(fAssessment),
-    riskAtLeast: fRisk !== 'All' ? (fRisk as RiskLevel) : undefined,
+    riskAtLeast: effectiveRisk !== 'All' ? (effectiveRisk as RiskLevel) : undefined,
   });
   const q = isData ? appsQ : isConn ? connsQ : isCert ? certsQ : isKey ? keysQ : isConfig ? configsQ : assetsQ;
 
   const levelOfA = (a: Asset) => a.risk_level || levelFromScore(typeof a.risk_score === 'number' ? a.risk_score : 0);
-  const levelOfC = (c: CryptoConfig) => (c.risk_level as string) || levelFromScore(typeof c.risk_score === 'number' ? c.risk_score : 0);
 
   let assets = assetsQ.data?.assets ?? [];
   if (fEnv !== 'All') assets = assets.filter((a) => (a.environment || '').toLowerCase() === fEnv.toLowerCase());
-  if (fRisk !== 'All') assets = assets.filter((a) => levelOfA(a) === fRisk);
+  if (effectiveRisk !== 'All') assets = assets.filter((a) => levelOfA(a) === effectiveRisk);
 
   const certs = (certsQ.data?.certificates ?? []) as Certificate[];
 
@@ -400,8 +403,7 @@ export function InventoryPage() {
   // count/pagination cover the whole matching set, not just the current page.
   let configs = configsQ.data?.crypto_implementations ?? [];
   if (fEnv !== 'All') configs = configs.filter((c) => (c.asset_environment || '').toLowerCase() === fEnv.toLowerCase());
-  if (fRisk !== 'All') configs = configs.filter((c) => levelOfC(c as CryptoConfig) === fRisk);
-  if (fStrength !== 'All') configs = configs.filter((c) => configStrength(c as CryptoConfig) === fStrength);
+  if (effectiveRisk !== 'All') configs = configs.filter((c) => configurationRiskGroup(c as CryptoConfig) === effectiveRisk);
 
   const conns = connsQ.data?.connections ?? [];
   const apps = appsQ.data?.items ?? [];
@@ -423,8 +425,8 @@ export function InventoryPage() {
         DATA_PROTECTION_CSV_HEADER, apps.map(dataProtectionCsvRow));
     } else if (isConn) {
       downloadCsv(`vista-inventory-connections-${stamp}.csv`,
-        ['destination', 'port', 'source', 'protocol', 'version', 'cipher_suite', 'crypto_strength', 'weak_reasons', 'cert_not_after', 'last_seen_at'],
-        conns.map((cn) => [cn.dest_hostname ?? stripInetMask(cn.dest_ip), cn.dest_port, cn.source_hostname ?? stripInetMask(cn.source_ip), cn.protocol, stripEmptyParens(cn.protocol_version), cn.cipher_suite, cn.crypto_strength, ((cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined)?.join('; '), cn.cert_not_after, cn.last_seen_at]));
+        ['destination', 'port', 'source', 'protocol', 'version', 'cipher_suite', 'strength', 'weak_reasons', 'cert_hygiene_flags', 'cert_not_after', 'last_seen_at'],
+        conns.map((cn) => [cn.dest_hostname ?? stripInetMask(cn.dest_ip), cn.dest_port, cn.source_hostname ?? stripInetMask(cn.source_ip), cn.protocol, stripEmptyParens(cn.protocol_version), cn.cipher_suite, connectionStrengthLabel(cn.strength, cn.weak_reasons), ((cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined)?.join('; '), cn.cert_hygiene_flags?.join('; '), cn.cert_not_after, cn.last_seen_at]));
     } else if (isCert) {
       downloadCsv(`vista-inventory-certificates-${stamp}.csv`,
         ['common_name', 'subject', 'issuer', 'key_algorithm', 'key_size', 'signature_algorithm', 'not_after', 'days_remaining', 'state', 'data_source', 'deployment_count'],
@@ -439,7 +441,10 @@ export function InventoryPage() {
     } else if (isConfig) {
       downloadCsv(`vista-inventory-${lens}-${stamp}.csv`,
         ['host', 'environment', 'protocol', 'version', 'cipher_suite', 'key_exchange', 'signature', 'symmetric', 'hash', 'key_size', 'risk_level', 'risk_score'],
-        configs.map((c) => [c.asset_hostname, c.asset_environment, c.protocol, c.protocol_version, c.cipher_suite, c.key_exchange_algorithm, c.signature_algorithm, c.symmetric_encryption, c.hash_algorithm, c.key_size as number, levelOfC(c as CryptoConfig), c.risk_score as number]));
+        configs.map((c) => {
+          const risk = cryptoRiskPresentation(c as CryptoConfig);
+          return [c.asset_hostname, c.asset_environment, c.protocol, c.protocol_version, c.cipher_suite, c.key_exchange_algorithm, c.signature_algorithm, c.symmetric_encryption, c.hash_algorithm, c.key_size as number, risk.assessed ? risk.level : 'Not assessed', risk.score];
+        }));
     } else {
       const rows = lens === 'stale' ? staleAssets : assets;
       // `address` is the PRIMARY ENDPOINT's address and port (blank when the
@@ -464,7 +469,7 @@ export function InventoryPage() {
         // Wording is deliberately not a clean bill of health. This endpoint
         // cannot distinguish "discovery never ran" from "discovery ran and
         // found no storage/database resources", so it says neither.
-        const filtered = !!search || fResourceType !== 'All' || fAssessment !== 'All' || fRisk !== 'All';
+        const filtered = !!search || fResourceType !== 'All' || fAssessment !== 'All' || effectiveRisk !== 'All';
         return (
           <Center
             icon="vault"
@@ -491,26 +496,41 @@ export function InventoryPage() {
         <>
           <Header grid={CONN_GRID} cols={['', 'Destination', 'Protocol', 'Cipher suite', 'Strength', 'Cert expires', 'Last seen', '']} />
           {conns.map((cn) => {
-            const strength = cn.crypto_strength || 'unknown';
-            const tone = strength === 'good' ? 'var(--ok)' : strength === 'weak' ? 'var(--danger)' : 'var(--warn)';
+            const strength = cn.strength;
+            const tone = connectionStrengthTone(strength);
             const certDays = cn.cert_not_after ? -(daysSince(cn.cert_not_after) ?? 0) : null;
             // weak_reasons is where the ACTUAL reason for a "weak" badge lives
-            // (e.g. "Certificate missing SCTs — not logged in CT") — the badge
-            // alone doesn't say why a TLS 1.3 connection with a strong cipher
-            // suite is flagged (#M-5). Surfaced as a tooltip on the badge.
+            // (e.g. a weak cipher suite or an undersized key) — the badge
+            // alone doesn't say why a connection is flagged (#M-5). Surfaced
+            // as a tooltip on the badge.
             const weakReasons = (cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined;
             const reasonsTitle = weakReasons && weakReasons.length > 0 ? weakReasons.join('; ') : undefined;
+            // cert_hygiene_flags holds certificate-HYGIENE observations —
+            // missing SCT, an untrusted/pinned CA, an incomplete chain, a
+            // missing Subject DN — deliberately kept OUT of weak_reasons/
+            // crypto_strength (a TLS 1.3 / AES-256-GCM connection with a
+            // missing SCT is not "weak crypto"). Shown as its own indicator
+            // so the observation isn't lost, just not conflated with strength.
+            const hygieneFlags = cn.cert_hygiene_flags;
+            const hygieneTitle = hygieneFlags && hygieneFlags.length > 0 ? hygieneFlags.join('; ') : undefined;
             return (
               <div key={cn.id} className="row-hover" style={{ display: 'grid', gridTemplateColumns: CONN_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)' }}>
-                <LevelDot level={strength === 'weak' ? 'High' : strength === 'good' ? 'Informational' : 'Medium'} />
+                <span aria-label={connectionStrengthLabel(strength, cn.weak_reasons)} style={{ width: 7, height: 7, borderRadius: '50%', background: tone }} />
                 <div style={{ minWidth: 0 }}>
                   <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cn.dest_hostname ?? stripInetMask(cn.dest_ip)}:{cn.dest_port}</div>
                   <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>from {cn.source_hostname ?? stripInetMask(cn.source_ip)}</div>
                 </div>
                 <Mono v={`${cn.protocol || ''} ${stripEmptyParens(cn.protocol_version) || ''}`.trim()} />
                 <Mono v={cn.cipher_suite} small />
-                <span title={reasonsTitle} style={{ fontSize: 11, fontWeight: 600, color: tone, background: `color-mix(in srgb, ${tone} 11%, transparent)`, borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: reasonsTitle ? 'help' : 'default' }}>
-                  {strength}{reasonsTitle && <Icon name="info" size={10} />}
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, justifySelf: 'start' }}>
+                  <span title={reasonsTitle} style={{ fontSize: 11, fontWeight: 600, color: tone, background: `color-mix(in srgb, ${tone} 11%, transparent)`, borderRadius: 40, padding: '2px 9px', textTransform: 'capitalize', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: reasonsTitle ? 'help' : 'default' }}>
+                    {connectionStrengthLabel(strength, cn.weak_reasons)}{reasonsTitle && <Icon name="info" size={10} />}
+                  </span>
+                  {hygieneTitle && (
+                    <span title={`Certificate hygiene (not a crypto weakness): ${hygieneTitle}`} style={{ display: 'inline-flex', color: 'var(--app-t3)', cursor: 'help' }}>
+                      <Icon name="shield-alert" size={12} />
+                    </span>
+                  )}
                 </span>
                 <Mono v={certDays == null ? '—' : cn.cert_is_expired ? 'expired' : `${certDays}d`} />
                 <Mono v={daysAgo(cn.last_seen_at)} small />
@@ -590,15 +610,11 @@ export function InventoryPage() {
     }
 
     if (lens === 'configuration') {
-      // mock parity: configs grouped by strength (Weak / Acceptable / Strong),
-      // plus a "Not assessed" group for configs with no resolved risk_score
-      // (#M-4) so they're never counted as "Strong".
+      // Configurations are grouped by the canonical numeric risk bands. The
+      // catalogue's distinct qualitative strength remains separate evidence.
       if (configs.length === 0) return <Center icon="inbox" tone="var(--app-t3)" title="Nothing here" message={search || hasFilters ? 'Nothing matches your filters.' : 'No crypto configurations yet.'} />;
-      const order: Strength[] = ['Weak', 'Acceptable', 'Strong', 'Not assessed'];
-      return order
-        .map((st) => ({ st, list: configs.filter((c) => configStrength(c as CryptoConfig) === st) }))
-        .filter((g) => g.list.length > 0)
-        .map((g) => <StrengthGroup key={g.st} strength={g.st} configs={g.list as CryptoConfig[]} openConfig={openConfig} defaultOpen={g.st === 'Weak'} />);
+      return groupConfigurationsByRisk(configs as CryptoConfig[])
+        .map((g) => <ConfigurationRiskGroupRows key={g.riskGroup} riskGroup={g.riskGroup} configs={g.list as CryptoConfig[]} openConfig={openConfig} defaultOpen={g.riskGroup === 'Critical'} />);
     }
 
     if (isConfig) {
@@ -608,7 +624,7 @@ export function InventoryPage() {
           <Header grid={CFG_GRID} cols={['', 'Host', 'Protocol', 'Cipher suite', 'Key', 'Hash']} />
           {configs.map((c) => (
             <div key={c.id} className="row-hover" onClick={() => openConfig(c as CryptoConfig)} style={{ display: 'grid', gridTemplateColumns: CFG_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
-              <RiskChip level={c.risk_level || levelFromScore(typeof c.risk_score === 'number' ? c.risk_score : 0)} size={22} />
+              <CryptoRiskChip config={c as CryptoConfig} size={22} />
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.asset_hostname || '—'}</div>
                 <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{c.asset_environment || ''}</div>
@@ -707,19 +723,19 @@ export function InventoryPage() {
           <>
             <FilterSelect label="Resource type" value={fResourceType} onChange={(v) => { setFResourceType(v); setPage(1); }} options={RESOURCE_TYPE_OPTS} />
             <FilterSelect label="Assessment" value={fAssessment} onChange={(v) => { setFAssessment(v); setPage(1); }} options={ASSESSMENT_OPTS} />
-            <FilterSelect label="Risk" value={fRisk} onChange={(v) => { setFRisk(v); setPage(1); }} options={RISK_OPTS} />
-            {(fRisk !== 'All' || fResourceType !== 'All' || fAssessment !== 'All') && (
+            <FilterSelect label="Risk" value={effectiveRisk} onChange={(v) => { setFRisk(v); setPage(1); }} options={RISK_OPTS} />
+            {(effectiveRisk !== 'All' || fResourceType !== 'All' || fAssessment !== 'All') && (
               <button onClick={() => { setFRisk('All'); setFResourceType('All'); setFAssessment('All'); setPage(1); }} className="ui-btn ghost" style={{ height: 31, padding: '0 9px', fontSize: 12.5 }}>
                 <Icon name="x" size={13} />Clear
               </button>
             )}
           </>
         )}
+        {isConn && <FilterSelect label="Strength" value={fConnectionStrength} onChange={(v) => { setFConnectionStrength(v); setPage(1); }} options={CONNECTION_STRENGTH_OPTIONS} />}
         {!isConn && !isCert && !isKey && !isData && (
           <>
             <FilterSelect label="Environment" value={fEnv} onChange={setFEnv} options={ENV_OPTS} />
-            <FilterSelect label="Risk" value={fRisk} onChange={setFRisk} options={RISK_OPTS} />
-            {isConfig && <FilterSelect label="Strength" value={fStrength} onChange={setFStrength} options={STRENGTH_OPTS} />}
+            <FilterSelect label={isConfig ? 'Risk band' : 'Risk'} value={effectiveRisk} onChange={setFRisk} options={isConfig ? CONFIGURATION_RISK_OPTS : RISK_OPTS} />
             {hasFilters && (
               <button onClick={clearFilters} className="ui-btn ghost" style={{ height: 31, padding: '0 9px', fontSize: 12.5 }}>
                 <Icon name="x" size={13} />Clear
@@ -820,27 +836,27 @@ const CHILD_GRID = '18px minmax(0,1.5fr) minmax(0,1.3fr) 1fr 56px';
 
 function ConfigChildRow({ config, onClick, showHost }: { config: CryptoConfig; onClick: () => void; showHost?: boolean }) {
   const c = config as Record<string, unknown> & CryptoConfig;
-  const level = (c.risk_level as string) || levelFromScore(typeof c.risk_score === 'number' ? c.risk_score : 0);
+  const risk = cryptoRiskPresentation(c);
   return (
     <button onClick={onClick} className="row-hover" style={{ display: 'grid', gridTemplateColumns: CHILD_GRID, gap: 12, alignItems: 'center', width: '100%', padding: '0 16px 0 40px', minHeight: 38, border: 'none', borderBottom: '1px solid var(--app-border)', background: 'transparent', cursor: 'pointer', textAlign: 'left' }}>
-      <LevelDot level={level} />
+      <CryptoRiskChip config={c} size={18} />
       <div style={{ minWidth: 0 }}>
         <div className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{[c.protocol as string, c.protocol_version as string].filter(Boolean).join(' · ') || '—'}</div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{showHost ? (c.asset_hostname as string) || '' : (c.cipher_suite as string) || ''}</div>
       </div>
       <Mono v={[(c.signature_algorithm as string) || (c.key_exchange_algorithm as string), c.key_size ? `${c.key_size}b` : ''].filter(Boolean).join(' · ')} />
       <Mono v={[c.symmetric_encryption as string, c.hash_algorithm as string].filter(Boolean).join(' · ')} small />
-      <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', textAlign: 'right' }}>{typeof c.risk_score === 'number' && c.risk_score ? c.risk_score : '—'}</span>
+      <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', textAlign: 'right' }}>{risk.assessed ? risk.score : '—'}</span>
     </button>
   );
 }
 
-// ---- configuration lens: strength accordion -------------------------------
-function StrengthGroup({ strength, configs, openConfig, defaultOpen }: {
-  strength: Strength; configs: CryptoConfig[]; openConfig: OpenConfig; defaultOpen: boolean;
+// ---- configuration lens: numeric risk accordion ---------------------------
+function ConfigurationRiskGroupRows({ riskGroup, configs, openConfig, defaultOpen }: {
+  riskGroup: ConfigurationRiskGroup; configs: CryptoConfig[]; openConfig: OpenConfig; defaultOpen: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  const meta = STRENGTH_META[strength];
+  const meta = CONFIGURATION_RISK_META[riskGroup];
   return (
     <div>
       <button onClick={() => setOpen((o) => !o)} className="row-hover" style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '11px 16px', border: 'none', borderTop: '1px solid var(--app-border)', background: 'var(--app-panel2)', cursor: 'pointer', textAlign: 'left' }}>
@@ -849,7 +865,7 @@ function StrengthGroup({ strength, configs, openConfig, defaultOpen }: {
           <Icon name={meta.icon} size={14} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)' }}>{strength} configurations</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)' }}>{riskGroup === 'Not assessed' ? 'Not assessed configurations' : `${riskGroup} risk configurations`}</div>
           <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{configs.length} config{configs.length === 1 ? '' : 's'}</div>
         </div>
         <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', flex: 'none' }}>{configs.length}</span>

@@ -16,36 +16,22 @@ type TenantAdminSettings struct {
 	UpdatedAt time.Time              `json:"updated_at" db:"updated_at"`
 }
 
-// TenantSettingsConfig represents the structure of tenant settings JSON
+// TenantSettingsConfig is the typed projection of the keys the MSP tenant-settings
+// handler owns inside the shared tenant_admin_settings.config jsonb document.
+//
+// It is deliberately NOT the whole document: discovery_auto_scan, drift,
+// identity, ai and network_spaces are other services' keys in the same blob and
+// are never named here, so they can never be serialised (and therefore never
+// clobbered) by a settings save.
+//
+// `FrameworkID` was removed with the consumerless frameworkId field — see the
+// TenantSettings doc comment in services/admin-service/ee/msp/tenant_settings.go.
 type TenantSettingsConfig struct {
-	FrameworkID               string                   `json:"frameworkId,omitempty"`
 	EmailVerificationRequired *bool                    `json:"email_verification_required,omitempty"` // nil = use platform default
 	OnboardingRequired        *bool                    `json:"onboarding_required,omitempty"`         // nil = use platform default (true)
 	NotificationPrefs         *NotificationPreferences `json:"notification_preferences,omitempty"`
 	ComplianceSettings        map[string]interface{}   `json:"compliance_settings,omitempty"`
 	FeatureFlags              map[string]bool          `json:"feature_flags,omitempty"`
-	CapabilityPolicy          *CapabilityPolicy        `json:"capability_policy,omitempty"`
-}
-
-// CapabilityPolicy controls which scanning and agent capabilities are allowed
-// for a tenant. When nil or when a specific field is nil, the platform default
-// (enabled) is used. Tenant admins set these to restrict capabilities across
-// all users in the tenant. The design is extensible — new capabilities are
-// added as new fields with *bool so nil = platform default.
-type CapabilityPolicy struct {
-	// ActiveScanning controls whether active probing (TLS handshakes, SSH kex,
-	// port scanning) is allowed. When false, discovery jobs are restricted to
-	// passive monitoring only.
-	ActiveScanning *bool `json:"active_scanning,omitempty"`
-	// ActiveScanningSegments lists network segment IDs where active scanning
-	// is allowed. When nil or empty and ActiveScanning is true, all segments
-	// are allowed. When populated, only listed segments permit active scanning.
-	ActiveScanningSegments []string `json:"active_scanning_segments,omitempty"`
-	// TLSVersionEnumeration controls whether the sensor enumerates all supported
-	// TLS versions per port (additional handshakes per version).
-	TLSVersionEnumeration *bool `json:"tls_version_enumeration,omitempty"`
-	// SSHProbing controls whether SSH key exchange probing is allowed.
-	SSHProbing *bool `json:"ssh_probing,omitempty"`
 }
 
 // NotificationPreferences represents notification preferences

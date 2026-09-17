@@ -94,7 +94,7 @@ func TestIntegration_IdentificationSettings_PreserveOtherKeys(t *testing.T) {
 		_, e := tx.ExecContext(ctx, `
 			INSERT INTO tenant_admin_settings (tenant_id, config, version, created_at, updated_at)
 			VALUES ($1, $2::jsonb, 1, NOW(), NOW())`,
-			tenant, `{"capability_policy":{"active_scanning":false},"onboarding_required":true}`)
+			tenant, `{"discovery_auto_scan":{"enabled":false},"onboarding_required":true}`)
 		return e
 	})
 	if err != nil {
@@ -116,9 +116,9 @@ func TestIntegration_IdentificationSettings_PreserveOtherKeys(t *testing.T) {
 	if err := json.Unmarshal(raw, &config); err != nil {
 		t.Fatalf("decode config: %v", err)
 	}
-	policy, ok := config["capability_policy"].(map[string]any)
-	if !ok || policy["active_scanning"] != false {
-		t.Errorf("capability_policy was clobbered by the threshold write: %s", raw)
+	policy, ok := config["discovery_auto_scan"].(map[string]any)
+	if !ok || policy["enabled"] != false {
+		t.Errorf("discovery_auto_scan was clobbered by the threshold write: %s", raw)
 	}
 	if config["onboarding_required"] != true {
 		t.Errorf("onboarding_required was clobbered by the threshold write: %s", raw)

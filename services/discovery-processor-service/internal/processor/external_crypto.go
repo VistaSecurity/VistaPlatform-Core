@@ -32,7 +32,8 @@ type ExternalCryptoDetails struct {
 	CertPEM                *string
 
 	// Sensor-level certificate quality flags (from classifyCertificateFlags)
-	CertHasSCT        *bool   // Certificate Transparency: embedded SCTs present
+	CertHasSCT        *bool   // Certificate Transparency: SCT present (any RFC 6962 route)
+	CertSCTSource     *string // Which route carried it: embedded | tls_extension | ocsp | none
 	CertKnownBadCA    *string // Known-bad CA name (Superfish, eDellRoot, etc.)
 	CertNoSubject     bool    // Certificate has no subject DN
 	CertNoCommonName  bool    // Certificate has no Common Name
@@ -150,15 +151,10 @@ func extractCryptoDetails(metadata []byte) *ExternalCryptoDetails {
 		d.SupportedTLSVersions = versions
 	}
 
-	// Explicit key_size from metadata (active probe may set this directly)
-	if n := intField(raw, "key_size"); n > 0 {
+	// Generic key_size can mean certificate or cipher bits. Only a measurement
+	// explicitly attributed to the exchange may populate its size.
+	if n := intField(raw, "key_exchange_key_size"); n > 0 {
 		d.KeySize = &n
-	}
-	// Derive cipher symmetric key size from suite name when not explicitly provided
-	if d.KeySize == nil && d.CipherSuite != nil {
-		if ks := keySizeFromCipherSuite(*d.CipherSuite); ks > 0 {
-			d.KeySize = &ks
-		}
 	}
 
 	// Both passive capture and active probe now emit a "certificates" array
@@ -198,6 +194,13 @@ func extractCryptoDetails(metadata []byte) *ExternalCryptoDetails {
 			d.CertHasSCT = &b
 		}
 	}
+	// cert_sct_source is intentionally absent (not merely empty-string) when
+	// the producer couldn't observe the TLS-extension/OCSP routes — see
+	// shared/discovery.RefineSCTFlags. Only assign when the key is present
+	// AND non-empty, so a missing key doesn't get coerced into "".
+	if v := stringField(raw, "cert_sct_source"); v != "" {
+		d.CertSCTSource = &v
+	}
 	if v := stringField(raw, "cert_known_bad_ca"); v != "" {
 		d.CertKnownBadCA = &v
 	}
@@ -224,31 +227,6 @@ func extractCryptoDetails(metadata []byte) *ExternalCryptoDetails {
 	}
 
 	return d
-}
-
-// keySizeFromCipherSuite extracts the symmetric cipher key size (in bits) from a
-// TLS cipher suite name. Returns 0 if the suite name doesn't contain a recognisable
-// key-size marker.
-func keySizeFromCipherSuite(suite string) int {
-	switch {
-	case strings.Contains(suite, "_AES_256_"):
-		return 256
-	case strings.Contains(suite, "_AES_128_"):
-		return 128
-	case strings.Contains(suite, "_CHACHA20_"):
-		return 256
-	case strings.Contains(suite, "_3DES_"):
-		return 168
-	case strings.Contains(suite, "_RC4_128_"):
-		return 128
-	case strings.Contains(suite, "_RC4_40_"):
-		return 40
-	case strings.Contains(suite, "_DES40_"):
-		return 40
-	case strings.Contains(suite, "_DES_"):
-		return 56
-	}
-	return 0
 }
 
 // leafCert picks the leaf certificate from the certificates array.

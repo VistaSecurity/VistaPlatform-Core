@@ -20,12 +20,38 @@ package hostobs
 // records what a device is looking for, and "_homekit._tcp queries from this
 // laptop" is a statement about a person, not an inventory fact.
 //
-// The subject is the SENDER, identified by the frame's source MAC. mDNS
-// responders answer for themselves by design, so the records in a response
-// describe the host that sent it. A proxy responder answering on another
-// host's behalf would misattribute — it is non-standard and rare, and the
-// alternative (refusing to use the source MAC at all) would throw away the one
-// strong identifier mDNS gives us.
+// # Who the subject is
+//
+// mDNS responders answer for themselves by design, so the records in a
+// response describe the host that sent it — USUALLY. The frame's source MAC is
+// the subject's MAC only when the response proves it: an A or AAAA record in
+// the message must name the address the frame came from. A host announcing
+// itself always satisfies that, because the address it announces is the
+// address it sends from.
+//
+// A response that fails the test was RELAYED. mDNS is link-scoped, and every
+// segmented network that wants AirPlay or Chromecast to work across VLANs runs
+// a reflector for it — UniFi's mDNS reflector, Avahi's reflector mode, Cisco
+// and Aruba Bonjour gateways. A reflector re-originates the packet from its
+// own address and its own MAC, and the sender rule then pins every host on
+// every other VLAN to the router: on the first network this ran on, the
+// gateway asset collected twenty-seven host names, forty addresses, a second
+// MAC and another machine's SSH endpoint, and was displayed under a laptop's
+// name. That was not rare and it was not a proxy responder; it was the
+// default configuration of a consumer router.
+//
+// A relayed response is therefore treated the way [DecodeDNS] treats a
+// resolver's answer: hearsay about the host the records NAME. The MAC and the
+// source address — which belong to the reflector — are not attached, the
+// observation keys on the announced name and its addresses, and a response
+// that announces addresses for more than one name is refused rather than
+// merged into a host that does not exist. A relayed response with no A/AAAA
+// binding at all (an SRV/PTR-only answer) identifies nothing we can stand
+// behind and is dropped: the service type it carries would only ever be
+// attached to the wrong device.
+//
+// The `mdns_relayed` attribute records which case a stored observation was,
+// so a human reading the row can see why it carries no MAC.
 func DecodeMDNS(f Frame) (*HostObservation, error) {
 	msg, err := parseDNSMessage(f.Payload)
 	if err != nil {
@@ -36,12 +62,13 @@ func DecodeMDNS(f Frame) (*HostObservation, error) {
 	}
 
 	obs := f.newObservation(SourceMDNS)
-	obs.MAC = NormalizeMAC(f.SrcMAC)
 
-	// The frame's own source address is a real binding: the host that sent the
-	// announcement is at that address, whatever its records claim.
-	obs.addAddr(f.SrcAddr)
-
+	src := f.SrcAddr
+	if src.IsValid() {
+		src = src.Unmap().WithZone("")
+	}
+	selfOrigin := false // an A/AAAA record names the frame's own source address
+	owners := map[string]struct{}{}
 	found := false
 	for _, rr := range msg.Records {
 		switch rr.Type {
@@ -50,8 +77,14 @@ func DecodeMDNS(f Frame) (*HostObservation, error) {
 			if !ok {
 				continue
 			}
+			if src.IsValid() && a.Unmap().WithZone("") == src {
+				selfOrigin = true
+			}
 			// An A record in an mDNS response names the host itself, so the
 			// owner name is a host name even though it ends in .local.
+			if name := normalizeName(rr.Name); name != "" {
+				owners[name] = struct{}{}
+			}
 			obs.addName(rr.Name)
 			obs.addAddr(a)
 			found = true
@@ -96,6 +129,20 @@ func DecodeMDNS(f Frame) (*HostObservation, error) {
 
 	if !found && len(obs.Addresses) == 0 {
 		return nil, ErrNotApplicable
+	}
+
+	if selfOrigin {
+		obs.MAC = NormalizeMAC(f.SrcMAC)
+		// The frame's own source address is a real binding: the host that
+		// sent the announcement is at that address, whatever else it claims.
+		obs.addAddr(f.SrcAddr)
+	} else {
+		// Relayed, or unverifiable (no IP layer to check against). Hearsay
+		// about the named host: no MAC, no source address, one subject.
+		if len(owners) != 1 {
+			return nil, ErrNotApplicable
+		}
+		obs.setAttr("mdns_relayed", true)
 	}
 
 	obs.Finalize()

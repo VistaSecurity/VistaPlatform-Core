@@ -83,6 +83,24 @@ type HostObservation struct {
 	// from, not the time it was decoded or sent.
 	ObservedAt time.Time `json:"observed_at"`
 
+	// AgentID is set ONLY for the one producer that is not a passive decoder:
+	// a sensor's SELF-report of the host it runs on (sensor-manager builds
+	// this from a heartbeat/registration `host` block; asset-inventory
+	// decision 9,. It carries the sensor's own id, which
+	// identity.KindAgentID ranks as the strongest identifier kind there is —
+	// "a host agent's own installation id: the strongest identifier we have,
+	// because we issued it" (shared/identity/identifier.go). Empty on every
+	// observation a passive decoder produces.
+	AgentID string `json:"agent_id,omitempty"`
+
+	// Platform and Profile travel ONLY on a self-report (AgentID set): the
+	// sensor's own registered OS platform ("linux", "windows", "darwin") and
+	// install profile ("datacenter_host", ...). They are evidence for a class
+	// HINT, not an applied classification — see the consumer's
+	// classHintForSelfReport, which is the one place that reads them.
+	Platform string `json:"platform,omitempty"`
+	Profile  string `json:"profile,omitempty"`
+
 	// MAC is the subject's hardware address, lowercase colon-separated. Empty
 	// when the frame carried no usable one.
 	MAC string `json:"mac,omitempty"`
@@ -94,6 +112,13 @@ type HostObservation struct {
 	// Recorded explicitly rather than left to the consumer to work out,
 	// because an explicit false is an answer and a missing field is not.
 	MACLocallyAdministered bool `json:"mac_locally_administered,omitempty"`
+
+	// MACVirtual records that MAC is a first-hop-redundancy VIRTUAL ROUTER
+	// address (VRRP, CARP, HSRP, GLBP — see [VirtualMACProtocol]). Like a
+	// locally-administered one it is not a stable identifier of a chassis: it
+	// belongs to the floating address and moves with it at failover. The
+	// protocol is recorded in Attributes as `virtual_mac_protocol`.
+	MACVirtual bool `json:"mac_virtual,omitempty"`
 
 	// Addresses are the IP addresses bound to the subject, in observation
 	// order, bounded by MaxAddresses.
@@ -150,9 +175,16 @@ type HostObservation struct {
 // [Coalesce] re-runs it on the merged result, so the invariants hold in one
 // place rather than seven.
 func (o *HostObservation) Finalize() {
+	o.AgentID = strings.TrimSpace(o.AgentID)
+	o.Platform = boundIdentifier(o.Platform)
+	o.Profile = boundIdentifier(o.Profile)
 	o.MAC = NormalizeMAC(o.MAC)
 	if o.MAC != "" {
 		o.MACLocallyAdministered = macLocallyAdministered(o.MAC)
+		if proto, ok := VirtualMACProtocol(o.MAC); ok {
+			o.MACVirtual = true
+			o.setAttr("virtual_mac_protocol", proto)
+		}
 		if o.Vendor == "" {
 			o.Vendor = VendorForMAC(o.MAC)
 		}
@@ -202,6 +234,9 @@ func (o *HostObservation) buildFacts() map[string]any {
 // first address, then the first fully-qualified name. Returns "" when the
 // observation identifies nothing, which is the caller's signal to drop it.
 func (o *HostObservation) Key() string {
+	if o.AgentID != "" {
+		return "agent:" + o.AgentID
+	}
 	if o.MAC != "" {
 		return "mac:" + o.MAC
 	}
@@ -215,6 +250,14 @@ func (o *HostObservation) Key() string {
 		return "host:" + o.Hostnames[0]
 	}
 	return ""
+}
+
+// Relayed reports whether the observation is mDNS hearsay: a response that a
+// reflector re-originated, so the frame's MAC and source address were NOT the
+// subject's and were not attached. See DecodeMDNS.
+func (o *HostObservation) Relayed() bool {
+	v, ok := o.Attributes["mdns_relayed"].(bool)
+	return ok && v
 }
 
 // Identifies reports whether the observation carries any identity worth
@@ -396,6 +439,18 @@ func macLocallyAdministered(mac string) bool {
 	}
 	v, ok := hexByte(mac[0], mac[1])
 	return ok && v&0x02 != 0
+}
+
+// MACLocallyAdministered is the exported form of macLocallyAdministered, for
+// consumers outside this package that need to apply the same U/L-bit rule to
+// a MAC before treating it as a stable identifier — shared/network's
+// interface enumeration is the first of these (it populates
+// InterfaceAddress.MAC and must not hand back a randomised or virtual-NIC
+// address as if it identified the host). Unlike the internal helper this
+// normalises its input first, so it is safe to call on a raw
+// net.Interface.HardwareAddr rendering.
+func MACLocallyAdministered(mac string) bool {
+	return macLocallyAdministered(NormalizeMAC(mac))
 }
 
 func hexByte(hi, lo byte) (byte, bool) {

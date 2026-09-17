@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 func TestEnumerateTLSVersionsUsesFirstTLSFindingPerPort(t *testing.T) {
@@ -237,4 +238,87 @@ func mustCreateCASignedLeafCertificate(t *testing.T) *x509.Certificate {
 	}
 
 	return leafCert
+}
+
+// TestProbeResultToFinding_CarriesSSHAlgorithms is the sensor half of the
+// SSH_MSG_KEXINIT work. The probe itself is shared code, so the standalone
+// sensor and the in-cluster Platform Sensor measure the same thing — but they
+// carry it to the platform by different routes, and this is the sensor's.
+//
+// The route matters: the Platform Sensor copies ProbeResult.Metadata straight
+// into finding.Data, whereas the sensor's RawMetadata is serialized as
+// "raw_metadata" and sensor-manager's DiscoveryFinding has no field under that
+// name, so RawMetadata alone is dropped at the upload boundary. Everything
+// below therefore has to be a TYPED field, and a field left unmapped here is
+// silent — the sensor would report an SSH server with no key exchange, no
+// cipher and no MAC while the Platform Sensor reported all three.
+func TestProbeResultToFinding_CarriesSSHAlgorithms(t *testing.T) {
+	t.Parallel()
+
+	res := &shareddisc.ProbeResult{
+		Protocol:              "SSH",
+		Port:                  22,
+		SSHBanner:             "SSH-2.0-OpenSSH_9.6p1",
+		SSHHostKeyType:        "rsa-sha2-512",
+		SSHHostKeyFingerprint: "SHA256:notarealfingerprint",
+		SSHKeyTypes:           []string{"rsa-sha2-512"},
+		SSHProtocolVersion:    "SSH-2.0",
+		SSHSoftwareVersion:    "OpenSSH_9.6p1",
+
+		SSHKexAlgorithm:     "curve25519-sha256",
+		SSHHostKeyAlgorithm: "rsa-sha2-512",
+		SSHEncryptionAlgC2S: "aes256-ctr",
+		SSHEncryptionAlgS2C: "aes128-ctr",
+		SSHMACAlgC2S:        "hmac-sha2-256",
+		SSHMACAlgS2C:        "hmac-sha2-512",
+		SSHCompressionAlg:   "none",
+
+		SSHServerKexAlgorithms:     []string{"curve25519-sha256", "diffie-hellman-group1-sha1"},
+		SSHServerHostKeyAlgorithms: []string{"rsa-sha2-512", "ssh-rsa"},
+		SSHServerEncryptionC2S:     []string{"aes256-ctr", "aes128-cbc"},
+		SSHServerEncryptionS2C:     []string{"aes128-ctr"},
+		SSHServerMACsC2S:           []string{"hmac-sha2-256", "hmac-md5"},
+		SSHServerMACsS2C:           []string{"hmac-sha2-512"},
+		SSHServerCompressionC2S:    []string{"none"},
+		SSHServerCompressionS2C:    []string{"none"},
+	}
+
+	got := probeResultToFinding(res)
+
+	scalars := map[string]struct{ got, want string }{
+		"SSHBanner":             {got.SSHBanner, "SSH-2.0-OpenSSH_9.6p1"},
+		"SSHHostKeyType":        {got.SSHHostKeyType, "rsa-sha2-512"},
+		"SSHHostKeyFingerprint": {got.SSHHostKeyFingerprint, "SHA256:notarealfingerprint"},
+		"SSHProtocolVersion":    {got.SSHProtocolVersion, "SSH-2.0"},
+		"SSHSoftwareVersion":    {got.SSHSoftwareVersion, "OpenSSH_9.6p1"},
+		"SSHKexAlgorithm":       {got.SSHKexAlgorithm, "curve25519-sha256"},
+		"SSHHostKeyAlgorithm":   {got.SSHHostKeyAlgorithm, "rsa-sha2-512"},
+		"SSHEncryptionAlgC2S":   {got.SSHEncryptionAlgC2S, "aes256-ctr"},
+		"SSHEncryptionAlgS2C":   {got.SSHEncryptionAlgS2C, "aes128-ctr"},
+		"SSHMACAlgC2S":          {got.SSHMACAlgC2S, "hmac-sha2-256"},
+		"SSHMACAlgS2C":          {got.SSHMACAlgS2C, "hmac-sha2-512"},
+		"SSHCompressionAlg":     {got.SSHCompressionAlg, "none"},
+	}
+	for name, c := range scalars {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", name, c.got, c.want)
+		}
+	}
+
+	lists := map[string]struct{ got, want []string }{
+		"SSHKeyTypes":                {got.SSHKeyTypes, []string{"rsa-sha2-512"}},
+		"SSHServerKexAlgorithms":     {got.SSHServerKexAlgorithms, []string{"curve25519-sha256", "diffie-hellman-group1-sha1"}},
+		"SSHServerHostKeyAlgorithms": {got.SSHServerHostKeyAlgorithms, []string{"rsa-sha2-512", "ssh-rsa"}},
+		"SSHServerEncryptionC2S":     {got.SSHServerEncryptionC2S, []string{"aes256-ctr", "aes128-cbc"}},
+		"SSHServerEncryptionS2C":     {got.SSHServerEncryptionS2C, []string{"aes128-ctr"}},
+		"SSHServerMACsC2S":           {got.SSHServerMACsC2S, []string{"hmac-sha2-256", "hmac-md5"}},
+		"SSHServerMACsS2C":           {got.SSHServerMACsS2C, []string{"hmac-sha2-512"}},
+		"SSHServerCompressionC2S":    {got.SSHServerCompressionC2S, []string{"none"}},
+		"SSHServerCompressionS2C":    {got.SSHServerCompressionS2C, []string{"none"}},
+	}
+	for name, c := range lists {
+		if !reflect.DeepEqual(c.got, c.want) {
+			t.Errorf("%s = %v, want %v", name, c.got, c.want)
+		}
+	}
 }

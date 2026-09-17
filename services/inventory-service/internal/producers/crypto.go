@@ -3,6 +3,7 @@ package producers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -40,17 +41,22 @@ import (
 //  2. `crypto_implementations.risk_score`, the verdict ingest already persisted
 //     (itself the worse of the catalogue and the weak-crypto detector, which is
 //     where key SIZE enters for a configuration);
-//  3. for a certificate, [cryptoparse.WeakKeySizeSeverity] and
+//  3. for configurations and certificates, [cryptoparse.WeakKeySizeSeverity] and
 //     [cryptoparse.WeakHashSeverity] — the two rules a per-algorithm catalogue
 //     row cannot express, shared with the detector rather than restated.
 //
-// Taking the worst of (1) and (2) means the producer's score for a
-// configuration can never be LOWER than the number the product showed before
-// this producer existed, which is what makes the cutover a parity change rather
-// than a rescoring. `TestIntegration_CryptoProducer_MatchesTheLegacyCryptoRollup`
-// pins that.
+// Qualified findings retain the worst numeric assessment. Emission is a
+// separate strength/rule judgment: strong and recommended components alone no
+// longer contribute a weak finding to asset risk. Stored configuration scores
+// themselves are unchanged.
 //
-// # Score 0 is NOT ASSESSED, and no finding is written for it
+// # Numeric scores do not decide whether cryptography is weak
+//
+// Every applicable component strength and size/hash rule decides emission. A
+// weak catalogue row with score zero still emits an informational finding.
+// Strong/recommended rows alone do not emit, regardless of their risk score.
+//
+// # Coverage remains independent of finding emission
 //
 // A configuration whose components resolve to nothing has not been judged
 // clean; it has not been judged. It raises no finding — and it also does not,
@@ -106,20 +112,27 @@ type CryptoRun struct {
 
 // configSubject is one crypto configuration and everything judged about it.
 type configSubject struct {
-	id       uuid.UUID
-	assetID  uuid.UUID
-	label    string
-	protocol string
-	version  string
-	suite    string
+	id        uuid.UUID
+	assetID   uuid.UUID
+	label     string
+	protocol  string
+	version   string
+	suite     string
+	keyAlg    string
+	keyBits   int
+	hashAlg   string
+	sigAlg    string
+	symmetric string
 
 	// storedRisk is crypto_implementations.risk_score, ingest's persisted
 	// verdict; catalogueRisk is recomputed here from the junction so a catalogue
 	// row edited since ingest takes effect without re-observing the service.
-	storedRisk    int
-	catalogueRisk int
-	linked        int
-	components    []byte // jsonb array, worst first
+	storedRisk       int
+	catalogueRisk    *int
+	linked           int
+	components       []byte // jsonb array, worst first
+	previousEvidence []byte
+	previousScore    *int
 
 	pqcVulnerable bool
 	pqcCodes      []string
@@ -249,7 +262,7 @@ type catalogueHit struct {
 	Field             string `json:"field"`
 	Observed          string `json:"observed"`
 	Code              string `json:"code"`
-	RiskScore         int    `json:"risk_score"`
+	RiskScore         *int   `json:"risk_score"`
 	Strength          string `json:"strength"`
 	DeprecationStatus string `json:"deprecation_status"`
 	Primitive         string `json:"primitive"`
@@ -423,17 +436,18 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 			` + cryptoassess.PQCClassCTE("SELECT id, tenant_id FROM cfg", "$2", "$3") + `,
 			cat AS (
 			    SELECT cia.crypto_implementation_id AS impl_id,
-			           MAX(COALESCE(a.risk_score, 0)) AS max_risk,
+			           MAX(a.risk_score)              AS max_risk,
 			           COUNT(*)                       AS linked,
 			           jsonb_agg(
 			               jsonb_build_object(
 			                   'code', a.code,
 			                   'role', cia.algorithm_type,
-			                   'risk_score', COALESCE(a.risk_score, 0),
+			                   'is_inferred', cia.is_inferred,
+			                   'risk_score', a.risk_score,
 			                   'strength', COALESCE(a.strength, ''),
 			                   'deprecation_status', COALESCE(a.deprecation_status, '')
 			               )
-			               ORDER BY COALESCE(a.risk_score, 0) DESC, a.code
+			               ORDER BY a.risk_score DESC NULLS LAST, a.code
 			           ) AS components
 			      FROM crypto_implementation_algorithms cia
 			      JOIN algorithms a ON a.id = cia.algorithm_id
@@ -446,14 +460,21 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 			       ci.protocol::text,
 			       COALESCE(ci.protocol_version, ''),
 			       COALESCE(ci.cipher_suite, ''),
+			       COALESCE(ci.key_exchange_algorithm, ''), COALESCE(ci.key_size, 0),
+			       COALESCE(ci.hash_algorithm, ''), COALESCE(ci.signature_algorithm, ''),
+			       COALESCE(ci.symmetric_encryption, ''),
 			       COALESCE(ci.risk_score, 0),
-			       COALESCE(cat.max_risk, 0),
+			       cat.max_risk,
 			       COALESCE(cat.linked, 0),
 			       COALESCE(cat.components, '[]'::jsonb)::text,
 			       COALESCE(k.vulnerable, false),
 			       COALESCE(k.vulnerable_codes, ARRAY[]::text[]),
 			       COALESCE(host(e.address), ''),
-			       COALESCE(e.port, 0)
+			       COALESCE(e.port, 0),
+             COALESCE((SELECT jsonb_build_object('score',f.score,'evidence',f.evidence)::text FROM findings f
+              WHERE f.tenant_id=ci.tenant_id AND f.producer='crypto' AND f.kind='weak_configuration'
+               AND f.subject_type='crypto_configuration' AND f.subject_id=ci.id AND f.detection_state='ACTIVE'
+              ORDER BY f.last_seen DESC,f.id LIMIT 1),'null')
 			  FROM cfg
 			  JOIN crypto_implementations ci ON ci.id = cfg.id
 			  LEFT JOIN cat ON cat.impl_id = cfg.id
@@ -471,16 +492,26 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var c configSubject
-			var components string
+			var components, previous string
 			var codes pq.StringArray
 			var addr string
 			var port int
 			if err := rows.Scan(&c.id, &c.assetID, &c.protocol, &c.version, &c.suite,
+				&c.keyAlg, &c.keyBits, &c.hashAlg, &c.sigAlg, &c.symmetric,
 				&c.storedRisk, &c.catalogueRisk, &c.linked, &components,
-				&c.pqcVulnerable, &codes, &addr, &port); err != nil {
+				&c.pqcVulnerable, &codes, &addr, &port, &previous); err != nil {
 				return fmt.Errorf("scan crypto configuration: %w", err)
 			}
 			c.components = []byte(components)
+			var prior struct {
+				Score    *int            `json:"score"`
+				Evidence json.RawMessage `json:"evidence"`
+			}
+			if err := json.Unmarshal([]byte(previous), &prior); err != nil {
+				return fmt.Errorf("decode prior configuration finding: %w", err)
+			}
+			c.previousEvidence = prior.Evidence
+			c.previousScore = prior.Score
 			c.pqcCodes = codes
 			c.label = configurationLabel(c.protocol, c.version, addr, port)
 			configs = append(configs, c)
@@ -694,7 +725,7 @@ func (p *CryptoProducer) resolveCertificateAlgorithms(ctx context.Context, tx *s
 	// consistency test (TestIntegration_AlgorithmCatalogue_IsInternallyConsistent)
 	// now fails on any such pair.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT UPPER(code), code, COALESCE(risk_score, 0), COALESCE(strength, ''),
+		SELECT UPPER(code), code, risk_score, COALESCE(strength, ''),
 		       COALESCE(deprecation_status, ''), COALESCE(primitive, ''), COALESCE(is_pqc, false),
 		       COALESCE(category, '')
 		FROM algorithms
@@ -907,7 +938,8 @@ func (p *CryptoProducer) resolveFamilyTaxonomy(ctx context.Context, tx *sql.Tx, 
 // — a certificate belongs to every asset that serves it. Coverage travels
 // separately, in the assessed set.
 type plannedCrypto struct {
-	finding producer.Finding
+	finding    producer.Finding
+	retainOnly bool // incomplete facts may retain an existing finding, never invent one
 }
 
 // judge turns the read rows into findings and into a coverage claim.
@@ -926,11 +958,15 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 		// ingest's own verdict is non-zero. A configuration whose components
 		// resolved to nothing and whose stored score is 0 has not been judged
 		// clean — it has not been judged.
-		if c.linked > 0 || c.storedRisk > 0 {
+		judgment := c.judgment()
+		if c.linked > 0 || c.storedRisk > 0 || len(judgment.Rules) > 0 || c.pqcVulnerable {
 			assessed[c.assetID] = true
 		}
 
-		if score := c.score(); score > 0 {
+		if judgment.Emit() || len(judgment.Limitations) > 0 {
+			score := c.score()
+			evidence := c.evidence(score)
+			judgment.AddEvidence(evidence)
 			planned = append(planned, plannedCrypto{
 				finding: producer.Finding{
 					Kind:         findings.KindWeakConfiguration,
@@ -938,9 +974,10 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 					SubjectLabel: c.label,
 					Severity:     severityForScore(score),
 					Score:        score,
-					Summary:      summary(findings.KindWeakConfiguration, c.label, ""),
-					Evidence:     c.evidence(score),
+					Summary:      summary(findings.KindWeakConfiguration, c.label, judgment.Detail()),
+					Evidence:     evidence,
 				},
+				retainOnly: !judgment.Emit(),
 			})
 		}
 
@@ -978,7 +1015,10 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 				assessed[assetID] = true
 			}
 		}
-		if score > 0 {
+		judgment := c.judgment()
+		if judgment.Emit() || len(judgment.Limitations) > 0 {
+			evidence := c.evidence(score, factors)
+			judgment.AddEvidence(evidence)
 			planned = append(planned, plannedCrypto{
 				finding: producer.Finding{
 					Kind:         findings.KindWeakCertificate,
@@ -986,9 +1026,10 @@ func (p *CryptoProducer) judge(configs []configSubject, certs []certSubject, key
 					SubjectLabel: c.label,
 					Severity:     severityForScore(score),
 					Score:        score,
-					Summary:      summary(findings.KindWeakCertificate, c.label, ""),
-					Evidence:     c.evidence(score, factors),
+					Summary:      summary(findings.KindWeakCertificate, c.label, judgment.Detail()),
+					Evidence:     evidence,
 				},
+				retainOnly: !judgment.Emit(),
 			})
 		}
 		if len(codes) > 0 {
@@ -1063,19 +1104,18 @@ func pqcFinding(subject producer.Subject, label string, evidence map[string]any)
 // judgement, which no per-algorithm row can express; the stored value alone
 // would ignore a catalogue row corrected since the configuration was last
 // observed, which is the whole promise of "edit the catalogue row, not Go
-// code". Taking the worse means adding the producer can only ever raise a
-// score relative to the rollup it replaces, never silently lower one.
+// code". Recomputed size/hash rules can also supply the numeric maximum.
+// This preserves numeric ratings independently of the new emission gate.
 func (c configSubject) score() int {
-	if c.catalogueRisk > c.storedRisk {
-		return c.catalogueRisk
+	if score := c.assessment().Score(); score != nil {
+		return *score
 	}
-	return c.storedRisk
+	return 0
 }
 
 func (c configSubject) evidence(score int) map[string]any {
 	e := map[string]any{
 		"score":                  score,
-		"catalogue_score":        c.catalogueRisk,
 		"stored_score":           c.storedRisk,
 		"protocol":               c.protocol,
 		"linked_component_count": c.linked,
@@ -1083,7 +1123,11 @@ func (c configSubject) evidence(score int) map[string]any {
 		// the catalogue rows. Algorithm CODES and their assessments only: a
 		// cipher suite name and a protocol version are posture, and nothing
 		// here is or derives from key material.
-		"components": rawJSON(c.components),
+		"components":    rawJSON(c.components),
+		"score_sources": c.scoreSources(score),
+	}
+	if c.catalogueRisk != nil {
+		e["catalogue_score"] = *c.catalogueRisk
 	}
 	if c.version != "" {
 		e["protocol_version"] = c.version
@@ -1103,12 +1147,12 @@ func (c configSubject) evidence(score int) map[string]any {
 func (c certSubject) assess() (score int, factors []string, measurable bool) {
 	for _, h := range c.catalogue {
 		measurable = true
-		if h.RiskScore > score {
-			score = h.RiskScore
+		if h.RiskScore != nil && *h.RiskScore > score {
+			score = *h.RiskScore
 		}
-		if h.RiskScore > 0 {
+		if h.RiskScore != nil && *h.RiskScore > 0 {
 			factors = append(factors, fmt.Sprintf("%s (%s) is rated %s by the algorithm catalogue (risk %d)",
-				h.Code, h.Field, orUnrated(h.Strength), h.RiskScore))
+				h.Code, h.Field, orUnrated(h.Strength), *h.RiskScore))
 		}
 	}
 
@@ -1200,6 +1244,7 @@ func (c certSubject) evidence(score int, factors []string) map[string]any {
 		"public_key_algorithm": c.keyAlg,
 		"signature_algorithm":  c.sigAlg,
 		"catalogue_matches":    c.catalogue,
+		"score_sources":        c.scoreSources(score),
 	}
 	if c.keyBits > 0 {
 		e["public_key_size"] = c.keyBits
@@ -1221,6 +1266,34 @@ func (p *CryptoProducer) write(ctx context.Context, tenantID uuid.UUID, planned 
 		tx := r.Tx()
 
 		for _, plan := range planned {
+			if plan.retainOnly {
+				// Keep the prior score and evidence when facts no longer support
+				// a full reassessment. Never resurrect an inactive finding.
+				var oldEvidence []byte
+				err := tx.QueryRowContext(ctx, `SELECT score, severity, evidence
+					FROM findings WHERE tenant_id=$1 AND producer='crypto'
+					AND kind=$2 AND subject_type=$3 AND subject_id=$4
+					AND detection_state='ACTIVE' AND control_id IS NULL FOR UPDATE`,
+					tenantID, plan.finding.Kind, plan.finding.Subject.Type, plan.finding.Subject.ID).
+					Scan(&plan.finding.Score, &plan.finding.Severity, &oldEvidence)
+				if err == sql.ErrNoRows {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				limitations := plan.finding.Evidence["assessment_limitations"]
+				currentEvidence := plan.finding.Evidence
+				plan.finding.Evidence = map[string]any{}
+				if err := json.Unmarshal(oldEvidence, &plan.finding.Evidence); err != nil {
+					return err
+				}
+				plan.finding.Evidence["reassessment_required"] = true
+				plan.finding.Evidence["assessment_limitations"] = limitations
+				plan.finding.Evidence["current_reassessment"] = currentEvidence
+				plan.finding.Summary = summary(plan.finding.Kind, plan.finding.SubjectLabel,
+					"requires cryptographic reassessment (prior finding retained; incomplete evidence)")
+			}
 			if _, err := p.writer.Upsert(ctx, tx, tenantID, plan.finding); err != nil {
 				return err
 			}
@@ -1261,21 +1334,10 @@ var cryptoKinds = func() []string {
 //
 // models.RiskBands (shared/riskbands) is the single CVSS-anchored ladder; this
 // does not re-band, it renames. "Informational" has no severity below `info`
-// and is unreachable here because the caller only raises a finding for a
-// positive score — which is the three-valued rule: 0 is not assessed, and not
-// assessed raises nothing.
+// and is valid for an explicitly weak catalogue component with score zero.
+// A zero score alone does not establish that a subject is assessed or clean.
 func severityForScore(score int) string {
-	switch riskbands.GetRiskLevel(score) {
-	case "Critical":
-		return producer.SeverityCritical
-	case "High":
-		return producer.SeverityHigh
-	case "Medium":
-		return producer.SeverityMedium
-	case "Low":
-		return producer.SeverityLow
-	}
-	return producer.SeverityInfo
+	return string(riskbands.Severity(score))
 }
 
 // summary renders the registry's title_template.

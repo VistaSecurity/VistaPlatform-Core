@@ -12,7 +12,7 @@ import {
   assetIdentity, assetLocation, assetRisk, assetService, attr, classDeclares,
   classIcon, classLabel, confidenceLabel, endpointCount, identifierKindLabel,
   operatingSystem, primaryAddress, primaryAddressPort, primaryEndpoint,
-  relativeSeen, riskBand, sourceKindLabel, stripMask,
+  relativeSeen, sourceKindLabel, stripMask,
   type AssetLike,
 } from './asset-shape';
 
@@ -271,12 +271,12 @@ describe('assetRisk', () => {
 });
 
 // The CVSS v3.1/v4.0 qualitative ratings ×10, mirroring models.RiskBands.
-describe('riskBand', () => {
+describe('assetRisk canonical bands', () => {
   it.each([
     [100, 'Critical'], [90, 'Critical'], [89, 'High'], [70, 'High'],
     [69, 'Medium'], [40, 'Medium'], [39, 'Low'], [1, 'Low'], [0, 'Informational'],
   ])('bands %i as %s', (score, band) => {
-    expect(riskBand(score)).toBe(band);
+    expect(assetRisk({ risk_score: score, risk_assessed_by: ['test'] }).level).toBe(band);
   });
 });
 
@@ -294,9 +294,11 @@ describe('label helpers', () => {
     expect(sourceKindLabel(null)).toBe('');
   });
 
-  it('renders confidence as a percentage from either 0..1 or 0..100', () => {
-    expect(confidenceLabel(0.85)).toBe('85%');
-    expect(confidenceLabel(85)).toBe('85%');
+  it('renders identifier/class confidence from its declared 0..1 unit', () => {
+    expect(confidenceLabel(0)).toBe('0%');
+    expect(confidenceLabel(0.01)).toBe('1%');
+    expect(confidenceLabel(1)).toBe('100%');
+    expect(confidenceLabel(85)).toBe('');
   });
 
   it('renders an ABSENT confidence as empty, never as 0%', () => {

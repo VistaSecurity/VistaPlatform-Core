@@ -92,16 +92,25 @@ describe('visibleSettingsNav', () => {
   // `built: true` is set.
   it('filters unbuilt entries out of the rendered rail', () => {
     const keys = keysOf(visibleSettingsNav(allOn));
-    expect(keys).not.toContain('ratings');       // Severity Ratings
-    expect(keys).not.toContain('sensor-config'); // Sensor Configuration
+    expect(keys).not.toContain('ratings'); // Severity Ratings
   });
 
   it('still carries the unbuilt entries in the source registry, for deep-link routing', () => {
     const allKeys = SETTINGS_NAV.flatMap((s) => s.items.map((i) => i.key));
     expect(allKeys).toContain('ratings');
-    expect(allKeys).toContain('sensor-config');
     expect(SETTINGS_NAV.flatMap((s) => s.items).find((i) => i.key === 'ratings')?.built).toBeFalsy();
-    expect(SETTINGS_NAV.flatMap((s) => s.items).find((i) => i.key === 'sensor-config')?.built).toBeFalsy();
+  });
+
+  // `sensor-config` was the second of the two placeholders this pair guarded.
+  // It has SHIPPED — as Active Scanning — so the assertion that it is unbuilt
+  // is now the wrong polarity: leaving it would fail the moment the page
+  // appeared, and "fixing" it by flipping `built` back would hide a live page
+  // over a running worker. Its own reachability suite
+  // (auto-scan-reachability.test.ts) carries the positive assertions.
+  it('no longer treats sensor-config as a placeholder', () => {
+    const item = SETTINGS_NAV.flatMap((s) => s.items).find((i) => i.key === 'sensor-config');
+    expect(item?.built).toBe(true);
+    expect(keysOf(visibleSettingsNav(allOn))).toContain('sensor-config');
   });
 });
 

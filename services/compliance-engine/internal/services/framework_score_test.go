@@ -18,10 +18,10 @@ func TestFrameworkScore_IsSeverityWeightedNotFlat(t *testing.T) {
 	// 20 (Low weight 1 of a total weight of 5). This asymmetry is the whole
 	// reason the two former implementations disagreed.
 	outcomes := []controlOutcome{
-		{BaselineSeverity: "Critical", Status: statusFail},
-		{BaselineSeverity: "Low", Status: statusPass},
+		{BaselineSeverity: "critical", Status: statusFail},
+		{BaselineSeverity: "low", Status: statusPass},
 	}
-	b := frameworkScore(outcomes)
+	b := scoreForTest(t, outcomes)
 	if b.Score == nil {
 		t.Fatal("score = nil, want 20 — both controls were assessed")
 	}
@@ -38,9 +38,9 @@ func TestFrameworkScore_IsSeverityWeightedNotFlat(t *testing.T) {
 // PASS, so cert-expiry-90-day reported "score 100, 1/1 controls passing" while
 // carrying two ACTIVE findings.
 func TestFrameworkScore_LowSeverityViolationDragsTheScore(t *testing.T) {
-	b := frameworkScore([]controlOutcome{
-		{BaselineSeverity: "Critical", Status: statusPass},
-		{BaselineSeverity: "Low", Status: statusFail},
+	b := scoreForTest(t, []controlOutcome{
+		{BaselineSeverity: "critical", Status: statusPass},
+		{BaselineSeverity: "low", Status: statusFail},
 	})
 	// Critical passing (weight 4) of a total weight of 5 → 80.
 	if b.Score == nil {
@@ -58,10 +58,10 @@ func TestFrameworkScore_LowSeverityViolationDragsTheScore(t *testing.T) {
 // controls leave the fraction entirely rather than being counted as passes
 // (which inflates) or failures (which punishes an empty inventory).
 func TestFrameworkScore_NotAssessedIsExcludedFromBothSides(t *testing.T) {
-	b := frameworkScore([]controlOutcome{
-		{BaselineSeverity: "Critical", Status: statusPass},
-		{BaselineSeverity: "Critical", Status: statusFail},
-		{BaselineSeverity: "Critical", Status: statusNotAssessed},
+	b := scoreForTest(t, []controlOutcome{
+		{BaselineSeverity: "critical", Status: statusPass},
+		{BaselineSeverity: "critical", Status: statusFail},
+		{BaselineSeverity: "critical", Status: statusNotAssessed},
 	})
 	// One of two ASSESSED equal-weight controls passing → 50. Counting the
 	// not-assessed control as a pass gives 67; as a failure, 33.
@@ -87,11 +87,11 @@ func TestFrameworkScore_ZeroAssessedHasNoScore(t *testing.T) {
 	for name, outcomes := range map[string][]controlOutcome{
 		"no controls at all": nil,
 		"every control not assessed": {
-			{BaselineSeverity: "Critical", Status: statusNotAssessed},
-			{BaselineSeverity: "Low", Status: statusNotAssessed},
+			{BaselineSeverity: "critical", Status: statusNotAssessed},
+			{BaselineSeverity: "low", Status: statusNotAssessed},
 		},
 	} {
-		b := frameworkScore(outcomes)
+		b := scoreForTest(t, outcomes)
 		if b.Score != nil {
 			t.Errorf("%s: score = %d, want no score (nil) — the UI renders '—'", name, *b.Score)
 		}
@@ -112,14 +112,14 @@ func TestFrameworkScore_CoverageWorkedExample(t *testing.T) {
 			outcomes = append(outcomes, controlOutcome{BaselineSeverity: severity, Status: status})
 		}
 	}
-	add(2, "Critical", statusPass) // weight 4 each
-	add(1, "High", statusFail)     // weight 3 — the one failure
-	add(2, "High", statusPass)     // weight 3 each
-	add(2, "Med", statusPass)      // weight 2 each
-	add(1, "Low", statusPass)      // weight 1
-	add(3, "High", statusNotAssessed)
+	add(2, "critical", statusPass) // weight 4 each
+	add(1, "high", statusFail)     // weight 3 — the one failure
+	add(2, "high", statusPass)     // weight 3 each
+	add(2, "medium", statusPass)   // weight 2 each
+	add(1, "low", statusPass)      // weight 1
+	add(3, "high", statusNotAssessed)
 
-	b := frameworkScore(outcomes)
+	b := scoreForTest(t, outcomes)
 	if b.Score == nil {
 		t.Fatal("score = nil, want 86 — eight controls were assessed")
 	}
@@ -133,16 +133,16 @@ func TestFrameworkScore_CoverageWorkedExample(t *testing.T) {
 
 func TestFrameworkScore_AllPassingAndAllFailing(t *testing.T) {
 	all := []controlOutcome{
-		{BaselineSeverity: "Critical", Status: statusPass},
-		{BaselineSeverity: "Med", Status: statusPass},
+		{BaselineSeverity: "critical", Status: statusPass},
+		{BaselineSeverity: "medium", Status: statusPass},
 	}
-	if b := frameworkScore(all); b.Score == nil || *b.Score != 100 {
+	if b := scoreForTest(t, all); b.Score == nil || *b.Score != 100 {
 		t.Fatalf("all passing: score = %v, want 100", b.Score)
 	}
 	for i := range all {
 		all[i].Status = statusFail
 	}
-	if b := frameworkScore(all); b.Score == nil || *b.Score != 0 {
+	if b := scoreForTest(t, all); b.Score == nil || *b.Score != 0 {
 		t.Fatalf("all failing: score = %v, want 0", b.Score)
 	}
 }
@@ -191,7 +191,7 @@ func TestOutcomesFromAssessments_UnknownControlIsNotAPass(t *testing.T) {
 		severity string
 	}
 	// A deliberately empty assessment map — nothing is known about the control.
-	outcomes := outcomesFromAssessments([]ctrl{{uuid.New(), "Critical"}},
+	outcomes := outcomesFromAssessments([]ctrl{{uuid.New(), "critical"}},
 		func(c ctrl) uuid.UUID { return c.id },
 		func(c ctrl) string { return c.severity },
 		nil)
@@ -204,14 +204,14 @@ func TestApplyThresholdOverride(t *testing.T) {
 	base := func() models.ControlMeasurement {
 		return models.ControlMeasurement{
 			Predicate:        map[string]interface{}{"operator": ">=", "value": float64(30)},
-			SeverityOverride: "High",
+			SeverityOverride: "high",
 		}
 	}
 
 	t.Run("no override leaves the platform measurement alone", func(t *testing.T) {
 		m := base()
 		applyThresholdOverride(&m, nil, sql.NullString{})
-		if m.Predicate["value"] != float64(30) || m.SeverityOverride != "High" {
+		if m.Predicate["value"] != float64(30) || m.SeverityOverride != "high" {
 			t.Fatalf("measurement mutated without an override: %+v", m)
 		}
 	})
@@ -222,15 +222,15 @@ func TestApplyThresholdOverride(t *testing.T) {
 		if m.Predicate["value"] != float64(90) {
 			t.Fatalf("predicate = %+v, want value 90", m.Predicate)
 		}
-		if m.SeverityOverride != "High" {
+		if m.SeverityOverride != "high" {
 			t.Fatalf("severity = %q, want High (a NULL severity must not clear the platform rating)", m.SeverityOverride)
 		}
 	})
 
 	t.Run("severity override re-rates the violation", func(t *testing.T) {
 		m := base()
-		applyThresholdOverride(&m, nil, sql.NullString{String: "Low", Valid: true})
-		if m.SeverityOverride != "Low" {
+		applyThresholdOverride(&m, nil, sql.NullString{String: "low", Valid: true})
+		if m.SeverityOverride != "low" {
 			t.Fatalf("severity = %q, want Low", m.SeverityOverride)
 		}
 	})
@@ -250,4 +250,23 @@ func TestApplyThresholdOverride(t *testing.T) {
 			}
 		}
 	})
+}
+
+func scoreForTest(t *testing.T, outcomes []controlOutcome) scoreBreakdown {
+	t.Helper()
+	result, err := frameworkScore(outcomes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestFrameworkScoreRejectsInvalidControlWeight(t *testing.T) {
+	for _, value := range []string{"info", "Med", "High", "", "unknown"} {
+		for _, status := range []string{statusPass, statusFail, statusNotAssessed} {
+			if _, err := frameworkScore([]controlOutcome{{BaselineSeverity: value, Status: status}}); err == nil {
+				t.Fatalf("scored invalid severity %q/%s", value, status)
+			}
+		}
+	}
 }

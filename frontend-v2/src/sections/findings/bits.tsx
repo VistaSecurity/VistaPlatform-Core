@@ -68,3 +68,16 @@ export function Loading({ label }: { label: string }) {
     </div>
   );
 }
+
+/** Discloses the bounded crypto prefix used by this page's local operations. */
+export function CryptoLoadedPrefixNotice({ loaded, total }: { loaded: number; total: number }) {
+  if (loaded >= total) return null;
+  return (
+    <div data-testid="crypto-loaded-prefix-notice" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 24px', borderBottom: '1px solid var(--app-border)', fontSize: 12, color: 'var(--app-t2)', background: 'var(--app-panel2)' }}>
+      <Icon name="info" size={13} style={{ flex: 'none', color: 'var(--accent)' }} />
+      <span>
+        Showing the first <strong>{loaded}</strong> of <strong>{total}</strong> crypto configurations. Filters, CSV export, and bulk actions apply to loaded rows.
+      </span>
+    </div>
+  );
+}

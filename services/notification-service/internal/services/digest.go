@@ -12,6 +12,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/notification-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // digestWindowMinutes returns the batching window (minutes) for a rule
@@ -49,9 +50,11 @@ func channelIDType(ch interface{}) (uuid.UUID, string, bool) {
 	return uuid.Nil, "", false
 }
 
-var digestSeverityOrder = map[string]int{"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-
-func digestSeverityRank(s string) int { return digestSeverityOrder[strings.ToLower(s)] }
+func digestSeverityRank(s string) int {
+	// Notification ingest is a compatibility boundary for older case variants.
+	rank, _ := severity.Rank(severity.Severity(strings.ToLower(s)))
+	return rank
+}
 
 // enqueueDigest appends a notification to the per-(scope, channel) digest batch.
 // Platform (nil tenant) writes via the bypass role; tenant writes are RLS-scoped.

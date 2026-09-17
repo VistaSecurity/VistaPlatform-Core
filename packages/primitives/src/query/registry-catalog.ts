@@ -1,3 +1,4 @@
+import { RISK_BANDS } from '../ratings';
 // The production catalogue: the generated registries over the production field
 // table.
 //
@@ -249,13 +250,5 @@ export function newRegistryCatalog(opts: RegistryCatalogOptions = {}): RegistryC
  * server's ladder ever changes, this changes with it.
  */
 export const CVSS_LADDER: BandLadder = {
-  bands() {
-    return [
-      { label: 'Critical', min: 90 },
-      { label: 'High', min: 70 },
-      { label: 'Medium', min: 40 },
-      { label: 'Low', min: 1 },
-      { label: 'Informational', min: 0 },
-    ];
-  },
+  bands: () => RISK_BANDS.map(({ label, min }) => ({ label, min })),
 };

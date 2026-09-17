@@ -55,3 +55,12 @@ src/
   features/   FeatureName / FeaturesMap / LimitsMap    (+ useFeatures in Phase 3)
   shared/     INotifier + HTTP-client DI interfaces, minimal query keys
 ```
+
+## Domain ratings
+
+`@vistasecurity/primitives/ratings` is a React-free entrypoint generated from
+Go's `shared/riskbands`, `shared/severity` and `shared/healthbands`. It exports
+risk bands, strict severity parsing/ranking and control weights, and tenant
+health bands. Field adapters retain assessment/unknown state; these helpers do
+not infer availability from numeric zero. See
+[the generator and migration notes](../../shared/ratingsgen/README.md).

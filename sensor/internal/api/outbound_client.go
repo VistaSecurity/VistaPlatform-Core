@@ -13,8 +13,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
+	"github.com/vistasecurity/vistaplatform/sensor/internal/hostid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // AvailableInterfaceNames returns the host's non-loopback NIC names. Single
@@ -149,6 +151,7 @@ func (c *OutboundClient) ActivateMTLS() {
 
 // Register registers the sensor with the control plane (outbound only)
 func (c *OutboundClient) Register() (*models.SensorConfig, error) {
+	registrationIP := c.getRegistrationIPAddress()
 	registration := models.SensorRegistration{
 		RegistrationKey:     c.config.RegistrationKey,
 		Name:                c.config.Name,
@@ -158,8 +161,11 @@ func (c *OutboundClient) Register() (*models.SensorConfig, error) {
 		Profile:             c.config.Profile,
 		NetworkInterfaces:   c.config.Capture.Interfaces,
 		AvailableInterfaces: AvailableInterfaceNames(),
-		IPAddress:           c.getRegistrationIPAddress(),
+		IPAddress:           registrationIP,
 		ReportingInterval:   int(c.config.ReportingInterval.Seconds()), // report the install-configured cadence
+		// Registration happens once, so the host block always goes out in
+		// full — there is no throttle to apply, unlike the heartbeat's.
+		Host: hostid.Build(registrationIP),
 	}
 
 	jsonData, err := json.Marshal(registration)
@@ -364,32 +370,40 @@ func (c *OutboundClient) PollForCommands() (*models.SensorCommands, error) {
 	return &commands, nil
 }
 
-// SubmitDiscoveryJobResults submits discovery job results to control plane
-func (c *OutboundClient) SubmitDiscoveryJobResults(response *models.DiscoveryJobResponse) error {
-	jsonData, err := json.Marshal(response)
+// CompleteDiscoveryJob tells the control plane a dispatched discovery job has
+// finished. The job's RESULTS went through SubmitDiscoveries — the same
+// route as every passive observation — so this carries only the counts and
+// the verdict, to the sensor-authenticated completion callback.
+//
+// This replaced SubmitDiscoveryJobResults, which posted the whole response to
+// a tenant-JWT route a sensor could never authenticate to, and which wrote
+// results into a table inventory never read.
+func (c *OutboundClient) CompleteDiscoveryJob(jobID string, completion sensordispatch.Completion) error {
+	if err := completion.Validate(); err != nil {
+		return fmt.Errorf("invalid completion: %w", err)
+	}
+	jsonData, err := json.Marshal(completion)
 	if err != nil {
-		return fmt.Errorf("failed to marshal discovery job response: %v", err)
+		return fmt.Errorf("failed to marshal completion: %v", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/sensor-manager/discovery/jobs/%s/results", c.baseURL, response.JobID)
+	url := fmt.Sprintf("%s/api/v1/sensor-manager/sensors/%s/discovery-jobs/%s/complete", c.baseURL, c.config.SensorID, jobID)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %v", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to submit discovery job results: %v", err)
+		return fmt.Errorf("failed to report job completion: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("submission failed with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("completion failed with status %d: %s", resp.StatusCode, string(body))
 	}
-
 	return nil
 }
 

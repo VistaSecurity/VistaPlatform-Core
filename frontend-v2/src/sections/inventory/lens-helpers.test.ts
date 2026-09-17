@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  configStrength, keyAlgorithmLabel, serviceConfidence,
+  configurationRiskGroup, effectiveInventoryRiskFilter, groupConfigurationsByRisk,
+  keyAlgorithmLabel, serviceConfidence,
   stripEmptyParens, stripInetMask,
 } from './lens-helpers';
 import type { CryptoConfig } from './drawers';
@@ -14,25 +15,48 @@ import type { CryptoConfig } from './drawers';
 // server-side.
 
 // M-4: a config with no resolved risk_score is NOT ASSESSED, not "Strong".
-describe('configStrength', () => {
+describe('configurationRiskGroup', () => {
   it('groups a null risk_score as Not assessed, not Strong', () => {
     const cfg = { risk_score: null } as unknown as CryptoConfig;
-    expect(configStrength(cfg)).toBe('Not assessed');
+    expect(configurationRiskGroup(cfg)).toBe('Not assessed');
   });
 
-  it('groups a risk_score of 0 as Not assessed (score 0 == NOT ASSESSED convention)', () => {
-    const cfg = { risk_score: 0 } as unknown as CryptoConfig;
-    expect(configStrength(cfg)).toBe('Not assessed');
+  it('groups an unmarked legacy risk_score of 0 as Not assessed', () => {
+    const cfg = { risk_score: 0, risk_score_assessed: false } as unknown as CryptoConfig;
+    expect(configurationRiskGroup(cfg)).toBe('Not assessed');
   });
 
-  it('groups a genuinely low-but-assessed score as Strong', () => {
-    const cfg = { risk_score: 5 } as unknown as CryptoConfig;
-    expect(configStrength(cfg)).toBe('Strong');
+  it('groups explicit assessed scores by canonical numeric risk band', () => {
+    expect(configurationRiskGroup({ risk_score: 0, risk_score_assessed: true } as unknown as CryptoConfig)).toBe('Informational');
+    expect(configurationRiskGroup({ risk_score: 5 } as unknown as CryptoConfig)).toBe('Low');
+    expect(configurationRiskGroup({ risk_score: 50 } as unknown as CryptoConfig)).toBe('Medium');
+    expect(configurationRiskGroup({ risk_score: 95 } as unknown as CryptoConfig)).toBe('Critical');
   });
 
-  it('groups a critical score as Weak and a medium score as Acceptable', () => {
-    expect(configStrength({ risk_score: 95 } as unknown as CryptoConfig)).toBe('Weak');
-    expect(configStrength({ risk_score: 50 } as unknown as CryptoConfig)).toBe('Acceptable');
+  it('does not infer qualitative strength words from the numeric score', () => {
+    expect(configurationRiskGroup({ risk_score: 0, risk_score_assessed: true, strength: 'weak' } as unknown as CryptoConfig)).toBe('Informational');
+    expect(configurationRiskGroup({ risk_score: 90, strength: 'strong' } as unknown as CryptoConfig)).toBe('Critical');
+  });
+
+  it('groups weak score 0 and strong score 90 by numeric risk without strength labels', () => {
+    const weakZero = { id: 'weak-zero', risk_score: 0, risk_score_assessed: true, strength: 'weak' } as unknown as CryptoConfig;
+    const strongNinety = { id: 'strong-ninety', risk_score: 90, strength: 'strong' } as unknown as CryptoConfig;
+    expect(groupConfigurationsByRisk([weakZero, strongNinety])).toEqual([
+      { riskGroup: 'Critical', list: [strongNinety] },
+      { riskGroup: 'Informational', list: [weakZero] },
+    ]);
+  });
+});
+
+describe('effectiveInventoryRiskFilter', () => {
+  it('scopes Not assessed to configuration lenses on the first render after a switch', () => {
+    expect(effectiveInventoryRiskFilter('Not assessed', true)).toBe('Not assessed');
+    expect(effectiveInventoryRiskFilter('Not assessed', false)).toBe('All');
+  });
+
+  it('preserves common risk-band preferences across lens switches', () => {
+    expect(effectiveInventoryRiskFilter('High', true)).toBe('High');
+    expect(effectiveInventoryRiskFilter('High', false)).toBe('High');
   });
 });
 

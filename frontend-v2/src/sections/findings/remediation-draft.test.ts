@@ -45,7 +45,8 @@ describe('guidanceFor', () => {
   it('resolves the registry guidance for a real producer/kind', () => {
     const g = guidanceFor('crypto', 'weak_configuration');
     expect(g).toBeTruthy();
-    expect(g).toContain('Reconfigure');
+    expect(g).toContain('strong or recommended alternatives');
+    expect(g).toContain('weak or acceptable components');
   });
 
   // The registry is the remediator's null default. A kind with no guidance is a

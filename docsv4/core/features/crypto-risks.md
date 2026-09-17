@@ -65,35 +65,46 @@ quietly export a different, wider dataset.
 
 ## Where the number comes from
 
-Risk scores run 0–100 and come from the **algorithm catalogue** — the same
-assessments you can read yourself under
-[Risk & Compliance → Posture → Algorithm Reference](algorithm-reference.md).
+Risk scores run 0–100. The **algorithm catalogue** supplies numeric component
+assessments, and applicable deployment rules can also contribute. Browse the
+catalogue under [Risk & Compliance → Posture → Algorithm Reference](algorithm-reference.md).
 
-For each crypto configuration we score every component we identified — the
-protocol version, the cipher suite, and the individual key exchange, signature,
-symmetric and hash algorithms — and **the worst component sets the score**. A
-service is only as strong as the weakest thing it negotiates, so a strong
-AES-256 cipher does not offset an RC4 fallback or a TLS 1.0 protocol version.
+For each crypto configuration, numeric catalogue assessments of the linked
+protocol version, cipher suite, key exchange, signature, symmetric and hash
+algorithms contribute to the score. **The highest numeric contribution wins**;
+a component with no numeric assessment contributes no invented number.
 
-Because the score is read from the catalogue, you can always trace a number back
-to a published assessment. Look up the algorithm in the Algorithm Reference and
-you will see the same strength rating, deprecation status and risk score that
-produced the finding.
+Cryptographic strength is a separate judgement. Crypto findings inspect every
+relevant component's strength and applicable size/hash rules. A weak component
+can justify a finding even with an explicit score of 0; an acceptable-only
+assessment uses acceptable wording. Strong or recommended components alone do
+not justify a weak-crypto finding merely because their numeric score is high.
 
-Two things are scored outside the catalogue, because they depend on how an
-algorithm was *used* rather than on the algorithm itself:
+The Algorithm Reference shows the catalogue's current strength, deprecation
+status and risk score, including unscored rows. Finding evidence distinguishes
+what justified the judgement from what set the numeric score. Deployment rules
+can also contribute, and incomplete historical evidence may require reassessment
+rather than support a fully reconstructable explanation.
+
+Deployment-specific checks also apply, including:
 
 - **Key size** — an RSA key below the NIST SP 800-131A 2048-bit floor is flagged
   regardless of the algorithm's own rating.
-- **Certificate lifecycle** — expiry and validity problems are their own
-  findings.
+- **Certificate lifecycle** — expiry and validity problems have a separate
+  lifecycle policy and alert stream.
 
-A score of **0 means "not assessed"** — we did not recognise the cryptography in
-use — which is deliberately different from "assessed and found safe". Those
-configurations show as *Informational* and are worth investigating rather than
-assuming clean. A configuration we *did* recognise and found nothing wrong with
-also sits at 0; the **Why this score** panel is what tells the two apart, by
-listing the components it resolved (or saying plainly that it resolved none).
+An **explicitly assessed score of 0 is Informational**. Missing numeric
+assessment is shown as *Not assessed*, not as zero. For legacy configurations,
+a stored zero is corroborated only when linked risk-relevant catalogue
+components have a maximum known numeric score of zero. Merely resolving a
+component's name or strength is insufficient; a stored zero beside a current
+catalogue score of 90 cannot establish an assessed zero.
+
+Neither Informational nor a completed producer pass proves that all evidence was
+scored. The **Why this score** panel and finding evidence expose the available
+components and limitations. A known weak component with score 0 remains weak;
+zero does not erase that qualitative judgement. See the
+[rating upgrade guide](../operate/rating-upgrade.md) for legacy and API handling.
 
 **Scores go down as well as up.** When you fix a service — disable TLS 1.0,
 retire a weak cipher — the next discovery that sees it re-scores the
@@ -118,7 +129,7 @@ standard 0.0–10.0 scale, ×10):
 | **High** | 70–89 | TLS 1.0, TLS 1.1, 3DES, SHA-1, RSA-1024 |
 | **Medium** | 40–69 | Expiring certificates, weak key sizes |
 | **Low** | 1–39 | Minor configuration improvements |
-| **Informational** | 0 | Not assessed — the cryptography in use was not recognised |
+| **Informational** | 0 | Explicit numeric assessment of zero; qualitative findings and coverage remain separate |
 
 The same bands are used everywhere a risk level appears — the badges in
 Inventory, the risk facet filter, the dashboard distribution, the counts here —
@@ -135,8 +146,8 @@ For each component you get:
 
 - the **component's role** (protocol version, cipher suite, key exchange,
   signature, symmetric, hash) and its algorithm code;
-- its **catalogue risk score and severity band**, plus the strength and
-  deprecation status the catalogue records;
+- its **catalogue risk score and severity band**, or *not scored* when absent,
+  plus the independently recorded strength and deprecation status;
 - whether it was **observed in use** or only **offered, not observed** (see the
   SSH section below — offered algorithms still count);
 - and, on the component that set the score, the catalogue's **migration
@@ -147,15 +158,22 @@ reads the catalogue live, correcting an assessment in the catalogue changes the
 explanation everywhere it appears — there is no separately stored copy to go
 stale.
 
-Two honest-answer cases to expect:
+Honest-answer cases to expect:
 
-- **"Not assessed."** If nothing on the configuration resolved against the
-  catalogue, the panel says so plainly. That is not a clean bill of health — it
-  means we did not recognise the cryptography in use and could not judge it.
+- **"Not assessed."** A legacy stored zero is not assessed when linked
+  catalogue evidence is missing, qualitative-only, or has a non-zero worst
+  score. An explicit zero is shown as Informational only when the worst linked
+  numeric catalogue contribution is also zero. Not assessed is not a clean bill
+  of health — the available evidence could not establish a number.
+- **Missing catalogue evidence.** No resolved components, or components
+  carrying only qualitative assessments, cannot explain a numeric catalogue
+  contribution. A positive stored score can still be displayed without claiming
+  its original cause; a recognised algorithm can also have a known strength and
+  no catalogue risk score.
 - **A score higher than any single component.** When the stored score exceeds
-  every catalogue component, the panel says the remainder comes from checks the
-  per-algorithm catalogue cannot express — chiefly key size — rather than
-  implying the component list is the whole story.
+  every current catalogue component, the panel identifies the gap without
+  inventing its original cause. Catalogue values may have changed, or other
+  checks may have contributed; this component evidence cannot determine which.
 
 ### Quantum vulnerability is decided by family
 
@@ -243,3 +261,29 @@ always more specific than this table.
 - [Remediation](./remediation.md) — Alerts, the ticket Queue, and migration Plans
 - [Inventory & Lenses](./inventory-and-lenses.md) — where the configurations themselves live
 - [Discovery](./discovery.md) — how a configuration gets observed in the first place
+
+## Legacy crypto-risk feed
+
+The Findings crypto-risk feed keeps one row per configuration, including its
+existing ticket link. Weak or acceptable catalogue judgments and applicable
+key-size/hash rules decide whether a new row appears; numeric score alone does
+not. A weak component scored 0 remains visible as Informational. A known
+qualitative issue without a numeric assessment has a neutral, unscored grade.
+
+The inspector separates the numeric score from its assessment basis, sources
+and limitations. Certificate expiry is a separate lifecycle policy: within
+30 days is Medium, and the remaining window through 90 days is Informational.
+That grade does not manufacture a numeric score. Previously detected issues
+remain visible when current evidence cannot refute them; deleting key-size or
+hash facts does not establish that an earlier weakness was repaired.
+
+The API emits canonical `info` and `low`, and nullable severity for unscored
+issues; the old `informational` spelling remains a read-filter alias. List,
+detail, summary and server export share this judgment. Summary severity buckets
+count each asset at its worst emitted grade, while list rows are configurations.
+Category membership can include several contributing issue types. The server
+CSV export evaluates once, returns at most 50,000 rows, and includes numeric
+score, assessment basis, sources and limitations alongside the original columns.
+The Findings screen loads at most 500 rows and explicitly discloses truncation.
+Its counts, filters and client export describe that loaded view, which remains
+distinct from the server export.

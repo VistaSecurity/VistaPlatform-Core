@@ -3802,8 +3802,10 @@ components:
           type: string
         severity_from:
           type: [string, "null"]
+          enum: [low, medium, high, critical, null]
         severity_to:
           type: [string, "null"]
+          enum: [low, medium, high, critical, null]
         rationale:
           type: string
         framework_type:
@@ -4431,7 +4433,7 @@ components:
           type: string
         baseline_severity:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
         crypto_relevant:
           type: boolean
         source_kind:
@@ -4491,6 +4493,7 @@ components:
           additionalProperties: true
         severity_override:
           type: string
+          enum: [low, medium, high, critical]
         weight:
           type: integer
         created_at:
@@ -4585,7 +4588,7 @@ components:
           type: string
         baseline_severity:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
         crypto_relevant:
           type: boolean
         source_kind:
@@ -4653,7 +4656,7 @@ components:
           description: Rule-logic JSON.
         severity_override:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
           description: Optional per-mapping severity override; omitted when unset.
         weight:
           type: integer
@@ -4698,7 +4701,7 @@ components:
           type: string
         baseline_severity:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
         crypto_relevant:
           type: boolean
         source_kind:
@@ -4731,7 +4734,7 @@ components:
           additionalProperties: true
         severity_override:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
         weight:
           type: integer
           minimum: 1
@@ -5309,7 +5312,7 @@ components:
           type: string
         baseline_severity:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
         crypto_relevant:
           type: boolean
         source_kind:
@@ -5450,7 +5453,7 @@ components:
           type: string
         severity:
           type: string
-          enum: [Low, Med, High, Critical]
+          enum: [low, medium, high, critical]
         citations:
           type: array
           items:
@@ -5483,6 +5486,7 @@ components:
             - no_citation
             - unresolvable_citation
             - missing_title
+            - invalid_severity
             - unknown_measurement_type
             - invalid_predicate
             - over_limit
@@ -5900,8 +5904,10 @@ components:
           type: string
         severity_from:
           type: string
+          enum: [low, medium, high, critical]
         severity_to:
           type: string
+          enum: [low, medium, high, critical]
         rationale:
           type: string
         framework_type:

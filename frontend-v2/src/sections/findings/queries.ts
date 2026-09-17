@@ -5,10 +5,14 @@ import type { complianceEnginePaths } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import type { ComplianceFinding, CryptoRisk } from './model';
 
-const RISK_PAGE_SIZE = 100; // contract max
-const RISK_PAGE_CAP = 5; // stream is capped at 500 rows for now (mock renders ≤200)
+export const RISK_PAGE_SIZE = 100; // contract max
+export const RISK_PAGE_CAP = 5;
 
-/** The full crypto-risk stream, paginated up to the cap. */
+/**
+ * The loaded prefix of the crypto-risk stream. `truncated` is part of the
+ * result because every Findings-page filter, count, export and bulk action
+ * operates on these rows; callers must say when more rows exist.
+ */
 export function useCryptoRisks() {
   return useQuery({
     queryKey: ['findings', 'crypto-risks'],
@@ -27,7 +31,7 @@ export function useCryptoRisks() {
         total = data.total;
         page++;
       } while (page <= totalPages && page <= RISK_PAGE_CAP);
-      return { risks: all, total };
+      return { risks: all, total, loaded: all.length, truncated: all.length < total };
     },
     staleTime: 60_000,
   });

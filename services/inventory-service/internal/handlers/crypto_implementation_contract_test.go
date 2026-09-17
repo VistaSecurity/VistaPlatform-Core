@@ -27,6 +27,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"github.com/lib/pq"
 	"io"
 	"net/http"
 	"strings"
@@ -128,7 +129,7 @@ func sampleComponents() []models.CryptoComponentAssessment {
 			Category:                "key_exchange",
 			Strength:                "weak",
 			DeprecationStatus:       "obsolete",
-			RiskScore:               82,
+			RiskScore:               intPtr(82),
 			MigrationGuidance:       strPtr("Disable group1; prefer curve25519-sha256."),
 			RecommendedAlternatives: []string{"curve25519-sha256"},
 		},
@@ -141,7 +142,7 @@ func sampleComponents() []models.CryptoComponentAssessment {
 			Category:          "symmetric",
 			Strength:          "weak",
 			DeprecationStatus: "deprecated",
-			RiskScore:         70,
+			RiskScore:         intPtr(70),
 		},
 	})
 }
@@ -171,6 +172,7 @@ func sampleCryptoConfig() models.CryptoImplementation {
 		KeySize:              &keySize,
 		CertificateID:        &certID,
 		DiscoveryMethod:      "passive",
+		DiscoveryMethods:     pq.StringArray{"passive", "active"},
 		ConfidenceScore:      &conf,
 		SourceSensorID:       &sensorID,
 		RawData:              models.JSONB{"sni": "example.com"},
@@ -190,11 +192,15 @@ func sampleCryptoConfig() models.CryptoImplementation {
 func nullableCryptoConfig() models.CryptoImplementation {
 	now := time.Now().UTC()
 	return models.CryptoImplementation{
-		ID:                uuid.New(),
-		TenantID:          uuid.New(),
-		AssetID:           uuid.New(),
-		Protocol:          "ssh",
-		DiscoveryMethod:   "active",
+		ID:              uuid.New(),
+		TenantID:        uuid.New(),
+		AssetID:         uuid.New(),
+		Protocol:        "ssh",
+		DiscoveryMethod: "active",
+		// Never null on the wire: the readers normalise a nil array to empty
+		// (crypto_implementation_relations.go), so the spec declares a plain
+		// array and this fixture holds the emptiest value it can take.
+		DiscoveryMethods:  pq.StringArray{},
 		RawData:           models.JSONB{},
 		ComplianceStatus:  models.JSONB{},
 		FirstDiscoveredAt: now,

@@ -85,6 +85,7 @@ func (s *stubLegacySensorService) ReconcileSensorAddresses(context.Context, stri
 func (s *stubLegacySensorService) ListSensorAddresses(context.Context, uuid.UUID, uuid.UUID) ([]models.AgentAddress, error) {
 	return nil, nil
 }
+func (s *stubLegacySensorService) EmitSelfObservationIfDue(uuid.UUID, *models.HostIdentity) {}
 
 // newSensorConfigEngine mounts only the config + interfaces routes, with the
 // legacy service stub injected (the shared newEngine leaves sensorService nil,

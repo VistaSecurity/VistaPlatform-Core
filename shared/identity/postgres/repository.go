@@ -44,6 +44,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/assetclasshistory"
 	"github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
 
 // Repository implements [identity.Repository] over Postgres.
@@ -547,7 +548,34 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 	if err != nil {
 		return err
 	}
+
+	// Serializes concurrent endpoint upserts for THIS asset. The
+	// match-by-address path below is a SELECT then an INSERT-or-UPDATE, which
+	// is not atomic the way a single `INSERT ... ON CONFLICT` is: two ingest
+	// workers racing to upsert the same (address, port, transport) under
+	// different FQDN spellings could otherwise both miss the SELECT and both
+	// insert, recreating the exact duplicate-endpoint defect this function
+	// exists to close. crypto_dedup.go's lockAssetMaterializationSQL is the
+	// identical shape of problem and fix — a stricter unique index was
+	// rejected there for the same reason it is rejected here: existing
+	// installs already hold duplicate rows, and a stricter index would fail to
+	// build against them (see the doc comment on asset_endpoints_identity_uniq
+	// in scripts/database/schema.sql and the POST-MIGRATIONS block that merges
+	// pre-existing duplicates instead of relying on the index to prevent new
+	// ones).
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		endpointUpsertLockKey(asset.TenantID, asset.ID),
+	); err != nil {
+		return fmt.Errorf("identity/postgres: lock endpoints for asset %s: %w", asset.ID, err)
+	}
+
 	for _, ep := range eps {
+		// Defense in depth: the engine's stampEndpoints already does this, but
+		// this repository has one other direct caller
+		// (AssetService.resolveEndpointForFinding) and is itself the last line
+		// of defense before a row is written.
+		ep = ep.Sanitized()
 		addr := nullInet(ep.Address)
 		fqdn := strings.ToLower(strings.TrimSpace(ep.FQDN))
 		if addr == nil && fqdn == "" {
@@ -564,11 +592,34 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 			// key the engine computed and the row written here agree.
 			transport = "none"
 		}
-		// Every enrichment column below is written with `coalesce(EXCLUDED.x,
-		// existing)` on conflict: an observation that does not know a service
-		// name or a binding must not ERASE one an observation that did know
-		// has already recorded. A TLS probe of a port a host agent has already
-		// named would otherwise blank the process name on every scan.
+		port := nullPort(ep.Port)
+
+		if addr != nil {
+			// An endpoint identified by an address is identified by
+			// (address, port, transport) — FQDN is an attribute of that
+			// endpoint, not part of what identifies it (see
+			// [identity.EndpointObservation.Sanitized] and
+			// [identity.EndpointObservation.Key]). Match on that narrower
+			// identity FIRST: an existing row with the same address, port and
+			// transport but a different (or empty) fqdn is the SAME endpoint
+			// wearing a different name, not a second listener.
+			matched, err := r.mergeEndpointByAddress(ctx, tx, asset, assetID, addr, port, transport, fqdn, ep)
+			if err != nil {
+				return err
+			}
+			if matched {
+				continue
+			}
+		}
+
+		// Falls through here for a genuinely new (address, port, transport),
+		// or for an address-less (fqdn-only) endpoint, whose identity IS the
+		// full tuple below. Every enrichment column is written with
+		// `coalesce(EXCLUDED.x, existing)` on conflict: an observation that
+		// does not know a service name or a binding must not ERASE one an
+		// observation that did know has already recorded. A TLS probe of a
+		// port a host agent has already named would otherwise blank the
+		// process name on every scan.
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO public.asset_endpoints (
 				tenant_id, asset_id, address, fqdn, port, transport, protocol,
@@ -597,7 +648,7 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 				source_ref   = coalesce(EXCLUDED.source_ref, public.asset_endpoints.source_ref),
 				status       = 'active',
 				updated_at   = now()`,
-			asset.TenantID, assetID, addr, fqdn, nullPort(ep.Port), transport,
+			asset.TenantID, assetID, addr, fqdn, port, transport,
 			strings.TrimSpace(ep.Protocol),
 			strings.TrimSpace(ep.ServiceName), strings.TrimSpace(ep.ServiceConfidence),
 			strings.TrimSpace(ep.ServiceIdentificationMethod), ep.BoundLocal,
@@ -608,6 +659,96 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 		}
 	}
 	return nil
+}
+
+// mergeEndpointByAddress looks for an existing asset_endpoints row identified
+// by (tenant_id, asset_id, address, port, transport) — ignoring fqdn, which is
+// an attribute rather than identity once an address is known. When found, it
+// UPDATEs that row rather than letting the caller INSERT a second one for the
+// same listener under a different name.
+//
+// fqdn is filled on the row only when the observation has one AND the row's is
+// empty — "empty never wins" — so a name a prior observation established is
+// never blanked by a later observation that does not know it, and never
+// overwritten by a differently-spelled one either. This is deliberately
+// asymmetric with the other enrichment columns below, which follow the
+// ordinary "new wins when present" rule: two sources naming the SAME address
+// differently (a DNS PTR vs. a certificate SAN) should not flap the display
+// name on every re-scan.
+//
+// sni and alpn are not touched: nothing populates them through
+// [identity.EndpointObservation] today (see the struct — it carries no such
+// fields), so there is nothing to merge yet. A future field added there
+// should follow the same "empty never wins" rule as fqdn.
+//
+// Reports whether an existing row was matched and updated. false means the
+// caller should fall through to the ordinary `INSERT ... ON CONFLICT`, which
+// also covers the address-less (fqdn-only) endpoint case this function never
+// sees (it is only called when addr != nil).
+func (r *Repository) mergeEndpointByAddress(
+	ctx context.Context, tx *sql.Tx, asset identity.AssetRef, assetID uuid.UUID,
+	addr, port any, transport, fqdn string, ep identity.EndpointObservation,
+) (bool, error) {
+	var id uuid.UUID
+	var existingFQDN sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT id, fqdn
+		  FROM public.asset_endpoints
+		 WHERE tenant_id = $1 AND asset_id = $2
+		   AND address = $3::inet
+		   AND port IS NOT DISTINCT FROM $4::int
+		   AND transport = $5`,
+		asset.TenantID, assetID, addr, port, transport,
+	).Scan(&id, &existingFQDN)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("identity/postgres: match endpoint %s by address: %w", ep.Key(), err)
+	}
+
+	newFQDN := existingFQDN.String
+	if newFQDN == "" && fqdn != "" {
+		newFQDN = fqdn
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE public.asset_endpoints SET
+			fqdn         = NULLIF($1, ''),
+			last_seen_at = GREATEST(last_seen_at, $2),
+			protocol     = coalesce((SELECT e.enumlabel::text::public.protocol_type
+			                            FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+			                           WHERE t.typname = 'protocol_type' AND e.enumlabel = $3), protocol),
+			service_name = coalesce(NULLIF($4, ''), service_name),
+			service_confidence = CASE WHEN NULLIF($4, '') IS NOT NULL
+			                          THEN coalesce(NULLIF($5, ''), 'none')
+			                          ELSE service_confidence END,
+			service_identification_method = CASE WHEN NULLIF($4, '') IS NOT NULL
+			                          THEN NULLIF($6, '')
+			                          ELSE service_identification_method END,
+			bound_local  = coalesce($7, bound_local),
+			source_ref   = coalesce(NULLIF($8, ''), source_ref),
+			status       = 'active',
+			updated_at   = now()
+		 WHERE tenant_id = $9 AND id = $10`,
+		newFQDN, timeOrNow(ep.SeenAt), strings.TrimSpace(ep.Protocol),
+		strings.TrimSpace(ep.ServiceName), strings.TrimSpace(ep.ServiceConfidence),
+		strings.TrimSpace(ep.ServiceIdentificationMethod), ep.BoundLocal,
+		ep.Source.Ref,
+		asset.TenantID, id,
+	)
+	if err != nil {
+		return false, fmt.Errorf("identity/postgres: update matched endpoint %s: %w", ep.Key(), err)
+	}
+	return true, nil
+}
+
+// endpointUpsertLockKey namespaces the advisory lock so it cannot collide with
+// an unrelated advisory lock elsewhere in the platform. Mirrors
+// assetMaterializationLockKey in services/inventory-service's crypto_dedup.go,
+// which serializes the identically-shaped SELECT-then-write race for
+// crypto_implementations.
+func endpointUpsertLockKey(tenantID, assetID string) string {
+	return "vistaplatform:identity_endpoints:" + tenantID + ":" + assetID
 }
 
 // Touch advances the asset's last-seen, never backwards: a late-arriving old
@@ -780,6 +921,7 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 	}
 
 	var id uuid.UUID
+	var reused bool
 	err = r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
 		if err := assertAssetExists(ctx, tx, identity.AssetRef{TenantID: tenantID, ID: subject}); err != nil {
 			return err
@@ -814,6 +956,7 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 				LIMIT 1`, tenantID, fingerprint).Scan(&id); err != nil {
 				return fmt.Errorf("identity/postgres: find the existing merge proposal: %w", err)
 			}
+			reused = true
 			// Still refresh the observation's status below: the asset is
 			// contested whether or not this is the first time we said so.
 		} else if err != nil {
@@ -845,7 +988,156 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 	if err != nil {
 		return identity.ProposalRef{}, err
 	}
-	return identity.ProposalRef{TenantID: tenantID, ID: id.String()}, nil
+	return identity.ProposalRef{TenantID: tenantID, ID: id.String(), Reused: reused}, nil
+}
+
+// LastKeptSeparate implements [identity.Repository]: the engine's decision
+// memory.
+//
+// A proposal is an `asset_history` row (see OpenMergeProposal) and its
+// resolution is what the approvals path patched onto `changes_json` —
+// `status`, `resolved_at`, `resolved_by`. The asset set is the candidates'
+// `asset_id`s plus the observation asset; the query asks for rows whose set
+// CONTAINS every id given (`<@`), newest first. Candidates are read back in Go
+// rather than in SQL because the kinds that matched them are nested one level
+// further down, and the engine wants those too.
+//
+// The predicate is the tenant plus a handful of jsonb operators over rows with
+// `action = 'merge_proposed'`, which are rare; it runs once per conflict, not
+// per observation, and needs no index of its own.
+func (r *Repository) LastKeptSeparate(ctx context.Context, tenantID string, assetIDs []string) (identity.PriorDecision, bool, error) {
+	if len(assetIDs) == 0 {
+		return identity.PriorDecision{}, false, nil
+	}
+	ids := make([]string, 0, len(assetIDs))
+	for _, id := range assetIDs {
+		aid, err := parseAsset(id)
+		if err != nil {
+			// Not a uuid names no row, so no proposal ever named it.
+			return identity.PriorDecision{}, false, nil
+		}
+		ids = append(ids, aid.String())
+	}
+
+	var (
+		id  uuid.UUID
+		raw []byte
+	)
+	found := false
+	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `
+			SELECT id, changes_json
+			  FROM public.asset_history
+			 WHERE tenant_id = $1
+			   AND action = 'merge_proposed'
+			   AND changes_json ->> 'kind' = 'merge_proposal'
+			   AND changes_json ->> 'status' = 'kept_separate'
+			   AND $2::text[] <@ (
+			         (SELECT coalesce(array_agg(c ->> 'asset_id'), '{}'::text[])
+			            FROM jsonb_array_elements(changes_json -> 'candidates') AS c)
+			         || ARRAY[coalesce(changes_json ->> 'observation_asset_id', '')]
+			       )
+			 ORDER BY seq DESC
+			 LIMIT 1`, tenantID, pgUUIDArray(ids)).Scan(&id, &raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("identity/postgres: read prior kept-separate decisions: %w", err)
+		}
+		found = true
+		return nil
+	})
+	if err != nil || !found {
+		return identity.PriorDecision{}, false, err
+	}
+
+	var body struct {
+		ObservationAssetID string `json:"observation_asset_id"`
+		ResolvedAt         string `json:"resolved_at"`
+		ResolvedBy         string `json:"resolved_by"`
+		Candidates         []struct {
+			AssetID            string `json:"asset_id"`
+			MatchedIdentifiers []struct {
+				Kind string `json:"kind"`
+			} `json:"matched_identifiers"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return identity.PriorDecision{}, false, fmt.Errorf("identity/postgres: decode prior decision %s: %w", id, err)
+	}
+	d := identity.PriorDecision{
+		ProposalID:         id.String(),
+		ObservationAssetID: body.ObservationAssetID,
+		DecidedBy:          body.ResolvedBy,
+	}
+	if body.ResolvedAt != "" {
+		if at, err := time.Parse(time.RFC3339, body.ResolvedAt); err == nil {
+			d.DecidedAt = at.UTC()
+		}
+	}
+	seen := map[identity.Kind]bool{}
+	for _, c := range body.Candidates {
+		d.Candidates = append(d.Candidates, c.AssetID)
+		for _, m := range c.MatchedIdentifiers {
+			k := identity.Kind(m.Kind)
+			if !seen[k] {
+				seen[k] = true
+				d.MatchedKinds = append(d.MatchedKinds, k)
+			}
+		}
+	}
+	return d, true, nil
+}
+
+// announcementEdgeType is the relationship a floating address is recorded as:
+// the address's asset is `hosted_on` the node that announces it (reverse label
+// "hosts"). Chosen over a new vocabulary entry because the ten types of
+// ADR-0003 D2 are a registry every producer and the query language share, and
+// "the VIP's asset currently rests on this node" is what `hosted_on` means.
+// The mechanism is in the edge's attributes.
+const announcementEdgeType = relationships.HostedOn
+
+// RecordAnnouncement implements [identity.Repository].
+//
+// The edge is holder → announcer, type `hosted_on`, measured, with the
+// evidence — the MACs, the addresses, whether the ARP was gratuitous — in
+// attributes under `floating_address`. Its status follows ADR-0003 D3's table
+// through EdgeStatusFor, so an announcement between two approved assets is
+// active at once and one involving a pending asset waits with it.
+func (r *Repository) RecordAnnouncement(ctx context.Context, announcer, holder identity.AssetRef, a identity.Announcement) error {
+	if announcer.TenantID != holder.TenantID {
+		return fmt.Errorf("identity/postgres: announcer %s and holder %s are in different tenants", announcer.ID, holder.ID)
+	}
+	if announcer.ID == holder.ID {
+		return fmt.Errorf("%w: %s announces its own address", ErrSelfEdge, announcer.ID)
+	}
+	kind := a.Source.Kind
+	if kind == "" {
+		kind = identity.SourceMeasured
+	}
+	status, err := r.EdgeStatusFor(ctx, holder.TenantID, kind, holder.ID, announcer.ID)
+	if err != nil {
+		return fmt.Errorf("identity/postgres: edge status for the announcement: %w", err)
+	}
+	return r.UpsertRelationship(ctx, holder.TenantID, Edge{
+		FromAssetID: holder.ID,
+		ToAssetID:   announcer.ID,
+		Type:        string(announcementEdgeType),
+		SourceKind:  kind,
+		SourceRef:   a.Source.Ref,
+		Confidence:  1,
+		Status:      status,
+		Attributes: map[string]any{
+			"floating_address": map[string]any{
+				"mechanism":      "l2_announcement",
+				"macs":           a.MACs,
+				"addresses":      a.Addresses,
+				"gratuitous_arp": a.Gratuitous,
+			},
+		},
+		ObservedAt: a.At,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +1218,46 @@ func (r *Repository) HistoryFor(ref identity.AssetRef) []identity.HistoryEntry {
 				}
 			}
 			out = append(out, e)
+		}
+		return rows.Err()
+	})
+	return out
+}
+
+// Endpoints returns the endpoints under an asset, oldest first. Nothing in
+// production reads it; the contract test does
+// ([identitytest.EndpointReader]), to check that a repeat upsert of the same
+// (address, port, transport) merges into one row instead of accumulating a
+// second one for a differently-spelled fqdn.
+func (r *Repository) Endpoints(ref identity.AssetRef) []identity.EndpointObservation {
+	assetID, err := parseAsset(ref.ID)
+	if err != nil {
+		return nil
+	}
+	var out []identity.EndpointObservation
+	_ = r.withTx(context.Background(), ref.TenantID, func(tx *sql.Tx) error {
+		// host(address), not address::text: the latter renders the netmask
+		// (`192.0.2.10` comes back as `192.0.2.10/32`), which is the exact
+		// mistake documented on resolveEndpointForFinding's read-back query in
+		// inventory-service.
+		rows, err := tx.QueryContext(context.Background(), `
+			SELECT coalesce(host(address), ''), coalesce(fqdn, ''), coalesce(port, 0), transport
+			  FROM public.asset_endpoints
+			 WHERE tenant_id = $1 AND asset_id = $2
+			 ORDER BY first_seen_at, id`, ref.TenantID, assetID)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var addr, fqdn, transport string
+			var port int
+			if err := rows.Scan(&addr, &fqdn, &port, &transport); err != nil {
+				return err
+			}
+			out = append(out, identity.EndpointObservation{
+				Address: addr, FQDN: fqdn, Port: port, Transport: transport,
+			})
 		}
 		return rows.Err()
 	})
@@ -1070,17 +1402,28 @@ func nullPort(p int) any {
 // nullInet returns the address only when it parses. An unparseable value would
 // abort the statement, and one malformed address in a batch must not lose the
 // whole observation.
+//
+// Validating with netip is NOT the same question Postgres asks. Go accepts an
+// IPv6 zone — `fe80::1%eth0`, and on Windows `fe80::1%6`, which is what a host
+// agent reports for a socket bound to a link-local address — and `inet` does
+// not, so the value passed this check and died at the cast with 22P02. One
+// zoned socket then failed the whole statement, which failed the whole host
+// inventory: exactly the batch-wide loss this function exists to prevent, by a
+// value it declared valid. So the zone is STRIPPED rather than the address
+// dropped: a listener on a link-local address is a real listener, and the zone
+// names an interface index on the reporting host that means nothing here.
 func nullInet(v string) any {
 	s := strings.TrimSpace(v)
 	if s == "" {
 		return nil
 	}
-	if _, err := netip.ParseAddr(s); err != nil {
-		if _, err := netip.ParsePrefix(s); err != nil {
-			return nil
-		}
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.WithZone("").String()
 	}
-	return s
+	if prefix, err := netip.ParsePrefix(s); err == nil {
+		return netip.PrefixFrom(prefix.Addr().WithZone(""), prefix.Bits()).String()
+	}
+	return nil
 }
 
 func nullUUID(v string) any {

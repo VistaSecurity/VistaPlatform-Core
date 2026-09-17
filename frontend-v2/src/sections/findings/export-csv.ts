@@ -13,7 +13,12 @@ import { kindLabel, producerLabel } from './producer-evidence';
 
 export interface ControlMeta { fwId: string; fwName: string; control: ControlRef }
 
-export const CRYPTO_RISK_CSV_HEADER = ['asset', 'category', 'issue', 'current_value', 'severity', 'protocol', 'protocol_version', 'detected_at'];
+// Keep established current-view columns in place; identity and assessment
+// provenance are additive for existing CSV consumers.
+export const CRYPTO_RISK_CSV_HEADER = [
+  'asset', 'category', 'issue', 'current_value', 'severity', 'protocol', 'protocol_version', 'detected_at',
+  'configuration_id', 'risk_score', 'assessment_basis', 'score_sources', 'assessment_limitations',
+];
 
 export function buildCryptoRiskCsvRows(risks: CryptoRisk[]): (string | number | null | undefined)[][] {
   return risks.map((r) => [
@@ -25,6 +30,11 @@ export function buildCryptoRiskCsvRows(risks: CryptoRisk[]): (string | number | 
     r.protocol,
     r.protocol_version,
     r.detected_at,
+    r.crypto_implementation_id,
+    r.risk_score ?? '',
+    r.assessment_basis ?? '',
+    (r.score_sources ?? []).join('; '),
+    (r.assessment_limitations ?? []).join('; '),
   ]);
 }
 

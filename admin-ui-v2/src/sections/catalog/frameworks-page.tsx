@@ -3,6 +3,7 @@
 // frameworks, expand to manage their controls, and open the measurement-rules
 // builder per control. This is work — relocated UNCHANGED from the
 // old in-page Catalog tab into its own left-rail sub-page.
+import { CONTROL_SEVERITIES, severityLabel, type ControlSeverity } from '@vistasecurity/primitives/ratings';
 import { Fragment, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -73,8 +74,7 @@ function useFrameworkMutations() {
 
 type AdminControl = complianceEngineComponents['schemas']['PublishedFrameworkControl'];
 type ControlInput = complianceEngineComponents['schemas']['PlatformFrameworkControlInput'];
-type ControlSeverity = 'Low' | 'Med' | 'High' | 'Critical';
-const CONTROL_SEVERITY_COLOR: Record<string, string> = { Critical: 'var(--danger)', High: 'var(--warn-strong)', Med: 'var(--warn)', Low: 'var(--ok-lime)' };
+const CONTROL_SEVERITY_COLOR: Record<string, string> = { critical: 'var(--danger)', high: 'var(--warn-strong)', medium: 'var(--warn)', low: 'var(--ok-lime)' };
 
 function useControlMutations() {
   const qc = useQueryClient();
@@ -145,7 +145,7 @@ function ControlFormModal({ frameworkId, control, onClose, mut }: { frameworkId:
   const [controlId, setControlId] = useState(control?.control_id ?? '');
   const [title, setTitle] = useState(control?.title ?? '');
   const [description, setDescription] = useState(control?.description ?? '');
-  const [severity, setSeverity] = useState<ControlSeverity>((control?.baseline_severity as ControlSeverity) ?? 'Med');
+  const [severity, setSeverity] = useState<ControlSeverity>((control?.baseline_severity as ControlSeverity) ?? 'medium');
   const [cryptoRelevant, setCryptoRelevant] = useState(control?.crypto_relevant ?? false);
   const invalid = !controlId.trim() || !title.trim();
 
@@ -172,7 +172,7 @@ function ControlFormModal({ frameworkId, control, onClose, mut }: { frameworkId:
       <ModalField label="Title"><input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Control title" style={modalInputStyle} /></ModalField>
       <ModalField label="Baseline severity">
         <select value={severity} onChange={(e) => setSeverity(e.target.value as ControlSeverity)} style={modalInputStyle}>
-          {(['Low', 'Med', 'High', 'Critical'] as ControlSeverity[]).map((s) => <option key={s} value={s}>{s}</option>)}
+          {CONTROL_SEVERITIES.map((s) => <option key={s} value={s}>{severityLabel(s)}</option>)}
         </select>
       </ModalField>
       <ModalField label="Description"><textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} style={{ ...modalInputStyle, height: 'auto', padding: '8px 11px', resize: 'vertical', fontFamily: 'var(--font-body)' }} /></ModalField>
@@ -286,7 +286,7 @@ export function FrameworksPage() {
                                   )}
                                   {ctrl.crypto_relevant && <Tag color="var(--info)">crypto</Tag>}
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }}>
-                                    <span style={{ width: 6, height: 6, borderRadius: 50, background: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }} />{ctrl.baseline_severity}
+                                    <span style={{ width: 6, height: 6, borderRadius: 50, background: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }} />{severityLabel(ctrl.baseline_severity)}
                                   </span>
                                   <button className="op-btn sm ghost" title="Manage measurement rules" onClick={() => setRulesControl({ id: ctrl.id, control_id: ctrl.control_id, title: ctrl.title })}>Rules</button>
                                   <button className="op-btn icon sm" title="Edit control" onClick={() => setControlModal({ kind: 'edit', frameworkId: f.id, control: ctrl })}><Pencil size={12} /></button>

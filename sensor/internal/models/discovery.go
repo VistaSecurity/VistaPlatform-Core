@@ -1,11 +1,50 @@
 package models
 
 import (
+	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
 	"time"
 
 	"github.com/google/uuid"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
+
+// HostIdentity is what the sensor knows about the machine it runs ON, as
+// distinct from anything it discovers about OTHER hosts on the network
+// (asset-inventory decision 9, morning notes).
+//
+// Before this existed, the sensor never called os.Hostname() anywhere, so the
+// host it ran on was seen only PASSIVELY — an ARP or mDNS frame someone else's
+// sensor happened to capture — and landed in inventory as `unknown_host`
+// holding nothing but a MAC and an IP. Reporting this block lets
+// sensor-manager turn that into a named, classed asset via the SAME
+// host-observation ingest path every other passive observation already uses,
+// using KindAgentID (the strongest identifier kind there is) so it can never
+// mis-merge with an unrelated host that happens to share an address.
+//
+// Sent on registration and (throttled — see the sensor's heartbeat builder)
+// on heartbeat. Omitted entirely (nil) is how an older sensor binary looks;
+// the consumer must treat that as "unchanged", never as "cleared".
+type HostIdentity struct {
+	// Hostname is the short name os.Hostname() returned. Empty when the call
+	// failed, which happens on some minimal containers.
+	Hostname string `json:"hostname,omitempty"`
+	// FQDN is a fully-qualified name for Hostname, resolved best-effort and
+	// CACHED — never looked up fresh on the heartbeat path, which must not
+	// block on DNS every 30 seconds. Empty when no qualified name could be
+	// resolved cheaply.
+	FQDN string `json:"fqdn,omitempty"`
+	// OS is runtime.GOOS ("linux", "windows", "darwin").
+	OS string `json:"os,omitempty"`
+	// Arch is runtime.GOARCH.
+	Arch string `json:"arch,omitempty"`
+	// Interfaces is the host's own bound addresses, each now carrying its
+	// interface's MAC (shared/network.InterfaceAddress.MAC) alongside the
+	// address — the same slice the heartbeat already reports as
+	// SensorHealth.Interfaces, duplicated here so a self-report is a complete,
+	// self-contained statement about the host that does not depend on the
+	// reader cross-referencing a sibling field.
+	Interfaces []sharednetwork.InterfaceAddress `json:"interfaces,omitempty"`
+}
 
 // ServiceHints holds identified service name/version and confidence for inventory enrichment.
 type ServiceHints struct {
@@ -109,6 +148,23 @@ type SensorHealth struct {
 	// AvailableInterfaces is the full host NIC inventory, reported so the
 	// platform/UI can offer a real interface picker.
 	AvailableInterfaces []string `json:"available_interfaces,omitempty"`
+	// ConfigRevision, ConfigFailures and ConfigPendingRestart are the sensor's
+	// desired-state report: the revision it has applied, anything it
+	// could not apply and why, and anything recorded but not in force until it
+	// restarts. Omitted when empty, so a sensor with nothing to say sends the
+	// body it always sent.
+	ConfigRevision       string            `json:"config_revision,omitempty"`
+	ConfigFailures       map[string]string `json:"config_failures,omitempty"`
+	ConfigPendingRestart []string          `json:"config_pending_restart,omitempty"`
+	// ConfigRunning is what the sensor says its managed settings are set to
+	// right now, including whatever came from its own configuration file. It is
+	// how a sensor that enrolled before the control plane existed establishes
+	// its starting position on its first report, instead of being handed
+	// built-in defaults that would silently undo locally customised settings
+	// (active_probing, host_observation_dns, dedup_ttl_minutes, ...). Omitted
+	// when empty, which is a build too old to report what it is running — not
+	// the same as "running nothing" ('s agentconfig.ExchangeReport.Running).
+	ConfigRunning agentconfig.Values `json:"config_running,omitempty"`
 	// ReportingInterval (seconds) is the sensor's current data-send cadence,
 	// reported every heartbeat so the platform's stored value tracks reality
 	// (including after an operator-initiated change is applied).
@@ -124,7 +180,13 @@ type SensorHealth struct {
 	// scalar address cannot express. Empty leaves the platform's recorded set
 	// untouched.
 	Interfaces []sharednetwork.InterfaceAddress `json:"interfaces,omitempty"`
-	Timestamp  time.Time                        `json:"timestamp"`
+	// Host is this sensor's own host identity — hostname, FQDN, OS/arch and
+	// per-interface MACs. Sent on every heartbeat only when it is new or has
+	// changed since the last send (the sensor's own throttle; see
+	// cmd/main.go's sendHeartbeat), never on every 30s beat, so nil here is
+	// the common case and does not mean "no host block was ever reported."
+	Host      *HostIdentity `json:"host,omitempty"`
+	Timestamp time.Time     `json:"timestamp"`
 }
 
 // InterfaceStatEntry holds per-interface packet capture statistics
@@ -168,6 +230,11 @@ type CaptureConfig struct {
 // SensorCommands represents a collection of commands for a sensor
 type SensorCommands struct {
 	Commands []Command `json:"commands"`
+	// Config is the sensor's desired state, answered on every
+	// heartbeat. Absent from an older platform's reply, which the sensor treats
+	// as "no change" rather than as an instruction to revert — silence is not
+	// an instruction.
+	Config *agentconfig.ExchangePayload `json:"config,omitempty"`
 }
 
 // Command represents a command sent to a sensor
@@ -213,6 +280,10 @@ type SensorRegistration struct {
 	// CSR-based registration fields
 	CSR      string `json:"csr,omitempty"`       // Certificate Signing Request (PEM format)
 	SensorID string `json:"sensor_id,omitempty"` // Proposed sensor ID (UUID string) for CSR CN
+	// Host is this sensor's own host identity, always sent at registration
+	// (registration happens once, so there is no throttle to apply). See
+	// [HostIdentity].
+	Host *HostIdentity `json:"host,omitempty"`
 }
 
 // DiscoveryOptions represents options for discovery operations
@@ -295,12 +366,30 @@ type DiscoveryFinding struct {
 	// SSH algorithm negotiation (active probe only — requires completing key exchange)
 	SSHHostKeyType        string `json:"ssh_host_key_type,omitempty"`        // e.g. "ssh-ed25519", "rsa-sha2-256"
 	SSHHostKeyFingerprint string `json:"ssh_host_key_fingerprint,omitempty"` // SHA256 fingerprint of host key
+	SSHProtocolVersion    string `json:"ssh_protocol_version,omitempty"`     // catalogue code, e.g. "SSH-2.0"
+	SSHSoftwareVersion    string `json:"ssh_software_version,omitempty"`     // e.g. "OpenSSH_9.6p1"
 	SSHKexAlgorithm       string `json:"ssh_kex_algorithm,omitempty"`        // e.g. "curve25519-sha256"
+	SSHHostKeyAlgorithm   string `json:"ssh_host_key_algorithm,omitempty"`   // negotiated host key algorithm
 	SSHEncryptionAlgC2S   string `json:"ssh_encryption_alg_c2s,omitempty"`   // client-to-server cipher
 	SSHEncryptionAlgS2C   string `json:"ssh_encryption_alg_s2c,omitempty"`   // server-to-client cipher
 	SSHMACAlgC2S          string `json:"ssh_mac_alg_c2s,omitempty"`          // client-to-server MAC
 	SSHMACAlgS2C          string `json:"ssh_mac_alg_s2c,omitempty"`          // server-to-client MAC
 	SSHCompressionAlg     string `json:"ssh_compression_alg,omitempty"`      // compression algorithm
+
+	// SSH algorithms the server OFFERED in its SSH_MSG_KEXINIT (active probe
+	// only). These are not in use — they are what the server will agree to if
+	// a client asks — and the inventory ingest links them as is_inferred=true.
+	// The json tags are the same key names the passive sensor's SSH assembler
+	// and the in-cluster Platform Sensor emit, so all three producers land in
+	// one vocabulary.
+	SSHServerKexAlgorithms     []string `json:"ssh_kex_algorithms_server,omitempty"`
+	SSHServerHostKeyAlgorithms []string `json:"ssh_host_key_algs_server,omitempty"`
+	SSHServerEncryptionC2S     []string `json:"ssh_encryption_algs_c2s_server,omitempty"`
+	SSHServerEncryptionS2C     []string `json:"ssh_encryption_algs_s2c_server,omitempty"`
+	SSHServerMACsC2S           []string `json:"ssh_mac_algs_c2s_server,omitempty"`
+	SSHServerMACsS2C           []string `json:"ssh_mac_algs_s2c_server,omitempty"`
+	SSHServerCompressionC2S    []string `json:"ssh_compression_algs_c2s_server,omitempty"`
+	SSHServerCompressionS2C    []string `json:"ssh_compression_algs_s2c_server,omitempty"`
 
 	// Key exchange algorithm parsed from selected cipher suite
 	KeyExchangeAlgorithm string `json:"key_exchange_algorithm,omitempty"`

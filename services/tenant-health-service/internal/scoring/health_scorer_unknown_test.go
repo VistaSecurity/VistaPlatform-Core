@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/healthbands"
 )
 
 // These tests pin B-12's contract: a peer that could not be reached produces
@@ -141,6 +142,29 @@ func TestCalculateHealthScore_UnmeasuredFactorsProduceNoRecommendations(t *testi
 	for _, rec := range got.Recommendations {
 		if rec.Category == "resource" || rec.Category == "cost" {
 			t.Errorf("recommendation %q drawn from an unmeasured factor", rec.Title)
+		}
+	}
+}
+
+func TestCalculateHealthScoreCanonicalBands(t *testing.T) {
+	hs := NewHealthScorer()
+	for _, tc := range []struct {
+		score  float64
+		status string
+	}{{0, "failing"}, {39.99, "failing"}, {40, "poor"}, {59.99, "poor"}, {60, "fair"}, {74.99, "fair"}, {75, "good"}, {89.99, "good"}, {90, "excellent"}, {100, "excellent"}} {
+		if got := hs.determineHealthStatus(tc.score); got != tc.status {
+			t.Fatalf("%v=%s want %s", tc.score, got, tc.status)
+		}
+	}
+	// Check the actual scorer is wired to the canonical classifier too.
+	for i := 0; i <= 10; i++ {
+		m := measuredMetrics()
+		m.CPUUtilization = float64(i * 10)
+		m.MemoryUtilization = float64(i * 10)
+		m.ComplianceScore = float64(i * 10)
+		got := hs.CalculateHealthScore(m)
+		if got.HealthStatus != healthbands.Status(&got.OverallScore) {
+			t.Fatalf("scorer %v=%s", got.OverallScore, got.HealthStatus)
 		}
 	}
 }

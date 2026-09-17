@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon, MiniBar } from '../../components/ui';
+import { assetConfidencePercent, Icon, MiniBar } from '../../components/ui';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime } from './kit';
 import { usePendingAssets } from './queries';
 import {
@@ -407,7 +407,7 @@ export function ApprovalsPage() {
               rows={assets}
               rowKey={(a) => a.id}
               render={(a) => {
-                const conf = typeof a.confidence_score === 'number' ? Math.round(a.confidence_score <= 1 ? a.confidence_score * 100 : a.confidence_score) : null;
+                const conf = assetConfidencePercent(a.confidence_score);
                 const source = sourceOfAsset(a);
                 return (
                   <>

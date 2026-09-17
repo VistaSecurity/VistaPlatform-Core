@@ -1,6 +1,9 @@
 package network
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
 
 func TestControlPlaneHostPortDefaultsPortByScheme(t *testing.T) {
 	cases := []struct {
@@ -71,5 +74,65 @@ func TestHostAddressesMarksNonePrimaryWhenUnknown(t *testing.T) {
 		if a.IsPrimary {
 			t.Fatalf("%s flagged primary with no primary IP supplied", a.Address)
 		}
+	}
+}
+
+// usableInterfaceMAC excludes a locally-administered (randomised/virtual-NIC)
+// MAC and a first-hop-redundancy virtual-router MAC, the same rule
+// shared/hostobs applies to a passively observed one — a rotating or floating
+// address is not a stable identifier of this chassis.
+func TestUsableInterfaceMAC(t *testing.T) {
+	cases := []struct {
+		name string
+		mac  net.HardwareAddr
+		want string
+	}{
+		{"ordinary NIC", net.HardwareAddr{0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e}, "00:1a:2b:3c:4d:5e"},
+		{"locally administered (U/L bit set)", net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, ""},
+		{"VRRP virtual router MAC", net.HardwareAddr{0x00, 0x00, 0x5e, 0x00, 0x01, 0x07}, ""},
+		{"HSRP virtual router MAC", net.HardwareAddr{0x00, 0x00, 0x0c, 0x07, 0xac, 0x0a}, ""},
+		{"empty", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			iface := net.Interface{Name: "eth-test", HardwareAddr: tc.mac}
+			if got := usableInterfaceMAC(iface); got != tc.want {
+				t.Fatalf("usableInterfaceMAC(%v) = %q, want %q", tc.mac, got, tc.want)
+			}
+		})
+	}
+}
+
+// HostAddresses attaches the interface's MAC to every address bound to it,
+// when the interface has a real (non-loopback) one — verified against the
+// live environment's own interfaces rather than a mock, matching the file's
+// other HostAddresses tests.
+func TestHostAddressesCarriesMACWhenPresent(t *testing.T) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot enumerate interfaces in this environment")
+	}
+	hasRealMAC := false
+	for _, iface := range ifaces {
+		if usableInterfaceMAC(iface) != "" {
+			hasRealMAC = true
+			break
+		}
+	}
+	if !hasRealMAC {
+		t.Skip("no non-virtual, non-randomised interface MAC in this environment")
+	}
+
+	sawMAC := false
+	for _, a := range HostAddresses("") {
+		if a.MAC != "" {
+			sawMAC = true
+			if len(a.MAC) != 17 { // "aa:bb:cc:dd:ee:ff"
+				t.Fatalf("MAC %q is not a normalised 6-octet address", a.MAC)
+			}
+		}
+	}
+	if !sawMAC {
+		t.Fatalf("expected at least one reported address to carry a MAC")
 	}
 }

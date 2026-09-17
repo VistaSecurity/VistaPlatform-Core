@@ -3,14 +3,17 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 )
 
 type RevalidationService struct {
@@ -18,6 +21,8 @@ type RevalidationService struct {
 	discoveryService *DiscoveryService
 	assetService     *AssetService
 	lifecycleService *AssetLifecycleService
+	// router decides which executor a manual Active Scan runs from.
+	router activeScanRouter
 }
 
 func NewRevalidationService(
@@ -31,6 +36,7 @@ func NewRevalidationService(
 		discoveryService: discoveryService,
 		assetService:     assetService,
 		lifecycleService: lifecycleService,
+		router:           sensorrouting.NewStore(db),
 	}
 }
 
@@ -195,14 +201,33 @@ func (s *RevalidationService) CreateRevalidationJob(tenantID uuid.UUID, userID u
 // discovery-processor → IngestFindings pipeline matches each asset by IP/port and catalogs
 // its certificates and cipher configs.
 // Returns the dispatched job ID and the number of assets actually scanned.
-func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string) (string, int, error) {
+func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string, runFrom RunFrom) (ActiveScanResult, error) {
+	var result ActiveScanResult
 	if len(assetIDs) == 0 {
-		return "", 0, fmt.Errorf("at least one asset ID is required")
+		return result, fmt.Errorf("at least one asset ID is required")
+	}
+	if err := runFrom.validate(); err != nil {
+		return result, err
+	}
+	now := time.Now()
+
+	// A named sensor is checked BEFORE anything is stamped, so "that sensor is
+	// offline" leaves every asset exactly as it was.
+	var chosen *sensorrouting.Sensor
+	if runFrom.Mode == RunFromSensor {
+		if s.router == nil {
+			return result, fmt.Errorf("%w: sensor routing is not available", sensorrouting.ErrSensorNotDispatchable)
+		}
+		sensor, err := s.router.FindDispatchable(context.Background(), tenantID, runFrom.SensorID, now)
+		if err != nil {
+			return result, err
+		}
+		chosen = &sensor
 	}
 
 	assets, err := s.resolveActiveScanAssets(tenantID, assetIDs)
 	if err != nil {
-		return "", 0, err
+		return result, err
 	}
 
 	// Group into homogeneous jobs (see planActiveScanBatches for why this is not
@@ -210,50 +235,71 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 	// simply absent from every batch — and, crucially, never stamped.
 	batches := planActiveScanBatches(assets)
 	if len(batches) == 0 {
-		return "", 0, fmt.Errorf("no valid scan targets found (assets need an IP or hostname)")
+		return result, fmt.Errorf("no valid scan targets found (assets need an IP or hostname)")
 	}
 
-	var firstJobID string
-	var scanned, failed int
+	var failed int
 	var lastErr error
 	for _, batch := range batches {
-		// Approve + stamp freshness BEFORE dispatching THIS batch. Approving
-		// (pending_approval → monitoring) is required or the pipeline defers the
-		// scanned crypto; stamping makes the asset drop out of the "unscanned"
-		// coverage set. Idempotent for already-monitoring assets. The returned
-		// stamps are what a failed dispatch restores.
-		prior, e := s.stampScanning(tenantID, batch.assetIDs)
-		if e != nil {
-			failed += len(batch.assetIDs)
-			lastErr = fmt.Errorf("failed to mark assets for scanning: %w", e)
-			logBatchDispatchFailure(tenantID, batch, lastErr)
-			continue
-		}
+		for _, routed := range s.routeActiveScanBatch(tenantID, batch, runFrom, chosen, now) {
+			if routed.skip != nil {
+				// The observing sensor is offline. Not stamped, not scanned
+				// from anywhere else; reported so the caller can say so.
+				for _, id := range routed.batch.assetIDs {
+					result.Skipped = append(result.Skipped, ActiveScanSkip{AssetID: id, Reason: routed.skip.Message()})
+				}
+				continue
+			}
 
-		job, e := s.discoveryService.CreateJob(tenantID.String(), userID.String(), models.CreateDiscoveryJobInput{
-			Targets:       batch.targets,
-			ExecutionMode: "async",
-			Protocols:     batch.protocols,
-			Ports:         batch.ports,
-			Options:       activeScanJobOptions(),
-		}, authHeader)
-		if e != nil {
-			// Restore the pre-scan freshness so the UI doesn't show a stuck
-			// "scanning" and the asset isn't reported as freshly scanned.
-			s.stampScanFailed(tenantID, prior)
-			failed += len(batch.assetIDs)
-			lastErr = e
-			logBatchDispatchFailure(tenantID, batch, e)
-			continue
+			// Approve + stamp freshness BEFORE dispatching THIS batch. Approving
+			// (pending_approval → monitoring) is required or the pipeline defers the
+			// scanned crypto; stamping makes the asset drop out of the "unscanned"
+			// coverage set. Idempotent for already-monitoring assets. The returned
+			// stamps are what a failed dispatch restores.
+			prior, e := s.stampScanning(tenantID, routed.batch.assetIDs)
+			if e != nil {
+				failed += len(routed.batch.assetIDs)
+				lastErr = fmt.Errorf("failed to mark assets for scanning: %w", e)
+				logBatchDispatchFailure(tenantID, routed.batch, lastErr)
+				continue
+			}
+
+			job, e := s.discoveryService.CreateJob(tenantID.String(), userID.String(), models.CreateDiscoveryJobInput{
+				Targets:            routed.batch.targets,
+				ExecutionMode:      routed.executionMode,
+				PreferredSensorIDs: routed.preferredSensorIDs,
+				Protocols:          routed.batch.protocols,
+				Ports:              routed.batch.ports,
+				Options:            activeScanJobOptions(),
+			}, authHeader)
+			if e != nil {
+				// Restore the pre-scan freshness so the UI doesn't show a stuck
+				// "scanning" and the asset isn't reported as freshly scanned.
+				s.stampScanFailed(tenantID, prior)
+				failed += len(routed.batch.assetIDs)
+				lastErr = e
+				logBatchDispatchFailure(tenantID, routed.batch, e)
+				continue
+			}
+			dispatched := ActiveScanDispatchedJob{JobID: job.ID, Executor: "platform", Count: len(routed.batch.assetIDs)}
+			if routed.sensor != nil {
+				id := routed.sensor.ID
+				dispatched.Executor = "sensor"
+				dispatched.SensorID = &id
+				dispatched.SensorName = routed.sensor.Name
+			}
+			result.Jobs = append(result.Jobs, dispatched)
+			result.Scanned += len(routed.batch.assetIDs)
 		}
-		if firstJobID == "" {
-			firstJobID = job.ID
-		}
-		scanned += len(batch.assetIDs)
 	}
 
-	if firstJobID == "" {
-		return "", 0, fmt.Errorf("failed to dispatch active scan: %w", lastErr)
+	if len(result.Jobs) == 0 {
+		if lastErr != nil {
+			return result, fmt.Errorf("failed to dispatch active scan: %w", lastErr)
+		}
+		// Every asset was skipped: nothing failed, nothing ran, and the caller
+		// is told exactly why per asset.
+		return result, nil
 	}
 	if failed > 0 {
 		// Partial dispatch. The returned count already excludes these assets and
@@ -261,9 +307,131 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 		// Active Scan list — but a failure that leaves no trace anywhere is the
 		// silent-failure shape this whole path exists to avoid.
 		log.Printf("[ERROR] CreateActiveScanJob - partial dispatch: %d asset(s) scanned, %d NOT dispatched, tenantID: %v, last error: %v",
-			scanned, failed, tenantID, lastErr)
+			result.Scanned, failed, tenantID, lastErr)
 	}
-	return firstJobID, scanned, nil
+	return result, nil
+}
+
+// RunFrom is the executor a manual Active Scan asked for.
+type RunFrom struct {
+	// Mode is RunFromAuto, RunFromPlatform or RunFromSensor. Empty means auto.
+	Mode string
+	// SensorID names the tenant sensor when Mode is RunFromSensor.
+	SensorID uuid.UUID
+}
+
+const (
+	RunFromAuto     = "auto"
+	RunFromPlatform = "platform"
+	RunFromSensor   = "sensor"
+)
+
+// ErrInvalidRunFrom is a request-shape refusal: an unknown mode, or a sensor
+// mode with no sensor.
+var ErrInvalidRunFrom = errors.New("invalid run_from")
+
+func (r *RunFrom) validate() error {
+	switch r.Mode {
+	case "":
+		r.Mode = RunFromAuto
+	case RunFromAuto, RunFromPlatform:
+	case RunFromSensor:
+		if r.SensorID == uuid.Nil {
+			return fmt.Errorf("%w: run_from \"sensor\" needs a sensor_id", ErrInvalidRunFrom)
+		}
+	default:
+		return fmt.Errorf("%w: %q (use auto, platform or sensor)", ErrInvalidRunFrom, r.Mode)
+	}
+	return nil
+}
+
+// ActiveScanDispatchedJob is one discovery job an Active Scan created.
+type ActiveScanDispatchedJob struct {
+	JobID      string
+	Executor   string // "platform" | "sensor"
+	SensorID   *uuid.UUID
+	SensorName string
+	Count      int
+}
+
+// ActiveScanSkip is an asset the scan left alone, and why.
+type ActiveScanSkip struct {
+	AssetID uuid.UUID
+	Reason  string
+}
+
+// ActiveScanResult is what an Active Scan did.
+type ActiveScanResult struct {
+	Jobs    []ActiveScanDispatchedJob
+	Skipped []ActiveScanSkip
+	Scanned int
+}
+
+// FirstJobID keeps the pre- response shape: the first job dispatched.
+func (r ActiveScanResult) FirstJobID() string {
+	if len(r.Jobs) == 0 {
+		return ""
+	}
+	return r.Jobs[0].JobID
+}
+
+// routedActiveScanBatch is a batch after the executor decision.
+type routedActiveScanBatch struct {
+	batch              activeScanBatch
+	executionMode      string
+	preferredSensorIDs []string
+	sensor             *sensorrouting.Sensor
+	skip               *sensorrouting.Skip
+}
+
+// activeScanRouter is the slice of sensorrouting.Store the manual scan uses.
+type activeScanRouter interface {
+	Resolve(ctx context.Context, tenantID uuid.UUID, targets []string, now time.Time) (sensorrouting.Plan, error)
+	FindDispatchable(ctx context.Context, tenantID, sensorID uuid.UUID, now time.Time) (sensorrouting.Sensor, error)
+}
+
+// routeActiveScanBatch splits a batch across executors according to run_from.
+//
+// platform: everything from the platform. sensor: everything from the chosen
+// sensor. auto: the routing rule — observing sensor, else segment sensor, else
+// platform — with an offline observer's hosts SKIPPED rather than scanned from
+// the wrong place. A router that cannot answer falls back to the platform for
+// this scan, loudly, because refusing to scan at all is the worse failure and
+// "from the platform" is what every manual scan did until today.
+func (s *RevalidationService) routeActiveScanBatch(tenantID uuid.UUID, batch activeScanBatch, runFrom RunFrom, chosen *sensorrouting.Sensor, now time.Time) []routedActiveScanBatch {
+	platform := []routedActiveScanBatch{{batch: batch, executionMode: "async"}}
+	switch runFrom.Mode {
+	case RunFromPlatform:
+		return platform
+	case RunFromSensor:
+		return []routedActiveScanBatch{{batch: batch, executionMode: "sensors", preferredSensorIDs: []string{chosen.ID.String()}, sensor: chosen}}
+	}
+	if s.router == nil {
+		return platform
+	}
+	plan, err := s.router.Resolve(context.Background(), tenantID, batch.targets, now)
+	if err != nil {
+		log.Printf("[ERROR] Active scan routing failed for tenant %v, scanning %d host(s) from the platform: %v", tenantID, len(batch.targets), err)
+		return platform
+	}
+	var out []routedActiveScanBatch
+	for _, group := range plan.Groups {
+		sensor := group.Sensor
+		out = append(out, routedActiveScanBatch{
+			batch:              batch.subset(group.Targets),
+			executionMode:      "sensors",
+			preferredSensorIDs: []string{sensor.ID.String()},
+			sensor:             &sensor,
+		})
+	}
+	if len(plan.Platform) > 0 {
+		out = append(out, routedActiveScanBatch{batch: batch.subset(plan.Platform), executionMode: "async"})
+	}
+	for _, skip := range plan.Skipped {
+		sk := skip
+		out = append(out, routedActiveScanBatch{batch: batch.subset([]string{skip.Target}), skip: &sk})
+	}
+	return out
 }
 
 // logBatchDispatchFailure records exactly which assets were not dispatched and

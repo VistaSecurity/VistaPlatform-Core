@@ -402,8 +402,11 @@ func (c *f5Client) apiRequest(ctx context.Context, method, url string, body io.R
 
 // convertVIPToAsset builds one CryptoAsset from a VIP joined to one SSL profile.
 func (c *f5Client) convertVIPToAsset(ctx context.Context, vs f5VirtualServer, profile *f5SSLProfile, ipAddress string, port int) CryptoAsset {
+	// vs.Name is the BIG-IP object name (often partition-qualified, e.g.
+	// "/Common/my-vip") — kept for display under "virtual_server" below, only
+	// promoted to Hostname when it is DNS-valid.
 	asset := CryptoAsset{
-		Hostname:  vs.Name,
+		Hostname:  canonicalHostnameOrEmpty(vs.Name),
 		IPAddress: ipAddress,
 		Port:      port,
 		Protocol:  "TLS",

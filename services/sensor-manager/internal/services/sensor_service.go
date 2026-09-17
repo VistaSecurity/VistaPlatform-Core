@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -537,6 +538,15 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 				hostnameVal = h
 			}
 		}
+		// Fall back to the TLS SNI the sensor captured off the ClientHello.
+		// It is a measured fact — the name the client actually asked for —
+		// and for a third-party endpoint with no PTR record (most cloud
+		// providers) it is often the only name the platform will ever learn.
+		// sniHostnameFromRawMetadata rejects IP literals, since SNI is a DNS
+		// identity check and an IP in that field is not a name.
+		if hostnameVal == "" {
+			hostnameVal = sniHostnameFromRawMetadata(discovery.RawMetadata)
+		}
 		var hostname interface{}
 		if hostnameVal != "" {
 			hostname = hostnameVal
@@ -633,6 +643,45 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 	}
 
 	return tx.Commit()
+}
+
+// sniHostnameFromRawMetadata returns the TLS SNI hostname captured for a
+// discovery, or "" when none is present or the value is not a usable DNS
+// name.
+//
+// "sni" is the first-class key (sensor/internal/capture/tls_assembler.go);
+// "sni_server_name" is the older spelling still written alongside it there
+// and, for STARTTLS sessions, written alone
+// (sensor/internal/capture/starttls_assembler.go never gained the "sni"
+// alias). Both are checked, "sni" first.
+//
+// An IP literal in the SNI field is not a hostname — RFC 6066 forbids one,
+// but a malformed or spoofed ClientHello could still carry one, and
+// net.ParseIP is the standard way to reject it before it lands in a
+// hostname column.
+func sniHostnameFromRawMetadata(raw map[string]interface{}) string {
+	if raw == nil {
+		return ""
+	}
+	for _, key := range []string{"sni", "sni_server_name"} {
+		v, ok := raw[key]
+		if !ok || v == nil {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			continue
+		}
+		if net.ParseIP(s) != nil {
+			continue
+		}
+		return s
+	}
+	return ""
 }
 
 // StoreAirGappedExport stores air-gapped export data

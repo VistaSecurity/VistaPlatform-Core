@@ -12,6 +12,7 @@ package handlers
 // — no database.
 
 import (
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -31,28 +32,27 @@ import (
 // --- stub cryptoRisksService ----------------------------------------------
 
 type stubCryptoRisksService struct {
-	summary    *services.CryptoRisksSummary
-	summaryErr error
-	list       *services.CryptoRisksResponse
-	listByPage map[int]*services.CryptoRisksResponse
-	listCalls  []services.CryptoRiskFilters
-	listErr    error
-	risk       *services.CryptoRisk
-	riskErr    error
+	summary     *services.CryptoRisksSummary
+	summaryErr  error
+	list        *services.CryptoRisksResponse
+	exportCalls []services.CryptoRiskFilters
+	listErr     error
+	risk        *services.CryptoRisk
+	riskErr     error
 }
 
 func (s *stubCryptoRisksService) GetSummary(_ uuid.UUID) (*services.CryptoRisksSummary, error) {
 	return s.summary, s.summaryErr
 }
 func (s *stubCryptoRisksService) ListRisks(_ uuid.UUID, filters services.CryptoRiskFilters) (*services.CryptoRisksResponse, error) {
-	s.listCalls = append(s.listCalls, filters)
-	if s.listByPage != nil {
-		if response, ok := s.listByPage[filters.Page]; ok {
-			return response, s.listErr
-		}
-		return &services.CryptoRisksResponse{Risks: []services.CryptoRisk{}, Page: filters.Page, PageSize: filters.PageSize}, s.listErr
-	}
 	return s.list, s.listErr
+}
+func (s *stubCryptoRisksService) ExportRisks(_ uuid.UUID, f services.CryptoRiskFilters) ([]services.CryptoRisk, error) {
+	s.exportCalls = append(s.exportCalls, f)
+	if s.list == nil {
+		return nil, s.listErr
+	}
+	return s.list.Risks, s.listErr
 }
 func (s *stubCryptoRisksService) GetRiskByID(_, _ uuid.UUID) (*services.CryptoRisk, error) {
 	return s.risk, s.riskErr
@@ -77,11 +77,12 @@ func newCryptoRisksEngine(svc *stubCryptoRisksService) *gin.Engine {
 // sampleRisk sets the optional asset/crypto enrichment fields too.
 func sampleRisk() services.CryptoRisk {
 	return services.CryptoRisk{
+		AssessmentBasis: "configuration", AssessmentLimitations: []string{}, ScoreSources: []string{},
 		ID:                     uuid.New(),
 		TenantID:               uuid.New(),
 		AssetID:                uuid.New(),
 		CryptoImplementationID: uuid.New(),
-		Severity:               "high",
+		Severity:               cryptoRiskString("high"),
 		Category:               "protocol",
 		IssueType:              "deprecated_tls",
 		CurrentValue:           "TLS 1.0",
@@ -102,11 +103,12 @@ func sampleRisk() services.CryptoRisk {
 // (not null), proving the spec's optional-key handling holds.
 func minimalRisk() services.CryptoRisk {
 	return services.CryptoRisk{
+		AssessmentBasis: "configuration", AssessmentLimitations: []string{}, ScoreSources: []string{},
 		ID:                     uuid.New(),
 		TenantID:               uuid.New(),
 		AssetID:                uuid.New(),
 		CryptoImplementationID: uuid.New(),
-		Severity:               "medium",
+		Severity:               cryptoRiskString("medium"),
 		Category:               "algorithm",
 		IssueType:              "weak_cipher",
 		CurrentValue:           "3DES",
@@ -169,10 +171,10 @@ func TestContract_GetCryptoRisk_400_badID(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
-// GetRisk maps the no-rows sentinel to 404 (string-matched in the handler).
+// GetRisk maps the no-rows sentinel to 404, including wrapped service errors.
 func TestContract_GetCryptoRisk_404(t *testing.T) {
 	sv := loadSpec(t)
-	eng := newCryptoRisksEngine(&stubCryptoRisksService{riskErr: errors.New("sql: no rows in result set")})
+	eng := newCryptoRisksEngine(&stubCryptoRisksService{riskErr: fmt.Errorf("wrapped: %w", sql.ErrNoRows)})
 	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-risks/"+aUUID, nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
@@ -210,7 +212,7 @@ func TestContract_ExportCryptoRisks_200(t *testing.T) {
 	}
 }
 
-func TestContract_ExportCryptoRisks_PaginatesPastFirstClampedPage(t *testing.T) {
+func TestContract_ExportCryptoRisks_SingleReadBeyondListPageSize(t *testing.T) {
 	firstPage := make([]services.CryptoRisk, services.MaxCryptoRiskPageSize)
 	for i := range firstPage {
 		firstPage[i] = exportRisk(i, fmt.Sprintf("page-one-%03d", i))
@@ -219,22 +221,7 @@ func TestContract_ExportCryptoRisks_PaginatesPastFirstClampedPage(t *testing.T) 
 		exportRisk(services.MaxCryptoRiskPageSize, "page-two-000"),
 		exportRisk(services.MaxCryptoRiskPageSize+1, "page-two-001"),
 	}
-	svc := &stubCryptoRisksService{listByPage: map[int]*services.CryptoRisksResponse{
-		1: {
-			Risks:      firstPage,
-			Total:      len(firstPage) + len(secondPage),
-			Page:       1,
-			PageSize:   services.MaxCryptoRiskPageSize,
-			TotalPages: 2,
-		},
-		2: {
-			Risks:      secondPage,
-			Total:      len(firstPage) + len(secondPage),
-			Page:       2,
-			PageSize:   services.MaxCryptoRiskPageSize,
-			TotalPages: 2,
-		},
-	}}
+	svc := &stubCryptoRisksService{list: &services.CryptoRisksResponse{Risks: append(firstPage, secondPage...)}}
 	eng := newCryptoRisksEngine(svc)
 
 	w := do(eng, http.MethodGet, "/api/v2/inventory-service/crypto-risks/export", nil)
@@ -260,17 +247,10 @@ func TestContract_ExportCryptoRisks_PaginatesPastFirstClampedPage(t *testing.T) 
 	if got := records[services.MaxCryptoRiskPageSize+2][3]; got != "page-two-001" {
 		t.Fatalf("last second-page issue_type = %q, want page-two-001", got)
 	}
-	if got := len(svc.listCalls); got != 2 {
-		t.Fatalf("ListRisks calls = %d, want 2", got)
+	if len(svc.exportCalls) != 1 {
+		t.Fatalf("export calls=%d want1", len(svc.exportCalls))
 	}
-	for i, call := range svc.listCalls {
-		if got, want := call.Page, i+1; got != want {
-			t.Fatalf("call %d page = %d, want %d", i, got, want)
-		}
-		if got := call.PageSize; got != services.MaxCryptoRiskPageSize {
-			t.Fatalf("call %d page_size = %d, want %d", i, got, services.MaxCryptoRiskPageSize)
-		}
-	}
+
 }
 
 // An empty result still produces a valid CSV (just the header row).
@@ -322,5 +302,26 @@ func TestContract_CryptoRisks_DriftIsCaught(t *testing.T) {
 	}
 	if err := sch.Validate(bad); err == nil {
 		t.Fatal("expected validation to FAIL for a drifted CryptoRisk, but it passed — the guardrail is not actually checking")
+	}
+}
+
+func cryptoRiskString(value string) *string { return &value }
+
+func BenchmarkExportCryptoRisksCSV(b *testing.B) {
+	rows := make([]services.CryptoRisk, 50000)
+	sample := sampleRisk()
+	sample.AssessmentLimitations = []string{"Original numeric rule provenance unavailable"}
+	sample.ScoreSources = []string{"persisted configuration risk"}
+	for i := range rows {
+		rows[i] = sample
+	}
+	engine := newCryptoRisksEngine(&stubCryptoRisksService{list: &services.CryptoRisksResponse{Risks: rows}})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		response := do(engine, http.MethodGet, "/api/v2/inventory-service/crypto-risks/export", nil)
+		if response.Code != http.StatusOK || strings.Count(response.Body.String(), "\n") != 50001 {
+			b.Fatal("incomplete export")
+		}
 	}
 }

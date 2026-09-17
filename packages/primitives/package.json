@@ -19,7 +19,8 @@
     "./facts": "./src/facts/index.ts",
     "./findings": "./src/findings/index.ts",
     "./shared": "./src/shared/index.ts",
-    "./query": "./src/query/index.ts"
+    "./query": "./src/query/index.ts",
+    "./ratings": "./src/ratings/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

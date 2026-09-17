@@ -78,6 +78,7 @@ generate: node_modules_check generate-k8s-ingress ## Generate shared docs/config
 	# YAML file. It reads shared/findings and shared/assetclass through those
 	# packages, so it runs after the generators that write them.
 	cd shared && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go run ./query/catalog/registrycatalog/cmd/gen-ts-fields
+	GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go run ./shared/ratingsgen/cmd/gen-ratings
 	# Note: Environment files (.env, .env.ec2-smoke, .env.prod) are generated
 	# by their respective deployment scripts, not here
 
@@ -994,6 +995,8 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/billingapi ]; then go test ./ee/billingapi/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (monitoring-service/status + alerting + trends + gateway + admin-status)..."
 	@cd services/monitoring-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
+	@echo "==> API contract: tenant-health-service rating vocabulary and serialized scorer output..."
+	@cd services/tenant-health-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/scoring/ -run Contract
 	@echo "==> API contract: mcp-service tool-surface snapshot (JSON-RPC, so OpenAPI does not apply)..."
 	@cd services/mcp-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/server/ -run ToolSurface
 	@echo "✅ Contract tests pass — live handlers conform to the spec."
@@ -1044,7 +1047,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: generate verify-generated chart-lint changelog-audit-test lint-workflows  ## Generate, verify and run all standards checks
+standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test lint-workflows  ## Generate, verify and run all standards checks
 
 registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"
@@ -1161,3 +1164,12 @@ ts-build: ## Build TypeScript for both UIs
 
 prod-validate-fast: generate verify-generated  ## Fast validation using existing checks (no containers)
 	@echo "✅ Fast prod validation complete (no container bring-up)."
+
+.PHONY: rating-contract-test
+rating-contract-test: ## Mutation-test explicit rating contract bindings
+	node --test ./scripts/audit-rating-scales.test.mjs
+
+.PHONY: rating-ladder-test
+rating-ladder-test: ## Exercise syntax-aware rating ladder detection and enforcement wiring
+	GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./shared/ratingsguard/...
+	node --test ./scripts/audit-rating-ladders.test.mjs

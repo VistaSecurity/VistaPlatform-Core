@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -16,6 +19,7 @@ import (
 type cryptoRisksService interface {
 	GetSummary(tenantID uuid.UUID) (*services.CryptoRisksSummary, error)
 	ListRisks(tenantID uuid.UUID, filters services.CryptoRiskFilters) (*services.CryptoRisksResponse, error)
+	ExportRisks(tenantID uuid.UUID, filters services.CryptoRiskFilters) ([]services.CryptoRisk, error)
 	GetRiskByID(tenantID, riskID uuid.UUID) (*services.CryptoRisk, error)
 }
 
@@ -135,7 +139,7 @@ func (h *CryptoRisksHandlers) GetRisk(c *gin.Context) {
 
 	risk, err := h.service.GetRiskByID(tenantUUID, riskID)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
+		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Risk not found"})
 			return
 		}
@@ -175,27 +179,16 @@ func (h *CryptoRisksHandlers) ExportRisks(c *gin.Context) {
 		return
 	}
 
-	// Export the full result set. ListRisks clamps PageSize to
-	// MaxCryptoRiskPageSize, so page through until a short page signals the
-	// end (bounded by exportPageCap so a runaway can't stream unbounded).
-	const exportPageCap = 500 // MaxCryptoRiskPageSize * 500 = 50k row ceiling
-	filters.PageSize = services.MaxCryptoRiskPageSize
-	var risks []services.CryptoRisk
-	for page := 1; page <= exportPageCap; page++ {
-		filters.Page = page
-		response, err := h.service.ListRisks(tenantUUID, filters)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-			return
-		}
-		risks = append(risks, response.Risks...)
-		if len(response.Risks) < services.MaxCryptoRiskPageSize {
-			break
-		}
+	// One read/judgment pass, bounded to the documented 50k export ceiling.
+	risks, err := h.service.ExportRisks(tenantUUID, filters)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
 	}
 
 	// Build CSV
-	csv := "ID,Severity,Category,Issue Type,Current Value,Description,Recommendation,Asset Hostname,Asset IP,Asset Port,Protocol,Protocol Version,Detected At\n"
+	var csv strings.Builder
+	csv.WriteString("ID,Severity,Category,Issue Type,Current Value,Description,Recommendation,Asset Hostname,Asset IP,Asset Port,Protocol,Protocol Version,Detected At,Risk Score,Assessment Basis,Score Sources,Assessment Limitations\n")
 	for _, risk := range risks {
 		hostname := ""
 		if risk.AssetHostname != nil {
@@ -214,24 +207,31 @@ func (h *CryptoRisksHandlers) ExportRisks(c *gin.Context) {
 			protocolVersion = *risk.ProtocolVersion
 		}
 
-		csv += risk.ID.String() + ","
-		csv += risk.Severity + ","
-		csv += risk.Category + ","
-		csv += escapeCSV(risk.IssueType) + ","
-		csv += escapeCSV(risk.CurrentValue) + ","
-		csv += escapeCSV(risk.Description) + ","
-		csv += escapeCSV(risk.Recommendation) + ","
-		csv += escapeCSV(hostname) + ","
-		csv += escapeCSV(ip) + ","
-		csv += port + ","
-		csv += escapeCSV(risk.Protocol) + ","
-		csv += escapeCSV(protocolVersion) + ","
-		csv += risk.DetectedAt.Format("2006-01-02 15:04:05") + "\n"
+		csv.WriteString(risk.ID.String() + ",")
+		if risk.Severity != nil {
+			csv.WriteString(*risk.Severity)
+		}
+		csv.WriteString(",")
+		csv.WriteString(risk.Category + ",")
+		csv.WriteString(escapeCSV(risk.IssueType) + ",")
+		csv.WriteString(escapeCSV(risk.CurrentValue) + ",")
+		csv.WriteString(escapeCSV(risk.Description) + ",")
+		csv.WriteString(escapeCSV(risk.Recommendation) + ",")
+		csv.WriteString(escapeCSV(hostname) + ",")
+		csv.WriteString(escapeCSV(ip) + ",")
+		csv.WriteString(port + ",")
+		csv.WriteString(escapeCSV(risk.Protocol) + ",")
+		csv.WriteString(escapeCSV(protocolVersion) + ",")
+		csv.WriteString(risk.DetectedAt.Format("2006-01-02 15:04:05") + ",")
+		if risk.RiskScore != nil {
+			csv.WriteString(strconv.Itoa(*risk.RiskScore))
+		}
+		csv.WriteString("," + escapeCSV(risk.AssessmentBasis) + "," + escapeCSV(strings.Join(risk.ScoreSources, "; ")) + "," + escapeCSV(strings.Join(risk.AssessmentLimitations, "; ")) + "\n")
 	}
 
 	c.Header("Content-Type", "text/csv")
 	c.Header("Content-Disposition", "attachment; filename=crypto-risks.csv")
-	c.String(http.StatusOK, csv)
+	c.String(http.StatusOK, csv.String())
 }
 
 // escapeCSV escapes a string for CSV output

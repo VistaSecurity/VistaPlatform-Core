@@ -3,6 +3,7 @@
 // lucide-react components passed in directly (no string registry).
 import type { CSSProperties, ReactNode } from 'react';
 import { type LucideIcon, Crown, TrendingUp, TrendingDown, ArrowUpRight } from 'lucide-react';
+import { healthBandFromScore, healthLabel, type HealthBand } from '@vistasecurity/primitives/ratings';
 
 /* ---------------- status color system (operational signals) ---------------- */
 type StatusMeta = { c: string; label: string };
@@ -27,12 +28,36 @@ const STATUS: Record<string, StatusMeta> = {
 };
 export const statusOf = (k: string): StatusMeta => STATUS[k] ?? { c: 'var(--neutral)', label: k };
 
-export function healthColor(s: number): string {
-  if (s >= 85) return 'var(--ok)';
-  if (s >= 70) return 'var(--ok-lime)';
-  if (s >= 55) return 'var(--warn)';
-  if (s >= 40) return 'var(--warn-strong)';
-  return 'var(--danger)';
+const HEALTH_COLOR: Record<HealthBand, string> = {
+  excellent: 'var(--ok)',
+  good: 'var(--ok-lime)',
+  fair: 'var(--warn)',
+  poor: 'var(--warn-strong)',
+  failing: 'var(--danger)',
+};
+
+export function healthColor(score: number | null | undefined): string {
+  const band = healthBandFromScore(score);
+  return band ? HEALTH_COLOR[band] : 'var(--neutral)';
+}
+
+export interface HealthIndexPresentation {
+  score: number;
+  band: HealthBand;
+  label: string;
+  text: string;
+  color: string;
+}
+
+/** Tenant health is a composite index, presented as N/100 plus its health band. */
+export function healthIndexPresentation(score: number | null | undefined, available = true): HealthIndexPresentation | null {
+  if (!available) return null;
+  const band = healthBandFromScore(score);
+  if (!band || typeof score !== 'number') return null;
+  // Do not round across a band boundary (74.9 must not read 75 · Fair).
+  const rounded = Math.floor(score * 10) / 10;
+  const label = healthLabel(band) ?? band;
+  return { score: rounded, band, label, text: `${rounded}/100 · ${label}`, color: HEALTH_COLOR[band] };
 }
 export const planColor = (p: string): string =>
   ({ Sovereign: '#E2B033', Fortress: 'var(--info)', Guardian: 'var(--neutral)', Trial: '#646C79' } as Record<string, string>)[p] ?? 'var(--neutral)';

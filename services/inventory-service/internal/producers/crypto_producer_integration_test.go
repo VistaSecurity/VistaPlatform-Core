@@ -284,7 +284,8 @@ func TestIntegration_CryptoProducer_ResolvedAndCleanIsAssessed(t *testing.T) {
 	f := newCryptoFixture(t)
 
 	clean := f.configuration(t, "TLS 1.3", 0)
-	f.linkAlgorithm(t, clean, "cipher_suite", "TLS_AES_256_GCM_SHA384-IT", 0, "ae", false)
+	alg := f.linkAlgorithm(t, clean, "cipher_suite", "TLS_AES_256_GCM_SHA384-IT", 0, "ae", false)
+	exec(t, f.owner, `UPDATE algorithms SET strength='recommended' WHERE id=$1`, alg)
 
 	run := f.mustRun(t, context.Background())
 	if run.Raised != 0 {

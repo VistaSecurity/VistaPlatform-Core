@@ -11,13 +11,18 @@
 // send no health/commands/config/cert telemetry, so they show only Overview +
 // Discoveries.
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { sensorManagerComponents } from '@vistasecurity/api-contract';
-import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon, DrawerShell, DrawerCloseBtn, MetaRow, SectionLabel, Pill, Modal, ModalField } from '../../components/ui';
 import { DTable, CellMono, CellTxt, Note, sensorOnline, relTime } from './kit';
 import { summariseHostObservations } from './host-observations';
+import { SettingsPanel } from './settings-panel';
+import { useSensorConfig, useSensorConfigHistory, useSaveSensorConfig } from './sensor-config-queries';
+import { ConfigHistorySection } from './config-history';
+import type { SettingValue } from './agent-config';
 // useDiscoveryCounts is the one hook this drawer borrows from the shared
 // queries.ts (everything else lives locally per the note above) — it's a
 // cheap bulk id→count fetch already shared by sensors-page.tsx and
@@ -30,6 +35,17 @@ type HealthMetrics = sensorManagerComponents['schemas']['SensorHealthMetrics'];
 type SensorDiscovery = sensorManagerComponents['schemas']['SensorDiscovery'];
 type SensorCertificate = sensorManagerComponents['schemas']['SensorCertificateResponse'];
 type SensorCommand = sensorManagerComponents['schemas']['SensorCommand'];
+
+// sensorHostAssetHref is the "Host" row's link target: the inventory asset
+// for the host THIS sensor runs on, once its own self-report has resolved
+// one (asset-inventory decision 9). null — and the row is omitted — for an
+// older sensor build that never sent a `host` block, or before its first
+// self-observation has landed.
+export function sensorHostAssetHref(sensor: Pick<Sensor, 'asset_id'>): string | null {
+  const id = sensor.asset_id;
+  if (!id) return null;
+  return `/inventory/assets/${id}`;
+}
 
 // ---- formatters -----------------------------------------------------------
 function fmtUptime(sec?: number | null): string {
@@ -265,6 +281,16 @@ function OverviewTab({ sensor, isPlatform }: { sensor: Sensor; isPlatform: boole
       {!isPlatform && <MetaRow k="Reporting interval" v={fmtIntervalSecs(sensor.reporting_interval)} />}
       <MetaRow k="Version" v={sensor.version ? 'v' + sensor.version : null} mono />
       <MetaRow k="IP address" v={sensor.ip_address} mono />
+      {/* The asset for the HOST THIS SENSOR RUNS ON, once its own self-report
+          has resolved one (asset-inventory decision 9) — absent for an older
+          sensor build or before its first self-observation lands. */}
+      {sensorHostAssetHref(sensor) && (
+        <MetaRow
+          k="Host"
+          v={<Link to={sensorHostAssetHref(sensor)!} style={{ color: 'var(--accent)', fontWeight: 600 }}>View asset</Link>}
+          title="The inventory asset for the host this sensor runs on"
+        />
+      )}
       {/* Only worth listing when the host has more than the primary — on a
           single-homed box the list would just repeat the row above. */}
       {(sensor.addresses?.length ?? 0) > 1 && (
@@ -618,9 +644,61 @@ const COMMAND_TYPES = ['restart', 'clear_cache', 'update_interfaces', 'list_inte
 function ControlTab({ sensor }: { sensor: Sensor }) {
   return (
     <div style={{ marginTop: 4 }}>
+      {/* Managed settings first: they are what an operator came here to change,
+          and they are the half that survives a restart of the sensor. The NIC
+          picker and the one-shot commands below remain what they were. */}
+      <SensorSettingsSection sensor={sensor} />
       <ConfigSection sensor={sensor} />
       <CommandsSection sensorId={sensor.id} />
     </div>
+  );
+}
+
+// ---- Control-plane-managed settings -------------------------------
+function SensorSettingsSection({ sensor }: { sensor: Sensor }) {
+  // Not destructured: relationships-tab.tsx records that destructuring the
+  // permission hook's methods trips.
+  const canEdit = usePermissions().hasPermission(TENANT_PERMISSIONS.sensors.update);
+  const q = useSensorConfig(sensor.id);
+  const save = useSaveSensorConfig(sensor.id);
+  // Fetched only once opened: a drawer somebody glances at should not query an
+  // audit table.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const history = useSensorConfigHistory(sensor.id, historyOpen);
+
+  if (q.isLoading) {
+    return <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '10px 0' }}>Loading settings…</div>;
+  }
+  if (q.isError || !q.data) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--danger-text)', padding: '10px 0' }}>
+        Couldn't load this sensor's settings.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <SettingsPanel
+        settings={q.data.settings}
+        status={q.data.status}
+        version={q.data.version}
+        scope="device"
+        canEdit={canEdit}
+        saving={save.isPending}
+        save={(values: Record<string, SettingValue>, confirmed: boolean) => save.mutateAsync({ values, confirmed })}
+      />
+      <div style={{ fontSize: 11, color: 'var(--app-t3)', margin: '12px 0 18px', lineHeight: 1.6 }}>
+        These are managed here, not on the sensor's host — a local edit to its config file is
+        overwritten at the next heartbeat.
+      </div>
+      <ConfigHistorySection
+        changes={history.data}
+        isLoading={history.isLoading}
+        isError={history.isError}
+        onOpen={() => setHistoryOpen(true)}
+      />
+    </>
   );
 }
 

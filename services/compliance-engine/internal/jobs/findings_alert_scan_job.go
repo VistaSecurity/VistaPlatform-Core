@@ -14,12 +14,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
-
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/alertcatalog"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/riskbands"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // FindingsAlertScanJob turns OPEN findings into stateful alerts (ADR-0005 D7,
@@ -517,18 +518,6 @@ func severityWorse(a, b string) bool {
 
 // --- known_vulnerability ----------------------------------------------------
 
-// The CVSS qualitative severity band boundaries, times ten.
-//
-// `findings.score` for a known_vulnerability finding IS the CVSS base score ×10
-// (the findings registry says `score_source: cvss_x10`), so banding it at these
-// numbers is the published CVSS v3.1/v4.0 mapping rather than a second opinion
-// about it — the same anchor models.RiskBands uses.
-const (
-	vulnAlertMediumScore   = 40 // CVSS 4.0
-	vulnAlertHighScore     = 70 // CVSS 7.0
-	vulnAlertCriticalScore = 90 // CVSS 9.0
-)
-
 // Rung indices into the known_vulnerability ladder, worst-last.
 const (
 	vulnRungMedium   = 0
@@ -545,12 +534,12 @@ const (
 // on the asset's Findings tab, and still says "not scored" where it was never
 // graded. Opening an alert would be claiming a severity nobody assigned.
 func vulnerabilityRungFor(f openFinding) (int, bool) {
-	switch {
-	case f.score >= vulnAlertCriticalScore:
+	switch riskbands.Severity(f.score) {
+	case sharedseverity.Critical:
 		return vulnRungCritical, true
-	case f.score >= vulnAlertHighScore:
+	case sharedseverity.High:
 		return vulnRungHigh, true
-	case f.score >= vulnAlertMediumScore:
+	case sharedseverity.Medium:
 		return vulnRungMedium, true
 	}
 	return 0, false

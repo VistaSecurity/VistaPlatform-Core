@@ -1,12 +1,16 @@
 package handlers
 
 import (
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 )
@@ -25,7 +29,7 @@ type lifecycleStore interface {
 
 type revalidationStore interface {
 	CreateRevalidationJob(tenantID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string) (string, error)
-	CreateActiveScanJob(tenantID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string) (string, int, error)
+	CreateActiveScanJob(tenantID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string, runFrom services.RunFrom) (services.ActiveScanResult, error)
 }
 
 type AssetLifecycleHandler struct {
@@ -211,8 +215,14 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 		}
 	}
 
+	// run_from chooses the executor: auto (the observing sensor, else
+	// a segment sensor, else the platform), platform, or one named sensor.
+	// The permission is the same for all three — assets.update, checked on
+	// the route — because the permission follows the action, not the executor.
 	var req struct {
 		AssetIDs []string `json:"asset_ids" binding:"required"`
+		RunFrom  string   `json:"run_from"`
+		SensorID string   `json:"sensor_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
@@ -230,18 +240,68 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 		return
 	}
 
+	runFrom := services.RunFrom{Mode: strings.ToLower(strings.TrimSpace(req.RunFrom))}
+	if runFrom.Mode == services.RunFromSensor {
+		id, err := uuid.Parse(strings.TrimSpace(req.SensorID))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "run_from \"sensor\" needs a sensor_id"})
+			return
+		}
+		runFrom.SensorID = id
+	}
+
 	authHeader := s2sAuthHeader(c)
-	jobID, scanned, err := h.revalidationService.CreateActiveScanJob(tenantUUID, userUUID, assetIDs, authHeader)
+	result, err := h.revalidationService.CreateActiveScanJob(tenantUUID, userUUID, assetIDs, authHeader, runFrom)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start active scan"})
+		// The executor refusals are the caller's to act on — pick another
+		// sensor, wait for it, or run from the platform — so they keep their
+		// status and their reason rather than collapsing into a 500.
+		switch {
+		case errors.Is(err, services.ErrInvalidRunFrom), errors.Is(err, sensorrouting.ErrSensorNotDispatchable):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, sensorrouting.ErrSensorNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, sensorrouting.ErrSensorOffline):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			log.Printf("[ERROR] ScanAssets - tenantID: %v, run_from: %s, error: %v", tenantUUID, runFrom.Mode, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start active scan"})
+		}
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Active scan started",
-		"job_id":  jobID,
-		"count":   scanned,
-	})
+	c.JSON(http.StatusOK, activeScanResponse(result))
+}
+
+// activeScanResponse renders an ActiveScanResult on the wire: the original
+// `job_id`/`count` summary plus every job with its executor and every asset
+// that was skipped, so a caller can name the executor and say what did not
+// run.
+func activeScanResponse(r services.ActiveScanResult) gin.H {
+	jobs := make([]gin.H, 0, len(r.Jobs))
+	for _, j := range r.Jobs {
+		job := gin.H{"job_id": j.JobID, "executor": j.Executor, "count": j.Count}
+		if j.SensorID != nil {
+			job["sensor_id"] = j.SensorID.String()
+			job["sensor_name"] = j.SensorName
+		}
+		jobs = append(jobs, job)
+	}
+	skipped := make([]gin.H, 0, len(r.Skipped))
+	for _, s := range r.Skipped {
+		skipped = append(skipped, gin.H{"asset_id": s.AssetID.String(), "reason": s.Reason})
+	}
+	message := "Active scan started"
+	if len(r.Jobs) == 0 {
+		message = "No scan was started"
+	}
+	return gin.H{
+		"message": message,
+		"job_id":  r.FirstJobID(),
+		"count":   r.Scanned,
+		"jobs":    jobs,
+		"skipped": skipped,
+	}
 }
 
 // ArchiveAssets handles POST /api/v1/inventory-service/assets/stale/archive

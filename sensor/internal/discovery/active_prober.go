@@ -367,8 +367,32 @@ func probeResultToFinding(res *shareddisc.ProbeResult) *models.DiscoveryFinding 
 		SSHKeyTypes:           res.SSHKeyTypes,
 		SSHHostKeyType:        res.SSHHostKeyType,
 		SSHHostKeyFingerprint: res.SSHHostKeyFingerprint,
-		SSHKexAlgorithm:       res.SSHKexAlgorithm,
-		RawMetadata:           res.Metadata,
+		SSHProtocolVersion:    res.SSHProtocolVersion,
+		SSHSoftwareVersion:    res.SSHSoftwareVersion,
+
+		// The SSH algorithm fields are carried as TYPED fields, not left to
+		// RawMetadata: the sensor serializes RawMetadata as "raw_metadata",
+		// and sensor-manager's own DiscoveryFinding has no field under that
+		// name, so anything reaching the platform by that route alone is
+		// dropped at the upload boundary. buildFindingDetails reads these.
+		SSHKexAlgorithm:     res.SSHKexAlgorithm,
+		SSHHostKeyAlgorithm: res.SSHHostKeyAlgorithm,
+		SSHEncryptionAlgC2S: res.SSHEncryptionAlgC2S,
+		SSHEncryptionAlgS2C: res.SSHEncryptionAlgS2C,
+		SSHMACAlgC2S:        res.SSHMACAlgC2S,
+		SSHMACAlgS2C:        res.SSHMACAlgS2C,
+		SSHCompressionAlg:   res.SSHCompressionAlg,
+
+		SSHServerKexAlgorithms:     res.SSHServerKexAlgorithms,
+		SSHServerHostKeyAlgorithms: res.SSHServerHostKeyAlgorithms,
+		SSHServerEncryptionC2S:     res.SSHServerEncryptionC2S,
+		SSHServerEncryptionS2C:     res.SSHServerEncryptionS2C,
+		SSHServerMACsC2S:           res.SSHServerMACsC2S,
+		SSHServerMACsS2C:           res.SSHServerMACsS2C,
+		SSHServerCompressionC2S:    res.SSHServerCompressionC2S,
+		SSHServerCompressionS2C:    res.SSHServerCompressionS2C,
+
+		RawMetadata: res.Metadata,
 	}
 	if finding.RawMetadata == nil {
 		finding.RawMetadata = map[string]interface{}{}
@@ -436,6 +460,17 @@ func VerifyDNSName(leaf *x509.Certificate, host string) string {
 // primitive so the sensor and the in-cluster Platform Sensor flag identically.
 func ClassifyCertificateFlags(leaf *x509.Certificate, chain []*x509.Certificate) map[string]interface{} {
 	return shareddisc.ClassifyCertificateFlags(leaf, chain)
+}
+
+// RefineSCTFlags upgrades cert_has_sct/cert_sct_source (already computed from
+// the embedded route by ClassifyCertificateFlags) using the TLS extension and
+// OCSP delivery routes visible from a live handshake. Exported for use by the
+// enrichment package; delegates to the shared discovery primitive so the
+// sensor and the in-cluster Platform Sensor detect SCTs identically. Only
+// call this from a genuine live handshake — see the shared primitive's doc
+// for why a passive/PEM-only caller must not.
+func RefineSCTFlags(flags map[string]interface{}, tlsExtensionSCTs [][]byte, ocspResponse []byte, issuer *x509.Certificate) {
+	shareddisc.RefineSCTFlags(flags, tlsExtensionSCTs, ocspResponse, issuer)
 }
 
 // CheckOCSPStaple parses the OCSP response stapled by the server during the TLS

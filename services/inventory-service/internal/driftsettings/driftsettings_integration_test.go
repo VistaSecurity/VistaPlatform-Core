@@ -131,7 +131,7 @@ func TestIntegration_DriftSettings_PreserveOtherKeys(t *testing.T) {
 		_, e := tx.ExecContext(ctx, `
 			INSERT INTO tenant_admin_settings (tenant_id, config, version, created_at, updated_at)
 			VALUES ($1, $2::jsonb, 1, NOW(), NOW())`,
-			tenant, `{"capability_policy":{"active_scanning":false},"identity":{"auto_accept_threshold":0.9}}`)
+			tenant, `{"discovery_auto_scan":{"enabled":false},"identity":{"auto_accept_threshold":0.9}}`)
 		return e
 	})
 	if err != nil {
@@ -153,9 +153,9 @@ func TestIntegration_DriftSettings_PreserveOtherKeys(t *testing.T) {
 	if err := json.Unmarshal(raw, &config); err != nil {
 		t.Fatalf("decode config: %v", err)
 	}
-	policy, ok := config["capability_policy"].(map[string]any)
-	if !ok || policy["active_scanning"] != false {
-		t.Errorf("capability_policy was clobbered by the window write: %s", raw)
+	policy, ok := config["discovery_auto_scan"].(map[string]any)
+	if !ok || policy["enabled"] != false {
+		t.Errorf("discovery_auto_scan was clobbered by the window write: %s", raw)
 	}
 	identity, ok := config["identity"].(map[string]any)
 	if !ok || identity["auto_accept_threshold"] != 0.9 {

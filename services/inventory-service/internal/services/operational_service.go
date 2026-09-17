@@ -10,6 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // OperationalService provides location summary, environment drill-down, and remediation queue from materialized views.
@@ -209,7 +210,7 @@ func (s *OperationalService) GetRemediationQueue(tenantID uuid.UUID, filters mod
 
 	selQuery := `SELECT tenant_id, finding_type, severity, asset_id, asset_hostname, asset_ip, asset_port,
 		location_name, location_full_path, environment, service_name, certificate_id, crypto_implementation_id, detail_text, created_at ` +
-		baseQuery + ` ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC` +
+		baseQuery + ` ORDER BY ` + severity.RankSQL("severity") + ` DESC NULLS LAST, created_at DESC` +
 		fmt.Sprintf(` LIMIT $%d OFFSET $%d`, n, n+1)
 
 	// mv_remediation_queue_tenant scopes by app.tenant_id — count + page in one tenant tx.

@@ -68,6 +68,10 @@ func (h *ExternalConnectionsHandler) ListExternalConnections(c *gin.Context) {
 		return
 	}
 
+	if c.Request.URL.Query().Has("crypto_strength") || c.Query("sort_by") == "crypto_strength" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Use strength with weak, acceptable, strong, recommended, or unassessed"})
+		return
+	}
 	var f models.ExternalConnectionFilters
 	if err := c.ShouldBindQuery(&f); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid query parameters"})

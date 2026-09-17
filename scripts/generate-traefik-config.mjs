@@ -564,6 +564,24 @@ async function main() {
       };
     }
 
+    // mcp-service: RFC 9728 protected-resource metadata at the well-known root
+    // (no /api/v1/ prefix), the target of the MCP 401 challenge's
+    // resource_metadata parameter. Same priority band as the RFC 8414 document
+    // above. `Path || PathPrefix` because Traefik's PathPrefix(`/x/`) does not
+    // match the bare `/x`, and clients probe both the root and the §3.1
+    // path-suffixed form.
+    if (svc.name === 'mcp-service') {
+      routers['mcp_protected_resource_metadata'] = {
+        rule:
+          'Path(`/.well-known/oauth-protected-resource`) || ' +
+          'PathPrefix(`/.well-known/oauth-protected-resource/`)',
+        entryPoints: routerEntryPoints,
+        service: svcKey,
+        middlewares: noRateLimitMiddlewares,
+        priority: 9000,
+      };
+    }
+
     // Inventory-service: discovery import with extended timeout
     if (svc.name === 'inventory-service') {
       routers['inventory_discovery_import_v1'] = {

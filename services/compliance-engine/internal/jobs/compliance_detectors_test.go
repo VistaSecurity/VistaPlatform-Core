@@ -4,17 +4,20 @@ import "testing"
 
 func TestControlSeverityToAlert(t *testing.T) {
 	cases := map[string]string{
-		"Critical": "critical",
-		"High":     "high",
-		"Med":      "medium",
+		"critical": "critical",
+		"high":     "high",
 		"medium":   "medium",
-		"Low":      "low",
-		"  high  ": "high",
-		"":         "medium", // unknown → safe default
-		"weird":    "medium",
+		"low":      "low",
+		"  high  ": "",
+		"":         "", // unknown → safe default
+		"weird":    "",
 	}
 	for in, want := range cases {
-		if got := controlSeverityToAlert(in); got != want {
+		got, err := controlSeverityToAlert(in)
+		if (err != nil) != (want == "") {
+			t.Errorf("input %q validation err=%v", in, err)
+		}
+		if got != want {
 			t.Errorf("controlSeverityToAlert(%q) = %q, want %q", in, got, want)
 		}
 	}

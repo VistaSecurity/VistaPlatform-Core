@@ -235,3 +235,76 @@ export function useTenantReevaluateMutation() {
     },
   });
 }
+
+// ---- Per-tenant overrides (Tenants ▸ a tenant ▸ Settings) -------------------
+//
+// GET/PUT /admin/tenants/{id}/settings — an ee/msp surface, so it inherits the
+// Tenants section's `edition: 'msp'` gate; a Core build never renders the tab.
+//
+// These two hooks are the first callers this endpoint has ever had. It shipped
+// wired but unreachable: the v1 admin-ui drove it from the tenant modal's
+// Security tab, and the v1→v2 rebuild dropped that surface without
+// dropping the backend. It was also non-functional the whole time — an
+// un-castable `$4` in its optimistic-locking WHERE clause made every real call
+// fail at Postgres parse time — which is why nobody noticed the UI was gone.
+
+/** A tenant's platform-admin overrides. Every field is tri-state: `undefined`
+ *  means "no override, follow the platform default". */
+export type TenantSettings = adminServiceComponents['schemas']['TenantSettings'];
+
+/** The settings document plus its optimistic-locking version. */
+export type TenantSettingsSnapshot = { settings: TenantSettings; version: number };
+
+const tenantSettingsKey = (id: string | null) => ['platform', 'tenant-settings', id] as const;
+
+/** One tenant's overrides. Unlike the drawer's best-effort enrichment reads,
+ *  this is the tab's primary content, so it keeps the default retry behaviour —
+ *  a transient failure should recover rather than render a permanent empty. */
+export function useTenantSettings(id: string | null) {
+  return useQuery({
+    queryKey: tenantSettingsKey(id),
+    enabled: !!id,
+    staleTime: 30 * 1000,
+    queryFn: async (): Promise<TenantSettingsSnapshot> => {
+      const { data, error } = await clients.admin.GET('/admin/tenants/{id}/settings', {
+        params: { path: { id: id! } },
+      });
+      if (error || !data) throw new Error('Failed to load tenant settings');
+      // A tenant with no settings row yet answers `{settings: {}, version: 0}`;
+      // that is a valid starting state, not an error.
+      return { settings: data.settings ?? {}, version: data.version ?? 0 };
+    },
+  });
+}
+
+/**
+ * Save a tenant's overrides.
+ *
+ * `settings` carries ONLY the keys this form owns, and a key whose control is
+ * on "Platform default" is omitted entirely rather than sent as null — absent
+ * is what the backend's jsonb merge reads as "leave this alone", so sending the
+ * whole form with nulls would clobber. `version` comes from the last GET and
+ * makes a concurrent edit fail with 409 instead of silently winning.
+ */
+export function useUpdateTenantSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, settings, version }: { id: string; settings: TenantSettings; version?: number }) => {
+      const { data, error } = await clients.admin.PUT('/admin/tenants/{id}/settings', {
+        params: { path: { id } },
+        body: { settings, ...(version !== undefined ? { version } : {}) },
+      });
+      if (error || !data) {
+        throw new Error(
+          (error as { error?: string } | undefined)?.error === 'Version conflict'
+            ? 'These settings were changed by someone else. Reload and try again.'
+            : 'Failed to save tenant settings',
+        );
+      }
+      return data;
+    },
+    onSuccess: (_d, { id }) => {
+      void qc.invalidateQueries({ queryKey: tenantSettingsKey(id) });
+    },
+  });
+}

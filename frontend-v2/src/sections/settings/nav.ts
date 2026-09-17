@@ -171,7 +171,12 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     { key: 'audit', label: 'Audit', icon: 'history', built: true, permission: TENANT_PERMISSIONS.audit.read, job: 'Search, view, and export the full audit trail — who did what, when.' },
   ] },
   { section: 'Infrastructure', items: [
-    { key: 'sensor-config', label: 'Sensor Configuration', icon: 'radar', job: 'Set global discovery-engine behavior — Active Scanning Policy and Observation Rest Period.' },
+    // Was spec'd as "Sensor Configuration". It is not about sensors: it decides
+    // whether the PLATFORM probes the tenant's own network without being asked,
+    // and a tenant admin looking for that would not click a page named after a
+    // piece of hardware. The key stays `sensor-config` because the route is the
+    // key and a rename would break anyone's bookmark for nothing.
+    { key: 'sensor-config', label: 'Active Scanning', icon: 'radar', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Decide whether the platform scans your internal hosts on its own — when one is first seen, and how often after that.' },
     { key: 'locations', label: 'Locations', icon: 'map-pin', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Maintain the hierarchical physical/cloud location registry used by Inventory and Discovery.' },
     { key: 'segments', label: 'Network Segments', icon: 'network', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Define network boundaries (CIDR / range / domain / VPC) that Discovery scopes scans against.' },
   ] },

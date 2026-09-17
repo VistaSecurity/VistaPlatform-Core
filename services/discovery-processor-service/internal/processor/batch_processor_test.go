@@ -117,3 +117,53 @@ func TestShouldKeepCloudPlaceholderManaged(t *testing.T) {
 		})
 	}
 }
+
+// reverseDNSLookup runs from inside a cluster pod, whose resolver (CoreDNS)
+// synthesises a PTR answer for any address it considers in-cluster rather
+// than forwarding to the customer's real resolver. A customer host at
+// 192.0.2.124 therefore does not fail the lookup — it gets a confidently
+// wrong answer, "192-0-2-124.kubernetes.default.svc.cluster.local", that
+// nothing on the customer's network ever answers to. isClusterInternalPTRName
+// is the guard that keeps that fabricated name out of reverseDNSLookup's
+// return value; this pins it directly since the resolver itself can't be
+// exercised in a unit test.
+func TestIsClusterInternalPTRName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{
+			name: "kubernetes-synthesized dash-IP name for a customer host",
+			in:   "192-0-2-124.kubernetes.default.svc.cluster.local",
+			want: true,
+		},
+		{
+			name: "svc.cluster.local name for an in-cluster service",
+			in:   "my-service.default.svc.cluster.local",
+			want: true,
+		},
+		{
+			name: "synthesized dash-IP shape under a non-default cluster domain",
+			in:   "192-0-2-124.ec2.internal",
+			want: true,
+		},
+		{
+			name: "pod-scoped synthesized name under a custom cluster domain",
+			in:   "192-0-2-124.default.pod.example-cluster.local",
+			want: true,
+		},
+		{
+			name: "legitimate customer FQDN with a trailing dot must still pass",
+			in:   "host.corp.example.",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isClusterInternalPTRName(tc.in); got != tc.want {
+				t.Errorf("isClusterInternalPTRName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}

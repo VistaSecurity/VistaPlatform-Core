@@ -153,6 +153,14 @@ The agent can be configured via environment variables or a YAML file:
 - `HOST_INVENTORY_INTERVAL`: how often it does so (default: `24h`, minimum
   `1h` — a shorter value is raised to the minimum and logged).
 
+> **These are a starting position, not the source of truth.** Once the agent is
+> enrolled, `POLL_INTERVAL`, `HEARTBEAT_INTERVAL`, `VERBOSE` and both
+> `HOST_INVENTORY_*` settings are managed from the console (Discovery → Sensors
+> & Agents → the agent → Settings), and a later edit to this file is overwritten
+> at the next check-in. `PLATFORM_URL`, `REGISTRATION_KEY` and `AGENT_ID` stay
+> local — they are what the agent needs to reach the platform in the first
+> place. See [Agent and sensor settings](../../features/agent-and-sensor-settings.md).
+
 ### Configuration File
 
 Create a `device-agent.yaml` file:
@@ -292,12 +300,17 @@ reached two ways:
 | Identity | Strongest: the agent's own id, plus the host's serial and MACs | Whatever the host reports |
 | Sees loopback sockets and the package database | Yes | Yes, subject to the login account's privileges |
 
-**Local mode** is off by default. Turn it on with `HOST_INVENTORY_ENABLED=true`
-(or `host_inventory_enabled: true` in the config file). The agent then collects
-on start and every `HOST_INVENTORY_INTERVAL` (default 24 hours, minimum 1 hour)
-and posts the result to the platform. An agent you installed to interrogate
-firewalls will not start enumerating its own host's software just because it was
-upgraded.
+**Local mode** is off by default. Turn it on from the console — Discovery →
+Sensors & Agents → the agent → **Settings** — or, for an agent that has not
+enrolled yet, with `HOST_INVENTORY_ENABLED=true` (or `host_inventory_enabled:
+true` in the config file). The agent then collects on start and every
+`HOST_INVENTORY_INTERVAL` (default 24 hours, minimum 1 hour) and posts the
+result to the platform. An agent you installed to interrogate firewalls will not
+start enumerating its own host's software just because it was upgraded.
+
+Turning it on from the console takes effect at the agent's next check-in,
+without a restart and without touching the host. Turning it **off** stops the
+collection, rather than collecting and discarding the result.
 
 **Remote mode** is queued like any other job, against a device that already has
 SSH credentials configured:

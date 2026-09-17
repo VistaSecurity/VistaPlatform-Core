@@ -28,7 +28,7 @@ function draft(over: Partial<ControlDraft> = {}): ControlDraft {
     control_id: 'SEC-1',
     title: 'No deprecated ciphers',
     description: 'Disallow 3DES and RC4.',
-    severity: 'High',
+    severity: 'high',
     published: false,
     citations: [{ kind: 'standard_span', ref: '0-31' }],
     measurements: [
@@ -63,7 +63,7 @@ describe('accept flow (tenant endpoints)', () => {
         control_id: 'SEC-1',
         title: 'No deprecated ciphers',
         description: 'Disallow 3DES and RC4.',
-        baseline_severity: 'High',
+        baseline_severity: 'high',
         crypto_relevant: true,
         // The whole reason the accept goes through the ordinary endpoint: the
         // row records that a model drafted it, and which one.

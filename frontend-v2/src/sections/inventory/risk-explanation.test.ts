@@ -36,7 +36,7 @@ describe('not assessed is never a clean bill of health', () => {
     const x = explainRisk([], 0);
     expect(x.assessed).toBe(false);
     expect(x.worst).toBeNull();
-    expect(x.headline).toMatch(/not assessed/i);
+    expect(x.headline).toMatch(/no catalogue evidence/i);
   });
 
   it('reports assessed=false when the field is missing entirely', () => {
@@ -46,18 +46,20 @@ describe('not assessed is never a clean bill of health', () => {
   it('says what we do not know, and never that there is no risk', () => {
     const { caption, headline } = explainRisk([], 0);
     const text = `${headline} ${caption}`.toLowerCase();
-    expect(caption).toMatch(/has not been assessed/i);
-    expect(caption).toMatch(/not the same as being safe/i);
+    expect(caption).toMatch(/no catalogue components resolved/i);
+    expect(caption).toMatch(/not explained by this catalogue evidence/i);
     // Reassuring phrasings that would misread an absence of data as a verdict.
     for (const forbidden of ['no risk', 'no issues', 'looks good', 'secure', 'clean', 'safe configuration']) {
       expect(text).not.toContain(forbidden);
     }
   });
 
-  it('stays not-assessed even if a score somehow arrives without components', () => {
-    // Defensive: the panel must follow the COMPONENTS, not the number. A score
-    // with no explanation is still an unexplained score.
-    expect(explainRisk([], 82).assessed).toBe(false);
+  it('keeps a positive stored score present while naming its missing catalogue evidence', () => {
+    const x = explainRisk([], 82);
+    expect(x.assessed).toBe(false);
+    expect(x.caption).toContain('existing risk score 82');
+    expect(x.caption).toContain('not explained by this catalogue evidence');
+    expect(x.caption).not.toMatch(/has not been assessed/i);
   });
 });
 
@@ -121,6 +123,15 @@ describe('worst-component selection', () => {
     // badges band High at >=60 while the summary used >=70.
     const x = explainRisk([comp({ sets_score: true, risk_score: 65, risk_level: 'Critical' })], 65);
     expect(x.caption).toContain('Critical');
+  });
+
+  it('preserves a resolved qualitative judgment without inventing a numeric score', () => {
+    const x = explainRisk([comp({ strength: 'weak', risk_score: null, risk_level: null, sets_score: false })], null);
+    expect(x.assessed).toBe(true);
+    expect(x.worst).toBeNull();
+    expect(x.caption).toMatch(/qualitative judgments/i);
+    expect(x.caption).toMatch(/no numeric risk score/i);
+    expect(x.unexplainedRemainder).toBeNull();
   });
 });
 

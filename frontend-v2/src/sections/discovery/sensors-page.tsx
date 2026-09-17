@@ -5,6 +5,9 @@ import { DTable, CellMono, CellTxt, PageWrap, queryNote, sensorOnline, relTime }
 import { useSensors, useDiscoveryCounts, useDeviceAgents } from './queries';
 import { RegisterSensorModal, DeleteSensorModal, DeleteAgentModal, PendingRegistrationsSection } from './sensor-modals';
 import { SensorDetailDrawer } from './sensor-detail-drawer';
+import { AgentDetailDrawer, type DeviceAgentRow } from './agent-detail-drawer';
+import { AgentFleetDefaultsModal } from './agent-fleet-defaults-modal';
+import { SensorFleetDefaultsModal } from './sensor-fleet-defaults-modal';
 import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary } from './agent-fleet';
 
 // Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
@@ -58,6 +61,9 @@ export function SensorsPage() {
   const [toDelete, setToDelete] = useState<{ id: string; name: string } | null>(null);
   const [agentToDelete, setAgentToDelete] = useState<{ id: string; name: string } | null>(null);
   const [selected, setSelected] = useState<SensorRow | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<DeviceAgentRow | null>(null);
+  const [fleetDefaultsOpen, setFleetDefaultsOpen] = useState(false);
+  const [sensorDefaultsOpen, setSensorDefaultsOpen] = useState(false);
 
   const sensors = q.data ?? [];
   const agents = agentsQ.data ?? [];
@@ -83,13 +89,26 @@ export function SensorsPage() {
     <PageWrap title="Sensors & Agents" count={bothLoaded ? total : ''}>
       {/* sensors.create: registering a sensor or agent POSTs /sensors/pending,
           which sensor-manager gates on SensorsCreate — not SensorsManage. */}
-      <PermissionGate permission={TENANT_PERMISSIONS.sensors.create}>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 14 }}>
+        {/* Fleet defaults: the settings every agent inherits unless it carries
+            its own override. Reading them needs sensors.read, which anyone on
+            this page already has; the panel itself hides its Save when the user
+            cannot change them. */}
+        {/* Two fleets, two sets of defaults: a sensor and an agent share almost
+            no settings, and one combined dialog would be a list of controls
+            half of which do nothing for half the fleet. */}
+        <button className="ui-btn ghost" onClick={() => setSensorDefaultsOpen(true)}>
+          <Icon name="settings" size={14} />Sensor defaults
+        </button>
+        <button className="ui-btn ghost" onClick={() => setFleetDefaultsOpen(true)}>
+          <Icon name="settings" size={14} />Agent defaults
+        </button>
+        <PermissionGate permission={TENANT_PERMISSIONS.sensors.create}>
           <button className="ui-btn accent" onClick={() => setRegisterOpen(true)}>
             <Icon name="plus" size={14} />Register sensor or agent
           </button>
-        </div>
-      </PermissionGate>
+        </PermissionGate>
+      </div>
 
       {sensorNote ?? (
         <DTable
@@ -156,6 +175,7 @@ export function SensorsPage() {
             cols={AGENT_COLS}
             rows={agents}
             rowKey={(a) => a.id}
+            onRow={(a) => setSelectedAgent(a)}
             render={(a) => {
               const on = sensorOnline(a.status, a.last_heartbeat);
               const jobs = jobsSummary(a);
@@ -232,6 +252,9 @@ export function SensorsPage() {
       <DeleteSensorModal open={!!toDelete} sensor={toDelete} onClose={() => setToDelete(null)} />
       <DeleteAgentModal open={!!agentToDelete} agent={agentToDelete} onClose={() => setAgentToDelete(null)} />
       {selected && <SensorDetailDrawer sensor={selected} onClose={() => setSelected(null)} />}
+      {selectedAgent && <AgentDetailDrawer agent={selectedAgent} onClose={() => setSelectedAgent(null)} />}
+      {fleetDefaultsOpen && <AgentFleetDefaultsModal onClose={() => setFleetDefaultsOpen(false)} />}
+      {sensorDefaultsOpen && <SensorFleetDefaultsModal onClose={() => setSensorDefaultsOpen(false)} />}
     </PageWrap>
   );
 }

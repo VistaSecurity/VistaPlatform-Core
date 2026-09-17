@@ -3,6 +3,8 @@ package riskbands
 import (
 	"fmt"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // Risk severity bands — the single source of truth for turning a 0–100
@@ -135,4 +137,16 @@ func RiskBandMin(label string) (int, bool) {
 		return 0, false
 	}
 	return RiskBands[i].Min, true
+}
+
+// Severity maps a measured risk score to the finding wire vocabulary. Numeric
+// zero is Info; callers must preserve their separate assessment/availability flag.
+func Severity(score int) severity.Severity {
+	label := GetRiskLevel(score)
+	for _, d := range severity.Definitions() {
+		if d.Label == label {
+			return d.Value
+		}
+	}
+	panic("risk band has no finding severity mapping: " + label)
 }

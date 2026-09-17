@@ -15,6 +15,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // ErrFrameworkNotFound is returned by EvaluateFramework when the requested
@@ -420,7 +421,10 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 	// Canonical severity-weighted score over the ASSESSED controls only
 	// (Critical 4x, High 3x, Med 2x, Low 1x). Score is nil — "—", never 100 —
 	// when nothing was assessed.
-	breakdown := frameworkScore(outcomes)
+	breakdown, err := frameworkScore(outcomes)
+	if err != nil {
+		return nil, err
+	}
 
 	overridesActive := len(overrides)
 
@@ -889,7 +893,8 @@ func (s *EvaluationService) calculatePlatformFrameworkScore(tenantID, frameworkI
 		outcomes = append(outcomes, controlOutcome{BaselineSeverity: ctrl.BaselineSeverity, Status: status})
 	}
 
-	return frameworkScore(outcomes).Score, nil
+	breakdown, err := frameworkScore(outcomes)
+	return breakdown.Score, err
 }
 
 // FrameworkStatusResponse represents framework status information
@@ -1228,7 +1233,7 @@ func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid
 	// Ignore "undefined" string values (from frontend URLSearchParams)
 	if filters.Severity != "" && strings.ToLower(filters.Severity) != "undefined" {
 		query += fmt.Sprintf(" AND cf.severity = $%d", argIndex)
-		args = append(args, normalizeSeverity(filters.Severity))
+		args = append(args, legacySeverityFilter(filters.Severity))
 	}
 
 	query += " ORDER BY cf.last_seen DESC"
@@ -1339,17 +1344,8 @@ func (s *EvaluationService) getOverrides(tenantID uuid.UUID, scenarioID *uuid.UU
 // severityToWeight converts a baseline severity to a numeric weight for scoring.
 // Critical=4, High=3, Med=2, Low=1. This ensures critical control failures
 // have 4x the impact on compliance score compared to low-severity ones.
-func severityToWeight(severity string) int {
-	switch severity {
-	case "Critical":
-		return 4
-	case "High":
-		return 3
-	case "Med":
-		return 2
-	default:
-		return 1
-	}
+func severityToWeight(value string) (int, error) {
+	return sharedseverity.ControlWeight(sharedseverity.Severity(value))
 }
 
 // controlStatusFromAssessment is calculateControlStatus plus the materialized
@@ -1364,9 +1360,9 @@ func (s *EvaluationService) controlStatusFromAssessment(findings []models.Compli
 		return status, severity, ""
 	}
 	if a.Status == statusNotAssessed {
-		return statusNotAssessed, "Low", a.Reason
+		return statusNotAssessed, "low", a.Reason
 	}
-	return statusPass, "Low", ""
+	return statusPass, "low", ""
 }
 
 // calculateControlStatus calculates the baseline status and severity for a control
@@ -1375,24 +1371,12 @@ func (s *EvaluationService) controlStatusFromAssessment(findings []models.Compli
 // badge, never the pass/fail input.
 func (s *EvaluationService) calculateControlStatus(findings []models.ComplianceFinding) (status, severity string) {
 	if len(findings) == 0 {
-		return statusPass, "Low"
+		return statusPass, "low"
 	}
 
-	// Find highest severity finding
-	highestSeverity := "Low"
+	highestSeverity := SeverityLow
 	for _, finding := range findings {
-		switch finding.Severity {
-		case "Critical":
-			highestSeverity = "Critical"
-		case "High":
-			if highestSeverity != "Critical" {
-				highestSeverity = "High"
-			}
-		case "Med":
-			if highestSeverity == "Low" {
-				highestSeverity = "Med"
-			}
-		}
+		highestSeverity = worseSeverity(highestSeverity, finding.Severity)
 	}
 
 	// Violated → FAIL, whatever the severity. Shared with the materialized path
@@ -1535,7 +1519,7 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 	//
 	// EVERY row in allFindings is an ACTIVE, non-SUPPRESSED violation of this
 	// control — getVisibleFindingsForControl filters on exactly that — so all of
-	// them are failing findings. The old count excluded severity "Low", which is
+	// them are failing findings. The old count excluded severity "low", which is
 	// the same severity-decides-the-result mistake removed everywhere else
 	// (framework_score.go: severity is the WEIGHT, never the pass/fail input). It
 	// produced the flat contradiction of `failing_findings_count: 0, score: 100`

@@ -98,6 +98,9 @@ type RegistrationRequest struct {
 	// CSR-based registration fields (optional for backward compatibility)
 	CSR      string `json:"csr,omitempty"`       // Certificate Signing Request (PEM format)
 	SensorID string `json:"sensor_id,omitempty"` // Proposed sensor ID (UUID string) for CSR CN
+	// Host is this sensor's own host identity, always sent at registration by
+	// a sensor build new enough to have one. nil on an older sensor.
+	Host *models.HostIdentity `json:"host,omitempty"`
 }
 
 // RegistrationResponse represents the response to a registration request
@@ -403,6 +406,12 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 		"name":      sensor.Name,
 		"tenant_id": sensor.TenantID.String(),
 	}).Info("Sensor registered successfully")
+
+	// The sensor's own host, turned into a host observation (asset-inventory
+	// decision 9) on the very first opportunity — registration happens once,
+	// so there is no throttle to defer to. Best effort: a self-observation
+	// failure must never fail a registration the tenant is waiting on.
+	h.sensorService.EmitSelfObservationIfDue(sensor.ID, req.Host)
 
 	// Verify sensor ID matches (should always match since we pass it)
 	if sensor.ID != sensorID {

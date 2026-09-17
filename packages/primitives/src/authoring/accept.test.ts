@@ -11,7 +11,7 @@ function draft(over: Partial<ControlDraft> = {}): ControlDraft {
     control_id: '4.2.1',
     title: 'Strong cryptography',
     description: 'Use strong cryptography.',
-    severity: 'High',
+    severity: 'high',
     published: false,
     citations: [{ kind: 'standard_span', ref: '0-31' }],
     measurements: [
@@ -37,10 +37,10 @@ describe('controlBodyFor', () => {
     expect(body.source_ref).toBe('author:test-model');
   });
 
-  it('coerces a severity outside the four the column admits', () => {
-    expect(controlBodyFor(draft({ severity: 'catastrophic' as never }), 'm').baseline_severity).toBe('Med');
-    expect(controlBodyFor(draft({ severity: undefined }), 'm').baseline_severity).toBe('Med');
-    expect(controlBodyFor(draft({ severity: 'Critical' }), 'm').baseline_severity).toBe('Critical');
+  it('rejects a severity outside the four the column admits', () => {
+    expect(() => controlBodyFor(draft({ severity: 'catastrophic' as never }), 'm')).toThrow();
+    expect(() => controlBodyFor(draft({ severity: undefined }), 'm')).toThrow();
+    expect(controlBodyFor(draft({ severity: 'critical' }), 'm').baseline_severity).toBe('critical');
   });
 
   // A control with no rule is not evidence of cryptographic relevance. Flagging
@@ -74,6 +74,13 @@ describe('measurementBodyFor', () => {
 });
 
 describe('acceptDraft', () => {
+  it.each(['info', 'Med', 'High', 'invalid', ''])('rejects %s before any writes', async (severity) => {
+    const d = deps();
+    await expect(acceptDraft(draft({ severity: severity as never }), 'm', d)).rejects.toThrow();
+    expect(d.createControl).not.toHaveBeenCalled();
+    expect(d.addMeasurement).not.toHaveBeenCalled();
+  });
+
   it('creates the control then adds each rule, in that order', async () => {
     const order: string[] = [];
     const d = deps({

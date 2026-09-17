@@ -18,12 +18,12 @@ import "github.com/google/uuid"
 //     option is a real weakness — but "this server negotiated 3DES" and "this
 //     server would accept 3DES if asked" are different findings, so they must
 //     not render identically.
-//   - SetsScore marks the worst component, the one worst-component-wins
-//     selected. Exactly one component carries it when the list is non-empty.
+//   - SetsScore marks the worst numerically scored component. It remains false
+//     for every row when the resolved catalogue evidence is qualitative only.
 //
 // RiskLevel is banded SERVER-SIDE with GetRiskLevel so no consumer re-derives
-// the ladder. An EMPTY list means NOT ASSESSED, which is deliberately distinct
-// from "assessed as safe".
+// the ladder. A nil RiskScore/RiskLevel preserves a qualitative-only catalogue
+// judgment without fabricating zero.
 type CryptoComponentAssessment struct {
 	// AlgorithmType is the junction role: protocol_version, cipher_suite,
 	// key_exchange, signature, symmetric, hash.
@@ -38,8 +38,8 @@ type CryptoComponentAssessment struct {
 
 	Strength                string   `json:"strength" db:"strength"`
 	DeprecationStatus       string   `json:"deprecation_status" db:"deprecation_status"`
-	RiskScore               int      `json:"risk_score" db:"risk_score"`
-	RiskLevel               string   `json:"risk_level" db:"-"`
+	RiskScore               *int     `json:"risk_score" db:"risk_score"`
+	RiskLevel               *string  `json:"risk_level" db:"-"`
 	MigrationGuidance       *string  `json:"migration_guidance,omitempty" db:"migration_guidance"`
 	RecommendedAlternatives []string `json:"recommended_alternatives" db:"recommended_alternatives"`
 	IsPQC                   bool     `json:"is_pqc" db:"is_pqc"`
@@ -55,21 +55,26 @@ type CryptoComponentAssessment struct {
 // Go label and the SQL: a hand-written ladder in a consumer is how badges once
 // banded High at >= 60 while the summary used >= 70.
 //
-// The input MUST already be ordered worst-first (risk_score DESC) — the query
+// The input MUST already be ordered worst-first with NULLS LAST — the query
 // orders it, and this function asserts nothing about ties beyond taking the
 // first row, which is exactly what catalogueRiskForImplementation does when it
 // picks the score.
 func AnnotateComponentAssessments(components []CryptoComponentAssessment) []CryptoComponentAssessment {
+	setterMarked := false
 	for i := range components {
-		components[i].RiskLevel = GetRiskLevel(components[i].RiskScore)
+		if components[i].RiskScore != nil {
+			level := GetRiskLevel(*components[i].RiskScore)
+			components[i].RiskLevel = &level
+			if !setterMarked {
+				components[i].SetsScore = true
+				setterMarked = true
+			}
+		}
 		// Never leave the JSON array null: a null "recommended_alternatives"
 		// reads as "unknown" to a consumer, while the truth is "none recorded".
 		if components[i].RecommendedAlternatives == nil {
 			components[i].RecommendedAlternatives = []string{}
 		}
-	}
-	if len(components) > 0 {
-		components[0].SetsScore = true
 	}
 	return components
 }

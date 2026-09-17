@@ -2,6 +2,7 @@
 // (inventory-service crypto risks + compliance-engine framework evaluation)
 // and the mock's presentation vocabulary (Findings.jsx CAT / ISSUE maps).
 import type { inventoryComponents, complianceEngineComponents } from '@vistasecurity/api-contract';
+import { RISK_BANDS, parseSeverity, severityLabel, severityRank, type RiskLevel } from '@vistasecurity/primitives/ratings';
 
 export type CryptoRisk = inventoryComponents['schemas']['CryptoRisk'];
 export type BatchResult = complianceEngineComponents['schemas']['BatchEvaluateResult'];
@@ -122,6 +123,15 @@ export const CAT_OPTS = ['All', 'Protocol', 'Algorithm', 'Key size', 'Certificat
 
 export const catOf = (risk: CryptoRisk) => CAT[risk.category] ?? { label: 'Other', icon: 'circle-alert' };
 
+/** All applicable categories, falling back to the legacy primary category. */
+export function categoriesOf(risk: CryptoRisk): string[] {
+  return risk.categories?.length ? risk.categories : [risk.category];
+}
+
+export function hasCategoryLabel(risk: CryptoRisk, label: string): boolean {
+  return categoriesOf(risk).some((category) => (CAT[category]?.label ?? 'Other') === label);
+}
+
 // human description of the failure, keyed by backend issue_type
 const ISSUE: Record<string, string> = {
   weak_protocol: 'Weak protocol version in use',
@@ -147,15 +157,13 @@ export function issueLabel(risk: CryptoRisk): string {
  * the old vocabulary and reaches some surfaces unnormalized; the findings table
  * itself no longer stores it.
  */
-export function sevLevel(s: string | undefined): string {
-  switch ((s ?? '').toLowerCase()) {
-    case 'critical': return 'Critical';
-    case 'high': return 'High';
-    case 'medium': return 'Medium';
-    case 'med': return 'Medium';
-    case 'low': return 'Low';
-    default: return 'Informational';
-  }
+export type FindingLevel = RiskLevel | 'Unknown';
+
+export function sevLevel(s: string | null | undefined): FindingLevel {
+  const source = (s ?? '').toLowerCase();
+  const canonical = source === 'med' ? 'medium' : source === 'informational' ? 'info' : source;
+  const severity = parseSeverity(canonical);
+  return severity ? severityLabel(severity) as RiskLevel : 'Unknown';
 }
 
 /**
@@ -211,8 +219,11 @@ export function segOwnsSeverityAxis(seg: string): boolean {
   return (SEVERITY_AXIS_SEGS as readonly string[]).includes(seg);
 }
 
-const SEV_RANK: Record<string, number> = { Critical: 0, High: 1, Medium: 2, Low: 3, Informational: 4 };
-export const sevRank = (lvl: string) => SEV_RANK[lvl] ?? 4;
+export const sevRank = (level: string): number => {
+  const severity = RISK_BANDS.find((band) => band.label === level)?.severity;
+  const rank = severity ? severityRank(severity) : null;
+  return rank === null ? 5 : 5 - rank;
+};
 
 /**
  * The citation a finding carries, if it has one.
@@ -260,4 +271,17 @@ function isHttpURL(raw: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Tickets have a distinct four-value workflow scale. Unknown risk leaves the
+ * optional severity unset and uses the server's normal priority default. */
+type TicketRating = 'critical' | 'high' | 'medium' | 'low';
+
+export function cryptoTicketRating(value: string | null | undefined): { priority?: TicketRating; severity?: TicketRating } {
+  const source = (value ?? '').trim().toLowerCase();
+  const canonical = source === 'informational' ? 'info' : source;
+  const parsed = parseSeverity(canonical);
+  if (!parsed) return {};
+  const workflow: TicketRating = parsed === 'info' ? 'low' : parsed;
+  return { priority: workflow, severity: workflow };
 }

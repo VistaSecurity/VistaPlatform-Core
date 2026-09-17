@@ -49,7 +49,7 @@ func waitForBeats(t *testing.T, s *fakeHeartbeatSender, want int) {
 func TestHeartbeatLoop_BeatsOnInterval(t *testing.T) {
 	sender := &fakeHeartbeatSender{}
 	stop := make(chan struct{})
-	go runHeartbeatLoop(sender, 5*time.Millisecond, stop)
+	go runHeartbeatLoop(sender, newInterval(5*time.Millisecond), stop)
 	defer close(stop)
 
 	waitForBeats(t, sender, 3)
@@ -60,7 +60,7 @@ func TestHeartbeatLoop_BeatsOnInterval(t *testing.T) {
 func TestHeartbeatLoop_BeatsImmediately(t *testing.T) {
 	sender := &fakeHeartbeatSender{}
 	stop := make(chan struct{})
-	go runHeartbeatLoop(sender, time.Hour, stop)
+	go runHeartbeatLoop(sender, newInterval(time.Hour), stop)
 	defer close(stop)
 
 	waitForBeats(t, sender, 1)
@@ -72,7 +72,7 @@ func TestHeartbeatLoop_BeatsImmediately(t *testing.T) {
 func TestHeartbeatLoop_SurvivesFailures(t *testing.T) {
 	sender := &fakeHeartbeatSender{err: errors.New("connection refused")}
 	stop := make(chan struct{})
-	go runHeartbeatLoop(sender, 5*time.Millisecond, stop)
+	go runHeartbeatLoop(sender, newInterval(5*time.Millisecond), stop)
 	defer close(stop)
 
 	waitForBeats(t, sender, 3)
@@ -82,7 +82,7 @@ func TestHeartbeatLoop_SurvivesFailures(t *testing.T) {
 func TestHeartbeatLoop_StopHalts(t *testing.T) {
 	sender := &fakeHeartbeatSender{}
 	stop := make(chan struct{})
-	go runHeartbeatLoop(sender, 5*time.Millisecond, stop)
+	go runHeartbeatLoop(sender, newInterval(5*time.Millisecond), stop)
 
 	waitForBeats(t, sender, 2)
 	close(stop)
@@ -100,7 +100,7 @@ func TestHeartbeatLoop_NilSenderIsSafe(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runHeartbeatLoop(nil, time.Millisecond, nil)
+		runHeartbeatLoop(nil, newInterval(time.Millisecond), nil)
 	}()
 	select {
 	case <-done:

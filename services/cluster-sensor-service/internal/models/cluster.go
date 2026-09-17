@@ -3,29 +3,60 @@ package models
 import (
 	"time"
 
+	"github.com/lib/pq"
+
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // DiscoveryJob represents a discovery job in the cluster
 type DiscoveryJob struct {
-	ID                 string                 `json:"id" db:"id"`
-	TenantID           string                 `json:"tenant_id" db:"tenant_id"`
-	CreatedBy          string                 `json:"created_by" db:"created_by"`
-	ExecutionMode      string                 `json:"execution_mode" db:"execution_mode"`
-	Targets            []string               `json:"targets" db:"targets"`
-	RequestedSensorIDs []string               `json:"requested_sensor_ids" db:"requested_sensor_ids"`
-	AssignedSensorID   *string                `json:"assigned_sensor_id" db:"assigned_sensor_id"`
-	Fanout             bool                   `json:"fanout" db:"fanout"`
-	Status             string                 `json:"status" db:"status"` // "queued", "running", "completed", "failed"
-	Progress           int                    `json:"progress" db:"progress"`
-	ResultsSummary     map[string]interface{} `json:"results_summary" db:"results_summary"`
-	RetentionCapMB     int                    `json:"retention_cap_mb" db:"retention_cap_mb"`
-	RetentionTTLHours  int                    `json:"retention_ttl_hours" db:"retention_ttl_hours"`
-	StartedAt          *time.Time             `json:"started_at" db:"started_at"`
-	CompletedAt        *time.Time             `json:"completed_at" db:"completed_at"`
-	CreatedAt          time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt          time.Time              `json:"updated_at" db:"updated_at"`
-	DeletedAt          *time.Time             `json:"deleted_at" db:"deleted_at"`
+	ID       string `json:"id" db:"id"`
+	TenantID string `json:"tenant_id" db:"tenant_id"`
+	// CreatedBy is empty for a job the platform created on its own initiative
+	// (the automatic active-scan sweep, any HMAC service-auth caller): the
+	// column is NULL for those and the reads COALESCE it.
+	CreatedBy     string   `json:"created_by" db:"created_by"`
+	ExecutionMode string   `json:"execution_mode" db:"execution_mode"`
+	Targets       []string `json:"targets" db:"targets"`
+	// RequestedSensorIDs is a pq.StringArray (a []string that knows how to
+	// scan a Postgres text[]) so sqlx can read it straight off a row; it
+	// marshals to JSON as an ordinary string array.
+	RequestedSensorIDs pq.StringArray `json:"requested_sensor_ids" db:"requested_sensor_ids"`
+	// Tenant-sensor dispatch. AssignedSensorID is the tenant sensor a
+	// `sensors` job was handed to; DispatchedAt is when its command was
+	// written; PickedUpAt is when the sensor collected that command on a
+	// heartbeat (sensor_commands.delivered_at). Executor is derived —
+	// "platform" or "sensor" — so a reader does not have to infer it from
+	// which of the other fields are set. AssignedSensorLastHeartbeat is what a
+	// "sensor offline" failure shows beside the error.
+	AssignedSensorID            *string    `json:"assigned_sensor_id" db:"assigned_sensor_id"`
+	AssignedSensorName          *string    `json:"assigned_sensor_name,omitempty" db:"assigned_sensor_name"`
+	AssignedSensorLastHeartbeat *time.Time `json:"assigned_sensor_last_heartbeat,omitempty" db:"assigned_sensor_last_heartbeat"`
+	Executor                    string     `json:"executor" db:"-"`
+	DispatchedAt                *time.Time `json:"dispatched_at" db:"dispatched_at"`
+	PickedUpAt                  *time.Time `json:"picked_up_at" db:"picked_up_at"`
+	Fanout                      bool       `json:"fanout" db:"fanout"`
+	// Status is one of queued, awaiting_sensor, running, completed, failed,
+	// cancelled. awaiting_sensor is the interval between a `sensors` job being
+	// dispatched and the sensor's completion callback.
+	Status            string                 `json:"status" db:"status"`
+	ErrorMessage      *string                `json:"error_message" db:"error_message"`
+	Progress          int                    `json:"progress" db:"progress"`
+	ResultsSummary    map[string]interface{} `json:"results_summary" db:"results_summary"`
+	RetentionCapMB    int                    `json:"retention_cap_mb" db:"retention_cap_mb"`
+	RetentionTTLHours int                    `json:"retention_ttl_hours" db:"retention_ttl_hours"`
+	StartedAt         *time.Time             `json:"started_at" db:"started_at"`
+	CompletedAt       *time.Time             `json:"completed_at" db:"completed_at"`
+	CreatedAt         time.Time              `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at" db:"updated_at"`
+	DeletedAt         *time.Time             `json:"deleted_at" db:"deleted_at"`
+	// Origin is the auto-scan marker (autoscan.Origin = "auto_scan" in
+	// inventory-service) an automatic-scan job carries in
+	// `metadata.options.origin`, surfaced here read-only so a listing can tell
+	// an automatic sweep's job from an operator-started one (Discover wizard,
+	// Active Scan) without parsing raw metadata itself. Empty for both — the
+	// distinction between those two is ExecutionMode/CreatedBy, not Origin.
+	Origin string `json:"origin,omitempty" db:"origin"`
 }
 
 // CreateDiscoveryJobRequest represents a request to create a discovery job
@@ -66,10 +97,19 @@ type DiscoveryMaterialization struct {
 	Queued int `json:"queued"`
 	// Queue rows an auto-approval rule matched — assets went straight to monitoring.
 	AutoApproved int `json:"auto_approved"`
-	// Queue rows no rule matched — assets are in Discovery → Approvals.
+	// Queue rows genuinely awaiting a human — no rule matched, and the row is
+	// in Discovery → Approvals. Counted by `approval_status = 'pending'`, not
+	// merely "not auto_approved": `observed` (host observations) and
+	// `suppressed` (the matched asset is archived or denied) are also not
+	// auto_approved, and neither is awaiting anything.
 	PendingApproval int `json:"pending_approval"`
 	// Queue rows the pipeline has not dispositioned yet.
 	AwaitingProcessing int `json:"awaiting_processing"`
+	// Queue rows that matched an asset the tenant has taken off the table —
+	// archived or denied. Nothing was materialized and no approval decision
+	// will ever be made; these are neither pending nor processed in the sense
+	// the other counts mean.
+	Suppressed int `json:"suppressed"`
 }
 
 // DiscoveryResultsResponse represents the response for discovery results

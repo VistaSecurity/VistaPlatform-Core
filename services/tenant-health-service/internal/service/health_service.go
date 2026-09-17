@@ -16,8 +16,10 @@ import (
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/repository"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/scoring"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	"github.com/vistasecurity/vistaplatform/shared/healthbands"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 type HealthService struct {
@@ -617,18 +619,18 @@ func (s *HealthService) GenerateHealthInsights(tenantID uuid.UUID) (*models.Heal
 func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error {
 	var alerts []models.HealthAlert
 
-	// Critical health status alert
-	if health.HealthStatus == "critical" {
+	// Failing health retains critical alert severity as a separate policy.
+	if health.HealthStatus == string(healthbands.Failing) {
 		alerts = append(alerts, models.HealthAlert{
 			ID:           uuid.New(),
 			TenantID:     health.TenantID,
 			AlertType:    "health_decline",
-			Severity:     "critical",
-			Title:        "Critical Health Status",
-			Description:  "Tenant health has reached critical levels. Immediate attention required.",
+			Severity:     string(severity.Critical),
+			Title:        "Failing Tenant Health",
+			Description:  "Tenant health index is in the failing band. Immediate attention required.",
 			Category:     "overall",
 			CurrentValue: health.OverallScore,
-			Threshold:    40.0,
+			Threshold:    healthbands.PoorMin,
 			IsActive:     true,
 			CreatedAt:    time.Now(),
 		})
@@ -640,12 +642,12 @@ func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error 
 			ID:           uuid.New(),
 			TenantID:     health.TenantID,
 			AlertType:    "health_decline",
-			Severity:     "high",
+			Severity:     string(severity.High),
 			Title:        "Poor Health Status",
 			Description:  "Tenant health is below acceptable levels. Review recommendations.",
 			Category:     "overall",
 			CurrentValue: health.OverallScore,
-			Threshold:    60.0,
+			Threshold:    healthbands.FairMin,
 			IsActive:     true,
 			CreatedAt:    time.Now(),
 		})
@@ -664,7 +666,7 @@ func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error 
 			ID:           uuid.New(),
 			TenantID:     health.TenantID,
 			AlertType:    "improvement_opportunity",
-			Severity:     "medium",
+			Severity:     string(severity.Medium),
 			Title:        "High Priority Recommendations",
 			Description:  fmt.Sprintf("%d high priority recommendations available for health improvement.", highPriorityRecs),
 			Category:     "recommendations",
@@ -826,11 +828,11 @@ func (s *HealthService) generateTrendsFromHistory(tenantID uuid.UUID, currentSco
 			break
 		}
 		// Calculate approximate score from metrics
-		approxScore := s.calculateScoreFromMetrics(metric)
+		assessment := s.scorer.CalculateHealthScore(metric)
 		scoreHistory = append(scoreHistory, models.HealthDataPoint{
 			Timestamp: metric.Timestamp,
-			Score:     approxScore,
-			Status:    s.determineStatusFromScore(approxScore),
+			Score:     assessment.OverallScore,
+			Status:    assessment.HealthStatus,
 		})
 	}
 
@@ -897,25 +899,4 @@ func (s *HealthService) generateTrendsFromHistory(tenantID uuid.UUID, currentSco
 		TrendStrength:  trendStrength,
 		PredictedScore: predictedScore,
 	}
-}
-
-// calculateScoreFromMetrics calculates an approximate health score from metrics
-func (s *HealthService) calculateScoreFromMetrics(metrics models.HealthMetrics) float64 {
-	// Use the scorer to calculate score from metrics
-	response := s.scorer.CalculateHealthScore(metrics)
-	return response.OverallScore
-}
-
-// determineStatusFromScore determines health status from score
-func (s *HealthService) determineStatusFromScore(score float64) string {
-	if score >= 80 {
-		return "excellent"
-	} else if score >= 60 {
-		return "good"
-	} else if score >= 40 {
-		return "fair"
-	} else if score >= 20 {
-		return "poor"
-	}
-	return "critical"
 }

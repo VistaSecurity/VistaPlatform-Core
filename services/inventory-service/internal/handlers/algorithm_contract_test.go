@@ -11,6 +11,7 @@ package handlers
 // these tests drive the real handlers with an in-memory stub — no database.
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -41,6 +42,7 @@ type stubAlgorithmReader struct {
 	updatedErr     error
 	created        *services.Algorithm
 	createdErr     error
+	createdInput   *services.AlgorithmCreate
 }
 
 func (s *stubAlgorithmReader) GetAllAlgorithms() ([]services.Algorithm, error) {
@@ -70,7 +72,8 @@ func (s *stubAlgorithmReader) GetPQCProgress(uuid.UUID) (*models.PQCProgress, er
 func (s *stubAlgorithmReader) UpdateAlgorithmAssessment(string, services.AlgorithmAssessmentUpdate) (*services.Algorithm, error) {
 	return s.updated, s.updatedErr
 }
-func (s *stubAlgorithmReader) CreateAlgorithm(services.AlgorithmCreate) (*services.Algorithm, error) {
+func (s *stubAlgorithmReader) CreateAlgorithm(in services.AlgorithmCreate) (*services.Algorithm, error) {
+	s.createdInput = &in
 	return s.created, s.createdErr
 }
 func (s *stubAlgorithmReader) DB() *database.DB { return nil }
@@ -113,7 +116,7 @@ func sampleAlgorithm() services.Algorithm {
 		Description:              strPtr("Authenticated encryption"),
 		Strength:                 "recommended",
 		DeprecationStatus:        "current",
-		RiskScore:                5,
+		RiskScore:                intPtr(5),
 		RecommendedAlternatives:  []string{},
 		ComplianceMappings:       map[string]interface{}{"fips": "approved"},
 		Metadata:                 map[string]interface{}{"source": "seed"},
@@ -140,7 +143,7 @@ func minimalAlgorithm() services.Algorithm {
 		Name:                     "RSA 1024",
 		Strength:                 "weak",
 		DeprecationStatus:        "deprecated",
-		RiskScore:                90,
+		RiskScore:                intPtr(90),
 		IsStandard:               true,
 		IsPQC:                    false,
 		PQCStandardizationStatus: "none",
@@ -361,7 +364,7 @@ func TestContract_UpdateAlgorithm_200(t *testing.T) {
 	after := sampleAlgorithm()
 	after.Strength = "weak"
 	after.DeprecationStatus = "deprecated"
-	after.RiskScore = 80
+	after.RiskScore = intPtr(80)
 	eng := newAlgorithmEngine(&stubAlgorithmReader{byCode: &before, updated: &after})
 	body := strings.NewReader(`{
 		"strength":"weak",
@@ -450,6 +453,52 @@ func TestContract_CreateAlgorithm_201(t *testing.T) {
 	sv.assertConforms(t, "AlgorithmResponse", w.Body.Bytes())
 }
 
+func TestContract_CreateAlgorithm_RequiresExplicitRiskScore(t *testing.T) {
+	sv := loadSpec(t)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "omitted", body: `{"code":"FOO","name":"Foo","category":"hash"}`},
+		{name: "null", body: `{"code":"FOO","name":"Foo","category":"hash","risk_score":null}`},
+		{name: "below range", body: `{"code":"FOO","name":"Foo","category":"hash","risk_score":-1}`},
+		{name: "above range", body: `{"code":"FOO","name":"Foo","category":"hash","risk_score":101}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubAlgorithmReader{}
+			w := do(newAlgorithmEngine(stub), http.MethodPost,
+				"/api/v2/inventory-service/admin/algorithms", strings.NewReader(tc.body))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+			}
+			if stub.createdInput != nil {
+				t.Fatal("invalid request reached CreateAlgorithm")
+			}
+			sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+		})
+	}
+}
+
+func TestContract_CreateAlgorithm_AcceptsExplicitZeroRiskScore(t *testing.T) {
+	sv := loadSpec(t)
+	created := sampleAlgorithm()
+	created.Code = "ZERO"
+	created.Name = "Explicit zero"
+	created.Category = "hash"
+	created.RiskScore = intPtr(0)
+	stub := &stubAlgorithmReader{created: &created}
+	w := do(newAlgorithmEngine(stub), http.MethodPost,
+		"/api/v2/inventory-service/admin/algorithms",
+		strings.NewReader(`{"code":"ZERO","name":"Explicit zero","category":"hash","risk_score":0}`))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+	if stub.createdInput == nil || stub.createdInput.RiskScore == nil || *stub.createdInput.RiskScore != 0 {
+		t.Fatalf("CreateAlgorithm input = %#v, want explicit risk_score 0", stub.createdInput)
+	}
+	sv.assertConforms(t, "AlgorithmResponse", w.Body.Bytes())
+}
+
 // Missing required category -> 400.
 func TestContract_CreateAlgorithm_400_missingCategory(t *testing.T) {
 	sv := loadSpec(t)
@@ -478,10 +527,65 @@ func TestContract_CreateAlgorithm_400_badCategory(t *testing.T) {
 func TestContract_CreateAlgorithm_409(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlgorithmEngine(&stubAlgorithmReader{createdErr: services.ErrAlgorithmExists})
-	body := strings.NewReader(`{"code":"AES-256-GCM","name":"AES","category":"symmetric"}`)
+	body := strings.NewReader(`{"code":"AES-256-GCM","name":"AES","category":"symmetric","risk_score":50}`)
 	w := do(eng, http.MethodPost, "/api/v2/inventory-service/admin/algorithms", body)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// The real batch handler must use canonical risk bands before translating into
+// its retained three-value workflow priority. 60..69 is Medium risk, not High.
+func TestContract_BatchRecommendations_PriorityBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		score    int
+		priority string
+	}{{0, "low"}, {1, "low"}, {39, "low"}, {40, "medium"}, {60, "medium"}, {69, "medium"}, {70, "high"}, {89, "high"}, {90, "high"}, {100, "high"}} {
+		cur := minimalAlgorithm()
+		cur.RiskScore = intPtr(tc.score)
+		eng := newAlgorithmEngine(&stubAlgorithmReader{batchResult: map[string]*services.Algorithm{"RSA-1024": &cur}})
+		w := do(eng, http.MethodPost, "/api/v2/inventory-service/algorithms/recommendations/batch", strings.NewReader(`{"algorithm_codes":["RSA-1024"]}`))
+		if w.Code != http.StatusOK {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var response struct {
+			Recommendations []struct {
+				Priority string `json:"priority"`
+			} `json:"recommendations"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Recommendations) != 1 || response.Recommendations[0].Priority != tc.priority {
+			t.Fatalf("score %d: %s", tc.score, w.Body.String())
+		}
+	}
+}
+
+func TestContract_BatchRecommendations_UnassessedRiskStaysUnknown(t *testing.T) {
+	sv := loadSpec(t)
+	cur := minimalAlgorithm()
+	cur.RiskScore = nil
+	eng := newAlgorithmEngine(&stubAlgorithmReader{batchResult: map[string]*services.Algorithm{"CUSTOM": &cur}})
+	w := do(eng, http.MethodPost, "/api/v2/inventory-service/algorithms/recommendations/batch",
+		strings.NewReader(`{"algorithm_codes":["CUSTOM"]}`))
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var response struct {
+		Recommendations []struct {
+			RiskScore *int    `json:"risk_score"`
+			Priority  *string `json:"priority"`
+			Reason    string  `json:"reason"`
+		} `json:"recommendations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Recommendations) != 1 || response.Recommendations[0].RiskScore != nil ||
+		response.Recommendations[0].Priority != nil || !strings.Contains(response.Recommendations[0].Reason, "unassessed") {
+		t.Fatalf("unassessed recommendation was assigned a rating: %s", w.Body.String())
+	}
+	sv.assertConforms(t, "BatchRecommendationsResponse", w.Body.Bytes())
 }

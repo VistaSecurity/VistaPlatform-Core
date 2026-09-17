@@ -531,6 +531,9 @@ func TestSanitizeHostname(t *testing.T) {
 		{"héllo.example.com", ""},       // non-ASCII
 		{"...", ""},                     // no labels
 		{strings.Repeat("a", 253), strings.Repeat("a", 253)}, // exactly at the limit
+		{"203.0.113.10", ""},                   // IPv4 literal — not a DNS identity
+		{"2001:DB8::1", ""},                    // IPv6 literal (colons already rejected by the char class, but pin it)
+		{"API.Example.COM", "api.example.com"}, // lower-cased for cross-observation comparison
 	}
 	for _, tc := range tests {
 		if got := SanitizeHostname(tc.in); got != tc.want {

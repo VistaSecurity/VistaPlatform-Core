@@ -101,7 +101,7 @@ func sampleExternalConnection() models.ExternalConnection {
 		ProtocolVersion:      strp("1.3"),
 		CipherSuite:          strp("TLS_AES_128_GCM_SHA256"),
 		SupportedTLSVersions: []string{"1.2", "1.3"},
-		CryptoStrength:       "good",
+		Strength:             strp("recommended"),
 		IsPQCResistant:       false,
 		CertSubject:          strp("CN=api.github.com"),
 		CertIssuer:           strp("CN=DigiCert"),
@@ -128,7 +128,7 @@ func minimalExternalConnection() models.ExternalConnection {
 		DestIP:           "1.1.1.1",
 		DestPort:         853,
 		Protocol:         "dot",
-		CryptoStrength:   "unknown",
+		Strength:         nil,
 		CertIsExpired:    false,
 		FirstSeenAt:      now,
 		LastSeenAt:       now,
@@ -141,13 +141,14 @@ func minimalExternalConnection() models.ExternalConnection {
 func sampleExtConnHistory() models.ExternalConnectionHistory {
 	now := time.Now().UTC()
 	return models.ExternalConnectionHistory{
-		ID:                   uuid.New(),
-		ExternalConnectionID: uuid.New(),
-		TenantID:             uuid.New(),
-		ChangeType:           "cert_rotated",
-		PreviousCertNotAfter: &now,
-		NewCertNotAfter:      &now,
-		CreatedAt:            now,
+		ID:                        uuid.New(),
+		ExternalConnectionID:      uuid.New(),
+		TenantID:                  uuid.New(),
+		ChangeType:                "cert_rotated",
+		StrengthVocabularyVersion: 2,
+		PreviousCertNotAfter:      &now,
+		NewCertNotAfter:           &now,
+		CreatedAt:                 now,
 	}
 }
 

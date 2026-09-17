@@ -2,6 +2,7 @@
 // rules on a single control: list existing rules, add/edit via a per-rule-type
 // predicate editor (threshold / presence / pattern / range), delete. The rule
 // types + operators + enum values come from the measurement-types catalog.
+import { CONTROL_SEVERITIES, severityLabel, type ControlSeverity } from '@vistasecurity/primitives/ratings';
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -72,7 +73,7 @@ interface FormState {
   min: string;
   max: string;
   weight: string;
-  severity: '' | 'Low' | 'Med' | 'High' | 'Critical';
+  severity: '' | ControlSeverity;
 }
 
 function blankForm(mtId: string, ruleType: RuleType): FormState {
@@ -322,7 +323,7 @@ export function MeasurementRulesModal({ control, onClose }: { control: { id: str
             <ModalField label="Severity override">
               <select value={form.severity} onChange={(e) => setForm({ ...form, severity: e.target.value as FormState['severity'] })} style={modalInputStyle}>
                 <option value="">Use control baseline</option>
-                {(['Low', 'Med', 'High', 'Critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
+                {CONTROL_SEVERITIES.map((s) => <option key={s} value={s}>{severityLabel(s)}</option>)}
               </select>
             </ModalField>
           </div>

@@ -16,7 +16,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
-import { Icon, MiniBar } from '../../components/ui';
+import { Icon, probabilityConfidencePercent, MiniBar } from '../../components/ui';
 import { relTime } from './kit';
 import type {
   ClassModelReason, ClassOption, ClassificationRuleRef, ClassProposal,
@@ -57,11 +57,6 @@ function firstNonEmpty(...values: (string | undefined)[]): string {
 /** The rule's assertion as a percentage, or null when it asserts nothing —
  *  which is what a CONFLICT looks like, and a 0% bar would read as a confident
  *  rejection rather than as an absent answer. */
-function assertedPct(confidence: number | undefined): number | null {
-  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence <= 0) return null;
-  return Math.round(confidence <= 1 ? confidence * 100 : confidence);
-}
-
 function ClassCard({ label, name, muted }: { label: string; name: string; muted?: boolean }) {
   return (
     <div
@@ -101,7 +96,7 @@ export function ClassProposalRow({ proposal, busy, onAccept, onReject }: {
   // one — nothing deterministic argued it and there is no source to cite — so
   // the row says which, rather than letting a percentage stand for both.
   const byModel = Boolean(proposal.model_id);
-  const pct = assertedPct(byModel ? proposal.model_probability : proposal.confidence);
+  const pct = probabilityConfidencePercent(byModel ? proposal.model_probability : proposal.confidence);
   const rules = proposal.matched_rules ?? [];
   const reasons = proposal.model_reasons ?? [];
   const assetName = firstNonEmpty(

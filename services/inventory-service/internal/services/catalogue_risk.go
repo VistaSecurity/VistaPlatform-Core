@@ -38,7 +38,7 @@ var catalogueRiskRoles = cryptoassess.CatalogueRiskRoles
 // implementation's risk, carrying enough context to explain the number.
 type catalogueRiskContribution struct {
 	Code              string
-	RiskScore         int
+	RiskScore         *int
 	Strength          string
 	DeprecationStatus string
 }
@@ -47,13 +47,16 @@ type catalogueRiskContribution struct {
 // catalogue row so the score is traceable to an assessment rather than to an
 // opinion buried in code.
 func (c catalogueRiskContribution) Reason() string {
+	if c.RiskScore == nil {
+		return fmt.Sprintf("%s has no catalogue risk assessment", c.Code)
+	}
 	switch {
 	case c.Strength != "" && c.DeprecationStatus != "" && c.DeprecationStatus != "current":
-		return fmt.Sprintf("%s is %s and %s (catalogue risk %d)", c.Code, c.Strength, c.DeprecationStatus, c.RiskScore)
+		return fmt.Sprintf("%s is %s and %s (catalogue risk %d)", c.Code, c.Strength, c.DeprecationStatus, *c.RiskScore)
 	case c.Strength != "":
-		return fmt.Sprintf("%s is rated %s (catalogue risk %d)", c.Code, c.Strength, c.RiskScore)
+		return fmt.Sprintf("%s is rated %s (catalogue risk %d)", c.Code, c.Strength, *c.RiskScore)
 	default:
-		return fmt.Sprintf("%s (catalogue risk %d)", c.Code, c.RiskScore)
+		return fmt.Sprintf("%s (catalogue risk %d)", c.Code, *c.RiskScore)
 	}
 }
 
@@ -71,20 +74,20 @@ func (c catalogueRiskContribution) Reason() string {
 // reachable by any client that asks for it, so a server's posture is its worst
 // reachable option, not merely its last observed one.
 //
-// Returns ok=false when nothing is linked — meaning "not assessed", which is
-// deliberately distinct from "assessed as safe". Callers keep the score at 0 in
-// that case so the Informational band continues to mean unassessed.
+// Returns ok=false when no linked component has a score. Unscored linked rows
+// remain in all so the evidence says what is incomplete; they never become a
+// precise-looking zero.
 func catalogueRiskForImplementation(tx *sqlx.Tx, implID uuid.UUID) (worst catalogueRiskContribution, all []catalogueRiskContribution, ok bool, err error) {
 	const q = `
 		SELECT a.code,
-		       COALESCE(a.risk_score, 0),
+		       a.risk_score,
 		       COALESCE(a.strength, ''),
 		       COALESCE(a.deprecation_status, '')
 		  FROM crypto_implementation_algorithms cia
 		  JOIN algorithms a ON a.id = cia.algorithm_id
 		 WHERE cia.crypto_implementation_id = $1
 		   AND cia.algorithm_type = ANY($2)
-		 ORDER BY COALESCE(a.risk_score, 0) DESC, a.code
+		 ORDER BY a.risk_score DESC NULLS LAST, a.code
 	`
 	rows, e := tx.Query(q, implID, pq.Array(catalogueRiskRoles))
 	if e != nil {
@@ -102,11 +105,12 @@ func catalogueRiskForImplementation(tx *sqlx.Tx, implID uuid.UUID) (worst catalo
 	if e := rows.Err(); e != nil {
 		return worst, nil, false, e
 	}
-	if len(all) == 0 {
-		return worst, nil, false, nil
+	for _, contribution := range all {
+		if contribution.RiskScore != nil {
+			return contribution, all, true, nil
+		}
 	}
-	// Ordered by risk_score DESC, so the first row is the worst component.
-	return all[0], all, true, nil
+	return worst, all, false, nil
 }
 
 // catalogueRiskFactors renders every contribution as a risk factor, worst

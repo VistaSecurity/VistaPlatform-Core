@@ -46,7 +46,7 @@ func (s *NetworkSpaceService) GetNetworkSpaces(tenantID uuid.UUID) ([]models.Net
 	}
 
 	// Extract network_spaces from config
-	networkSpacesRaw, exists := config["network_spaces"]
+	networkSpacesRaw, exists := config[NetworkSpacesSettingsKey]
 	if !exists {
 		return []models.NetworkSpace{}, nil
 	}
@@ -73,64 +73,108 @@ func (s *NetworkSpaceService) GetNetworkSpaces(tenantID uuid.UUID) ([]models.Net
 	return activeSpaces, nil
 }
 
-// SaveNetworkSpaces saves network spaces to tenant_admin_settings
-// Note: This requires the user ID for the updated_by field
+// NetworkSpacesSettingsKey is the key inside `tenant_admin_settings.config`
+// this feature owns.
+//
+// The row is ONE jsonb document shared by six features — `drift`, `identity`,
+// `ai`, `discovery_auto_scan`, `onboarding_required` and this one — each owning
+// a single top-level key. Naming the key once is what keeps the reader and the
+// writer below from drifting to two spellings of it.
+const NetworkSpacesSettingsKey = "network_spaces"
+
+// SaveNetworkSpaces saves network spaces to tenant_admin_settings, merging into
+// the shared config document rather than replacing it.
+//
+// # Why the merge happens in SQL and not in Go
+//
+// This used to SELECT the whole `config` into a map[string]interface{}, set its
+// own key in Go, and write the WHOLE map back. That is a full-document replace
+// wearing an update's clothes, and it cost two distinct things:
+//
+//   - Every sibling key made a lossy round trip on every save, concurrency or
+//     not. encoding/json decodes each number into a float64, so any integer
+//     past 2^53 came back changed: a stored 1758153600123456789 was rewritten
+//     as 1758153600123456800 by a save that had nothing to do with it. Nothing
+//     reported it; jsonb accepted the new number as readily as the old one.
+//   - A sibling writer committing between the read and the write had its change
+//     erased — or, once the `AND version = $n` guard was added, aborted THIS
+//     save with "settings were modified by another process, please retry". That
+//     guard protected nothing a user could act on: the version it compared
+//     against was read microseconds earlier inside the same transaction, not
+//     when the browser loaded the settings page, so it could only ever fire on
+//     the sibling-writer race it was reporting instead of resolving.
+//
+// The other five writers merge inside their UPDATE, so the merge and the write
+// are one statement and the window does not exist. This now does the same.
+//
+// `||` alone is the whole merge, and deliberately NOT the
+// `jsonb_set(config || jsonb_build_object(...), ARRAY[...])` dance the drift
+// writer beside this one performs. That dance is there because drift's path is
+// TWO levels deep (`['drift','baseline_days']`) and jsonb_set creates only the
+// LAST element of a path — with `drift` absent it would return its input
+// unchanged and report success. This key is top-level, and `jsonb || jsonb`
+// replaces exactly the named key and carries every other one forward, whether
+// or not the key already existed.
+//
+// Two statements rather than one upsert, for the reason the drift writer
+// records: `log_tenant_admin_settings_change` is an AFTER **UPDATE** trigger
+// reading OLD.config/OLD.version, so it cannot fire on an INSERT. A single
+// `INSERT … ON CONFLICT DO UPDATE` writes NO audit row for a tenant who has
+// never opened the settings page — and the first time somebody defines their
+// network spaces is the change most worth having a record of. So: seed the row
+// if it is missing (a no-op if it is not), then UPDATE, which always fires
+// because `version` always moves. Both run inside the one WithTenantTx.
 func (s *NetworkSpaceService) SaveNetworkSpaces(tenantID, userID uuid.UUID, spaces []models.NetworkSpace) error {
-	// RLS-scoped read + write over tenant_admin_settings — the version read and the
-	// conditional insert/update form one optimistic-locking unit, so they run in one tenant tx.
+	if spaces == nil {
+		// A nil slice marshals to `null`, which would store a JSON null where
+		// every reader expects an array.
+		spaces = []models.NetworkSpace{}
+	}
+	spacesJSON, err := json.Marshal(spaces)
+	if err != nil {
+		return fmt.Errorf("failed to marshal network spaces: %w", err)
+	}
+
+	// RLS-scoped write over tenant_admin_settings. The seed and the merge form
+	// one unit, so they run in one tenant tx.
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		// Get current config
-		var configJSON []byte
-		var config map[string]interface{}
-
-		query := `SELECT config, version FROM tenant_admin_settings WHERE tenant_id = $1`
-		var version int
-		err := tx.QueryRow(query, tenantID).Scan(&configJSON, &version)
-		if err != nil && err != sql.ErrNoRows {
-			return fmt.Errorf("failed to get current settings: %w", err)
+		// `updated_by` carries a foreign key to users ON DELETE SET NULL, so an
+		// absent actor must be stored as NULL rather than as the nil UUID,
+		// which no user row has.
+		var actor any
+		if userID != uuid.Nil {
+			actor = userID
 		}
 
-		if err == sql.ErrNoRows {
-			// Create new settings
-			config = make(map[string]interface{})
-			version = 0
-		} else {
-			if err := json.Unmarshal(configJSON, &config); err != nil {
-				return fmt.Errorf("failed to parse current config: %w", err)
-			}
+		if _, err := tx.Exec(`
+			INSERT INTO tenant_admin_settings (tenant_id, config, updated_by, created_at, updated_at)
+			VALUES ($1, '{}'::jsonb, $2, NOW(), NOW())
+			ON CONFLICT (tenant_id) DO NOTHING`,
+			tenantID, actor); err != nil {
+			return fmt.Errorf("failed to seed settings row: %w", err)
 		}
 
-		// Update network_spaces in config
-		config["network_spaces"] = spaces
-
-		// Marshal updated config
-		updatedConfigJSON, err := json.Marshal(config)
+		result, err := tx.Exec(`
+			UPDATE tenant_admin_settings
+			SET config = COALESCE(tenant_admin_settings.config, '{}'::jsonb)
+			             || jsonb_build_object($2::text, $3::jsonb),
+			    version = tenant_admin_settings.version + 1,
+			    updated_by = $4,
+			    updated_at = NOW()
+			WHERE tenant_id = $1`,
+			tenantID, NetworkSpacesSettingsKey, spacesJSON, actor)
 		if err != nil {
-			return fmt.Errorf("failed to marshal updated config: %w", err)
+			return fmt.Errorf("failed to update settings: %w", err)
 		}
-
-		// Save to database
-		if version == 0 {
-			// Insert new record
-			insertQuery := `INSERT INTO tenant_admin_settings (tenant_id, config, version, updated_by, created_at, updated_at)
-				VALUES ($1, $2, 1, $3, NOW(), NOW())`
-			_, err = tx.Exec(insertQuery, tenantID, updatedConfigJSON, userID)
-			if err != nil {
-				return fmt.Errorf("failed to insert settings: %w", err)
-			}
-		} else {
-			// Update existing record with optimistic locking
-			updateQuery := `UPDATE tenant_admin_settings
-				SET config = $1, version = version + 1, updated_by = $2, updated_at = NOW()
-				WHERE tenant_id = $3 AND version = $4`
-			result, err := tx.Exec(updateQuery, updatedConfigJSON, userID, tenantID, version)
-			if err != nil {
-				return fmt.Errorf("failed to update settings: %w", err)
-			}
-			rowsAffected, _ := result.RowsAffected()
-			if rowsAffected == 0 {
-				return fmt.Errorf("settings were modified by another process, please retry")
-			}
+		// The seed above guarantees the row exists under this tenant's RLS
+		// context, so zero rows here means the write did not land and must not
+		// be reported as a save.
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to confirm the settings update: %w", err)
+		}
+		if rowsAffected == 0 {
+			return fmt.Errorf("failed to update settings: no tenant_admin_settings row for tenant %s", tenantID)
 		}
 		return nil
 	}); err != nil {

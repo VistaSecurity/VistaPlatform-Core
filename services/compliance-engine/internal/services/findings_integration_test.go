@@ -251,7 +251,7 @@ func TestIntegration_UpsertFinding_SkipsNoOpsButWritesRealChanges(t *testing.T) 
 	// halves matter: the write must happen (it is a material change) AND the
 	// value must land normalized, or a reader filtering on `critical` would
 	// silently miss it.
-	raised.Severity = "Critical"
+	raised.Severity = "critical"
 	mustUpsert(t, svc, tenant, c, a, &raised, "ACTIVE")
 	if sev, _, occ, _ := reload(f.ID); sev != "critical" || occ != 2 {
 		t.Fatalf("severity change: severity=%s occ=%d, want critical/2 (a material change must write)", sev, occ)
@@ -493,20 +493,20 @@ func TestIntegration_GetFindingStatistics_SeverityCounts(t *testing.T) {
 		mustUpsert(t, svc, tenant, c, a, f, "ACTIVE")
 		return f
 	}
-	// The spellings a control author uses ("Critical", "Med") are normalized
+	// The spellings a control author uses ("critical", "medium") are normalized
 	// onto the registry ladder by the writer, which is what the counters below
 	// read back — one vocabulary in the database, whatever the author typed.
-	withSeverity("Critical")
-	withSeverity("Critical")
-	withSeverity("High")
-	withSeverity("Med")
-	withSeverity("Low")
+	withSeverity("critical")
+	withSeverity("critical")
+	withSeverity("high")
+	withSeverity("medium")
+	withSeverity("low")
 
 	// An INACTIVE finding must not be counted — SeverityCounts scopes to ACTIVE
 	// only, matching GetFindingsByControl and the Findings page default view.
-	cInactive, aInactive := newControl("Critical"), uuid.New()
+	cInactive, aInactive := newControl("critical"), uuid.New()
 	fInactive := activeViolation(cInactive, aInactive)
-	fInactive.Severity = "Critical"
+	fInactive.Severity = "critical"
 	mustUpsert(t, svc, tenant, cInactive, aInactive, fInactive, "ACTIVE")
 	mustInactivate(t, svc, tenant, cInactive, aInactive)
 

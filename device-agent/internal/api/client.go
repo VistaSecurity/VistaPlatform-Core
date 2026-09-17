@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/models"
 	// Aliased: the device-agent has its own `certificates` package, above.
+	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
@@ -34,7 +36,42 @@ type OutboundClient struct {
 	// at startup; empty is sent as-is and the platform treats it as
 	// "not reported" rather than blanking the stored value.
 	agentVersion string
+	// configApplier is the desired-state handler. Nil in an agent built
+	// without one, which is what makes the exchange additive: no report goes
+	// up, no config is applied, and the heartbeat is byte-for-byte what it was.
+	configApplier ConfigApplier
+	// restart is called with the AGE of the platform's restart request on every
+	// heartbeat that carries one. An age, not a timestamp: see
+	// agentconfig.ShouldRestart on why two clocks must not be compared.
+	restart func(requestAge time.Duration)
 }
+
+// ConfigApplier is the slice of desiredstate.Applier the client needs. An
+// interface rather than the concrete type so the client can be tested without
+// the agent's runtime, and so this package does not depend on the applier's
+// internals.
+type ConfigApplier interface {
+	// Report is what this agent is running now.
+	Report() (revision string, failures map[string]string, pendingRestart []string)
+	// Running is the value of each managed setting as it stands on this agent,
+	// including the ones that came from its own configuration file.
+	Running() agentconfig.Values
+	// Apply makes the platform's answer true.
+	Apply(revision string, values agentconfig.Values)
+}
+
+// maxHeartbeatResponseBytes bounds the heartbeat answer. The desired-state
+// block is a handful of scalars; anything approaching this is not a
+// configuration.
+const maxHeartbeatResponseBytes = 1 << 20
+
+// SetConfigApplier wires the desired-state handler.
+func (c *OutboundClient) SetConfigApplier(a ConfigApplier) { c.configApplier = a }
+
+// SetRestartHandler wires what happens when the platform has asked this agent
+// to restart, receiving how long ago it was asked. Nil means an agent that
+// ignores restart requests, which is what an older build does anyway.
+func (c *OutboundClient) SetRestartHandler(f func(requestAge time.Duration)) { c.restart = f }
 
 // SetAgentVersion records the running binary's version for liveness reporting.
 func (c *OutboundClient) SetAgentVersion(v string) { c.agentVersion = v }
@@ -353,6 +390,29 @@ func (c *OutboundClient) SendHeartbeat() error {
 		"interfaces": sharednetwork.HostAddresses(primaryIP),
 	}
 
+	// The desired-state exchange. What this agent is actually running
+	// goes UP; what it should be running comes back in the response. Reported
+	// only when a config handler is wired, so an agent built without one sends
+	// exactly the body it sent before — the platform reads an absent revision
+	// as "this build does not speak desired state", which is true.
+	if c.configApplier != nil {
+		revision, failures, pendingRestart := c.configApplier.Report()
+		reqBody["config_revision"] = revision
+		if len(failures) > 0 {
+			reqBody["config_failures"] = failures
+		}
+		if len(pendingRestart) > 0 {
+			reqBody["config_pending_restart"] = pendingRestart
+		}
+		// What this agent is running RIGHT NOW, file configuration included.
+		// On the first beat from an agent the platform has never been told
+		// anything about, this is what stops the answer being built-in
+		// defaults that switch off whatever the file had turned on.
+		if running := c.configApplier.Running(); len(running) > 0 {
+			reqBody["config_running"] = running
+		}
+	}
+
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal heartbeat: %w", err)
@@ -374,6 +434,36 @@ func (c *OutboundClient) SendHeartbeat() error {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("heartbeat failed: %s (status: %d)", string(body), resp.StatusCode)
+	}
+
+	// The platform's answer: what this agent should be running. A response
+	// without a config block is not an error — an older platform simply does
+	// not send one, and the agent keeps whatever it already has rather than
+	// reverting to its file. A malformed one is logged and ignored for the same
+	// reason: a bad answer must not cost the agent its liveness reporting.
+	if c.configApplier != nil {
+		var answer struct {
+			Config *agentconfig.ExchangePayload `json:"config"`
+		}
+		// Bounded: the body is parsed on every beat, and an agent must not be
+		// made to buffer an unbounded response by whatever it is pointed at.
+		err := json.NewDecoder(io.LimitReader(resp.Body, maxHeartbeatResponseBytes)).Decode(&answer)
+		switch {
+		case errors.Is(err, io.EOF):
+			// An empty body. That is exactly what an older platform returns, so
+			// it is the normal case for a mixed fleet, not something to warn
+			// about once a minute for the life of the process.
+		case err != nil:
+			log.Printf("⚠️  Could not read the configuration from the heartbeat response: %v", err)
+		case answer.Config != nil:
+			c.configApplier.Apply(answer.Config.Revision, answer.Config.Values)
+			// A restart is decided here rather than inside the applier: it is
+			// not a setting, and the applier's job is to make values true, not
+			// to end the process.
+			if c.restart != nil {
+				c.restart(time.Duration(answer.Config.RestartRequestAgeSeconds) * time.Second)
+			}
+		}
 	}
 
 	return nil

@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -249,7 +248,7 @@ func TestIntegration_ControlNoncompliantScan_FiresOnActiveFinding(t *testing.T) 
 	h.exec(t, `INSERT INTO platform_frameworks (id, code, name, version, created_by)
 	           VALUES ($1,$2,'Predicate Audit FW','1.0',$3)`, frameworkID, "paf-"+uuid.NewString()[:8], author)
 	h.exec(t, `INSERT INTO platform_framework_controls (id, framework_id, control_id, title, baseline_severity)
-	           VALUES ($1,$2,'PAF-1','No weak TLS','High')`, controlID, frameworkID)
+	           VALUES ($1,$2,'PAF-1','No weak TLS','high')`, controlID, frameworkID)
 	h.exec(t, `INSERT INTO tenant_framework_licenses (tenant_id, platform_framework_id, subscription_status)
 	           VALUES ($1,$2,'active')`, tenant, frameworkID)
 
@@ -262,7 +261,7 @@ func TestIntegration_ControlNoncompliantScan_FiresOnActiveFinding(t *testing.T) 
 	// detection_state / workflow_status use the uppercase vocabulary the
 	// reconciler writes. The finding's own severity is the registry's lowercase
 	// ladder; the CONTROL's baseline_severity above is still the authoring
-	// vocabulary ('High'), and the alert takes its severity from that, not this.
+	// vocabulary ('high'), and the alert takes its severity from that, not this.
 	h.exec(t, `INSERT INTO findings
 	             (tenant_id, producer, kind, control_id, subject_id, subject_type,
 	              severity, summary, detection_state, workflow_status)
@@ -280,7 +279,7 @@ func TestIntegration_ControlNoncompliantScan_FiresOnActiveFinding(t *testing.T) 
 		t.Fatalf("read alert severity: %v", err)
 	}
 	if severity != "high" {
-		t.Fatalf("control baseline_severity 'High' did not map to alert severity 'high': got %q", severity)
+		t.Fatalf("control baseline_severity 'high' did not map to alert severity 'high': got %q", severity)
 	}
 }
 
@@ -492,3 +491,35 @@ func (h *jobHarness) subjectAlertCount(t *testing.T, tenantID uuid.UUID, alertTy
 }
 
 var _ = context.Background
+
+func TestIntegration_TenantHealthAlertBoundaries(t *testing.T) {
+	h := newJobHarness(t)
+	sentinel := services.PlatformAlertTenantID
+	for _, tc := range []struct {
+		score            float64
+		status, severity string
+	}{{0, "unknown", ""}, {0, "failing", "high"}, {39.99, "failing", "high"}, {40, "poor", "medium"}, {59.99, "poor", "medium"}, {60, "fair", ""}, {75, "good", ""}, {90, "excellent", ""}} {
+		tenant := testdb.NewTenant(t, h.owner)
+		t.Cleanup(func() {
+			_, _ = h.owner.Exec("DELETE FROM alerts WHERE tenant_id=$1 AND subject_id=$2", sentinel, tenant)
+		})
+		h.exec(t, "INSERT INTO tenant_health (tenant_id,overall_score,health_status) VALUES ($1,$2,$3)", tenant, tc.score, tc.status)
+		job := NewTenantHealthDegradedScanJob(h.app, h.bypass, h.catlg, h.engine, time.Hour)
+		job.Scan()
+
+		var count int
+		var value string
+		if err := h.owner.QueryRow("SELECT count(*),coalesce(max(severity),'') FROM alerts WHERE tenant_id=$1 AND subject_id=$2 AND status <> 'resolved'", sentinel, tenant).Scan(&count, &value); err != nil {
+			t.Fatal(err)
+		}
+		if value != tc.severity || (tc.severity == "" && count != 0) || (tc.severity != "" && count != 1) {
+			t.Fatal(tc, count, value)
+		}
+
+		h.exec(t, "UPDATE tenant_health SET overall_score=60,health_status='fair' WHERE tenant_id=$1", tenant)
+		job.Scan()
+		if n := h.subjectAlertCount(t, sentinel, "tenant_health_degraded", tenant); n != 0 {
+			t.Fatalf("recovery at 60 left %d alerts", n)
+		}
+	}
+}

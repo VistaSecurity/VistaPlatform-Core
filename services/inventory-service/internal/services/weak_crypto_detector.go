@@ -445,19 +445,6 @@ func highRiskKeySizeSQL(keySizeCol, kexCol string) string {
 		keySizeCol, keySizeCol, cryptoparse.MinECCKeySizeBits, kexFamilySQL(kexCol, kexFamilyEllipticCurve))
 }
 
-// singleDESSQL is the SQL twin of isSingleDES: matches broken single DES while
-// excluding both spellings of triple DES ("3DES", OpenSSL's "CBC3").
-func singleDESSQL(col string) string {
-	c := fmt.Sprintf("UPPER(COALESCE(%s, ''))", col)
-	return fmt.Sprintf("(%s LIKE '%%DES%%' AND %s NOT LIKE '%%3DES%%' AND %s NOT LIKE '%%CBC3%%')", c, c, c)
-}
-
-// tripleDESSQL matches triple DES in either spelling.
-func tripleDESSQL(col string) string {
-	c := fmt.Sprintf("UPPER(COALESCE(%s, ''))", col)
-	return fmt.Sprintf("(%s LIKE '%%3DES%%' OR %s LIKE '%%CBC3%%')", c, c)
-}
-
 // anyWeakKeySizeSQL matches every key the classifier would flag for its size,
 // at any severity.
 func anyWeakKeySizeSQL(keySizeCol, kexCol string) string {

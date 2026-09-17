@@ -205,6 +205,38 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			// every other destructive route in this service (devices,
 			// integrations, schedules), not a new agents-specific one.
 			agents.DELETE("/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deleteAgentHandler(db, bypassDB, redis))
+
+			// Desired-state management.
+			//
+			// sensors.* rather than discovery.*: agents and sensors are one
+			// fleet on one page with the same settings surface, so splitting
+			// the permission would let a role configure a sensor but not an
+			// agent on the same screen.
+			//
+			// update rather than manage for the WRITES. This repo already draws
+			// that line — sensors.update for configuration, sensors.manage for
+			// destructive and credential operations (certificate revoke) — and
+			// `PUT /sensors/:sensor_id/config` changes several of these very
+			// settings under sensors.update today. Requiring manage here would
+			// mean two endpoints changing the same settings behind different
+			// permissions, with the weaker one still open: confusing, and no
+			// safer.
+			agentConfig := handlers.NewAgentConfigHandler(db)
+			agents.GET("/config/defaults", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), agentConfig.GetAgentFleetDefaults)
+			agents.PUT("/config/defaults", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsUpdate), agentConfig.PutAgentFleetDefaults)
+			agents.GET("/:id/config", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), agentConfig.GetAgentConfig)
+			agents.PUT("/:id/config", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsUpdate), agentConfig.PutAgentConfig)
+			// Restart is sensors.MANAGE while configuration is sensors.update.
+			// That line only became meaningful when moved configuration
+			// down to update; before it, both were manage and the distinction
+			// was theoretical. Disruptive operations sit with the destructive
+			// and credential ones.
+			agents.POST("/:id/restart", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsManage), agentConfig.RequestAgentRestart)
+			// Reading who changed what is a READ of configuration, so it sits
+			// with the other reads on sensors.read rather than behind manage:
+			// the operator most likely to ask "why is this on" is the one who
+			// cannot change it.
+			agents.GET("/:id/config/history", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), agentConfig.GetAgentConfigHistory)
 		}
 
 		// Cloud discovery routes — these actively run discovery/interrogation.
@@ -562,6 +594,7 @@ func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Handle
 			Version    string                           `json:"version"`
 			IPAddress  string                           `json:"ip_address"`
 			Interfaces []sharednetwork.InterfaceAddress `json:"interfaces"`
+			handlers.AgentReport
 		}
 		_ = c.ShouldBindJSON(&beat)
 
@@ -570,7 +603,29 @@ func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Handle
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "Heartbeat received"})
+		// The desired-state exchange. The agent says what it is
+		// running; the platform records that and answers with what it should
+		// be. It rides the heartbeat because that call already exists, is
+		// already authenticated as this agent, and keeping report and answer in
+		// one round trip stops the two halves of convergence drifting apart.
+		//
+		// A failure here does NOT fail the heartbeat: an agent that cannot be
+		// told its configuration is still an agent that is alive, and marking it
+		// offline for a config problem would be a worse lie than the stale
+		// config. It is logged and the beat is acknowledged without a config
+		// block, which the agent treats as "no change".
+		resp := gin.H{"message": "Heartbeat received"}
+		tenantIDVal, hasTenant := c.Get("tenantID")
+		if tenantID, ok := tenantIDVal.(uuid.UUID); hasTenant && ok {
+			payload, err := handlers.NewAgentConfigHandler(db).
+				Exchange(c.Request.Context(), tenantID, agentID, beat.AgentReport)
+			if err != nil {
+				log.Printf("agent config exchange failed for agent %s: %v", agentID, err)
+			} else {
+				resp["config"] = payload
+			}
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }
 

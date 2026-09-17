@@ -12,7 +12,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/agentconfig/confighttp"
 )
 
 // Heartbeat handles sensor heartbeat and returns commands (outbound-only).
@@ -68,6 +70,11 @@ func (h *Handler) Heartbeat(c *gin.Context) {
 			Warn("Failed to reconcile reported host addresses")
 	}
 
+	// The sensor's own host, turned into a host observation (asset-inventory
+	// decision 9) when this beat carries one and the throttle allows it. Best
+	// effort and never fails the heartbeat — see EmitSelfObservationIfDue.
+	h.sensorService.EmitSelfObservationIfDue(sensorUUID, health.Host)
+
 	// Get pending commands for this sensor
 	commands, err := h.sensorService.GetPendingCommands(sensorID)
 	if err != nil {
@@ -96,6 +103,32 @@ func (h *Handler) Heartbeat(c *gin.Context) {
 	response := models.SensorCommands{
 		SensorID: sensorID,
 		Commands: commands,
+	}
+
+	// The desired-state exchange. The sensor says which revision it is
+	// running; the platform records that and answers with what it should be.
+	//
+	// On the heartbeat because that call already exists and is already
+	// authenticated as this sensor, and because keeping report and answer in
+	// one round trip stops the two halves of convergence drifting apart. A
+	// failure here does NOT fail the heartbeat: a sensor that cannot be told
+	// its configuration is still a sensor that is alive, and marking it offline
+	// over a config problem would be a worse lie than a stale config.
+	if h.sensorConfig != nil {
+		if tenantID, ok := TenantForSensor(c, h.bypassDB, sensorUUID); ok {
+			payload, err := h.sensorConfig.Exchange(c, tenantID, sensorUUID, confighttp.ExchangeReport{
+				ConfigRevision: health.ConfigRevision,
+				ConfigFailures: health.ConfigFailures,
+				PendingRestart: health.ConfigPendingRestart,
+				Running:        health.ConfigRunning,
+			})
+			if err != nil {
+				h.log.WithError(err).WithField("sensor_id", sensorID).
+					Warn("Sensor config exchange failed")
+			} else {
+				response.Config = payload
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, response)

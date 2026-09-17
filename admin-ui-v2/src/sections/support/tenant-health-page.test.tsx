@@ -123,8 +123,21 @@ describe('TenantHealthPage unknown health rendering', () => {
     );
 
     expect(html).toContain('Unavailable');
+    expect(html).toContain('72/100');
+    expect(html).toContain('Fair');
+    expect(html).toContain('80/100');
     expect(html).toContain('Some factors could not be measured');
     expect(html).toContain('resource-tracker-service');
     expect(html).toContain('score reflects 60% of the factor weight');
+  });
+
+  it('renders the shared band beside an index rather than a percentage', () => {
+    queryState.list.data = [summary({ overall_score: 82, health_status: 'good' })];
+
+    const html = renderToStaticMarkup(createElement(TenantHealthPage));
+
+    expect(html).toContain('82/100');
+    expect(html).toContain('Good');
+    expect(html).not.toContain('82%');
   });
 });

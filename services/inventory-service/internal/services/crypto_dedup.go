@@ -64,6 +64,49 @@ import (
 //     cost of keeping it is bounded — at most one row per method per
 //     configuration — and it errs toward under-deduping, which is the safe
 //     direction.
+//
+// # Subset absorption
+//
+// Equality on the component fingerprint is not the whole story, because the
+// same configuration is routinely observed at two levels of completeness. A
+// passive sensor that sees a handshake it cannot fully decode writes a row
+// with protocol='TLS' and every other component NULL; the active probe that
+// follows (automatic on first observation and daily, since the auto active
+// scan shipped) measures the full handshake — version, suite, key exchange,
+// signature, symmetric, hash. Those two fingerprints differ on six columns, so
+// under pure equality the second observation INSERTED a second row and the
+// refresh path, which only bumps timestamps, never completed the first. In
+// the observed deployment that was 2 of 247 endpoints carrying exactly that partial+complete
+// pair, and with the automatic scan it becomes the steady state for every
+// passive-first endpoint: the asset page shows two rows under one endpoint,
+// `total_crypto` counts both, and the CBOM ships an empty component beside a
+// real one.
+//
+// The rule, applied on the same (tenant, asset, endpoint, protocol) after the
+// exact-key lookup misses:
+//
+//  1. A live row whose non-NULL components all EQUAL the observation's, and
+//     which is NULL somewhere the observation is not, is the same
+//     configuration observed less completely. It is ENRICHED in place — the
+//     NULLs are filled from the observation, first_discovered_at is kept — and
+//     the caller re-links and re-scores it exactly as it would a fresh row.
+//  2. The converse — every non-NULL component of the observation equals the
+//     row's, and the row knows strictly more — is a less complete
+//     re-observation of a configuration already held. The row is refreshed;
+//     nothing is inserted, and the observation's components change nothing.
+//  3. Any non-NULL component that CONFLICTS (passive saw TLS 1.2, active saw
+//     TLS 1.3) is a genuine second configuration — a change between the two
+//     observations, or a downgrade surface — and stays a second row.
+//
+// Equal fingerprints under DIFFERENT methods are deliberately outside the rule
+// (neither is a strict subset of the other), so the attribution argument above
+// holds unchanged and the observed data — zero such pairs — is not what this is
+// for. Provenance is kept explicitly instead: `discovery_methods` accumulates
+// every method that has contributed to a row, `discovery_method` stays the
+// first, and the exact-key lookup treats a method already in the array as a
+// match — otherwise a row enriched by an active probe would gain a fresh
+// duplicate on the very next active probe, which is the defect re-created one
+// observation later.
 type cryptoImplementationKey struct {
 	AssetID uuid.UUID
 	// EndpointID is the face the configuration was measured on, and it IS part
@@ -105,6 +148,15 @@ type cryptoImplementationKey struct {
 // already holds duplicates that means ingest converges on the earliest row —
 // the one whose first_discovered_at is actually true — rather than picking an
 // arbitrary survivor or, worse, a different one each run.
+//
+// The method predicate accepts a row whose `discovery_methods` provenance
+// already contains the observation's method, not only one whose primary
+// `discovery_method` equals it. A row first written by a passive sensor and
+// then enriched by an active probe carries {passive, active}; the next active
+// probe must land on it, and under a primary-only predicate it would miss,
+// fall through the subset lookups (equal fingerprints are not strict
+// subsets) and INSERT — re-creating the duplicate this file exists to stop,
+// one observation later.
 const findCryptoImplementationSQL = `
 		SELECT id FROM crypto_implementations
 		 WHERE tenant_id = $1
@@ -119,9 +171,94 @@ const findCryptoImplementationSQL = `
 		   AND symmetric_encryption   IS NOT DISTINCT FROM $8::text
 		   AND hash_algorithm         IS NOT DISTINCT FROM $9::text
 		   AND key_size               IS NOT DISTINCT FROM $10::integer
-		   AND discovery_method = $11::public.discovery_method
+		   AND ($11::public.discovery_method = discovery_method
+		        OR $11::public.discovery_method = ANY(discovery_methods))
 		 ORDER BY first_discovered_at ASC, id ASC
 		 LIMIT 1`
+
+// cryptoComponentCountSQL is how many of the seven component columns a row
+// has measured. It is the strictness half of both subset lookups below: the
+// per-column predicates establish "compatible", and comparing this count to
+// the observation's establishes "and one side knows strictly more". Equal
+// counts under compatible columns means equal fingerprints, which is the
+// exact-key lookup's business, not the subset lookups'.
+const cryptoComponentCountSQL = `(
+		    (protocol_version       IS NOT NULL)::int
+		  + (cipher_suite           IS NOT NULL)::int
+		  + (key_exchange_algorithm IS NOT NULL)::int
+		  + (signature_algorithm    IS NOT NULL)::int
+		  + (symmetric_encryption   IS NOT NULL)::int
+		  + (hash_algorithm         IS NOT NULL)::int
+		  + (key_size               IS NOT NULL)::int)`
+
+// findPartialCryptoImplementationSQL locates a live row that is a STRICT
+// component-subset of the observation on the same (tenant, asset, endpoint,
+// protocol): every component the row has measured equals the observation's,
+// and the observation has measured at least one the row has not. That row is
+// the same configuration seen less completely, and the caller enriches it.
+//
+// `col IS NULL OR col = $n` is the per-column "compatible" test, and it is
+// deliberately NOT null-safe on the right-hand side: when the observation's
+// value is NULL, `col = NULL` is NULL, so the disjunction is true only when
+// the row's column is NULL too. That is the subset relation exactly — a row
+// may know less than the observation, never more, and never differently.
+//
+// Oldest first, for the same reason as the exact lookup: on an install that
+// already holds several partial rows for one endpoint, every enrichment
+// converges on the earliest, whose first_discovered_at is the true one.
+const findPartialCryptoImplementationSQL = `
+		SELECT id FROM crypto_implementations
+		 WHERE tenant_id = $1
+		   AND asset_id = $2
+		   AND deleted_at IS NULL
+		   AND endpoint_id IS NOT DISTINCT FROM $11::uuid
+		   AND protocol = $3::public.protocol_type
+		   AND (protocol_version       IS NULL OR protocol_version       = $4::text)
+		   AND (cipher_suite           IS NULL OR cipher_suite           = $5::text)
+		   AND (key_exchange_algorithm IS NULL OR key_exchange_algorithm = $6::text)
+		   AND (signature_algorithm    IS NULL OR signature_algorithm    = $7::text)
+		   AND (symmetric_encryption   IS NULL OR symmetric_encryption   = $8::text)
+		   AND (hash_algorithm         IS NULL OR hash_algorithm         = $9::text)
+		   AND (key_size               IS NULL OR key_size               = $10::integer)
+		   AND ` + cryptoComponentCountSQL + ` < $12::integer
+		 ORDER BY first_discovered_at ASC, id ASC
+		 LIMIT 1`
+
+// findSupersetCryptoImplementationSQL is the converse: a live row of which the
+// observation is a STRICT component-subset. Every component the observation
+// has measured equals the row's, and the row has measured at least one more.
+// The observation is then a less complete re-observation of a configuration
+// already held, and the caller refreshes that row instead of inserting.
+//
+// Same per-column shape as above with the sides swapped: `$n IS NULL OR col =
+// $n` is true when the observation did not measure the column (whatever the
+// row holds) or when both measured it identically.
+const findSupersetCryptoImplementationSQL = `
+		SELECT id FROM crypto_implementations
+		 WHERE tenant_id = $1
+		   AND asset_id = $2
+		   AND deleted_at IS NULL
+		   AND endpoint_id IS NOT DISTINCT FROM $11::uuid
+		   AND protocol = $3::public.protocol_type
+		   AND ($4::text     IS NULL OR protocol_version       = $4::text)
+		   AND ($5::text     IS NULL OR cipher_suite           = $5::text)
+		   AND ($6::text     IS NULL OR key_exchange_algorithm = $6::text)
+		   AND ($7::text     IS NULL OR signature_algorithm    = $7::text)
+		   AND ($8::text     IS NULL OR symmetric_encryption   = $8::text)
+		   AND ($9::text     IS NULL OR hash_algorithm         = $9::text)
+		   AND ($10::integer IS NULL OR key_size               = $10::integer)
+		   AND ` + cryptoComponentCountSQL + ` > $12::integer
+		 ORDER BY first_discovered_at ASC, id ASC
+		 LIMIT 1`
+
+// recordDiscoveryMethodSQL is the provenance append every write path shares:
+// the observation's method joins `discovery_methods` once. Written as a CASE
+// rather than an unconditional array_append so a re-observation under a
+// method already recorded does not grow the array on every pass.
+const recordDiscoveryMethodSQL = `CASE
+		           WHEN $5::public.discovery_method = ANY(discovery_methods) THEN discovery_methods
+		           ELSE array_append(discovery_methods, $5::public.discovery_method)
+		         END`
 
 // refreshCryptoImplementationSQL re-observes an existing configuration.
 //
@@ -138,11 +275,64 @@ const findCryptoImplementationSQL = `
 // evidence is worse than none.
 const refreshCryptoImplementationSQL = `
 		UPDATE crypto_implementations
-		   SET certificate_id   = COALESCE($2::uuid, certificate_id),
-		       source_sensor_id = COALESCE($3::uuid, source_sensor_id),
-		       raw_data         = $4::jsonb,
-		       last_verified_at = NOW(),
-		       updated_at       = NOW()
+		   SET certificate_id    = COALESCE($2::uuid, certificate_id),
+		       source_sensor_id  = COALESCE($3::uuid, source_sensor_id),
+		       raw_data          = $4::jsonb,
+		       discovery_methods = ` + recordDiscoveryMethodSQL + `,
+		       last_verified_at  = NOW(),
+		       updated_at        = NOW()
+		 WHERE id = $1`
+
+// reobserveCryptoImplementationSQL is the refresh for a LESS complete
+// re-observation (the observation is a strict subset of the row). It differs
+// from refreshCryptoImplementationSQL in one clause: raw_data is MERGED, the
+// observation's keys over the row's, rather than replaced. A passive glimpse
+// that decoded only the protocol carries no `tls_versions` enumeration and no
+// quality flags; replacing the active probe's evidence with it would erase the
+// "server still accepts TLS 1.0" signal that AnalyzeCryptoRisk reads from
+// raw_data, on every passive re-observation, until the next probe. What the
+// observation did measure still wins on its own keys.
+const reobserveCryptoImplementationSQL = `
+		UPDATE crypto_implementations
+		   SET certificate_id    = COALESCE($2::uuid, certificate_id),
+		       source_sensor_id  = COALESCE($3::uuid, source_sensor_id),
+		       raw_data          = COALESCE(raw_data, '{}'::jsonb) || $4::jsonb,
+		       discovery_methods = ` + recordDiscoveryMethodSQL + `,
+		       last_verified_at  = NOW(),
+		       updated_at        = NOW()
+		 WHERE id = $1`
+
+// enrichCryptoImplementationSQL completes a partial row from a fuller
+// observation of the same configuration. Every component is COALESCEd —
+// the row's value if it has one, else the observation's — which, given the
+// lookup that selected the row guarantees the two agree wherever both are
+// measured, fills exactly the NULLs and changes nothing else.
+//
+// first_discovered_at is kept: the configuration was first seen when the
+// partial row was written, and completing the picture is not a new discovery.
+// raw_data is merged the same way as reobserveCryptoImplementationSQL, with
+// the fuller observation's keys winning, so nothing the partial observation
+// alone recorded is lost.
+//
+// What this statement does NOT do is score. The caller re-links the
+// components and recomputes risk for the returned row exactly as it would for
+// a freshly inserted one, so an enriched row ends at the same score and the
+// same junction rows a fresh insert of the same observation would get.
+const enrichCryptoImplementationSQL = `
+		UPDATE crypto_implementations
+		   SET protocol_version       = COALESCE(protocol_version,       $6::text),
+		       cipher_suite           = COALESCE(cipher_suite,           $7::text),
+		       key_exchange_algorithm = COALESCE(key_exchange_algorithm, $8::text),
+		       signature_algorithm    = COALESCE(signature_algorithm,    $9::text),
+		       symmetric_encryption   = COALESCE(symmetric_encryption,   $10::text),
+		       hash_algorithm         = COALESCE(hash_algorithm,         $11::text),
+		       key_size               = COALESCE(key_size,               $12::integer),
+		       certificate_id         = COALESCE($2::uuid, certificate_id),
+		       source_sensor_id       = COALESCE($3::uuid, source_sensor_id),
+		       raw_data               = COALESCE(raw_data, '{}'::jsonb) || $4::jsonb,
+		       discovery_methods      = ` + recordDiscoveryMethodSQL + `,
+		       last_verified_at       = NOW(),
+		       updated_at             = NOW()
 		 WHERE id = $1`
 
 // setCryptoRiskScoreSQL writes a configuration's risk score.
@@ -304,8 +494,54 @@ func (s *AssetService) cryptoKeyForFindingOnEndpoint(assetID, endpointID uuid.UU
 	}, verdict == protocolEnum
 }
 
+// cryptoUpsertOutcome says what upsertCryptoImplementation did with an
+// observation. The caller needs more than created/not-created: an enriched row
+// must be re-scored like a fresh one, and a less complete re-observation must
+// NOT be — see processDiscoveryCryptoData.
+type cryptoUpsertOutcome int
+
+const (
+	// cryptoUpsertCreated: no compatible row existed; a new one was inserted.
+	cryptoUpsertCreated cryptoUpsertOutcome = iota
+	// cryptoUpsertRefreshed: the exact key matched; timestamps and evidence
+	// were refreshed.
+	cryptoUpsertRefreshed
+	// cryptoUpsertEnriched: a live row that was a strict component-subset of
+	// the observation had its NULL components filled from it.
+	cryptoUpsertEnriched
+	// cryptoUpsertPartialReobserved: the observation is a strict
+	// component-subset of a live row; that row was refreshed and the
+	// observation's components changed nothing.
+	cryptoUpsertPartialReobserved
+)
+
+// componentCount is how many of the seven component columns the observation
+// measured — the observation-side half of the strictness test the two subset
+// lookups apply against cryptoComponentCountSQL.
+func (k cryptoImplementationKey) componentCount() int {
+	n := 0
+	for _, p := range []*string{k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature, k.Symmetric, k.Hash} {
+		if p != nil {
+			n++
+		}
+	}
+	if k.KeySize != nil {
+		n++
+	}
+	return n
+}
+
 // upsertCryptoImplementation finds the configuration matching k and refreshes
-// it, or inserts a new one. Returns the row's id and whether it was created.
+// it, enriches or re-observes a compatible one, or inserts a new one. Returns
+// the row's id and which of those happened.
+//
+// The order is load-bearing: exact key, then a partial row this observation
+// completes, then a fuller row this observation partially re-observes, then
+// insert. Only the last branch creates a row, and it is reached only when
+// every live row on the same (asset, endpoint, protocol) either conflicts
+// with the observation on a measured component or carries an equal
+// fingerprint under a method not yet in its provenance — both of which are
+// genuinely second rows (see the package doc on cryptoImplementationKey).
 //
 // The caller supplies the transaction; it must already have taken the
 // per-asset advisory lock (see lockAssetMaterializationSQL), and the bound
@@ -319,26 +555,72 @@ func upsertCryptoImplementation(
 	certificateID interface{},
 	sourceSensorID interface{},
 	rawJSON []byte,
-) (uuid.UUID, bool, error) {
+) (uuid.UUID, cryptoUpsertOutcome, error) {
+	endpoint := nullUUIDValue(k.EndpointID)
+
 	var existing uuid.UUID
 	err := tx.QueryRow(
 		findCryptoImplementationSQL,
 		tenantID, k.AssetID, k.Protocol,
 		k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
 		k.Symmetric, k.Hash, k.KeySize, k.DiscoveryMethod,
-		nullUUIDValue(k.EndpointID),
+		endpoint,
 	).Scan(&existing)
 	if err == nil {
-		if _, e := tx.Exec(refreshCryptoImplementationSQL, existing, certificateID, sourceSensorID, rawJSON); e != nil {
-			return uuid.Nil, false, fmt.Errorf("refresh crypto implementation %s: %w", existing, e)
+		if _, e := tx.Exec(refreshCryptoImplementationSQL, existing, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod); e != nil {
+			return uuid.Nil, cryptoUpsertRefreshed, fmt.Errorf("refresh crypto implementation %s: %w", existing, e)
 		}
 		if e := linkLeafCertificate(tx, existing); e != nil {
-			return uuid.Nil, false, e
+			return uuid.Nil, cryptoUpsertRefreshed, e
 		}
-		return existing, false, nil
+		return existing, cryptoUpsertRefreshed, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return uuid.Nil, false, fmt.Errorf("look up crypto implementation: %w", err)
+		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up crypto implementation: %w", err)
+	}
+
+	// The subset lookups bind the same values in the same order; only the
+	// strictness comparison differs.
+	subsetArgs := []interface{}{
+		tenantID, k.AssetID, k.Protocol,
+		k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
+		k.Symmetric, k.Hash, k.KeySize,
+		endpoint, k.componentCount(),
+	}
+
+	var partial uuid.UUID
+	err = tx.QueryRow(findPartialCryptoImplementationSQL, subsetArgs...).Scan(&partial)
+	if err == nil {
+		if _, e := tx.Exec(
+			enrichCryptoImplementationSQL,
+			partial, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod,
+			k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
+			k.Symmetric, k.Hash, k.KeySize,
+		); e != nil {
+			return uuid.Nil, cryptoUpsertEnriched, fmt.Errorf("enrich crypto implementation %s: %w", partial, e)
+		}
+		if e := linkLeafCertificate(tx, partial); e != nil {
+			return uuid.Nil, cryptoUpsertEnriched, e
+		}
+		return partial, cryptoUpsertEnriched, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up partial crypto implementation: %w", err)
+	}
+
+	var superset uuid.UUID
+	err = tx.QueryRow(findSupersetCryptoImplementationSQL, subsetArgs...).Scan(&superset)
+	if err == nil {
+		if _, e := tx.Exec(reobserveCryptoImplementationSQL, superset, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod); e != nil {
+			return uuid.Nil, cryptoUpsertPartialReobserved, fmt.Errorf("re-observe crypto implementation %s: %w", superset, e)
+		}
+		if e := linkLeafCertificate(tx, superset); e != nil {
+			return uuid.Nil, cryptoUpsertPartialReobserved, e
+		}
+		return superset, cryptoUpsertPartialReobserved, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up superset crypto implementation: %w", err)
 	}
 
 	id := uuid.New()
@@ -347,14 +629,14 @@ func upsertCryptoImplementation(
 		id, tenantID, k.AssetID, k.Protocol, k.ProtocolVersion, k.CipherSuite,
 		k.Hash, k.KeySize, certificateID, sourceSensorID, rawJSON,
 		k.KeyExchange, k.Signature, k.Symmetric,
-		k.DiscoveryMethod, nullUUIDValue(k.EndpointID),
+		k.DiscoveryMethod, endpoint,
 	); e != nil {
-		return uuid.Nil, false, fmt.Errorf("insert crypto implementation: %w", e)
+		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("insert crypto implementation: %w", e)
 	}
 	if e := linkLeafCertificate(tx, id); e != nil {
-		return uuid.Nil, false, e
+		return uuid.Nil, cryptoUpsertCreated, e
 	}
-	return id, true, nil
+	return id, cryptoUpsertCreated, nil
 }
 
 // linkLeafCertificate is the one call site shape of linkLeafCertificateSQL, so

@@ -5,38 +5,32 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-
 	"github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // The severity ladder, lowercase, as findings_severity_check spells it. Named
 // here so a producer never types a bare string and a caller comparing against
 // one cannot pick a spelling the CHECK rejects.
 const (
-	SeverityInfo     = "info"
-	SeverityLow      = "low"
-	SeverityMedium   = "medium"
-	SeverityHigh     = "high"
-	SeverityCritical = "critical"
+	SeverityInfo     = string(severity.Info)
+	SeverityLow      = string(severity.Low)
+	SeverityMedium   = string(severity.Medium)
+	SeverityHigh     = string(severity.High)
+	SeverityCritical = string(severity.Critical)
 )
 
-// severityRank orders the ladder worst-last. 0 means "not on the ladder".
-var severityRank = map[string]int{
-	SeverityInfo:     1,
-	SeverityLow:      2,
-	SeverityMedium:   3,
-	SeverityHigh:     4,
-	SeverityCritical: 5,
-}
-
 // ValidSeverity reports whether s is one of the five stored severities.
-func ValidSeverity(s string) bool { return severityRank[s] > 0 }
+func ValidSeverity(s string) bool { _, err := severity.Parse(s); return err == nil }
 
-// SeverityAtLeast reports whether a is at least as severe as b. Both must be on
-// the ladder; an unknown value is treated as below everything, which is the
-// conservative direction for a "is this bad enough to report" test and the
-// wrong one for a "is this safe" test — there is no caller of the second kind.
-func SeverityAtLeast(a, b string) bool { return severityRank[a] >= severityRank[b] }
+// SeverityAtLeast compares valid severities. This producer compatibility API
+// preserves its historical zero-rank behavior for invalid inputs; writers still
+// reject those inputs through ValidSeverity before persistence.
+func SeverityAtLeast(a, b string) bool {
+	ar, _ := severity.Rank(severity.Severity(a))
+	br, _ := severity.Rank(severity.Severity(b))
+	return ar >= br
+}
 
 // Source kinds, mirroring findings_source_kind_check.
 const (

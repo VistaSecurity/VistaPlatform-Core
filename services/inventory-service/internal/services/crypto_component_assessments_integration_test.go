@@ -70,15 +70,18 @@ func TestIntegration_CryptoComponents_WorstFirstAndSetsScore(t *testing.T) {
 		t.Error("only ONE component may be marked sets_score")
 	}
 	// Banding is server-side and must match the canonical ladder exactly.
-	if want := models.GetRiskLevel(got[0].RiskScore); got[0].RiskLevel != want {
-		t.Errorf("risk_level = %q, want %q (models.RiskBands)", got[0].RiskLevel, want)
+	if got[0].RiskScore == nil || got[0].RiskLevel == nil {
+		t.Fatalf("worst component lost numeric assessment: %+v", got[0])
+	}
+	if want := models.GetRiskLevel(*got[0].RiskScore); *got[0].RiskLevel != want {
+		t.Errorf("risk_level = %q, want %q (models.RiskBands)", *got[0].RiskLevel, want)
 	}
 	// And it must agree with the score the ingest path computes, or the drawer
 	// would be explaining a different number than it displays.
 	score, _, ok := f.score(t, impl)
-	if !ok || score != got[0].RiskScore {
+	if !ok || score != *got[0].RiskScore {
 		t.Errorf("worst component risk %d != ingest score %d (ok=%v) — explanation and score disagree",
-			got[0].RiskScore, score, ok)
+			*got[0].RiskScore, score, ok)
 	}
 }
 
@@ -137,14 +140,17 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 	if len(before) != 1 {
 		t.Fatalf("baseline = %+v, want a single AES256 component", before)
 	}
-	if want := models.GetRiskLevel(before[0].RiskScore); before[0].RiskLevel != want {
-		t.Fatalf("baseline band = %q, want %q for score %d", before[0].RiskLevel, want, before[0].RiskScore)
+	if before[0].RiskScore == nil || before[0].RiskLevel == nil {
+		t.Fatalf("baseline lost numeric assessment: %+v", before[0])
+	}
+	if want := models.GetRiskLevel(*before[0].RiskScore); *before[0].RiskLevel != want {
+		t.Fatalf("baseline band = %q, want %q for score %d", *before[0].RiskLevel, want, *before[0].RiskScore)
 	}
 	// Move to a score in a DIFFERENT band from wherever the row currently sits,
 	// so the assertion proves movement rather than coincidence — and so the test
 	// passes regardless of what an earlier test left behind.
 	target, targetBand := 88, "High"
-	if before[0].RiskScore >= 70 {
+	if *before[0].RiskScore >= 70 {
 		target, targetBand = 15, "Low"
 	}
 
@@ -152,7 +158,7 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 	t.Cleanup(func() {
 		if _, err := f.db.Exec(
 			`UPDATE algorithms SET risk_score = $1, strength = $2, deprecation_status = $3 WHERE code = 'AES256'`,
-			baseline.RiskScore, baseline.Strength, baseline.DeprecationStatus,
+			*baseline.RiskScore, baseline.Strength, baseline.DeprecationStatus,
 		); err != nil {
 			t.Errorf("restore catalogue row: %v", err)
 		}
@@ -172,8 +178,8 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 	if len(after) != 1 {
 		t.Fatalf("got %d components, want 1", len(after))
 	}
-	if after[0].RiskScore != target || after[0].RiskLevel != targetBand {
-		t.Errorf("after re-assessment: score=%d level=%q, want %d/%s — the explanation is not reading the catalogue",
+	if after[0].RiskScore == nil || after[0].RiskLevel == nil || *after[0].RiskScore != target || *after[0].RiskLevel != targetBand {
+		t.Errorf("after re-assessment: score=%v level=%v, want %d/%s — the explanation is not reading the catalogue",
 			after[0].RiskScore, after[0].RiskLevel, target, targetBand)
 	}
 	if after[0].Strength != "weak" || after[0].DeprecationStatus != "deprecated" {
@@ -186,6 +192,77 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 		t.Errorf("recommended_alternatives = %v, want the catalogue's single entry", after[0].RecommendedAlternatives)
 	}
 }
+
+func TestIntegration_CryptoComponents_NullAndExplicitZeroStayDistinct(t *testing.T) {
+	f := newCatRiskFixture(t)
+	impl := f.implWith(t, map[string]string{"symmetric": "AES256"})
+
+	var original int
+	var originalStrength string
+	if err := f.db.QueryRow(`SELECT risk_score, strength FROM algorithms WHERE code = 'AES256'`).Scan(&original, &originalStrength); err != nil {
+		t.Fatalf("read baseline AES256 score: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := f.db.Exec(`UPDATE algorithms SET risk_score = $1, strength = $2 WHERE code = 'AES256'`, original, originalStrength); err != nil {
+			t.Errorf("restore AES256 score and strength: %v", err)
+		}
+	})
+
+	assertRead := func(wantAssessed bool, wantScore *int) {
+		t.Helper()
+		rows, err := (&AssetService{db: f.db}).GetCryptoImplementations(f.tenant, f.asset)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("read asset configurations: rows=%+v err=%v", rows, err)
+		}
+		if rows[0].RiskScoreAssessed != wantAssessed {
+			t.Fatalf("risk_score_assessed=%v want %v", rows[0].RiskScoreAssessed, wantAssessed)
+		}
+		if (rows[0].RiskScore == nil) != (wantScore == nil) || (wantScore != nil && *rows[0].RiskScore != *wantScore) {
+			t.Fatalf("risk_score=%v want %v", rows[0].RiskScore, wantScore)
+		}
+	}
+	assertInformationalFilter := func(want int) {
+		t.Helper()
+		rows, total, err := (&CryptoImplementationService{db: f.db}).GetCryptoImplementations(f.tenant, models.CryptoImplementationFilters{
+			AssetID: &f.asset, RiskLevel: []string{"Informational"}, Page: 1, PageSize: 20,
+		})
+		if err != nil || total != want || len(rows) != want {
+			t.Fatalf("Informational filter rows=%d total=%d err=%v, want %d", len(rows), total, err, want)
+		}
+	}
+
+	if _, err := f.db.Exec(`UPDATE crypto_implementations SET risk_score = NULL WHERE id = $1`, impl); err != nil {
+		t.Fatalf("set stored score null: %v", err)
+	}
+	assertRead(false, nil)
+	assertInformationalFilter(0)
+
+	if _, err := f.db.Exec(`UPDATE crypto_implementations SET risk_score = 0 WHERE id = $1`, impl); err != nil {
+		t.Fatalf("store explicit zero: %v", err)
+	}
+	// The existing non-zero AES256 catalogue assessment cannot prove that a
+	// legacy stored zero is deliberate; the two numbers contradict each other.
+	assertRead(false, nil)
+	assertInformationalFilter(0)
+
+	if _, err := f.db.Exec(`UPDATE algorithms SET risk_score = 0 WHERE code = 'AES256'`); err != nil {
+		t.Fatalf("set explicit zero: %v", err)
+	}
+	assertRead(true, producerIntPtrForService(0))
+	assertInformationalFilter(1)
+
+	if _, err := f.db.Exec(`UPDATE algorithms SET risk_score = NULL, strength = 'weak' WHERE code = 'AES256'`); err != nil {
+		t.Fatalf("set qualitative-only judgment: %v", err)
+	}
+	assertRead(false, nil)
+	assertInformationalFilter(0)
+	components := f.componentsOf(t, impl)
+	if len(components) != 1 || components[0].Strength != "weak" || components[0].RiskScore != nil || components[0].RiskLevel != nil || components[0].SetsScore {
+		t.Fatalf("qualitative-only component fabricated a numeric assessment: %+v", components)
+	}
+}
+
+func producerIntPtrForService(value int) *int { return &value }
 
 // Tenant isolation: the junction carries no tenant_id, so the join through
 // crypto_implementations is the ONLY thing keeping this read from being

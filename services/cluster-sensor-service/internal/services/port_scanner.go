@@ -104,18 +104,74 @@ func requestsTLS(protocol string) bool {
 	return tlsWrappedProtocols[shareddisc.CanonicalProtocolName(protocol)]
 }
 
+// genericProtocol reports whether a protocol name says nothing about what the
+// listener speaks — the shapes a job carries when it did not ask for anything
+// in particular — so the well-known-port map is what decides which probes run.
+func genericProtocol(protocol string) bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "", "tcp", "udp", "unknown":
+		return true
+	}
+	return false
+}
+
 // shouldProbeTLS decides whether to run the TLS probe for a (protocol, port)
 // pair: honour an explicit TLS request on any port, and otherwise fall back to
 // the curated well-known-port map for unspecified sweeps.
+//
+// The port map is consulted ONLY for a generic finding. One finding is created
+// per requested protocol, so a job that asked for TLS and SSH produces an SSH
+// finding on 443 as well as a TLS one — and letting the port map run the TLS
+// probe on the SSH finding filled it with the TLS handshake. The row then
+// reached the inventory as "SSH on 443, TLS 1.3, TLS_AES_256_GCM_SHA384": a
+// crypto configuration for a protocol the port does not speak, beside the
+// correct one. A finding that exists because the job asked for a specific
+// protocol gets that protocol's probe and no other.
 func shouldProbeTLS(protocolName, reqProtocol string, port int) bool {
-	return requestsTLS(reqProtocol) || requestsTLS(protocolName) || shareddisc.PortSpeaks(port, "TLS")
+	if requestsTLS(reqProtocol) || requestsTLS(protocolName) {
+		return true
+	}
+	return genericProtocol(reqProtocol) && genericProtocol(protocolName) && shareddisc.PortSpeaks(port, "TLS")
 }
 
 // shouldProbeSSH mirrors shouldProbeTLS for SSH.
 func shouldProbeSSH(protocolName, reqProtocol string, port int) bool {
-	return shareddisc.CanonicalProtocolName(reqProtocol) == "SSH" ||
-		shareddisc.CanonicalProtocolName(protocolName) == "SSH" ||
-		shareddisc.PortSpeaks(port, "SSH")
+	if shareddisc.CanonicalProtocolName(reqProtocol) == "SSH" ||
+		shareddisc.CanonicalProtocolName(protocolName) == "SSH" {
+		return true
+	}
+	return genericProtocol(reqProtocol) && genericProtocol(protocolName) && shareddisc.PortSpeaks(port, "SSH")
+}
+
+// probeRefuted reports whether a finding that exists only because the job
+// asked for reqProtocol has been shown NOT to speak it: the protocol's own
+// probe failed, on a port that protocol is not known on.
+//
+// The finding is then dropped rather than stored. Stored, it becomes an
+// open-port row labelled with a protocol nothing measured — "SSH on 443" with
+// an `ssh_probe_error` — and the inventory materialises a crypto configuration
+// for it with no version and no cipher, which reads as "SSH, not assessed"
+// rather than "not SSH". An open port is already recorded by the finding for
+// the protocol that DID answer, or by the generic one.
+//
+// A well-known port keeps its finding even when the probe fails: an sshd on 22
+// that rejects the handshake before the banner is still an sshd on 22, and the
+// error on the row is the useful part.
+func probeRefuted(finding models.DiscoveryFinding, reqProtocol string, port int) bool {
+	canon := shareddisc.CanonicalProtocolName(reqProtocol)
+	var key, speaks string
+	switch {
+	case requestsTLS(reqProtocol):
+		key, speaks = "tls_probe_error", "TLS"
+	case canon == "SSH":
+		key, speaks = "ssh_probe_error", "SSH"
+	default:
+		return false
+	}
+	if _, failed := finding.Data[key]; !failed {
+		return false
+	}
+	return !shareddisc.PortSpeaks(port, speaks)
 }
 
 // isProbeEnabled checks whether a probe type is enabled for this scan.
@@ -391,6 +447,11 @@ func (ps *PortScanner) parseNmapOutput(output, target string, ports []int32, pro
 				// OT/ICS + SMB protocols nmap can't speak: probe via the shared core.
 				ps.probeSharedOTSMB(&finding, target, port, protocolName, reqProtocol)
 
+				if probeRefuted(finding, reqProtocol, port) {
+					log.Printf("[PortScanner] %s:%d does not speak %s (probe failed on a port it is not known on) — no %s finding recorded",
+						target, port, reqProtocol, reqProtocol)
+					continue
+				}
 				findings = append(findings, finding)
 			}
 		}
@@ -629,6 +690,11 @@ func (ps *PortScanner) fallbackScan(target string, ports []int32, protocols []st
 				// OT/ICS + SMB protocols nmap can't speak: probe via the shared core.
 				ps.probeSharedOTSMB(&finding, target, int(port), protocol, protocol)
 
+				if probeRefuted(finding, protocol, int(port)) {
+					log.Printf("[PortScanner] %s:%d does not speak %s (probe failed on a port it is not known on) — no %s finding recorded",
+						target, port, protocol, protocol)
+					continue
+				}
 				findings = append(findings, finding)
 			}
 		}

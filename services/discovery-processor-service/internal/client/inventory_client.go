@@ -47,6 +47,13 @@ type InventoryClient struct {
 }
 
 // NewInventoryClient creates a new inventory client
+// ImportTimeout bounds every call this client makes to inventory-service,
+// import included. It is exported because the import is chunked to fit inside
+// it (processor.importChunkSize) and that relationship is load-bearing: a
+// chunk that cannot finish in time fails the whole batch and gets its rows
+// marked rejected, which is.
+const ImportTimeout = 30 * time.Second
+
 func NewInventoryClient(cfg *config.Config) (*InventoryClient, error) {
 	baseURL := cfg.InventoryServiceURL
 	if baseURL == "" {
@@ -75,10 +82,10 @@ func NewInventoryClient(cfg *config.Config) (*InventoryClient, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create mTLS client: %w", err)
 		}
-		httpClient.Timeout = 30 * time.Second
+		httpClient.Timeout = ImportTimeout
 	} else {
 		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: ImportTimeout,
 		}
 	}
 
@@ -119,6 +126,7 @@ type ExternalConnectionUpsert struct {
 
 	// Sensor-level certificate quality flags
 	CertHasSCT        *bool   `json:"cert_has_sct,omitempty"`
+	CertSCTSource     *string `json:"cert_sct_source,omitempty"`
 	CertKnownBadCA    *string `json:"cert_known_bad_ca,omitempty"`
 	CertNoSubject     bool    `json:"cert_no_subject,omitempty"`
 	CertNoCommonName  bool    `json:"cert_no_common_name,omitempty"`
@@ -168,6 +176,17 @@ type ImportFindingsRequest struct {
 // ImportFindingsResponse represents the response from importing findings
 type ImportFindingsResponse struct {
 	Imported int `json:"imported"`
+
+	// AssetStatuses is index-aligned with the findings that were sent: entry i
+	// is the asset_status the i-th finding's asset ACTUALLY has after the
+	// import, empty when it landed on no asset. It is how this service learns
+	// that a finding it sent as `pending_approval` was materialized anyway,
+	// because the asset it matched was already being monitored.
+	//
+	// Absent from an inventory-service older than this field, which is why it
+	// is a nil-safe slice and not a count: nil means "not told", and every
+	// caller must leave the discovery row exactly as it was.
+	AssetStatuses []string `json:"asset_statuses,omitempty"`
 }
 
 // ClassifyResponse is the response from POST network-segments/classify-asset

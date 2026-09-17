@@ -135,10 +135,13 @@ func TestHostObservationBuilder_PerSource(t *testing.T) {
 			},
 			wantKinds: map[identity.Kind]string{
 				identity.KindMACAddress: "28:cf:da:11:22:35",
-				identity.KindFQDN:       "hp-printer.local",
 				identity.KindHostname:   "hp-printer",
 				identity.KindIPAddress:  "192.0.2.52",
 			},
+			// A `.local` name is link-scoped, so it is filed as a SCOPED
+			// hostname, never as a globally unique fqdn — see
+			// TestHostObservationBuilder_MDNSLocalNamesAreSegmentScoped.
+			wantAbsent:  []identity.Kind{identity.KindFQDN},
 			wantDisplay: "hp-printer.local",
 		},
 		{
@@ -352,6 +355,109 @@ func TestHostObservationBuilder_LocallyAdministeredMACIsNotAKey(t *testing.T) {
 // reached by both would become two assets — and the address-in-a-name-slot
 // would be scoped as a hostname and allowed to vote in a dynamic segment where
 // the real ip_address identifier is forbidden to.
+// A first-hop-redundancy virtual router MAC (VRRP/CARP, HSRP, GLBP) is not an
+// asset key either: it belongs to the group's floating address and moves to
+// the standby router at failover. Same treatment as a locally-administered
+// MAC, and applied by the CONSUMER — an older sensor sends no `mac_virtual`.
+func TestHostObservationBuilder_VirtualRouterMACIsNotAKey(t *testing.T) {
+	cases := []struct{ name, mac string }{
+		{"VRRP/CARP", "00:00:5e:00:01:07"},
+		{"VRRP IPv6", "00:00:5e:00:02:07"},
+		{"HSRP v1", "00:00:0c:07:ac:0a"},
+		{"HSRP v2", "00:00:0c:9f:f0:0a"},
+		{"GLBP", "00:07:b4:00:0a:01"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ho := &hostobs.HostObservation{
+				Source:    hostobs.SourceARP,
+				MAC:       tc.mac,
+				Addresses: addrsFor(t, "192.0.2.1"),
+			}
+			obs, err := buildHostObs(t, unscopedService(), ho)
+			if err != nil {
+				t.Fatalf("hostObservationObservation: %v", err)
+			}
+			if id, ok := ids(obs)[identity.KindMACAddress]; ok {
+				t.Errorf("a %s virtual router MAC was attached as an identifier: %q", tc.name, id.Value)
+			}
+			if id, ok := ids(obs)[identity.KindIPAddress]; !ok || id.Value != "192.0.2.1" {
+				t.Errorf("the address should still identify the gateway; identifiers = %v", obs.Identifiers)
+			}
+			// And through a payload from an OLDER sensor, which never set the
+			// flag: the consumer's own table decides.
+			raw := &hostobs.HostObservation{Source: hostobs.SourceARP, MAC: tc.mac, Addresses: addrsFor(t, "192.0.2.1")}
+			raw.Finalize()
+			raw.MACVirtual = false
+			delete(raw.Attributes, "virtual_mac_protocol")
+			f := hostObsFinding(t, raw, nil)
+			payload, ok := hostObservationPayload(f)
+			if !ok {
+				t.Fatal("no readable payload")
+			}
+			old, err := unscopedService().hostObservationObservation(uuid.New(), f, payload)
+			if err != nil {
+				t.Fatalf("hostObservationObservation(old sensor): %v", err)
+			}
+			if _, ok := ids(old)[identity.KindMACAddress]; ok {
+				t.Errorf("a %s virtual MAC from an old sensor (no mac_virtual flag) was attached as an identifier", tc.name)
+			}
+			meta := hostObservationMetadata(f, payload)
+			if meta["host_observation_virtual_mac"] != tc.mac {
+				t.Errorf("host_observation_virtual_mac = %v, want the MAC kept as evidence", meta["host_observation_virtual_mac"])
+			}
+		})
+	}
+
+	t.Run("a real NIC's MAC still identifies", func(t *testing.T) {
+		obs, err := buildHostObs(t, unscopedService(), &hostobs.HostObservation{
+			Source: hostobs.SourceARP, MAC: "e8:ff:1e:00:00:07", Addresses: addrsFor(t, "192.0.2.10"),
+		})
+		if err != nil {
+			t.Fatalf("hostObservationObservation: %v", err)
+		}
+		if _, ok := ids(obs)[identity.KindMACAddress]; !ok {
+			t.Error("a universally-administered, non-virtual MAC was dropped")
+		}
+	})
+}
+
+// The ARP decoder's gratuitous flag travels to the engine as an observation
+// attribute, so the floating-address rule can record it as corroborating
+// evidence. Nothing else from the decoder's attribute map does.
+func TestHostObservationBuilder_CarriesARPEvidenceToTheEngine(t *testing.T) {
+	ho := &hostobs.HostObservation{Source: hostobs.SourceARP, MAC: "e8:ff:1e:00:00:07", Addresses: addrsFor(t, "192.0.2.230")}
+	ho.Finalize()
+	ho.Attributes = map[string]any{
+		"arp_gratuitous":    true,
+		"arp_operation":     "request",
+		"capture_interface": "eth0",
+	}
+	obs, err := buildHostObs(t, unscopedService(), ho)
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	if obs.Attributes["arp_gratuitous"] != true {
+		t.Errorf("attributes[arp_gratuitous] = %v, want true", obs.Attributes["arp_gratuitous"])
+	}
+	if obs.Attributes["arp_operation"] != "request" {
+		t.Errorf("attributes[arp_operation] = %v, want request", obs.Attributes["arp_operation"])
+	}
+	if _, ok := obs.Attributes["capture_interface"]; ok {
+		t.Error("a decoder attribute outside the allowlist reached the engine's observation")
+	}
+
+	plain, err := buildHostObs(t, unscopedService(), &hostobs.HostObservation{
+		Source: hostobs.SourceMDNS, MAC: "e8:ff:1e:00:00:08", Hostnames: []string{"ws1"},
+	})
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	if len(plain.Attributes) != 0 {
+		t.Errorf("an observation with no ARP evidence carries attributes %v", plain.Attributes)
+	}
+}
+
 func TestHostObservationBuilder_AnIPLiteralIsNeverAName(t *testing.T) {
 	obs, err := buildHostObs(t, unscopedService(), &hostobs.HostObservation{
 		Source:    hostobs.SourceNBNS,
@@ -633,5 +739,230 @@ func TestHostObservationKindSpellingIsShared(t *testing.T) {
 	// BOTH were renamed, and the wire format is not ours to rename.
 	if KindHostObservation != "host_observation" {
 		t.Errorf("the wire kind is %q, want host_observation — every row already in sensor_discoveries carries the old spelling", KindHostObservation)
+	}
+}
+
+// TestHostObservationBuilder_MDNSLocalNamesAreSegmentScoped pins the dev-lab
+// cascade: a gateway running an mDNS reflector re-originated a laptop's
+// announcement onto the sensor's VLAN; the sensor pinned "mbp-m3-alice.local"
+// to the gateway; and when the laptop's OWN announcement arrived from its home
+// VLAN, an unscoped fqdn decided the match and the laptop — MAC, addresses,
+// SSH endpoint — was folded into the gateway asset.
+//
+// A `.local` name is link-scoped by definition. It is kept in full (a CMDB can
+// join on it) but as a hostname scoped to the segment it was heard in, so it
+// can only decide a match there. Every other qualified name is still an
+// unscoped fqdn.
+func TestHostObservationBuilder_MDNSLocalNamesAreSegmentScoped(t *testing.T) {
+	obs, err := buildHostObs(t, unscopedService(), &hostobs.HostObservation{
+		Source:    hostobs.SourceMDNS,
+		MAC:       "00:e0:4c:06:12:91",
+		Addresses: mustAddrs(t, "192.0.2.33"),
+		FQDNs:     []string{"mbp-m3-alice.local", "alice-wired.corp.example"},
+		Hostnames: []string{"mbp-m3-alice", "alice-wired"},
+	})
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+
+	byValue := map[string]identity.Identifier{}
+	for _, id := range obs.Identifiers {
+		byValue[id.Value] = id
+	}
+
+	local, ok := byValue["mbp-m3-alice.local"]
+	if !ok {
+		t.Fatalf("the .local name was dropped entirely: %v", obs.Identifiers)
+	}
+	if local.Kind != identity.KindHostname {
+		t.Errorf(".local name filed as %s, want %s (a link-scoped name must not be globally unique)", local.Kind, identity.KindHostname)
+	}
+	if local.Scope == "" {
+		t.Error(".local name carries no scope; an unscoped name decides matches across segments")
+	}
+	if local.Scope != obs.Network.SegmentID {
+		t.Errorf(".local name scope = %q, want the observation's segment %q", local.Scope, obs.Network.SegmentID)
+	}
+
+	corp, ok := byValue["alice-wired.corp.example"]
+	if !ok {
+		t.Fatalf("the ordinary FQDN was dropped: %v", obs.Identifiers)
+	}
+	if corp.Kind != identity.KindFQDN || corp.Scope != "" {
+		t.Errorf("ordinary FQDN filed as %s scope %q, want an unscoped fqdn", corp.Kind, corp.Scope)
+	}
+
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindFQDN && isMDNSLocalName(id.Value) {
+			t.Errorf("a .local name reached the fqdn kind: %q", id.Value)
+		}
+	}
+
+	// The display name is unchanged by the filing: the most specific name the
+	// host answered to is still what a person should see.
+	if obs.DisplayName != "mbp-m3-alice.local" {
+		t.Errorf("DisplayName = %q, want %q", obs.DisplayName, "mbp-m3-alice.local")
+	}
+}
+
+// --- sensor self-observation (asset-inventory decision 9) -------------------
+
+// TestHostObservationBuilder_SelfReport_CarriesAgentID pins the strongest-
+// identifier wiring: a self-report's AgentID becomes a KindAgentID
+// identifier, alongside the ordinary MAC/hostname/address identifiers the
+// payload also carries.
+//
+// Mutation check: deleting the `if agentID := ...` block in
+// hostObservationObservation makes this test fail (no KindAgentID
+// identifier at all).
+func TestHostObservationBuilder_SelfReport_CarriesAgentID(t *testing.T) {
+	svc := unscopedService()
+	ho := &hostobs.HostObservation{
+		AgentID:   "22222222-2222-2222-2222-222222222222",
+		Platform:  "linux",
+		Profile:   "datacenter_host",
+		Hostnames: []string{"xps16-sensor"},
+		Addresses: mustAddrs(t, "192.0.2.173"),
+	}
+	obs, err := buildHostObs(t, svc, ho)
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+
+	var found bool
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindAgentID {
+			found = true
+			if id.Value != "22222222-2222-2222-2222-222222222222" {
+				t.Errorf("agent_id value = %q", id.Value)
+			}
+			if id.Confidence != 1 {
+				t.Errorf("agent_id confidence = %v, want 1", id.Confidence)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no agent_id identifier in %v", obs.Identifiers)
+	}
+}
+
+// TestHostObservationBuilder_PassiveObservation_NeverCarriesAgentID: the
+// ordinary passive decoders (arp/mdns/...) never set AgentID, so an ordinary
+// observation must never manufacture a KindAgentID identifier out of
+// anything else on the payload.
+func TestHostObservationBuilder_PassiveObservation_NeverCarriesAgentID(t *testing.T) {
+	svc := unscopedService()
+	ho := &hostobs.HostObservation{
+		MAC:       "00:1a:2b:3c:4d:5e",
+		Hostnames: []string{"printer"},
+	}
+	obs, err := buildHostObs(t, svc, ho)
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindAgentID {
+			t.Fatalf("a passive observation with no AgentID produced an agent_id identifier: %v", id)
+		}
+	}
+}
+
+// TestHostObservationSource_SelfReportIsActiveMode pins the Mode distinction:
+// a self-report is ACTIVE (the host measuring itself), every ordinary decoder
+// stays PASSIVE (traffic it happened to see).
+//
+// Mutation check: hard-coding hostObservationSource's mode to ModePassive
+// makes this test fail on the self-report case.
+func TestHostObservationSource_SelfReportIsActiveMode(t *testing.T) {
+	selfReport := hostObsFinding(t, &hostobs.HostObservation{AgentID: "s1"}, map[string]interface{}{
+		"discovery_method": "sensor_self_report",
+	})
+	if got := hostObservationSource(selfReport); got.Mode != identity.ModeActive {
+		t.Errorf("self-report Source.Mode = %q, want %q", got.Mode, identity.ModeActive)
+	}
+
+	passive := hostObsFinding(t, &hostobs.HostObservation{MAC: "00:1a:2b:3c:4d:5e"}, map[string]interface{}{
+		"discovery_method": "passive_host_observation",
+	})
+	if got := hostObservationSource(passive); got.Mode != identity.ModePassive {
+		t.Errorf("passive Source.Mode = %q, want %q", got.Mode, identity.ModePassive)
+	}
+}
+
+// TestHostObservationIsSelfReport pins the marker string sensor-manager's
+// self_observation.go writes.
+func TestHostObservationIsSelfReport(t *testing.T) {
+	cases := map[string]bool{
+		"sensor_self_report":       true,
+		"passive_host_observation": false,
+		"pcap_upload":              false,
+		"":                         false,
+	}
+	for method, want := range cases {
+		f := hostObsFinding(t, &hostobs.HostObservation{MAC: "00:1a:2b:3c:4d:5e"}, map[string]interface{}{
+			"discovery_method": method,
+		})
+		if got := hostObservationIsSelfReport(f); got != want {
+			t.Errorf("hostObservationIsSelfReport(discovery_method=%q) = %v, want %v", method, got, want)
+		}
+	}
+}
+
+// TestClassHintForSelfReport pins the platform/profile → class-hint heuristic
+// (flagged in the PR for owner review — see the function's doc comment).
+//
+// Mutation check: swapping the KeyServer/KeyWorkstation branches makes the
+// linux and windows cases fail.
+func TestClassHintForSelfReport(t *testing.T) {
+	cases := []struct {
+		name     string
+		platform string
+		profile  string
+		want     assetclass.Key
+	}{
+		{"linux datacenter_host is a server", "linux", "datacenter_host", assetclass.KeyServer},
+		{"linux cloud_instance is a server", "linux", "cloud_instance", assetclass.KeyServer},
+		{"linux with no profile is a server", "linux", "", assetclass.KeyServer},
+		{"linux desktop-ish profile is a plain computer", "linux", "desktop", assetclass.KeyComputer},
+		{"windows is a workstation", "windows", "datacenter_host", assetclass.KeyWorkstation},
+		{"darwin is a workstation", "darwin", "", assetclass.KeyWorkstation},
+		{"unknown platform is a plain computer", "freebsd", "", assetclass.KeyComputer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ho := &hostobs.HostObservation{AgentID: "s1", Platform: tc.platform, Profile: tc.profile}
+			if got := classHintForSelfReport(ho); got != tc.want {
+				t.Errorf("classHintForSelfReport(platform=%q, profile=%q) = %q, want %q", tc.platform, tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestClassHintForSelfReport_PassiveObservationStaysUnknownHost: an
+// observation with no AgentID (every ordinary passive decoder) must always
+// float the unknown_host floor, regardless of what Platform/Profile happen to
+// hold (they are never populated on a passive path, but the function must not
+// trust them if they somehow were — AgentID is the gate).
+func TestClassHintForSelfReport_PassiveObservationStaysUnknownHost(t *testing.T) {
+	ho := &hostobs.HostObservation{Platform: "linux", Profile: "datacenter_host"}
+	if got := classHintForSelfReport(ho); got != assetclass.KeyUnknownHost {
+		t.Errorf("classHintForSelfReport (no AgentID) = %q, want %q", got, assetclass.KeyUnknownHost)
+	}
+}
+
+func TestIsMDNSLocalName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"printer.local":      true,
+		"Printer.LOCAL.":     true,
+		"a.b.local":          true,
+		"local":              true,
+		"printer.localhost":  false,
+		"printer.local.corp": false,
+		"app.corp.example":   false,
+		"":                   false,
+	} {
+		if got := isMDNSLocalName(name); got != want {
+			t.Errorf("isMDNSLocalName(%q) = %v, want %v", name, got, want)
+		}
 	}
 }

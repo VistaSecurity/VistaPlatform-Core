@@ -25,6 +25,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 )
 
 // --- stubs -----------------------------------------------------------------
@@ -55,14 +57,29 @@ type stubRevalidationStore struct {
 	jobID   string
 	scanned int
 	err     error
+	// scan is returned by CreateActiveScanJob when set; otherwise a single
+	// platform job is synthesized from jobID/scanned. gotRunFrom records what
+	// the handler asked for.
+	scan       *services.ActiveScanResult
+	gotRunFrom services.RunFrom
 }
 
 func (s *stubRevalidationStore) CreateRevalidationJob(_, _ uuid.UUID, _ []uuid.UUID, _ string) (string, error) {
 	return s.jobID, s.err
 }
 
-func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, _ []uuid.UUID, _ string) (string, int, error) {
-	return s.jobID, s.scanned, s.err
+func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, _ []uuid.UUID, _ string, runFrom services.RunFrom) (services.ActiveScanResult, error) {
+	s.gotRunFrom = runFrom
+	if s.err != nil {
+		return services.ActiveScanResult{}, s.err
+	}
+	if s.scan != nil {
+		return *s.scan, nil
+	}
+	return services.ActiveScanResult{
+		Jobs:    []services.ActiveScanDispatchedJob{{JobID: s.jobID, Executor: "platform", Count: s.scanned}},
+		Scanned: s.scanned,
+	}, nil
 }
 
 // --- harness ---------------------------------------------------------------
@@ -192,7 +209,78 @@ func TestContract_ScanAssets_200(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	sv.assertConforms(t, "RevalidationJobResponse", w.Body.Bytes())
+	sv.assertConforms(t, "ActiveScanResponse", w.Body.Bytes())
+}
+
+// run_from: the handler hands the executor choice to the service
+// verbatim, and the response names every job's executor.
+func TestContract_ScanAssets_RunFromReachesTheServiceAndTheExecutorComesBack(t *testing.T) {
+	sv := loadSpec(t)
+	sensorID := uuid.New()
+	rv := &stubRevalidationStore{scan: &services.ActiveScanResult{
+		Jobs: []services.ActiveScanDispatchedJob{
+			{JobID: "scan-job-1", Executor: "sensor", SensorID: &sensorID, SensorName: "xps16-sensor", Count: 2},
+			{JobID: "scan-job-2", Executor: "platform", Count: 1},
+		},
+		Skipped: []services.ActiveScanSkip{{AssetID: uuid.New(), Reason: "observing sensor branch-sensor is offline; 10.0.0.9 was not scanned this pass"}},
+		Scanned: 3,
+	}}
+	eng := newLifecycleEngine(&stubLifecycleStore{}, rv)
+	body := strings.NewReader(`{"asset_ids":["` + aUUID + `"],"run_from":"sensor","sensor_id":"` + sensorID.String() + `"}`)
+	w := do(eng, http.MethodPost, lifecycleBase+"/infrastructure-assets/scan", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "ActiveScanResponse", w.Body.Bytes())
+	if rv.gotRunFrom.Mode != services.RunFromSensor || rv.gotRunFrom.SensorID != sensorID {
+		t.Errorf("service got run_from %+v, want sensor/%s", rv.gotRunFrom, sensorID)
+	}
+	for _, want := range []string{`"executor":"sensor"`, `"sensor_name":"xps16-sensor"`, `"executor":"platform"`, `"skipped":[{`, `"count":3`, `"job_id":"scan-job-1"`} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("body lacks %s: %s", want, w.Body.String())
+		}
+	}
+}
+
+// Omitted run_from is auto; the legacy body (asset_ids only) keeps working.
+func TestContract_ScanAssets_DefaultsToAuto(t *testing.T) {
+	rv := &stubRevalidationStore{jobID: "scan-job-1", scanned: 1}
+	eng := newLifecycleEngine(&stubLifecycleStore{}, rv)
+	w := do(eng, http.MethodPost, lifecycleBase+"/infrastructure-assets/scan", strings.NewReader(`{"asset_ids":["`+aUUID+`"]}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if rv.gotRunFrom.Mode != "" && rv.gotRunFrom.Mode != services.RunFromAuto {
+		t.Errorf("run_from = %q, want auto", rv.gotRunFrom.Mode)
+	}
+}
+
+// The executor refusals keep their status: 404 unknown, 400 the platform's
+// own / a bad run_from, 409 offline. Nothing is scanned in any of them.
+func TestContract_ScanAssets_ExecutorRefusals(t *testing.T) {
+	sv := loadSpec(t)
+	cases := []struct {
+		name string
+		body string
+		err  error
+		want int
+	}{
+		{"sensor mode without sensor_id", `{"asset_ids":["` + aUUID + `"],"run_from":"sensor"}`, nil, http.StatusBadRequest},
+		{"unknown run_from", `{"asset_ids":["` + aUUID + `"],"run_from":"cloud"}`, services.ErrInvalidRunFrom, http.StatusBadRequest},
+		{"unknown sensor", `{"asset_ids":["` + aUUID + `"],"run_from":"sensor","sensor_id":"` + uuid.New().String() + `"}`, sensorrouting.ErrSensorNotFound, http.StatusNotFound},
+		{"the platform's own sensor", `{"asset_ids":["` + aUUID + `"],"run_from":"sensor","sensor_id":"` + uuid.New().String() + `"}`, sensorrouting.ErrSensorNotDispatchable, http.StatusBadRequest},
+		{"offline sensor", `{"asset_ids":["` + aUUID + `"],"run_from":"sensor","sensor_id":"` + uuid.New().String() + `"}`, sensorrouting.ErrSensorOffline, http.StatusConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := newLifecycleEngine(&stubLifecycleStore{}, &stubRevalidationStore{err: tc.err})
+			w := do(eng, http.MethodPost, lifecycleBase+"/infrastructure-assets/scan", strings.NewReader(tc.body))
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, tc.want, w.Body.String())
+			}
+			sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+		})
+	}
 }
 
 // Missing required asset_ids -> 400.

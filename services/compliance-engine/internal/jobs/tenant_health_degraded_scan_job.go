@@ -10,26 +10,28 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	"github.com/vistasecurity/vistaplatform/shared/healthbands"
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 const (
 	tenantHealthDegradedAlertType = "tenant_health_degraded"
-	tenantHealthDegradedThreshold = 60 // overall_score below this = degraded
-	tenantHealthCriticalThreshold = 40 // below this escalates to high
+	tenantHealthDegradedThreshold = healthbands.FairMin // overall_score below this = degraded
+	tenantHealthFailingThreshold  = healthbands.PoorMin // below this escalates to high
 
 	// tenantHealthStatusUnknown mirrors tenant-health-service's
 	// models.HealthStatusUnknown: no factor could be measured, so the stored
 	// overall_score is 0 for want of data and must not be read as a score.
-	tenantHealthStatusUnknown = "unknown"
+	tenantHealthStatusUnknown = healthbands.Unknown
 )
 
 // healthDegradedSeverity maps a health score to alert severity: medium for a
-// degraded score, high for the critical band.
+// degraded score, high for the failing health band.
 func healthDegradedSeverity(score float64) string {
-	if score < tenantHealthCriticalThreshold {
-		return "high"
+	if score < tenantHealthFailingThreshold {
+		return string(severity.High)
 	}
-	return "medium"
+	return string(severity.Medium)
 }
 
 // TenantHealthDegradedScanJob raises a PLATFORM-track alert (one per tenant)

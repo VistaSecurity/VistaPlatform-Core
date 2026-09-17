@@ -143,6 +143,44 @@ func isHostObservation(f IngestFinding) bool {
 // engine can match on it. An observation carrying NOTHING attachable is still
 // refused — errNoIdentifiers — because an asset nothing can ever match again
 // becomes a new asset on every coalescing window.
+
+// classHintForSelfReport turns a sensor's own registered platform/profile
+// into a class HINT — the FLOOR an observation starts from, same status as
+// assetclass.KeyUnknownHost, and still overridable by the curated rule table
+// (applyClassProposal) below it. It is NOT an applied classification:
+// class_source_kind stays whatever the rule table (or nothing) decides, the
+// same "propose, do not apply" discipline host_inventory_ingest.go documents
+// for the device-agent path ("Never guess a class... turning evidence into a
+// class is a RULE's job").
+//
+// Deliberately a small, explicit heuristic rather than a lookup table: sensor
+// profiles today are effectively a single value in practice
+// (config.Profile defaults to "datacenter_host" for every sensor install —
+// only the unrelated device-agent uses "device_interrogation"), so platform is
+// doing almost all of the work. Flagged in the PR for the owner to review;
+// widening sensor install profiles to a real workstation/laptop vocabulary
+// would make this a straightforward lookup instead of a guess about Windows
+// and macOS sensor hosts.
+func classHintForSelfReport(ho *hostobs.HostObservation) assetclass.Key {
+	if ho == nil || strings.TrimSpace(ho.AgentID) == "" {
+		return assetclass.KeyUnknownHost
+	}
+	platform := strings.ToLower(strings.TrimSpace(ho.Platform))
+	profile := strings.ToLower(strings.TrimSpace(ho.Profile))
+	switch platform {
+	case "linux":
+		if profile == "" || strings.Contains(profile, "server") ||
+			strings.Contains(profile, "datacenter") || strings.Contains(profile, "cloud") {
+			return assetclass.KeyServer
+		}
+		return assetclass.KeyComputer
+	case "windows", "darwin", "macos":
+		return assetclass.KeyWorkstation
+	default:
+		return assetclass.KeyComputer
+	}
+}
+
 func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.Observation, error) {
 	obs := identity.Observation{
 		TenantID:   tenantID.String(),
@@ -160,7 +198,25 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 		// `class_source_ref` naming the row. When they do not — or when they
 		// contradict each other — it stands, which is the same honesty as the
 		// PQC classifier's `unclassified` bucket.
-		ClassHint: assetclass.KeyUnknownHost,
+		//
+		// A SELF-report (ho.AgentID set) starts from a smarter floor: the
+		// sensor's own registered platform/profile, which is real evidence
+		// about the host it runs on, not a guess. See
+		// classHintForSelfReport — it is still a HINT, exactly like
+		// KeyUnknownHost is, and the rule table below can still override it.
+		ClassHint: classHintForSelfReport(ho),
+	}
+
+	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
+		// The strongest identifier kind there is (shared/identity/identifier.go:
+		// "a host agent's own installation id... because we issued it"). Set
+		// ONLY on a sensor's self-report of the host it runs on — every
+		// passively decoded observation leaves AgentID empty. Confidence 1: an
+		// agent's own id is not graded on the arp/dhcp/mdns ladder that grades
+		// how directly a THIRD PARTY's frame states an identity.
+		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
+			Kind: identity.KindAgentID, Value: agentID, Confidence: 1,
+		})
 	}
 
 	// The scope weak identifiers live in. Addresses are scoped individually
@@ -177,7 +233,22 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 	}
 
 	if mac := strings.TrimSpace(ho.MAC); mac != "" {
-		if ho.MACLocallyAdministered {
+		// Computed here as well as read from the payload: an older sensor
+		// binary sends no `mac_virtual`, and the rule has to hold for it too.
+		virtualProto, virtual := hostobs.VirtualMACProtocol(mac)
+		if virtual || ho.MACVirtual {
+			// A first-hop-redundancy virtual router MAC (VRRP, CARP, HSRP,
+			// GLBP — shared/hostobs/virtualmac.go). It belongs to the floating
+			// address's GROUP, not to a chassis, and moves to the standby
+			// router at failover: keying a node on it makes the standby
+			// "become" the active router every time. Same treatment as a
+			// locally-administered MAC, for the same reason — identifier
+			// confidence does not affect voting, so "attach weakly" is
+			// indistinguishable from attaching. Recorded as an attribute
+			// (hostObservationMetadata) so the row stays explicable.
+			log.Printf("[AssetService] host observation %s: MAC %s is a %s virtual router address; not used as an identifier (it moves with the floating address)",
+				hostObservationLabel(ho), mac, orDefault(virtualProto, "first-hop-redundancy"))
+		} else if ho.MACLocallyAdministered {
 			// The U/L bit is set: a randomised iOS/Android Wi-Fi address, a
 			// virtual NIC, or a spoofed one. It is not a stable key — the device
 			// rotates it — and attaching it would create a fresh asset on every
@@ -207,12 +278,30 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 	// heading (shared/hostobs addName), so this does not re-derive it — and it
 	// must not: "an IP is never a hostname" is enforced at the source, where a
 	// name that parses as an address never becomes a name at all.
+	//
+	// EXCEPT `.local`. An mDNS name is link-scoped by definition (RFC 6762 §3):
+	// "printer.local" on one VLAN and "printer.local" on another are two hosts,
+	// and nothing about the name says which. Filing it as an unscoped, globally
+	// unique fqdn let one name DECIDE a match across segments — which is how a
+	// gateway that reflected a laptop's announcement onto the sensor's VLAN
+	// then absorbed the laptop's own observation from its home VLAN, decided
+	// by fqdn, and with it the laptop's SSH endpoint. The whole name is kept
+	// (a CMDB can still join on it) but as a hostname, scoped to the segment
+	// the observation was made in, so it identifies where mDNS says it does.
 	for _, fqdn := range ho.FQDNs {
-		if v := strings.TrimSpace(fqdn); v != "" && !isIPLiteral(v) {
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindFQDN, Value: v, Confidence: 1,
-			})
+		v := strings.TrimSpace(fqdn)
+		if v == "" || isIPLiteral(v) {
+			continue
 		}
+		if isMDNSLocalName(v) {
+			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
+				Kind: identity.KindHostname, Value: v, Scope: nameScope, Confidence: 1,
+			})
+			continue
+		}
+		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
+			Kind: identity.KindFQDN, Value: v, Confidence: 1,
+		})
 	}
 	for _, name := range ho.Hostnames {
 		if v := strings.TrimSpace(name); v != "" && !isIPLiteral(v) {
@@ -246,6 +335,22 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 		obs.DynamicScopes = dynamic
 	}
 
+	// The ARP decoder's evidence, for the engine's floating-address rule. A
+	// gratuitous ARP is the announcer CLAIMING the address, which corroborates
+	// "node X announces VIP Y" when the MAC and the address resolve to two
+	// assets. Only these two keys travel: Observation.Attributes is read by
+	// the engine on an allowlist (SummaryAttributeKeys for the matcher; these
+	// for the rule), and the rest of the decoder's attributes stay in the
+	// asset's metadata where they always were.
+	for _, key := range []string{"arp_gratuitous", "arp_operation"} {
+		if v, ok := ho.Attributes[key]; ok {
+			if obs.Attributes == nil {
+				obs.Attributes = map[string]any{}
+			}
+			obs.Attributes[key] = v
+		}
+	}
+
 	// Display name and hostname are context, not identity: the authoritative
 	// list is Identifiers. A host with no name at all displays as its address,
 	// and one with neither displays as its MAC — which is the only thing we were
@@ -277,6 +382,14 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 		return identity.Observation{}, fmt.Errorf("%w: host observation %s", errNoIdentifiers, hostObservationLabel(ho))
 	}
 	return clean, nil
+}
+
+// isMDNSLocalName reports whether a qualified name is in the mDNS link-local
+// domain (`.local`, RFC 6762 §3), which is the one TLD a name can carry and
+// still identify a host only on the link it was heard on.
+func isMDNSLocalName(name string) bool {
+	n := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	return n == "local" || strings.HasSuffix(n, ".local")
 }
 
 // isIPLiteral reports whether a name is really an address written down.
@@ -328,11 +441,16 @@ func hostObservationBestName(ho *hostobs.HostObservation) *string {
 
 // hostObservationSource attributes the observation to the capture that made it.
 //
-// Mode is always PASSIVE: every decoder behind a host observation reads frames
-// that were going to be on the wire anyway. The ref distinguishes the standalone
-// sensor from the platform's own capture, because "which sensor told us this" is
-// the question an operator asks of a surprising asset, and because the two are
-// different fact producers (shared/facts `sensor` vs `platform-sensor`).
+// Mode is PASSIVE for every ordinary decoder — arp/dhcp/mdns/lldp/cdp all read
+// frames that were going to be on the wire anyway — but ACTIVE for a sensor's
+// SELF-report (hostObservationIsSelfReport): os.Hostname() and the host's own
+// interface table are not "traffic this device happened to see", they are the
+// host measuring itself, which identity.ModeActive is documented to rank above
+// ModePassive when two measured values disagree (shared/identity/reconcile.go).
+// The ref distinguishes the standalone sensor from the platform's own capture,
+// because "which sensor told us this" is the question an operator asks of a
+// surprising asset, and because the two are different fact producers
+// (shared/facts `sensor` vs `platform-sensor`).
 func hostObservationSource(f IngestFinding) identity.Source {
 	ref := "sensor"
 	if hostObservationIsPlatformCapture(f) {
@@ -341,7 +459,11 @@ func hostObservationSource(f IngestFinding) identity.Source {
 	if id := strings.TrimSpace(derefString(f.SourceSensorID)); id != "" {
 		ref += ":" + id
 	}
-	return identity.Source{Kind: identity.SourceMeasured, Ref: ref, Mode: identity.ModePassive}
+	mode := identity.ModePassive
+	if hostObservationIsSelfReport(f) {
+		mode = identity.ModeActive
+	}
+	return identity.Source{Kind: identity.SourceMeasured, Ref: ref, Mode: mode}
 }
 
 // hostObservationIsPlatformCapture reports whether the row came from the
@@ -357,6 +479,17 @@ func hostObservationIsPlatformCapture(f IngestFinding) bool {
 		return true
 	}
 	return false
+}
+
+// hostObservationIsSelfReport reports whether the row is a sensor's SELF-report
+// of the host it runs on (asset-inventory decision 9) rather than a passive
+// capture of some OTHER host. Read the same way
+// hostObservationIsPlatformCapture reads its own marker: sensor-manager's
+// services/self_observation.go writes `discovery_method: "sensor_self_report"`,
+// distinct from the sensor's own passive `passive_host_observation` and
+// pcap-processor's `pcap_upload`.
+func hostObservationIsSelfReport(f IngestFinding) bool {
+	return strings.ToLower(rawDataString(f.RawData, "discovery_method")) == "sensor_self_report"
 }
 
 // hostObservationFactProducer is the shared/facts producer key the observation's
@@ -496,6 +629,16 @@ func hostObservationMetadata(f IngestFinding, ho *hostobs.HostObservation) model
 	if ho.MAC != "" && ho.MACLocallyAdministered {
 		out["host_observation_local_mac"] = ho.MAC
 	}
+	if ho.MAC != "" {
+		if proto, ok := hostobs.VirtualMACProtocol(ho.MAC); ok || ho.MACVirtual {
+			// The virtual router MAC, kept the same way: not an identifier,
+			// but not lost either.
+			out["host_observation_virtual_mac"] = ho.MAC
+			if proto != "" {
+				out["host_observation_virtual_mac_protocol"] = proto
+			}
+		}
+	}
 	return out
 }
 
@@ -563,9 +706,123 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 		if cerr := s.recordClassOutcome(ctx, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
 			return cerr
 		}
+		if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
+			// Link the sensor to the asset its own self-report resolved to —
+			// in the SAME transaction as everything else this observation
+			// wrote, so the link is atomic with the asset it points at. This
+			// is also the RETRO-LINK path: an existing anonymous unknown_host
+			// asset holding only this host's MAC/IP (a real deployment shape:
+			// seen passively by another sensor before this one ever reported
+			// itself) is exactly what res.Asset already is when the engine
+			// matched on mac_address/ip_address, so linking here covers both
+			// "created fresh" and "matched existing" without a separate code
+			// path.
+			//
+			// `sensors` belongs to sensor-manager, not this service, but both
+			// read/write the one shared database — sensorrouting.Store
+			// already SELECTs from `sensors` for the same reason (see its
+			// TenantSensors). agentID is the sensor's own id (it set AgentID
+			// to sensorID.String() — see sensor-manager's
+			// selfHostObservation), so no separate lookup is needed.
+			if sensorID, perr := uuid.Parse(agentID); perr == nil {
+				if lerr := s.linkSensorAsset(tx, tenantID, sensorID, assetID); lerr != nil {
+					return fmt.Errorf("linking sensor %s to its host asset: %w", sensorID, lerr)
+				}
+			}
+			// Upgrade the class on the RETRO-LINK path (asset MATCHED an
+			// existing row rather than being created): classForCreate's
+			// ClassHint only ever applies at creation, by design — an
+			// observation must not overwrite a class an asset already HAS,
+			// the same invariant classproposal documents ("It never sets a
+			// class on an existing asset... a rule that changed its mind six
+			// months after somebody approved a class would be a silent
+			// rewrite"). This is the one narrow, deliberate exception: it
+			// fires ONLY while the asset's class is still the unassigned
+			// floor (unknown_host) — nothing has been decided yet, by a rule,
+			// a human, or anything else — and the evidence is the sensor's
+			// own self-report, not a guess. Flagged for the owner in the PR:
+			// this reaches past the ordinary class-proposal review queue on
+			// the reasoning that "nothing was ever decided" is different from
+			// "something was decided and this disagrees."
+			if hint := classHintForSelfReport(ho); hint != assetclass.KeyUnknownHost {
+				if cerr := upgradeUnknownHostClass(ctx, tx, tenantID, assetID, hint, "sensor:"+agentID); cerr != nil {
+					return fmt.Errorf("upgrading class for sensor %s's host asset: %w", agentID, cerr)
+				}
+			}
+			// Same "fill the floor, never overwrite" shape for the display
+			// name: the identification engine's own asset writer
+			// (shared/identity/postgres.Repository.CreateAsset) only ever
+			// sets hostname/display_name at CREATION — there is no path today
+			// that backfills an unnamed EXISTING asset when a later
+			// observation finally carries a name, which is exactly the
+			// retro-link case (an anonymous MAC/IP-only unknown_host, seen
+			// passively, that this self-report is the first thing to name).
+			if obs.Hostname != "" {
+				if herr := backfillAssetHostname(ctx, tx, tenantID, assetID, obs.Hostname); herr != nil {
+					return fmt.Errorf("backfilling hostname for sensor %s's host asset: %w", agentID, herr)
+				}
+			}
+		}
 		if res.Outcome != identity.OutcomeConflict && assetStatus != "" && assetStatus != identity.StatusPendingApproval {
-			return s.setAssetStatus(tx, tenantID, assetID, assetStatus, obs.Source)
+			return s.setStatusUnlessArchived(tx, tenantID, assetID, assetStatus, obs.Source)
 		}
 		return nil
 	})
+}
+
+// linkSensorAsset records that sensorID's own host resolved to assetID — the
+// "sensors.asset_id" link the sensor-routing "never scan yourself" guard
+// reads (services/inventory-service/internal/sensorrouting.Store.TenantSensors)
+// and the Sensors & Agents page's "Host" line reads. tenant_id is part of the
+// predicate as the repo's belt-and-braces rule requires even though sensors
+// is not RLS-scoped through this service's connection.
+func (s *AssetService) linkSensorAsset(tx *sqlx.Tx, tenantID, sensorID, assetID uuid.UUID) error {
+	_, err := tx.Exec(
+		`UPDATE sensors SET asset_id = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL`,
+		assetID, sensorID, tenantID,
+	)
+	return err
+}
+
+// backfillAssetHostname names an asset that has never had one, on the same
+// "fill the floor, never overwrite" principle as upgradeUnknownHostClass
+// below: the predicate is `hostname IS NULL OR hostname = ”`, so this is a
+// no-op for any asset a human has already named or that an earlier
+// observation already named. display_name follows hostname's value when it
+// was ALSO unset — a display_name an operator typed by hand (models.AssetInput's
+// own path, unrelated to this one) is left alone the same way.
+func backfillAssetHostname(ctx context.Context, tx *sqlx.Tx, tenantID, assetID uuid.UUID, hostname string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE assets
+		   SET hostname = $3,
+		       display_name = CASE WHEN display_name IS NULL OR display_name = '' THEN $3 ELSE display_name END,
+		       updated_at = now()
+		 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+		   AND (hostname IS NULL OR hostname = '')`,
+		tenantID, assetID, hostname,
+	)
+	return err
+}
+
+// upgradeUnknownHostClass moves an asset off the unassigned unknown_host
+// floor onto hint, source-kind `measured` (a self-report is the host
+// measuring itself, ADR-0002 D4's precedence — see hostObservationSource's
+// Mode: ModeActive for the same reasoning). The `class_key = 'unknown_host'`
+// predicate is the whole safety property: it is a no-op the moment anything
+// — a rule, a human, an import — has ever set a real class, same shape as
+// applyProposedClass (class_proposal_service.go) which this mirrors for the
+// one case that never goes through Approvals.
+func upgradeUnknownHostClass(ctx context.Context, tx *sqlx.Tx, tenantID, assetID uuid.UUID, hint assetclass.Key, sourceRef string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE assets
+		   SET class_key = $3,
+		       class_path = $4,
+		       class_source_kind = 'measured',
+		       class_source_ref = $5,
+		       class_confidence = 1,
+		       updated_at = now()
+		 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND class_key = 'unknown_host'`,
+		tenantID, assetID, string(hint), classPathForKey(string(hint)), sourceRef,
+	)
+	return err
 }

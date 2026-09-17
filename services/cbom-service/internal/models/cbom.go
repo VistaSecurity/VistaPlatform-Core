@@ -133,7 +133,7 @@ type CBOMAlgorithmDetails struct {
 	IsPQC                    bool     `json:"is_pqc"`
 	PQCStandardizationStatus string   `json:"pqc_standardization_status,omitempty"`
 	KeySize                  int      `json:"key_size,omitempty"`
-	RiskScore                int      `json:"risk_score,omitempty"`
+	RiskScore                *int     `json:"risk_score,omitempty"`
 	MigrationGuidance        string   `json:"migration_guidance,omitempty"`
 	RecommendedAlternatives  []string `json:"recommended_alternatives,omitempty"`
 }

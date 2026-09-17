@@ -5,7 +5,7 @@
 // — no fabricated data. Row click opens the tenant drawer.
 import { useMemo, useState } from 'react';
 import { Search, ChevronRight } from 'lucide-react';
-import { Avatar, MiniBar, PlanTag, StatusTag, healthColor, initialsFromName, relTime } from '../../components/ui/primitives';
+import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, relTime } from '../../components/ui/primitives';
 import { useTenants, useTenantHealthMap, tenantStatus, type Tenant, type TenantDisplayStatus } from './queries';
 import { TenantDrawer } from './tenant-drawer';
 import { useScope } from '../../app/scope';
@@ -89,7 +89,7 @@ export function TenantsPage() {
             {rows.map((t) => {
               const plan = t.subscription_tier ?? 'Trial';
               const h = healthMap?.get(t.id);
-              const score = h ? Math.round(h.overall_score) : null;
+              const healthIndex = healthIndexPresentation(h?.overall_score, h?.health_status !== 'unknown');
               return (
                 <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => setOpen(t)}>
                   <td>
@@ -104,10 +104,10 @@ export function TenantsPage() {
                   <td><PlanTag plan={plan} /></td>
                   <td><StatusTag status={tenantStatus(t)} /></td>
                   <td>
-                    {score === null ? <span className="t-muted">—</span> : (
+                    {healthIndex === null ? <span className="t-muted">—</span> : (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="op-num" style={{ color: healthColor(score), fontWeight: 700, width: 20 }}>{score}</span>
-                        <div style={{ width: 40 }}><MiniBar pct={score} color={healthColor(score)} h={5} /></div>
+                        <span className="op-num" style={{ color: healthIndex.color, fontWeight: 700, whiteSpace: 'nowrap' }}>{healthIndex.text}</span>
+                        <div style={{ width: 40 }}><MiniBar pct={healthIndex.score} color={healthIndex.color} h={5} /></div>
                       </div>
                     )}
                   </td>

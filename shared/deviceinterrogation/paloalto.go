@@ -478,8 +478,11 @@ func (c *panClient) apiRequest(ctx context.Context, method, apiURL string) (stri
 
 // convertSSLDecryptProfileToAsset converts an SSL-decrypt profile to a CryptoAsset.
 func (c *panClient) convertSSLDecryptProfileToAsset(profile panSSLDecryptEntry) CryptoAsset {
+	// profile.Name is the admin-chosen config-object label, not a hostname —
+	// kept for display under "profile_name" below, only promoted to Hostname
+	// when it is DNS-valid.
 	return CryptoAsset{
-		Hostname:  profile.Name,
+		Hostname:  canonicalHostnameOrEmpty(profile.Name),
 		Protocol:  "TLS",
 		Port:      443, // Default HTTPS port
 		AssetType: "firewall",
@@ -498,8 +501,11 @@ func (c *panClient) convertSSLDecryptProfileToAsset(profile panSSLDecryptEntry) 
 
 // convertSecurityRuleToAsset converts a security rule with SSL settings to a CryptoAsset.
 func (c *panClient) convertSecurityRuleToAsset(rule panRuleEntry) CryptoAsset {
+	// rule.Name is the admin-chosen rule label, not a hostname — kept for
+	// display under "rule_name" below, only promoted to Hostname when it is
+	// DNS-valid.
 	return CryptoAsset{
-		Hostname:  rule.Name,
+		Hostname:  canonicalHostnameOrEmpty(rule.Name),
 		Protocol:  "TLS",
 		Port:      443, // Default HTTPS port
 		AssetType: "firewall",

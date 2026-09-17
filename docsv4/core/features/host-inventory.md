@@ -53,17 +53,28 @@ remotely and a host described locally produce the same record.
 
 ### Turning local collection on
 
-Two settings on the agent host:
+**From the console:** Discovery → Sensors & Agents → click the agent → **Settings**
+→ turn on **Host inventory enabled** and set **Host inventory interval**. The
+agent picks it up at its next check-in; the tab shows whether it has. To turn it
+on for every agent at once, use **Agent defaults** on the same page. See
+[Agent and sensor settings](./agent-and-sensor-settings.md).
+
+The interval has a **one-hour floor**. A shorter value is raised to the floor,
+and the console says so when it does — asking for five minutes walks the whole
+package database twelve times an hour, which is not what anyone wants from a
+setting they typed once.
+
+**At install time,** before an agent has ever checked in, the same two settings
+can be set on the host:
 
 | Setting | Meaning | Default |
 |---|---|---|
 | `HOST_INVENTORY_ENABLED` | `true` turns the local schedule on | off |
 | `HOST_INVENTORY_INTERVAL` | How often the agent re-describes its host | `24h` |
 
-The interval has a **one-hour floor**. A shorter value is raised to the floor
-and the agent logs that it did so — asking for five minutes walks the whole
-package database twelve times an hour, which is not what anyone wants from a
-setting they typed once.
+These are a **starting position only**. Once the agent is enrolled the control
+plane owns both, and a later edit to the file is overwritten at the next
+check-in — the console is meant to be the one place you look.
 
 To see exactly what would be sent before enabling anything, run the agent with
 `--host-inventory-once`. It collects the host, prints the whole report, and

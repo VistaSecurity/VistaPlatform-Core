@@ -28,6 +28,6 @@ type TenantMeasurementOverride struct {
 type TenantMeasurementOverrideInput struct {
 	ControlMeasurementID string                 `json:"control_measurement_id" binding:"required"`
 	PredicateOverride    map[string]interface{} `json:"predicate_override" binding:"required"`
-	SeverityOverride     *string                `json:"severity_override,omitempty"`
+	SeverityOverride     *string                `json:"severity_override,omitempty" binding:"omitempty,oneof=low medium high critical"`
 	Rationale            string                 `json:"rationale" binding:"required"`
 }

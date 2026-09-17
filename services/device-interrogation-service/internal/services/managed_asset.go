@@ -808,6 +808,18 @@ func mergeAssetTags(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UUID
 //
 // "Empty never wins" (the discovery-envelope rule): a device edit that does not
 // mention the hostname must not clear the hostname the sensor measured.
+//
+// The display name follows the NAME the operator typed, and only that. A
+// person naming a device is the highest-provenance name it will ever have
+// (ADR-0002 D4: declared over measured), and the old `coalesce(display_name,
+// …)` let a measured name that happened to arrive first keep the label for
+// good: on the dev lab the gateway was registered as "lab gateway" and kept
+// displaying as "mbp-m3-alice.local", a laptop's mDNS name the sensor had
+// pinned to it minutes earlier. The hostname column already took the declared
+// value; the label a person reads did not. An ADDRESS typed into the form is
+// not a name and still only fills an empty label — replacing "core-sw-1" with
+// "10.0.0.1" because someone edited the management address would be the same
+// mistake pointed the other way.
 func setAssetAddress(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UUID, hostname, ip string) error {
 	hostname = strings.TrimSpace(hostname)
 	ip = strings.TrimSpace(ip)
@@ -828,10 +840,10 @@ func setAssetAddress(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UUI
 		UPDATE public.assets
 		SET hostname         = coalesce(NULLIF($3, ''), hostname),
 		    primary_address  = coalesce(NULLIF($4, '')::inet, primary_address),
-		    display_name     = coalesce(display_name, NULLIF($3, ''), NULLIF($4, '')),
+		    display_name     = coalesce(NULLIF($5, ''), display_name, NULLIF($4, '')),
 		    updated_at       = now()
 		WHERE tenant_id = $1 AND id = $2`,
-		tenantID, assetID, strings.ToLower(hostname), ip)
+		tenantID, assetID, strings.ToLower(hostname), ip, hostname)
 	return err
 }
 

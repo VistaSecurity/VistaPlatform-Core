@@ -28,6 +28,7 @@ organization.
 - [Production Checklist](./deployment/production-checklist.md)
 - [Service-mesh mTLS](./security/service-mesh-mtls.md) — staging internal mTLS across upgrades, managed-Postgres/NATS notes
 - [Database Migrations](./deployment/database-migrations.md)
+- [Rating vocabulary upgrade](./rating-upgrade.md) — Coordinated API/schema changes, reassessment and evidence limits
 - [Device Agent Deployment](./deployment/device-agent-deployment.md)
 
 ### Operations

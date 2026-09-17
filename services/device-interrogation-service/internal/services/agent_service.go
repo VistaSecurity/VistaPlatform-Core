@@ -276,6 +276,14 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 		-- it, and reporting its timestamp as "last host inventory" would tell an
 		-- operator the agent is reporting when it is not. That is the same
 		-- distinction the materialized count draws on the job row itself.
+		--
+		-- A run the consumer DID reach and then failed (processing.fatal) is
+		-- excluded for the same reason. Its counts block exists — the consumer
+		-- writes it beside the error — and reading it here rendered "Last host
+		-- inventory: 2h ago — 0 packages, 91 listeners" on an agent whose host
+		-- was not in the inventory at all. The failure is the Job Logs line's
+		-- to report; this column says when the host was last actually
+		-- described.
 		LEFT JOIN LATERAL (
 			SELECT COALESCE(dj.completed_at, dj.updated_at) AS at,
 			       (dj.results #>> '{processing,host_inventory,installs_active}')::int AS packages,
@@ -284,6 +292,7 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 			WHERE dj.agent_id = a.id AND dj.deleted_at IS NULL
 			  AND dj.job_type = 'host_inventory'
 			  AND dj.results #> '{processing,host_inventory}' IS NOT NULL
+			  AND NULLIF(dj.results #>> '{processing,fatal}', '') IS NULL
 			ORDER BY COALESCE(dj.completed_at, dj.updated_at) DESC
 			LIMIT 1
 		) hi ON TRUE

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +18,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
+	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
@@ -225,16 +228,17 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		// loop untouched by two steps that would otherwise misread them.
 		hostObservation := isHostObservationDiscovery(discovery)
 
-		// Attempt reverse DNS if no hostname was captured by the sensor.
+		// Fill a missing hostname, preferring measured facts over inference.
 		//
 		// Not for a host observation. Its names are the measurement — what the
 		// host called itself over DHCP, mDNS or NetBIOS — and a resolver answer
-		// is a different claim from a different source. Mixing the two into one
+		// (or a TLS SNI, which is meaningless for a non-TLS observation) is a
+		// different claim from a different source. Mixing the two into one
 		// hostname field destroys the provenance the identification engine
 		// needs, and for an observation whose dest_ip is 0.0.0.0 ("no address
-		// observed") the lookup is a wasted query as well.
+		// observed") a lookup is a wasted query as well.
 		if !hostObservation && (discovery.Hostname == nil || *discovery.Hostname == "") {
-			if resolved := reverseDNSLookup(discovery.DestIP); resolved != "" {
+			if resolved := resolveMissingHostname(discovery.Metadata, discovery.DestIP, reverseDNSLookup); resolved != "" {
 				discovery.Hostname = &resolved
 			}
 		}
@@ -336,7 +340,19 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			Discovery:   discovery,
 		})
 
-		if autoApprove && ruleID != nil {
+		if hostObservation {
+			// A host observation is identity evidence — "this device exists on
+			// a segment we watch" — not a cryptographic finding awaiting a
+			// human's approval. `assetStatus` above still decides what a NEW
+			// asset lands as; this is the separate, row-level answer to "does
+			// this discovery need an approval decision", and for a host
+			// observation the honest answer is that none will ever be made,
+			// whatever the resulting asset's own status is. `observed` says
+			// so as a terminal value, rather than leaving the row `pending`
+			// (or crediting a rule with `auto_approved`) where nothing —
+			// Discovery → Approvals included — will ever clear it.
+			discovery.ApprovalStatus = "observed"
+		} else if autoApprove && ruleID != nil {
 			discovery.ApprovalStatus = "auto_approved"
 			discovery.AutoApprovalRuleID = ruleID
 		} else {
@@ -404,6 +420,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			req.CertValidationStatus = crypto.CertValidationStatus
 			req.CertPEM = crypto.CertPEM
 			req.CertHasSCT = crypto.CertHasSCT
+			req.CertSCTSource = crypto.CertSCTSource
 			req.CertKnownBadCA = crypto.CertKnownBadCA
 			req.CertNoSubject = crypto.CertNoSubject
 			req.CertNoCommonName = crypto.CertNoCommonName
@@ -464,7 +481,9 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		totalImported := 0
 
 		if len(monitoringFindings) > 0 {
-			response, err := p.inventoryClient.ImportFindings(tenantID, batchJobID, monitoringFindings, "monitoring")
+			imported, err := p.importInChunks(tenantID, batchJobID, monitoringFindings, monitoringDiscoveries, "monitoring")
+			totalImported += imported
+			ba.imported = totalImported
 			if err != nil {
 				// Flush what IS settled (the external connections already
 				// upserted above) before bailing, so the retry does not redo
@@ -472,18 +491,16 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 				p.markProcessed(ctx, tenantID, now, marks)
 				return fmt.Errorf("failed to import monitoring findings: %w", err)
 			}
-			totalImported += response.Imported
-			ba.imported = totalImported
 		}
 
 		if len(pendingFindings) > 0 {
-			response, err := p.inventoryClient.ImportFindings(tenantID, batchJobID, pendingFindings, "pending_approval")
+			imported, err := p.importInChunks(tenantID, batchJobID, pendingFindings, pendingDiscoveries, "pending_approval")
+			totalImported += imported
+			ba.imported = totalImported
 			if err != nil {
 				p.markProcessed(ctx, tenantID, now, marks)
 				return fmt.Errorf("failed to import pending findings: %w", err)
 			}
-			totalImported += response.Imported
-			ba.imported = totalImported
 		}
 
 		allDiscoveries := append(monitoringDiscoveries, pendingDiscoveries...)
@@ -624,6 +641,126 @@ func (m *processedMarks) empty() bool { return len(m.order) == 0 }
 //
 // Failures are logged, not returned: the rows simply stay unprocessed and the
 // batch is re-polled, which is the same outcome the per-row version produced.
+// importChunkSize bounds how many findings go to inventory-service in one
+// import call.
+//
+// The import is O(n) on the far side — per finding it resolves identity,
+// scores the catalogue risk and publishes an event, measured at 100-280ms
+// each on a dev cluster — while the client that calls it holds a 30s timeout
+// (client.NewInventoryClient). One call per batch therefore could not survive
+// a batch of any size: seeding a 4-site tenant produced batches of 338, 208
+// and 156 findings, every one of which blew the deadline, exhausted the retry
+// ladder and left its rows marked `rejected` — while inventory-service,
+// which never saw the client leave, finished all three imports anyway and
+// did each of them three times over, once per retry.
+//
+// 50 keeps a chunk near 10s at the slowest observed rate, which leaves room
+// for a far side several times slower than measured before anything times
+// out again.
+const importChunkSize = 50
+
+// importInChunks imports findings in importChunkSize-sized calls, returning
+// how many were imported before any error.
+//
+// Chunks share the batch's job ID: inventory-service uses it only to stamp the
+// audit event, so one logical import stays one job in the audit trail.
+//
+// A chunk that fails abandons the rest — the caller retries the whole batch,
+// and the upserts on the far side are idempotent (proved in anger:'s
+// three concurrent imports of the same batch still produced exactly one crypto
+// implementation per endpoint). Re-importing a chunk that already landed is
+// wasted work, not corruption.
+// discoveries is index-aligned with findings: entry i is the row finding i was
+// converted from, and it is what adoptEffectiveStatus stamps.
+func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, discoveries []*models.SensorDiscovery, assetStatus string) (int, error) {
+	imported := 0
+	for start := 0; start < len(findings); start += importChunkSize {
+		end := start + importChunkSize
+		if end > len(findings) {
+			end = len(findings)
+		}
+		response, err := p.inventoryClient.ImportFindings(tenantID, jobID, findings[start:end], assetStatus)
+		if err != nil {
+			return imported, fmt.Errorf("chunk %d-%d of %d: %w", start, end, len(findings), err)
+		}
+		imported += response.Imported
+		if end > len(discoveries) {
+			// The two slices are built side by side by the caller, so this
+			// cannot happen without a bug — and a silent no-op would leave
+			// every row in the batch stamped from the rule result alone, which
+			// is the failure this function exists to prevent. Say so.
+			fmt.Printf("Warning: %d findings were imported against only %d discovery rows; their row state was left as the rules set it\n",
+				len(findings), len(discoveries))
+			continue
+		}
+		adoptEffectiveStatus(discoveries[start:end], response.AssetStatuses)
+	}
+	return imported, nil
+}
+
+// adoptEffectiveStatus corrects the row state for findings inventory-service
+// materialized despite this service having asked for `pending_approval`.
+//
+// A discovery row is stamped from the auto-approval rule that matched it, and a
+// row that matched none is `pending`. That is right for a finding that created
+// an asset and wrong for one that landed on an asset the tenant approved long
+// ago: inventory-service writes its certificates and crypto configuration
+// immediately, and the row is then pending forever — the only thing that clears
+// pending is a human approving a PENDING ASSET in Discovery → Approvals, and
+// there is no pending asset to approve. Eleven access points with TLS-on-8443
+// rows, and eighty host observations, sat in exactly that state on a dev
+// cluster.
+//
+// `auto_approved` rather than a new value: it is the vocabulary the rest of the
+// system already reads (cluster-sensor-service's per-batch stats count
+// `auto_approved` against everything else), and `auto_approval_rule_id` stays
+// NULL, which says truthfully that no rule fired.
+//
+// It also carries the other side of the same fix: a finding that matched an
+// asset the tenant has taken off the table — `archived` or `denied` —
+// materializes NOTHING (asset_service.go IngestFindings skips both), and no
+// approval decision will ever be made about that row either. `suppressed` says
+// so as a terminal value, the same way `observed` already does for host
+// observations, rather than leaving the row `pending` where nothing will ever
+// clear it.
+//
+// Silence is the safe answer. An inventory-service older than the field sends
+// nothing, and then every row keeps the state it had.
+func adoptEffectiveStatus(discoveries []*models.SensorDiscovery, statuses []string) {
+	if len(statuses) == 0 {
+		return
+	}
+	if len(statuses) != len(discoveries) {
+		// Two slices that should be the same length are not, so no entry can be
+		// trusted to describe the row at its index. Stamping anyway would put
+		// one discovery's outcome on another.
+		fmt.Printf("Warning: inventory-service returned %d asset statuses for %d findings; leaving the discovery rows as they are\n",
+			len(statuses), len(discoveries))
+		return
+	}
+	for i, status := range statuses {
+		d := discoveries[i]
+		if d == nil {
+			continue
+		}
+		if isHostObservationDiscovery(d) {
+			// Already stamped `observed` above, unconditionally, at the point
+			// the row was classified — before inventory-service was even
+			// called. A host observation's discovery row never awaits an
+			// approval decision regardless of which status the resulting
+			// asset landed on, so nothing here may correct it back to
+			// `auto_approved` (or, below, `suppressed`).
+			continue
+		}
+		switch status {
+		case "monitoring":
+			d.ApprovalStatus = "auto_approved"
+		case "archived", "denied":
+			d.ApprovalStatus = "suppressed"
+		}
+	}
+}
+
 func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, now time.Time, marks *processedMarks) {
 	if marks == nil || marks.empty() {
 		return
@@ -775,8 +912,74 @@ func shouldKeepCloudPlaceholderManaged(discovery *models.SensorDiscovery, classi
 	return method == "cloud_api"
 }
 
+// resolveMissingHostname fills a discovery's absent hostname, preferring the
+// TLS SNI the sensor captured off the wire over a reverse-DNS guess.
+//
+// The SNI is what the client itself asked to connect to — a measured fact
+// from the connection — while a PTR answer is hearsay about the address from
+// a third party (and often absent: most cloud/CDN IPs have no PTR record at
+// all, and where one exists it can name infrastructure the client never
+// referenced, such as a load balancer's generic PTR instead of the vhost the
+// client actually requested).
+//
+// The PTR lookup itself only runs for a genuinely PUBLIC destination address
+// — see isPublicAddress. For a private/LAN address the cluster's own resolver
+// is the wrong vantage point (usually unreachable for that address, or
+// answers a different network's idea of it), and weaker evidence besides: the
+// sensor's own passive mDNS/NBNS/LLDP observations are a direct measurement of
+// what the LAN host calls itself, where a PTR answer is not. Sensor-side
+// passive DNS capture is unaffected by this — it is a different code path
+// entirely and never reaches here.
+//
+// lookupPTR is injected — production passes reverseDNSLookup — so callers
+// that only want to exercise the ordering (SNI beats DNS) are not forced to
+// perform a real network lookup.
+func resolveMissingHostname(metadata []byte, destIP string, lookupPTR func(string) string) string {
+	if sni := sniHostnameFromDiscoveryMetadata(metadata); sni != "" {
+		return sni
+	}
+	if !isPublicAddress(destIP) {
+		return ""
+	}
+	return lookupPTR(destIP)
+}
+
+// isPublicAddress reports whether destIP is a genuinely public unicast
+// address — the only case where a reverse-DNS lookup from inside the cluster
+// is meaningful evidence at all.
+//
+// Reuses shared/autoscan's address ladder (the same one automatic active
+// scanning already uses to decide what it may probe) instead of duplicating
+// it: with no registered segments and no exclusions, Classify answers exactly
+// "is this address public" and nothing more — private (RFC 1918 / ULA),
+// loopback, link-local, multicast, unspecified and carrier-grade NAT
+// (100.64.0.0/10) all come back non-public, which is every case's
+// cluster-internal-PTR-name rejection cannot itself rule out (that guard
+// catches a fabricated CLUSTER answer; this guard stops the lookup for a
+// PRIVATE destination before any answer, real or fabricated, is asked for).
+//
+// An address that fails to parse is treated as not public — the safe
+// direction is to skip the lookup, not to guess.
+func isPublicAddress(destIP string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(destIP))
+	if err != nil {
+		return false
+	}
+	_, reason := autoscan.Classify(addr.Unmap(), nil, nil)
+	return reason == autoscan.ReasonPublic
+}
+
 // reverseDNSLookup performs a PTR lookup for the given IP address with a 3s timeout.
 // Returns the first resolved hostname (with trailing dot stripped), or empty string on failure/timeout.
+//
+// This runs from inside a pod on the RKE2/EKS cluster, using the pod's own
+// resolver (kube-dns/CoreDNS). Kubernetes DNS synthesises a PTR answer for any
+// IP it considers "in-cluster" rather than forwarding to the customer's real
+// resolver — so a customer host at, say, 192.0.2.124 came back as
+// "192-0-2-124.kubernetes.default.svc.cluster.local", a name nothing on the
+// customer's network ever answers to. That fabricated name must never become
+// a discovered asset's display name; isClusterInternalPTRName rejects it so
+// the caller falls back to the address until a real name arrives.
 func reverseDNSLookup(ipAddress string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -789,7 +992,50 @@ func reverseDNSLookup(ipAddress string) string {
 	if len(name) > 0 && name[len(name)-1] == '.' {
 		name = name[:len(name)-1]
 	}
+	if isClusterInternalPTRName(name) {
+		return ""
+	}
 	return name
+}
+
+// isClusterInternalPTRName reports whether name is a Kubernetes-synthesised
+// PTR answer rather than a name a real host answers to.
+//
+// Cluster DNS providers (CoreDNS/kube-dns) synthesise reverse-lookup answers
+// for pod/service/node IPs in three recognisable shapes, all rejected here:
+//   - anything ending in ".cluster.local" (the default cluster domain);
+//   - anything with "svc" or "pod" as its own label (".svc.<anything>",
+//     ".pod.<anything>") — clusters can and do run a custom cluster domain,
+//     so the suffix alone is not a reliable signal;
+//   - the general synthesized shape "<a>-<b>-<c>-<d>.<...>", where the first
+//     label is simply the queried IP address with its dots replaced by
+//     dashes. This is the part of the answer that is always fabricated,
+//     whatever domain trails it, so it is checked independent of the other
+//     two rules.
+func isClusterInternalPTRName(name string) bool {
+	lower := strings.ToLower(strings.TrimSuffix(name, "."))
+	if lower == "" {
+		return false
+	}
+	if strings.HasSuffix(lower, ".cluster.local") {
+		return true
+	}
+	labels := strings.Split(lower, ".")
+	for _, label := range labels {
+		if label == "svc" || label == "pod" {
+			return true
+		}
+	}
+	// The first label, with dashes turned back into dots, is the fabricated
+	// IP-shaped name Kubernetes emits for an in-cluster address — check it
+	// regardless of what domain follows.
+	if len(labels) > 0 {
+		candidate := strings.ReplaceAll(labels[0], "-", ".")
+		if ip := net.ParseIP(candidate); ip != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // isHostObservationDiscovery reports whether a stored discovery is a passive
@@ -816,4 +1062,63 @@ func isHostObservationDiscovery(d *models.SensorDiscovery) bool {
 		}
 	}
 	return false
+}
+
+// sniHostnameFromDiscoveryMetadata returns the TLS SNI hostname captured for
+// a stored discovery, or "" when none is present or usable.
+//
+// sensor-manager nests the sensor's own payload under "raw_metadata" and only
+// promotes a fixed set of envelope keys to the top level (version,
+// cipher_suite, key_size, source_ip, discovery_method, discovery_type) — SNI
+// is not one of them, so it is read from the nested object.
+// pcap-processor writes its metadata flat (no envelope), so the top level is
+// checked too; either shape resolves through one unmarshal.
+//
+// "sni" is the first-class key the passive TLS assembler writes
+// (sensor/internal/capture/tls_assembler.go); "sni_server_name" is the older
+// spelling kept alongside it there and, for STARTTLS sessions, written alone
+// (sensor/internal/capture/starttls_assembler.go never gained the "sni"
+// alias). Both are checked, "sni" first.
+func sniHostnameFromDiscoveryMetadata(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return ""
+	}
+	if s := sniHostnameFromMap(metadata); s != "" {
+		return s
+	}
+	if nested, ok := metadata["raw_metadata"].(map[string]interface{}); ok {
+		return sniHostnameFromMap(nested)
+	}
+	return ""
+}
+
+// sniHostnameFromMap reads "sni"/"sni_server_name" from one metadata level,
+// rejecting anything that is not a plausible DNS name. An IP literal is not a
+// hostname — RFC 6066 server_name is a DNS identity check, not an address —
+// and net.ParseIP is the standard way to reject one before it reaches a
+// hostname column.
+func sniHostnameFromMap(m map[string]interface{}) string {
+	for _, key := range []string{"sni", "sni_server_name"} {
+		v, ok := m[key]
+		if !ok || v == nil {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			continue
+		}
+		if net.ParseIP(s) != nil {
+			continue
+		}
+		return s
+	}
+	return ""
 }

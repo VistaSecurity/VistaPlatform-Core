@@ -72,8 +72,14 @@ func unifiVPNAsset(conf map[string]interface{}, controllerHost string) CryptoAss
 	asset.Metadata["source"] = "unifi_networkconf"
 	asset.Metadata["vpn_purpose"] = purpose
 
+	// conf["name"] is the operator-chosen label for the VPN network config
+	// ("Office VPN"), not necessarily a DNS name. Kept for display in
+	// Metadata via unifiSanitizeConf above; only promote it to Hostname when
+	// it is DNS-valid.
 	if name, ok := conf["name"].(string); ok {
-		asset.Hostname = name
+		if hostname := canonicalHostnameOrEmpty(name); hostname != "" {
+			asset.Hostname = hostname
+		}
 	}
 
 	// The VPN terminates on the gateway; prefer the tunnel-local address the

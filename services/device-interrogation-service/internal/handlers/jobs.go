@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -73,6 +74,17 @@ type HostInventoryCounts struct {
 	// be settled. Neither a failure nor a success, and the log line must not
 	// read as either.
 	Contested bool `json:"contested,omitempty"`
+	// Failed is the consumer's fatal error when the collection reached it and
+	// was NOT materialised — the report is on the job row, and nothing below
+	// landed. Absent on a run that materialised.
+	//
+	// It changes what every other number here MEANS. The counts are what the
+	// consumer had assembled when it failed: a run that resolved 91 listeners
+	// and then died writing them still carries `endpoints: 91`, and a log line
+	// that printed "91 listeners" for it read as a success for a host that was
+	// not in the inventory. That is the "reports success while doing nothing"
+	// failure this field exists to make impossible.
+	Failed string `json:"failed,omitempty"`
 }
 
 // hostInventoryFromResults extracts the host-inventory counts from a job's
@@ -128,6 +140,13 @@ func hostInventoryFromResults(resultsJSON string) *HostInventoryCounts {
 			active = *stored.InstallsActive
 		}
 		out.Packages = &active
+	}
+	// The consumer records a materialisation failure beside the counts, as
+	// `processing.fatal` (services.ProcessingLog), because the intake has
+	// already answered the agent by then and the row is the only place left
+	// to say it. Surface it, or the counts above read as a success.
+	if fatal, ok := payload.Processing["fatal"].(string); ok && strings.TrimSpace(fatal) != "" {
+		out.Failed = strings.TrimSpace(fatal)
 	}
 	return out
 }

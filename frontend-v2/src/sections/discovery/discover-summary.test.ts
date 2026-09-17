@@ -48,6 +48,28 @@ describe('describeMaterialization', () => {
     const s = describeMaterialization(1, { findings: 1, queued: 1, auto_approved: 1, pending_approval: 0, awaiting_processing: 0 });
     expect(s.note).toContain('network segments with auto-approve enabled');
   });
+
+  // Suppressed rows matched an asset the tenant already archived or denied —
+  // nothing was added, and nothing is awaiting a decision either, so this must
+  // read as neither "added to inventory" nor "awaiting approval".
+  it('states suppressed findings separately from added or awaiting', () => {
+    const s = describeMaterialization(4, {
+      findings: 4, queued: 4, auto_approved: 1, pending_approval: 0, awaiting_processing: 0, suppressed: 3,
+    });
+    expect(texts(4, {
+      findings: 4, queued: 4, auto_approved: 1, pending_approval: 0, awaiting_processing: 0, suppressed: 3,
+    })).toContain('3 findings on denied or archived assets — not shown in Approvals');
+    // Not the "0 added to inventory" fallback — 1 auto-approved is real.
+    expect(s.parts.map((p) => p.text)).not.toContain('0 added to inventory');
+  });
+
+  it('a purely suppressed job does not fall back to "0 added to inventory"', () => {
+    const s = describeMaterialization(2, {
+      findings: 2, queued: 2, auto_approved: 0, pending_approval: 0, awaiting_processing: 0, suppressed: 2,
+    });
+    expect(s.parts.map((p) => p.text)).toContain('2 findings on denied or archived assets — not shown in Approvals');
+    expect(s.parts.map((p) => p.text)).not.toContain('0 added to inventory');
+  });
 });
 
 describe('the Discover wizard has no import step', () => {

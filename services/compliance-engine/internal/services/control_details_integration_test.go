@@ -36,7 +36,7 @@ func TestIntegration_GetControlDetails_LowSeverityViolationsAreFailing(t *testin
 	f := newAuthoringFixture(t, "published")
 	seedTenantInventory(t, f.db, f.tenant)
 
-	controlID := f.newControl(t, "CD-1", "Low")
+	controlID := f.newControl(t, "CD-1", "low")
 	f.seedMeasurementRow(t, controlID)
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
 
@@ -85,7 +85,7 @@ func TestIntegration_GetControlDetails_CleanControlScores100(t *testing.T) {
 	f := newAuthoringFixture(t, "published")
 	seedTenantInventory(t, f.db, f.tenant)
 
-	controlID := f.newControl(t, "CD-2", "High")
+	controlID := f.newControl(t, "CD-2", "high")
 	f.seedMeasurementRow(t, controlID)
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
 
@@ -117,7 +117,7 @@ func TestIntegration_GetControlDetails_NoMeasurementsIsNotAssessed(t *testing.T)
 	seedTenantInventory(t, f.db, f.tenant)
 
 	// Deliberately no measurement row.
-	controlID := f.newControl(t, "CD-3", "Critical")
+	controlID := f.newControl(t, "CD-3", "critical")
 	evaluatedAtRollup(t, f.db, f.tenant, f.frameworkID, time.Now())
 
 	details, err := NewEvaluationService(f.db).GetControlDetails(

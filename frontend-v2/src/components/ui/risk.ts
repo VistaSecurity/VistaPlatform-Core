@@ -1,11 +1,12 @@
-// Risk-level model — the shared scoring vocabulary (high score = worse).
-// Ported from the mock's primitives.jsx. The authoritative severity *grading*
-// (which value → which level) is a backend concern (Severity Ratings, ADR-0009,
-// stubbed for now); this module only owns the presentation of a level.
+// Risk presentation tokens. Numeric grading comes from the generated,
+// React-free twin of the Go owner in @vistasecurity/primitives/ratings.
+import {
+  RISK_BANDS, RISK_LEVELS, riskLevelFromScore, type RiskLevel as CanonicalRiskLevel,
+} from '@vistasecurity/primitives/ratings';
 
-export type RiskLevel = 'Critical' | 'High' | 'Medium' | 'Low' | 'Informational';
+export type RiskLevel = CanonicalRiskLevel;
 
-export const LEVELS: RiskLevel[] = ['Critical', 'High', 'Medium', 'Low', 'Informational'];
+export const LEVELS: RiskLevel[] = [...RISK_LEVELS];
 
 export const LEVEL_COLOR: Record<RiskLevel, string> = {
   Critical: 'var(--danger)',
@@ -24,20 +25,19 @@ export const riskColor = (lvl: string): string => LEVEL_COLOR[lvl as RiskLevel] 
 // Ladder must match the backend's canonical, CVSS-anchored bands exactly —
 // see services/inventory-service/internal/models/risk_bands.go (RiskBands /
 // GetRiskLevel). Critical >=90, High >=70, Medium >=40, Low >=1,
-// Informational == 0 only (0 means NOT ASSESSED, not "safe" — keep it a
-// distinct band, not folded into Low). Do not hand-drift these boundaries;
+// Informational is measured zero; availability is a separate field contract.
+// Do not hand-drift these boundaries;
 // a mismatch here previously made an asset scoring 60-69 show a "High" badge
 // while the backend summary/facets counted it "Medium" (F5 in the audit).
-export const levelFromScore = (s: number): RiskLevel =>
-  s >= 90 ? 'Critical' : s >= 70 ? 'High' : s >= 40 ? 'Medium' : s >= 1 ? 'Low' : 'Informational';
+export const levelFromScore = riskLevelFromScore;
 
 // The minimum score for each band, exported so captions ("risk score ≥ N")
 // can be built from the same numbers levelFromScore uses instead of a
 // hand-typed literal drifting out of sync with it (L-4: a caption once read
 // "≥ 60" while the actual High threshold was 70).
-export const LEVEL_MIN: Record<RiskLevel, number> = {
-  Critical: 90, High: 70, Medium: 40, Low: 1, Informational: 0,
-};
+export const LEVEL_MIN = Object.fromEntries(
+  RISK_BANDS.map((band) => [band.label, band.min]),
+) as Record<RiskLevel, number>;
 
 /** Heat ramp for matrices: 0 → transparent, rising → amber → red. */
 export function heatColor(ratio: number): string {
@@ -51,7 +51,7 @@ export function heatColor(ratio: number): string {
 
 /** Count items by level into a {level: n} record. */
 export function byLevel<T>(items: T[], get: (t: T) => string): Record<RiskLevel, number> {
-  const out = { Critical: 0, High: 0, Medium: 0, Low: 0, Informational: 0 } as Record<RiskLevel, number>;
+  const out = Object.fromEntries(LEVELS.map((level) => [level, 0])) as Record<RiskLevel, number>;
   for (const it of items) {
     const l = get(it) as RiskLevel;
     if (l in out) out[l]++;
@@ -59,5 +59,8 @@ export function byLevel<T>(items: T[], get: (t: T) => string): Record<RiskLevel,
   return out;
 }
 
-export const worstLevel = (counts: Record<RiskLevel, number>): RiskLevel =>
-  LEVELS.find((l) => counts[l] > 0) ?? 'Informational';
+export function worstLevel(counts: Record<RiskLevel, number>, fallback: 'Unknown'): RiskLevel | 'Unknown';
+export function worstLevel(counts: Record<RiskLevel, number>): RiskLevel;
+export function worstLevel(counts: Record<RiskLevel, number>, fallback: RiskLevel | 'Unknown' = 'Informational'): RiskLevel | 'Unknown' {
+  return LEVELS.find((l) => counts[l] > 0) ?? fallback;
+}

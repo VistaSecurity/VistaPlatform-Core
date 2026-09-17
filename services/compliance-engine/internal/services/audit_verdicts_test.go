@@ -345,28 +345,28 @@ func TestEvaluateMeasurement_SeverityFallsBackToControlBaseline(t *testing.T) {
 	mt := models.MeasurementType{Code: "tls_version"}
 
 	t.Run("baseline is used when no override is set", func(t *testing.T) {
-		passed, severity := ev.evaluateMeasurement(value, measurement, mt, "Critical")
+		passed, severity := ev.evaluateMeasurement(value, measurement, mt, "critical")
 		if passed {
 			t.Fatal("fixture should produce a violation")
 		}
-		if severity != "Critical" {
+		if severity != "critical" {
 			t.Errorf("severity = %q, want the control's baseline Critical (not the literal Med)", severity)
 		}
 	})
 
 	t.Run("severity_override still wins", func(t *testing.T) {
 		overridden := measurement
-		overridden.SeverityOverride = "Low"
-		_, severity := ev.evaluateMeasurement(value, overridden, mt, "Critical")
-		if severity != "Low" {
+		overridden.SeverityOverride = "low"
+		_, severity := ev.evaluateMeasurement(value, overridden, mt, "critical")
+		if severity != "low" {
 			t.Errorf("severity = %q, want the measurement override Low", severity)
 		}
 	})
 
-	t.Run("Med remains the last resort", func(t *testing.T) {
+	t.Run("missing severity is not defaulted", func(t *testing.T) {
 		_, severity := ev.evaluateMeasurement(value, measurement, mt, "")
-		if severity != "Med" {
-			t.Errorf("severity = %q, want Med when the control carries no baseline either", severity)
+		if severity != "" {
+			t.Errorf("severity = %q, want no invented grade", severity)
 		}
 	})
 }
@@ -392,8 +392,8 @@ func TestLiveControlStatusIsDrivenByViolationsNotSeverity(t *testing.T) {
 
 	// The regression itself: severity no longer participates. A control whose
 	// only finding is Low must FAIL exactly as a Critical one does.
-	for _, severity := range []string{"Low", "Med", "High", "Critical"} {
-		b := frameworkScore([]controlOutcome{{BaselineSeverity: severity, Status: statusForFindings(true)}})
+	for _, severity := range []string{"low", "medium", "high", "critical"} {
+		b := scoreForTest(t, []controlOutcome{{BaselineSeverity: severity, Status: statusForFindings(true)}})
 		if b.Score == nil {
 			t.Errorf("baseline %s: a violated control has no score; it was assessed and it failed", severity)
 		} else if *b.Score != 0 {

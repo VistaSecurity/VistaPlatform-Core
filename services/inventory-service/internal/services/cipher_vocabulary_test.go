@@ -33,7 +33,7 @@ func cryptoImplWithSuite(cipherSuite string) *models.CryptoImplementation {
 // used to land on them.
 func fakeCatalogue() []Algorithm {
 	mk := func(code, category string, risk int) Algorithm {
-		return Algorithm{ID: uuid.New(), Code: code, Category: category, RiskScore: risk, Strength: "strong"}
+		return Algorithm{ID: uuid.New(), Code: code, Category: category, RiskScore: scorePtr(risk), Strength: "strong"}
 	}
 	return []Algorithm{
 		// symmetric
@@ -463,7 +463,7 @@ func TestClassifyRisk_ECKeyIsNotAWeakRSAKey(t *testing.T) {
 			r := &CryptoRisk{ID: uuid.New()}
 			s.classifyRisk(r, &v, &cipher, &hash, &k, &ks, nil)
 			if r.Category == "key_size" {
-				t.Fatalf("%s with a 256-bit key was flagged %s/%s: %s", kex, r.Severity, r.IssueType, r.Description)
+				t.Fatalf("%s with a 256-bit key was flagged %s/%s: %s", kex, riskSeverityValue(r), r.IssueType, r.Description)
 			}
 		})
 	}
@@ -496,8 +496,8 @@ func TestClassifyRisk_WeakRSAStillFlagged(t *testing.T) {
 			}
 			continue
 		}
-		if r.Category != "key_size" || r.Severity != tc.severity {
-			t.Fatalf("RSA-%d: got %s/%s, want key_size/%s", tc.keySize, r.Severity, r.Category, tc.severity)
+		if r.Category != "key_size" || riskSeverityValue(r) != tc.severity {
+			t.Fatalf("RSA-%d: got %s/%s, want key_size/%s", tc.keySize, riskSeverityValue(r), r.Category, tc.severity)
 		}
 	}
 }

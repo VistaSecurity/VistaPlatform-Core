@@ -215,3 +215,177 @@ func TestDeriveCipherComponents_SSHDoesNotOverrideExplicitFields(t *testing.T) {
 		t.Errorf("ProtocolVersion = %v, want SSH-2.0 derived from the banner", got.ProtocolVersion)
 	}
 }
+
+// activeProbeSSHFinding mirrors what an active SSH probe now emits after the
+// KEXINIT pass (shared/discovery/probe_ssh_kexinit.go): the server's own
+// offer, the algorithms that offer negotiates against the probe's strong-first
+// lists, and the host key the key exchange actually delivered.
+//
+// The probe's own client name-lists are deliberately NOT in the finding — they
+// describe the prober, not the asset — so the ingest cannot reconstruct a
+// negotiated algorithm here and must take the reported one.
+func activeProbeSSHFinding() IngestFinding {
+	return IngestFinding{
+		Protocol: "SSH",
+		RawData: map[string]interface{}{
+			"ssh_banner":             "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5",
+			"ssh_software_version":   "OpenSSH_9.6p1",
+			"ssh_host_key_type":      "rsa-sha2-512",
+			"ssh_kex_algorithm":      "curve25519-sha256",
+			"ssh_host_key_algorithm": "rsa-sha2-512",
+			"ssh_encryption_alg_c2s": "aes256-ctr",
+			"ssh_mac_alg_c2s":        "hmac-sha2-256",
+			"ssh_kex_algorithms_server": []interface{}{
+				"curve25519-sha256", "diffie-hellman-group14-sha256", "diffie-hellman-group1-sha1",
+			},
+			"ssh_host_key_algs_server":       []interface{}{"rsa-sha2-512", "ssh-rsa"},
+			"ssh_encryption_algs_c2s_server": []interface{}{"aes256-ctr", "aes128-cbc"},
+			"ssh_encryption_algs_s2c_server": []interface{}{"aes256-ctr", "3des-cbc"},
+			"ssh_mac_algs_c2s_server":        []interface{}{"hmac-sha2-256", "hmac-md5"},
+		},
+	}
+}
+
+// TestSSHObservation_ActiveProbeReportsNegotiatedComponents is the ingest half
+// of the KEXINIT work. Before it, an actively probed SSH server produced only
+// a protocol version and a host key type: key_exchange_algorithm,
+// symmetric_encryption and hash_algorithm all stayed NULL because the ingest
+// could only reconstruct them from two name-lists and an active probe carries
+// one. The probe now reports the negotiated values directly, and this asserts
+// they reach the component columns.
+func TestSSHObservation_ActiveProbeReportsNegotiatedComponents(t *testing.T) {
+	obs := sshObservationFromFinding(activeProbeSSHFinding())
+
+	if !obs.Present {
+		t.Fatal("Present = false for an active SSH probe finding")
+	}
+	measured := map[string]struct{ got, want string }{
+		"ProtocolVersion": {obs.ProtocolVersion, "SSH-2.0"},
+		"HostKeyType":     {obs.HostKeyType, "rsa-sha2-512"},
+		"KeyExchange":     {obs.KeyExchange, "curve25519-sha256"},
+		"Symmetric":       {obs.Symmetric, "aes256-ctr"},
+		"Hash":            {obs.Hash, "hmac-sha2-256"},
+	}
+	for name, c := range measured {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", name, c.got, c.want)
+		}
+	}
+
+	cols := obs.sshDerivedColumns()
+	columns := map[string]struct {
+		got  *string
+		want string
+	}{
+		"protocol_version":    {cols.ProtocolVersion, "SSH-2.0"},
+		"signature_algorithm": {cols.Signature, "rsa-sha2-512"},
+		"key_exchange":        {cols.KeyExchange, "curve25519-sha256"},
+		"symmetric":           {cols.Symmetric, "aes256-ctr"},
+		"hash":                {cols.Hash, "hmac-sha2-256"},
+	}
+	for name, c := range columns {
+		if c.got == nil {
+			t.Errorf("%s column is NULL — the column this whole path exists to fill", name)
+			continue
+		}
+		if *c.got != c.want {
+			t.Errorf("%s column = %q, want %q", name, *c.got, c.want)
+		}
+	}
+}
+
+// The server's weak OFFERS must survive alongside the strong negotiated
+// choice. A server that negotiates curve25519-sha256 with a modern client but
+// still offers diffie-hellman-group1-sha1 and ssh-rsa is reachable at those
+// algorithms by anyone who asks, and worst-component-wins scoring depends on
+// the offers being linked.
+func TestSSHObservation_ActiveProbeKeepsWeakOffers(t *testing.T) {
+	obs := sshObservationFromFinding(activeProbeSSHFinding())
+
+	offers := map[string]struct {
+		got  []string
+		want []string
+	}{
+		"OfferedKex":      {obs.OfferedKex, []string{"curve25519-sha256", "diffie-hellman-group14-sha256", "diffie-hellman-group1-sha1"}},
+		"OfferedHostKeys": {obs.OfferedHostKeys, []string{"rsa-sha2-512", "ssh-rsa"}},
+		"OfferedCiphers":  {obs.OfferedCiphers, []string{"aes256-ctr", "aes128-cbc", "3des-cbc"}},
+		"OfferedMACs":     {obs.OfferedMACs, []string{"hmac-sha2-256", "hmac-md5"}},
+	}
+	for name, c := range offers {
+		if !reflect.DeepEqual(c.got, c.want) {
+			t.Errorf("%s = %v, want %v", name, c.got, c.want)
+		}
+	}
+
+	// Offers are NOT measured: they must never reach the component columns,
+	// which seeded compliance predicates read as "what this server uses".
+	cols := obs.sshDerivedColumns()
+	if cols.KeyExchange == nil || *cols.KeyExchange == "diffie-hellman-group1-sha1" {
+		t.Errorf("key_exchange column = %v, an offer must not be written as measured", cols.KeyExchange)
+	}
+}
+
+// ssh-rsa signs the exchange hash with SHA-1. A server that offers it while
+// presenting a modern rsa-sha2-512 host key to the probe looks clean unless
+// the OFFERED host key algorithms are linked too — which is why
+// ssh_host_key_algs_server exists and why classifyAndLinkSSH links it.
+func TestSSHObservation_OfferedHostKeyAlgorithmsAreCollected(t *testing.T) {
+	f := activeProbeSSHFinding()
+	obs := sshObservationFromFinding(f)
+
+	var sawWeak bool
+	for _, a := range obs.OfferedHostKeys {
+		if a == "ssh-rsa" {
+			sawWeak = true
+		}
+	}
+	if !sawWeak {
+		t.Fatalf("OfferedHostKeys = %v, want the SHA-1 ssh-rsa offer preserved", obs.OfferedHostKeys)
+	}
+
+	// A finding carrying ONLY the offered host-key list still registers as
+	// SSH: ssh_host_key_algs_server has to be in sshRawKeys, or a probe that
+	// got no further than KEXINIT is not recognised as an SSH finding at all.
+	only := IngestFinding{
+		Protocol: "",
+		RawData:  map[string]interface{}{"ssh_host_key_algs_server": []interface{}{"ssh-rsa"}},
+	}
+	if !sshObservationFromFinding(only).Present {
+		t.Error("a finding carrying only ssh_host_key_algs_server was not recognised as SSH")
+	}
+}
+
+// The AEAD suppression rule has to apply to the DIRECTLY REPORTED cipher too,
+// not only to a reconstructed one — otherwise an active probe against a
+// chacha20-poly1305 server records a MAC that the connection never used.
+func TestSSHObservation_ActiveProbeAEADSuppressesReportedMAC(t *testing.T) {
+	f := activeProbeSSHFinding()
+	f.RawData["ssh_encryption_alg_c2s"] = "chacha20-poly1305@openssh.com"
+
+	obs := sshObservationFromFinding(f)
+	if obs.Symmetric != "chacha20-poly1305@openssh.com" {
+		t.Errorf("Symmetric = %q", obs.Symmetric)
+	}
+	if obs.Hash != "" {
+		t.Errorf("Hash = %q, want \"\" — an AEAD cipher negotiates no separate MAC", obs.Hash)
+	}
+	if len(obs.OfferedMACs) == 0 {
+		t.Error("the server's MAC offers must survive suppression of the negotiated MAC")
+	}
+}
+
+// A passive capture carries both name-lists and no directly reported choice,
+// so reconstruction must remain the path for it. This is the regression guard
+// for making the reported value win: if the new "reported first" branch were
+// written so it also swallowed the empty case, every passive SSH finding would
+// silently lose its negotiated cipher and MAC.
+func TestSSHObservation_PassiveCaptureStillReconstructs(t *testing.T) {
+	obs := sshObservationFromFinding(passiveSSHFinding())
+
+	if obs.Symmetric != "aes256-ctr" {
+		t.Errorf("Symmetric = %q, want aes256-ctr reconstructed from both name-lists", obs.Symmetric)
+	}
+	if obs.Hash != "hmac-sha2-256" {
+		t.Errorf("Hash = %q, want hmac-sha2-256 reconstructed from both name-lists", obs.Hash)
+	}
+}

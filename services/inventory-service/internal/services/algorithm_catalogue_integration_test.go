@@ -67,6 +67,19 @@ func TestIntegration_AlgorithmCatalogue_ClassifiesEverythingItMust(t *testing.T)
 	}
 }
 
+// Every row shipped by this repository has a deliberate score. This is the
+// evidence audit for the committed catalogue sources; it does not authorize a
+// backfill of operator-created NULL rows, whose intended assessment is unknown.
+func TestIntegration_AlgorithmCatalogue_ShippedRowsHaveExplicitRiskScores(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+
+	missing := queryStrings(t, db, `SELECT code FROM algorithms WHERE risk_score IS NULL ORDER BY code`)
+	if len(missing) > 0 {
+		t.Fatalf("shipped algorithm rows without an explicit risk score: %v", missing)
+	}
+}
+
 // Internal consistency. These are relationships that must hold for the ratings
 // to be trustworthy; a violation means two columns disagree about the same
 // algorithm.

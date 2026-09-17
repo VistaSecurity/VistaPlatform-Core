@@ -60,6 +60,12 @@ export function enumerationSummary(e: EnumerationCounts | undefined): string | n
  */
 export function hostInventorySummary(h: HostInventoryCounts | undefined): string | null {
   if (!h) return null;
+  // A run the consumer reached and could NOT materialise. The counts beside it
+  // are what the consumer had assembled when it failed — 91 listeners it never
+  // wrote — and rendering them made a failed run read "91 listeners", a
+  // success for a host that was not in the inventory. The failure is the whole
+  // line; nothing after it is true of the inventory.
+  if (h.failed) return `host inventory NOT materialised — ${h.failed}`;
   const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
   const parts = [
     h.contested ? 'identity contested — merge proposal waiting' : null,

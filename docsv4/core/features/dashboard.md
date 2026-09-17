@@ -8,7 +8,7 @@ Someone running the estate wants to know what is out there, what is waiting for 
 
 ### Cryptographic posture
 
-The top panel. A risk index, a thirty-day trend and your observed third-party exposure. What proportion of your assets are at high risk, how many critical findings are open, and how many of your cryptographic configurations are already post-quantum.
+The top panel. The headline is the **percentage of monitored assets that are high-risk**, with the numerator and denominator shown beside it. It is a population share, so it does not receive an individual-risk band. An empty monitored population shows a dash rather than 0%. The panel also shows the thirty-day individual-risk trend, observed third-party exposure, open critical findings, and post-quantum adoption.
 
 ### Inventory health
 
@@ -34,7 +34,7 @@ The **Topology** link beside the heading opens the [map's topology view](./map.m
 
 ## Reading "Data quality"
 
-This is the score of **Inventory Hygiene**, one of the free [compliance frameworks](./compliance-frameworks.md) every edition ships. It asks the questions an auditor asks about the records themselves rather than about the cryptography: does every asset have an owner, a business unit, an environment; has anything gone unseen for too long; is anything still sitting unapproved.
+This is the **percentage score** of **Inventory Hygiene**, one of the free [compliance frameworks](./compliance-frameworks.md) every edition ships. It asks the questions an auditor asks about the records themselves rather than about the cryptography: does every asset have an owner, a business unit, an environment; has anything gone unseen for too long; is anything still sitting unapproved. The gauge shows `%` and uses Inventory Hygiene's existing green/amber/red feedback; those colours are not individual-risk bands.
 
 Three numbers sit beside the gauge, and the third is the important one:
 

@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	inventorydb "github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/producers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/riskrollup"
@@ -62,9 +65,10 @@ import (
 // tenant, so N producers would otherwise pay for N full recomputes to reach the
 // same answer the last one gives.
 type FindingProducerJob struct {
-	eol    *producers.EOLProducer
-	vuln   *producers.VulnerabilityProducer
-	crypto *producers.CryptoProducer
+	external *services.ExternalConnectionsService
+	eol      *producers.EOLProducer
+	vuln     *producers.VulnerabilityProducer
+	crypto   *producers.CryptoProducer
 	// config and hygiene are workstream 3.5's producers, drift is 4.7's. They
 	// read only the tenant's own inventory — no catalogue, no mirror — so they
 	// need one handle and cannot be held up by a feed that has never run.
@@ -140,7 +144,9 @@ func NewFindingProducerJob(appDB, bypassDB *sql.DB) (*FindingProducerJob, error)
 		auditServiceURL = sharedconfig.PeerURL("audit-service", sharedconfig.MTLSEnabled())
 	}
 
+	externalDB := &inventorydb.DB{DB: sqlx.NewDb(appDB, "postgres")}
 	j := &FindingProducerJob{
+		external:        services.NewExternalConnectionsService(externalDB, services.NewAlgorithmService(externalDB)),
 		eol:             eol,
 		vuln:            vuln,
 		crypto:          crypto,
@@ -334,6 +340,23 @@ func (j *FindingProducerJob) runAllTenants(ctx context.Context) {
 // to avoid.
 func (j *FindingProducerJob) runTenant(ctx context.Context, tenantID uuid.UUID) bool {
 	ok := true
+	// External-only tenants participate too. Each bounded batch commits on its
+	// own; a failed batch keeps its cursor unchanged and retries next pass.
+	if j.external != nil {
+		after := uuid.Nil
+		for {
+			next, n, err := j.external.ReassessBatch(ctx, tenantID, after, 200)
+			if err != nil {
+				ok = false
+				j.logger.Printf("ERROR: external strength reassessment failed for tenant %s: %v", tenantID, err)
+				break
+			}
+			if n == 0 {
+				break
+			}
+			after = next
+		}
+	}
 
 	if run, err := j.eol.Run(ctx, tenantID); err != nil {
 		ok = false
@@ -462,7 +485,7 @@ func (j *FindingProducerJob) tenantsToProcess() ([]uuid.UUID, error) {
 	if j.bypassDB == nil {
 		return nil, nil
 	}
-	rows, err := j.bypassDB.Query(`SELECT DISTINCT tenant_id FROM assets WHERE deleted_at IS NULL`)
+	rows, err := j.bypassDB.Query(`SELECT tenant_id FROM assets WHERE deleted_at IS NULL UNION SELECT tenant_id FROM external_connections`)
 	if err != nil {
 		return nil, err
 	}

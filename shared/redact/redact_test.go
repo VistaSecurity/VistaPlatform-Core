@@ -394,3 +394,24 @@ func TestMap_NoSecretValueSurvivesSerialization(t *testing.T) {
 		t.Error("Map dropped legitimate inventory data")
 	}
 }
+
+// TestTextPEMRedactsAHeadlessBeginHeader pins the fragment case: a string cut
+// at a line or length bound before redaction keeps only the BEGIN header, which
+// the full-block rule cannot match. The header alone still names key material
+// and must not ship — the SSH identification reader takes one line, so this is
+// exactly what a banner carrying a pasted key looks like by the time it is
+// redacted.
+func TestTextPEMRedactsAHeadlessBeginHeader(t *testing.T) {
+	in := "SSH-2.0-OpenSSH_9.6 support -----BEGIN RSA PRIVATE KEY-----"
+	got := TextPEM(in)
+	if strings.Contains(got, "PRIVATE KEY") {
+		t.Fatalf("headless BEGIN header shipped: %q", got)
+	}
+	if got != "SSH-2.0-OpenSSH_9.6 support "+Marker {
+		t.Fatalf("got %q, want the prefix kept and the fragment replaced by the marker", got)
+	}
+	// A public artefact's header is posture, not material, and passes through.
+	if pub := "x -----BEGIN CERTIFICATE-----"; TextPEM(pub) != pub {
+		t.Fatalf("a certificate header was redacted: %q", TextPEM(pub))
+	}
+}

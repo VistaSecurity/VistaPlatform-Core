@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
@@ -154,6 +153,11 @@ func (jp *JobProcessor) pollForStuckJobs() {
 					}
 				}
 			}
+
+			// Jobs handed to a tenant sensor that never collected the command,
+			// refused it, or went quiet mid-run. Same cross-tenant sweep, same
+			// bypass handle, same reason.
+			jp.sweepStaleDispatches(jp.ctx)
 		case <-jp.ctx.Done():
 			return
 		}
@@ -201,6 +205,15 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 			log.Printf("Failed to mark job %s failed after rate limit — job may be stuck in its previous state: %v", jobID, statusErr)
 		}
 		return nil // Permanent failure, don't redeliver
+	}
+
+	// A `sensors` job is handed to the tenant's sensor, not run here. The
+	// dispatcher records the outcome on the row (awaiting_sensor, or failed
+	// with the reason) and the sensor's completion callback finishes it; this
+	// processor must not touch its status again, or a dispatched job would be
+	// marked completed by a scan that never ran.
+	if isSensorExecutionMode(job.ExecutionMode) {
+		return jp.dispatchToSensor(job)
 	}
 
 	// Update job status to running
@@ -264,20 +277,21 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 		return jp.delegateToDeviceInterrogation(job)
 	}
 
-	// "sensors" means "run this from a tenant-deployed sensor", and there is no
-	// dispatcher for that. This branch used to be absent, so such a job fell
-	// through to the in-cluster nmap path below: the scan ran from the platform
-	// cluster, could not reach a target only the tenant's sensor can see, and the
-	// job finished `completed` with zero findings and no indication the sensor was
-	// never involved. Fail it loudly instead.
-	//
-	// Creation is now rejected at every entry point, so this only catches rows
-	// written before that guard existed (or by a future writer that forgets it) —
-	// which is exactly when a silent wrong-executor run would be hardest to spot.
-	if strings.EqualFold(strings.TrimSpace(job.ExecutionMode), "sensors") {
-		log.Printf("Job %s requests tenant-sensor execution, which has no dispatcher; failing rather than running it in-cluster", job.ID)
-		return fmt.Errorf("execution_mode \"sensors\" is not supported: this job asked to run on a tenant-deployed sensor, " +
-			"and dispatching discovery jobs to sensors is not implemented. Re-create the job with execution_mode \"cloud\" or \"auto\"")
+	// "sensors" means "run this from a tenant-deployed sensor", and the
+	// dispatcher (sensor_dispatcher.go) is where such a job goes —
+	// processDiscoveryJobByID routes it there before this function is ever
+	// called. This branch is the last line: before the dispatcher existed, a
+	// `sensors` job fell through to the in-cluster nmap path below, the scan
+	// ran from the platform cluster, could not reach a target only the
+	// tenant's sensor can see, and the job finished `completed` with zero
+	// findings and no indication the sensor was never involved. Any `sensors`
+	// row that reaches this path — a future caller that forgets the routing,
+	// a retry that skips it — must FAIL, never run somewhere the caller did
+	// not ask for. Mutation-tested: TestProcessDiscoveryJob_FailsSensorExecutionMode.
+	if isSensorExecutionMode(job.ExecutionMode) {
+		log.Printf("Job %s asked for a tenant sensor but reached the in-cluster scan path unassigned; failing rather than running it from the cluster", job.ID)
+		return fmt.Errorf("execution_mode \"sensors\": this job asked to run on a tenant-deployed sensor but reached the " +
+			"in-cluster scan path; it was not run from the platform. Re-create the job to dispatch it again")
 	}
 
 	// Read scanning options from job metadata

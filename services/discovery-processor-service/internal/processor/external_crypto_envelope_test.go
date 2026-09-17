@@ -96,12 +96,12 @@ func TestExtractCryptoDetails_PopulatedEnvelopeStillWins(t *testing.T) {
 // numeric, so its empty form is 0 rather than "" — the shadowing is identical.
 func TestExtractCryptoDetails_EmptyEnvelopeCipherAndKeySize(t *testing.T) {
 	raw := map[string]interface{}{
-		"version":      "TLS 1.2",
-		"cipher_suite": "",
-		"key_size":     0,
+		"version":               "TLS 1.2",
+		"cipher_suite":          "",
+		"key_exchange_key_size": 0,
 		"raw_metadata": map[string]interface{}{
-			"cipher_suite": "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
-			"key_size":     256,
+			"cipher_suite":          "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			"key_exchange_key_size": 256,
 		},
 	}
 	metadata, _ := json.Marshal(raw)

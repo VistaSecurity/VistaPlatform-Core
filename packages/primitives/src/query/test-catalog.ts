@@ -1,3 +1,4 @@
+import { RISK_BANDS } from '../ratings';
 // The static catalogue the cross-language conformance fixtures resolve against.
 //
 // It is the port of Go's `shared/query/catalog/testcatalog`: the first-class
@@ -20,19 +21,11 @@ export { IDENTIFIER_ANY_KIND, IDENTIFIER_KINDS } from './targets';
 /**
  * The risk/severity ladder: the CVSS v3.1/v4.0 qualitative ratings ×10, which
  * is what `models.RiskBands` holds. The production caller passes the real
- * ladder; this copy exists so the language can be tested without importing a
+ * ladder; this adapter uses the generated definitions without importing a
  * service.
  */
 export const LADDER: BandLadder = {
-  bands() {
-    return [
-      { label: 'Critical', min: 90 },
-      { label: 'High', min: 70 },
-      { label: 'Medium', min: 40 },
-      { label: 'Low', min: 1 },
-      { label: 'Informational', min: 0 },
-    ];
-  },
+  bands: () => RISK_BANDS.map(({ label, min }) => ({ label, min })),
 };
 
 /**

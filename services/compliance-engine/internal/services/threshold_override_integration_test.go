@@ -67,7 +67,7 @@ func newThresholdFixture(t *testing.T) *thresholdFixture {
 	measurementID := uuid.New()
 	if _, err := db.Exec(`
 		INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight)
-		VALUES ($1, $2, 'platform', $3, 'threshold', '{"operator": ">=", "value": 30}'::jsonb, 'High', 1)`,
+		VALUES ($1, $2, 'platform', $3, 'threshold', '{"operator": ">=", "value": 30}'::jsonb, 'high', 1)`,
 		measurementID, f.critical, measurementTypeID); err != nil {
 		t.Fatalf("seed control measurement: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestIntegration_ThresholdOverride_AppliedAtEvaluation(t *testing.T) {
 // the override row carries: it can also re-rate the violation's severity.
 func TestIntegration_ThresholdOverride_SeverityOverrideApplied(t *testing.T) {
 	f := newThresholdFixture(t)
-	low := "Low"
+	low := "low"
 	f.addOverride(t, f.tenant, map[string]any{"operator": ">=", "value": 90}, &low)
 
 	res, err := f.evaluator.EvaluateControl(f.tenant, f.controlID, "platform")
@@ -178,7 +178,7 @@ func TestIntegration_ThresholdOverride_SeverityOverrideApplied(t *testing.T) {
 	if len(res.Findings) != 1 {
 		t.Fatalf("findings = %d, want 1", len(res.Findings))
 	}
-	// The override is AUTHORED as "Low" — the control-authoring vocabulary — and
+	// The override is AUTHORED as "low" — the control-authoring vocabulary — and
 	// the finding stores the registry ladder's `low`. The normalization is the
 	// writer's, so the override keeps working whichever spelling an author used.
 	if res.Findings[0].Severity != "low" {

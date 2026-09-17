@@ -2831,6 +2831,26 @@ spec:
       middlewares:
         - name: rewrite-mcp-service-health
         - name: retry
+    - match: {{ $apiHost }} && (Path(`/.well-known/oauth-protected-resource`) || PathPrefix(`/.well-known/oauth-protected-resource/`))
+      kind: Rule
+      priority: 200
+      services:
+        - name: mcp-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-mcp-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: compress
+        - name: body-size-limit
+        - name: retry
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/mcp-service/`))
       kind: Rule
       priority: 100

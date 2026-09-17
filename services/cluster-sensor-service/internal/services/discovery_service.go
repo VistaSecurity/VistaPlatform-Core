@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -96,6 +95,19 @@ func dispatchableOTProtocols(canonical []string) []string {
 	return out
 }
 
+// createdByOrNull renders a caller identity for the nullable `created_by`
+// column: the uuid when the caller is a person, NULL otherwise.
+//
+// "Otherwise" is a real case, not a defensive one. The automatic active-scan
+// sweep reaches this service over the HMAC service-auth path, where the shared
+// middleware sets userID to the literal string "system".
+func createdByOrNull(userID string) interface{} {
+	if uid, err := uuid.Parse(strings.TrimSpace(userID)); err == nil {
+		return uid
+	}
+	return nil
+}
+
 func valueOrEmpty(s *string) string {
 	if s == nil {
 		return ""
@@ -139,37 +151,16 @@ func NewDiscoveryService(db, bypassDB *sqlx.DB) *DiscoveryService {
 	return &DiscoveryService{db: db, bypassDB: bypassDB}
 }
 
-// ErrSensorDispatchUnsupported is returned when a caller asks for a discovery
-// job to be executed by a tenant-deployed sensor.
-//
-// There is no dispatcher: nothing turns a discovery job into a sensor command,
-// the sensor's command switch has no discovery case, and requested_sensor_ids is
-// written and read back but consumed by nothing. Jobs asking for it used to fall
-// straight through to the in-cluster nmap path — so a tenant who chose "run this
-// from my sensor" and targeted an address only that sensor can reach got a scan
-// launched from the platform cluster that reached nothing, and a job that
-// finished `completed` with zero findings and no hint the sensor was never used.
-//
-// Failing the request is the honest answer until dispatch is actually built:
-// a job must never run somewhere other than where the caller asked.
-var ErrSensorDispatchUnsupported = errors.New(
-	"execution_mode \"sensors\" is not supported: discovery jobs cannot be dispatched to tenant-deployed sensors. " +
-		"Use \"cloud\" (platform sensor) or \"auto\"")
-
-// rejectSensorDispatch guards every discovery-job creation path against the
-// unimplemented tenant-sensor execution mode. preferred_sensor_ids is rejected
-// for the same reason — it only means anything under sensor dispatch, and
-// accepting it silently would be the same lie in a different field.
-func rejectSensorDispatch(executionMode string, preferredSensorIDs []string) error {
-	if strings.EqualFold(strings.TrimSpace(executionMode), "sensors") || len(preferredSensorIDs) > 0 {
-		return ErrSensorDispatchUnsupported
-	}
-	return nil
-}
+// Tenant-sensor dispatch rules (which sensor a `sensors` job may be handed to,
+// and why a request is refused) live in sensor_dispatch.go.
 
 func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateDiscoveryJobRequest) (*models.DiscoveryJob, error) {
-	// Validate request
-	if err := rejectSensorDispatch(req.ExecutionMode, req.PreferredSensorIDs); err != nil {
+	// A `sensors` job is refused HERE, with a reason, when the sensor it names
+	// is unknown, the platform's own, air-gapped or offline. Refusing at
+	// creation is what keeps "the job was created" meaning "the job can run":
+	// a row waiting on a sensor that will never collect it is the silent
+	// failure this path used to produce, in a different costume.
+	if _, err := s.resolveDispatchSensor(context.Background(), tenantID, req.ExecutionMode, req.PreferredSensorIDs, time.Now()); err != nil {
 		return nil, err
 	}
 	if len(req.Targets) == 0 {
@@ -266,6 +257,14 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 		return nil, fmt.Errorf("invalid tenant_id: %w", err)
 	}
 
+	// created_by is NULLABLE, and a job the platform created on its own
+	// initiative has nobody behind it. Internal service-to-service callers
+	// arrive with the literal userID "system" (shared middleware sets it), which
+	// is not a uuid — inserting it would fail the whole INSERT, and inventing a
+	// user id would attribute an unattended act to a person who did not perform
+	// it. NULL is the honest value and the column already accepts it.
+	createdBy := createdByOrNull(userID)
+
 	err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantUUID, func(tx *sql.Tx) error {
 		// Insert job. ot_probe_protocols is the audit column — captures which
 		// OT probes the operator opted in to for forensic traceability, even
@@ -276,7 +275,7 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 			RETURNING id`
 
 		if err := tx.QueryRow(query,
-			job.TenantID, job.CreatedBy, job.ExecutionMode, job.Status,
+			job.TenantID, createdBy, job.ExecutionMode, job.Status,
 			pq.Array(job.RequestedSensorIDs), job.Fanout, job.RetentionCapMB,
 			job.RetentionTTLHours, metadataJSON, pq.Array(otProtocols),
 			job.CreatedAt, job.UpdatedAt).Scan(&job.ID); err != nil {
@@ -364,9 +363,17 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 	// Note: Targets, Progress, ResultsSummary, AssignedSensorID, DeletedAt don't exist in DB
 	// Use pq.Array wrapper for PostgreSQL array types
 	var requestedSensorIDs pq.StringArray
-	query := `SELECT id, tenant_id, created_by, execution_mode, status, requested_sensor_ids, fanout,
-	          retention_cap_mb, retention_ttl_hours, created_at, updated_at, started_at, completed_at
-	          FROM discovery_jobs WHERE id = $1`
+	// created_by is NULL for a job the platform created on its own (the
+	// automatic active-scan sweep, or any HMAC service caller) — see
+	// createdByOrNull. Scanning that NULL straight into a string fails the
+	// whole read, and this is the read the job processor does FIRST, so every
+	// such job was unreadable and sat in `queued` forever. COALESCE, and the
+	// same in GetJobs below.
+	query := `SELECT j.id, j.tenant_id, COALESCE(j.created_by::text, ''), j.execution_mode, j.status, j.requested_sensor_ids, j.fanout,
+	          j.retention_cap_mb, j.retention_ttl_hours, j.created_at, j.updated_at, j.started_at, j.completed_at,
+	          j.error_message, j.assigned_sensor_id, j.dispatched_at, s.name, s.last_heartbeat, c.delivered_at,
+	          COALESCE(j.metadata -> 'options' ->> 'origin', '')
+	          FROM discovery_jobs j` + jobExecutorJoins + ` WHERE j.id = $1`
 
 	err := s.bypassDB.QueryRow(query, jobID).Scan(
 		&job.ID,
@@ -374,7 +381,10 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 		&job.CreatedBy,
 		&job.ExecutionMode,
 		&job.Status,
-		pq.Array(&requestedSensorIDs),
+		// pq.StringArray is its own sql.Scanner; wrapping it in pq.Array made
+		// a GenericArray that cannot scan into plain strings, so this read
+		// failed for any job that actually named a sensor.
+		&requestedSensorIDs,
 		&job.Fanout,
 		&job.RetentionCapMB,
 		&job.RetentionTTLHours,
@@ -382,6 +392,13 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 		&job.UpdatedAt,
 		&job.StartedAt,
 		&job.CompletedAt,
+		&job.ErrorMessage,
+		&job.AssignedSensorID,
+		&job.DispatchedAt,
+		&job.AssignedSensorName,
+		&job.AssignedSensorLastHeartbeat,
+		&job.PickedUpAt,
+		&job.Origin,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -392,6 +409,7 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 
 	// Convert pq.StringArray to []string
 	job.RequestedSensorIDs = []string(requestedSensorIDs)
+	job.Executor = executorFor(job.ExecutionMode, job.AssignedSensorID)
 
 	// Get targets separately since they're stored in discovery_targets table
 	var targets []string
@@ -554,13 +572,23 @@ func (s *DiscoveryService) getJobMaterialization(jobID string, total int) *model
 		AutoApproved       int `db:"auto_approved"`
 		PendingApproval    int `db:"pending_approval"`
 		AwaitingProcessing int `db:"awaiting_processing"`
+		Suppressed         int `db:"suppressed"`
 	}
+	// pending_approval is `= 'pending'`, not `<> 'auto_approved'`. The column
+	// grew two more terminal values that are not auto_approved and are not
+	// awaiting anything either: `observed` (host observations — identity
+	// evidence, never a finding awaiting approval) and `suppressed` (the
+	// matched asset is archived or denied, so nothing was materialized and no
+	// approval decision will ever be made). The old predicate counted both as
+	// "pending", so Discovery → Approvals' own summary permanently overstated
+	// how much of a job was actually awaiting a human.
 	err := s.bypassDB.Get(&row, `
 		SELECT
-			COUNT(*)                                                                                  AS queued,
-			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'auto_approved')    AS auto_approved,
-			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status <> 'auto_approved')   AS pending_approval,
-			COUNT(*) FILTER (WHERE processed_at IS NULL)                                              AS awaiting_processing
+			COUNT(*)                                                                                AS queued,
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'auto_approved')  AS auto_approved,
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'pending')         AS pending_approval,
+			COUNT(*) FILTER (WHERE processed_at IS NULL)                                             AS awaiting_processing,
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'suppressed')      AS suppressed
 		FROM sensor_discoveries
 		WHERE batch_id = $1`, jobID)
 	if err != nil {
@@ -573,30 +601,49 @@ func (s *DiscoveryService) getJobMaterialization(jobID string, total int) *model
 		AutoApproved:       row.AutoApproved,
 		PendingApproval:    row.PendingApproval,
 		AwaitingProcessing: row.AwaitingProcessing,
+		Suppressed:         row.Suppressed,
 	}
 }
 
 // GetJobs retrieves discovery jobs with pagination and filtering
-func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, startDate, endDate string) ([]models.DiscoveryJob, int, error) {
+// kind values: "" (no filter), "automatic" (the automatic-scan sweep —
+// metadata.options.origin = autoscan.Origin), "manual" (everything else:
+// Active Scan, the Discover wizard, any operator-started run).
+func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, kind, startDate, endDate string) ([]models.DiscoveryJob, int, error) {
 	// Build WHERE clause
-	whereClause := "WHERE tenant_id = $1"
+	whereClause := "WHERE j.tenant_id = $1"
 	args := []interface{}{tenantID}
 	argIndex := 2
 
 	if status != "" {
-		whereClause += fmt.Sprintf(" AND status = $%d", argIndex)
+		whereClause += fmt.Sprintf(" AND j.status = $%d", argIndex)
 		args = append(args, status)
 		argIndex++
 	}
 
+	switch kind {
+	case "automatic":
+		// Mirrors autoscan.originFilterJSON in inventory-service — kept as an
+		// inline literal rather than importing inventory-service's package
+		// (cluster-sensor-service does not depend on it), matched by a
+		// dedicated test so the two cannot silently diverge.
+		whereClause += fmt.Sprintf(" AND j.metadata @> $%d::jsonb", argIndex)
+		args = append(args, `{"options":{"origin":"auto_scan"}}`)
+		argIndex++
+	case "manual":
+		whereClause += fmt.Sprintf(" AND NOT (j.metadata @> $%d::jsonb)", argIndex)
+		args = append(args, `{"options":{"origin":"auto_scan"}}`)
+		argIndex++
+	}
+
 	if startDate != "" {
-		whereClause += fmt.Sprintf(" AND created_at >= $%d", argIndex)
+		whereClause += fmt.Sprintf(" AND j.created_at >= $%d", argIndex)
 		args = append(args, startDate)
 		argIndex++
 	}
 
 	if endDate != "" {
-		whereClause += fmt.Sprintf(" AND created_at <= $%d", argIndex)
+		whereClause += fmt.Sprintf(" AND j.created_at <= $%d", argIndex)
 		args = append(args, endDate)
 		argIndex++
 	}
@@ -604,12 +651,16 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 	// Get jobs with pagination
 	offset := (page - 1) * pageSize
 	jobsQuery := fmt.Sprintf(`
-		SELECT id, tenant_id, created_by, execution_mode, status, requested_sensor_ids,
-		       fanout, retention_cap_mb, retention_ttl_hours, created_at, updated_at,
-		       started_at, completed_at, error_message
-		FROM discovery_jobs %s
-		ORDER BY created_at DESC
-		LIMIT $%d OFFSET $%d`, whereClause, argIndex, argIndex+1)
+		SELECT j.id, j.tenant_id, COALESCE(j.created_by::text, '') AS created_by, j.execution_mode, j.status, j.requested_sensor_ids,
+		       j.fanout, j.retention_cap_mb, j.retention_ttl_hours, j.created_at, j.updated_at,
+		       j.started_at, j.completed_at, j.error_message,
+		       j.assigned_sensor_id, j.dispatched_at,
+		       s.name AS assigned_sensor_name, s.last_heartbeat AS assigned_sensor_last_heartbeat,
+		       c.delivered_at AS picked_up_at,
+		       COALESCE(j.metadata -> 'options' ->> 'origin', '') AS origin
+		FROM discovery_jobs j %s %s
+		ORDER BY j.created_at DESC
+		LIMIT $%d OFFSET $%d`, jobExecutorJoins, whereClause, argIndex, argIndex+1)
 
 	// RLS-scoped reads over discovery_jobs. Both the count and the page run on
 	// one tenant-scoped sqlx transaction so app.tenant_id is set on the same
@@ -624,7 +675,7 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 	var total int
 	var jobs []models.DiscoveryJob
 	err = s.withTenantTxx(context.Background(), tenantUUID, func(tx *sqlx.Tx) error {
-		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM discovery_jobs %s", whereClause)
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM discovery_jobs j %s", whereClause)
 		if e := tx.Get(&total, countQuery, args...); e != nil {
 			return fmt.Errorf("failed to count jobs: %w", e)
 		}
@@ -638,9 +689,28 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 	if err != nil {
 		return nil, 0, err
 	}
+	for i := range jobs {
+		jobs[i].Executor = executorFor(jobs[i].ExecutionMode, jobs[i].AssignedSensorID)
+	}
 
 	return jobs, total, nil
 }
+
+// jobExecutorJoins attaches the executor columns to a discovery_jobs read: the
+// assigned sensor's name and last heartbeat, and when the sensor collected the
+// job's command. LEFT joins, so a platform-run job reads exactly as before with
+// NULLs in the new columns. The command is found through its payload's job_id
+// (served by idx_sensor_commands_discovery_job_id) — the newest one, should a
+// retry ever write a second.
+const jobExecutorJoins = `
+		LEFT JOIN sensors s ON s.id = j.assigned_sensor_id
+		LEFT JOIN LATERAL (
+			SELECT c.delivered_at
+			FROM sensor_commands c
+			WHERE c.command_type = 'discovery_job' AND c.payload ->> 'job_id' = j.id::text
+			ORDER BY c.created_at DESC
+			LIMIT 1
+		) c ON true`
 
 // withTenantTxx runs fn inside a tenant-scoped sqlx transaction. It mirrors
 // shareddatabase.WithTenantTx but yields a *sqlx.Tx so callers keep sqlx's

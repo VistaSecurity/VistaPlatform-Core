@@ -89,7 +89,11 @@ A command palette (**Cmd/Ctrl + K**) lets you jump to any page by name; it respe
 **Key tasks:**
 
 - Scan overall service health at a glance.
-- Work the "needs you" items — failing services, expiring trials, open security events — each links straight to the section that owns it.
+- Work the "needs you" items — degraded services and, on MSP builds,
+  suspended or past-due tenants and tenants with a measured health index below
+  55. Unknown health is omitted from the health-based list because its stored
+  zero means no factor could be measured; billing and suspension status still
+  qualify independently.
 - Use it as the jumping-off point; it's an index, not a place you do detailed work.
 
 ---
@@ -100,7 +104,7 @@ A command palette (**Cmd/Ctrl + K**) lets you jump to any page by name; it respe
 
 **What it's for:** the customer-success operator cockpit — **tenant health, impersonation, and job repair**. Three sub-pages:
 
-- **Tenant Health** — per-tenant health scores and the alerts that drive them, so you can spot a customer trending toward churn or trouble before they open a ticket.
+- **Tenant Health** — per-tenant health indices and the alerts that drive them, so you can spot a customer trending toward churn or trouble before they open a ticket. The composite is displayed as an index such as `82/100 · Good`, not as a percentage. Bands are Excellent (90+), Good (75+), Fair (60+), Poor (40+) and Failing (below 40); unavailable factors remain unavailable and do not become zero.
 - **Impersonation** — the audit trail of support-impersonation sessions: who impersonated which tenant's user, when, and for how long.
 - **Job Repair** — retry or cancel stuck discovery jobs on a tenant's behalf, without needing database access.
 

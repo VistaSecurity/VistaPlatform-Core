@@ -1160,7 +1160,14 @@ INSERT INTO algorithms (code, category, name, description, strength, deprecation
 ('diffie-hellman-group-exchange-sha1', 'key_exchange', 'diffie-hellman-group-exchange-sha1 (SSH)', 'Negotiated-group finite-field DH with SHA-1 as the key-exchange hash (RFC 4419). Both the SHA-1 hash and the historically small negotiable groups are problems.', 'weak', 'deprecated', 72, ARRAY['diffie-hellman-group14-sha256', 'curve25519-sha256'], 'Disable. Use diffie-hellman-group-exchange-sha256 at minimum, curve25519-sha256 preferably. OpenSSH removed this from the default proposal in 8.2.', '{"PCI-DSS": "non-compliant", "NIST": "deprecated", "FIPS": "non-compliant"}'::jsonb, true, 'DH', 'key-agree', ARRAY['keygen', 'keyderive'], 112, NULL, false, 'none', NULL, '{"protocol": "ssh", "rfc": "RFC 4419"}'::jsonb),
 ('diffie-hellman-group1-sha1', 'key_exchange', 'diffie-hellman-group1-sha1 (SSH)', 'Finite-field DH over the 1024-bit MODP group 2 with SHA-1 (RFC 4253). A 1024-bit fixed, universally-shared modulus is a precomputation target (Logjam, CVE-2015-4000), and the hash is SHA-1.', 'weak', 'obsolete', 82, ARRAY['curve25519-sha256', 'diffie-hellman-group14-sha256'], 'Disable immediately. The 1024-bit group is below the SP 800-131A floor and its fixed modulus makes precomputed discrete-log attacks practical for well-resourced adversaries. OpenSSH disabled it by default in 7.0.', '{"PCI-DSS": "non-compliant", "NIST": "deprecated", "FIPS": "non-compliant"}'::jsonb, true, 'DH', 'key-agree', ARRAY['keygen', 'keyderive'], 80, NULL, false, 'none', NULL, '{"protocol": "ssh", "rfc": "RFC 4253", "modp_bits": 1024, "cve_references": ["CVE-2015-4000"]}'::jsonb),
 ('sntrup761x25519-sha512@openssh.com', 'key_exchange', 'sntrup761x25519-sha512@openssh.com (SSH)', 'Hybrid post-quantum key exchange combining Streamlined NTRU Prime sntrup761 with X25519. OpenSSH default since 9.0. Not a NIST standard, but the hybrid construction is no weaker than X25519 alone.', 'recommended', 'current', 10, ARRAY['mlkem768x25519-sha256'], 'A quantum-resistant hybrid key exchange. Where both peers support it, mlkem768x25519-sha256 is preferable because ML-KEM is the NIST standard (FIPS 203).', '{"NIST": "not-standardized", "PCI-DSS": "compliant"}'::jsonb, true, 'NTRU Prime', 'kem', ARRAY['encapsulate', 'decapsulate', 'keyderive'], 128, NULL, true, 'alternative', 3, '{"protocol": "ssh", "hybrid": true, "hybrid_classical": "X25519", "quantum_resistance": true}'::jsonb),
-('mlkem768x25519-sha256', 'key_exchange', 'mlkem768x25519-sha256 (SSH)', 'Hybrid post-quantum key exchange combining ML-KEM-768 (FIPS 203) with X25519. OpenSSH default since 10.0.', 'recommended', 'current', 5, ARRAY[]::text[], 'The recommended quantum-resistant SSH key exchange. No migration needed.', '{"NIST": "standardized", "PCI-DSS": "compliant", "FIPS": "approved"}'::jsonb, true, 'ML-KEM', 'kem', ARRAY['encapsulate', 'decapsulate', 'keyderive'], 192, NULL, true, 'standardized', 3, '{"protocol": "ssh", "hybrid": true, "hybrid_classical": "X25519", "fips_reference": "FIPS 203", "quantum_resistance": true}'::jsonb)
+('mlkem768x25519-sha256', 'key_exchange', 'mlkem768x25519-sha256 (SSH)', 'Hybrid post-quantum key exchange combining ML-KEM-768 (FIPS 203) with X25519. OpenSSH default since 10.0.', 'recommended', 'current', 5, ARRAY[]::text[], 'The recommended quantum-resistant SSH key exchange. No migration needed.', '{"NIST": "standardized", "PCI-DSS": "compliant", "FIPS": "approved"}'::jsonb, true, 'ML-KEM', 'kem', ARRAY['encapsulate', 'decapsulate', 'keyderive'], 192, NULL, true, 'standardized', 3, '{"protocol": "ssh", "hybrid": true, "hybrid_classical": "X25519", "fips_reference": "FIPS 203", "quantum_resistance": true}'::jsonb),
+-- Names a current sshd puts on the wire that had no catalogue row. Active
+-- probing reads the server's KEXINIT name-list verbatim, so an unlisted name
+-- resolves to nothing and the component is recorded as UNASSESSED — which is
+-- indistinguishable, in the UI, from a server we never looked at.
+('sntrup761x25519-sha512', 'key_exchange', 'sntrup761x25519-sha512 (SSH)', 'The standardised name for the sntrup761 + X25519 hybrid key exchange, offered alongside the older vendor-prefixed spelling from OpenSSH 9.9. Cryptographically identical to sntrup761x25519-sha512@openssh.com.', 'recommended', 'current', 10, ARRAY['mlkem768x25519-sha256'], 'A quantum-resistant hybrid key exchange. Where both peers support it, mlkem768x25519-sha256 is preferable because ML-KEM is the NIST standard (FIPS 203).', '{"NIST": "not-standardized", "PCI-DSS": "compliant"}'::jsonb, true, 'NTRU Prime', 'kem', ARRAY['encapsulate', 'decapsulate', 'keyderive'], 128, NULL, true, 'alternative', 3, '{"protocol": "ssh", "hybrid": true, "hybrid_classical": "X25519", "quantum_resistance": true}'::jsonb),
+('mlkem768nistp256-sha256', 'key_exchange', 'mlkem768nistp256-sha256 (SSH)', 'Hybrid post-quantum key exchange combining ML-KEM-768 (FIPS 203) with ECDH over NIST P-256. The FIPS-friendly counterpart to mlkem768x25519-sha256.', 'recommended', 'current', 10, ARRAY['mlkem768x25519-sha256'], 'A quantum-resistant hybrid key exchange, and the one to prefer where the classical half must be a NIST curve. Otherwise mlkem768x25519-sha256 is the more widely deployed pairing.', '{"NIST": "standardized", "PCI-DSS": "compliant", "FIPS": "approved"}'::jsonb, true, 'ML-KEM', 'kem', ARRAY['encapsulate', 'decapsulate', 'keyderive'], 192, 'P-256', true, 'standardized', 3, '{"protocol": "ssh", "hybrid": true, "hybrid_classical": "ECDH-P256", "fips_reference": "FIPS 203", "quantum_resistance": true}'::jsonb),
+('curve448-sha512', 'key_exchange', 'curve448-sha512 (SSH)', 'ECDH over Curve448 with SHA-512 (RFC 8731). ~224-bit classical security; offered by some non-OpenSSH implementations.', 'strong', 'current', 15, ARRAY[]::text[], 'Strong classical key exchange. No migration needed until post-quantum transition.', '{"NIST": "acceptable", "PCI-DSS": "compliant"}'::jsonb, true, 'Curve448', 'key-agree', ARRAY['keygen', 'keyderive'], 224, 'curve448', false, 'none', NULL, '{"protocol": "ssh", "rfc": "RFC 8731"}'::jsonb)
 ON CONFLICT (code) DO NOTHING;
 
 -- SSH encryption algorithms (RFC 4253 s6.3 name-lists "encryption_algorithms_*").
@@ -1198,7 +1205,12 @@ INSERT INTO algorithms (code, category, name, description, strength, deprecation
 ('hmac-sha1', 'hash', 'hmac-sha1 (SSH)', 'HMAC-SHA-1 in the RFC 4253 MAC-then-encrypt ordering. Retired for new use by NIST SP 800-131A Rev.2 and non-compliant under PCI-DSS.', 'weak', 'deprecated', 65, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Retire SHA-1. Switch to hmac-sha2-256-etm@openssh.com.', '{"PCI-DSS": "non-compliant", "NIST": "deprecated", "FIPS": "non-compliant"}'::jsonb, true, 'SHA-1', 'mac', ARRAY['tag'], 160, '{"protocol": "ssh", "etm": false}'::jsonb),
 ('hmac-sha1-96', 'hash', 'hmac-sha1-96 (SSH)', 'HMAC-SHA-1 truncated to 96 bits (RFC 4253). Both the SHA-1 primitive and the truncated tag are below current guidance.', 'weak', 'deprecated', 68, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Disable. Switch to hmac-sha2-256-etm@openssh.com.', '{"PCI-DSS": "non-compliant", "NIST": "deprecated", "FIPS": "non-compliant"}'::jsonb, true, 'SHA-1', 'mac', ARRAY['tag'], 96, '{"protocol": "ssh", "etm": false, "tag_bits": 96}'::jsonb),
 ('hmac-md5', 'hash', 'hmac-md5 (SSH)', 'HMAC-MD5 (RFC 4253). MD5 is cryptographically broken and disallowed for any new use; no modern SSH deployment should offer this.', 'weak', 'obsolete', 78, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Disable immediately. Switch to hmac-sha2-256-etm@openssh.com. OpenSSH removed the MD5 MACs in 7.6.', '{"PCI-DSS": "non-compliant", "NIST": "disallowed", "FIPS": "non-compliant"}'::jsonb, true, 'MD5', 'mac', ARRAY['tag'], 128, '{"protocol": "ssh", "etm": false}'::jsonb),
-('hmac-md5-96', 'hash', 'hmac-md5-96 (SSH)', 'HMAC-MD5 truncated to 96 bits (RFC 4253). Broken primitive plus a truncated tag.', 'weak', 'obsolete', 80, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Disable immediately. Switch to hmac-sha2-256-etm@openssh.com. OpenSSH removed the MD5 MACs in 7.6.', '{"PCI-DSS": "non-compliant", "NIST": "disallowed", "FIPS": "non-compliant"}'::jsonb, true, 'MD5', 'mac', ARRAY['tag'], 96, '{"protocol": "ssh", "etm": false, "tag_bits": 96}'::jsonb)
+('hmac-md5-96', 'hash', 'hmac-md5-96 (SSH)', 'HMAC-MD5 truncated to 96 bits (RFC 4253). Broken primitive plus a truncated tag.', 'weak', 'obsolete', 80, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Disable immediately. Switch to hmac-sha2-256-etm@openssh.com. OpenSSH removed the MD5 MACs in 7.6.', '{"PCI-DSS": "non-compliant", "NIST": "disallowed", "FIPS": "non-compliant"}'::jsonb, true, 'MD5', 'mac', ARRAY['tag'], 96, '{"protocol": "ssh", "etm": false, "tag_bits": 96}'::jsonb),
+-- The -etm spellings of the two retired MAC families. An sshd configured with
+-- "MACs +hmac-md5-etm@openssh.com" offers exactly this string, and without a
+-- row the worst thing on its MAC list resolves to nothing at all.
+('hmac-sha1-96-etm@openssh.com', 'hash', 'hmac-sha1-96-etm@openssh.com (SSH)', 'HMAC-SHA-1 truncated to 96 bits, encrypt-then-MAC. The EtM construction is sound; the SHA-1 primitive and the truncated tag are not.', 'weak', 'deprecated', 66, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Disable. Switch to hmac-sha2-256-etm@openssh.com.', '{"PCI-DSS": "non-compliant", "NIST": "deprecated", "FIPS": "non-compliant"}'::jsonb, true, 'SHA-1', 'mac', ARRAY['tag'], 96, '{"protocol": "ssh", "etm": true, "tag_bits": 96}'::jsonb),
+('hmac-md5-etm@openssh.com', 'hash', 'hmac-md5-etm@openssh.com (SSH)', 'HMAC-MD5 in encrypt-then-MAC construction. The EtM ordering does not rescue a broken primitive.', 'weak', 'obsolete', 76, ARRAY['hmac-sha2-256-etm@openssh.com'], 'Disable immediately. Switch to hmac-sha2-256-etm@openssh.com. OpenSSH removed the MD5 MACs in 7.6.', '{"PCI-DSS": "non-compliant", "NIST": "disallowed", "FIPS": "non-compliant"}'::jsonb, true, 'MD5', 'mac', ARRAY['tag'], 128, '{"protocol": "ssh", "etm": true}'::jsonb)
 ON CONFLICT (code) DO NOTHING;
 
 -- SSH host key / public key algorithms (RFC 4253 s6.6 name-list "server_host_key_algorithms").
@@ -1782,7 +1794,7 @@ BEGIN
         'BP-001',
         'TLS Version Requirements',
         'All TLS connections must use TLS 1.2 or higher. TLS 1.0 and TLS 1.1 are deprecated and must not be used.',
-        'High',
+        'high',
         true,
         NOW(),
         NOW()
@@ -1803,7 +1815,7 @@ BEGIN
         'BP-002',
         'Certificate Expiration Monitoring',
         'Certificates must have at least 30 days remaining before expiration. Certificates expiring within 30 days should be renewed immediately.',
-        'Med',
+        'medium',
         true,
         NOW(),
         NOW()
@@ -1824,7 +1836,7 @@ BEGIN
         'BP-003',
         'Weak Cipher Detection',
         'Weak and deprecated ciphers (3DES, DES, RC4) must not be used. Only modern, secure cipher suites should be enabled.',
-        'High',
+        'high',
         true,
         NOW(),
         NOW()
@@ -1845,7 +1857,7 @@ BEGIN
         'BP-004',
         'Perfect Forward Secrecy Support',
         'All TLS connections should support Perfect Forward Secrecy (PFS) to protect past communications even if private keys are compromised.',
-        'Med',
+        'medium',
         true,
         NOW(),
         NOW()
@@ -1866,7 +1878,7 @@ BEGIN
         'BP-005',
         'Minimum Key Size Requirements',
         'RSA keys must be at least 2048 bits. ECC keys must be at least 256 bits. Smaller key sizes are cryptographically weak.',
-        'High',
+        'high',
         true,
         NOW(),
         NOW()
@@ -1887,7 +1899,7 @@ BEGIN
         'BP-006',
         'Deprecated Protocol Detection',
         'SSL 2.0, SSL 3.0, TLS 1.0, and TLS 1.1 are deprecated and must not be used. Only TLS 1.2 and TLS 1.3 are acceptable.',
-        'Critical',
+        'critical',
         true,
         NOW(),
         NOW()
@@ -1908,7 +1920,7 @@ BEGIN
         'BP-007',
         'Certificate Chain Validation',
         'All certificates must have valid certificate chains. Self-signed certificates or broken chains indicate misconfiguration.',
-        'Med',
+        'medium',
         true,
         NOW(),
         NOW()
@@ -1929,7 +1941,7 @@ BEGIN
         'BP-008',
         'Hash Algorithm Requirements',
         'Hash algorithms must be SHA-256 or stronger. SHA-1 and MD5 are cryptographically broken and must not be used.',
-        'High',
+        'high',
         true,
         NOW(),
         NOW()
@@ -1950,7 +1962,7 @@ BEGIN
         'BP-009',
         'Secure Key Exchange',
         'Key exchange must use ephemeral methods (ECDHE or DHE). Static RSA key exchange is vulnerable and should be avoided.',
-        'Med',
+        'medium',
         true,
         NOW(),
         NOW()
@@ -1971,7 +1983,7 @@ BEGIN
         'BP-010',
         'Symmetric Encryption Standards',
         'Symmetric encryption must use AES-128 or stronger (AES-256 preferred) or ChaCha20-Poly1305. Weak algorithms (3DES, DES, RC4) are prohibited.',
-        'High',
+        'high',
         true,
         NOW(),
         NOW()
@@ -1997,7 +2009,7 @@ BEGIN
             tls_version_mt_id,
             'pattern',
             '{"pattern": "^(TLS.?1\\.0|TLS.?1\\.1|1\\.0|1\\.1|SSL.?[23](\\.0)?|Unknown-0x0300|Unknown-0x0002)$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'High',
+            'high',
             8,
             NOW(),
             NOW()
@@ -2016,7 +2028,7 @@ BEGIN
             cert_expiration_mt_id,
             'threshold',
             '{"operator": ">=", "value": 30}'::jsonb,
-            'Med',
+            'medium',
             6,
             NOW(),
             NOW()
@@ -2035,7 +2047,7 @@ BEGIN
             symmetric_encryption_mt_id,
             'pattern',
             '{"pattern": "^(3DES|DES|RC4)(-[A-Z0-9]+)*$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'High',
+            'high',
             8,
             NOW(),
             NOW()
@@ -2060,7 +2072,7 @@ BEGIN
             -- inverse of the control — and could not fire either way while
             -- booleans were compared against nil/"" (CMP-1).
             '{"exists": true}'::jsonb,
-            'Med',
+            'medium',
             5,
             NOW(),
             NOW()
@@ -2085,7 +2097,7 @@ BEGIN
             key_size_mt_id,
             'threshold',
             '{"operator": ">=", "value": 2048}'::jsonb,
-            'High',
+            'high',
             9,
             NOW(),
             NOW()
@@ -2103,7 +2115,7 @@ BEGIN
             key_size_ec_mt_id,
             'threshold',
             '{"operator": ">=", "value": 256}'::jsonb,
-            'High',
+            'high',
             9,
             NOW(),
             NOW()
@@ -2122,7 +2134,7 @@ BEGIN
             tls_version_mt_id,
             'pattern',
             '{"pattern": "^(TLS.?1\\.0|TLS.?1\\.1|1\\.0|1\\.1|SSL.?[23](\\.0)?|Unknown-0x0300|Unknown-0x0002)$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'Critical',
+            'critical',
             10,
             NOW(),
             NOW()
@@ -2142,7 +2154,7 @@ BEGIN
             'presence',
             -- See BP-004 above: `exists: true` = the chain must be valid.
             '{"exists": true}'::jsonb,
-            'Med',
+            'medium',
             6,
             NOW(),
             NOW()
@@ -2161,7 +2173,7 @@ BEGIN
             hash_algorithm_mt_id,
             'pattern',
             '{"pattern": "^(SHA1|MD5)$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'High',
+            'high',
             8,
             NOW(),
             NOW()
@@ -2180,7 +2192,7 @@ BEGIN
             key_exchange_mt_id,
             'pattern',
             '{"pattern": "^(RSA|NULL|ECDH(_[A-Z0-9]+)*|DH(_[A-Z0-9]+)*)$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'Med',
+            'medium',
             6,
             NOW(),
             NOW()
@@ -2199,7 +2211,7 @@ BEGIN
             symmetric_encryption_mt_id,
             'pattern',
             '{"pattern": "^(3DES|DES|RC4)(-[A-Z0-9]+)*$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'High',
+            'high',
             8,
             NOW(),
             NOW()
@@ -2218,7 +2230,7 @@ BEGIN
         'BP-011',
         'OT Protocol Encryption',
         'Industrial / OT protocol sessions (Modbus, DNP3, MMS, ICCP, BACnet, BACnet/SC, EtherNet/IP CIP, OPC UA, HART-IP, Siemens S7) must use cryptographic protection. Plaintext OT traffic detected on the wire is a high-severity finding for cryptographic asset audits and is non-compliant with NERC CIP and IEC 62443.',
-        'High',
+        'high',
         true,
         NOW(),
         NOW()
@@ -2244,7 +2256,7 @@ BEGIN
             ot_protocol_encryption_mt_id,
             'pattern',
             '{"pattern": "^absent$", "flags": "i", "match_means_violation": true}'::jsonb,
-            'High',
+            'high',
             9,
             NOW(),
             NOW()
@@ -2333,69 +2345,69 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'PQC-001', 'Quantum-vulnerable certificate algorithm',
-        'The certificate uses a public-key algorithm that is not quantum-safe. Plan migration to a NIST post-quantum algorithm.', 'Med', true, NOW(), NOW())
+        'The certificate uses a public-key algorithm that is not quantum-safe. Plan migration to a NIST post-quantum algorithm.', 'medium', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF cert_pqc_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_pqc_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'Med', 5, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'medium', 5, NOW(), NOW());
     END IF;
 
     -- PQC-002: Certificate signature algorithm quantum-vulnerable (the CA's signature over the leaf).
     -- Advisory (Low) — remediation is usually "your CA must issue PQC certs", outside the tenant's direct control.
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'PQC-002', 'Quantum-vulnerable certificate signature',
-        'The certificate was signed (by its CA) with a classical signature algorithm vulnerable to quantum forgery. Track and raise with your CA; migration depends on the issuer offering PQC signatures.', 'Low', true, NOW(), NOW())
+        'The certificate was signed (by its CA) with a classical signature algorithm vulnerable to quantum forgery. Track and raise with your CA; migration depends on the issuer offering PQC signatures.', 'low', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF cert_sig_pqc_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_sig_pqc_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_sig_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'Low', 3, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_sig_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'low', 3, NOW(), NOW());
     END IF;
 
     -- PQC-003: Crypto-config key-exchange quantum-vulnerable. The MOST urgent PQC control —
     -- harvest-now-decrypt-later: traffic captured today is decryptable once a quantum computer exists.
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'PQC-003', 'Quantum-vulnerable key exchange',
-        'A crypto-configuration negotiates session keys with a classical key-exchange algorithm (RSA/ECDH/DH). This is the highest-priority post-quantum exposure (harvest-now-decrypt-later). Migrate to ML-KEM or a hybrid (e.g. X25519MLKEM768).', 'Critical', true, NOW(), NOW())
+        'A crypto-configuration negotiates session keys with a classical key-exchange algorithm (RSA/ECDH/DH). This is the highest-priority post-quantum exposure (harvest-now-decrypt-later). Migrate to ML-KEM or a hybrid (e.g. X25519MLKEM768).', 'critical', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF config_kex_pqc_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=config_kex_pqc_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', config_kex_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'Critical', 10, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', config_kex_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'critical', 10, NOW(), NOW());
     END IF;
 
     -- PQC-004: Crypto-config signature/authentication quantum-vulnerable.
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'PQC-004', 'Quantum-vulnerable authentication signature',
-        'A crypto-configuration authenticates with a classical signature algorithm (RSA/ECDSA/EdDSA) vulnerable to quantum forgery, enabling future impersonation. Migrate to a NIST PQC signature (ML-DSA, SLH-DSA, FN-DSA).', 'High', true, NOW(), NOW())
+        'A crypto-configuration authenticates with a classical signature algorithm (RSA/ECDSA/EdDSA) vulnerable to quantum forgery, enabling future impersonation. Migrate to a NIST PQC signature (ML-DSA, SLH-DSA, FN-DSA).', 'high', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF config_sig_pqc_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=config_sig_pqc_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', config_sig_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'High', 8, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', config_sig_pqc_mt_id, 'pattern', '{"pattern": "^quantum_vulnerable$", "flags": "i", "match_means_violation": true}'::jsonb, 'high', 8, NOW(), NOW());
     END IF;
 
     -- PQC-005: Crypto-config symmetric quantum margin (advisory). Symmetric crypto is only
     -- weakened (not broken) by Grover, so this is Low/advisory: flag < AES-256-equivalent.
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'PQC-005', 'Insufficient symmetric quantum margin',
-        'A crypto-configuration uses a symmetric cipher below the post-quantum margin (AES-128 or weaker). Grover halves the effective key strength, so AES-256 / ChaCha20 are recommended (CNSA 2.0). Advisory.', 'Low', true, NOW(), NOW())
+        'A crypto-configuration uses a symmetric cipher below the post-quantum margin (AES-128 or weaker). Grover halves the effective key strength, so AES-256 / ChaCha20 are recommended (CNSA 2.0). Advisory.', 'low', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF config_sym_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=config_sym_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', config_sym_mt_id, 'pattern', '{"pattern": "^quantum_marginal$", "flags": "i", "match_means_violation": true}'::jsonb, 'Low', 2, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', config_sym_mt_id, 'pattern', '{"pattern": "^quantum_marginal$", "flags": "i", "match_means_violation": true}'::jsonb, 'low', 2, NOW(), NOW());
     END IF;
 
     -- ===================== Certificate Hygiene =====================
@@ -2410,7 +2422,7 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'CH-001', 'Minimum certificate key size',
-        'Certificate keys must be at least 2048-bit (RSA) / 256-bit (EC) equivalent. Smaller keys are considered weak.', 'High', true, NOW(), NOW())
+        'Certificate keys must be at least 2048-bit (RSA) / 256-bit (EC) equivalent. Smaller keys are considered weak.', 'high', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
@@ -2420,25 +2432,25 @@ BEGIN
     IF key_size_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=key_size_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', key_size_mt_id, 'threshold', '{"operator": ">=", "value": 2048}'::jsonb, 'High', 7, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', key_size_mt_id, 'threshold', '{"operator": ">=", "value": 2048}'::jsonb, 'high', 7, NOW(), NOW());
     END IF;
 
     IF key_size_ec_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=key_size_ec_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', key_size_ec_mt_id, 'threshold', '{"operator": ">=", "value": 256}'::jsonb, 'High', 7, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', key_size_ec_mt_id, 'threshold', '{"operator": ">=", "value": 256}'::jsonb, 'high', 7, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'CH-002', 'Maximum certificate validity period',
-        'Certificate validity period should not exceed 398 days (CA/Browser Forum max; trending toward 47 days). Over-long lifetimes increase exposure when a key is compromised.', 'Med', true, NOW(), NOW())
+        'Certificate validity period should not exceed 398 days (CA/Browser Forum max; trending toward 47 days). Over-long lifetimes increase exposure when a key is compromised.', 'medium', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF cert_validity_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_validity_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_validity_mt_id, 'threshold', '{"operator": "<=", "value": 398}'::jsonb, 'Med', 5, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_validity_mt_id, 'threshold', '{"operator": "<=", "value": 398}'::jsonb, 'medium', 5, NOW(), NOW());
     END IF;
 
     -- ===================== Certificate Expiry: Not Expired =====================
@@ -2453,14 +2465,14 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'CE-NE-001', 'Certificate must not be expired',
-        'The certificate has passed its not_after date and is expired.', 'High', true, NOW(), NOW())
+        'The certificate has passed its not_after date and is expired.', 'high', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF cert_expiration_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_expiration_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_expiration_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'High', 8, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_expiration_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'high', 8, NOW(), NOW());
     END IF;
 
     -- ===================== Certificate Expiry: 30-Day Notice =====================
@@ -2475,14 +2487,14 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'CE-30-001', 'Certificate expires within 30 days',
-        'The certificate has fewer than 30 days of validity remaining and should be renewed.', 'Med', true, NOW(), NOW())
+        'The certificate has fewer than 30 days of validity remaining and should be renewed.', 'medium', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF cert_expiration_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_expiration_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_expiration_mt_id, 'threshold', '{"operator": ">=", "value": 30}'::jsonb, 'Med', 6, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_expiration_mt_id, 'threshold', '{"operator": ">=", "value": 30}'::jsonb, 'medium', 6, NOW(), NOW());
     END IF;
 
     -- ===================== Certificate Expiry: 90-Day Notice =====================
@@ -2497,14 +2509,14 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'CE-90-001', 'Certificate expires within 90 days',
-        'The certificate has fewer than 90 days of validity remaining; begin renewal planning.', 'Low', true, NOW(), NOW())
+        'The certificate has fewer than 90 days of validity remaining; begin renewal planning.', 'low', true, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF cert_expiration_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_expiration_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_expiration_mt_id, 'threshold', '{"operator": ">=", "value": 90}'::jsonb, 'Low', 4, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_expiration_mt_id, 'threshold', '{"operator": ">=", "value": 90}'::jsonb, 'low', 4, NOW(), NOW());
     END IF;
 
     RAISE NOTICE 'Seeded certificate opt-in frameworks (PQC Readiness, Certificate Hygiene, Expiry: Not-Expired/30/90)';
@@ -2532,74 +2544,74 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'IH-001', 'Every asset has an owner',
-        'The asset records neither an owner email nor a support group. An asset nobody is accountable for is an asset nobody can be asked about when it fails a control.', 'Low', false, NOW(), NOW())
+        'The asset records neither an owner email nor a support group. An asset nobody is accountable for is an asset nobody can be asked about when it fails a control.', 'low', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF asset_has_owner_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=asset_has_owner_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_has_owner_mt_id, 'presence', '{"exists": true}'::jsonb, 'Low', 5, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_has_owner_mt_id, 'presence', '{"exists": true}'::jsonb, 'low', 5, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'IH-002', 'Every asset is classified',
-        'The asset still sits on the unknown_host placeholder the classifier assigns when it cannot decide what something is. An unclassified asset is invisible to class facets and to every class-scoped policy.', 'Low', false, NOW(), NOW())
+        'The asset still sits on the unknown_host placeholder the classifier assigns when it cannot decide what something is. An unclassified asset is invisible to class facets and to every class-scoped policy.', 'low', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF asset_class_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=asset_class_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_class_mt_id, 'pattern', '{"pattern": "^unknown_host$", "flags": "i", "match_means_violation": true}'::jsonb, 'Low', 5, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_class_mt_id, 'pattern', '{"pattern": "^unknown_host$", "flags": "i", "match_means_violation": true}'::jsonb, 'low', 5, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'IH-003', 'Every asset has a location',
-        'The asset records no site, region, zone or location. Location is what turns a compliance finding into a work order somebody can act on.', 'Low', false, NOW(), NOW())
+        'The asset records no site, region, zone or location. Location is what turns a compliance finding into a work order somebody can act on.', 'low', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF asset_has_location_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=asset_has_location_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_has_location_mt_id, 'presence', '{"exists": true}'::jsonb, 'Low', 4, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', asset_has_location_mt_id, 'presence', '{"exists": true}'::jsonb, 'low', 4, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'IH-004', 'No stale asset records',
-        'No collector has observed the asset for more than 30 days — the first rung of the hygiene producer''s stale ladder. Stale records are the main way an inventory silently becomes wrong.', 'Low', false, NOW(), NOW())
+        'No collector has observed the asset for more than 30 days — the first rung of the hygiene producer''s stale ladder. Stale records are the main way an inventory silently becomes wrong.', 'low', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF last_seen_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=last_seen_days_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', last_seen_days_mt_id, 'threshold', '{"operator": "<=", "value": 30}'::jsonb, 'Low', 4, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', last_seen_days_mt_id, 'threshold', '{"operator": "<=", "value": 30}'::jsonb, 'low', 4, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'IH-005', 'No suspected duplicate assets',
-        'The identification engine found two records sharing an identifier but disagreeing on others, and did not merge them on its own. The merge proposal is waiting in Approvals. Not assessed until the hygiene producer has evaluated the asset.', 'Med', false, NOW(), NOW())
+        'The identification engine found two records sharing an identifier but disagreeing on others, and did not merge them on its own. The merge proposal is waiting in Approvals. Not assessed until the hygiene producer has evaluated the asset.', 'medium', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF duplicate_suspected_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=duplicate_suspected_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', duplicate_suspected_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'Med', 6, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', duplicate_suspected_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'medium', 6, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'IH-006', 'No orphan relationships',
-        'A relationship this asset takes part in points at an asset that has been archived or deleted. The edge is kept so the history stays readable, but it should be resolved. Not assessed until the hygiene producer has evaluated the asset.', 'Low', false, NOW(), NOW())
+        'A relationship this asset takes part in points at an asset that has been archived or deleted. The edge is kept so the history stays readable, but it should be resolved. Not assessed until the hygiene producer has evaluated the asset.', 'low', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF orphan_relationship_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=orphan_relationship_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', orphan_relationship_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'Low', 3, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', orphan_relationship_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'low', 3, NOW(), NOW());
     END IF;
 
     -- ===================== Lifecycle =====================
@@ -2626,50 +2638,50 @@ BEGIN
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'LC-001', 'No end-of-life operating systems',
-        'The asset runs an operating system whose end-of-life date has passed. It receives no further security fixes from its vendor, so every future vulnerability in it is permanent.', 'High', false, NOW(), NOW())
+        'The asset runs an operating system whose end-of-life date has passed. It receives no further security fixes from its vendor, so every future vulnerability in it is permanent.', 'high', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF os_eol_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=os_eol_days_mt_id AND framework_type='platform' AND predicate = '{"operator": ">", "value": 0}'::jsonb) THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', os_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'High', 8, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', os_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'high', 8, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'LC-002', 'Operating systems approaching end of life',
-        'The asset runs an operating system with 90 days or less of vendor support remaining. This is the planning window: an upgrade scheduled now is maintenance, and one scheduled after the date is an incident. The rung is cumulative — an operating system already past end of life has none remaining, so it fails this control as well as LC-001.', 'Low', false, NOW(), NOW())
+        'The asset runs an operating system with 90 days or less of vendor support remaining. This is the planning window: an upgrade scheduled now is maintenance, and one scheduled after the date is an incident. The rung is cumulative — an operating system already past end of life has none remaining, so it fails this control as well as LC-001.', 'low', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF os_eol_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=os_eol_days_mt_id AND framework_type='platform' AND predicate = '{"operator": ">", "value": 90}'::jsonb) THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', os_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 90}'::jsonb, 'Low', 3, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', os_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 90}'::jsonb, 'low', 3, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'LC-003', 'No end-of-life software',
-        'An installed software product on this asset has passed its end-of-life date. Scored below the operating system control because the blast radius of one package is narrower than the platform it runs on.', 'Med', false, NOW(), NOW())
+        'An installed software product on this asset has passed its end-of-life date. Scored below the operating system control because the blast radius of one package is narrower than the platform it runs on.', 'medium', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF software_eol_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=software_eol_days_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', software_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'Med', 6, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', software_eol_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'medium', 6, NOW(), NOW());
     END IF;
 
     INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
     VALUES (gen_random_uuid(), fw_id, 'LC-004', 'No hardware past end of support',
-        'The asset''s hardware is past its vendor end-of-SUPPORT date — the date after which no further firmware fixes ship, which is not the date it stopped being sold.', 'Med', false, NOW(), NOW())
+        'The asset''s hardware is past its vendor end-of-SUPPORT date — the date after which no further firmware fixes ship, which is not the date it stopped being sold.', 'medium', false, NOW(), NOW())
     ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
     RETURNING id INTO ctl_id;
 
     IF hardware_eos_days_mt_id IS NOT NULL AND ctl_id IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=hardware_eos_days_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
-        VALUES (gen_random_uuid(), ctl_id, 'platform', hardware_eos_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'Med', 5, NOW(), NOW());
+        VALUES (gen_random_uuid(), ctl_id, 'platform', hardware_eos_days_mt_id, 'threshold', '{"operator": ">", "value": 0}'::jsonb, 'medium', 5, NOW(), NOW());
     END IF;
 
     RAISE NOTICE 'Seeded inventory frameworks (Inventory Hygiene, Lifecycle)';

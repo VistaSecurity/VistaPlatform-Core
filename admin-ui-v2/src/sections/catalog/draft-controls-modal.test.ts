@@ -27,7 +27,7 @@ function draft(over: Partial<ControlDraft> = {}): ControlDraft {
     control_id: '4.2.1',
     title: 'Strong cryptography',
     description: 'Use strong cryptography.',
-    severity: 'High',
+    severity: 'high',
     published: false,
     citations: [{ kind: 'standard_span', ref: '0-31' }],
     measurements: [
@@ -62,7 +62,7 @@ describe('accept flow (platform endpoints)', () => {
         control_id: '4.2.1',
         title: 'Strong cryptography',
         description: 'Use strong cryptography.',
-        baseline_severity: 'High',
+        baseline_severity: 'high',
         crypto_relevant: true,
         // The whole reason the accept goes through the ordinary endpoint: the
         // row records that a model drafted it, and which one.

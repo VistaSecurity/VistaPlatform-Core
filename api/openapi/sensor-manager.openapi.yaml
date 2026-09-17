@@ -311,6 +311,189 @@ paths:
           $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /sensors/config/defaults:
+    get:
+      operationId: getSensorFleetDefaults
+      tags:
+      - sensors
+      summary: The tenant's fleet-wide default settings for sensors
+      description: |
+        Every settable sensor setting with the value that applies fleet-wide,
+        and an `origin` saying whether the tenant set it (`fleet`) or is
+        inheriting the sensor binary's own default (`built_in`). Gated at
+        SensorsRead.
+      responses:
+        '200':
+          description: The fleet defaults.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorConfigDefaultsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: putSensorFleetDefaults
+      tags:
+      - sensors
+      summary: Replace the tenant's fleet-wide default settings for sensors
+      description: |
+        Replaces the whole set: a key left out is cleared, because a partial
+        write cannot express "remove this one". Every sensor without its own
+        override converges on the new values at its next heartbeat, with nothing
+        to push — the desired revision is a content hash, so a changed default
+        makes every inheriting sensor disagree.
+
+        Gated at SensorsManage. A value below a setting's floor is RAISED rather
+        than rejected, and the response says so in `adjusted`. Turning on a
+        setting that starts a new kind of collection — `host_observation_dns` —
+        answers 409 until the request carries `confirmed: true`, and the change
+        is recorded with the acting user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentConfigWriteRequest'
+      responses:
+        '200':
+          description: The defaults were saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentConfigWriteResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '409':
+          description: A setting in this change needs explicit confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentConfigConfirmationRequired'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/desired-config/history:
+    get:
+      operationId: getSensorConfigHistory
+      tags:
+      - sensors
+      summary: Who changed this sensor's configuration, when, and what moved
+      description: |
+        The recorded change history, newest first, covering this sensor's own
+        overrides AND the tenant's fleet defaults for its runtime — an operator
+        asking "why is this on" is not served by a history that can only answer
+        half the time.
+
+        Gated at SensorsRead rather than behind update or manage: reading who
+        changed something is a read, and the person most likely to ask is the
+        one who cannot change it.
+      parameters:
+      - name: sensor_id
+        in: path
+        required: true
+        description: The sensor's UUID.
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The change history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentConfigHistory'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/desired-config:
+    get:
+      operationId: getSensorDesiredConfig
+      tags:
+      - sensors
+      summary: One sensor's effective settings and how far it has converged
+      description: |
+        The effective value of every sensor setting with the `origin` it came
+        from (`built_in`, `fleet` or `device`), plus a `status` block reconciling
+        what the platform wants against what the sensor last reported.
+
+        Distinct from `/sensors/{sensor_id}/config`, which queues a one-shot
+        `update_config` command and persists nothing — so the platform cannot
+        say what it asked for, a missed command is never re-sent, and the
+        console can show a value that never took effect.
+
+        Gated at SensorsRead. Another tenant's sensor id is answered 404,
+        identically to an unknown id.
+      parameters:
+      - name: sensor_id
+        in: path
+        required: true
+        description: The sensor's UUID.
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The sensor's configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorConfigResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: putSensorDesiredConfig
+      tags:
+      - sensors
+      summary: Replace one sensor's settings override
+      description: |
+        Sets what THIS sensor should be, over and above the fleet defaults. An
+        explicit `false` is an override and beats a fleet default of `true`; an
+        omitted key inherits. Send `{"values": {}}` to clear the override
+        entirely.
+
+        Gated at SensorsManage. The sensor adopts the change at its next
+        heartbeat; settings marked `apply: restart` — host observation and DNS
+        decoding, whose BPF filter is fixed when the capture handle opens — are
+        listed in `needs_restart` and adopted when the sensor restarts.
+      parameters:
+      - name: sensor_id
+        in: path
+        required: true
+        description: The sensor's UUID.
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentConfigWriteRequest'
+      responses:
+        '200':
+          description: The override was saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentConfigWriteResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          description: A setting in this change needs explicit confirmation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentConfigConfirmationRequired'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /sensors/{sensor_id}/commands:
     parameters:
     - $ref: '#/components/parameters/SensorId'
@@ -941,6 +1124,71 @@ paths:
           $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /sensors/{sensor_id}/discovery-jobs/{job_id}/complete:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    - name: job_id
+      in: path
+      required: true
+      description: Discovery job UUID — the job the platform dispatched to this sensor.
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: completeDispatchedDiscoveryJob
+      tags:
+      - sensors
+      summary: A sensor reports that a dispatched discovery job has finished
+      description: |
+        Tenant-sensor dispatch. The one sensor-agent-facing route this spec
+        carries, because it closes a job the tenant is watching on Discovery →
+        Discovery Jobs. The caller is authenticated **as the sensor** (the
+        `sensors` group's mTLS/HMAC auth, fail-closed when agent mTLS is
+        required) — not by a tenant JWT.
+
+        The job's RESULTS do not travel here. The sensor submits them through
+        its ordinary `POST /sensors/{sensor_id}/discoveries` batch, tagged
+        `discovery_method: active` and carrying the `job_id` in
+        `raw_metadata`, so they flow `sensor_discoveries` → discovery-processor
+        → inventory exactly like passive data. This call only marks the job
+        `completed` or `failed` with the sensor's counts.
+
+        The job must belong to the sensor's tenant and be assigned to this
+        sensor (404 otherwise — an unknown, cross-tenant, differently
+        assigned and platform-run job all answer the same). A job that is no
+        longer `awaiting_sensor` (the platform already failed it as "sensor
+        offline", or it was cancelled) answers 409: the late report is kept in
+        the job's metadata as evidence, but a verdict the tenant has already
+        been shown is not rewritten.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscoveryJobCompletion'
+      responses:
+        '200':
+          description: Completion recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryJobCompletionResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          description: The job is no longer awaiting this sensor; the report was recorded but the job's status stands.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
 
 components:
   parameters:
@@ -997,6 +1245,281 @@ components:
           schema:
             $ref: '#/components/schemas/LegacyError'
   schemas:
+    AgentConfigChange:
+      type: object
+      description: |
+        One recorded configuration change. Both the device's own overrides and
+        the tenant's fleet defaults appear, because a device's effective
+        configuration moves when either does.
+      required:
+      - changed_at
+      - changed_by
+      - scope
+      - keys
+      - values_before
+      - values_after
+      properties:
+        changed_at:
+          type: string
+          format: date-time
+        changed_by:
+          type: string
+          description: The account that made the change. Empty when it was not made by a user.
+        scope:
+          type: string
+          enum: [device, fleet]
+        keys:
+          type: array
+          description: The setting keys whose value actually moved, derived server-side so no client re-implements the comparison.
+          items:
+            type: string
+        values_before:
+          type: object
+          additionalProperties: true
+        values_after:
+          type: object
+          additionalProperties: true
+    AgentConfigHistory:
+      type: object
+      required:
+      - changes
+      properties:
+        changes:
+          type: array
+          description: Newest first. Always present, never null — a device nobody has configured has an empty history, not an unknown one.
+          items:
+            $ref: '#/components/schemas/AgentConfigChange'
+    AgentConfigVersion:
+      type: object
+      description: |
+        What the device runs, what this platform release ships, and whether they
+        differ. The expected version is the release the PLATFORM is running,
+        because the device binaries ship from the same tag — so the platform can
+        only report a device as behind once it has itself been upgraded, and it
+        never queries an external service to find out.
+      required:
+      - device
+      - expected
+      - state
+      properties:
+        device:
+          type: string
+          description: What the device last reported. Empty when it has never reported one.
+        expected:
+          type: string
+          description: The version shipping with this platform release. Empty when the platform does not know its own.
+        state:
+          type: string
+          enum: [unknown, current, behind, ahead]
+          description: |
+            `unknown` when the comparison could not be made — either side
+            missing or unparseable. Deliberately distinct from `current`: a
+            comparison that was not made must never render as up to date.
+            `ahead` is a device newer than the platform, which happens mid-
+            rollout and also when the wrong binary was installed.
+    AgentConfigSetting:
+      type: object
+      description: |
+        One setting: its effective value, where that value came from, and enough
+        of its registry entry for a client to render a control for it without
+        hard-coding a second copy of the rules.
+      required:
+      - key
+      - value
+      - origin
+      - kind
+      - apply
+      - description
+      properties:
+        key:
+          type: string
+          description: The setting's name, spelled as the device's own config file spells it.
+          example: host_inventory_enabled
+        value:
+          description: The effective value — a boolean, a whole number or a string.
+          oneOf:
+          - type: boolean
+          - type: integer
+            format: int64
+          - type: string
+        origin:
+          type: string
+          enum: [built_in, fleet, device]
+          description: |
+            Where the effective value came from. `built_in` is the device's own
+            default (nobody has set it), `fleet` the tenant default, `device` an
+            override on this device. Without this the console cannot offer
+            "revert to fleet default", or say whether a value is deliberate.
+        kind:
+          type: string
+          enum: [bool, int, enum]
+        apply:
+          type: string
+          enum: [immediate, restart]
+          description: |
+            When the device adopts a change. `restart` settings sit at
+            `awaiting_restart` until the process restarts; showing them as
+            applied on the next check-in would be false.
+        description:
+          type: string
+          description: Operator-facing explanation of what the setting does.
+        confirm:
+          type: string
+          description: |
+            Present when turning this setting ON requires explicit
+            confirmation, and states what begins to be collected. Only settings
+            that start a new kind of collection carry one.
+        min:
+          type: integer
+          format: int64
+        max:
+          type: integer
+          format: int64
+        allowed:
+          type: array
+          items:
+            type: string
+    AgentConfigStatus:
+      type: object
+      description: How far the device has converged on the desired settings.
+      required:
+      - state
+      - desired_revision
+      properties:
+        state:
+          type: string
+          enum: [never_reported, not_reporting, pending, awaiting_restart, applied, failed]
+        desired_revision:
+          type: string
+          description: |
+            Content hash of the effective settings. The device reports the
+            revision it has adopted; equality is what "applied" means. A hash
+            rather than a counter, so a changed fleet default moves every
+            inheriting device with nothing having to notify them.
+        reported_at:
+          type: string
+          format: date-time
+          description: When the device last reported. Absent if it never has.
+        failures:
+          type: object
+          additionalProperties:
+            type: string
+          description: The device's own reason, per setting it could not apply.
+        pending_restart:
+          type: array
+          items:
+            type: string
+          description: Settings accepted but not adopted until the device restarts.
+    SensorConfigResponse:
+      type: object
+      required:
+      - runtime
+      - settings
+      - status
+      - version
+      properties:
+        runtime:
+          type: string
+          enum: [sensor]
+        settings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentConfigSetting'
+        status:
+          $ref: '#/components/schemas/AgentConfigStatus'
+        version:
+          $ref: '#/components/schemas/AgentConfigVersion'
+    SensorConfigDefaultsResponse:
+      type: object
+      required:
+      - runtime
+      - settings
+      properties:
+        runtime:
+          type: string
+          enum: [sensor]
+        settings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentConfigSetting'
+    AgentConfigWriteRequest:
+      type: object
+      required:
+      - values
+      properties:
+        values:
+          type: object
+          description: |
+            The settings to store, keyed by setting name. The whole set is
+            replaced: a key left out is cleared. A null value clears that one
+            key. An explicit `false` is a value, not an absence.
+          additionalProperties:
+            oneOf:
+            - type: boolean
+            - type: integer
+              format: int64
+            - type: string
+            - type: 'null'
+          example:
+            host_inventory_enabled: true
+            host_inventory_interval_seconds: 21600
+        confirmed:
+          type: boolean
+          description: |
+            Acknowledges any setting whose registry entry demands confirmation.
+            The server decides whether one is needed; omitting the flag cannot
+            waive it.
+    AgentConfigWriteResponse:
+      type: object
+      required:
+      - changed
+      - adjusted
+      - needs_restart
+      properties:
+        changed:
+          type: array
+          items:
+            type: string
+          description: One line per setting that actually changed, rendered as key, then the old and new values.
+          example: ["host_inventory_enabled: false → true"]
+        adjusted:
+          type: array
+          items:
+            type: string
+          description: |
+            Values silently raised to a setting's floor. The device does this on
+            its own today and logs it locally, so whoever typed the value never
+            learns it was changed; saying so here is the point.
+          example: ["host_inventory_interval_seconds: raised 300 to the minimum of 3600"]
+        needs_restart:
+          type: array
+          items:
+            type: string
+          description: |
+            Changed settings the device can only adopt on restart. An operator
+            who is not told will read the resulting `awaiting_restart` as a
+            failure.
+    AgentConfigConfirmationRequired:
+      type: object
+      required:
+      - error
+      - needs_confirming
+      properties:
+        error:
+          type: string
+        needs_confirming:
+          type: array
+          items:
+            type: object
+            required:
+            - key
+            - confirm
+            properties:
+              key:
+                type: string
+              confirm:
+                type: string
+                description: What begins to be collected if this is turned on.
     Sensor:
       type: object
       additionalProperties: true
@@ -1025,6 +1548,7 @@ components:
       - available_interfaces
       - tags
       - ip_address
+      - asset_id
       - last_heartbeat
       - created_at
       - updated_at
@@ -1080,6 +1604,17 @@ components:
           type:
           - string
           - 'null'
+        asset_id:
+          description: |
+            The asset the HOST THIS SENSOR RUNS ON resolved to, from the
+            sensor's own self-reported host identity (hostname, FQDN,
+            interfaces) turned into a host observation. Null until the first
+            successful self-observation, and always null for a sensor build
+            old enough to send none.
+          type:
+          - string
+          - 'null'
+          format: uuid
         last_heartbeat:
           type:
           - string
@@ -1654,6 +2189,55 @@ components:
           type: string
         message:
           type: string
+    DiscoveryJobCompletion:
+      type: object
+      additionalProperties: false
+      description: |
+        A sensor's report that a dispatched discovery job finished. Mirrors
+        shared/sensordispatch.Completion, the struct both the sensor and the
+        platform compile against. Counts are never negative; `status` is
+        `completed` or `failed`. `discoveries_submitted` is how many result
+        rows the sensor pushed through the discovery batch route for this job
+        — zero with `completed` is a legitimate answer (every target answered,
+        none spoke a protocol the probe recognises).
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum: [completed, failed]
+        error_message:
+          type: string
+          description: Why, when status is `failed`.
+        total_targets:
+          type: integer
+          minimum: 0
+        successful_targets:
+          type: integer
+          minimum: 0
+        failed_targets:
+          type: integer
+          minimum: 0
+        discoveries_submitted:
+          type: integer
+          minimum: 0
+    DiscoveryJobCompletionResponse:
+      type: object
+      additionalProperties: false
+      description: 'POST /sensors/{sensor_id}/discovery-jobs/{job_id}/complete result.'
+      required:
+      - status
+      - message
+      - job_id
+      properties:
+        status:
+          type: string
+          enum: [success]
+        message:
+          type: string
+        job_id:
+          type: string
+          format: uuid
     RotateCertificateResponse:
       type: object
       additionalProperties: false

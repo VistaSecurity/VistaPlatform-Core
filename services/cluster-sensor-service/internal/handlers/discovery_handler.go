@@ -135,16 +135,22 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	job, err := h.discoveryService.CreateJob(tenantID, userID, req)
 	if err != nil {
 		log.Printf("[DiscoveryHandler] CreateJob error: %v", err)
-		// Sensor dispatch is not implemented; say so instead of collapsing it
-		// into the generic message. A caller must be able to tell "you asked
-		// for something that does not exist" from "your request was malformed",
-		// because the previous behaviour was to accept it and run the scan
-		// somewhere else entirely.
-		if errors.Is(err, services.ErrSensorDispatchUnsupported) {
+		// A `sensors` job that cannot run is refused with a reason and a
+		// status a caller can act on, not collapsed into the generic message.
+		// A caller must be able to tell "that sensor is offline" (409, try
+		// later or pick another) from "that sensor does not exist" (404) from
+		// "your request was malformed" (400), because the previous behaviour
+		// was to accept the job and run the scan somewhere else entirely.
+		switch {
+		case errors.Is(err, services.ErrSensorNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrSensorOffline):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, services.ErrSensorDispatchInvalid):
 			sharedapi.BadRequest(c, err.Error())
-			return
+		default:
+			sharedapi.BadRequest(c, "failed to create job")
 		}
-		sharedapi.BadRequest(c, "failed to create job")
 		return
 	}
 
@@ -189,11 +195,14 @@ func (h *DiscoveryHandler) GetJobs(c *gin.Context) {
 	// Parse status filter
 	status := c.Query("status")
 
+	// kind: "automatic" (the sweep) or "manual" (everything else).
+	kind := c.Query("kind")
+
 	// Parse date range filters
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
-	jobs, total, err := h.discoveryService.GetJobs(tenantID, page, pageSize, status, startDate, endDate)
+	jobs, total, err := h.discoveryService.GetJobs(tenantID, page, pageSize, status, kind, startDate, endDate)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get jobs"})
 		return

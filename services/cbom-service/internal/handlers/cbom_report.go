@@ -5,6 +5,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -1149,29 +1150,6 @@ func inferAlgorithmCategory(role, code string) string {
 	}
 }
 
-func inferAlgorithmStrength(code string, keySize int) string {
-	upper := strings.ToUpper(code)
-	switch {
-	case strings.Contains(upper, "MD5"), strings.Contains(upper, "SHA1"), strings.Contains(upper, "DES"), strings.Contains(upper, "RC4"), strings.Contains(upper, "3DES"):
-		return "weak"
-	case strings.Contains(upper, "RSA"):
-		switch {
-		case keySize > 0 && keySize < 2048:
-			return "weak"
-		case keySize >= 4096:
-			return "strong"
-		default:
-			return "acceptable"
-		}
-	case strings.Contains(upper, "AES-256"), strings.Contains(upper, "AES256"), strings.Contains(upper, "SHA512"), strings.Contains(upper, "SHA384"), strings.Contains(upper, "SHA256"), strings.Contains(upper, "X25519"), strings.Contains(upper, "P-384"), strings.Contains(upper, "P-521"):
-		return "strong"
-	case strings.Contains(upper, "AES-128"), strings.Contains(upper, "AES128"), strings.Contains(upper, "CHACHA20"), strings.Contains(upper, "P-256"):
-		return "acceptable"
-	default:
-		return "acceptable"
-	}
-}
-
 func inferAlgorithmDeprecationStatus(code string, keySize int) string {
 	upper := strings.ToUpper(code)
 	switch {
@@ -1184,17 +1162,29 @@ func inferAlgorithmDeprecationStatus(code string, keySize int) string {
 	}
 }
 
-func inferAlgorithmRiskScore(code string, keySize int) int {
-	if inferAlgorithmDeprecationStatus(code, keySize) == "deprecated" {
-		return 85
+// catalogueRiskScore preserves an explicit zero and leaves absent or invalid
+// catalogue scores unassessed. Reports must not manufacture a default rating.
+func catalogueRiskScore(value interface{}) *int {
+	var score float64
+	switch v := value.(type) {
+	case int:
+		score = float64(v)
+	case int32:
+		score = float64(v)
+	case int64:
+		score = float64(v)
+	case float32:
+		score = float64(v)
+	case float64:
+		score = v
+	default:
+		return nil
 	}
-	if inferAlgorithmStrength(code, keySize) == "weak" {
-		return 70
+	if math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 100 || math.Trunc(score) != score {
+		return nil
 	}
-	if isPQCAlgorithm(code) {
-		return 10
-	}
-	return 25
+	result := int(score)
+	return &result
 }
 
 func inferMigrationGuidance(code string, keySize int) string {
@@ -1304,7 +1294,7 @@ func lookupAlgorithm(code string, lookup map[string]map[string]interface{}) map[
 }
 
 // enrichAlgorithmDetails builds CBOMAlgorithmDetails by first consulting the canonical
-// algorithms table, falling back to heuristic inference for algorithms not in the catalog.
+// algorithms table. Identity hints may be inferred; ratings require catalogue data.
 func enrichAlgorithmDetails(source cbomAlgorithmSource, algorithmLookup map[string]map[string]interface{}) *models.CBOMAlgorithmDetails {
 	canonical := lookupAlgorithm(source.Code, algorithmLookup)
 
@@ -1320,7 +1310,7 @@ func enrichAlgorithmDetails(source cbomAlgorithmSource, algorithmLookup map[stri
 	if canonical != nil {
 		// Use authoritative data from the algorithms table
 		details.Category = firstNonEmpty(strVal(canonical["category"]), category)
-		details.Strength = firstNonEmpty(strVal(canonical["strength"]), inferAlgorithmStrength(source.Code, source.KeySize))
+		details.Strength = strVal(canonical["strength"])
 		details.DeprecationStatus = firstNonEmpty(strVal(canonical["deprecation_status"]), inferAlgorithmDeprecationStatus(source.Code, source.KeySize))
 		details.IsPQC = boolVal(canonical["is_pqc"])
 		details.PQCStandardizationStatus = firstNonEmpty(strVal(canonical["pqc_standardization_status"]), inferPQCStatus(source.Code))
@@ -1328,7 +1318,7 @@ func enrichAlgorithmDetails(source cbomAlgorithmSource, algorithmLookup map[stri
 		// classical strength in bits and used to stand in for it, which put
 		// values like 128 into a field the spec bounds at 0–6.
 		details.NistQuantumSecurityLevel = intVal(canonical["nist_quantum_security_level"])
-		details.RiskScore = firstNonZeroInt(intVal(canonical["risk_score"]), inferAlgorithmRiskScore(source.Code, source.KeySize))
+		details.RiskScore = catalogueRiskScore(canonical["risk_score"])
 		details.MigrationGuidance = firstNonEmpty(strVal(canonical["migration_guidance"]), inferMigrationGuidance(source.Code, source.KeySize))
 		details.RecommendedAlternatives = stringSliceVal(canonical["recommended_alternatives"])
 
@@ -1345,13 +1335,11 @@ func enrichAlgorithmDetails(source cbomAlgorithmSource, algorithmLookup map[stri
 			details.Curve = strVal(canonical["curve"])
 		}
 	} else {
-		// Fallback to heuristic inference for algorithms not in the catalog
+		// Infer identity hints only; unknown catalogue ratings stay absent.
 		details.Category = category
-		details.Strength = inferAlgorithmStrength(source.Code, source.KeySize)
 		details.DeprecationStatus = inferAlgorithmDeprecationStatus(source.Code, source.KeySize)
 		details.IsPQC = isPQCAlgorithm(source.Code)
 		details.PQCStandardizationStatus = inferPQCStatus(source.Code)
-		details.RiskScore = inferAlgorithmRiskScore(source.Code, source.KeySize)
 		details.MigrationGuidance = inferMigrationGuidance(source.Code, source.KeySize)
 	}
 

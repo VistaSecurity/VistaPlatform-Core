@@ -210,6 +210,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description Tenant health index band: excellent >=90, good >=75, fair >=60, poor >=40, failing <40. Unknown means no valid health index is available. When no factor could be measured, overall_score 0 is a sentinel, not a measured score; nonfinite or out-of-range indices are also unbanded. Critical is accepted only for stored pre-ADR-0016 historical responses; new assessments write failing. Stored history is not relabelled.
+         * @enum {string}
+         */
+        TenantHealthStatus: "excellent" | "good" | "fair" | "poor" | "failing" | "unknown" | "critical";
         /** @description Per-factor scoring, each 0-100 (models.HealthBreakdown). A factor is `null` when it could NOT be measured because the peer service supplying its raw metrics was unreachable — null means "unknown", never zero. Null factors are excluded from `overall_score`, whose remaining weights are renormalised; `data_completeness` says how much of the total factor weight was actually measured and `unavailable_sources` says which peers were missing. */
         HealthBreakdown: {
             resource_efficiency: number | null;
@@ -244,7 +249,7 @@ export interface components {
             /** Format: date-time */
             timestamp: string;
             score: number;
-            status: string;
+            status: components["schemas"]["TenantHealthStatus"];
         };
         /** @description Historical health trend data (models.HealthTrends). */
         HealthTrends: {
@@ -263,8 +268,7 @@ export interface components {
             /** Format: uuid */
             tenant_id: string;
             overall_score: number;
-            /** @description excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score). */
-            health_status: string;
+            health_status: components["schemas"]["TenantHealthStatus"];
             /** Format: date-time */
             last_calculated: string;
             score_breakdown: components["schemas"]["HealthBreakdown"];
@@ -340,8 +344,7 @@ export interface components {
             /** Format: uuid */
             tenant_id: string;
             overall_score: number;
-            /** @description excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score). */
-            health_status: string;
+            health_status: components["schemas"]["TenantHealthStatus"];
             score_breakdown: components["schemas"]["HealthBreakdown"];
             recommendations: components["schemas"]["Recommendation"][] | null;
             trends: components["schemas"]["HealthTrends"];
@@ -354,8 +357,7 @@ export interface components {
             tenant_id: string;
             tenant_name: string;
             overall_score: number;
-            /** @description excellent / good / fair / poor / critical / unknown (unknown = no factor could be measured; overall_score is 0 for want of data, not a score). */
-            health_status: string;
+            health_status: components["schemas"]["TenantHealthStatus"];
             /** Format: date-time */
             last_calculated: string;
             /** @description improving / stable / declining. */
@@ -544,7 +546,7 @@ export interface operations {
                 limit?: number;
                 /** @description Page offset (applied only when >= 0). */
                 offset?: number;
-                /** @description Filter by health_status (excellent / good / fair / poor / critical / unknown). */
+                /** @description Filter by health_status (excellent / good / fair / poor / failing / unknown; critical is a legacy stored value). */
                 status?: string;
                 min_score?: number;
                 max_score?: number;

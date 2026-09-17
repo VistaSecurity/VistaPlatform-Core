@@ -8,7 +8,7 @@
 // builder pulls from CryptoRisk rows — each producing a row per item in the
 // already-filtered array it's given, never a hidden network fetch.
 import { describe, expect, it } from 'vitest';
-import { buildComplianceFindingCsvRows, buildCryptoRiskCsvRows, type ControlMeta } from './export-csv';
+import { buildComplianceFindingCsvRows, buildCryptoRiskCsvRows, CRYPTO_RISK_CSV_HEADER, type ControlMeta } from './export-csv';
 import type { ComplianceFinding, CryptoRisk } from './model';
 
 const cryptoRisk: CryptoRisk = {
@@ -56,11 +56,42 @@ describe('B-31: buildCryptoRiskCsvRows', () => {
   it('produces one row per crypto risk, from the risk fields — never from ComplianceFinding data', () => {
     const rows = buildCryptoRiskCsvRows([cryptoRisk]);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toEqual(['db01.internal', 'Protocol', 'Weak protocol version in use', 'TLSv1.0', 'Critical', 'TLS', '1.0', '2026-08-01T00:00:00Z']);
+    expect(rows[0]).toEqual([
+      'db01.internal', 'Protocol', 'Weak protocol version in use', 'TLSv1.0', 'Critical', 'TLS', '1.0', '2026-08-01T00:00:00Z',
+      'impl-1', '', '', '', '',
+    ]);
   });
 
   it('honors whatever filtered set it is given — an empty filtered list exports nothing', () => {
     expect(buildCryptoRiskCsvRows([])).toEqual([]);
+  });
+
+  it('exports a nullable severity as Unknown instead of fabricating Informational', () => {
+    const unscored: CryptoRisk = { ...cryptoRisk, severity: null };
+    expect(buildCryptoRiskCsvRows([unscored])[0][4]).toBe('Unknown');
+  });
+
+  it('appends configuration identity and assessment provenance without moving existing columns', () => {
+    const assessed: CryptoRisk = {
+      ...cryptoRisk,
+      severity: 'info',
+      risk_score: 20,
+      assessment_basis: 'certificate_lifecycle',
+      score_sources: ['AES-256-GCM [cipher_suite]'],
+      assessment_limitations: ['certificate chain was incomplete'],
+    };
+    const row = buildCryptoRiskCsvRows([assessed])[0];
+
+    expect(CRYPTO_RISK_CSV_HEADER).toEqual([
+      'asset', 'category', 'issue', 'current_value', 'severity', 'protocol', 'protocol_version', 'detected_at',
+      'configuration_id', 'risk_score', 'assessment_basis', 'score_sources', 'assessment_limitations',
+    ]);
+    expect(row.slice(0, 8)).toEqual([
+      'db01.internal', 'Protocol', 'Weak protocol version in use', 'TLSv1.0', 'Informational', 'TLS', '1.0', '2026-08-01T00:00:00Z',
+    ]);
+    expect(row.slice(8)).toEqual([
+      'impl-1', 20, 'certificate_lifecycle', 'AES-256-GCM [cipher_suite]', 'certificate chain was incomplete',
+    ]);
   });
 });
 

@@ -271,7 +271,7 @@ func TestContract_CreateOverride_201(t *testing.T) {
 	sv := loadSpec(t)
 	ov := sampleOverride()
 	eng := newWorkspaceEngine(&stubScenarioStore{}, &stubOverrideStore{created: &ov})
-	body := `{"control_id":"` + fUUID + `","override_type":"severity","rationale":"compensating control"}`
+	body := `{"control_id":"` + fUUID + `","override_type":"severity","severity_from":"high","severity_to":"low","rationale":"compensating control"}`
 	w := do(eng, http.MethodPost, cBase+"/overrides", strings.NewReader(body))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
@@ -353,5 +353,16 @@ func TestContract_DeleteOverride_scopesToContextTenant(t *testing.T) {
 	}
 	if ov.gotTenant != ctxTenantForTest {
 		t.Fatalf("DeleteOverride tenant = %s, want context tenant %s (#528)", ov.gotTenant, ctxTenantForTest)
+	}
+}
+
+func TestContract_OverrideRejectsInvalidControlSeverity(t *testing.T) {
+	for _, value := range []string{"Med", "High", "info", "invalid", ""} {
+		eng := newWorkspaceEngine(&stubScenarioStore{}, &stubOverrideStore{})
+		body := `{"control_id":"` + fUUID + `","override_type":"severity","severity_from":"high","severity_to":"` + value + `","rationale":"test"}`
+		w := do(eng, http.MethodPost, cBase+"/overrides", strings.NewReader(body))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("accepted %q: %d %s", value, w.Code, w.Body.String())
+		}
 	}
 }

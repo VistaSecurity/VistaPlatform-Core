@@ -1,6 +1,6 @@
 // In-page RBAC gates must name the permission their route enforces.
 //
-// The settings-rail gates are pinned in sections/settings/nav.test.ts. This file
+// The settings-drawer gates are pinned in sections/settings/nav.test.ts. This file
 // covers the layer one click deeper: the buttons, toggles and drawers INSIDE a
 // page. A gate that is weaker than its route hands the user an enabled control
 // and a 403; a gate that is stricter hides a control the server would have

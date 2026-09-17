@@ -61,7 +61,6 @@ func TestContract_SpecRoutesAndEditionTags(t *testing.T) {
 			"GET /tenants/:id/billing":                         "per-tenant billing read/write (ee/billingapi) is unspecified — spec backlog (#257)",
 			"GET /tenants/:id/integrations":                    "per-tenant integration CRUD (ee/msp) is unspecified — spec backlog (#257)",
 			"GET /tenants/:id/integrations/:integrationId":     "per-tenant integration CRUD (ee/msp) is unspecified — spec backlog (#257)",
-			"GET /tenants/:id/settings":                        "per-tenant settings (ee/msp) is unspecified — spec backlog (#257)",
 			"POST /admin/billing/webhook/:provider":            "Stripe webhook receiver: called by the provider, not by any client",
 			"POST /billing/dunning/tenants/:tenant_id/resume":  "dunning (ee/billingapi) is unspecified — spec backlog (#257)",
 			"POST /billing/dunning/tenants/:tenant_id/retry":   "dunning (ee/billingapi) is unspecified — spec backlog (#257)",
@@ -75,7 +74,6 @@ func TestContract_SpecRoutesAndEditionTags(t *testing.T) {
 			"POST /tenants/:id/integrations":                   "per-tenant integration CRUD (ee/msp) is unspecified — spec backlog (#257)",
 			"PUT /tenants/:id/billing":                         "per-tenant billing read/write (ee/billingapi) is unspecified — spec backlog (#257)",
 			"PUT /tenants/:id/integrations/:integrationId":     "per-tenant integration CRUD (ee/msp) is unspecified — spec backlog (#257)",
-			"PUT /tenants/:id/settings":                        "per-tenant settings (ee/msp) is unspecified — spec backlog (#257)",
 		},
 	})
 }

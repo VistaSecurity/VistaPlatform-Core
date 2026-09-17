@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -174,7 +175,12 @@ func TestSSHBannerCapturedByProbeAndFallbackAreBothBounded(t *testing.T) {
 	if !strings.Contains(src, "result.SSHBanner = boundSSHBanner(string(sshConn.ServerVersion()))") {
 		t.Error("the full-handshake path no longer routes the banner through boundSSHBanner")
 	}
-	if !strings.Contains(src, "bannerStr := boundSSHBanner(string(banner[:n]))") {
+	// The fallback reads the identification LINE (sshReadIdentification), not
+	// a raw blob — a plain Read used to return the version string with the
+	// server's SSH_MSG_KEXINIT packet stapled to it — but the bounding
+	// requirement is unchanged: whatever it read still goes through
+	// boundSSHBanner.
+	if !strings.Contains(src, "bannerStr := boundSSHBanner(raw)") {
 		t.Error("the banner-only fallback no longer routes the banner through boundSSHBanner")
 	}
 }
@@ -244,5 +250,38 @@ func TestSSHProbeFallbackReadsTheBannerOnAFreshConnection(t *testing.T) {
 	}
 	if res.SSHHostKeyType != "" || len(res.SSHKeyTypes) != 0 {
 		t.Errorf("no kex happened, so no host key can have been captured: type=%q types=%v", res.SSHHostKeyType, res.SSHKeyTypes)
+	}
+}
+
+// TestSSHProbeFallbackStopsAtTheIdentificationLine is the regression test for
+// a banner that carried a binary packet in it.
+//
+// sshprobeBannerOnly used to do a plain 1024-byte Read and keep whatever came
+// back. An SSH server sends its SSH_MSG_KEXINIT immediately behind the
+// identification string, normally in the same TCP segment, so that read
+// returned the version line with a KEXINIT packet stapled to it — algorithm
+// name-lists, a 16-byte cookie and random padding — and the whole lot was
+// truncated to 256 bytes and stored as the device's banner. It also made
+// cryptoparse.SSHProtocolVersionCode's job harder for no reason and put
+// unprintable bytes into a field the UI shows.
+//
+// RFC 4253 §4.2 terminates the identification string with CR LF. Stopping
+// there is the fix.
+func TestSSHProbeFallbackStopsAtTheIdentificationLine(t *testing.T) {
+	const version = "SSH-2.0-Appliance_1.0 firmware-7.2"
+	// A KEXINIT-shaped packet right behind the version line, exactly as a
+	// real sshd sends it.
+	trailing := string(sshWrapPacket(sshBuildKexInitPayload()))
+	host, port := serveRawBanner(t, version+"\r\n"+trailing)
+
+	res, err := sshprobeBannerOnly(NewProber(3*time.Second), net.JoinHostPort(host, strconv.Itoa(port)), port)
+	if err != nil {
+		t.Fatalf("sshprobeBannerOnly: %v", err)
+	}
+	if res.SSHBanner != version {
+		t.Errorf("SSHBanner = %q, want exactly %q — the read must stop at the line terminator", res.SSHBanner, version)
+	}
+	if strings.ContainsAny(res.SSHBanner, "\x00\x01\x14") {
+		t.Errorf("binary packet bytes reached the banner: %q", res.SSHBanner)
 	}
 }

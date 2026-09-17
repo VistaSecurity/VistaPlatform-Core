@@ -10,15 +10,25 @@ package services
 // here and they are different sockets, which the old flattening could not say.
 
 import (
+	"container/heap"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
+	"math"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
-	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
+	"github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/riskbands"
+	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // CryptoRisksSummary represents aggregated crypto risk statistics
@@ -26,6 +36,8 @@ type CryptoRisksSummary struct {
 	Critical          int `json:"critical"`
 	High              int `json:"high"`
 	Medium            int `json:"medium"`
+	Low               int `json:"low"`
+	Unscored          int `json:"unscored"`
 	Informational     int `json:"informational"`
 	TotalAffected     int `json:"total_assets_affected"`
 	ProtocolIssues    int `json:"protocol_issues"`
@@ -40,7 +52,12 @@ type CryptoRisk struct {
 	TenantID               uuid.UUID `json:"tenant_id" db:"tenant_id"`
 	AssetID                uuid.UUID `json:"asset_id" db:"asset_id"`
 	CryptoImplementationID uuid.UUID `json:"crypto_implementation_id" db:"crypto_implementation_id"`
-	Severity               string    `json:"severity"`
+	Severity               *string   `json:"severity"`
+	RiskScore              *int      `json:"risk_score"`
+	AssessmentBasis        string    `json:"assessment_basis"`
+	AssessmentLimitations  []string  `json:"assessment_limitations"`
+	ScoreSources           []string  `json:"score_sources"`
+	Categories             []string  `json:"categories,omitempty"`
 	Category               string    `json:"category"`
 	IssueType              string    `json:"issue_type"`
 	CurrentValue           string    `json:"current_value"`
@@ -76,7 +93,7 @@ type CryptoRisk struct {
 
 // CryptoRiskFilters defines filters for crypto risk queries
 type CryptoRiskFilters struct {
-	Severity  []string `json:"severity" form:"severity"` // critical, high, medium, info
+	Severity  []string `json:"severity" form:"severity"` // critical, high, medium, low, informational; unscored selects NULL
 	Category  []string `json:"category" form:"category"` // protocol, algorithm, certificate, key_size
 	Search    string   `json:"search" form:"search"`
 	Page      int      `json:"page" form:"page"`
@@ -87,8 +104,7 @@ type CryptoRiskFilters struct {
 
 // CryptoRisksResponse represents the paginated response for crypto risks
 // MaxCryptoRiskPageSize is the largest page a single ListRisks call will
-// return. List endpoints clamp to it; the CSV export pages through in chunks
-// of this size to stream the full result set.
+// return. List endpoints clamp to it; export selects up to 50k rows in one pass.
 const MaxCryptoRiskPageSize = 100
 
 type CryptoRisksResponse struct {
@@ -109,641 +125,464 @@ func NewCryptoRisksService(db *database.DB) *CryptoRisksService {
 	return &CryptoRisksService{db: db}
 }
 
-// GetSummary returns aggregated crypto risk statistics for a tenant.
-//
-// # Roll up per asset first, then band once
-//
-// The four severity counters count ASSETS, and every asset lands in exactly
-// one. Each was previously its own `COUNT(DISTINCT ci.asset_id)` with the band
-// decided per CONFIGURATION, so a host with one TLS 1.0 endpoint and one TLS
-// 1.1 endpoint was counted in Critical and in High — the buckets overlapped,
-// summed past the number of affected assets, and made the distribution bar
-// exceed 100%. That is the bug CLAUDE.md names: band per implementation, count
-// distinct assets, and one asset appears in several buckets.
-//
-// The fix is the rule stated there: take the WORST severity per asset, then
-// band that once. `cryptoSeverityCaseSQL` ranks a configuration 4..1 so the
-// rollup is a plain MAX, and the four counters are `FILTER`s over the ranked
-// per-asset row.
-//
-// The issue counters below (protocol / algorithm / certificate / key size) are
-// deliberately a different unit — they count CONFIGURATIONS, because "how many
-// weak protocol configurations" is the question they answer — and they are
-// labelled as such in the response.
-//
-// A dead `LEFT JOIN asset_endpoints e` sat in eight of these queries after the
-// endpoint split, joined and then never referenced. It is gone: a join nothing
-// reads is a cost with no meaning, and it invited the reader to think the
-// counter was per endpoint.
-func (s *CryptoRisksService) GetSummary(tenantID uuid.UUID) (*CryptoRisksSummary, error) {
-	summary := &CryptoRisksSummary{}
-
-	// RLS-scoped reads over crypto_implementations / certificates (JOIN assets)
-	// — all aggregate counts run in one tenant tx so app.tenant_id is set throughout.
-	txErr := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		// One pass: rank every live configuration, keep the worst per asset,
-		// then count assets per band. Five numbers from one statement, which is
-		// also what makes them consistent with each other.
-		bandQuery := `
-		WITH ranked AS (
-			SELECT ci.asset_id, ` + cryptoSeverityCaseSQL() + ` AS severity
-			FROM crypto_implementations ci
-			JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
-			                  AND na.deleted_at IS NULL
-			WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL
-		),
-		per_asset AS (
-			SELECT asset_id, MAX(severity) AS severity
-			FROM ranked
-			GROUP BY asset_id
-		)
-		SELECT
-			COUNT(*) FILTER (WHERE severity = 4) AS critical,
-			COUNT(*) FILTER (WHERE severity = 3) AS high,
-			COUNT(*) FILTER (WHERE severity = 2) AS medium,
-			COUNT(*) FILTER (WHERE severity = 1) AS informational,
-			COUNT(*) FILTER (WHERE severity > 0) AS total_affected
-		FROM per_asset
-	`
-		if err := tx.QueryRow(bandQuery, tenantID).Scan(
-			&summary.Critical, &summary.High, &summary.Medium,
-			&summary.Informational, &summary.TotalAffected,
-		); err != nil {
-			return fmt.Errorf("failed to count risk bands: %w", err)
-		}
-
-		// The issue counters: configurations, not assets.
-		issueQuery := `
-		SELECT
-			COUNT(*) FILTER (WHERE
-				UPPER(COALESCE(ci.protocol_version, '')) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
-				OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.0%'
-				OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%0%'
-				OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1.1%'
-				OR UPPER(COALESCE(ci.protocol_version, '')) LIKE '%TLS%1%1%'
-				OR COALESCE(ci.protocol_version, '') IN ('1.0', '1.1')
-				OR COALESCE(ci.protocol_version, '') LIKE '1.0%'
-				OR COALESCE(ci.protocol_version, '') LIKE '1.1%'
-				OR COALESCE(ci.protocol_version, '') LIKE '%1.0'
-				OR COALESCE(ci.protocol_version, '') LIKE '%1.1'
-			) AS protocol_issues,
-			COUNT(*) FILTER (WHERE
-				UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%RC4%'
-				OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%DES%'
-				OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%NULL%'
-				OR UPPER(COALESCE(ci.cipher_suite, '')) LIKE '%EXPORT%'
-				OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%MD5%'
-				OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%SHA1%'
-				OR UPPER(COALESCE(ci.hash_algorithm, '')) LIKE '%SHA-1%'
-			) AS algorithm_issues,
-			COUNT(*) FILTER (WHERE ` + anyWeakKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm") + `) AS key_size_issues
-		FROM crypto_implementations ci
-		JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
-		                  AND na.deleted_at IS NULL
-		WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL
-	`
-		if err := tx.QueryRow(issueQuery, tenantID).Scan(
-			&summary.ProtocolIssues, &summary.AlgorithmIssues, &summary.KeySizeIssues,
-		); err != nil {
-			return fmt.Errorf("failed to count issues: %w", err)
-		}
-
-		// Certificate issues (expiring within 90 days or weak key).
-		//
-		// The weak-key half used to be a bare `public_key_size < 2048`, which is
-		// the RSA/finite-field floor applied to every family: a healthy 256-bit
-		// EC certificate counted as an issue here while the `crypto` finding
-		// producer (shared/cryptoparse.WeakKeySizeSeverity) raised nothing for
-		// it — two opinions about the same certificate. anyWeakKeySizeSQL is the
-		// SQL twin of that same classifier, family-aware via public_key_algorithm
-		// ("RSA" / "ECDSA" / "Ed25519", as Go's x509 PublicKeyAlgorithm.String()
-		// spells them).
-		certQuery := `
-		SELECT COUNT(*)
-		FROM certificates c
-		WHERE c.tenant_id = $1
-		  AND (
-			(c.not_after IS NOT NULL AND c.not_after BETWEEN NOW() AND NOW() + INTERVAL '90 days')
-			OR ` + anyWeakKeySizeSQL("c.public_key_size", "c.public_key_algorithm") + `
-		  )
-	`
-		if err := tx.Get(&summary.CertificateIssues, certQuery, tenantID); err != nil {
-			return fmt.Errorf("failed to count certificate issues: %w", err)
-		}
-		return nil
-	})
-	if txErr != nil {
-		return nil, txErr
-	}
-
-	return summary, nil
-}
-
-// ListRisks returns a paginated list of crypto risks for a tenant
-func (s *CryptoRisksService) ListRisks(tenantID uuid.UUID, filters CryptoRiskFilters) (*CryptoRisksResponse, error) {
-	// Set defaults
-	if filters.Page < 1 {
-		filters.Page = 1
-	}
-	if filters.PageSize < 1 {
-		filters.PageSize = 20
-	} else if filters.PageSize > MaxCryptoRiskPageSize {
-		// Clamp oversized page requests to the max instead of silently
-		// snapping back to the default — the export path pages through at
-		// MaxCryptoRiskPageSize and would otherwise be truncated to 20.
-		filters.PageSize = MaxCryptoRiskPageSize
-	}
-	offset := (filters.Page - 1) * filters.PageSize
-
-	// Build the query to identify risky crypto implementations
-	var conditions []string
-	args := []interface{}{tenantID}
-	argPos := 2
-
-	// Base condition for risks
-	riskConditions := []string{}
-
-	// Severity filter
-	if len(filters.Severity) > 0 {
-		severityConditions := []string{}
-		for _, sev := range filters.Severity {
-			switch strings.ToLower(sev) {
-			case "critical":
-				severityConditions = append(severityConditions, cryptoCriticalSQL())
-			case "high":
-				severityConditions = append(severityConditions, cryptoHighSQL())
-			case "medium":
-				// Medium: expiring certificates (within 30 days)
-				severityConditions = append(severityConditions, cryptoMediumSQL())
-			case "informational":
-				// Informational: scored, but matching none of the three named
-				// bands. Defined as the negation of the others so the four bands
-				// partition the scored configurations.
-				severityConditions = append(severityConditions, cryptoInformationalSQL())
-			}
-		}
-		if len(severityConditions) > 0 {
-			riskConditions = append(riskConditions, "("+strings.Join(severityConditions, " OR ")+")")
-		}
-	} else {
-		// Default: show all risks (critical, high, medium, informational)
-		// Return all crypto implementations that match ANY risk pattern
-		// Don't require risk_score > 0 as many risks may not have score set yet
-		riskConditions = append(riskConditions, cryptoAnyRiskSQL())
-	}
-
-	// Category filter
-	if len(filters.Category) > 0 {
-		categoryConditions := []string{}
-		for _, cat := range filters.Category {
-			switch strings.ToLower(cat) {
-			case "protocol":
-				categoryConditions = append(categoryConditions, `(
-					UPPER(ci.protocol_version) IN ('SSLV2', 'SSLV3', 'SSL2', 'SSL3')
-					OR UPPER(ci.protocol_version) LIKE '%TLS%1.0%'
-					OR UPPER(ci.protocol_version) LIKE '%TLS%1%0%'
-					OR UPPER(ci.protocol_version) LIKE '%TLS%1.1%'
-					OR UPPER(ci.protocol_version) LIKE '%TLS%1%1%'
-					OR (ci.protocol_version IS NOT NULL AND (
-						ci.protocol_version = '1.0'
-						OR ci.protocol_version = '1.1'
-						OR ci.protocol_version LIKE '1.0%'
-						OR ci.protocol_version LIKE '1.1%'
-						OR ci.protocol_version LIKE '%1.0'
-						OR ci.protocol_version LIKE '%1.1'
-					))
-				)`)
-			case "algorithm":
-				categoryConditions = append(categoryConditions, `(
-					UPPER(ci.cipher_suite) LIKE '%RC4%'
-					OR UPPER(ci.cipher_suite) LIKE '%DES%'
-					OR UPPER(ci.cipher_suite) LIKE '%NULL%'
-					OR UPPER(ci.cipher_suite) LIKE '%EXPORT%'
-					OR UPPER(ci.hash_algorithm) LIKE '%MD5%'
-					OR UPPER(ci.hash_algorithm) LIKE '%SHA1%'
-				)`)
-			case "key_size":
-				categoryConditions = append(categoryConditions,
-					anyWeakKeySizeSQL("ci.key_size", "ci.key_exchange_algorithm"))
-			}
-		}
-		if len(categoryConditions) > 0 {
-			conditions = append(conditions, "("+strings.Join(categoryConditions, " OR ")+")")
-		}
-	}
-
-	if len(riskConditions) > 0 {
-		conditions = append(conditions, "("+strings.Join(riskConditions, " OR ")+")")
-	}
-
-	// Search filter
-	if filters.Search != "" {
-		// host(...) is INET and ci.protocol is the protocol_type ENUM; neither has
-		// an ILIKE (~~*) operator, so both need an explicit ::text cast or the
-		// statement fails at plan time. Same defect/fix as the Configuration-lens
-		// search in crypto_implementation_service.go.
-		//
-		// Both addresses are searched, rather than a COALESCE of them: typing the
-		// endpoint's address should find the row, and so should typing the host's.
-		// COALESCE searched only whichever one happened to be non-NULL.
-		conditions = append(conditions, fmt.Sprintf(`(
-			na.hostname ILIKE $%d
-			OR host(na.primary_address)::text ILIKE $%d
-			OR host(e.address)::text ILIKE $%d
-			OR ci.protocol::text ILIKE $%d
-			OR ci.cipher_suite ILIKE $%d
-		)`, argPos, argPos, argPos, argPos, argPos))
-		args = append(args, "%"+filters.Search+"%")
-		argPos++
-	}
-
-	whereClause := ""
-	if len(conditions) > 0 {
-		whereClause = "AND " + strings.Join(conditions, " AND ")
-	}
-
-	// Count total
-	// Use same structure as main query to ensure consistent counting
-	countQuery := fmt.Sprintf(`
-		SELECT COUNT(DISTINCT ci.id)
-		FROM crypto_implementations ci
-		JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id AND na.deleted_at IS NULL
-		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
-		LEFT JOIN crypto_implementation_certificates cic ON cic.crypto_implementation_id = ci.id
-		LEFT JOIN certificates c ON cic.certificate_id = c.id
-		WHERE ci.tenant_id = $1
-		  AND ci.deleted_at IS NULL
-		  %s
-	`, whereClause)
-
-	var total int
-
-	// Build sort clause
-	sortClause := "ORDER BY ci.risk_score DESC NULLS LAST, ci.created_at DESC"
-	if filters.SortBy != "" {
-		validSorts := map[string]string{
-			"severity":    "ci.risk_score",
-			"detected_at": "ci.created_at",
-			"hostname":    "na.hostname",
-			"protocol":    "ci.protocol",
-		}
-		if col, ok := validSorts[filters.SortBy]; ok {
-			order := "ASC"
-			if strings.ToUpper(filters.SortOrder) == "DESC" {
-				order = "DESC"
-			}
-			sortClause = fmt.Sprintf("ORDER BY %s %s NULLS LAST", col, order)
-		}
-	}
-
-	// Fetch risks
-	// Include certificate expiration info for medium risk classification
-	query := fmt.Sprintf(`
-		SELECT ci.id, ci.tenant_id, ci.asset_id, ci.id as crypto_implementation_id,
-		       ci.protocol, ci.protocol_version, ci.cipher_suite, ci.hash_algorithm,
-		       ci.key_exchange_algorithm, ci.key_size,
-		       ci.risk_score, ci.created_at,
-		       na.hostname, host(na.primary_address) AS ip_address,
-		       e.id AS endpoint_id, host(e.address) AS endpoint_address, e.port, na.class_key AS asset_type,
-		       MIN(c.not_after) as earliest_cert_expiry
-		FROM crypto_implementations ci
-		JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id AND na.deleted_at IS NULL
-		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
-		LEFT JOIN crypto_implementation_certificates cic ON cic.crypto_implementation_id = ci.id
-		LEFT JOIN certificates c ON cic.certificate_id = c.id
-		WHERE ci.tenant_id = $1
-		  AND ci.deleted_at IS NULL
-		  %s
-		GROUP BY ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version,
-		         ci.cipher_suite, ci.hash_algorithm, ci.key_exchange_algorithm, ci.key_size, ci.risk_score,
-		         ci.created_at, na.hostname, na.primary_address, e.id, e.address, e.port, na.class_key
-		%s
-		LIMIT $%d OFFSET $%d
-	`, whereClause, sortClause, argPos, argPos+1)
-
-	countArgs := append([]interface{}{}, args...)
-	args = append(args, filters.PageSize, offset)
-
-	// RLS-scoped reads over crypto_implementations / certificates (JOIN assets)
-	// — count + page run in one tenant tx so app.tenant_id is set for both.
-	risks := []CryptoRisk{}
-	txErr := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		if e := tx.Get(&total, countQuery, countArgs...); e != nil {
-			return fmt.Errorf("failed to count risks: %w", e)
-		}
-
-		rows, err := tx.Queryx(query, args...)
+// readRisks streams candidates in one tenant transaction. SQL restricts identity,
+// lifecycle and search; the same pure judge used by CryptoProducer determines
+// eligibility before filtering/counting/paging. No producer writes occur on GET.
+func (s *CryptoRisksService) readRisks(tenant uuid.UUID, id *uuid.UUID, search string, visit func(CryptoRisk)) error {
+	return database.WithTenantTx(context.Background(), s.db, tenant, func(tx *sqlx.Tx) error {
+		query := `SELECT ci.id, ci.tenant_id, a.id, ci.protocol::text,
+    ci.protocol_version, ci.cipher_suite, COALESCE(ci.key_exchange_algorithm,''),
+    COALESCE(ci.key_size,0), COALESCE(ci.hash_algorithm,''), COALESCE(ci.signature_algorithm,''),
+    COALESCE(ci.symmetric_encryption,''), COALESCE(ci.risk_score,0), ci.created_at,
+    a.hostname, host(a.primary_address), a.class_key, e.id, host(e.address), e.port,
+    cat.max_risk, COALESCE(cat.components,'[]'::jsonb)::text, cert.expiry, COALESCE(prior.fact,'null'::jsonb)::text
+   FROM crypto_implementations ci
+   LEFT JOIN asset_endpoints e ON e.id=ci.endpoint_id AND e.tenant_id=ci.tenant_id
+   JOIN assets a ON a.id=` + findings.ConfigurationAssetSQL("ci", "e") + ` AND a.tenant_id=ci.tenant_id
+    AND a.deleted_at IS NULL AND a.asset_status='monitoring'
+   LEFT JOIN LATERAL (
+    SELECT MAX(alg.risk_score) AS max_risk,
+     jsonb_agg(jsonb_build_object('code',alg.code,'role',cia.algorithm_type,
+      'strength',alg.strength,'risk_score',alg.risk_score) ORDER BY alg.code,cia.algorithm_type) AS components
+    FROM crypto_implementation_algorithms cia JOIN algorithms alg ON alg.id=cia.algorithm_id
+    WHERE cia.crypto_implementation_id=ci.id AND cia.algorithm_type=ANY($2)
+   ) cat ON true
+   LEFT JOIN LATERAL (
+    SELECT MIN(c.not_after) FILTER (WHERE c.not_after>NOW()) AS expiry
+    FROM crypto_implementation_certificates cic JOIN certificates c ON c.id=cic.certificate_id AND c.tenant_id=ci.tenant_id
+    WHERE cic.crypto_implementation_id=ci.id
+   ) cert ON true
+   LEFT JOIN LATERAL (
+    SELECT jsonb_build_object('score',f.score,'summary',f.summary,'evidence',f.evidence) AS fact
+    FROM findings f WHERE f.tenant_id=ci.tenant_id AND f.subject_id=ci.id
+     AND f.subject_type='crypto_configuration' AND f.producer='crypto'
+     AND f.kind='weak_configuration' AND f.detection_state='ACTIVE'
+    ORDER BY f.last_seen DESC,f.id LIMIT 1
+   ) prior ON true
+   WHERE ci.tenant_id=$1 AND ci.deleted_at IS NULL
+    AND ($3::uuid IS NULL OR ci.id=$3)
+    AND ($4='' OR a.hostname ILIKE $5 OR host(a.primary_address) ILIKE $5
+     OR host(e.address) ILIKE $5 OR ci.protocol::text ILIKE $5 OR ci.cipher_suite ILIKE $5)`
+		rows, err := tx.Query(query, tenant, pq.Array(cryptoassess.CatalogueRiskRoles), id, search, "%"+search+"%")
 		if err != nil {
-			return fmt.Errorf("failed to query risks: %w", err)
+			return fmt.Errorf("query crypto risks: %w", err)
 		}
 		defer func() { _ = rows.Close() }()
-
+		now := time.Now()
 		for rows.Next() {
-			var row struct {
-				ID                     uuid.UUID  `db:"id"`
-				TenantID               uuid.UUID  `db:"tenant_id"`
-				AssetID                uuid.UUID  `db:"asset_id"`
-				CryptoImplementationID uuid.UUID  `db:"crypto_implementation_id"`
-				Protocol               string     `db:"protocol"`
-				ProtocolVersion        *string    `db:"protocol_version"`
-				CipherSuite            *string    `db:"cipher_suite"`
-				HashAlgorithm          *string    `db:"hash_algorithm"`
-				KeyExchangeAlgorithm   *string    `db:"key_exchange_algorithm"`
-				KeySize                *int       `db:"key_size"`
-				RiskScore              *int       `db:"risk_score"`
-				CreatedAt              time.Time  `db:"created_at"`
-				Hostname               *string    `db:"hostname"`
-				IPAddress              *string    `db:"ip_address"`
-				EndpointID             *uuid.UUID `db:"endpoint_id"`
-				EndpointAddress        *string    `db:"endpoint_address"`
-				Port                   *int       `db:"port"`
-				AssetType              string     `db:"asset_type"`
-				EarliestCertExpiry     *time.Time `db:"earliest_cert_expiry"`
+			var r CryptoRisk
+			var c cryptoassess.Configuration
+			var components, previous string
+			var expiry *time.Time
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.AssetID, &r.Protocol, &r.ProtocolVersion, &r.CipherSuite,
+				&c.KeyAlgorithm, &c.KeyBits, &c.Hash, &c.Signature, &c.Symmetric, &c.StoredRisk, &r.DetectedAt,
+				&r.AssetHostname, &r.AssetIPAddress, &r.AssetClassKey, &r.EndpointID, &r.EndpointAddress, &r.EndpointPort,
+				&c.CatalogueRisk, &components, &expiry, &previous); err != nil {
+				return err
 			}
-
-			if err := rows.StructScan(&row); err != nil {
-				return fmt.Errorf("failed to scan risk row: %w", err)
+			r.CryptoImplementationID = r.ID
+			r.AssetPort = r.EndpointPort
+			if r.ProtocolVersion != nil {
+				c.Version = *r.ProtocolVersion
 			}
-
-			// Determine severity and category based on values
-			risk := CryptoRisk{
-				ID:                     row.ID,
-				TenantID:               row.TenantID,
-				AssetID:                row.AssetID,
-				CryptoImplementationID: row.CryptoImplementationID,
-				Protocol:               row.Protocol,
-				ProtocolVersion:        row.ProtocolVersion,
-				CipherSuite:            row.CipherSuite,
-				DetectedAt:             row.CreatedAt,
-				AssetHostname:          row.Hostname,
-				AssetIPAddress:         row.IPAddress,
-				EndpointID:             row.EndpointID,
-				EndpointAddress:        row.EndpointAddress,
-				EndpointPort:           row.Port,
-				AssetPort:              row.Port,
-				AssetClassKey:          row.AssetType,
+			if r.CipherSuite != nil {
+				c.Suite = *r.CipherSuite
 			}
-
-			// Classify the risk (include certificate expiration for medium risk detection)
-			s.classifyRisk(&risk, row.ProtocolVersion, row.CipherSuite, row.HashAlgorithm, row.KeyExchangeAlgorithm, row.KeySize, row.EarliestCertExpiry)
-
-			risks = append(risks, risk)
+			c.Components = []byte(components)
+			var priorInput struct {
+				Score    *int            `json:"score"`
+				Evidence json.RawMessage `json:"evidence"`
+			}
+			if json.Unmarshal([]byte(previous), &priorInput) == nil {
+				c.PreviousEvidence = priorInput.Evidence
+				c.PreviousScore = priorInput.Score
+			}
+			historical := r
+			retained := retainCryptoRisk(&historical, c, previous)
+			current := classifyConfigurationRisk(&r, c, expiry, now)
+			if retained {
+				if !current {
+					r = historical
+				} else {
+					categories := append(append([]string{}, r.Categories...), historical.Categories...)
+					description := r.Description + "; " + historical.Description
+					limitations := historical.AssessmentLimitations
+					if cryptoRiskRank(historical.Severity) > cryptoRiskRank(r.Severity) {
+						r = historical
+					}
+					r.Categories = categories
+					r.Description = description
+					r.AssessmentLimitations = limitations
+				}
+			}
+			if current || retained {
+				slices.Sort(r.Categories)
+				r.Categories = slices.Compact(r.Categories)
+				visit(r)
+			}
 		}
 		return rows.Err()
 	})
-	if txErr != nil {
-		return nil, txErr
-	}
-
-	totalPages := (total + filters.PageSize - 1) / filters.PageSize
-
-	return &CryptoRisksResponse{
-		Risks:      risks,
-		Total:      total,
-		Page:       filters.Page,
-		PageSize:   filters.PageSize,
-		TotalPages: totalPages,
-	}, nil
 }
 
-// classifyRisk determines severity, category, and description for a risk
-func (s *CryptoRisksService) classifyRisk(risk *CryptoRisk, protocolVersion, cipherSuite, hashAlgorithm, keyExchange *string, keySize *int, certExpiry *time.Time) {
-	// Check for critical protocol issues
-	// Handle various protocol version formats: '1.0', 'TLSv1.0', 'TLSV1.0', 'TLS 1.0', 'TLS1.0'
-	if protocolVersion != nil {
-		pv := strings.ToUpper(*protocolVersion)
-		// Check for SSL or TLS 1.0 (various formats)
-		if strings.Contains(pv, "SSL") ||
-			strings.Contains(pv, "TLS1.0") ||
-			strings.Contains(pv, "TLSV1.0") ||
-			strings.Contains(pv, "TLS 1.0") ||
-			strings.Contains(pv, "TLSV1") && strings.Contains(pv, "0") ||
-			*protocolVersion == "1.0" ||
-			strings.HasPrefix(*protocolVersion, "1.0") ||
-			strings.HasSuffix(*protocolVersion, "1.0") {
-			risk.Severity = "critical"
-			risk.Category = "protocol"
-			risk.IssueType = "weak_protocol"
-			risk.CurrentValue = *protocolVersion
-			risk.Description = "Using a critically vulnerable protocol version"
-			risk.Recommendation = "Upgrade to TLS 1.2 or TLS 1.3 immediately"
-			return
-		}
-		// TLS 1.1 only — do not use a broad "TLSV1" + "1" heuristic: TLSv1.2 / TLSv1.3
-		// also contain TLSV1 and a digit "1" but no "0", which wrongly matched here before.
-		if strings.Contains(pv, "TLSV1.1") ||
-			strings.Contains(pv, "TLS1.1") ||
-			strings.Contains(pv, "TLS 1.1") ||
-			strings.Contains(pv, "TLS_1_1") ||
-			*protocolVersion == "1.1" ||
-			strings.HasPrefix(*protocolVersion, "1.1") ||
-			strings.HasSuffix(*protocolVersion, "1.1") {
-			risk.Severity = "high"
-			risk.Category = "protocol"
-			risk.IssueType = "deprecated_protocol"
-			risk.CurrentValue = *protocolVersion
-			risk.Description = "Using a deprecated protocol version"
-			risk.Recommendation = "Upgrade to TLS 1.2 or TLS 1.3"
-			return
-		}
+// cryptoRiskSeverity returns a canonical wire value; NULL represents no numeric assessment.
+func cryptoRiskSeverity(value severity.Severity) *string { wire := string(value); return &wire }
+func cryptoRiskRank(value *string) int {
+	if value == nil {
+		return 0
 	}
-
-	// Check for critical algorithm issues
-	if cipherSuite != nil {
-		cs := strings.ToUpper(*cipherSuite)
-		if strings.Contains(cs, "RC4") || strings.Contains(cs, "NULL") || strings.Contains(cs, "EXPORT") {
-			risk.Severity = "critical"
-			risk.Category = "algorithm"
-			risk.IssueType = "weak_cipher"
-			risk.CurrentValue = *cipherSuite
-			risk.Description = "Using a weak or broken cipher algorithm"
-			risk.Recommendation = "Use AES-GCM or ChaCha20-Poly1305 cipher suites"
-			return
-		}
-		if isSingleDES(cs) {
-			risk.Severity = "critical"
-			risk.Category = "algorithm"
-			risk.IssueType = "weak_cipher"
-			risk.CurrentValue = *cipherSuite
-			risk.Description = "Using the deprecated DES cipher"
-			risk.Recommendation = "Use AES-GCM or ChaCha20-Poly1305 cipher suites"
-			return
-		}
-		if strings.Contains(cs, "3DES") || strings.Contains(cs, "CBC3") || strings.Contains(cs, "DES_EDE") {
-			risk.Severity = "high"
-			risk.Category = "algorithm"
-			risk.IssueType = "deprecated_cipher"
-			risk.CurrentValue = *cipherSuite
-			risk.Description = "Using the deprecated 3DES cipher"
-			risk.Recommendation = "Use AES-GCM or ChaCha20-Poly1305 cipher suites"
-			return
-		}
+	wire := *value
+	if wire == "informational" {
+		wire = string(severity.Info)
 	}
-
-	// Check for hash algorithm issues
-	if hashAlgorithm != nil {
-		ha := strings.ToUpper(*hashAlgorithm)
-		if strings.Contains(ha, "MD5") || strings.Contains(ha, "MD4") {
-			risk.Severity = "critical"
-			risk.Category = "algorithm"
-			risk.IssueType = "weak_hash"
-			risk.CurrentValue = *hashAlgorithm
-			risk.Description = "Using a cryptographically broken hash algorithm"
-			risk.Recommendation = "Use SHA-256 or SHA-384 for hashing"
-			return
-		}
-		if strings.Contains(ha, "SHA1") || strings.Contains(ha, "SHA-1") {
-			risk.Severity = "high"
-			risk.Category = "algorithm"
-			risk.IssueType = "deprecated_hash"
-			risk.CurrentValue = *hashAlgorithm
-			risk.Description = "Using a deprecated hash algorithm (SHA-1)"
-			risk.Recommendation = "Use SHA-256 or SHA-384 for hashing"
-			return
-		}
+	canonical, err := severity.Parse(wire)
+	if err != nil {
+		return 0
 	}
-
-	// Check for key size issues.
-	//
-	// A bit-length floor only means something for the algorithm family it was
-	// derived for. This branch used to flag ANY key below 2048 bits as a weak
-	// RSA key, so every P-256 / X25519 / Ed25519 endpoint — a 256-bit key, and a
-	// healthy one — was reported as "RSA key size is critically weak", the
-	// modern configurations the product should be rewarding. keyExchangeFamily
-	// (weak_crypto_detector.go) is the single classifier for this; it is reused
-	// here rather than re-derived so the two cannot drift.
-	if keySize != nil && *keySize > 0 {
-		switch keyExchangeFamily(keyExchange) {
-		case kexFamilyEllipticCurve:
-			if *keySize < cryptoparse.MinECCKeySizeBits {
-				risk.Severity = "high"
-				risk.Category = "key_size"
-				risk.IssueType = "weak_key_size"
-				risk.CurrentValue = fmt.Sprintf("%d bits", *keySize)
-				risk.Description = "ECC key size is below recommended minimum (256 bits)"
-				risk.Recommendation = "Use at least 256-bit ECC keys"
-				return
-			}
-		case kexFamilyFiniteField:
-			if *keySize < 1024 {
-				risk.Severity = "critical"
-				risk.Category = "key_size"
-				risk.IssueType = "critically_weak_key_size"
-				risk.CurrentValue = fmt.Sprintf("%d bits", *keySize)
-				risk.Description = "RSA key size is critically weak (below 1024 bits)"
-				risk.Recommendation = "Use at least 2048-bit RSA keys"
-				return
-			}
-			if *keySize < cryptoparse.MinRSAKeySizeBits {
-				risk.Severity = "high"
-				risk.Category = "key_size"
-				risk.IssueType = "weak_key_size"
-				risk.CurrentValue = fmt.Sprintf("%d bits", *keySize)
-				risk.Description = "RSA key size is below recommended minimum (2048 bits)"
-				risk.Recommendation = "Use at least 2048-bit RSA keys, preferably 3072 or 4096 bits"
-				return
-			}
-		case kexFamilyUnknown, kexFamilyPostQuantum:
-			// Unknown: a bare 256 could be an EC key (healthy) or an RSA modulus
-			// (catastrophic), and guessing wrong in either direction is worse
-			// than staying quiet. Post-quantum key sizes are not comparable to
-			// either floor.
-		}
-	}
-
-	// Check for medium risks: expiring certificates (within 30 days)
-	if certExpiry != nil {
-		daysUntilExpiry := int(time.Until(*certExpiry).Hours() / 24)
-		if daysUntilExpiry > 0 && daysUntilExpiry <= 30 {
-			risk.Severity = "medium"
-			risk.Category = "certificate"
-			risk.IssueType = "expiring_certificate"
-			risk.CurrentValue = fmt.Sprintf("Expires in %d days", daysUntilExpiry)
-			risk.Description = fmt.Sprintf("Certificate expiring within %d days", daysUntilExpiry)
-			risk.Recommendation = "Renew certificate before expiration to avoid service disruption"
-			return
-		}
-	}
-
-	// Default classification
-	risk.Severity = "informational"
-	risk.Category = "unknown"
-	risk.IssueType = "other"
-	risk.Description = "Crypto implementation flagged for review"
-	risk.Recommendation = "Review and verify cryptographic configuration"
+	rank, _ := severity.Rank(canonical)
+	return rank
 }
 
-// GetRiskByID returns a specific crypto risk by ID
-func (s *CryptoRisksService) GetRiskByID(tenantID, riskID uuid.UUID) (*CryptoRisk, error) {
-	query := `
-		SELECT ci.id, ci.tenant_id, ci.asset_id, ci.id as crypto_implementation_id,
-		       ci.protocol, ci.protocol_version, ci.cipher_suite, ci.hash_algorithm,
-		       ci.key_exchange_algorithm, ci.key_size,
-		       ci.risk_score, ci.created_at,
-		       na.hostname, host(na.primary_address) AS ip_address,
-		       e.id AS endpoint_id, host(e.address) AS endpoint_address, e.port, na.class_key AS asset_type,
-		       MIN(c.not_after) as earliest_cert_expiry
-		FROM crypto_implementations ci
-		JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id AND na.deleted_at IS NULL
-		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id
-		LEFT JOIN crypto_implementation_certificates cic ON cic.crypto_implementation_id = ci.id
-		LEFT JOIN certificates c ON cic.certificate_id = c.id
-		WHERE ci.tenant_id = $1
-		  AND ci.id = $2
-		  AND ci.deleted_at IS NULL
-		GROUP BY ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version,
-		         ci.cipher_suite, ci.hash_algorithm, ci.key_exchange_algorithm, ci.key_size, ci.risk_score,
-		         ci.created_at, na.hostname, na.primary_address, e.id, e.address, e.port, na.class_key
-	`
-
-	var row struct {
-		ID                     uuid.UUID  `db:"id"`
-		TenantID               uuid.UUID  `db:"tenant_id"`
-		AssetID                uuid.UUID  `db:"asset_id"`
-		CryptoImplementationID uuid.UUID  `db:"crypto_implementation_id"`
-		Protocol               string     `db:"protocol"`
-		ProtocolVersion        *string    `db:"protocol_version"`
-		CipherSuite            *string    `db:"cipher_suite"`
-		HashAlgorithm          *string    `db:"hash_algorithm"`
-		KeyExchangeAlgorithm   *string    `db:"key_exchange_algorithm"`
-		KeySize                *int       `db:"key_size"`
-		RiskScore              *int       `db:"risk_score"`
-		CreatedAt              time.Time  `db:"created_at"`
-		Hostname               *string    `db:"hostname"`
-		IPAddress              *string    `db:"ip_address"`
-		EndpointID             *uuid.UUID `db:"endpoint_id"`
-		EndpointAddress        *string    `db:"endpoint_address"`
-		Port                   *int       `db:"port"`
-		AssetType              string     `db:"asset_type"`
-		EarliestCertExpiry     *time.Time `db:"earliest_cert_expiry"`
+// certificateExpirySeverity is lifecycle policy, not a numeric crypto score.
+// The legacy feed surfaces future expiry within 90 days; the 30-day window is
+// Medium, the remaining window Informational. Expired certificates continue in
+// the separate certificate-expiring alert domain, not weak-configuration rules.
+func certificateExpirySeverity(expiry *time.Time, now time.Time) *string {
+	if expiry == nil || !expiry.After(now) || expiry.After(now.Add(90*24*time.Hour)) {
+		return nil
 	}
-
-	// RLS-scoped read over crypto_implementations / certificates (JOIN assets).
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.Get(&row, query, tenantID, riskID)
-	}); err != nil {
-		return nil, fmt.Errorf("failed to get risk: %w", err)
+	if !expiry.After(now.Add(30 * 24 * time.Hour)) {
+		return cryptoRiskSeverity(severity.Medium)
 	}
+	return cryptoRiskSeverity(severity.Info)
+}
 
-	risk := &CryptoRisk{
-		ID:                     row.ID,
-		TenantID:               row.TenantID,
-		AssetID:                row.AssetID,
-		CryptoImplementationID: row.CryptoImplementationID,
-		Protocol:               row.Protocol,
-		ProtocolVersion:        row.ProtocolVersion,
-		CipherSuite:            row.CipherSuite,
-		DetectedAt:             row.CreatedAt,
-		AssetHostname:          row.Hostname,
-		AssetIPAddress:         row.IPAddress,
-		EndpointID:             row.EndpointID,
-		EndpointAddress:        row.EndpointAddress,
-		EndpointPort:           row.Port,
-		AssetPort:              row.Port,
-		AssetClassKey:          row.AssetType,
+func classifyConfigurationRisk(r *CryptoRisk, c cryptoassess.Configuration, expiry *time.Time, now time.Time) bool {
+	judgment := c.Judge()
+	lifecycle := certificateExpirySeverity(expiry, now)
+	if !judgment.Emit() && lifecycle == nil {
+		return false
 	}
+	r.AssessmentLimitations = append([]string{}, judgment.Limitations...)
+	r.RiskScore = c.Score()
+	r.ScoreSources = []string{}
+	if r.RiskScore != nil {
+		r.ScoreSources = append(r.ScoreSources, c.ScoreSources(*r.RiskScore)...)
+	}
+	r.AssessmentBasis = "configuration"
+	if c.RetainsNumericHistory() && r.RiskScore != nil && *r.RiskScore == *c.PreviousScore {
+		r.AssessmentBasis = "retained_finding"
+	}
+	if judgment.Emit() {
+		if r.RiskScore != nil {
+			r.Severity = cryptoRiskSeverity(riskbands.Severity(*r.RiskScore))
+		}
+		r.Description = "Configuration " + judgment.Detail()
+		r.Recommendation = "Review the cited catalogue components and deployment rule failures"
+		r.IssueType = "acceptable_configuration"
+		if len(judgment.Weak)+len(judgment.Rules) > 0 {
+			r.IssueType = "weak_configuration"
+		}
+		for _, rule := range judgment.Rules {
+			category := "algorithm"
+			if rule.Rule == "key_size" {
+				category = "key_size"
+			}
+			r.Categories = append(r.Categories, category)
+			if len(r.Categories) == 1 {
+				r.Category = category
+				r.IssueType = "weak_hash"
+				r.CurrentValue = rule.Algorithm
+				if rule.Rule == "key_size" {
+					r.IssueType = "weak_key_size"
+					r.CurrentValue = fmt.Sprintf("%s %d bits", rule.Algorithm, rule.Bits)
+					if riskbands.Severity(rule.Score) == severity.Critical {
+						r.IssueType = "critically_weak_key_size"
+					}
+				}
+			}
+		}
+		weakRepresentative := len(judgment.Rules) > 0
+		var components []cryptoassess.Component
+		_ = json.Unmarshal(c.Components, &components) // Judge reports unreadable evidence.
+		for _, component := range components {
+			if component.Strength != "weak" && component.Strength != "acceptable" {
+				continue
+			}
+			category := "algorithm"
+			if component.Role == "protocol_version" {
+				category = "protocol"
+			}
+			r.Categories = append(r.Categories, category)
+			if len(r.Categories) == 1 || component.Strength == "weak" && !weakRepresentative {
+				weakRepresentative = component.Strength == "weak"
+				r.Category = category
+				factor := component.Role
+				if factor == "protocol_version" {
+					factor = "protocol"
+				}
+				if factor == "cipher_suite" {
+					factor = "cipher"
+				}
+				r.IssueType = component.Strength + "_" + factor
+			}
+			if r.CurrentValue != "" {
+				r.CurrentValue += "; "
+			}
+			r.CurrentValue += component.Code + " [" + component.Role + "]"
+		}
+	}
+	if lifecycle != nil {
+		r.Categories = append(r.Categories, "certificate")
+		days := int(expiry.Sub(now).Hours() / 24)
+		description := fmt.Sprintf("Certificate expires in %d days (certificate lifecycle policy)", days)
+		if !judgment.Emit() || cryptoRiskRank(lifecycle) > cryptoRiskRank(r.Severity) {
+			r.Severity = lifecycle
+			r.Category = "certificate"
+			r.IssueType = "expiring_certificate"
+			r.CurrentValue = expiry.UTC().Format(time.RFC3339)
+			r.AssessmentBasis = "certificate_lifecycle"
+			r.Recommendation = "Renew the certificate before expiration"
+		}
+		if r.Description != "" {
+			r.Description += "; "
+		}
+		r.Description += description
+	}
+	return true
+}
 
-	s.classifyRisk(risk, row.ProtocolVersion, row.CipherSuite, row.HashAlgorithm, row.KeyExchangeAlgorithm, row.KeySize, row.EarliestCertExpiry)
+func matchesCryptoRisk(r CryptoRisk, f CryptoRiskFilters) bool {
+	if len(f.Severity) > 0 {
+		matched := false
+		for _, value := range f.Severity {
+			value = strings.ToLower(value)
+			if value == "informational" {
+				value = "info"
+			}
+			if r.Severity == nil && value == "unscored" || r.Severity != nil && *r.Severity == value {
+				matched = true
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	if len(f.Category) > 0 {
+		matched := false
+		for _, category := range f.Category {
+			if slices.Contains(r.Categories, strings.ToLower(category)) {
+				matched = true
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
 
-	return risk, nil
+// cryptoRiskBefore always ends with the stable configuration ID tie-breaker, so
+// rows with equal scores/timestamps cannot move between pages or duplicate CSV.
+func cryptoRiskBefore(a, b CryptoRisk, f CryptoRiskFilters) bool {
+	comparison := 0
+	switch f.SortBy {
+	case "hostname":
+		if a.AssetHostname == nil || b.AssetHostname == nil {
+			if a.AssetHostname == nil && b.AssetHostname != nil {
+				return false
+			}
+			if a.AssetHostname != nil && b.AssetHostname == nil {
+				return true
+			}
+		} else {
+			comparison = strings.Compare(*a.AssetHostname, *b.AssetHostname)
+		}
+	case "protocol":
+		comparison = strings.Compare(a.Protocol, b.Protocol)
+	case "detected_at":
+		comparison = a.DetectedAt.Compare(b.DetectedAt)
+	default:
+		if a.Severity == nil || b.Severity == nil {
+			if a.Severity == nil && b.Severity != nil {
+				return false
+			}
+			if a.Severity != nil && b.Severity == nil {
+				return true
+			}
+		}
+		comparison = cryptoRiskRank(a.Severity) - cryptoRiskRank(b.Severity)
+	}
+	desc := strings.EqualFold(f.SortOrder, "DESC") || f.SortBy == ""
+	if comparison != 0 {
+		if desc {
+			return comparison > 0
+		}
+		return comparison < 0
+	}
+	return a.ID.String() < b.ID.String()
+}
+
+type cryptoRiskSelection struct {
+	rows    []CryptoRisk
+	filters CryptoRiskFilters
+}
+
+func (h cryptoRiskSelection) Len() int { return len(h.rows) }
+func (h cryptoRiskSelection) Less(i, j int) bool {
+	return cryptoRiskBefore(h.rows[j], h.rows[i], h.filters)
+}
+func (h cryptoRiskSelection) Swap(i, j int) { h.rows[i], h.rows[j] = h.rows[j], h.rows[i] }
+func (h *cryptoRiskSelection) Push(v any)   { h.rows = append(h.rows, v.(CryptoRisk)) }
+func (h *cryptoRiskSelection) Pop() any {
+	n := len(h.rows) - 1
+	v := h.rows[n]
+	h.rows = h.rows[:n]
+	return v
+}
+
+func (s *CryptoRisksService) selectRisks(tenant uuid.UUID, f CryptoRiskFilters, keep int) ([]CryptoRisk, int, error) {
+	selected := &cryptoRiskSelection{filters: f}
+	total := 0
+	err := s.readRisks(tenant, nil, f.Search, func(r CryptoRisk) {
+		if !matchesCryptoRisk(r, f) {
+			return
+		}
+		total++
+		if len(selected.rows) < keep {
+			heap.Push(selected, r)
+		} else if keep > 0 && cryptoRiskBefore(r, selected.rows[0], f) {
+			selected.rows[0] = r
+			heap.Fix(selected, 0)
+		}
+	})
+	sort.Slice(selected.rows, func(i, j int) bool { return cryptoRiskBefore(selected.rows[i], selected.rows[j], f) })
+	return selected.rows, total, err
+}
+
+func (s *CryptoRisksService) ListRisks(tenant uuid.UUID, f CryptoRiskFilters) (*CryptoRisksResponse, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.PageSize < 1 {
+		f.PageSize = 20
+	} else if f.PageSize > MaxCryptoRiskPageSize {
+		f.PageSize = MaxCryptoRiskPageSize
+	}
+	keep := 0
+	if f.Page <= math.MaxInt/f.PageSize {
+		keep = f.Page * f.PageSize
+	}
+	rows, total, err := s.selectRisks(tenant, f, keep)
+	if err != nil {
+		return nil, err
+	}
+	start := len(rows)
+	if keep > 0 {
+		start = min((f.Page-1)*f.PageSize, len(rows))
+	}
+	page := append([]CryptoRisk{}, rows[start:]...)
+	return &CryptoRisksResponse{Risks: page, Total: total, Page: f.Page, PageSize: f.PageSize, TotalPages: (total + f.PageSize - 1) / f.PageSize}, nil
+}
+
+// ExportRisks evaluates once rather than repeating a tenant scan for every page.
+func (s *CryptoRisksService) ExportRisks(tenant uuid.UUID, f CryptoRiskFilters) ([]CryptoRisk, error) {
+	rows, _, err := s.selectRisks(tenant, f, 50000)
+	return rows, err
+}
+func (s *CryptoRisksService) GetRiskByID(tenant, id uuid.UUID) (*CryptoRisk, error) {
+	var result *CryptoRisk
+	err := s.readRisks(tenant, &id, "", func(r CryptoRisk) { result = &r })
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, sql.ErrNoRows
+	}
+	return result, nil
+}
+func (s *CryptoRisksService) GetSummary(tenant uuid.UUID) (*CryptoRisksSummary, error) {
+	result := &CryptoRisksSummary{}
+	assets := map[uuid.UUID]*string{}
+	err := s.readRisks(tenant, nil, "", func(r CryptoRisk) {
+		prior, seen := assets[r.AssetID]
+		if !seen || cryptoRiskRank(r.Severity) > cryptoRiskRank(prior) {
+			assets[r.AssetID] = r.Severity
+		}
+		if slices.Contains(r.Categories, "protocol") {
+			result.ProtocolIssues++
+		}
+		if slices.Contains(r.Categories, "algorithm") {
+			result.AlgorithmIssues++
+		}
+		if slices.Contains(r.Categories, "key_size") {
+			result.KeySizeIssues++
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, band := range assets {
+		result.TotalAffected++
+		if band == nil {
+			result.Unscored++
+			continue
+		}
+		switch *band {
+		case string(severity.Critical):
+			result.Critical++
+		case string(severity.High):
+			result.High++
+		case string(severity.Medium):
+			result.Medium++
+		case string(severity.Low):
+			result.Low++
+		case string(severity.Info):
+			result.Informational++
+		}
+	}
+	// Preserve the existing certificate inventory counter (certificates, not
+	// configuration rows); the mixed feed's expiry facet uses linked rows only.
+	err = database.WithTenantTx(context.Background(), s.db, tenant, func(tx *sqlx.Tx) error {
+		return tx.Get(&result.CertificateIssues, `SELECT COUNT(*) FROM certificates c WHERE c.tenant_id=$1 AND
+   ((c.not_after IS NOT NULL AND c.not_after BETWEEN NOW() AND NOW()+INTERVAL '90 days')
+    OR `+anyWeakKeySizeSQL("c.public_key_size", "c.public_key_algorithm")+`)`, tenant)
+	})
+	return result, err
+}
+
+// Retention requires an actual previous active finding, never just a positive
+// legacy score. This read-only projection names its historical basis and does
+// not extend producer lifecycle or write a new finding.
+func retainCryptoRisk(r *CryptoRisk, c cryptoassess.Configuration, previous string) bool {
+	judgment := c.Judge()
+	if judgment.Emit() || len(judgment.Limitations) == 0 {
+		return false
+	}
+	var prior *struct {
+		Score    int    `json:"score"`
+		Summary  string `json:"summary"`
+		Evidence struct {
+			Sources []string `json:"score_sources"`
+		} `json:"evidence"`
+	}
+	if json.Unmarshal([]byte(previous), &prior) != nil || prior == nil {
+		return false
+	}
+	r.AssessmentBasis = "retained_finding"
+	r.AssessmentLimitations = append(append([]string{}, judgment.Limitations...), "Previously detected issue retained because current evidence cannot refute the prior assessment")
+	r.Description = "Previous assessment: " + prior.Summary + ". Current evidence is insufficient to reassess this issue."
+	r.Category = "algorithm"
+	r.Categories = []string{"algorithm"}
+	r.IssueType = "retained_configuration"
+	r.Recommendation = "Refresh the configuration evidence to reassess the previously detected issue"
+	r.ScoreSources = []string{}
+	// Positive historical scores are retained as historical numbers; a legacy
+	// zero without recorded numeric sources does not establish measured zero.
+	if prior.Score > 0 || len(prior.Evidence.Sources) > 0 {
+		r.RiskScore = &prior.Score
+		r.Severity = cryptoRiskSeverity(riskbands.Severity(prior.Score))
+		r.ScoreSources = []string{"retained finding score (historical assessment, not a current rule inference)"}
+	}
+	return true
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // AlertEngineService owns the stateful alert lifecycle ():
@@ -92,19 +93,9 @@ func NewAlertEngineServiceWithConfig(db, bypassDB *sqlx.DB, natsClient *events.N
 // --- pure lifecycle rules (unit-tested in alert_engine_test.go) -------------
 
 // severityRank orders the normalized severity enum; higher = more urgent.
-func severityRank(s string) int {
-	switch s {
-	case "critical":
-		return 4
-	case "high":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	default: // info or unknown
-		return 0
-	}
+func severityRank(value string) int {
+	rank, _ := sharedseverity.Rank(sharedseverity.Severity(value))
+	return rank
 }
 
 // transitionFor validates an action against the alert's current status and
@@ -211,14 +202,14 @@ func (s *AlertEngineService) raise(ctx context.Context, ev events.AlertRaiseEven
 	if ev.TenantID == uuid.Nil {
 		return "", fmt.Errorf("alert raise requires tenant_id")
 	}
+	severity := ev.Severity
+	if _, err := sharedseverity.Parse(severity); err != nil {
+		return "", err
+	}
 	if !policyRung && !s.typeEnabledForTenant(ctx, ev.TenantID, ev.AlertType) {
 		log.Printf("[AlertEngine] Raise suppressed: tenant=%s type=%s disabled in alert catalog",
 			ev.TenantID, ev.AlertType)
 		return RaiseSuppressed, nil
-	}
-	severity := ev.Severity
-	if severityRank(severity) == 0 && severity != "info" {
-		severity = "info"
 	}
 
 	outcome := RaiseTouched

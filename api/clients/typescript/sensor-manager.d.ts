@@ -180,6 +180,112 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sensors/config/defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tenant's fleet-wide default settings for sensors
+         * @description Every settable sensor setting with the value that applies fleet-wide,
+         *     and an `origin` saying whether the tenant set it (`fleet`) or is
+         *     inheriting the sensor binary's own default (`built_in`). Gated at
+         *     SensorsRead.
+         */
+        get: operations["getSensorFleetDefaults"];
+        /**
+         * Replace the tenant's fleet-wide default settings for sensors
+         * @description Replaces the whole set: a key left out is cleared, because a partial
+         *     write cannot express "remove this one". Every sensor without its own
+         *     override converges on the new values at its next heartbeat, with nothing
+         *     to push — the desired revision is a content hash, so a changed default
+         *     makes every inheriting sensor disagree.
+         *
+         *     Gated at SensorsManage. A value below a setting's floor is RAISED rather
+         *     than rejected, and the response says so in `adjusted`. Turning on a
+         *     setting that starts a new kind of collection — `host_observation_dns` —
+         *     answers 409 until the request carries `confirmed: true`, and the change
+         *     is recorded with the acting user.
+         */
+        put: operations["putSensorFleetDefaults"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sensors/{sensor_id}/desired-config/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Who changed this sensor's configuration, when, and what moved
+         * @description The recorded change history, newest first, covering this sensor's own
+         *     overrides AND the tenant's fleet defaults for its runtime — an operator
+         *     asking "why is this on" is not served by a history that can only answer
+         *     half the time.
+         *
+         *     Gated at SensorsRead rather than behind update or manage: reading who
+         *     changed something is a read, and the person most likely to ask is the
+         *     one who cannot change it.
+         */
+        get: operations["getSensorConfigHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sensors/{sensor_id}/desired-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One sensor's effective settings and how far it has converged
+         * @description The effective value of every sensor setting with the `origin` it came
+         *     from (`built_in`, `fleet` or `device`), plus a `status` block reconciling
+         *     what the platform wants against what the sensor last reported.
+         *
+         *     Distinct from `/sensors/{sensor_id}/config`, which queues a one-shot
+         *     `update_config` command and persists nothing — so the platform cannot
+         *     say what it asked for, a missed command is never re-sent, and the
+         *     console can show a value that never took effect.
+         *
+         *     Gated at SensorsRead. Another tenant's sensor id is answered 404,
+         *     identically to an unknown id.
+         */
+        get: operations["getSensorDesiredConfig"];
+        /**
+         * Replace one sensor's settings override
+         * @description Sets what THIS sensor should be, over and above the fleet defaults. An
+         *     explicit `false` is an override and beats a fleet default of `true`; an
+         *     omitted key inherits. Send `{"values": {}}` to clear the override
+         *     entirely.
+         *
+         *     Gated at SensorsManage. The sensor adopts the change at its next
+         *     heartbeat; settings marked `apply: restart` — host observation and DNS
+         *     decoding, whose BPF filter is fixed when the capture handle opens — are
+         *     listed in `needs_restart` and adopted when the sensor restarts.
+         */
+        put: operations["putSensorDesiredConfig"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sensors/{sensor_id}/commands": {
         parameters: {
             query?: never;
@@ -622,10 +728,232 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sensors/{sensor_id}/discovery-jobs/{job_id}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sensor UUID. */
+                sensor_id: components["parameters"]["SensorId"];
+                /** @description Discovery job UUID — the job the platform dispatched to this sensor. */
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A sensor reports that a dispatched discovery job has finished
+         * @description Tenant-sensor dispatch. The one sensor-agent-facing route this spec
+         *     carries, because it closes a job the tenant is watching on Discovery →
+         *     Discovery Jobs. The caller is authenticated **as the sensor** (the
+         *     `sensors` group's mTLS/HMAC auth, fail-closed when agent mTLS is
+         *     required) — not by a tenant JWT.
+         *
+         *     The job's RESULTS do not travel here. The sensor submits them through
+         *     its ordinary `POST /sensors/{sensor_id}/discoveries` batch, tagged
+         *     `discovery_method: active` and carrying the `job_id` in
+         *     `raw_metadata`, so they flow `sensor_discoveries` → discovery-processor
+         *     → inventory exactly like passive data. This call only marks the job
+         *     `completed` or `failed` with the sensor's counts.
+         *
+         *     The job must belong to the sensor's tenant and be assigned to this
+         *     sensor (404 otherwise — an unknown, cross-tenant, differently
+         *     assigned and platform-run job all answer the same). A job that is no
+         *     longer `awaiting_sensor` (the platform already failed it as "sensor
+         *     offline", or it was cancelled) answers 409: the late report is kept in
+         *     the job's metadata as evidence, but a verdict the tenant has already
+         *     been shown is not rewritten.
+         */
+        post: operations["completeDispatchedDiscoveryJob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description One recorded configuration change. Both the device's own overrides and
+         *     the tenant's fleet defaults appear, because a device's effective
+         *     configuration moves when either does.
+         */
+        AgentConfigChange: {
+            /** Format: date-time */
+            changed_at: string;
+            /** @description The account that made the change. Empty when it was not made by a user. */
+            changed_by: string;
+            /** @enum {string} */
+            scope: "device" | "fleet";
+            /** @description The setting keys whose value actually moved, derived server-side so no client re-implements the comparison. */
+            keys: string[];
+            values_before: {
+                [key: string]: unknown;
+            };
+            values_after: {
+                [key: string]: unknown;
+            };
+        };
+        AgentConfigHistory: {
+            /** @description Newest first. Always present, never null — a device nobody has configured has an empty history, not an unknown one. */
+            changes: components["schemas"]["AgentConfigChange"][];
+        };
+        /**
+         * @description What the device runs, what this platform release ships, and whether they
+         *     differ. The expected version is the release the PLATFORM is running,
+         *     because the device binaries ship from the same tag — so the platform can
+         *     only report a device as behind once it has itself been upgraded, and it
+         *     never queries an external service to find out.
+         */
+        AgentConfigVersion: {
+            /** @description What the device last reported. Empty when it has never reported one. */
+            device: string;
+            /** @description The version shipping with this platform release. Empty when the platform does not know its own. */
+            expected: string;
+            /**
+             * @description `unknown` when the comparison could not be made — either side
+             *     missing or unparseable. Deliberately distinct from `current`: a
+             *     comparison that was not made must never render as up to date.
+             *     `ahead` is a device newer than the platform, which happens mid-
+             *     rollout and also when the wrong binary was installed.
+             * @enum {string}
+             */
+            state: "unknown" | "current" | "behind" | "ahead";
+        };
+        /**
+         * @description One setting: its effective value, where that value came from, and enough
+         *     of its registry entry for a client to render a control for it without
+         *     hard-coding a second copy of the rules.
+         */
+        AgentConfigSetting: {
+            /**
+             * @description The setting's name, spelled as the device's own config file spells it.
+             * @example host_inventory_enabled
+             */
+            key: string;
+            /** @description The effective value — a boolean, a whole number or a string. */
+            value: boolean | number | string;
+            /**
+             * @description Where the effective value came from. `built_in` is the device's own
+             *     default (nobody has set it), `fleet` the tenant default, `device` an
+             *     override on this device. Without this the console cannot offer
+             *     "revert to fleet default", or say whether a value is deliberate.
+             * @enum {string}
+             */
+            origin: "built_in" | "fleet" | "device";
+            /** @enum {string} */
+            kind: "bool" | "int" | "enum";
+            /**
+             * @description When the device adopts a change. `restart` settings sit at
+             *     `awaiting_restart` until the process restarts; showing them as
+             *     applied on the next check-in would be false.
+             * @enum {string}
+             */
+            apply: "immediate" | "restart";
+            /** @description Operator-facing explanation of what the setting does. */
+            description: string;
+            /**
+             * @description Present when turning this setting ON requires explicit
+             *     confirmation, and states what begins to be collected. Only settings
+             *     that start a new kind of collection carry one.
+             */
+            confirm?: string;
+            /** Format: int64 */
+            min?: number;
+            /** Format: int64 */
+            max?: number;
+            allowed?: string[];
+        };
+        /** @description How far the device has converged on the desired settings. */
+        AgentConfigStatus: {
+            /** @enum {string} */
+            state: "never_reported" | "not_reporting" | "pending" | "awaiting_restart" | "applied" | "failed";
+            /**
+             * @description Content hash of the effective settings. The device reports the
+             *     revision it has adopted; equality is what "applied" means. A hash
+             *     rather than a counter, so a changed fleet default moves every
+             *     inheriting device with nothing having to notify them.
+             */
+            desired_revision: string;
+            /**
+             * Format: date-time
+             * @description When the device last reported. Absent if it never has.
+             */
+            reported_at?: string;
+            /** @description The device's own reason, per setting it could not apply. */
+            failures?: {
+                [key: string]: string;
+            };
+            /** @description Settings accepted but not adopted until the device restarts. */
+            pending_restart?: string[];
+        };
+        SensorConfigResponse: {
+            /** @enum {string} */
+            runtime: "sensor";
+            settings: components["schemas"]["AgentConfigSetting"][];
+            status: components["schemas"]["AgentConfigStatus"];
+            version: components["schemas"]["AgentConfigVersion"];
+        };
+        SensorConfigDefaultsResponse: {
+            /** @enum {string} */
+            runtime: "sensor";
+            settings: components["schemas"]["AgentConfigSetting"][];
+        };
+        AgentConfigWriteRequest: {
+            /**
+             * @description The settings to store, keyed by setting name. The whole set is
+             *     replaced: a key left out is cleared. A null value clears that one
+             *     key. An explicit `false` is a value, not an absence.
+             * @example {
+             *       "host_inventory_enabled": true,
+             *       "host_inventory_interval_seconds": 21600
+             *     }
+             */
+            values: {
+                [key: string]: boolean | number | string | null;
+            };
+            /**
+             * @description Acknowledges any setting whose registry entry demands confirmation.
+             *     The server decides whether one is needed; omitting the flag cannot
+             *     waive it.
+             */
+            confirmed?: boolean;
+        };
+        AgentConfigWriteResponse: {
+            /**
+             * @description One line per setting that actually changed, rendered as key, then the old and new values.
+             * @example [
+             *       "host_inventory_enabled: false → true"
+             *     ]
+             */
+            changed: string[];
+            /**
+             * @description Values silently raised to a setting's floor. The device does this on
+             *     its own today and logs it locally, so whoever typed the value never
+             *     learns it was changed; saying so here is the point.
+             * @example [
+             *       "host_inventory_interval_seconds: raised 300 to the minimum of 3600"
+             *     ]
+             */
+            adjusted: string[];
+            /**
+             * @description Changed settings the device can only adopt on restart. An operator
+             *     who is not told will read the resulting `awaiting_restart` as a
+             *     failure.
+             */
+            needs_restart: string[];
+        };
+        AgentConfigConfirmationRequired: {
+            error: string;
+            needs_confirming: {
+                key: string;
+                /** @description What begins to be collected if this is turned on. */
+                confirm: string;
+            }[];
+        };
         /**
          * @description A tenant sensor. Field presence follows models.Sensor's json tags:
          *     non-`omitempty` fields are always present (nullable pointers serialize as
@@ -658,6 +986,15 @@ export interface components {
             available_interfaces: string[] | null;
             tags: string[] | null;
             ip_address: string | null;
+            /**
+             * Format: uuid
+             * @description The asset the HOST THIS SENSOR RUNS ON resolved to, from the
+             *     sensor's own self-reported host identity (hostname, FQDN,
+             *     interfaces) turned into a host observation. Null until the first
+             *     successful self-observation, and always null for a sensor build
+             *     old enough to send none.
+             */
+            asset_id: string | null;
             /** Format: date-time */
             last_heartbeat: string | null;
             /** @description Sensor's data-send cadence in seconds (null until the sensor reports it). */
@@ -928,6 +1265,33 @@ export interface components {
             revoked_at: string;
             reason: string;
             message: string;
+        };
+        /**
+         * @description A sensor's report that a dispatched discovery job finished. Mirrors
+         *     shared/sensordispatch.Completion, the struct both the sensor and the
+         *     platform compile against. Counts are never negative; `status` is
+         *     `completed` or `failed`. `discoveries_submitted` is how many result
+         *     rows the sensor pushed through the discovery batch route for this job
+         *     — zero with `completed` is a legitimate answer (every target answered,
+         *     none spoke a protocol the probe recognises).
+         */
+        DiscoveryJobCompletion: {
+            /** @enum {string} */
+            status: "completed" | "failed";
+            /** @description Why, when status is `failed`. */
+            error_message?: string;
+            total_targets?: number;
+            successful_targets?: number;
+            failed_targets?: number;
+            discoveries_submitted?: number;
+        };
+        /** @description POST /sensors/{sensor_id}/discovery-jobs/{job_id}/complete result. */
+        DiscoveryJobCompletionResponse: {
+            /** @enum {string} */
+            status: "success";
+            message: string;
+            /** Format: uuid */
+            job_id: string;
         };
         /** @description POST /sensors/{sensor_id}/certificates/rotate result. */
         RotateCertificateResponse: {
@@ -1477,6 +1841,153 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getSensorFleetDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The fleet defaults. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SensorConfigDefaultsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putSensorFleetDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentConfigWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description The defaults were saved. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigWriteResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description A setting in this change needs explicit confirmation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigConfirmationRequired"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getSensorConfigHistory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The sensor's UUID. */
+                sensor_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The change history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigHistory"];
+                };
+            };
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getSensorDesiredConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The sensor's UUID. */
+                sensor_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sensor's configuration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SensorConfigResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putSensorDesiredConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The sensor's UUID. */
+                sensor_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AgentConfigWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description The override was saved. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigWriteResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description A setting in this change needs explicit confirmation. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentConfigConfirmationRequired"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -2048,6 +2559,49 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    completeDispatchedDiscoveryJob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sensor UUID. */
+                sensor_id: components["parameters"]["SensorId"];
+                /** @description Discovery job UUID — the job the platform dispatched to this sensor. */
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiscoveryJobCompletion"];
+            };
+        };
+        responses: {
+            /** @description Completion recorded. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryJobCompletionResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description The job is no longer awaiting this sensor; the report was recorded but the job's status stands. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyServiceUnavailable"];
         };
     };
 }

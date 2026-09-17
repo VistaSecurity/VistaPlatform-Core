@@ -3,6 +3,8 @@ package alertcatalog
 import (
 	"fmt"
 	"sort"
+
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // Rung is one trigger point on an escalating alert ladder. For time ladders
@@ -33,7 +35,7 @@ func BuildLadder(baseline *Rung, preference *Rung, policy []Rung, typeEnabled bo
 	byDay := map[int]Rung{}
 
 	add := func(r Rung) {
-		if r.Days < 0 || r.Severity == "" {
+		if r.Days < 0 || severityRank(r.Severity) == 0 {
 			return
 		}
 		if existing, ok := byDay[r.Days]; ok {
@@ -123,38 +125,17 @@ func SeverityRank(s string) int { return severityRank(s) }
 
 // severityRank mirrors the alert engine's ordering. "" ranks below info so
 // EffectiveSeverity can use it as the no-rung-crossed sentinel.
-func severityRank(s string) int {
-	switch s {
-	case "critical":
-		return 5
-	case "high":
-		return 4
-	case "medium":
-		return 3
-	case "low":
-		return 2
-	case "info":
-		return 1
-	default:
-		return 0
-	}
+func severityRank(value string) int {
+	rank, _ := sharedseverity.Rank(sharedseverity.Severity(value))
+	return rank
 }
 
-// NormalizeControlSeverity maps framework-control severity vocabulary
-// (Low/Med/High/Critical) onto the platform enum.
-func NormalizeControlSeverity(s string) string {
-	switch s {
-	case "Critical", "critical":
-		return "critical"
-	case "High", "high":
-		return "high"
-	case "Med", "Medium", "medium":
-		return "medium"
-	case "Low", "low":
-		return "low"
-	default:
-		return "medium"
+// ControlSeverity validates a stored control grade at the alert boundary.
+func ControlSeverity(value string) (string, error) {
+	if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(value)); err != nil {
+		return "", err
 	}
+	return value, nil
 }
 
 // Get returns the registry entry for an alert type id.

@@ -11,7 +11,7 @@ import {
   X, LogIn, Filter, Pencil, Pause, Play, Trash2, MapPin, RefreshCw,
   Users, Boxes, Radar, HardDrive, KeyRound, ShieldCheck, ShieldOff, Ticket, ScrollText,
 } from 'lucide-react';
-import { Avatar, MiniBar, PlanTag, StatusTag, healthColor, initialsFromName, money, relTime } from '../../components/ui/primitives';
+import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, money, relTime } from '../../components/ui/primitives';
 import {
   type Tenant, type TenantHealthSummary, tenantStatus, useTenantStatusMutation,
   useTenantReevaluateMutation, useTenantStats, useTenantCost, useTenantCoupons, useTierEntitlements,
@@ -19,8 +19,9 @@ import {
 } from './queries';
 import { TenantFormModal } from './tenant-form-modal';
 import { PlanExceptionsPanel } from './plan-exceptions';
+import { TenantSettingsPanel } from './tenant-settings-tab';
 
-const TABS = ['Overview', 'Billing', 'Entitlements', 'SSO', 'Activity'] as const;
+const TABS = ['Overview', 'Billing', 'Entitlements', 'Settings', 'SSO', 'Activity'] as const;
 type DrawerTab = (typeof TABS)[number];
 
 function DrawerSection({ title, children }: { title: string; children: React.ReactNode }) {
@@ -64,7 +65,7 @@ function StatCell({ icon: Icon, label, value }: { icon: typeof Users; label: str
 function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthSummary; onClose: () => void }) {
   const status = tenantStatus(t);
   const plan = t.subscription_tier ?? 'Trial';
-  const score = health ? Math.round(health.overall_score) : null;
+  const healthIndex = healthIndexPresentation(health?.overall_score, health?.health_status !== 'unknown');
   const stats = useTenantStats(t.id);
   const statusMut = useTenantStatusMutation();
   const deleteMut = useDeleteTenant();
@@ -104,14 +105,14 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
 
   return (
     <>
-      {score !== null && health && (
+      {healthIndex !== null && health && (
         <DrawerSection title="Health">
           <div style={{ background: 'var(--op-panel2)', border: '1px solid var(--op-border)', borderRadius: 'var(--r-sm)', padding: '12px 14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span className="op-num" style={{ fontSize: 24, fontWeight: 700, color: healthColor(score), lineHeight: 1 }}>{score}</span>
+              <span className="op-num" style={{ fontSize: 24, fontWeight: 700, color: healthIndex.color, lineHeight: 1 }}>{healthIndex.score}/100</span>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, color: 'var(--op-t1)', fontWeight: 500, textTransform: 'capitalize' }}>{health.health_status}</div>
-                <div style={{ marginTop: 6 }}><MiniBar pct={score} color={healthColor(score)} h={5} /></div>
+                <div style={{ fontSize: 12, color: 'var(--op-t1)', fontWeight: 500 }}>{healthIndex.label}</div>
+                <div style={{ marginTop: 6 }}><MiniBar pct={healthIndex.score} color={healthIndex.color} h={5} /></div>
               </div>
               {health.critical_alerts > 0 && <span style={{ fontSize: 11, color: 'var(--danger)', fontWeight: 600 }}>{health.critical_alerts} critical</span>}
             </div>
@@ -401,6 +402,7 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
           {tab === 'Overview' && <OverviewTab t={t} health={health} onClose={onClose} />}
           {tab === 'Billing' && <BillingTab t={t} />}
           {tab === 'Entitlements' && <EntitlementsTab t={t} />}
+          {tab === 'Settings' && <TenantSettingsPanel tenantId={t.id} />}
           {tab === 'SSO' && <SSOTab t={t} />}
           {tab === 'Activity' && <ActivityTab />}
           <div style={{ height: 16 }} />

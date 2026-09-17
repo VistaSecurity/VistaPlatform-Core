@@ -7,19 +7,22 @@
 // returned to all tenants (transparency, ADR-0014). No new capability.
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { Icon, Pill, DrawerShell, DrawerCloseBtn, riskColor } from '../../components/ui';
+import { parseSeverity, severityLabel } from '@vistasecurity/primitives/ratings';
+import {
+  DrawerCloseBtn, DrawerShell, frameworkPercentageColor, Icon, Pill, riskColor,
+} from '../../components/ui';
 import { EmptyState, Loading } from '../findings/bits';
 import { coverageLine, formatScore, isUnscored, notAssessedReasonText } from '../findings/control-status';
 import { describeMeasurement } from './measurement-language';
 import { useAvailableFrameworks, useFrameworkDetail, type AvailableFrameworkRow, type FrameworkControlRow } from './queries';
 
-// baseline_severity uses the backend's abbreviations (Low/Med/High/Critical);
-// map "Med" to the UI's "Medium" so riskColor resolves.
-const normSeverity = (s?: string) => (s === 'Med' ? 'Medium' : s ?? 'Low');
-
-function scoreColor(pct: number) {
-  return pct >= 85 ? 'var(--ok)' : pct >= 70 ? 'var(--warn)' : pct >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
-}
+// Current controls use canonical lowercase severity. `Med` remains readable for
+// historical framework payloads created before the vocabulary migration.
+const normSeverity = (value?: string) => {
+  const raw = value?.toLowerCase() === 'med' ? 'medium' : value?.toLowerCase() ?? 'low';
+  const severity = parseSeverity(raw);
+  return severity ? severityLabel(severity) ?? 'Low' : 'Low';
+};
 
 function ScoreBadge({ value }: { value?: number | null }) {
   // "—" covers both "not scored yet" and "nothing could be assessed".
@@ -27,7 +30,7 @@ function ScoreBadge({ value }: { value?: number | null }) {
     return <span style={{ fontSize: 12, color: 'var(--app-t3)' }} title="No control could be assessed against your current inventory, so there is no score to show.">—</span>;
   }
   return (
-    <span className="mono" style={{ fontSize: 20, fontWeight: 800, color: scoreColor(value!), lineHeight: 1 }}>
+    <span className="mono" style={{ fontSize: 20, fontWeight: 800, color: frameworkPercentageColor(value), lineHeight: 1 }}>
       {formatScore(value)}<span style={{ fontSize: 12 }}>%</span>
     </span>
   );

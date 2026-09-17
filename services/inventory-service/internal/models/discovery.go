@@ -33,4 +33,11 @@ type DiscoveryJob struct {
 	RetentionTTLHours  int       `json:"retention_ttl_hours" db:"retention_ttl_hours"`
 	CreatedAt          time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+	// Tenant-sensor dispatch. Executor is "platform" or "sensor";
+	// the assigned fields name the tenant sensor a `sensors` job was handed
+	// to and when. Carried through from cluster-sensor-service's job.
+	Executor           string     `json:"executor,omitempty"`
+	AssignedSensorID   *string    `json:"assigned_sensor_id,omitempty"`
+	AssignedSensorName *string    `json:"assigned_sensor_name,omitempty"`
+	DispatchedAt       *time.Time `json:"dispatched_at,omitempty"`
 }

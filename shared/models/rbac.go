@@ -1,8 +1,9 @@
 package models
 
 import (
-	"github.com/google/uuid"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // PlatformUser represents a user at the platform level
@@ -219,18 +220,4 @@ type TenantStats struct {
 	LastActivity time.Time `json:"last_activity" db:"last_activity"`
 	StorageUsed  int64     `json:"storage_used" db:"storage_used"`
 	APIRequests  int64     `json:"api_requests" db:"api_requests"`
-}
-
-// GetRiskLevel determines the risk level based on a score
-func GetRiskLevel(score int) string {
-	if score >= 80 {
-		return "Critical"
-	} else if score >= 60 {
-		return "High"
-	} else if score >= 40 {
-		return "Medium"
-	} else if score >= 20 {
-		return "Low"
-	}
-	return "Informational"
 }

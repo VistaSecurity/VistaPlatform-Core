@@ -18,6 +18,7 @@ import { IntegrationsPage, RoutingRulesPage, AlertRulesPage } from './pages-inte
 import { NotificationHistoryPage } from './pages-notification-history';
 import { AuditPage } from './pages-audit';
 import { LocationsPage, NetworkSegmentsPage, AssetLifecyclePage } from './pages-infra';
+import { AutoScanPage } from './pages-auto-scan';
 import { AIAssistantPage } from './pages-ai';
 import { ProfilePersonalPage, ProfileSecurityPage, ProfileNotificationsPage } from './pages-profile';
 import { ApiTokensPage } from './api-tokens';
@@ -90,6 +91,7 @@ export function SettingsPage() {
     case 'locations': return <LocationsPage meta={meta} />;
     case 'segments': return <NetworkSegmentsPage meta={meta} />;
     case 'asset-lifecycle': return <AssetLifecyclePage meta={meta} />;
+    case 'sensor-config': return <AutoScanPage meta={meta} />;
     default: return <SpecPendingPage meta={meta} />;
   }
 }

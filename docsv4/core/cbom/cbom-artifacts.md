@@ -49,6 +49,15 @@ The **Download** dropdown offers:
 
 SPDX and PDF downloads, HMAC signing, and compliance attestation are part of the Enterprise CBOM evidence layer — see below.
 
+## Algorithm ratings
+
+New reports use catalogue strength and risk assessments. An explicit risk score
+of zero is retained; a missing catalogue score or strength is unassessed, rather
+than a guessed score of 25 or an acceptable-strength label. Known weak-algorithm
+counts count confirmed weak rows; they are not proof that every other algorithm
+was assessed. PDF reports label absent strength **Unassessed**. Existing frozen
+artifacts retain their original values and bytes.
+
 ## Content hash & integrity
 
 Every artifact carries a SHA-256 hash of its canonical bytes. The hash is shown in the table (truncated; full value on the row's detail). If anyone tampers with the file after download, the hash won't match — your auditor can verify by recomputing.

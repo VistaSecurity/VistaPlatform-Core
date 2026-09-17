@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // PlatformFrameworkService handles platform framework operations
@@ -407,6 +408,10 @@ func (s *PlatformFrameworkService) DeleteFramework(id uuid.UUID) error {
 
 // CreateControl creates a control for a platform framework
 func (s *PlatformFrameworkService) CreateControl(frameworkID uuid.UUID, input *models.PlatformFrameworkControlInput) (*models.PlatformFrameworkControl, error) {
+	if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(input.BaselineSeverity)); err != nil {
+		return nil, err
+	}
+
 	control := &models.PlatformFrameworkControl{
 		ID:               uuid.New(),
 		FrameworkID:      frameworkID,
@@ -452,6 +457,10 @@ func (s *PlatformFrameworkService) CreateControl(frameworkID uuid.UUID, input *m
 
 // UpdateControl updates a platform framework control
 func (s *PlatformFrameworkService) UpdateControl(controlID uuid.UUID, input *models.PlatformFrameworkControlInput) (*models.PlatformFrameworkControl, error) {
+	if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(input.BaselineSeverity)); err != nil {
+		return nil, err
+	}
+
 	// source_kind / source_ref are deliberately NOT in the SET list: provenance
 	// records where a row came from, and editing a drafted control does not
 	// make it a hand-written one. They are in the RETURNING list so the client
@@ -552,6 +561,12 @@ func NullableSourceRef(ref string) interface{} {
 
 // AddControlMeasurement adds a measurement mapping to a control
 func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, input *models.ControlMeasurementInput) (*models.ControlMeasurement, error) {
+	if input.SeverityOverride != "" {
+		if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(input.SeverityOverride)); err != nil {
+			return nil, err
+		}
+	}
+
 	// Get measurement type for validation
 	var measurementType models.MeasurementType
 	err := s.db.Get(&measurementType, `
@@ -631,6 +646,12 @@ func (s *PlatformFrameworkService) AddControlMeasurement(controlID uuid.UUID, in
 
 // UpdateControlMeasurement updates a control measurement mapping
 func (s *PlatformFrameworkService) UpdateControlMeasurement(measurementID uuid.UUID, input *models.ControlMeasurementInput) (*models.ControlMeasurement, error) {
+	if input.SeverityOverride != "" {
+		if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(input.SeverityOverride)); err != nil {
+			return nil, err
+		}
+	}
+
 	// Get measurement type for validation
 	var measurementType models.MeasurementType
 	err := s.db.Get(&measurementType, `

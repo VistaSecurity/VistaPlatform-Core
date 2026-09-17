@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
-import { Icon, LevelBar, LevelDot, MiniBar, RiskGauge, levelFromScore, riskColor, LEVEL_MIN } from '../../components/ui';
+import { Icon, LevelBar, LevelDot, MiniBar, PercentageGauge, proportionPercent, LEVEL_MIN } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import {
   DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
@@ -114,8 +114,7 @@ export function DashboardPage() {
   const crit = findingsSeverity.data?.critical ?? 0;
   const crypto = s?.total_crypto ?? 0;
   const unknown = s?.unknown_risk ?? 0;
-  const pctHigh = total ? Math.round((high / total) * 100) : 0;
-  const lvl = levelFromScore(pctHigh);
+  const pctHigh = proportionPercent(high, total);
   // The dashboard's PQC number is ALWAYS config adoption (% of crypto configs on PQC
   // algorithms, /pqc/progress) so the % and the config counts beside it are one metric.
   // It must never swap to the PQC Readiness framework's severity-weighted score — that
@@ -156,6 +155,7 @@ export function DashboardPage() {
   const extHosts = cx?.source_hosts ?? 0;
   const extStats: [string, number][] = [
     ['Weak crypto', cx?.weak_crypto ?? 0],
+    ['Reassessment required', cx?.reassessment_required ?? 0],
     ['Legacy TLS', cx?.legacy_tls ?? 0],
     ['Expired certs', cx?.expired_certs ?? 0],
     ['PQC-resistant', cx?.pqc_resistant ?? 0],
@@ -184,9 +184,19 @@ export function DashboardPage() {
 
   return (
     <div style={{ padding: '20px 26px 44px', height: '100%', overflow: 'auto' }}>
+      {/* ---------- INVENTORY HEALTH hero (ADR-0006 D5) ---------- */}
+      {/* Stacked with the cryptographic-posture hero below it, NOT on a page of
+          its own: D5's whole point is that the ops and compliance personas read
+          two halves of ONE dashboard. Inventory leads — what you have comes
+          before how well it is protected. */}
+      <InventoryHealthHero />
+
       {/* ---------- HERO — cinematic accent posture ---------- */}
+      {/* Carries the bottom margin that separates it from the strip below. It
+          used to sit first and get that gap from the inventory hero's top
+          margin; now that the order is reversed it owns the gap itself. */}
       <div className="fade-up panel" style={{
-        position: 'relative', overflow: 'hidden', padding: '26px 30px',
+        position: 'relative', overflow: 'hidden', padding: '26px 30px', marginBottom: 18,
         background: 'var(--hero-bg)', border: '1px solid var(--hero-border)',
       }}>
         <div className="hero-glow" style={{ position: 'absolute', left: '-18%', top: '-80%', width: 640, height: 640, background: 'var(--accent-glow)', opacity: 0.7, pointerEvents: 'none' }} />
@@ -205,15 +215,14 @@ export function DashboardPage() {
               </div>
               <div>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                  <span className="accent-text" style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 76, lineHeight: 0.9, letterSpacing: '-.03em' }}>{risk.isLoading ? '…' : pctHigh}</span>
-                  <span className="mono" style={{ fontSize: 14, color: 'var(--app-t3)' }}>/100</span>
+                  <span className="accent-text" data-testid="dashboard-high-risk-percent" style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 76, lineHeight: 0.9, letterSpacing: '-.03em' }}>{risk.isLoading ? '…' : pctHigh === null ? '—' : `${pctHigh}%`}</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginTop: 10 }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 700, color: riskColor(lvl), background: `color-mix(in srgb, ${riskColor(lvl)} 11%, transparent)`, borderRadius: 40, padding: '3px 10px' }}>
-                    <LevelDot level={lvl} size={7} />{lvl} risk
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--accent)' }}>
+                    {pctHigh === null ? 'No monitored assets' : `${high.toLocaleString()} of ${total.toLocaleString()} monitored assets`}
                   </span>
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 4 }}>risk index · % of assets at high risk</div>
+                <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 4 }}>assets at high risk (risk score ≥ {LEVEL_MIN.High})</div>
               </div>
             </div>
             <p style={{ margin: '20px 0 0', fontSize: 14.5, lineHeight: 1.5, color: 'var(--app-t2)', maxWidth: 330 }}>
@@ -278,12 +287,6 @@ export function DashboardPage() {
           </div>
         </div>
       </div>
-
-      {/* ---------- INVENTORY HEALTH hero (ADR-0006 D5) ---------- */}
-      {/* Directly under the cryptographic-posture hero, NOT on a page of its
-          own: D5's whole point is that the ops and compliance personas read
-          two halves of ONE dashboard. */}
-      <InventoryHealthHero />
 
       {/* ---------- NEEDS ATTENTION strip ---------- */}
       <div className="fade-up" style={{ marginBottom: 18, animationDelay: '.05s' }}>
@@ -416,7 +419,7 @@ export function DashboardPage() {
           <h3 style={{ margin: '0 0 3px', fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14.5, color: 'var(--app-t1)' }}>Quantum readiness</h3>
           <p style={{ margin: '0 0 18px', fontSize: 11.5, color: 'var(--app-t3)' }}>Post-quantum migration progress</p>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
-            <RiskGauge score={pqcPct} level={pqcPct >= 50 ? 'Low' : 'Critical'} size={104} label="" stroke={8} />
+            <PercentageGauge value={pqc.isError || pqc.isLoading ? null : pqcPct} size={104} label="" stroke={8} />
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 11 }}>
               {/* M-2: unclassified (no algorithm data at all) is shown as its own
                   "not yet assessed" row, never folded into "awaiting migration" —

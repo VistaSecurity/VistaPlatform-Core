@@ -76,6 +76,17 @@ func main() {
 	batchProcessor := processor.NewBatchProcessor(db.DB, converter, approvalService, inventoryClient, auditMiddleware)
 	discoveryProcessor := processor.NewDiscoveryProcessor(db.DB, bypassDB, batchProcessor, cfg)
 
+	// Retention sweep: purge PROCESSED sensor_discoveries rows once they pass
+	// SENSOR_DISCOVERY_RETENTION_HOURS (default 7 days). Kill switch
+	// SENSOR_DISCOVERY_RETENTION_ENABLED=false. Runs on its own ticker beside
+	// the poller, on the bypass handle for the same cross-tenant reason
+	// processNextBatch uses it. retentionCtx is cancelled during graceful
+	// shutdown below, alongside discoveryProcessor.Stop().
+	retentionCtx, cancelRetention := context.WithCancel(context.Background())
+	defer cancelRetention()
+	retentionSweep := processor.NewRetentionSweepJob(bypassDB)
+	go retentionSweep.Start(retentionCtx)
+
 	// Setup HTTP server for API endpoints (metrics/status/health)
 	mux := http.NewServeMux()
 
@@ -222,6 +233,7 @@ func main() {
 	// Graceful shutdown
 	log.Println("Stopping discovery processor...")
 	discoveryProcessor.Stop()
+	cancelRetention()
 
 	// Wait for in-flight batches to complete (max 30s)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -43,11 +43,21 @@ export function describeMaterialization(count: number, m?: Materialization): Dis
   const pending = m.pending_approval ?? 0;
   const awaiting = m.awaiting_processing ?? 0;
   const queued = m.queued ?? 0;
+  const suppressed = m.suppressed ?? 0;
 
   if (auto > 0) parts.push({ text: `${auto} auto-approved`, tone: 'ok' });
   if (pending > 0) parts.push({ text: `${pending} awaiting approval`, tone: 'warn' });
   if (awaiting > 0) parts.push({ text: `${awaiting} still processing`, tone: 'muted' });
-  if (auto === 0 && pending === 0 && awaiting === 0) {
+  // Suppressed rows matched an asset the tenant already archived or denied —
+  // nothing was added and nothing is awaiting a decision, so this is neither
+  // "added to inventory" nor "awaiting approval". Stated explicitly rather
+  // than silently absorbed into the shortfall note below, so a job that
+  // mostly re-observed denied devices does not read as findings that simply
+  // vanished.
+  if (suppressed > 0) {
+    parts.push({ text: `${plural(suppressed, 'finding')} on denied or archived assets — not shown in Approvals`, tone: 'muted' });
+  }
+  if (auto === 0 && pending === 0 && awaiting === 0 && suppressed === 0) {
     parts.push({ text: '0 added to inventory', tone: 'muted' });
   }
 

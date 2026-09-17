@@ -38,18 +38,24 @@ one of them is good news.
 Every cryptographic configuration in your inventory, and every certificate
 reachable from one, is judged against the algorithm catalogue.
 
-- **Weak cryptographic configuration** — the configuration negotiates a
-  protocol version, cipher suite, key exchange, signature, symmetric cipher or
-  hash the catalogue rates as weak or deprecated. The score is the worst of
-  them: a service is only as strong as the weakest thing it will agree to, so
-  an AES-256 cipher does not offset a TLS 1.0 protocol version. The finding
-  lists every component that was looked at, worst first, with the catalogue's
-  rating of each — so the number always has its working attached.
-- **Certificate uses weak cryptography** — the certificate's key algorithm,
-  key size or signature algorithm is rated weak, or the key falls below the
-  NIST SP 800-131A floor (2048 bits for RSA, 256 for an elliptic curve). The
-  floor is applied per algorithm FAMILY: a 256-bit elliptic-curve key is
-  healthy and is not measured against the RSA floor.
+- **Uses weak cryptography** — any applicable configuration component or
+  certificate algorithm is rated **weak**, or a key-size/hash rule fails.
+  Every resolved component participates, including offered and inferred
+  algorithms. A higher-scoring strong component cannot hide a weaker one.
+- **Uses an algorithm rated acceptable** — at least one component is
+  **acceptable**, with no weak component or size/hash failure. The title names
+  that component; it does not call acceptable cryptography weak.
+- **Strong/recommended components** alone do not raise either finding merely
+  because their catalogue risk is nonzero. Numeric risk remains separate from
+  strength: the finding's severity follows the highest numeric assessment,
+  while its title follows the weakest applicable judgment. An explicitly weak
+  component scored zero still raises an informational finding.
+- **Size/hash exceptions** apply to configurations and certificates. Persisted
+  key sizes are checked against the NIST SP 800-131A floor by family (2048 bits
+  for RSA, 256 for an elliptic curve); hash checks also recognize deprecated or
+  broken hashes inside signature names. A healthy 256-bit EC key does not fail
+  the RSA floor. Evidence records the failing rule and separately identifies
+  the sources of the numeric score.
 - **Vulnerable to quantum attack** — the subject uses a classical asymmetric
   algorithm that Shor's algorithm breaks (a signature, a key-establishment or
   a public-key encryption primitive), per **NIST IR 8547**, which deprecates
@@ -70,6 +76,24 @@ A configuration whose components resolve to **nothing** in the catalogue raises
 no finding — and does not count as assessed either. That is the difference
 between "we checked and it is fine" and "we could not check", and the product
 keeps them apart rather than showing you the reassuring one.
+
+Existing findings are reassessed when the inventory service starts and during
+its recurring producer pass (24 hours by default); rediscovery is not required.
+Each tenant's crypto writes, coverage and sweep commit together, followed by
+the shared asset-risk rollup. A failed crypto pass leaves its findings intact
+and can be retried on the next pass or service restart. Repeated passes converge
+on the same finding identities and retain their audit history. Frozen CBOM
+artifacts are not rewritten.
+
+Unknown components are not strong. When an existing finding cannot be safely
+reassessed, its title says **requires cryptographic reassessment** and its prior
+score/evidence remain available. For example, an old configuration may have an
+opaque stored risk above its current catalogue score but lack the key-size or
+hash facts needed to explain it. The evidence names this gap; the number alone
+does not create a new weak finding. New observations can supply missing facts.
+Producer coverage means that some facts were assessed, not that every observed
+component resolved. Removing a false weak finding can lower asset risk, while
+PQC, vulnerability and other risk-feeding findings continue to contribute.
 
 ### End-of-life findings
 
@@ -102,7 +126,9 @@ CVEs are listed *on* the finding instead.
 
 Severity is the worst matching CVE's CVSS score. **A CVE the catalogue has never
 scored still raises a finding**, marked as not scored — it is reported as
-ungraded, never as harmless.
+ungraded, never as harmless. The assessment warning inspects every CVE carried
+by the finding: a scored headline CVE does not hide another matching CVE that
+has no CVSS score.
 
 Software with neither a CPE nor a Package URL **cannot be checked at all**, and
 the platform counts those separately rather than reporting them as clean.
@@ -276,6 +302,14 @@ are shown apart because they are fixed in different places: a catalogue score
 changes when an administrator edits the algorithm's catalogue row, and an
 observed score changes when the service is scanned again.
 
+When the cryptography producer can prove that evidence is incomplete, the same
+panel shows its exact limitation, such as an observed algorithm that did not
+resolve to the catalogue or a missing key size. Older retained findings can say
+that reassessment is required while preserving their prior evidence. If no such
+limitation is present, the UI does not infer completeness from the number of
+resolved components: that array contains resolved catalogue rows and does not,
+by itself, reveal unresolved observations.
+
 A catalogue entry the platform has never heard of is **not** silently treated as
 safe: the lookup is recorded as a gap, and a platform administrator can see and
 fill it under **Catalog → End-of-life → Gaps**.
@@ -309,8 +343,13 @@ score. A framework is scored by its own score; counting one failing control
 across every asset it touches would swamp the per-asset number and tell you
 less, not more.
 
-A score of **0** means *not assessed* — nothing resolved against a catalogue and
-no rule fired. It does not mean safe.
+An explicitly assessed score of **0** is **Informational**. Missing numeric
+assessment remains unscored; an asset's legacy zero alone does not establish
+whether any producer evaluated it. Read its **Assessed by** coverage and the
+finding's evidence limitations. A weak catalogue judgement may also carry an
+explicit numeric zero, so zero is not a claim that the cryptography is safe.
+See the [rating upgrade guide](../operate/rating-upgrade.md) for the distinct
+catalogue, configuration and asset assessment contracts.
 
 ## How an asset's risk score is made
 
@@ -360,7 +399,7 @@ That turns a score of 0 into two different answers, and the page tells you which
 
 | What you see | What it means |
 |---|---|
-| **0, assessed by crypto, drift, eol** | Those producers looked at this asset and found nothing to score. A clean bill of health, from the parts of the platform that can give you one. |
+| **0, assessed by crypto, drift, eol** | Those producers completed a pass and no open risk-feeding finding contributes a positive score. Check evidence limitations: this does not prove full coverage or exclude a qualitative finding with score 0. |
 | **Not assessed** | Nobody has evaluated this asset yet. There is no finding *and* no reassurance. |
 
 An unassessed asset is not a low-risk asset. Filter for them with **Inventory →
@@ -370,7 +409,9 @@ missing.
 
 Where the score comes from is on the asset page too: the **Overview** tab names
 the single finding the score came from, and clicking it opens the **Findings**
-tab with that finding highlighted, alongside the rest of them.
+tab with that finding highlighted, alongside the rest of them. When finding
+evidence shows that part of the assessment is unscored or otherwise limited,
+the warning appears beside the Overview risk as well as on the Findings tab.
 
 ## The two states a finding has
 
@@ -510,7 +551,7 @@ will find it in the **Remediation** block of the finding inspector, under
 **Risk & Compliance → Findings**.
 
 It is generic to the kind, on purpose. "Reissue the certificate with a key and
-signature algorithm the catalogue rates acceptable" is true of every weak
+signature algorithm the catalogue rates strong or recommended" applies to a weak
 certificate, so it does not need a model, a provider or an edition to say — it
 is simply there, in every deployment, whether or not anyone has configured AI.
 

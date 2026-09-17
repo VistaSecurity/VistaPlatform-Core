@@ -3,7 +3,9 @@
 // SSH data was collected richly and mapped nowhere. The passive sensor puts a
 // full set of SSH_MSG_KEXINIT name-lists into the finding's raw metadata
 // (ssh_kex_algorithms_*, ssh_encryption_algs_*, ssh_mac_algs_*), the active
-// prober adds the banner and the negotiated host-key type — and the ingest
+// prober adds the banner, the negotiated host-key type, the server's own
+// KEXINIT name-lists and the algorithms those name-lists negotiate
+// (shared/discovery/probe_ssh_kexinit.go) — and the ingest
 // adapter mapped only the TLS-shaped fields (protocol_version, cipher_suite,
 // key_exchange_algorithm, hash_algorithm). So an SSH configuration linked ZERO
 // rows in crypto_implementation_algorithms, catalogueRiskForImplementation
@@ -77,9 +79,10 @@ type sshObservation struct {
 	Hash            string // MAC; empty when an AEAD cipher makes it moot
 
 	// Offered — the server's KEXINIT name-lists.
-	OfferedKex     []string
-	OfferedCiphers []string
-	OfferedMACs    []string
+	OfferedKex      []string
+	OfferedHostKeys []string
+	OfferedCiphers  []string
+	OfferedMACs     []string
 }
 
 // sshRawKeys are the raw-metadata keys that mark a finding as carrying SSH
@@ -91,9 +94,12 @@ var sshRawKeys = []string{
 	"ssh_kex_algorithm",
 	"ssh_kex_algorithms_server",
 	"ssh_kex_algorithms_client",
+	"ssh_host_key_algs_server",
+	"ssh_encryption_alg_c2s",
 	"ssh_encryption_algs_c2s_server",
 	"ssh_encryption_algs_s2c_server",
 	"ssh_encryption_algs_c2s_client",
+	"ssh_mac_alg_c2s",
 	"ssh_mac_algs_c2s_server",
 	"ssh_mac_algs_c2s_client",
 }
@@ -222,18 +228,29 @@ func sshObservationFromFinding(f IngestFinding) sshObservation {
 	serverMAC := rawStringSlice(raw, "ssh_mac_algs_c2s_server")
 
 	obs.OfferedKex = serverKex
+	obs.OfferedHostKeys = rawStringSlice(raw, "ssh_host_key_algs_server")
 	obs.OfferedCiphers = mergeNameLists(serverEncC2S, serverEncS2C)
 	obs.OfferedMACs = serverMAC
 
-	// A directly-reported negotiated kex (cluster-sensor's ssh_kex_algorithm)
-	// beats reconstructing one, exactly as an explicitly reported TLS key
-	// exchange beats one inferred from the suite name.
+	// A directly-reported negotiated algorithm beats reconstructing one,
+	// exactly as an explicitly reported TLS key exchange beats one inferred
+	// from the suite name. The active probers report all three, because they
+	// know both name-lists at the moment of the exchange: their own offer is
+	// not in the finding, so the ingest could not reconstruct these itself.
+	// Reconstruction remains the path for a passive capture, which carries
+	// the real client's lists instead.
 	obs.KeyExchange = rawString(raw, "ssh_kex_algorithm")
 	if obs.KeyExchange == "" {
 		obs.KeyExchange = cryptoparse.NegotiateSSHAlgorithm(clientKex, serverKex)
 	}
-	obs.Symmetric = cryptoparse.NegotiateSSHAlgorithm(clientEnc, serverEncC2S)
-	obs.Hash = cryptoparse.NegotiateSSHAlgorithm(clientMAC, serverMAC)
+	obs.Symmetric = rawString(raw, "ssh_encryption_alg_c2s")
+	if obs.Symmetric == "" {
+		obs.Symmetric = cryptoparse.NegotiateSSHAlgorithm(clientEnc, serverEncC2S)
+	}
+	obs.Hash = rawString(raw, "ssh_mac_alg_c2s")
+	if obs.Hash == "" {
+		obs.Hash = cryptoparse.NegotiateSSHAlgorithm(clientMAC, serverMAC)
+	}
 
 	// With an AEAD cipher the MAC name-list is not consulted at all, so no MAC
 	// was negotiated. The server's MAC offers are still recorded as offers.
@@ -311,6 +328,12 @@ func (s *AssetService) classifyAndLinkSSH(implID uuid.UUID, obs sshObservation) 
 		}
 	}
 	linkOffered(obs.OfferedKex, "key_exchange")
+	// Host key offers matter for the same reason cipher offers do, and more
+	// sharply: a server that still offers ssh-rsa will sign the exchange hash
+	// with SHA-1 for any client that asks for it, while presenting a
+	// perfectly modern rsa-sha2-512 host key to one that does not. Linking
+	// only the key the probe negotiated would report that server as clean.
+	linkOffered(obs.OfferedHostKeys, "signature")
 	linkOffered(obs.OfferedCiphers, "symmetric")
 	linkOffered(obs.OfferedMACs, "hash")
 }

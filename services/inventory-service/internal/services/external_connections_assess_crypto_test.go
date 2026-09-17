@@ -103,10 +103,10 @@ func TestAssessKeyExchangeSize(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name:       "STATIC-RSA — no forward secrecy",
-			kex:        strPtr("STATIC-RSA"),
-			keySize:    intPtr(2048),
-			wantSubstr: "forward secrecy",
+			name:      "STATIC-RSA healthy size — catalogue assesses algorithm",
+			kex:       strPtr("STATIC-RSA"),
+			keySize:   intPtr(2048),
+			wantEmpty: true,
 		},
 		{
 			name:       "STATIC-RSA weak key — RSA size check",
@@ -180,7 +180,7 @@ func TestAssessCertPublicKeySize(t *testing.T) {
 		{name: "RSA 1024 — weak", alg: strPtr("RSA"), size: intPtr(1024), wantSubstr: "Weak"},
 		{name: "RSA 512 — critical", alg: strPtr("RSA"), size: intPtr(512), wantSubstr: "Critical"},
 		{name: "ECDSA 256 — ok", alg: strPtr("ECDSA"), size: intPtr(256), wantEmpty: true},
-		{name: "ECDSA 224 — ok (boundary)", alg: strPtr("ECDSA"), size: intPtr(224), wantEmpty: true},
+		{name: "ECDSA 224 — below shared 256-bit floor", alg: strPtr("ECDSA"), size: intPtr(224), wantSubstr: "Weak"},
 		{name: "ECDSA 160 — weak", alg: strPtr("ECDSA"), size: intPtr(160), wantSubstr: "Weak"},
 	}
 
@@ -275,8 +275,12 @@ func TestAssessCertValidationStatus(t *testing.T) {
 		{name: "self_signed", status: strPtr("self_signed"), wantSubstr: "self-signed"},
 		{name: "expired", status: strPtr("expired"), wantSubstr: "expired"},
 		{name: "hostname_mismatch", status: strPtr("hostname_mismatch"), wantSubstr: "hostname"},
-		{name: "untrusted_ca", status: strPtr("untrusted_ca"), wantSubstr: "untrusted"},
-		{name: "incomplete_chain", status: strPtr("incomplete_chain"), wantSubstr: "Incomplete"},
+		// untrusted_ca and incomplete_chain are certificate-hygiene observations,
+		// not cryptographic weakness (a service pinning its own CA, e.g. Signal,
+		// still validates as untrusted_ca over a strong TLS 1.3 connection) — see
+		// assessCertHygiene and TestAssessCertHygiene below.
+		{name: "untrusted_ca", status: strPtr("untrusted_ca"), wantEmpty: true},
+		{name: "incomplete_chain", status: strPtr("incomplete_chain"), wantEmpty: true},
 		{name: "revoked", status: strPtr("revoked"), wantSubstr: "revoked"},
 		{name: "unknown_status", status: strPtr("something_weird"), wantSubstr: "something_weird"},
 	}
@@ -332,12 +336,14 @@ func TestAssessSensorCertFlags(t *testing.T) {
 			wantSubstr: "Superfish",
 		},
 		{
-			name: "missing SCTs",
+			// Missing SCTs is certificate hygiene (CT logging), not crypto
+			// weakness — see TestAssessCertHygiene. assessSensorCertFlags no
+			// longer reports it.
+			name: "missing SCTs — no reason (moved to assessCertHygiene)",
 			input: models.ExternalConnectionUpsert{
 				CertHasSCT: boolPtr(false),
 			},
-			wantCount:  1,
-			wantSubstr: "SCT",
+			wantCount: 0,
 		},
 		{
 			name: "has SCTs — no reason",
@@ -347,20 +353,19 @@ func TestAssessSensorCertFlags(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name: "no subject",
+			// No Subject DN is also hygiene — see TestAssessCertHygiene.
+			name: "no subject — no reason (moved to assessCertHygiene)",
 			input: models.ExternalConnectionUpsert{
 				CertNoSubject: true,
 			},
-			wantCount:  1,
-			wantSubstr: "no Subject",
+			wantCount: 0,
 		},
 		{
-			name: "no common name",
+			name: "no common name — no reason (moved to assessCertHygiene)",
 			input: models.ExternalConnectionUpsert{
 				CertNoCommonName: true,
 			},
-			wantCount:  1,
-			wantSubstr: "no Common Name",
+			wantCount: 0,
 		},
 		{
 			name: "OCSP revoked",
@@ -386,13 +391,14 @@ func TestAssessSensorCertFlags(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name: "multiple flags combine",
+			name: "known-bad CA is the only surviving flag once SCT/no-subject moved to hygiene",
 			input: models.ExternalConnectionUpsert{
 				CertKnownBadCA: strPtr("eDellRoot"),
 				CertHasSCT:     boolPtr(false),
 				CertNoSubject:  true,
 			},
-			wantCount: 3,
+			wantCount:  1,
+			wantSubstr: "eDellRoot",
 		},
 	}
 
@@ -414,6 +420,120 @@ func TestAssessSensorCertFlags(t *testing.T) {
 				}
 				if !found {
 					t.Fatalf("expected a reason containing %q, got %v", tt.wantSubstr, reasons)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// assessCertHygiene
+// ---------------------------------------------------------------------------
+
+// TestAssessCertHygiene pins the destination for every flag moved out of
+// weak_reasons: missing SCT, no Subject DN, no Common Name, untrusted/pinned
+// CA, incomplete chain. None of these are cryptographic weakness (protocol
+// version, cipher suite, key exchange, key size, signature algorithm) — see
+// CLAUDE.md "Crypto Assessment Source of Truth" and "Certificate quality
+// flags".
+func TestAssessCertHygiene(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		input      models.ExternalConnectionUpsert
+		wantCount  int
+		wantSubstr string
+	}{
+		{
+			name:      "no flags set — no hygiene observations",
+			input:     models.ExternalConnectionUpsert{},
+			wantCount: 0,
+		},
+		{
+			name:       "missing SCT",
+			input:      models.ExternalConnectionUpsert{CertHasSCT: boolPtr(false)},
+			wantCount:  1,
+			wantSubstr: "SCT",
+		},
+		{
+			name:      "has SCT — no hygiene observation",
+			input:     models.ExternalConnectionUpsert{CertHasSCT: boolPtr(true)},
+			wantCount: 0,
+		},
+		{
+			name:       "no subject",
+			input:      models.ExternalConnectionUpsert{CertNoSubject: true},
+			wantCount:  1,
+			wantSubstr: "no Subject",
+		},
+		{
+			name:       "no common name",
+			input:      models.ExternalConnectionUpsert{CertNoCommonName: true},
+			wantCount:  1,
+			wantSubstr: "no Common Name",
+		},
+		{
+			// no subject takes precedence over no common name, matching
+			// assessSensorCertFlags' pre-split behavior (they're mutually
+			// informative, not additive: a cert with no Subject DN at all
+			// trivially also has no Common Name).
+			name: "no subject wins over no common name",
+			input: models.ExternalConnectionUpsert{
+				CertNoSubject:    true,
+				CertNoCommonName: true,
+			},
+			wantCount:  1,
+			wantSubstr: "no Subject",
+		},
+		{
+			name:       "untrusted CA — e.g. a service pinning its own root (Signal)",
+			input:      models.ExternalConnectionUpsert{CertValidationStatus: strPtr("untrusted_ca")},
+			wantCount:  1,
+			wantSubstr: "untrusted",
+		},
+		{
+			name:       "incomplete chain",
+			input:      models.ExternalConnectionUpsert{CertValidationStatus: strPtr("incomplete_chain")},
+			wantCount:  1,
+			wantSubstr: "Incomplete",
+		},
+		{
+			// self_signed/expired/hostname_mismatch/revoked are NOT hygiene —
+			// they stay in assessCertValidationStatus's weak_reasons.
+			name:      "self_signed is not hygiene",
+			input:     models.ExternalConnectionUpsert{CertValidationStatus: strPtr("self_signed")},
+			wantCount: 0,
+		},
+		{
+			name: "everything combines",
+			input: models.ExternalConnectionUpsert{
+				CertHasSCT:           boolPtr(false),
+				CertNoSubject:        true,
+				CertValidationStatus: strPtr("untrusted_ca"),
+			},
+			wantCount: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			flags := assessCertHygiene(tt.input)
+			if len(flags) != tt.wantCount {
+				t.Fatalf("expected %d hygiene flags, got %d: %v", tt.wantCount, len(flags), flags)
+			}
+			if tt.wantSubstr != "" && len(flags) > 0 {
+				found := false
+				for _, f := range flags {
+					if strings.Contains(f, tt.wantSubstr) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("expected a flag containing %q, got %v", tt.wantSubstr, flags)
 				}
 			}
 		})

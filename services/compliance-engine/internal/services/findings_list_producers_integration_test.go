@@ -29,7 +29,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -361,17 +360,17 @@ func TestIntegration_GetFindingStatistics_CountsEveryProducer(t *testing.T) {
 
 	// One compliance Critical on an ACTIVATED framework — in both rollups.
 	_, newLicensedControl := seedPublishedFramework(t, db, tenant, "stats-all-lic", true)
-	licControl, licAsset := newLicensedControl("Critical"), uuid.New()
+	licControl, licAsset := newLicensedControl("critical"), uuid.New()
 	licFinding := activeViolation(licControl, licAsset)
-	licFinding.Severity = "Critical"
+	licFinding.Severity = "critical"
 	mustUpsert(t, svc, tenant, licControl, licAsset, licFinding, "ACTIVE")
 
 	// One compliance Critical on a framework the tenant has NOT activated — in
 	// neither rollup.
 	_, newUnlicensedControl := seedPublishedFramework(t, db, tenant, "stats-all-unlic", false)
-	unlicControl, unlicAsset := newUnlicensedControl("Critical"), uuid.New()
+	unlicControl, unlicAsset := newUnlicensedControl("critical"), uuid.New()
 	unlicFinding := activeViolation(unlicControl, unlicAsset)
-	unlicFinding.Severity = "Critical"
+	unlicFinding.Severity = "critical"
 	mustUpsert(t, svc, tenant, unlicControl, unlicAsset, unlicFinding, "ACTIVE")
 
 	// Two non-compliance Criticals and one non-compliance High. No framework is
@@ -437,18 +436,18 @@ func TestIntegration_GetFindingStatistics_AgreesUnderTheRLSAppRole(t *testing.T)
 	// One compliance Critical on an ACTIVATED framework. This is the row the
 	// licence EXISTS has to be able to resolve as the app role.
 	_, newLicensedControl := seedPublishedFramework(t, ownerDB, tenant, "stats-rls-lic", true)
-	licControl, licAsset := newLicensedControl("Critical"), uuid.New()
+	licControl, licAsset := newLicensedControl("critical"), uuid.New()
 	licFinding := activeViolation(licControl, licAsset)
-	licFinding.Severity = "Critical"
+	licFinding.Severity = "critical"
 	mustUpsert(t, ownerSvc, tenant, licControl, licAsset, licFinding, "ACTIVE")
 
 	// One compliance Critical on a framework the tenant has NOT activated. In
 	// neither rollup, under either role — the gate must not be relaxed by the
 	// app role either.
 	_, newUnlicensedControl := seedPublishedFramework(t, ownerDB, tenant, "stats-rls-unlic", false)
-	unlicControl, unlicAsset := newUnlicensedControl("Critical"), uuid.New()
+	unlicControl, unlicAsset := newUnlicensedControl("critical"), uuid.New()
 	unlicFinding := activeViolation(unlicControl, unlicAsset)
-	unlicFinding.Severity = "Critical"
+	unlicFinding.Severity = "critical"
 	mustUpsert(t, ownerSvc, tenant, unlicControl, unlicAsset, unlicFinding, "ACTIVE")
 
 	asset := insertAsset(t, ownerDB, tenant, "web-03.example.com")
@@ -539,9 +538,9 @@ func TestIntegration_GetFindingStatistics_CountsEveryRegisteredProducer(t *testi
 	// producer" is proven to include the one the licence gate applies to,
 	// rather than passing because compliance was left out.
 	_, newLicensedControl := seedPublishedFramework(t, db, tenant, "stats-every-producer", true)
-	control, asset := newLicensedControl("Critical"), uuid.New()
+	control, asset := newLicensedControl("critical"), uuid.New()
 	f := activeViolation(control, asset)
-	f.Severity = "Critical"
+	f.Severity = "critical"
 	mustUpsert(t, svc, tenant, control, asset, f, "ACTIVE")
 	wanted++
 

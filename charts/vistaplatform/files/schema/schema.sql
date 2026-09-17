@@ -1457,7 +1457,7 @@ CREATE TABLE IF NOT EXISTS public.algorithms (
     strength character varying(20) DEFAULT 'acceptable'::character varying NOT NULL,
     deprecation_status character varying(20) DEFAULT 'current'::character varying,
     deprecation_date date,
-    risk_score integer DEFAULT 50,
+    risk_score integer,
     recommended_alternatives text[],
     migration_guidance text,
     remediation_guidance jsonb DEFAULT '{}'::jsonb,
@@ -2015,8 +2015,8 @@ CREATE TABLE IF NOT EXISTS public.compliance_overrides (
     framework_type character varying(20) DEFAULT 'platform'::character varying NOT NULL,
     CONSTRAINT compliance_overrides_framework_type_check CHECK (((framework_type)::text = ANY ((ARRAY['platform'::character varying, 'tenant'::character varying])::text[]))),
     CONSTRAINT compliance_overrides_override_type_check CHECK (((override_type)::text = ANY ((ARRAY['disregard'::character varying, 'severity'::character varying])::text[]))),
-    CONSTRAINT compliance_overrides_severity_from_check CHECK (((severity_from)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[]))),
-    CONSTRAINT compliance_overrides_severity_to_check CHECK (((severity_to)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
+    CONSTRAINT compliance_overrides_severity_from_check CHECK (((severity_from)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
+    CONSTRAINT compliance_overrides_severity_to_check CHECK (((severity_to)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
 );
 
 
@@ -2148,7 +2148,7 @@ CREATE TABLE IF NOT EXISTS public.control_measurements (
     updated_at timestamp with time zone DEFAULT now(),
     CONSTRAINT control_measurements_framework_type_check CHECK (((framework_type)::text = ANY ((ARRAY['platform'::character varying, 'tenant'::character varying])::text[]))),
     CONSTRAINT control_measurements_rule_type_check CHECK (((rule_type)::text = ANY ((ARRAY['threshold'::character varying, 'presence'::character varying, 'pattern'::character varying, 'range'::character varying])::text[]))),
-    CONSTRAINT control_measurements_severity_override_check CHECK (((severity_override)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[]))),
+    CONSTRAINT control_measurements_severity_override_check CHECK (((severity_override)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
     CONSTRAINT valid_weight CHECK (((weight >= 1) AND (weight <= 10)))
 );
 
@@ -2236,6 +2236,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_partitioned (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2263,6 +2269,10 @@ PARTITION BY HASH (tenant_id);
 -- one statement covers all eight. It sits HERE, not in POST-MIGRATIONS, because
 -- the view immediately below selects the column.
 ALTER TABLE public.crypto_implementations_partitioned ADD COLUMN IF NOT EXISTS endpoint_id uuid;
+-- Same shape for the provenance array. NOT NULL with a DEFAULT is a
+-- metadata-only add (no rewrite); the POST-MIGRATIONS block at the bottom of
+-- this file backfills every existing row from its `discovery_method`.
+ALTER TABLE public.crypto_implementations_partitioned ADD COLUMN IF NOT EXISTS discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL;
 
 
 -- VIEW: crypto_implementations
@@ -2296,6 +2306,7 @@ CREATE VIEW public.crypto_implementations AS
     crypto_implementations_partitioned.key_size,
     crypto_implementations_partitioned.certificate_id,
     crypto_implementations_partitioned.discovery_method,
+    crypto_implementations_partitioned.discovery_methods,
     crypto_implementations_partitioned.confidence_score,
     crypto_implementations_partitioned.source_sensor_id,
     crypto_implementations_partitioned.raw_data,
@@ -2337,6 +2348,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_0 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2378,6 +2395,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_1 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2419,6 +2442,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_2 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2460,6 +2489,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_3 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2501,6 +2536,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_4 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2542,6 +2583,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_5 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2583,6 +2630,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_6 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2624,6 +2677,12 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_7 (
     key_size integer,
     certificate_id uuid,
     discovery_method public.discovery_method NOT NULL,
+    -- Every method that has contributed an observation to this row, primary
+    -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
+    -- passive glimpse and the active probe that completes it into ONE row, and
+    -- this is where the second method's attribution goes instead of into a
+    -- second row.
+    discovery_methods public.discovery_method[] DEFAULT '{}'::public.discovery_method[] NOT NULL,
     confidence_score numeric(3,2) DEFAULT 1.0,
     source_sensor_id uuid,
     raw_data jsonb,
@@ -2885,6 +2944,14 @@ CREATE TABLE IF NOT EXISTS public.discovery_jobs (
     -- Empty array = no OT active probing was approved; non-empty = the listed
     -- protocols (Modbus, OPC_UA, EtherNet_IP, BACnet) were dispatched.
     ot_probe_protocols text[] DEFAULT '{}'::text[],
+    -- Tenant-sensor dispatch. assigned_sensor_id is the tenant sensor a
+    -- `sensors` job was handed to and dispatched_at is when its discovery_job
+    -- command was written; both NULL for a job the platform sensor runs.
+    -- status gains 'awaiting_sensor' for the interval between dispatch and the
+    -- sensor's completion callback. Also added in POST-MIGRATIONS for
+    -- existing databases.
+    assigned_sensor_id uuid,
+    dispatched_at timestamp with time zone,
     started_at timestamp with time zone,
     completed_at timestamp with time zone,
     error_message text,
@@ -2949,6 +3016,7 @@ CREATE TABLE IF NOT EXISTS public.external_connection_history (
     previous_protocol_version character varying(50),
     previous_cipher_suite character varying(255),
     previous_crypto_strength character varying(20),
+    strength_vocabulary_version integer DEFAULT 1 NOT NULL,
     previous_is_pqc_resistant boolean,
     previous_cert_fingerprint_sha256 character varying(64),
     previous_cert_not_after timestamp with time zone,
@@ -2979,7 +3047,7 @@ CREATE TABLE IF NOT EXISTS public.external_connections (
     key_exchange_algorithm character varying(100),
     key_size integer,
     supported_tls_versions text[],
-    crypto_strength character varying(20) DEFAULT 'unknown'::character varying NOT NULL,
+    crypto_strength character varying(20),
     is_pqc_resistant boolean DEFAULT false NOT NULL,
     weak_reasons text[] DEFAULT '{}'::text[],
     cert_subject character varying(500),
@@ -3019,7 +3087,7 @@ CREATE TABLE IF NOT EXISTS public.external_connections (
     -- source port (a host agent watching its own connections, ADR-0004 D3) fills
     -- it in.
     source_endpoint_id uuid,
-    CONSTRAINT external_connections_crypto_strength_check CHECK (((crypto_strength)::text = ANY ((ARRAY['good'::character varying, 'weak'::character varying, 'unknown'::character varying])::text[]))),
+    CONSTRAINT external_connections_strength_v2_check CHECK (crypto_strength IS NULL OR crypto_strength IN ('weak', 'acceptable', 'strong', 'recommended')),
     CONSTRAINT external_connections_dest_port_check CHECK (((dest_port >= 1) AND (dest_port <= 65535)))
 );
 
@@ -4125,7 +4193,7 @@ CREATE TABLE IF NOT EXISTS public.platform_framework_controls (
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
     CONSTRAINT platform_framework_controls_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
-    CONSTRAINT platform_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
+    CONSTRAINT platform_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
 );
 
 
@@ -5045,6 +5113,15 @@ CREATE TABLE IF NOT EXISTS public.sensors (
     -- registration/heartbeat and operator-changeable via an update_config
     -- command. NULL when the sensor does not report one.
     reporting_interval integer,
+    -- The asset that the HOST THIS SENSOR RUNS ON resolved to, set from the
+    -- sensor's own self-reported host_observation ingest (asset-inventory
+    -- decision 9). NULL until the first successful self-observation, and
+    -- forever NULL for a sensor build old enough to send none.
+    asset_id uuid,
+    -- Throttle state for how often an UNCHANGED self-observation is
+    -- re-ingested (see services/sensor-manager/internal/services/self_observation.go).
+    self_observation_hash text,
+    self_observation_at timestamp with time zone,
     last_heartbeat timestamp with time zone,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
@@ -5093,6 +5170,132 @@ CREATE TABLE IF NOT EXISTS public.agent_addresses (
         (sensor_id IS NOT NULL AND device_agent_id IS NULL)
         OR (sensor_id IS NULL AND device_agent_id IS NOT NULL)
     )
+);
+
+
+-- TABLE: agent_config_defaults
+-- The tenant-wide desired settings for a runtime — the "fleet defaults" an
+-- individual sensor or agent inherits unless it carries its own override.
+--
+-- One row per (tenant, runtime). The values are a jsonb object keyed by the
+-- setting names in shared/agentconfig, NOT a column per setting: the registry
+-- there is the source of truth for what is settable, and a column per setting
+-- would mean a schema change every time a device gains a knob, with the two
+-- definitions free to disagree in between.
+CREATE TABLE IF NOT EXISTS public.agent_config_defaults (
+    tenant_id uuid NOT NULL,
+    -- 'sensor' or 'agent', matching shared/agentconfig.Runtime.
+    runtime character varying(16) NOT NULL,
+    values jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_config_defaults_pkey PRIMARY KEY (tenant_id, runtime),
+    CONSTRAINT agent_config_defaults_runtime_check CHECK (((runtime)::text = ANY ((ARRAY['sensor'::character varying, 'agent'::character varying])::text[])))
+);
+
+
+-- TABLE: agent_config_overrides
+-- The per-device desired settings: what an operator has asked THIS sensor or
+-- THIS agent to be, over and above the fleet defaults.
+--
+-- Same two-nullable-owners shape as agent_addresses, and for the same reason
+-- given there: one table rather than two near-identical ones, because the two
+-- runtimes are halves of one product and forking is how they drift apart. The
+-- CHECK makes "exactly one owner" a database invariant.
+--
+-- A row exists only when there IS an override. Absence means "inherits
+-- everything", which is a different statement from a row of nulls — see the
+-- three-valued note on Values in shared/agentconfig.
+CREATE TABLE IF NOT EXISTS public.agent_config_overrides (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    sensor_id uuid,
+    device_agent_id uuid,
+    values jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_by uuid,
+    -- When an operator last asked this device to restart, and who asked.
+    --
+    -- A timestamp rather than a command queue, and idempotent by construction:
+    -- a device that has already restarted has been running for less time than
+    -- the request is old, so it does not restart again. Nothing to acknowledge,
+    -- nothing to mark delivered, and ten clicks are one restart rather than ten.
+    --
+    -- The device is sent the request's AGE, never this timestamp, and compares
+    -- it with its own uptime. Two DURATIONS, never two clocks: a device whose
+    -- clock is behind the platform's would find every request permanently in
+    -- its future and restart on every check-in for ever. See
+    -- agentconfig.ShouldRestart.
+    restart_requested_at timestamp with time zone,
+    restart_requested_by uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_config_overrides_exactly_one_owner CHECK (
+        (sensor_id IS NOT NULL AND device_agent_id IS NULL)
+        OR (sensor_id IS NULL AND device_agent_id IS NOT NULL)
+    )
+);
+
+
+-- TABLE: agent_config_state
+-- What a device says it is actually running: the desired revision it has
+-- adopted, when it said so, and anything it could not apply.
+--
+-- Deliberately a DIFFERENT table from agent_config_overrides. Desired state is
+-- written by operators and reported state by devices; collapsing them into one
+-- row is how a console ends up displaying an intention as though it were a
+-- measurement. Everything this product has learned about "reports success while
+-- doing nothing" says keep the two apart and compute the difference.
+--
+-- reported_revision is the content hash from shared/agentconfig.Revision. NULL
+-- means the device has never reported one — an older build, or one that has not
+-- checked in — and must never be rendered as "up to date".
+CREATE TABLE IF NOT EXISTS public.agent_config_state (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    sensor_id uuid,
+    device_agent_id uuid,
+    reported_revision text,
+    reported_at timestamp with time zone,
+    -- Per-setting reasons the device gave for not applying something, keyed by
+    -- setting name. An empty object means no failures.
+    failures jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- Settings the device has accepted but cannot adopt until it restarts.
+    pending_restart text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_config_state_exactly_one_owner CHECK (
+        (sensor_id IS NOT NULL AND device_agent_id IS NULL)
+        OR (sensor_id IS NULL AND device_agent_id IS NOT NULL)
+    )
+);
+
+
+-- TABLE: agent_config_audit
+-- Append-only record of every desired-state change, mirroring scopes_audit.
+--
+-- Required, not optional: making the sensor's DNS decoder remotely settable was
+-- conditioned on the change being confirmed AND audited (feature spec §1a). A
+-- setting that turns on a new kind of collection has to leave a trail naming
+-- who turned it on.
+CREATE TABLE IF NOT EXISTS public.agent_config_audit (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    tenant_id uuid NOT NULL,
+    -- The subject: a device, or the tenant's fleet defaults (both owner columns
+    -- NULL, scope = 'fleet').
+    sensor_id uuid,
+    device_agent_id uuid,
+    scope character varying(16) NOT NULL,
+    runtime character varying(16) NOT NULL,
+    -- The values before and after, so a change is reconstructable without
+    -- replaying every row.
+    values_before jsonb DEFAULT '{}'::jsonb NOT NULL,
+    values_after jsonb DEFAULT '{}'::jsonb NOT NULL,
+    -- NULL for a change nobody made: 'bootstrap' rows record the position a
+    -- device was ALREADY in when it first reported, adopted so that desired
+    -- state does not overwrite a file configuration with defaults nobody chose.
+    -- Attributing that to a person would make the trail lie.
+    changed_by uuid,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_config_audit_scope_check CHECK (((scope)::text = ANY ((ARRAY['device'::character varying, 'fleet'::character varying, 'bootstrap'::character varying])::text[]))),
+    CONSTRAINT agent_config_audit_runtime_check CHECK (((runtime)::text = ANY ((ARRAY['sensor'::character varying, 'agent'::character varying])::text[])))
 );
 
 
@@ -5407,7 +5610,7 @@ CREATE TABLE IF NOT EXISTS public.tenant_framework_controls (
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
     CONSTRAINT tenant_framework_controls_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
-    CONSTRAINT tenant_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
+    CONSTRAINT tenant_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
 );
 
 
@@ -5512,7 +5715,7 @@ CREATE TABLE IF NOT EXISTS public.tenant_measurement_overrides (
     created_by uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT tenant_measurement_overrides_severity_override_check CHECK (((severity_override)::text = ANY ((ARRAY['Low'::character varying, 'Med'::character varying, 'High'::character varying, 'Critical'::character varying])::text[])))
+    CONSTRAINT tenant_measurement_overrides_severity_override_check CHECK (((severity_override)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
 );
 
 
@@ -11167,6 +11370,16 @@ CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_sensor_timestamp ON publi
 CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_claimed ON public.sensor_discoveries_partitioned USING btree (claimed_at) WHERE (processed_at IS NULL);
 
 
+-- INDEX: idx_sensor_discoveries_part_processed_at
+-- The retention sweep's index (discovery-processor-service's RetentionSweepJob,
+-- see scripts/database/schema.sql's sibling in Go). It deletes in batches by
+-- `WHERE processed_at IS NOT NULL AND processed_at < cutoff`, the mirror image
+-- of idx_sensor_discoveries_part_unprocessed above; without this, "find the
+-- next batch of old processed rows" is a sequential scan across all 8
+-- partitions on every sweep tick.
+CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_part_processed_at ON public.sensor_discoveries_partitioned USING btree (processed_at) WHERE (processed_at IS NOT NULL);
+
+
 -- INDEX: idx_sensor_discoveries_partitioned_sensor_id
 CREATE INDEX IF NOT EXISTS idx_sensor_discoveries_partitioned_sensor_id ON ONLY public.sensor_discoveries_partitioned USING btree (sensor_id);
 
@@ -15508,6 +15721,34 @@ ALTER TABLE public.ticket_comments ENABLE ROW LEVEL SECURITY;
 -- Job applies this whole file via `psql -v ON_ERROR_STOP=1`, so every
 -- statement here must be safely idempotent against any prior schema
 -- version.
+
+-- =========================================================================
+-- algorithms.risk_score: require an explicit catalogue assessment (ADR-0016)
+-- =========================================================================
+-- Older schemas supplied 50 whenever a catalogue writer omitted risk_score.
+-- That looked like an assessment even though no one had made one. New writes
+-- must provide a deliberate score through the catalogue API, so remove the
+-- database fallback as well as the service fallback. Existing values,
+-- including NULL in operator-created catalogues, are intentionally preserved:
+-- the repository has no evidence from which to assign those rows a score.
+ALTER TABLE public.algorithms ALTER COLUMN risk_score DROP DEFAULT;
+CREATE OR REPLACE FUNCTION public.require_algorithm_risk_score_on_insert()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.risk_score IS NULL THEN
+    RAISE EXCEPTION 'risk_score is required when creating an algorithm'
+      USING ERRCODE = '23514', CONSTRAINT = 'algorithms_risk_score_required_on_insert';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS algorithms_risk_score_required_on_insert ON public.algorithms;
+CREATE TRIGGER algorithms_risk_score_required_on_insert
+BEFORE INSERT ON public.algorithms
+FOR EACH ROW EXECUTE FUNCTION public.require_algorithm_risk_score_on_insert();
 --
 -- =========================================================================
 -- protocol_type: values added after the type first shipped
@@ -17603,6 +17844,153 @@ CREATE POLICY agent_addresses_tenant_isolation ON public.agent_addresses
   );
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_addresses TO crypto_app, crypto_bypass;
+
+
+-- ---------------------------------------------------------------------------
+-- agent_config_*: keys, indexes and isolation (feature)
+-- ---------------------------------------------------------------------------
+--
+-- Foreign keys live here rather than inline for the reason agent_addresses
+-- gives above: this file follows pg_dump layout, so sensors/device_agents have
+-- no primary key yet at the point the tables are declared.
+
+DO $$
+BEGIN
+  IF to_regclass('public.agent_config_overrides') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_config_overrides_sensor_id_fkey' AND conrelid = to_regclass('public.agent_config_overrides'))
+  THEN
+    ALTER TABLE ONLY public.agent_config_overrides
+        ADD CONSTRAINT agent_config_overrides_sensor_id_fkey FOREIGN KEY (sensor_id) REFERENCES public.sensors(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.agent_config_overrides') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_config_overrides_device_agent_id_fkey' AND conrelid = to_regclass('public.agent_config_overrides'))
+  THEN
+    ALTER TABLE ONLY public.agent_config_overrides
+        ADD CONSTRAINT agent_config_overrides_device_agent_id_fkey FOREIGN KEY (device_agent_id) REFERENCES public.device_agents(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.agent_config_state') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_config_state_sensor_id_fkey' AND conrelid = to_regclass('public.agent_config_state'))
+  THEN
+    ALTER TABLE ONLY public.agent_config_state
+        ADD CONSTRAINT agent_config_state_sensor_id_fkey FOREIGN KEY (sensor_id) REFERENCES public.sensors(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.agent_config_state') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_config_state_device_agent_id_fkey' AND conrelid = to_regclass('public.agent_config_state'))
+  THEN
+    ALTER TABLE ONLY public.agent_config_state
+        ADD CONSTRAINT agent_config_state_device_agent_id_fkey FOREIGN KEY (device_agent_id) REFERENCES public.device_agents(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.agent_config_defaults') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agent_config_defaults_tenant_id_fkey' AND conrelid = to_regclass('public.agent_config_defaults'))
+  THEN
+    ALTER TABLE ONLY public.agent_config_defaults
+        ADD CONSTRAINT agent_config_defaults_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- Widen the audit scope to admit 'bootstrap'.
+--
+-- Two edits, as an enum would need: the CREATE TABLE above carries the widened
+-- list for a fresh install, and this re-states it for a database created before
+-- the value existed — where the CREATE TABLE is a no-op. Postgres has no
+-- ALTER CONSTRAINT for a CHECK, so it is dropped and re-added; a CHECK has no
+-- dependents, so unlike a primary key that is safe. Existing rows are all
+-- 'device' or 'fleet' and satisfy the wider list, so this cannot fail on a
+-- populated table.
+DO $$
+BEGIN
+  IF to_regclass('public.agent_config_audit') IS NOT NULL THEN
+    ALTER TABLE public.agent_config_audit DROP CONSTRAINT IF EXISTS agent_config_audit_scope_check;
+    ALTER TABLE public.agent_config_audit
+        ADD CONSTRAINT agent_config_audit_scope_check
+        CHECK (((scope)::text = ANY ((ARRAY['device'::character varying, 'fleet'::character varying, 'bootstrap'::character varying])::text[])));
+  END IF;
+END $$;
+
+-- One override row and one state row per device, whichever runtime owns it.
+-- Partial unique indexes rather than a plain one: the unused owner column is
+-- NULL on every row, and NULLs do not conflict in a unique index.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_config_overrides_one_per_sensor
+    ON public.agent_config_overrides (sensor_id) WHERE sensor_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_config_overrides_one_per_device_agent
+    ON public.agent_config_overrides (device_agent_id) WHERE device_agent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_config_state_one_per_sensor
+    ON public.agent_config_state (sensor_id) WHERE sensor_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS agent_config_state_one_per_device_agent
+    ON public.agent_config_state (device_agent_id) WHERE device_agent_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_agent_config_audit_tenant_changed
+    ON public.agent_config_audit (tenant_id, changed_at DESC);
+
+-- Tenant isolation. The two device-scoped tables inherit it from whichever
+-- owner the row hangs off, exactly as agent_addresses does; the defaults and
+-- audit tables carry tenant_id themselves.
+ALTER TABLE public.agent_config_overrides ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_config_overrides_tenant_isolation ON public.agent_config_overrides;
+CREATE POLICY agent_config_overrides_tenant_isolation ON public.agent_config_overrides
+  USING (
+    EXISTS (SELECT 1 FROM public.sensors s WHERE s.id = agent_config_overrides.sensor_id AND s.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    OR EXISTS (SELECT 1 FROM public.device_agents a WHERE a.id = agent_config_overrides.device_agent_id AND a.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  )
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.sensors s WHERE s.id = agent_config_overrides.sensor_id AND s.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    OR EXISTS (SELECT 1 FROM public.device_agents a WHERE a.id = agent_config_overrides.device_agent_id AND a.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  );
+
+ALTER TABLE public.agent_config_state ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_config_state_tenant_isolation ON public.agent_config_state;
+CREATE POLICY agent_config_state_tenant_isolation ON public.agent_config_state
+  USING (
+    EXISTS (SELECT 1 FROM public.sensors s WHERE s.id = agent_config_state.sensor_id AND s.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    OR EXISTS (SELECT 1 FROM public.device_agents a WHERE a.id = agent_config_state.device_agent_id AND a.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  )
+  WITH CHECK (
+    EXISTS (SELECT 1 FROM public.sensors s WHERE s.id = agent_config_state.sensor_id AND s.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    OR EXISTS (SELECT 1 FROM public.device_agents a WHERE a.id = agent_config_state.device_agent_id AND a.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  );
+
+ALTER TABLE public.agent_config_defaults ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_config_defaults_tenant_isolation ON public.agent_config_defaults;
+CREATE POLICY agent_config_defaults_tenant_isolation ON public.agent_config_defaults
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+ALTER TABLE public.agent_config_audit ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_config_audit_tenant_isolation ON public.agent_config_audit;
+CREATE POLICY agent_config_audit_tenant_isolation ON public.agent_config_audit
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_config_overrides TO crypto_app, crypto_bypass;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_config_state TO crypto_app, crypto_bypass;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.agent_config_defaults TO crypto_app, crypto_bypass;
+-- Audit rows are append-only: no UPDATE, no DELETE, mirroring scopes_audit.
+GRANT SELECT, INSERT ON public.agent_config_audit TO crypto_app, crypto_bypass;
+
+-- agent_config_overrides gains the restart-request columns. ADD COLUMN
+-- IF NOT EXISTS is idempotent, and both are nullable, so this is safe over a
+-- populated table — a row that has never been asked to restart simply holds
+-- NULL, which ShouldRestart reads as "never asked".
+ALTER TABLE IF EXISTS public.agent_config_overrides
+    ADD COLUMN IF NOT EXISTS restart_requested_at timestamp with time zone;
+ALTER TABLE IF EXISTS public.agent_config_overrides
+    ADD COLUMN IF NOT EXISTS restart_requested_by uuid;
 
 -- discovery_auto_approval_rules.created_by must allow NULL: segment saves made
 -- under HMAC service auth (no user context) still need to create the rule the
@@ -20449,6 +20837,457 @@ DROP INDEX IF EXISTS public.idx_findings_summary_trgm;
 DROP INDEX IF EXISTS public.idx_findings_subject_label_trgm;
 
 
+-- =========================================================================
+-- POST-MIGRATIONS: SCT delivery-route tracking (RFC 6962 §3.3)
+-- =========================================================================
+-- Certificate Transparency SCTs can arrive by three routes: embedded in the
+-- certificate, the TLS "signed_certificate_timestamp" extension, or OCSP.
+-- has_sct / cert_has_sct already answered "was one seen"; these columns add
+-- "by which route" (embedded | tls_extension | ocsp | none), so a passive
+-- capture that only checked the embedded route can leave the column NULL
+-- ("not observable") rather than a false "none" that would claim all three
+-- routes were checked. See shared/discovery.RefineSCTFlags.
+ALTER TABLE IF EXISTS public.certificates ADD COLUMN IF NOT EXISTS sct_source character varying(20);
+
+-- external_connections never persisted the sensor-level certificate quality
+-- flags (cert_has_sct, cert_no_subject, cert_validation_status="untrusted_ca"
+-- /"incomplete_chain") anywhere except as free text folded into weak_reasons —
+-- which is the bug this migration accompanies: those are certificate-hygiene
+-- observations, not cryptographic weakness, and conflating them inflated the
+-- "weak crypto" dashboard tile with TLS 1.3/AES-256-GCM connections whose only
+-- flaw was a missing SCT. cert_hygiene_flags is their new, non-scoring home;
+-- cert_sct_source mirrors certificates.sct_source above.
+ALTER TABLE IF EXISTS public.external_connections ADD COLUMN IF NOT EXISTS cert_hygiene_flags text[] DEFAULT '{}'::text[];
+ALTER TABLE IF EXISTS public.external_connections ADD COLUMN IF NOT EXISTS cert_sct_source character varying(20);
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: merge asset_endpoints rows the IP-literal-fqdn defect wrote
+-- ============================================================================
+-- Before this release, an intake path that did not know a listener's name
+-- could write the scan TARGET into `fqdn` even when the target was an IP
+-- literal — it has dots, so it passed a naive "contains a dot -> fqdn" check.
+-- That produced a SECOND asset_endpoints row for a listener already recorded
+-- with fqdn NULL from a passive observation: same address, same port, same
+-- transport, "duplicate" only because one row's name field held an address
+-- spelled as text. Every duplicate then carried its own crypto configuration
+-- and its own findings, doubling counts on the asset page.
+--
+-- New writes are fixed at the source (asset_identity.go's findingEndpoint) and
+-- at the funnel (identity.EndpointObservation.Sanitized, consulted by
+-- Observation.Sanitize, the engine's stampEndpoints, and
+-- postgres.Repository.UpsertEndpoints, which now matches an incoming
+-- address-bearing observation on (address, port, transport) — not the full
+-- (address, fqdn, port, transport) tuple asset_endpoints_identity_uniq still
+-- keys on — and merges into the existing row rather than inserting a second
+-- one). This block merges rows the defect already wrote, on every existing
+-- install, once.
+--
+-- Identity for this merge is (tenant_id, asset_id, address, port, transport):
+-- an endpoint identified by an address is identified by that tuple, and fqdn
+-- is an ATTRIBUTE of it, not part of what identifies it — see the doc comment
+-- on identity.EndpointObservation.Key. Endpoints with no address (fqdn-only)
+-- are untouched: fqdn IS their whole identity, and the unique index already
+-- prevents duplicates among them.
+--
+-- Survivor: the OLDEST row by first_seen_at (tie-broken by id), because it is
+-- what every dependent already points at most often and what a user has been
+-- looking at longest. Its fqdn is kept if it has one; otherwise it is
+-- backfilled from any duplicate that does — "empty never wins", the same rule
+-- [mergeEndpointByAddress] applies on the live upsert path. Dependents
+-- (crypto_implementations, external_connections, ssh_keys) are re-pointed at
+-- the survivor before the losing rows are deleted.
+--
+-- The backfill and the delete are ONE statement (step 5 below), not two, and
+-- the ordering is load-bearing rather than cosmetic: a loser row due to be
+-- deleted for having fqdn = 'host.corp.example' can ALREADY be the value the
+-- survivor (fqdn NULL) needs backfilled to. Writing that value onto the
+-- survivor with the loser still present would give two rows the identical
+-- (address, fqdn, port, transport) tuple — an immediate
+-- asset_endpoints_identity_uniq violation, not a race, since Postgres checks a
+-- non-deferred unique index at the end of the writing statement regardless of
+-- what a later statement in this DO block was going to do. A single
+-- `WITH deleted AS (DELETE ... RETURNING ...) UPDATE ... FROM deleted` makes
+-- the backfill provably run against the POST-delete state — the UPDATE cannot
+-- produce a row without first consuming `deleted`'s output, which requires the
+-- DELETE (and its index removals) to have already completed — while still
+-- letting the backfill value be READ from the row before it disappears, via
+-- RETURNING.
+--
+-- The (tenant_id, asset_id, address, port, transport) grouping is recomputed
+-- identically in the FK-repointing statements below rather than cached in a
+-- temp table: nothing those statements write changes those five columns, so
+-- every recomputation sees the same groups and the same survivor, and the
+-- repetition costs one extra `GROUP BY` pass over what is normally a small
+-- table rather than a code path this file has never used before. They must
+-- all run BEFORE the delete: each depends on the loser row still existing to
+-- name what it should be re-pointed away from.
+--
+-- Idempotent: a re-run finds no group with more than one row — the DELETE
+-- already removed the rest — and every statement affects zero rows. Tested by
+-- applying schema.sql twice with populated asset_endpoints,
+-- crypto_implementations, external_connections and ssh_keys duplicates
+-- between the two passes
+-- (TestIntegration_Schema_MergesDuplicateAssetEndpoints).
+DO $$
+BEGIN
+  IF to_regclass('public.asset_endpoints') IS NULL THEN
+    RETURN;
+  END IF;
+
+  -- 1. Re-point crypto_implementations.endpoint_id at the survivor.
+  IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL THEN
+    WITH dupes AS (
+      SELECT tenant_id, asset_id, address, port, transport,
+             (array_agg(id ORDER BY first_seen_at, id))[1] AS survivor_id
+        FROM public.asset_endpoints
+       WHERE address IS NOT NULL
+       GROUP BY tenant_id, asset_id, address, port, transport
+      HAVING count(*) > 1
+    ),
+    losers AS (
+      SELECT e.tenant_id, e.id AS loser_id, d.survivor_id
+        FROM public.asset_endpoints e
+        JOIN dupes d
+          ON d.tenant_id = e.tenant_id AND d.asset_id = e.asset_id
+         AND d.address IS NOT DISTINCT FROM e.address
+         AND d.port IS NOT DISTINCT FROM e.port
+         AND d.transport = e.transport
+       WHERE e.id <> d.survivor_id
+    )
+    UPDATE public.crypto_implementations_partitioned ci
+       SET endpoint_id = l.survivor_id
+      FROM losers l
+     WHERE ci.tenant_id = l.tenant_id AND ci.endpoint_id = l.loser_id;
+  END IF;
+
+  -- 2. Re-point external_connections.source_endpoint_id at the survivor.
+  IF to_regclass('public.external_connections') IS NOT NULL THEN
+    WITH dupes AS (
+      SELECT tenant_id, asset_id, address, port, transport,
+             (array_agg(id ORDER BY first_seen_at, id))[1] AS survivor_id
+        FROM public.asset_endpoints
+       WHERE address IS NOT NULL
+       GROUP BY tenant_id, asset_id, address, port, transport
+      HAVING count(*) > 1
+    ),
+    losers AS (
+      SELECT e.tenant_id, e.id AS loser_id, d.survivor_id
+        FROM public.asset_endpoints e
+        JOIN dupes d
+          ON d.tenant_id = e.tenant_id AND d.asset_id = e.asset_id
+         AND d.address IS NOT DISTINCT FROM e.address
+         AND d.port IS NOT DISTINCT FROM e.port
+         AND d.transport = e.transport
+       WHERE e.id <> d.survivor_id
+    )
+    UPDATE public.external_connections c
+       SET source_endpoint_id = l.survivor_id
+      FROM losers l
+     WHERE c.tenant_id = l.tenant_id AND c.source_endpoint_id = l.loser_id;
+  END IF;
+
+  -- 3. Re-point ssh_keys.endpoint_id at the survivor.
+  IF to_regclass('public.ssh_keys') IS NOT NULL THEN
+    WITH dupes AS (
+      SELECT tenant_id, asset_id, address, port, transport,
+             (array_agg(id ORDER BY first_seen_at, id))[1] AS survivor_id
+        FROM public.asset_endpoints
+       WHERE address IS NOT NULL
+       GROUP BY tenant_id, asset_id, address, port, transport
+      HAVING count(*) > 1
+    ),
+    losers AS (
+      SELECT e.tenant_id, e.id AS loser_id, d.survivor_id
+        FROM public.asset_endpoints e
+        JOIN dupes d
+          ON d.tenant_id = e.tenant_id AND d.asset_id = e.asset_id
+         AND d.address IS NOT DISTINCT FROM e.address
+         AND d.port IS NOT DISTINCT FROM e.port
+         AND d.transport = e.transport
+       WHERE e.id <> d.survivor_id
+    )
+    UPDATE public.ssh_keys k
+       SET endpoint_id = l.survivor_id
+      FROM losers l
+     WHERE k.tenant_id = l.tenant_id AND k.endpoint_id = l.loser_id;
+  END IF;
+
+  -- 4. Every dependent is re-pointed; delete the losing rows and, in the same
+  -- statement, backfill the survivor's fqdn from whichever deleted row had
+  -- one (the earliest-seen such row, for a deterministic pick when more than
+  -- one duplicate carried a different name) — see the long comment above on
+  -- why this has to be one statement rather than two.
+  WITH dupes AS (
+    SELECT tenant_id, asset_id, address, port, transport,
+           (array_agg(id ORDER BY first_seen_at, id))[1] AS survivor_id
+      FROM public.asset_endpoints
+     WHERE address IS NOT NULL
+     GROUP BY tenant_id, asset_id, address, port, transport
+    HAVING count(*) > 1
+  ),
+  losers AS (
+    SELECT e.tenant_id, e.id AS loser_id, e.fqdn AS loser_fqdn, e.first_seen_at AS loser_seen,
+           d.survivor_id
+      FROM public.asset_endpoints e
+      JOIN dupes d
+        ON d.tenant_id = e.tenant_id AND d.asset_id = e.asset_id
+       AND d.address IS NOT DISTINCT FROM e.address
+       AND d.port IS NOT DISTINCT FROM e.port
+       AND d.transport = e.transport
+     WHERE e.id <> d.survivor_id
+  ),
+  deleted AS (
+    DELETE FROM public.asset_endpoints e
+    USING losers l
+    WHERE e.tenant_id = l.tenant_id AND e.id = l.loser_id
+    RETURNING l.tenant_id, l.survivor_id, l.loser_fqdn, l.loser_seen
+  ),
+  best AS (
+    -- An IP literal is NOT a candidate name. The rows this block merges are
+    -- exactly the rows the defect wrote, so the losing row's fqdn is USUALLY
+    -- the address spelled as text — backfilling that onto the survivor would
+    -- re-create the very value this release exists to stop writing, and it
+    -- would be permanent: [mergeEndpointByAddress] fills fqdn only when the
+    -- row's is empty, so a real name arriving later would never replace it.
+    -- The predicate mirrors [identity.EndpointObservation.Sanitized]'s
+    -- netip.ParseAddr, including the IPv6 zone suffix netip accepts and inet
+    -- does not (see the go-netip-vs-postgres-inet note) — hence split_part.
+    SELECT DISTINCT ON (tenant_id, survivor_id) tenant_id, survivor_id, loser_fqdn
+      FROM deleted
+     WHERE loser_fqdn IS NOT NULL AND loser_fqdn <> ''
+       AND NOT pg_input_is_valid(split_part(loser_fqdn, '%', 1), 'inet')
+     ORDER BY tenant_id, survivor_id, loser_seen
+  )
+  UPDATE public.asset_endpoints e
+     SET fqdn = best.loser_fqdn, updated_at = now()
+    FROM best
+   WHERE e.tenant_id = best.tenant_id AND e.id = best.survivor_id
+     -- Also overwrites a survivor whose OWN fqdn is an IP literal: the
+     -- survivor is the oldest row, which is the active-scan row whenever the
+     -- scan saw the listener before anything named it. The losing rows are
+     -- already gone by the time this UPDATE produces a row (it cannot run
+     -- before it consumes `deleted`), so the group holds exactly one row and
+     -- this cannot collide with asset_endpoints_identity_uniq.
+     AND (e.fqdn IS NULL OR e.fqdn = ''
+          OR pg_input_is_valid(split_part(e.fqdn, '%', 1), 'inet'));
+
+  -- 6. Clear every remaining IP-literal fqdn on an address-bearing endpoint.
+  -- Steps 1-5 only touch groups that HAVE a duplicate; the defect also wrote
+  -- single rows — an active scan that reached a listener nothing had named —
+  -- and those keep an address in their name field with nothing to merge them
+  -- into. Left alone the value is permanent, for the same reason as above.
+  -- Restricted to `address IS NOT NULL` because for an address-less endpoint
+  -- fqdn IS the whole identity, and blanking it would leave a row identifying
+  -- nothing. Runs after the delete, so each address-bearing group holds one
+  -- row and clearing cannot collide.
+  UPDATE public.asset_endpoints e
+     SET fqdn = NULL, updated_at = now()
+   WHERE e.address IS NOT NULL
+     AND e.fqdn IS NOT NULL AND e.fqdn <> ''
+     AND pg_input_is_valid(split_part(e.fqdn, '%', 1), 'inet');
+END $$;
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: absorb partial crypto configurations into the complete one
+-- ============================================================================
+-- Before this release, a crypto configuration observed at two levels of
+-- completeness became two rows. A passive sensor that could not decode the
+-- handshake wrote protocol='TLS' with every other component NULL; the active
+-- probe that followed measured the full handshake and, because six key
+-- columns now differed, INSERTED a second row rather than completing the
+-- first. The refresh path only ever bumped timestamps, so the partial row was
+-- never superseded. In the observed deployment that was 2 of 247 endpoints; with the automatic
+-- active scan on first observation it becomes every passive-first endpoint.
+-- The asset page showed two rows under one endpoint, `total_crypto` counted
+-- both, and the CBOM shipped an empty component beside the real one.
+--
+-- New writes are fixed at the source (crypto_dedup.go's subset absorption,
+-- which enriches the partial row in place). This block reconciles the pairs
+-- the defect already wrote, on every existing install, once.
+--
+-- A pair is two LIVE rows on the same (tenant_id, asset_id, endpoint_id,
+-- protocol) where one is a STRICT component-subset of the other: every
+-- component the subset row has measured equals the superset row's, and the
+-- superset has measured at least one more. Conflicting rows (TLS 1.2 beside
+-- TLS 1.3) are NOT a pair — that is a real second configuration — and equal
+-- fingerprints under different methods are not either (neither is a strict
+-- subset). Where a subset row has several supersets, the one that knows the
+-- most wins, oldest first; that choice is transitively safe — a chosen
+-- superset can never itself be a strict subset of another live row, or that
+-- row would have been chosen instead.
+--
+-- The subset row is SOFT-deleted (deleted_at), never hard-deleted: it may be
+-- named by findings and tickets a user has looked at, and the `crypto`
+-- finding producer already scopes to deleted_at IS NULL, so its findings
+-- resolve on the producer's next pass. Its junction rows are MOVED to the
+-- superset — certificates and algorithms, each ON CONFLICT DO NOTHING against
+-- the junction's natural key so a link both rows held is not duplicated — and
+-- tickets are re-pointed, so nothing reachable from the retired row is lost.
+-- The superset takes the union of both rows' provenance and the earlier of
+-- the two first_discovered_at values: the configuration was first seen when
+-- the partial row was written.
+--
+-- One statement, chained data-modifying CTEs, not a sequence: every CTE sees
+-- the same snapshot, so the moves and the retirement are computed from ONE
+-- reading of `pairs` and cannot disagree about which rows are which. (The
+-- asset_endpoints merge above recomputes its grouping per statement instead;
+-- that is fine there because nothing it writes changes the grouping columns.
+-- Here the retirement DOES change what is live, so one snapshot is the safer
+-- shape.)
+--
+-- Idempotent: a retired row has deleted_at set and is not `live`, so a
+-- re-run finds no pair and every CTE affects zero rows. The provenance
+-- backfill touches only rows whose array is still empty — the column's
+-- default on an existing install — so it too is a no-op after the first
+-- apply. Tested by applying schema.sql twice with a populated partial +
+-- complete pair, certificate link, algorithm link and ticket between the two
+-- passes (TestIntegration_Schema_AbsorbsPartialCryptoConfigurations).
+DO $$
+DECLARE
+  absorbed integer;
+BEGIN
+  IF to_regclass('public.crypto_implementations_partitioned') IS NULL THEN
+    RETURN;
+  END IF;
+
+  -- 1. Provenance backfill. Every row written before this release has an
+  -- empty array; its one contributor is its primary method.
+  UPDATE public.crypto_implementations_partitioned
+     SET discovery_methods = ARRAY[discovery_method]
+   WHERE cardinality(discovery_methods) = 0;
+
+  -- 2. Find every (subset, superset) pair and, in one statement, move the
+  -- subset's dependents, fold its provenance and first-seen into the
+  -- superset, and retire it.
+  WITH live AS (
+    SELECT id, tenant_id, asset_id, endpoint_id, protocol,
+           protocol_version, cipher_suite, key_exchange_algorithm,
+           signature_algorithm, symmetric_encryption, hash_algorithm, key_size,
+           first_discovered_at, discovery_method, discovery_methods,
+           certificate_id, source_sensor_id,
+           (protocol_version       IS NOT NULL)::int
+         + (cipher_suite           IS NOT NULL)::int
+         + (key_exchange_algorithm IS NOT NULL)::int
+         + (signature_algorithm    IS NOT NULL)::int
+         + (symmetric_encryption   IS NOT NULL)::int
+         + (hash_algorithm         IS NOT NULL)::int
+         + (key_size               IS NOT NULL)::int AS measured
+      FROM public.crypto_implementations_partitioned
+     WHERE deleted_at IS NULL
+  ),
+  pairs AS (
+    SELECT DISTINCT ON (s.tenant_id, s.id)
+           s.tenant_id, s.id AS subset_id, p.id AS superset_id
+      FROM live s
+      JOIN live p
+        ON p.tenant_id = s.tenant_id
+       AND p.asset_id  = s.asset_id
+       AND p.endpoint_id IS NOT DISTINCT FROM s.endpoint_id
+       AND p.protocol  = s.protocol
+       AND p.id <> s.id
+       AND (s.protocol_version       IS NULL OR s.protocol_version       = p.protocol_version)
+       AND (s.cipher_suite           IS NULL OR s.cipher_suite           = p.cipher_suite)
+       AND (s.key_exchange_algorithm IS NULL OR s.key_exchange_algorithm = p.key_exchange_algorithm)
+       AND (s.signature_algorithm    IS NULL OR s.signature_algorithm    = p.signature_algorithm)
+       AND (s.symmetric_encryption   IS NULL OR s.symmetric_encryption   = p.symmetric_encryption)
+       AND (s.hash_algorithm         IS NULL OR s.hash_algorithm         = p.hash_algorithm)
+       AND (s.key_size               IS NULL OR s.key_size               = p.key_size)
+       AND s.measured < p.measured
+     ORDER BY s.tenant_id, s.id, p.measured DESC, p.first_discovered_at, p.id
+  ),
+  moved_certificates AS (
+    INSERT INTO public.crypto_implementation_certificates
+           (crypto_implementation_id, certificate_id, certificate_role, certificate_order)
+    SELECT pr.superset_id, c.certificate_id, c.certificate_role, c.certificate_order
+      FROM public.crypto_implementation_certificates c
+      JOIN pairs pr ON pr.subset_id = c.crypto_implementation_id
+    ON CONFLICT (crypto_implementation_id, certificate_id) DO NOTHING
+    RETURNING 1
+  ),
+  dropped_certificates AS (
+    DELETE FROM public.crypto_implementation_certificates c
+     USING pairs pr
+     WHERE c.crypto_implementation_id = pr.subset_id
+    RETURNING 1
+  ),
+  moved_algorithms AS (
+    INSERT INTO public.crypto_implementation_algorithms
+           (crypto_implementation_id, algorithm_id, algorithm_type, is_inferred)
+    SELECT pr.superset_id, a.algorithm_id, a.algorithm_type, a.is_inferred
+      FROM public.crypto_implementation_algorithms a
+      JOIN pairs pr ON pr.subset_id = a.crypto_implementation_id
+    ON CONFLICT (crypto_implementation_id, algorithm_id, algorithm_type) DO NOTHING
+    RETURNING 1
+  ),
+  dropped_algorithms AS (
+    DELETE FROM public.crypto_implementation_algorithms a
+     USING pairs pr
+     WHERE a.crypto_implementation_id = pr.subset_id
+    RETURNING 1
+  ),
+  repointed_tickets AS (
+    UPDATE public.tickets t
+       SET crypto_implementation_id = pr.superset_id
+      FROM pairs pr
+     WHERE t.crypto_implementation_id = pr.subset_id
+    RETURNING 1
+  ),
+  folded AS (
+    -- What each superset inherits: the earliest first-seen among its subsets,
+    -- every method any of them recorded (deterministic order), and the
+    -- certificate / sensor the earliest subset that had one named — the same
+    -- COALESCE the live refresh path applies, so a leaf the passive glimpse
+    -- captured is not lost when the probe that completed it captured none.
+    SELECT pr.tenant_id, pr.superset_id,
+           min(s.first_discovered_at) AS earliest,
+           array_agg(DISTINCT m ORDER BY m) AS methods,
+           (array_agg(s.certificate_id   ORDER BY s.first_discovered_at, s.id)
+              FILTER (WHERE s.certificate_id   IS NOT NULL))[1] AS certificate_id,
+           (array_agg(s.source_sensor_id ORDER BY s.first_discovered_at, s.id)
+              FILTER (WHERE s.source_sensor_id IS NOT NULL))[1] AS source_sensor_id
+      FROM pairs pr
+      JOIN live s ON s.tenant_id = pr.tenant_id AND s.id = pr.subset_id
+      CROSS JOIN LATERAL unnest(s.discovery_methods || s.discovery_method) AS m
+     GROUP BY pr.tenant_id, pr.superset_id
+  ),
+  completed AS (
+    UPDATE public.crypto_implementations_partitioned p
+       SET first_discovered_at = LEAST(p.first_discovered_at, f.earliest),
+           certificate_id      = COALESCE(p.certificate_id,   f.certificate_id),
+           source_sensor_id    = COALESCE(p.source_sensor_id, f.source_sensor_id),
+           -- The superset's own order first, then anything new from the
+           -- subsets, so the primary method stays at position 1.
+           discovery_methods = p.discovery_methods
+             || COALESCE((SELECT array_agg(m ORDER BY m)
+                            FROM unnest(f.methods) AS m
+                           WHERE NOT (m = ANY(p.discovery_methods))),
+                         '{}'::public.discovery_method[]),
+           updated_at = now()
+      FROM folded f
+     WHERE p.tenant_id = f.tenant_id AND p.id = f.superset_id
+    RETURNING 1
+  ),
+  retired AS (
+    -- certificate_id is cleared on the retired row, not merely left behind:
+    -- the leaf-link backfill earlier in this file re-creates a junction row
+    -- for EVERY row that names a certificate, retired or not, and would put
+    -- the link this block just moved straight back on the next apply. The
+    -- certificate itself lives on in the survivor's column and junction.
+    UPDATE public.crypto_implementations_partitioned s
+       SET deleted_at = now(), certificate_id = NULL, updated_at = now()
+      FROM pairs pr
+     WHERE s.tenant_id = pr.tenant_id AND s.id = pr.subset_id
+    RETURNING 1
+  )
+  SELECT count(*) INTO absorbed FROM pairs;
+  IF absorbed > 0 THEN
+    RAISE NOTICE 'crypto configuration subset absorption: retired % partial row(s)', absorbed;
+  END IF;
+END $$;
+
+
 -- ============================================================================
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
@@ -20503,3 +21342,177 @@ REVOKE ALL ON public.mv_location_finding_summary_tenant FROM crypto_app, crypto_
 REVOKE ALL ON public.mv_remediation_queue_tenant        FROM crypto_app, crypto_bypass;
 GRANT SELECT ON public.mv_location_finding_summary_tenant TO crypto_app, crypto_bypass;
 GRANT SELECT ON public.mv_remediation_queue_tenant        TO crypto_app, crypto_bypass;
+-- ADR-0016: compliance severity vocabulary. Preserve judgments and weights;
+-- only spellings change. Run before new writers/seeds; rollback requires the
+-- matching old vocabulary migration, not just restarting old application code.
+DO $compliance_severity$
+DECLARE
+    item record;
+BEGIN
+    FOR item IN SELECT * FROM (VALUES
+        ('platform_framework_controls', 'baseline_severity'),
+        ('tenant_framework_controls', 'baseline_severity'),
+        ('control_measurements', 'severity_override'),
+        ('tenant_measurement_overrides', 'severity_override'),
+        ('compliance_overrides', 'severity_from'),
+        ('compliance_overrides', 'severity_to')
+    ) AS fields(table_name, column_name)
+    LOOP
+        EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT IF EXISTS %I',
+            item.table_name, item.table_name || '_' || item.column_name || '_check');
+        EXECUTE format('UPDATE public.%I SET %I = CASE %I WHEN ''Low'' THEN ''low'' WHEN ''Med'' THEN ''medium'' WHEN ''High'' THEN ''high'' WHEN ''Critical'' THEN ''critical'' ELSE %I END WHERE %I IN (''Low'', ''Med'', ''High'', ''Critical'')',
+            item.table_name, item.column_name, item.column_name, item.column_name, item.column_name);
+        -- Required control grades have no guessed default; optional overrides
+        -- remain NULL when absent. Retire any old installation's Med default.
+        EXECUTE format('ALTER TABLE public.%I ALTER COLUMN %I DROP DEFAULT', item.table_name, item.column_name);
+        EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (%I IN (''low'', ''medium'', ''high'', ''critical''))',
+            item.table_name, item.table_name || '_' || item.column_name || '_check', item.column_name);
+    END LOOP;
+    -- Audit history keeps its actors, timestamps, reasons and meaning. Frozen
+    -- CBOM/evidence JSON is deliberately not rewritten or recomputed.
+    UPDATE public.compliance_finding_history
+    SET old_value = CASE old_value WHEN 'Low' THEN 'low' WHEN 'Med' THEN 'medium' WHEN 'High' THEN 'high' WHEN 'Critical' THEN 'critical' ELSE old_value END,
+        new_value = CASE new_value WHEN 'Low' THEN 'low' WHEN 'Med' THEN 'medium' WHEN 'High' THEN 'high' WHEN 'Critical' THEN 'critical' ELSE new_value END
+    WHERE field_name IN ('severity', 'baseline_severity', 'severity_override');
+END
+$compliance_severity$;
+
+-- POST-MIGRATIONS: ADR-0016 external connection strength vocabulary.
+-- Current ratings must be reassessed from persisted facts by inventory-service;
+-- historical good/weak/unknown labels remain verbatim under vocabulary version 1.
+ALTER TABLE public.external_connection_history
+    ADD COLUMN IF NOT EXISTS strength_vocabulary_version integer NOT NULL DEFAULT 1;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.external_connections'::regclass
+                   AND conname='external_connections_strength_v2_check') THEN
+        ALTER TABLE public.external_connections DROP CONSTRAINT IF EXISTS external_connections_crypto_strength_check;
+        ALTER TABLE public.external_connections ALTER COLUMN crypto_strength DROP NOT NULL;
+        ALTER TABLE public.external_connections ALTER COLUMN crypto_strength DROP DEFAULT;
+        UPDATE public.external_connections
+        SET weak_reasons=COALESCE(weak_reasons, ARRAY[]::text[]) || ARRAY['Previous weak assessment requires fresh cryptographic evidence']::text[]
+        WHERE crypto_strength='weak' OR COALESCE(cardinality(weak_reasons),0)>0;
+        UPDATE public.external_connections
+        SET weak_reasons=COALESCE(weak_reasons, ARRAY[]::text[]) || ARRAY['Historical key_size may be cipher bits; exchange-size verification required']::text[]
+        -- Exact symmetric-size fallback previously used by the external sensor
+        -- adapter. Preserve these numbers, but their exchange role is unknown.
+        WHERE key_size = CASE
+            WHEN position('_AES_256_' in cipher_suite)>0 THEN 256
+            WHEN position('_AES_128_' in cipher_suite)>0 THEN 128
+            WHEN position('_CHACHA20_' in cipher_suite)>0 THEN 256
+            WHEN position('_3DES_' in cipher_suite)>0 THEN 168
+            WHEN position('_RC4_128_' in cipher_suite)>0 THEN 128
+            WHEN position('_RC4_40_' in cipher_suite)>0 THEN 40
+            WHEN position('_DES40_' in cipher_suite)>0 THEN 40
+            WHEN position('_DES_' in cipher_suite)>0 THEN 56
+            ELSE NULL END;
+        UPDATE public.external_connections SET crypto_strength=NULL;
+        ALTER TABLE public.external_connections ADD CONSTRAINT external_connections_strength_v2_check
+            CHECK (crypto_strength IS NULL OR crypto_strength IN ('weak','acceptable','strong','recommended'));
+    END IF;
+END $$;
+
+-- Tenant-sensor dispatch: which tenant sensor a discovery job was handed
+-- to, and when. Existing databases pick the columns up here; fresh installs
+-- already have them from the CREATE TABLE above. The sensor_commands expression
+-- index serves the dispatcher's expiry sweep, which joins a job to its command
+-- through the command payload's job_id rather than a new column.
+ALTER TABLE public.discovery_jobs ADD COLUMN IF NOT EXISTS assigned_sensor_id uuid;
+ALTER TABLE public.discovery_jobs ADD COLUMN IF NOT EXISTS dispatched_at timestamp with time zone;
+CREATE INDEX IF NOT EXISTS idx_sensor_commands_discovery_job_id
+    ON public.sensor_commands ((payload ->> 'job_id'))
+    WHERE command_type = 'discovery_job';
+
+-- POST-MIGRATIONS: honest approval_status on sensor_discoveries rows that will
+-- never get an approval decision (owner's re-observation model review,
+-- 2026-09). discovery-processor-service's BatchProcessor used to write only
+-- pending / auto_approved / rejected — there was no value for "this row was
+-- never going to be approved" — so two classes of already-PROCESSED row sat
+-- `pending` forever:
+--
+--   * host observations — identity evidence, never a crypto finding a human
+--     approves. BatchProcessor now stamps these `observed` going forward
+--     (batch_processor.go); this backfills what it already wrote `pending`.
+--   * findings that matched an asset the tenant had already archived or
+--     denied — asset_service.go IngestFindings materializes nothing for
+--     either status, and no approval decision will ever follow. BatchProcessor
+--     now stamps these `suppressed` going forward (adoptEffectiveStatus); this
+--     backfills the same population.
+--
+-- approval_status carries NO CHECK constraint (verified: a plain
+-- character varying(20), default 'pending' — the "sensor_discoveries_
+-- approval_status_check" named in discovery_processor.go's markBatchAsFailed
+-- comment does not exist in this schema), so both new values need no ALTER.
+--
+-- Idempotent: both UPDATEs are scoped to `approval_status = 'pending'`, so a
+-- row this has already moved off `pending` — on this pass or a prior one —
+-- matches neither predicate again.
+DO $$
+DECLARE
+  observed_count   integer;
+  suppressed_count integer;
+BEGIN
+  IF to_regclass('public.sensor_discoveries_partitioned') IS NULL THEN
+    RETURN;
+  END IF;
+
+  -- Host observations: the discovery_type marker lives at either level of the
+  -- sensor-manager envelope (it promotes the marker to the top level;
+  -- pcap-processor writes it flat) — the same two-level read
+  -- isHostObservationDiscovery does in Go.
+  WITH updated AS (
+    UPDATE public.sensor_discoveries_partitioned
+       SET approval_status = 'observed'
+     WHERE processed_at IS NOT NULL
+       AND approval_status = 'pending'
+       AND (
+             metadata->>'discovery_type' = 'host_observation'
+          OR metadata->'raw_metadata'->>'discovery_type' = 'host_observation'
+           )
+    RETURNING 1
+  )
+  SELECT count(*) INTO observed_count FROM updated;
+
+  -- Findings on an archived or denied asset: joined by (tenant_id, dest_ip,
+  -- port) through asset_endpoints — the same identity a discovery's endpoint
+  -- resolves through at ingest. A best-effort backfill (a row whose endpoint
+  -- was since removed or renumbered will not match, and stays `pending`), not
+  -- a guarantee every affected historical row is found — new rows are exact
+  -- because BatchProcessor now stamps them at write time.
+  IF to_regclass('public.asset_endpoints') IS NOT NULL AND to_regclass('public.assets') IS NOT NULL THEN
+    WITH suppressed AS (
+      UPDATE public.sensor_discoveries_partitioned d
+         SET approval_status = 'suppressed'
+        FROM public.asset_endpoints e
+        JOIN public.assets a ON a.tenant_id = e.tenant_id AND a.id = e.asset_id AND a.deleted_at IS NULL
+       WHERE d.processed_at IS NOT NULL
+         AND d.approval_status = 'pending'
+         AND e.tenant_id = d.tenant_id
+         AND e.address = d.dest_ip
+         AND e.port IS NOT DISTINCT FROM d.port
+         AND a.asset_status IN ('archived', 'denied')
+      RETURNING 1
+    )
+    SELECT count(*) INTO suppressed_count FROM suppressed;
+  ELSE
+    suppressed_count := 0;
+  END IF;
+
+  IF observed_count > 0 OR suppressed_count > 0 THEN
+    RAISE NOTICE 'sensor_discoveries approval_status backfill: % row(s) -> observed, % row(s) -> suppressed', observed_count, suppressed_count;
+  END IF;
+END $$;
+
+-- Sensor self-identity (asset-inventory decision 9, morning
+-- notes): a sensor now reports its own hostname/FQDN/interfaces, which
+-- inventory-service turns into a host_observation via
+-- services/sensor-manager/internal/services/self_observation.go. asset_id
+-- links the sensors row to the asset that observation resolved to, once it
+-- has; the sensor-routing "never scan yourself" guard reads it
+-- (services/inventory-service/internal/sensorrouting). Existing databases
+-- pick the columns up here; fresh installs already have them from the CREATE
+-- TABLE above.
+ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS asset_id uuid;
+ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_hash text;
+ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_at timestamp with time zone;
+CREATE INDEX IF NOT EXISTS idx_sensors_asset_id ON public.sensors (asset_id) WHERE asset_id IS NOT NULL;

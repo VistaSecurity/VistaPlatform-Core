@@ -52,7 +52,9 @@ The core surfaces, in the order a tenant meets them:
 Discovery sources — how assets get into inventory:
 
 - [Discovery](./features/discovery.md)
+- [Automatic Active Scanning](./features/active-scanning.md) — what the platform scans on its own, and how to control it
 - [Sensor Registration & Management](./features/SENSOR_REGISTRATION.md)
+- [Agent and Sensor Settings](./features/agent-and-sensor-settings.md) — managing a registered fleet from the console rather than per host
 - [Host Inventory](./features/host-inventory.md) — what an agent collects about a host, and how it becomes an asset
 - [Device Interrogation](./features/device-interrogation.md)
 - [Fortinet Device Interrogation](./features/fortinet-device-interrogation.md)

@@ -465,8 +465,8 @@ func (h *WorkspaceHandlers) CreateOverride(c *gin.Context) {
 		ScenarioID    *string `json:"scenario_id"`
 		ControlID     string  `json:"control_id" binding:"required"`
 		OverrideType  string  `json:"override_type" binding:"required"`
-		SeverityFrom  *string `json:"severity_from"`
-		SeverityTo    *string `json:"severity_to"`
+		SeverityFrom  *string `json:"severity_from" binding:"required_if=OverrideType severity,omitempty,oneof=low medium high critical"`
+		SeverityTo    *string `json:"severity_to" binding:"required_if=OverrideType severity,omitempty,oneof=low medium high critical"`
 		Rationale     string  `json:"rationale" binding:"required"`
 		FrameworkType string  `json:"framework_type"` // "platform" or "tenant" (defaults to "platform")
 	}

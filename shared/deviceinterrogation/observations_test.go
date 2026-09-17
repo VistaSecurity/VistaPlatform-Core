@@ -402,6 +402,28 @@ func TestNormalizeIdentifierMatchesIdentityPackage(t *testing.T) {
 	}
 }
 
+func TestCanonicalHostnameOrEmpty(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"valid short hostname is kept", "office-switch-1", "office-switch-1"},
+		{"valid fqdn is lowercased and dotstripped", "HOST.Corp.Example.", "host.corp.example"},
+		{"UniFi-style display name with a space is rejected", "U6+ Living Room", ""},
+		{"display name with a hash is rejected", "Back Porch #1", ""},
+		{"F5 partition-qualified object name is rejected", "/Common/my-vip", ""},
+		{"empty input is rejected", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canonicalHostnameOrEmpty(tc.input); got != tc.want {
+				t.Errorf("canonicalHostnameOrEmpty(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPeerIdentifierKindsMatchIdentityRegistry(t *testing.T) {
 	for _, kind := range []string{
 		IdentifierSerialNumber, IdentifierMACAddress,

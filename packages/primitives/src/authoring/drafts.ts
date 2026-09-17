@@ -221,6 +221,8 @@ export function dropReasonLabel(reason: string): string {
       return 'Discarded: it cited no passage of your text, so there is nothing to check it against.';
     case 'unresolvable_citation':
       return 'Discarded: the passage it cited is not in your text.';
+    case 'invalid_severity':
+      return 'Discarded: choose a valid control severity; informational is not a control weight.';
     case 'missing_title':
       return 'Discarded: it had no title.';
     case 'unknown_measurement_type':

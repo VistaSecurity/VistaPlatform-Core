@@ -15,7 +15,7 @@
 //                       current posture rather than an empty chart.
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { Icon, RiskChip, RiskGauge, LevelBar, Pill, heatColor, levelFromScore, type RiskLevel } from '../../components/ui';
+import { Icon, RiskChip, PercentageGauge, LevelBar, Pill, heatColor, frameworkPercentageColor, proportionPercent, type RiskLevel } from '../../components/ui';
 import { Loading, EmptyState } from '../findings/bits';
 import { useAssetFacts, useBatchEvaluate, useFrameworkContext, usePostureByControl, usePostureTrend, useRiskSummary, type AssetFacts } from '../findings/queries';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
@@ -34,8 +34,7 @@ function FwRing({ pct, size = 50, stroke = 5 }: { pct: number | null | undefined
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const unscored = isUnscored(pct);
-  const col = unscored ? 'var(--app-t3)'
-    : pct! >= 85 ? 'var(--ok)' : pct! >= 70 ? 'var(--warn)' : pct! >= 50 ? 'var(--warn-strong)' : 'var(--danger)';
+  const col = unscored ? 'var(--app-t3)' : frameworkPercentageColor(pct);
   return (
     <div style={{ position: 'relative', width: size, height: size, flex: 'none' }} title={unscored ? 'No control could be assessed yet, so there is no score to show.' : undefined}>
       <svg width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
@@ -76,7 +75,9 @@ export function PostureOverview() {
 
   const s = riskQ.data;
   const total = s?.total_assets ?? 0;
-  const pctHigh = total ? Math.round(((s?.high_risk ?? 0) / total) * 100) : 0;
+  const unscoredAssets = s?.unknown_risk ?? 0;
+  const assessedAssets = Math.max(0, total - unscoredAssets);
+  const pctHigh = proportionPercent(s?.high_risk ?? 0, total);
   const overall = ctxQ.data?.status?.overall_score;
   const fwItems = ctxQ.data?.status?.frameworks ?? [];
 
@@ -138,11 +139,15 @@ export function PostureOverview() {
       <div className="fade-up" style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 16, marginBottom: 16 }}>
         <div className="panel" style={{ padding: 22, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4, position: 'relative', overflow: 'hidden' }}>
           <div style={{ position: 'absolute', width: 240, height: 240, left: -40, top: -80, background: 'var(--accent-glow)', pointerEvents: 'none' }} />
-          <RiskGauge score={pctHigh} level={levelFromScore(pctHigh)} size={128} label="% assets high-risk" />
+          <PercentageGauge value={pctHigh} color="var(--accent)" size={128} label="of assets high-risk" />
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, position: 'relative', fontSize: 12, color: 'var(--app-t3)' }}>
-            <span className="mono" style={{ color: 'var(--app-t2)' }}>{(s?.high_risk ?? 0).toLocaleString()}</span> of
-            <span className="mono" style={{ color: 'var(--app-t2)' }}>{total.toLocaleString()}</span> assets
+            {pctHigh === null ? 'No monitored assets' : <><span className="mono" style={{ color: 'var(--app-t2)' }}>{(s?.high_risk ?? 0).toLocaleString()}</span> of <span className="mono" style={{ color: 'var(--app-t2)' }}>{total.toLocaleString()}</span> monitored assets</>}
           </div>
+          {pctHigh !== null && (
+            <div style={{ marginTop: 3, position: 'relative', fontSize: 10.5, color: 'var(--app-t3)' }}>
+              {assessedAssets.toLocaleString()} assessed · {unscoredAssets.toLocaleString()} unscored
+            </div>
+          )}
         </div>
         <div className="panel" style={{ padding: '18px 22px', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -162,7 +167,7 @@ export function PostureOverview() {
                 <div className="mono accent-text" style={{ fontSize: 26, fontWeight: 800, lineHeight: 1, color: isUnscored(overall) ? 'var(--app-t3)' : undefined }} title={isUnscored(overall) ? 'No framework has an assessed control yet, so there is no overall score.' : undefined}>
                   {formatScore(overall)}{!isUnscored(overall) && <span style={{ fontSize: 15 }}>%</span>}
                 </div>
-                <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Overall compliance</div>
+                <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }} title="Average of severity-weighted framework scores. Frameworks with no assessed controls are excluded.">Mean framework compliance</div>
               </div>
             </div>
           </div>
@@ -195,7 +200,7 @@ export function PostureOverview() {
           });
           return (
             <button key={f.id} onClick={() => nav(`/risk-compliance/findings?lens=control&fw=${f.id}`)} className="panel row-hover" style={{ padding: '15px 16px', display: 'flex', alignItems: 'center', gap: 13, cursor: 'pointer', textAlign: 'left' }}>
-              <FwRing pct={f.compliance_percent} />
+              <div title="Severity-weighted compliance: passing control weight divided by assessed control weight. Unassessed controls are excluded."><FwRing pct={f.compliance_percent} /></div>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{f.name}</div>
                 <div style={{ fontSize: 11, color: f.controls_failing ? 'var(--danger-text)' : 'var(--app-t3)', marginTop: 2 }}>{f.controls_failing} failing control{f.controls_failing !== 1 ? 's' : ''}</div>

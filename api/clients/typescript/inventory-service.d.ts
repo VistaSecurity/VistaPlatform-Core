@@ -591,7 +591,7 @@ export interface paths {
         };
         /**
          * Aggregate crypto risk severity summary
-         * @description Returns severity counts (critical/high/medium/informational), total
+         * @description Returns mutually exclusive worst-per-asset severity counts (critical/high/medium/low/informational), unscored assets, total
          *     affected assets, and issue-category counts for the tenant.
          */
         get: operations["getCryptoRisksSummary"];
@@ -614,7 +614,7 @@ export interface paths {
          * Export crypto risk findings as CSV
          * @description Streams the tenant's crypto risk findings as a CSV file attachment
          *     (`Content-Disposition: attachment; filename=crypto-risks.csv`). Unlike
-         *     the paginated list, export returns up to 10,000 rows in a single
+         *     the paginated list, export returns up to 50,000 rows in a single
          *     response. Accepts the same filter query params as `GET /crypto-risks`.
          *
          *     This is the one crypto-risks endpoint whose 200 body is NOT JSON — it is
@@ -1454,7 +1454,7 @@ export interface paths {
         };
         /**
          * List the tenant's external connections
-         * @description Returns a paginated page of deduplicated third-party connections, with optional filters (search, crypto_strength, is_pqc_resistant, cert_expired, cert_trust_issue, has_legacy_tls, source_asset_id). Wrapped under `connections` with a sibling `pagination` block.
+         * @description Returns a paginated page of deduplicated third-party connections, with optional filters (search, strength, is_pqc_resistant, cert_expired, cert_trust_issue, has_legacy_tls, source_asset_id). Wrapped under `connections` with a sibling `pagination` block.
          */
         get: operations["listExternalConnections"];
         put?: never;
@@ -1649,7 +1649,8 @@ export interface paths {
         put?: never;
         /**
          * Run an Active Scan (on-demand crypto scan) for assets
-         * @description Active Scan (). Approves the targeted assets (so the discovery pipeline catalogs their crypto rather than deferring it), stamps scan freshness, and dispatches an active TLS probe whose results flow back through the discovery pipeline. RBAC-gated `assets.update`. Returns the dispatched job id and the count of assets scanned. Invalid UUIDs are skipped; an all-invalid list returns 400.
+         * @description Active Scan (). Approves the targeted assets (so the discovery pipeline catalogs their crypto rather than deferring it), stamps scan freshness, and dispatches an active probe whose results flow back through the discovery pipeline. RBAC-gated `assets.update` — the permission follows the action, not the executor, so running from a tenant sensor needs nothing more than running from the platform.
+         *     `run_from` chooses the executor: `auto` (default) routes each asset to the tenant sensor that most recently observed it, else one bound to its network segment, else the platform sensor; `platform` runs everything from the platform sensor; `sensor` runs everything from the one tenant sensor named by `sensor_id`. A named sensor that is not the tenant's answers 404, the platform's own sensor or an air-gapped one 400, and one that is offline 409 — nothing is scanned in those cases. Under `auto`, an asset whose observing sensor is offline is reported under `skipped` and left unscanned rather than scanned from the wrong place. Returns every job dispatched with its executor; `job_id` and `count` summarize the first job and the assets scanned. Invalid UUIDs are skipped; an all-invalid list returns 400.
          */
         post: operations["scanAssets"];
         delete?: never;
@@ -2693,7 +2694,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/discovery/capabilities": {
+    "/discovery/auto-scan": {
         parameters: {
             query?: never;
             header?: never;
@@ -2701,20 +2702,23 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Get the tenant's effective discovery capability policy
-         * @description Returns the scanning features the tenant admin has enabled for the
-         *     discovery wizard (active scanning, TLS-version enumeration, SSH probing).
-         *     Defaults to everything enabled; tenant-admin overrides in
-         *     `tenant_admin_settings.config.capability_policy` are merged on top.
+         * The tenant's automatic active-scanning policy, and what it has been doing
+         * @description Automatic active scanning probes a newly observed INTERNAL host as soon as it appears in the inventory, and probes every internal host again once the tenant's rescan interval has elapsed. Nobody presses a button.
+         *
+         *     The response carries three things the Settings → Discovery → Active Scanning page needs: the policy, the bounds the server will accept for it (so the page validates against the server's numbers rather than its own copy of them), and a read-only summary of what the sweep has done — because a capability that acts unasked and reports nowhere is indistinguishable from a bug.
+         *
+         *     Requires the `settings.read` permission.
          */
-        get: operations["getDiscoveryCapabilities"];
+        get: operations["getAutoScanPolicy"];
         /**
-         * Update the tenant's discovery capability policy
-         * @description Saves the tenant capability policy (sensor-configuration / tenant-admin
-         *     surface). Requires a tenant_admin or security_admin role; other callers
-         *     get 403.
+         * Set the automatic active-scanning policy
+         * @description Requires the `settings.update` permission: this decides whether the platform probes the tenant's own network without being asked.
+         *
+         *     Every field is required. A partial update would be a trap here — the difference between "leave the ports alone" and "scan no ports" is one absent key, and the tenant would have no way to tell which they had asked for.
+         *
+         *     Values outside the bounds are REFUSED rather than clamped, and the refusal names the bound that was broken. Protocols are restricted to `TLS` and `SSH`: the OT/ICS probes are gated by the `ot_active_probing` entitlement through a discovery job's separate field, and accepting one here would be a way to probe a PLC unattended, on a schedule, past that gate.
          */
-        put: operations["updateDiscoveryCapabilities"];
+        put: operations["updateAutoScanPolicy"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2729,7 +2733,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List the tenant's discovery jobs
+         * @description The tenant's discovery jobs (Active Scans, the automatic-scan
+         *     sweep, Discover wizard runs), newest first, with each job's executor
+         *     and — for a job handed to a tenant sensor — its dispatch timeline.
+         *     Proxied from cluster-sensor-service. This is what the unified
+         *     Discovery → Discovery Jobs page merges with device-interrogation
+         *     jobs (`GET /jobs` on device-interrogation-service).
+         */
+        get: operations["listDiscoveryJobs"];
         put?: never;
         /**
          * Start a discovery job (scan targets for crypto assets)
@@ -3128,7 +3141,8 @@ export interface components {
             strength: string;
             deprecation_status: string;
             deprecation_date?: string;
-            risk_score: number;
+            /** @description Null only for a historical or operator-created row that has not been assessed. */
+            risk_score: number | null;
             recommended_alternatives?: string[];
             migration_guidance?: string;
             remediation_guidance?: {
@@ -3242,10 +3256,12 @@ export interface components {
             };
         };
         /**
-         * @description Request body for POST /algorithms (createAlgorithm). `code`, `name` and
-         *     `category` are required; every other field is optional and falls back to
-         *     the algorithms-table column default. Enum-bearing fields validate against
-         *     the same schema CHECK constraints as UpdateAlgorithmRequest.
+         * @description Request body for POST /algorithms (createAlgorithm). `code`, `name`,
+         *     `category` and `risk_score` are required. The score is a deliberate
+         *     catalogue assessment: the API and database do not invent a default.
+         *     Other fields are optional and fall back to their algorithms-table
+         *     column defaults. Enum-bearing fields validate against the same schema
+         *     CHECK constraints as UpdateAlgorithmRequest.
          */
         CreateAlgorithmRequest: {
             /** @description Unique algorithm code (matching key; immutable after create). */
@@ -3271,7 +3287,8 @@ export interface components {
             is_standard?: boolean;
             /** @enum {string} */
             strength?: "weak" | "acceptable" | "strong" | "recommended";
-            risk_score?: number;
+            /** @description Explicit catalogue risk assessment. Zero is a valid assessed score. */
+            risk_score: number;
             /** @enum {string} */
             deprecation_status?: "current" | "deprecated" | "obsolete";
             deprecation_date?: string;
@@ -3302,7 +3319,7 @@ export interface components {
                  */
                 alternatives: string[] | null;
                 migration_guidance: string | null;
-                risk_score: number;
+                risk_score: number | null;
                 strength: string;
                 deprecation_status: string;
             };
@@ -3324,11 +3341,11 @@ export interface components {
             current_algorithm: components["schemas"]["Algorithm"];
             recommended_alternatives: components["schemas"]["Algorithm"][];
             migration_guidance: string | null;
-            risk_score: number;
+            risk_score: number | null;
             strength: string;
             deprecation_status: string;
-            /** @description high / medium / low (derived from risk_score). */
-            priority: string;
+            /** @description high / medium / low when risk_score is assessed; null otherwise. */
+            priority: string | null;
             reason: string;
         };
         /**
@@ -3354,8 +3371,20 @@ export interface components {
             asset_id: string;
             /** Format: uuid */
             crypto_implementation_id: string;
-            /** @description critical / high / medium / informational. */
-            severity: string;
+            /**
+             * @description Canonical numeric risk band, or separate certificate lifecycle severity. Null when a qualitative issue has no numeric assessment.
+             * @enum {string|null}
+             */
+            severity: "critical" | "high" | "medium" | "low" | "info" | null;
+            /** @description Available configuration numeric assessment; certificate lifecycle severity does not invent a numeric score. */
+            risk_score?: number | null;
+            /** @enum {string} */
+            assessment_basis?: "configuration" | "certificate_lifecycle" | "retained_finding";
+            assessment_limitations?: string[];
+            /** @description Actual tied numeric contributors; a persisted score explicitly has unavailable original rule provenance. */
+            score_sources?: string[];
+            /** @description All matching categories; category remains the deterministic representative for titles and grouping. */
+            categories?: ("protocol" | "algorithm" | "key_size" | "certificate")[];
             category: string;
             issue_type: string;
             current_value: string;
@@ -3365,6 +3394,10 @@ export interface components {
             detected_at: string;
             asset_hostname?: string;
             asset_ip_address?: string;
+            /** Format: uuid */
+            endpoint_id?: string;
+            endpoint_address?: string;
+            endpoint_port?: number;
             asset_port?: number;
             /** @description The owning asset's class. Renamed with the VALUE: an asset the retired enum called "appliance" is now `hardware`, `switch` or `firewall`, so a consumer still reading `asset_type` would have gone on matching four strings that no longer appear. */
             asset_class_key?: string;
@@ -3377,6 +3410,9 @@ export interface components {
             critical: number;
             high: number;
             medium: number;
+            low: number;
+            /** @description Affected assets with no graded emitted issue; separate from the five severity buckets. */
+            unscored: number;
             informational: number;
             total_assets_affected: number;
             protocol_issues: number;
@@ -3757,6 +3793,11 @@ export interface components {
             /** Format: date-time */
             last_data_update?: string;
             has_sct?: boolean;
+            /**
+             * @description Which RFC 6962 delivery route carried the Signed Certificate Timestamp, or "none" when a live handshake checked all three routes and found none. Absent when the route wasn't observable.
+             * @enum {string}
+             */
+            sct_source?: "embedded" | "tls_extension" | "ocsp" | "none";
             known_bad_ca?: string;
             is_ev?: boolean;
             ocsp_status?: string;
@@ -4948,6 +4989,45 @@ export interface components {
             assets: components["schemas"]["StaleAsset"][];
             pagination: components["schemas"]["PaginationMeta"];
         };
+        /** @description Body for POST /infrastructure-assets/scan. */
+        ActiveScanRequest: {
+            /** @description Asset UUIDs as strings. Unparseable entries are silently dropped. */
+            asset_ids: string[];
+            /**
+             * @description Which executor scans the assets. Defaults to `auto`.
+             * @enum {string}
+             */
+            run_from?: "auto" | "platform" | "sensor";
+            /**
+             * Format: uuid
+             * @description The tenant sensor to run from. Required when `run_from` is `sensor`; ignored otherwise.
+             */
+            sensor_id?: string;
+        };
+        /** @description One discovery job an Active Scan dispatched. */
+        ActiveScanJob: {
+            job_id: string;
+            /** @enum {string} */
+            executor: "platform" | "sensor";
+            /** Format: uuid */
+            sensor_id?: string;
+            sensor_name?: string;
+            /** @description Assets this job scans. */
+            count: number;
+        };
+        /** @description An asset the scan could not dispatch anywhere, and why. */
+        ActiveScanSkip: {
+            asset_id: string;
+            reason: string;
+        };
+        /** @description Result of an Active Scan. `job_id` and `count` keep the original shape (the first job and every asset scanned); `jobs` lists each dispatched job with its executor; `skipped` lists assets left unscanned because their observing sensor is offline. */
+        ActiveScanResponse: {
+            message: string;
+            job_id: string;
+            count: number;
+            jobs: components["schemas"]["ActiveScanJob"][];
+            skipped: components["schemas"]["ActiveScanSkip"][];
+        };
         /** @description Result of a rescan / revalidate action — `{ "message": "...", "job_id": "...", "count": N }`. */
         RevalidationJobResponse: {
             message: string;
@@ -5011,10 +5091,13 @@ export interface components {
             key_exchange_algorithm?: string;
             key_size?: number;
             supported_tls_versions?: string[];
-            /** @enum {string} */
-            crypto_strength: "good" | "weak" | "unknown";
+            /** @enum {string|null} */
+            strength: "weak" | "acceptable" | "strong" | "recommended" | null;
             is_pqc_resistant: boolean;
+            /** @description Reasons strength is "weak" — protocol version, cipher suite, key exchange, key size, signature algorithm ONLY. Never certificate-hygiene observations; see cert_hygiene_flags. */
             weak_reasons?: string[];
+            /** @description Certificate-hygiene observations (missing SCT, an untrusted or pinned CA, an incomplete chain, a missing Subject DN) that affect confidence in the chain but say nothing about cryptographic strength. Never influences strength/weak_reasons — see CLAUDE.md "Certificate quality flags". */
+            cert_hygiene_flags?: string[];
             cert_subject?: string;
             cert_issuer?: string;
             cert_san?: string[];
@@ -5028,6 +5111,11 @@ export interface components {
             cert_signature_algorithm?: string;
             cert_is_expired: boolean;
             cert_validation_status?: string;
+            /**
+             * @description Which RFC 6962 delivery route carried the Signed Certificate Timestamp, or "none" when a live handshake checked all three routes and found none. Absent when the route wasn't observable (e.g. a passive-capture-only observation) — never a false "none".
+             * @enum {string}
+             */
+            cert_sct_source?: "embedded" | "tls_extension" | "ocsp" | "none";
             cert_pem?: string;
             service_name?: string;
             service_version?: string;
@@ -5061,14 +5149,22 @@ export interface components {
             change_type: string;
             previous_protocol_version?: string;
             previous_cipher_suite?: string;
-            previous_crypto_strength?: string;
+            /** @enum {integer} */
+            strength_vocabulary_version: 1 | 2;
+            /** @description Original historical vocabulary; never inferred into a current grade. */
+            previous_strength_legacy?: string;
+            /** @description Original historical vocabulary; never inferred into a current grade. */
+            new_strength_legacy?: string;
+            /** @enum {string|null} */
+            previous_strength: "weak" | "acceptable" | "strong" | "recommended" | null;
             previous_is_pqc_resistant?: boolean;
             previous_cert_fingerprint_sha256?: string;
             /** Format: date-time */
             previous_cert_not_after?: string;
             new_protocol_version?: string;
             new_cipher_suite?: string;
-            new_crypto_strength?: string;
+            /** @enum {string|null} */
+            new_strength: "weak" | "acceptable" | "strong" | "recommended" | null;
             new_is_pqc_resistant?: boolean;
             new_cert_fingerprint_sha256?: string;
             /** Format: date-time */
@@ -5080,6 +5176,8 @@ export interface components {
         ExternalConnectionsSummary: {
             total: number;
             weak_crypto: number;
+            /** @description Connections with unresolved historical evidence */
+            reassessment_required: number;
             pqc_resistant: number;
             expired_certs: number;
             legacy_tls: number;
@@ -5173,7 +5271,10 @@ export interface components {
             key_size: number | null;
             /** Format: uuid */
             certificate_id: string | null;
+            /** @description The method that FIRST observed this configuration. Kept as the primary attribution; the full provenance is `discovery_methods`. */
             discovery_method: string;
+            /** @description Every discovery method that has contributed an observation to this configuration, `discovery_method` first. A configuration a passive sensor glimpsed and an active probe then measured in full is ONE row carrying both — the partial observation is absorbed into the complete one rather than kept as a second row. Always present; empty only for a row written before provenance was recorded and not yet backfilled. */
+            discovery_methods: string[];
             confidence_score: number | null;
             /** Format: uuid */
             source_sensor_id: string | null;
@@ -5181,7 +5282,10 @@ export interface components {
             raw_data: {
                 [key: string]: unknown;
             };
+            /** @description Numeric risk score when risk_score_assessed is true; null when no numeric scorer contributed. */
             risk_score: number | null;
+            /** @description True for an existing positive stored score, or when a stored zero is corroborated by a worst linked numeric catalogue contribution of zero. A non-zero catalogue contribution cannot certify a stored zero. Stored null and qualitative-only evidence do not make this true. */
+            risk_score_assessed: boolean;
             /** @description Arbitrary JSONB compliance status map. Always present (defaults to {}). */
             compliance_status: {
                 [key: string]: unknown;
@@ -5242,19 +5346,19 @@ export interface components {
             strength: string;
             /** @description Catalogue deprecation status. Empty string when unrecorded. */
             deprecation_status: string;
-            /** @description The catalogue row's 0-100 risk score. */
-            risk_score: number;
+            /** @description The catalogue row's explicit 0-100 risk score, or null when the row records only a qualitative assessment. */
+            risk_score: number | null;
             /**
-             * @description The score banded with the canonical ladder (models.RiskBands). Computed server-side — do not re-derive.
-             * @enum {string}
+             * @description The score banded with the canonical ladder (models.RiskBands), or null when risk_score is null. Computed server-side — do not re-derive.
+             * @enum {string|null}
              */
-            risk_level: "Critical" | "High" | "Medium" | "Low" | "Informational";
+            risk_level: "Critical" | "High" | "Medium" | "Low" | "Informational" | null;
             /** @description Catalogue migration guidance. Omitted when the row records none. */
             migration_guidance?: string;
             /** @description Catalogue-recommended replacements. Always present; empty means none recorded (not "unknown"). */
             recommended_alternatives: string[];
             is_pqc: boolean;
-            /** @description True on the worst component — the one worst-component-wins selected. Exactly one entry per non-empty list. */
+            /** @description True on the worst numerically scored component. False for every component when the resolved catalogue rows have no numeric score. */
             sets_score: boolean;
         };
         /** @description List envelope for GET /crypto-configurations/{id}/components — `{ "components": [...] }`. An EMPTY array means NOT ASSESSED, never "assessed clean". */
@@ -5622,8 +5726,10 @@ export interface components {
         CreateDiscoveryJobRequest: {
             /** @description IPs, CIDRs, or hostnames to scan (max 1000). */
             targets: string[];
-            /** @description How the scan is dispatched: `auto` (platform decides) or `cloud` (platform sensor). `sensors` is REJECTED with 400 — discovery jobs cannot be dispatched to tenant-deployed sensors; no dispatcher exists, and such jobs used to run from the platform cluster instead. */
+            /** @description How the scan is dispatched: `auto` (platform decides), `cloud` (platform sensor), or `sensors` — run from the one tenant sensor named in `preferred_sensor_ids`, which must be live; an unknown sensor answers 404, the platform's own or an air-gapped one 400, an offline one 409, and the job is not created. A `sensors` job is never run from the platform instead. */
             execution_mode?: string;
+            /** @description With `execution_mode: sensors`, exactly one tenant sensor id. Not accepted with any other mode. */
+            preferred_sensor_ids?: string[];
             /** @description Protocols to probe (e.g. `TLS`, `SSH`). Empty = service default. */
             protocols?: string[];
             /** @description Ports to probe (e.g. 443, 22, 8443). Empty = service default. */
@@ -5651,11 +5757,39 @@ export interface components {
             id: string;
             tenant_id?: string;
             created_by?: string;
-            /** @description e.g. pending, in_progress, completed, failed, cancelled. */
+            /** @description queued · awaiting_sensor (handed to a tenant sensor, not yet reported back) · running · completed · failed · cancelled. */
             status: string;
             targets?: string[];
             execution_mode?: string;
             requested_sensor_ids?: string[];
+            /**
+             * @description Who runs (or ran) the job.
+             * @enum {string}
+             */
+            executor?: "platform" | "sensor";
+            /** @description The tenant sensor a `sensors` job was handed to. */
+            assigned_sensor_id?: string | null;
+            assigned_sensor_name?: string;
+            /**
+             * Format: date-time
+             * @description When that sensor last checked in — what a "sensor offline" failure shows beside the error.
+             */
+            assigned_sensor_last_heartbeat?: string;
+            /**
+             * Format: date-time
+             * @description When the job's command was written for the sensor.
+             */
+            dispatched_at?: string | null;
+            /**
+             * Format: date-time
+             * @description When the sensor collected the command on a heartbeat.
+             */
+            picked_up_at?: string | null;
+            /** Format: date-time */
+            started_at?: string | null;
+            /** Format: date-time */
+            completed_at?: string | null;
+            error_message?: string | null;
             fanout?: boolean;
             retention_cap_mb?: number;
             retention_ttl_hours?: number;
@@ -5663,6 +5797,18 @@ export interface components {
             created_at?: string;
             /** Format: date-time */
             updated_at?: string;
+            /** @description `auto_scan` when the automatic-scan sweep created this job; empty for an operator-started run (Active Scan, Discover wizard). Drives the "Automatic scan" kind on the unified Jobs page. */
+            origin?: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** @description GET /discovery/jobs — a page of the tenant's discovery jobs, newest first. */
+        DiscoveryJobsResponse: {
+            jobs: components["schemas"]["DiscoveryJob"][];
+            total: number;
+            page: number;
+            page_size: number;
+            total_pages?: number;
         } & {
             [key: string]: unknown;
         };
@@ -5730,39 +5876,120 @@ export interface components {
              *     network segment with auto-approve enabled.
              */
             auto_approved?: number;
-            /** @description Queue rows no rule matched — the asset is in Discovery → Approvals. */
+            /**
+             * @description Queue rows genuinely awaiting a human — no rule matched, and the
+             *     asset is in Discovery → Approvals. Excludes `observed` (host
+             *     observations, which never await approval) and `suppressed` (the
+             *     matched asset is archived or denied), which are not
+             *     auto-approved either but are not pending anything.
+             */
             pending_approval?: number;
             /** @description Queue rows the pipeline has not dispositioned yet. */
             awaiting_processing?: number;
+            /**
+             * @description Queue rows that matched an asset the tenant has taken off the
+             *     table — archived or denied. Nothing was materialized and no
+             *     approval decision will ever be made about them.
+             */
+            suppressed?: number;
         } & {
             [key: string]: unknown;
         };
-        /**
-         * @description Discovery scanning features available to the tenant. Defaults to all
-         *     enabled; tenant admins can disable individual capabilities.
-         */
-        DiscoveryCapabilities: {
-            active_scanning?: boolean;
-            tls_version_enumeration?: boolean;
-            ssh_probing?: boolean;
-        } & {
-            [key: string]: unknown;
+        /** @description The tenant's automatic active-scanning policy. Stored in `tenant_admin_settings.config.discovery_auto_scan`. */
+        AutoScanPolicy: {
+            /** @description The master switch. Off means neither trigger fires and no host is scanned unless somebody asks for it. On by default. */
+            enabled: boolean;
+            /** @description Scan a newly observed internal address as soon as it appears, rather than waiting for the next scheduled sweep. Independent of the rescan schedule — a tenant can keep the daily rescan and decline to be scanned the instant something appears. */
+            scan_on_first_observation: boolean;
+            /** @description How stale an asset's last automatic scan may get before it is scanned again. 24 by default. */
+            rescan_interval_hours: number;
+            /** @description Restricted to the values in `limits.supported_protocols`. */
+            protocols: string[];
+            /** @description Route each automatic scan to the tenant sensor that most recently observed the host (or one bound to its network segment) instead of the platform sensor, so a host reachable only from inside the organization's network is scanned from where it can be reached. On by default. Off runs every automatic scan from the platform sensor. Optional on PUT: a client that omits it leaves the stored value unchanged. Manual scans choose per run via `run_from` and are not governed by this. */
+            prefer_observing_sensor?: boolean;
+            /** @description The ports each automatic scan probes. Defaults to the well-known TLS and SSH ports — deliberately narrower than the Discover wizard's crypto/OT set, because file-sharing (139/445) and industrial-control ports (502, 4840, 44818, 47808) are reasonable for a scan a person chose once and not for one that repeats against every host on every interval. A tenant who wants them adds them. */
+            ports: number[];
         };
-        /** @description GET /discovery/capabilities envelope — `{ "capabilities": {...} }`. */
-        DiscoveryCapabilitiesResponse: {
-            capabilities: components["schemas"]["DiscoveryCapabilities"];
+        /** @description The bounds the server accepts, carried in the response so the page validates against the server's numbers. Without them a change to the limits would leave a control accepting values the server refuses. */
+        AutoScanLimits: {
+            min_rescan_interval_hours: number;
+            max_rescan_interval_hours: number;
+            /** @description The most ports one policy may list. */
+            max_ports: number;
+            supported_protocols: string[];
+            /** @description The curated default port set, so the page can offer "reset to defaults". */
+            default_ports: number[];
         };
-        /** @description PUT /discovery/capabilities body. */
-        UpdateDiscoveryCapabilitiesRequest: {
-            capabilities: components["schemas"]["DiscoveryCapabilities"];
+        /** @description One automatic scan the platform ran. */
+        AutoScanRecentJob: {
+            id: string;
+            status: string;
+            /** @description How many distinct addresses the job covered. */
+            target_count: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            completed_at?: string;
+            /**
+             * @description Who ran (or is running) the scan — the platform sensor, or a tenant sensor.
+             * @enum {string}
+             */
+            executor: "platform" | "sensor";
+            /** @description The tenant sensor's name when `executor` is `sensor`. */
+            executor_name?: string;
+            /**
+             * Format: date-time
+             * @description When that sensor last checked in — shown beside a "sensor offline" failure.
+             */
+            executor_last_heartbeat?: string;
+            /**
+             * Format: date-time
+             * @description When the job's command was written for the sensor.
+             */
+            dispatched_at?: string;
+            /**
+             * Format: date-time
+             * @description When the sensor collected the command on a heartbeat.
+             */
+            picked_up_at?: string;
+            /** @description Why the scan failed, when it did. */
+            error_message?: string;
         };
-        /** @description PUT /discovery/capabilities result. */
-        UpdateDiscoveryCapabilitiesResponse: {
-            message: string;
-            capabilities: components["schemas"]["DiscoveryCapabilities"];
-            version?: number;
-        } & {
-            [key: string]: unknown;
+        /** @description One reason the last sweep left hosts out, and how many. The reason is the address classification verbatim — `public`, `carrier_grade_nat` (RFC 6598, 100.64.0.0/10), `excluded` (the platform's own addresses), `link_local`, `loopback`, `multicast`, `unspecified`, `zoned`, `unparseable`. The page owns the plain-language label and, for the first two, the call to action: register the range as a network segment to bring those hosts into scope. */
+        AutoScanNotScanned: {
+            reason: string;
+            count: number;
+        };
+        /** @description What automatic scanning has been doing. Read-only — the worker writes it, and it lives under its own key so saving the policy cannot rewrite the platform's account of its own runs. */
+        AutoScanSummary: {
+            /** @description Hosts the last sweep looked at and refused, by reason. Empty means every eligible host was scanned — which is a different answer from "no sweep has run", carried by `last_sweep_at` being absent. This exists because a tenant whose estate is in carrier-grade NAT space would otherwise see "Automatic scanning: on" over a sweep that scans nothing. */
+            not_scanned: components["schemas"]["AutoScanNotScanned"][];
+            /**
+             * Format: date-time
+             * @description Absent means no sweep has been recorded for this tenant yet — which is a different answer from a sweep that found nothing due.
+             */
+            last_sweep_at?: string;
+            /** Format: date-time */
+            next_sweep_at?: string;
+            last_sweep_jobs: number;
+            last_sweep_assets: number;
+            /** @description Every asset automatic scanning COVERS, whether or not it is due right now — internal address, not archived or denied, not third-party. Computed from the same rule the sweep selects by. */
+            assets_in_scope: number;
+            recent_jobs: components["schemas"]["AutoScanRecentJob"][];
+        };
+        /** @description GET/PUT /discovery/auto-scan envelope. */
+        AutoScanResponse: {
+            auto_scan: components["schemas"]["AutoScanPolicy"];
+            limits: components["schemas"]["AutoScanLimits"];
+            summary: components["schemas"]["AutoScanSummary"];
+        };
+        /** @description PUT /discovery/auto-scan body. Every field is required. */
+        AutoScanUpdateRequest: {
+            enabled: boolean;
+            scan_on_first_observation: boolean;
+            rescan_interval_hours: number;
+            protocols: string[];
+            ports: number[];
         };
         /** @description Simple message envelope for cancel/rerun — `{ "message": "..." }`. */
         DiscoveryMessageResponse: {
@@ -6698,6 +6925,12 @@ export interface operations {
                 page?: components["parameters"]["Page"];
                 /** @description Page size (default 20, max 100). */
                 page_size?: components["parameters"]["PageSize"];
+                /** @description Repeated canonical severity values; informational is accepted as a legacy alias for info, and unscored selects null severity. */
+                severity?: ("critical" | "high" | "medium" | "low" | "info" | "informational" | "unscored")[];
+                category?: ("protocol" | "algorithm" | "key_size" | "certificate")[];
+                search?: string;
+                sort_by?: "severity" | "detected_at" | "hostname" | "protocol";
+                sort_order?: "asc" | "desc";
             };
             header?: never;
             path?: never;
@@ -6743,7 +6976,14 @@ export interface operations {
     };
     exportCryptoRisks: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Repeated canonical severity values; informational is accepted as a legacy alias for info, and unscored selects null severity. */
+                severity?: ("critical" | "high" | "medium" | "low" | "info" | "informational" | "unscored")[];
+                category?: ("protocol" | "algorithm" | "key_size" | "certificate")[];
+                search?: string;
+                sort_by?: "severity" | "detected_at" | "hostname" | "protocol";
+                sort_order?: "asc" | "desc";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -6756,7 +6996,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    /** @example ID,Severity,Category,Issue Type,Current Value,Description,Recommendation,Asset Hostname,Asset IP,Asset Port,Protocol,Protocol Version,Detected At */
+                    /** @example ID,Severity,Category,Issue Type,Current Value,Description,Recommendation,Asset Hostname,Asset IP,Asset Port,Protocol,Protocol Version,Detected At,Risk Score,Assessment Basis,Score Sources,Assessment Limitations */
                     "text/csv": string;
                 };
             };
@@ -8224,7 +8464,7 @@ export interface operations {
                 page?: number;
                 page_size?: number;
                 search?: string;
-                crypto_strength?: "good" | "weak" | "unknown";
+                strength?: "weak" | "acceptable" | "strong" | "recommended" | "unassessed";
                 is_pqc_resistant?: boolean;
                 cert_expired?: boolean;
                 cert_trust_issue?: boolean;
@@ -8505,7 +8745,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AssetIdsRequest"];
+                "application/json": components["schemas"]["ActiveScanRequest"];
             };
         };
         responses: {
@@ -8515,11 +8755,21 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RevalidationJobResponse"];
+                    "application/json": components["schemas"]["ActiveScanResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description The named sensor is offline; nothing was scanned. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -10175,7 +10425,7 @@ export interface operations {
             };
         };
     };
-    getDiscoveryCapabilities: {
+    getAutoScanPolicy: {
         parameters: {
             query?: never;
             header?: never;
@@ -10184,20 +10434,21 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The tenant's effective discovery capabilities. */
+            /** @description The policy, its bounds, and the sweep summary. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["DiscoveryCapabilitiesResponse"];
+                    "application/json": components["schemas"]["AutoScanResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
-    updateDiscoveryCapabilities: {
+    updateAutoScanPolicy: {
         parameters: {
             query?: never;
             header?: never;
@@ -10206,23 +10457,68 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UpdateDiscoveryCapabilitiesRequest"];
+                "application/json": components["schemas"]["AutoScanUpdateRequest"];
             };
         };
         responses: {
-            /** @description Capability policy updated. */
+            /** @description The policy as saved. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UpdateDiscoveryCapabilitiesResponse"];
+                    "application/json": components["schemas"]["AutoScanResponse"];
                 };
             };
-            400: components["responses"]["LegacyBadRequest"];
+            /** @description A field is missing, or a value is outside its bounds. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listDiscoveryJobs: {
+        parameters: {
+            query?: {
+                page?: number;
+                page_size?: number;
+                status?: string;
+                /** @description `automatic` (the sweep) or `manual` (Active Scan / Discover wizard / any operator-started run). Omit for both. */
+                kind?: "automatic" | "manual";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of discovery jobs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryJobsResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            /** @description cluster-sensor-service could not be reached. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     createDiscoveryJob: {

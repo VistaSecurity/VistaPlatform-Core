@@ -1,8 +1,12 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/events"
 )
 
 // Pins the alert lifecycle state machine (NOTIFICATION_ALERTING_ARCHITECTURE.md
@@ -61,7 +65,17 @@ func TestSeverityRank(t *testing.T) {
 			t.Errorf("severityRank(%s) should outrank %s", order[i], order[i-1])
 		}
 	}
-	if severityRank("bogus") != severityRank("info") {
-		t.Errorf("unknown severities must rank as info")
+	if severityRank("bogus") >= severityRank("info") {
+		t.Errorf("unknown severities must not receive an info rank")
+	}
+}
+
+func TestAlertRaiseRejectsInvalidSeverityBeforePersistence(t *testing.T) {
+	engine := &AlertEngineService{}
+	for _, value := range []string{"High", "Med", "invalid", ""} {
+		_, err := engine.Raise(context.Background(), events.AlertRaiseEvent{TenantID: uuid.New(), Severity: value})
+		if err == nil {
+			t.Fatalf("accepted severity %q", value)
+		}
 	}
 }

@@ -34,9 +34,15 @@ type ExternalConnection struct {
 	SupportedTLSVersions []string `json:"supported_tls_versions,omitempty" db:"supported_tls_versions"`
 
 	// Pre-computed assessment
-	CryptoStrength string   `json:"crypto_strength" db:"crypto_strength"` // good | weak | unknown
+	Strength       *string  `json:"strength" db:"crypto_strength"` // nil = not assessed
 	IsPQCResistant bool     `json:"is_pqc_resistant" db:"is_pqc_resistant"`
 	WeakReasons    []string `json:"weak_reasons,omitempty" db:"weak_reasons"`
+	// CertHygieneFlags holds certificate-hygiene observations (missing SCT,
+	// untrusted/pinned CA, incomplete chain, missing Subject DN) that affect
+	// confidence in the chain but say nothing about cryptographic strength —
+	// they never influence Strength/WeakReasons. See CLAUDE.md
+	// "Certificate quality flags" and assessCertHygiene.
+	CertHygieneFlags []string `json:"cert_hygiene_flags,omitempty" db:"cert_hygiene_flags"`
 
 	// Certificate snapshot (leaf cert)
 	CertSubject            *string    `json:"cert_subject,omitempty" db:"cert_subject"`
@@ -50,7 +56,14 @@ type ExternalConnection struct {
 	CertSignatureAlgorithm *string    `json:"cert_signature_algorithm,omitempty" db:"cert_signature_algorithm"`
 	CertIsExpired          bool       `json:"cert_is_expired" db:"cert_is_expired"`
 	CertValidationStatus   *string    `json:"cert_validation_status,omitempty" db:"cert_validation_status"`
-	CertPEM                *string    `json:"cert_pem,omitempty" db:"cert_pem"`
+	// CertSCTSource is which RFC 6962 delivery route carried the Signed
+	// Certificate Timestamp when CertHasSCT-equivalent evidence was true, or
+	// "none" when a live handshake checked all three routes and found none.
+	// Absent (nil) means the route wasn't observable (e.g. a passive-capture
+	// observation, which can only see the embedded route) — never a false
+	// "none". See shared/discovery.RefineSCTFlags.
+	CertSCTSource *string `json:"cert_sct_source,omitempty" db:"cert_sct_source"`
+	CertPEM       *string `json:"cert_pem,omitempty" db:"cert_pem"`
 
 	// Service identification
 	ServiceName                 *string `json:"service_name,omitempty" db:"service_name"`
@@ -82,10 +95,15 @@ type ExternalConnectionHistory struct {
 	// first_seen | cert_rotated | cipher_changed | protocol_upgraded | protocol_downgraded | crypto_strength_changed
 	ChangeType string `json:"change_type" db:"change_type"`
 
+	// Historical values use their original vocabulary, never a guessed conversion.
+	StrengthVocabularyVersion int     `json:"strength_vocabulary_version" db:"strength_vocabulary_version"`
+	PreviousStrengthLegacy    *string `json:"previous_strength_legacy,omitempty"`
+	NewStrengthLegacy         *string `json:"new_strength_legacy,omitempty"`
+
 	// Previous state snapshot (nil on first_seen)
 	PreviousProtocolVersion       *string    `json:"previous_protocol_version,omitempty" db:"previous_protocol_version"`
 	PreviousCipherSuite           *string    `json:"previous_cipher_suite,omitempty" db:"previous_cipher_suite"`
-	PreviousCryptoStrength        *string    `json:"previous_crypto_strength,omitempty" db:"previous_crypto_strength"`
+	PreviousStrength              *string    `json:"previous_strength" db:"previous_crypto_strength"`
 	PreviousIsPQCResistant        *bool      `json:"previous_is_pqc_resistant,omitempty" db:"previous_is_pqc_resistant"`
 	PreviousCertFingerprintSHA256 *string    `json:"previous_cert_fingerprint_sha256,omitempty" db:"previous_cert_fingerprint_sha256"`
 	PreviousCertNotAfter          *time.Time `json:"previous_cert_not_after,omitempty" db:"previous_cert_not_after"`
@@ -93,7 +111,7 @@ type ExternalConnectionHistory struct {
 	// New state snapshot
 	NewProtocolVersion       *string    `json:"new_protocol_version,omitempty" db:"new_protocol_version"`
 	NewCipherSuite           *string    `json:"new_cipher_suite,omitempty" db:"new_cipher_suite"`
-	NewCryptoStrength        *string    `json:"new_crypto_strength,omitempty" db:"new_crypto_strength"`
+	NewStrength              *string    `json:"new_strength" db:"new_crypto_strength"`
 	NewIsPQCResistant        *bool      `json:"new_is_pqc_resistant,omitempty" db:"new_is_pqc_resistant"`
 	NewCertFingerprintSHA256 *string    `json:"new_cert_fingerprint_sha256,omitempty" db:"new_cert_fingerprint_sha256"`
 	NewCertNotAfter          *time.Time `json:"new_cert_not_after,omitempty" db:"new_cert_not_after"`
@@ -103,15 +121,16 @@ type ExternalConnectionHistory struct {
 
 // ExternalConnectionUpsert is the write payload accepted by POST /external-connections.
 type ExternalConnectionUpsert struct {
-	SourceIP             string     `json:"source_ip"`
-	SourceHostname       *string    `json:"source_hostname,omitempty"`
-	DestIP               string     `json:"dest_ip"`
-	DestHostname         *string    `json:"dest_hostname,omitempty"`
-	DestPort             int        `json:"dest_port"`
-	Protocol             string     `json:"protocol"`
-	ProtocolVersion      *string    `json:"protocol_version,omitempty"`
-	CipherSuite          *string    `json:"cipher_suite,omitempty"`
-	KeyExchangeAlgorithm *string    `json:"key_exchange_algorithm,omitempty"`
+	SourceIP             string  `json:"source_ip"`
+	SourceHostname       *string `json:"source_hostname,omitempty"`
+	DestIP               string  `json:"dest_ip"`
+	DestHostname         *string `json:"dest_hostname,omitempty"`
+	DestPort             int     `json:"dest_port"`
+	Protocol             string  `json:"protocol"`
+	ProtocolVersion      *string `json:"protocol_version,omitempty"`
+	CipherSuite          *string `json:"cipher_suite,omitempty"`
+	KeyExchangeAlgorithm *string `json:"key_exchange_algorithm,omitempty"`
+	// KeySize is measured exchange-key bits, never inferred cipher or certificate bits.
 	KeySize              *int       `json:"key_size,omitempty"`
 	SupportedTLSVersions []string   `json:"supported_tls_versions,omitempty"`
 	SensorID             *uuid.UUID `json:"sensor_id,omitempty"`
@@ -130,6 +149,7 @@ type ExternalConnectionUpsert struct {
 
 	// Sensor-level certificate quality flags
 	CertHasSCT        *bool   `json:"cert_has_sct,omitempty"`
+	CertSCTSource     *string `json:"cert_sct_source,omitempty"`
 	CertKnownBadCA    *string `json:"cert_known_bad_ca,omitempty"`
 	CertNoSubject     bool    `json:"cert_no_subject,omitempty"`
 	CertNoCommonName  bool    `json:"cert_no_common_name,omitempty"`
@@ -140,8 +160,8 @@ type ExternalConnectionUpsert struct {
 
 // ExternalConnectionFilters are the query parameters for listing external connections.
 type ExternalConnectionFilters struct {
-	Search         string `form:"search"`          // ILIKE on dest_hostname and dest_ip
-	CryptoStrength string `form:"crypto_strength"` // good | weak | unknown
+	Search         string `form:"search"` // ILIKE on dest_hostname and dest_ip
+	Strength       string `form:"strength" binding:"omitempty,oneof=weak acceptable strong recommended unassessed"`
 	IsPQCResistant *bool  `form:"is_pqc_resistant"`
 	CertExpired    *bool  `form:"cert_expired"`
 	// CertTrustIssue when true: cert_validation_status is set and not "valid" (self-signed, hostname mismatch, untrusted CA, etc.)
@@ -156,11 +176,12 @@ type ExternalConnectionFilters struct {
 
 // ExternalConnectionsSummary holds aggregate counts for the summary card row.
 type ExternalConnectionsSummary struct {
-	Total        int `json:"total"`
-	WeakCrypto   int `json:"weak_crypto"`
-	PQCResistant int `json:"pqc_resistant"`
-	ExpiredCerts int `json:"expired_certs"`
-	LegacyTLS    int `json:"legacy_tls"`
+	Total                int `json:"total"`
+	WeakCrypto           int `json:"weak_crypto"`
+	ReassessmentRequired int `json:"reassessment_required"`
+	PQCResistant         int `json:"pqc_resistant"`
+	ExpiredCerts         int `json:"expired_certs"`
+	LegacyTLS            int `json:"legacy_tls"`
 	// SourceHosts is the number of distinct internal hosts (by source_ip) observed
 	// making outbound 3rd-party connections.
 	SourceHosts int `json:"source_hosts"`

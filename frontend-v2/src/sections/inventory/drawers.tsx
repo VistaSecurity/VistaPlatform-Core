@@ -16,6 +16,7 @@ import {
   verdictOf,
   type CryptoComponent,
 } from './risk-explanation';
+import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
 
 export type CryptoConfig = inventoryComponents['schemas']['CryptoImplementation'];
 export type Certificate = inventoryComponents['schemas']['Certificate'];
@@ -36,15 +37,14 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
   config: CryptoConfig; onOpenAsset?: OpenAsset; onOpenCert?: OpenCert; onClose: () => void; active?: boolean; depth?: number;
 }) {
   const c = config as Record<string, unknown> & CryptoConfig;
-  const score = typeof c.risk_score === 'number' && Number.isFinite(c.risk_score) ? c.risk_score : 0;
-  const level = (c.risk_level as string) || levelFromScore(score);
+  const risk = cryptoRiskPresentation(c);
   const assetId = c.asset_id as string | undefined;
   const certId = c.certificate_id as string | undefined;
   return (
     <DrawerShell onClose={onClose} width={460} active={active} depth={depth}>
       <div style={{ padding: '18px 22px 16px', borderBottom: '1px solid var(--app-border)' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-          <RiskChip level={level} size={28} />
+          <CryptoRiskChip config={c} size={28} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="eyebrow-app">Crypto configuration</div>
             <h2 style={{ margin: '4px 0 2px', fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', lineHeight: 1.15 }}>{c.protocol as string} · {c.protocol_version as string}</h2>
@@ -101,14 +101,11 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
           <MetaRow k="Certificate" v={certId ? 'present' : '—'} />
         )}
         <SectionLabel icon="activity">Assessment</SectionLabel>
-        {/* Score 0 means NOT ASSESSED, not safe — same house pattern as the
-            Inventory row (#1340): an em dash plus an explicit caption, never a
-            bare "0" that reads as a clean bill of health. */}
-        <MetaRow k="Risk score" v={score > 0 ? score : '—'} mono />
-        <MetaRow k="Risk level" v={score > 0 ? level : 'not assessed'} />
+        <MetaRow k="Risk score" v={risk.assessed ? risk.score : '—'} mono />
+        <MetaRow k="Risk level" v={risk.assessed ? risk.level : 'not assessed'} />
         <MetaRow k="Discovery" v={c.discovery_method as string} />
         <MetaRow k="Last verified" v={(c.last_verified_at as string)?.slice(0, 10)} mono />
-        <WhyThisScore configId={c.id as string} score={score} />
+        <WhyThisScore configId={c.id as string} score={risk.score} />
       </div>
     </DrawerShell>
   );
@@ -124,7 +121,7 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
 //   * observed and offered-only must be unmistakably different on screen —
 //     different words, different icon, different tone, not colour alone;
 //   * banding comes from the API (models.RiskBands). Nothing here re-derives it.
-function WhyThisScore({ configId, score }: { configId?: string; score: number }) {
+function WhyThisScore({ configId, score }: { configId?: string; score: number | null }) {
   const q = useQuery({
     queryKey: ['config-components', configId],
     enabled: !!configId,
@@ -158,7 +155,7 @@ function WhyThisScore({ configId, score }: { configId?: string; score: number })
   );
 }
 
-function RiskExplanationPanel({ components, score }: { components?: CryptoComponent[]; score: number }) {
+export function RiskExplanationPanel({ components, score }: { components?: CryptoComponent[]; score: number | null }) {
   const x = explainRisk(components, score);
 
   if (!x.assessed) {
@@ -174,9 +171,11 @@ function RiskExplanationPanel({ components, score }: { components?: CryptoCompon
   }
 
   return (
-    <div style={{ paddingTop: 6 }}>
+      <div style={{ paddingTop: 6 }}>
       <div style={{ fontSize: 11.5, color: 'var(--app-t3)', lineHeight: 1.45, marginBottom: 8 }}>
-        The score is the worst component — a configuration is only as strong as what it negotiates.
+        {x.worst
+          ? 'The highlighted component has the highest numeric catalogue contribution among the resolved components.'
+          : 'The catalogue matched these components, but it has no numeric risk score for them.'}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {x.components.map((c) => (
@@ -187,8 +186,8 @@ function RiskExplanationPanel({ components, score }: { components?: CryptoCompon
         <div style={{ display: 'flex', gap: 7, marginTop: 9, fontSize: 11.5, color: 'var(--app-t3)', lineHeight: 1.45 }}>
           <Icon name="info" size={12} style={{ flex: 'none', marginTop: 2 }} />
           <span>
-            The stored score ({score}) is higher than any component above. The remainder comes from checks the
-            per-algorithm catalogue can't express — chiefly key size — so it isn't attributable to a single catalogue entry.
+            The stored score ({score}) is higher than any current catalogue contribution shown above. This evidence does
+            not establish whether the difference comes from a catalogue change or from other checks.
           </span>
         </div>
       )}
@@ -217,7 +216,9 @@ function ComponentCard({ c }: { c: CryptoComponent }) {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <LevelDot level={c.risk_level ?? 'Informational'} />
+        {typeof c.risk_score === 'number'
+          ? <LevelDot level={c.risk_level ?? 'Informational'} />
+          : <span aria-label="Risk score not assessed" style={{ color: 'var(--app-t3)', fontWeight: 700 }}>—</span>}
         <span className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 600, wordBreak: 'break-all' }}>{c.code}</span>
         {c.sets_score && (
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 40, padding: '1px 7px' }}>
@@ -228,7 +229,7 @@ function ComponentCard({ c }: { c: CryptoComponent }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--app-t3)' }}>
         <span>{componentTypeLabel(c.algorithm_type)}</span>
         <span>·</span>
-        <span className="mono">risk {c.risk_score} ({c.risk_level})</span>
+        <span className="mono">{typeof c.risk_score === 'number' ? `risk ${c.risk_score} (${c.risk_level})` : 'risk not scored'}</span>
         {verdict && (<><span>·</span><span>{verdict}</span></>)}
       </div>
       {/* Provenance marker. Tone is deliberately the informational ACCENT, not a

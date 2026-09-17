@@ -26,6 +26,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/audit"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/devices"
+	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
@@ -43,6 +44,20 @@ type DeviceAgent struct {
 	apiClient   *api.OutboundClient
 	jobExecutor *devices.JobExecutor
 	auditLogger *audit.AuditLogger
+
+	// Control-plane-managed runtime state. The config file supplies the
+	// STARTING value for each of these; the platform owns them from the first
+	// heartbeat onwards.
+	applier       *desiredstate.Applier
+	pollEvery     *interval
+	beatEvery     *interval
+	hostInventory *hostInventorySupervisor
+
+	// collector is the host-inventory collection step. Nil means the real one;
+	// it is a field only so a test can drive the REAL supervisor and the REAL
+	// heartbeat wiring without walking the test machine's package database,
+	// which takes seconds and reports whatever host the suite runs on.
+	collector hostInventoryCollector
 }
 
 type certificateRotator interface {
@@ -246,6 +261,31 @@ func main() {
 // end here, so a freshly-configured agent behaves exactly like a restarted one.
 // apiClient may be nil, in which case one is built from cfg.
 func runAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClient) {
+	agent := newDeviceAgent(cfg, configPath, apiClient)
+
+	// Start agent
+	if err := agent.Start(); err != nil {
+		log.Fatalf("❌ Failed to start agent: %v", err)
+	}
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("🛑 Shutting down device agent...")
+	agent.Stop()
+	log.Println("✅ Device agent stopped")
+}
+
+// newDeviceAgent builds a fully wired agent, ready to Start.
+//
+// Separate from runAgent so the wiring is reachable without the signal wait —
+// and so it is wiring a test can drive rather than approximate. Every previous
+// bug in this area was a missing CALL, not a broken function: a heartbeat that
+// never carried the report, an applier never handed to the client. A test that
+// builds its own plumbing cannot see any of them.
+func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClient) *DeviceAgent {
 	if apiClient == nil {
 		apiClient = api.NewOutboundClient(cfg)
 		apiClient.SetAgentVersion(Version)
@@ -271,19 +311,28 @@ func runAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClie
 		auditLogger: auditLogger,
 	}
 
-	// Start agent
-	if err := agent.Start(); err != nil {
-		log.Fatalf("❌ Failed to start agent: %v", err)
-	}
+	// Control-plane-managed settings. The file values seed the runtime
+	// state; from the first heartbeat the platform owns them, and a local edit
+	// to a managed setting is overwritten on the next beat. That is the
+	// intended behaviour, not a side effect: the console has to be the one
+	// place an operator looks.
+	agent.applier = desiredstate.New()
+	desiredstate.SetAgentVersion(Version)
+	agent.pollEvery = newInterval(cfg.PollInterval)
+	agent.beatEvery = newInterval(cfg.HeartbeatInterval)
+	agent.hostInventory = newHostInventorySupervisor(cfg.HostInventoryInterval, agent.collectHostInventory)
+	registerManagedSettings(agent.applier, agent.hostInventory, agent.pollEvery, agent.beatEvery, func(on bool) {
+		setVerboseLogging(on)
+	})
+	// What the file says this agent is running, told to the platform on every
+	// beat. Without it the platform has nothing to go on for a device it has
+	// never been configured for, resolves the built-in defaults, and the first
+	// answer turns off whatever the file turned on.
+	agent.applier.SetLocal(localValues(cfg))
+	apiClient.SetConfigApplier(agent.applier)
+	apiClient.SetRestartHandler(newRestartCoordinator(time.Now(), exitForRestart).onRequest)
 
-	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("🛑 Shutting down device agent...")
-	agent.Stop()
-	log.Println("✅ Device agent stopped")
+	return agent
 }
 
 // isFlagSet reports whether the named flag was given on the command line, as
@@ -366,9 +415,14 @@ func (a *DeviceAgent) Start() error {
 	// on. It is not a job: the agent describes the host it is installed on, on
 	// its own cadence, with no credentials and nothing for the platform to have
 	// queued (asset-inventory ADR-0004 D3).
+	//
+	// Started through the supervisor so the control plane can turn it on and
+	// off later; the file value is only the STARTING position.
 	if a.config.HostInventoryEnabled {
 		log.Printf("🖥️  Local host inventory enabled, every %v", a.config.HostInventoryInterval)
-		go a.collectHostInventory()
+		if err := a.hostInventory.setEnabled(true); err != nil {
+			log.Printf("⚠️  Could not start host inventory: %v", err)
+		}
 	}
 
 	return nil
@@ -380,8 +434,14 @@ func (a *DeviceAgent) Start() error {
 // On start as well as on the interval, because an agent that is restarted daily
 // — a container, a laptop — would otherwise never reach its first tick and the
 // feature would appear to do nothing.
-func (a *DeviceAgent) collectHostInventory() {
-	runLocalHostInventoryLoop(a.apiClient, a.config.AgentID, a.config.HostInventoryInterval, nil)
+func (a *DeviceAgent) collectHostInventory(iv *interval, stop <-chan struct{}) {
+	if a.collector != nil {
+		// Only a test sets one. Spelled as an early return rather than a
+		// default, so the production path below stays the exact call it was.
+		runLocalHostInventoryLoopWith(a.apiClient, a.config.AgentID, iv, stop, a.collector, productionHostInventoryFloor)
+		return
+	}
+	runLocalHostInventoryLoop(a.apiClient, a.config.AgentID, iv, stop)
 }
 
 // hostInventorySubmitter is the slice of the API client the local loop needs,
@@ -398,25 +458,65 @@ type hostInventorySubmitter interface {
 // network blip, or one boot where `ss` was momentarily unavailable, would
 // otherwise silently stop host inventory forever on that host — the same
 // reasoning as the heartbeat loop's.
-func runLocalHostInventoryLoop(submitter hostInventorySubmitter, agentID string, interval time.Duration, stop <-chan struct{}) {
+func runLocalHostInventoryLoop(submitter hostInventorySubmitter, agentID string, every *interval, stop <-chan struct{}) {
+	runLocalHostInventoryLoopWith(submitter, agentID, every, stop, devices.CollectLocalHostInventory, productionHostInventoryFloor)
+}
+
+// hostInventoryCollector is the collection step, injectable so the loop's
+// TIMING can be tested without walking the test machine's package database.
+// The real collector takes seconds and reports whatever host the suite happens
+// to run on, which makes a timing assertion both slow and dependent on the
+// runner.
+type hostInventoryCollector func(ctx context.Context, agentID string) (*hostinventory.Report, *di.InterrogateResult, error)
+
+// hostInventoryFloor is config.MinHostInventoryInterval, indirected only so a
+// test can drive the REAL loop's timing in milliseconds. Production never
+// changes it.
+//
+// The seam exists because the alternative was worse: with a one-hour floor, a
+// behavioural test of "a pushed cadence wakes this loop" would have to wait an
+// hour, so it would be written against a stub instead — and a stub is exactly
+// what let the loop ship ignoring the interval while a test called
+// "picks up a new cadence" passed.
+//
+// Passed per call rather than held in a package variable. A global seam is
+// shared with every other test in the package and with goroutines from earlier
+// ones still draining: the first version raced its own Cleanup, which the race
+// detector caught, and making it atomic fixed the race while leaving the
+// ordering correct only by luck. A parameter is correct by construction.
+const productionHostInventoryFloor = config.MinHostInventoryInterval
+
+func runLocalHostInventoryLoopWith(submitter hostInventorySubmitter, agentID string, every *interval, stop <-chan struct{}, collectFn hostInventoryCollector, floor time.Duration) {
 	if submitter == nil {
 		return
 	}
-	if interval < config.MinHostInventoryInterval {
-		interval = config.MinHostInventoryInterval
+	if every == nil {
+		every = newInterval(config.DefaultHostInventoryInterval)
+	}
+	// The cadence is re-read before every wait, so a change pushed from the
+	// control plane lands on the next cycle. The floor is applied HERE too,
+	// not only at the platform: an older platform, or a hand-made request,
+	// must not be able to make a customer's host walk its package database
+	// every minute.
+	currentInterval := func() time.Duration {
+		d := every.get()
+		if d < floor {
+			d = floor
+		}
+		return d
 	}
 
 	collect := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), hostInventoryCollectTimeout)
 		defer cancel()
 
-		report, observations, err := devices.CollectLocalHostInventory(ctx, agentID)
+		report, observations, err := collectFn(ctx, agentID)
 		if err != nil {
 			log.Printf("⚠️  Host inventory collection failed: %v", err)
 			return
 		}
 		if err := submitter.SubmitHostInventory(report, observations); err != nil {
-			log.Print(hostInventorySubmitFailure(err, interval))
+			log.Print(hostInventorySubmitFailure(err, currentInterval()))
 			return
 		}
 		// Say what was learned AND what was not: a report with three failed
@@ -444,16 +544,21 @@ func runLocalHostInventoryLoop(submitter hostInventorySubmitter, agentID string,
 	// The loop is also strictly sequential — collect() returns before the next
 	// wait begins — so two collections can never overlap on one host, however
 	// long one of them takes.
-	timer := time.NewTimer(jitteredInterval(interval))
-	defer timer.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-timer.C:
-			collect()
-			timer.Reset(jitteredInterval(interval))
+	// Waited through waitCycle, NOT a private timer, so a cadence pushed from
+	// the control plane wakes this loop instead of landing after the wait
+	// already in flight. With intervals allowed up to 30 days, a private timer
+	// meant shortening 30 days to an hour could take 30 days to take effect —
+	// on the headline setting of the feature that pushes it.
+	//
+	// The jitter is applied inside waitCycle via the shape function, so it is
+	// still drawn afresh each cycle and still only ever ADDS to the interval.
+	for waitCycle(every, stop, func(d time.Duration) time.Duration {
+		if d < floor {
+			d = floor
 		}
+		return jitteredInterval(d)
+	}) {
+		collect()
 	}
 }
 
@@ -565,17 +670,12 @@ func (a *DeviceAgent) Stop() {
 	}
 }
 
-// pollForJobs continuously polls for jobs from the platform
+// pollForJobs continuously polls for jobs from the platform.
+//
+// The interval is re-read every tick rather than fixed at startup, so a change
+// pushed from the control plane takes effect without a restart.
 func (a *DeviceAgent) pollForJobs() {
-	ticker := time.NewTicker(a.config.PollInterval)
-	defer ticker.Stop()
-
-	// Poll immediately on start
-	a.executeJobPoll()
-
-	for range ticker.C {
-		a.executeJobPoll()
-	}
+	everyInterval(a.pollEvery, nil, a.executeJobPoll)
 }
 
 // heartbeatSender is the slice of the API client the heartbeat loop needs, so
@@ -584,41 +684,28 @@ type heartbeatSender interface {
 	SendHeartbeat() error
 }
 
-// sendHeartbeats reports liveness to the platform on the configured interval.
+// sendHeartbeats reports liveness to the platform on the configured interval,
+// re-read every beat so the control plane can change it live.
 func (a *DeviceAgent) sendHeartbeats() {
-	interval := a.config.HeartbeatInterval
-	if interval <= 0 {
-		interval = config.DefaultHeartbeatInterval
-	}
-	runHeartbeatLoop(a.apiClient, interval, nil)
+	runHeartbeatLoop(a.apiClient, a.beatEvery, nil)
 }
 
 // runHeartbeatLoop beats immediately, then on the interval, until stop closes.
 // A failed beat is logged and retried on the next tick — a transient network
 // blip must not silently end the agent's liveness reporting for the lifetime of
 // the process.
-func runHeartbeatLoop(sender heartbeatSender, interval time.Duration, stop <-chan struct{}) {
+func runHeartbeatLoop(sender heartbeatSender, every *interval, stop <-chan struct{}) {
 	if sender == nil {
 		return
 	}
-	beat := func() {
+	if every == nil {
+		every = newInterval(config.DefaultHeartbeatInterval)
+	}
+	everyInterval(every, stop, func() {
 		if err := sender.SendHeartbeat(); err != nil {
 			log.Printf("⚠️  Heartbeat failed: %v", err)
 		}
-	}
-
-	beat()
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			beat()
-		}
-	}
+	})
 }
 
 func (a *DeviceAgent) monitorCertificateRotation() {

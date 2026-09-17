@@ -171,10 +171,10 @@ export function LoginPage() {
             </div>
           </div>
           <h2 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 42, lineHeight: 1.05, letterSpacing: '-.03em', color: '#F6F4EF', maxWidth: 500 }}>
-            The Gold Standard<br />of Cryptographic<br />Observability.
+            Complete Inventory.<br />Cryptographic Detail.<br />Defensible Evidence.
           </h2>
           <p style={{ margin: '16px 0 0', fontSize: 15, lineHeight: 1.6, color: 'rgba(255,255,255,.6)', maxWidth: 420 }}>
-            Discover, inventory, and grade every cryptographic asset across your network — with precision, discretion, and power.
+            Discover every asset, every piece of software, and every key across your network — graded for risk, evidenced for audit.
           </p>
         </div>
       </div>

@@ -56,7 +56,7 @@ export interface GridRow {
   count: number;
   cells: GridCell[];
   totFail: number;
-  level: RiskLevel;
+  level: RiskLevel | 'Unknown';
   /** True for the synthetic catch-all row — findings whose asset_id isn't a known infrastructure asset. */
   unattributed?: boolean;
 }
@@ -132,10 +132,10 @@ export function buildControlGrid(
       };
     });
     const totFail = cells.reduce((sum, c) => sum + c.fail, 0);
-    const worst = unattributedFindings.reduce<RiskLevel>((acc, f) => {
-      const lvl = sevLevel(f.severity) as RiskLevel;
+    const worst = unattributedFindings.reduce<RiskLevel | 'Unknown'>((acc, f) => {
+      const lvl = sevLevel(f.severity);
       return sevRank(lvl) < sevRank(acc) ? lvl : acc;
-    }, 'Informational');
+    }, 'Unknown');
     rows.push({ key: UNATTRIBUTED_ROW_KEY, count: unattributedIds.size, cells, totFail, level: worst, unattributed: true });
   }
 

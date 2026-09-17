@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
+	sharedseverity "github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
 // RuleEvaluator evaluates compliance controls dynamically based on measurement mappings
@@ -55,7 +56,7 @@ func (s *RuleEvaluator) recordNotAssessed(reason string) {
 type EvaluationResult struct {
 	ControlID uuid.UUID
 	Status    string // pass, fail, not_assessed
-	Severity  string // Low, Med, High, Critical
+	Severity  string // low, medium, high, critical
 	Findings  []models.ComplianceFinding
 	// Score is nil when the control was NOT assessed. A not-assessed control has
 	// no score — it used to report 100, which is the loudest possible way of
@@ -73,9 +74,6 @@ type EvaluationResult struct {
 func (s *RuleEvaluator) notAssessed(controlID uuid.UUID, baselineSeverity, reason, rationale string) *EvaluationResult {
 	s.recordNotAssessed(reason)
 	severity := baselineSeverity
-	if severity == "" {
-		severity = "Low"
-	}
 	return &EvaluationResult{
 		ControlID:         controlID,
 		Status:            strings.ToLower(statusNotAssessed),
@@ -96,8 +94,8 @@ func (s *RuleEvaluator) EvaluateControl(tenantID, controlID uuid.UUID, framework
 
 // controlBaselineSeverity looks up a control's baseline_severity for the
 // single-control entry point (the batch entry points already carry the loaded
-// models.Control). Returns "" when the control cannot be read; callers fall
-// back to "Med" rather than failing the evaluation over a severity label.
+// models.Control). Returns "" when the control cannot be read; evaluation rejects
+// that missing grade rather than assigning a fabricated weight.
 func (s *RuleEvaluator) controlBaselineSeverity(controlID uuid.UUID, frameworkType string) string {
 	table := "platform_framework_controls"
 	if frameworkType == "tenant" {
@@ -190,6 +188,9 @@ func (s *RuleEvaluator) EvaluateControlsBatchForAsset(tenantID, assetID uuid.UUI
 // caches so extraction work is shared across the batch. baselineSeverity is the
 // control's own rating, used when a measurement carries no severity_override.
 func (s *RuleEvaluator) evaluateControlCached(tenantID, controlID uuid.UUID, frameworkType, baselineSeverity string, getValues func(string) ([]MeasurementValue, error), typeCache map[uuid.UUID]models.MeasurementType) (*EvaluationResult, error) {
+	if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(baselineSeverity)); err != nil {
+		return nil, err
+	}
 	measurements, err := s.getControlMeasurements(tenantID, controlID, frameworkType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get control measurements: %w", err)
@@ -204,13 +205,19 @@ func (s *RuleEvaluator) evaluateControlCached(tenantID, controlID uuid.UUID, fra
 	}
 
 	var allFindings []models.ComplianceFinding
-	var maxSeverity = "Low"
+	var maxSeverity = "low"
 	var totalWeight int
 	var passedWeight int
 	var checkErrors int
 
 	// Evaluate each measurement
 	for _, measurement := range measurements {
+		if measurement.SeverityOverride != "" {
+			if _, err := sharedseverity.ControlWeight(sharedseverity.Severity(measurement.SeverityOverride)); err != nil {
+				return nil, err
+			}
+		}
+
 		// Get measurement type (memoized across the batch)
 		measurementType, ok := typeCache[measurement.MeasurementTypeID]
 		if !ok {
@@ -431,7 +438,7 @@ func applyThresholdOverride(m *models.ControlMeasurement, predicateJSON []byte, 
 //
 // baselineSeverity is the owning control's `baseline_severity`. A measurement's
 // severity_override wins when set; otherwise the control's own rating applies.
-// Until CMP-9 this fell back to the literal "Med" while its comment claimed it
+// Until CMP-9 this fell back to the legacy literal "Med" while its comment claimed it
 // used the control baseline, so a Critical control's un-overridden measurements
 // silently produced Med findings — and, through statusForWorstSeverity, WARN
 // instead of FAIL.
@@ -441,7 +448,7 @@ func (s *RuleEvaluator) evaluateMeasurement(value MeasurementValue, measurement 
 		severity = baselineSeverity
 	}
 	if severity == "" {
-		severity = "Med" // Last resort: control carries no baseline either.
+		return false, "" // Caller rejects the absent baseline before evaluation.
 	}
 
 	switch measurement.RuleType {
@@ -630,20 +637,7 @@ func (s *RuleEvaluator) toFloat64(v interface{}) (float64, error) {
 }
 
 // severityLevel returns numeric level for severity comparison
-func (s *RuleEvaluator) severityLevel(severity string) int {
-	switch strings.ToLower(severity) {
-	case "critical":
-		return 4
-	case "high":
-		return 3
-	case "med":
-		return 2
-	case "low":
-		return 1
-	default:
-		return 0
-	}
-}
+func (s *RuleEvaluator) severityLevel(value string) int { return findingSeverityRank(value) }
 
 // createFinding creates a compliance finding from a measurement violation
 func (s *RuleEvaluator) createFinding(tenantID, controlID uuid.UUID, value MeasurementValue, measurement models.ControlMeasurement, measurementType models.MeasurementType, severity string) models.ComplianceFinding {
@@ -674,7 +668,7 @@ func (s *RuleEvaluator) createFinding(tenantID, controlID uuid.UUID, value Measu
 		// finding whose subject has since been archived still reads as a name
 		// rather than a UUID. nil, never "", when nothing names it.
 		SubjectLabel: subjectLabelFrom(normalizeSubjectType(value.SubjectType), value.Metadata),
-		Severity:     normalizeSeverity(severity),
+		Severity:     severity,
 		Summary:      summary,
 		Evidence:     evidence,
 		FirstSeen:    value.MeasuredAt,

@@ -23,6 +23,14 @@ type Config struct {
 	ComplianceEngineURL string
 	CBOMServiceURL      string
 
+	// PublicBaseURL is the external origin clients address this service by
+	// (scheme://host[:port]), used to build the RFC 9728 protected-resource
+	// metadata and the resource_metadata pointer in the 401 challenge. Both
+	// sources come from the chart's shared app ConfigMap and carry the same
+	// public host; OAUTH_CALLBACK_BASE_URL is preferred because auth-service
+	// derives its OAuth issuer from it, and the two must agree.
+	PublicBaseURL string
+
 	// mTLS Configuration
 	UseMTLS            bool
 	TLSPort            string
@@ -53,6 +61,11 @@ func Load() *Config {
 		ComplianceEngineURL: sharedconfig.PeerServiceURLAuto("COMPLIANCE_ENGINE_URL", "compliance-engine"),
 		CBOMServiceURL:      sharedconfig.PeerServiceURLAuto("CBOM_SERVICE_URL", "cbom-service"),
 
+		PublicBaseURL: firstNonEmpty(
+			sharedconfig.GetEnv("OAUTH_CALLBACK_BASE_URL", ""),
+			sharedconfig.GetEnv("WEB_UI_BASE_URL", ""),
+		),
+
 		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
 		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),
 		ServiceCertPath:    sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
@@ -61,4 +74,13 @@ func Load() *Config {
 		ClientKeyPath:      sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
 		PlatformCACertPath: sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

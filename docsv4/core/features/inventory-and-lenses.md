@@ -163,7 +163,12 @@ A dedicated inventory of every cryptographic key discovered across your environm
 
 ### Configuration
 
-Every discovered **Crypto Configuration**, grouped by strength — Weak, Acceptable, Strong — with the weak group expanded first so the riskiest crypto is in front of you. Each row shows the host, protocol and version, cipher suite, key details, and hash. An additional **Strength** filter (on top of Environment and Risk) lets you isolate exactly the band you care about.
+Every discovered **Crypto Configuration**, grouped by the numeric risk bands —
+Critical, High, Medium, Low, Informational — plus **Not assessed** when no numeric
+evidence establishes a score. Critical opens first so the highest numeric risk
+is in front of you. Each row shows the host, protocol and version, cipher suite,
+key details, and hash. The **Risk band** filter uses those same groups. Catalogue
+strength remains separate evidence and is not inferred from the score.
 
 **Use it when** you're hunting for weak or deprecated crypto — outdated TLS versions, weak ciphers, small key sizes — across everything at once.
 

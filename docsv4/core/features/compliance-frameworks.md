@@ -84,7 +84,7 @@ It measures both your **certificates** and your **crypto-configurations**, becau
 
 | Control | What it checks | Severity |
 |---|---|---|
-| Certificate public-key | The certificate's own key is classical (RSA/ECDSA/EdDSA) | Med |
+| Certificate public-key | The certificate's own key is classical (RSA/ECDSA/EdDSA) | Medium |
 | Certificate signature | The certificate was signed by its CA with a classical algorithm | Low (advisory — usually your CA's call) |
 | Key exchange | A configuration negotiates session keys classically (RSA/ECDH/DH) | **Critical** |
 | Authentication signature | A configuration authenticates with a classical signature | High |
@@ -106,7 +106,7 @@ what you are reporting on do you actually know anything about?
 | IH-002 | The asset has a real class, not the `unknown_host` placeholder | Low |
 | IH-003 | The asset records a location — site, region, zone or a location record | Low |
 | IH-004 | Something has observed the asset within the last 30 days | Low |
-| IH-005 | No suspected duplicate records for the asset | Med |
+| IH-005 | No suspected duplicate records for the asset | Medium |
 | IH-006 | No relationships pointing at an asset that has been archived or deleted | Low |
 
 Nothing here contributes to an asset's **risk score**. A host with no owner is
@@ -131,8 +131,8 @@ Everything here is a worklist, not a threat.
 |---|---|---|
 | LC-001 | The asset's operating system is past its end-of-life date | High |
 | LC-002 | The asset's operating system has 90 days or less of vendor support left | Low |
-| LC-003 | Installed software is past its end-of-life date | Med |
-| LC-004 | The asset's hardware is past its vendor end-of-**support** date | Med |
+| LC-003 | Installed software is past its end-of-life date | Medium |
+| LC-004 | The asset's hardware is past its vendor end-of-**support** date | Medium |
 
 LC-001 and LC-002 exist as two controls on purpose: "already unsupported" and
 "unsupported next quarter" call for different work, and a single control would
@@ -336,3 +336,9 @@ want the numbers refreshed immediately (rate-limited to once an hour).
 - [Framework Transparency](./framework-transparency.md) — reading any published framework's controls and measurements, and how a score is computed
 - [Findings](./findings.md) — what a failed control becomes
 - [Algorithm Reference](./algorithm-reference.md) — the assessments the rules measure against
+
+Control severity values in API requests are `critical`, `high`, `medium`, and
+`low`; their scoring weights are 4, 3, 2, and 1. Labels remain human-readable.
+Informational findings do not define control weights. Controls that were not
+assessed are excluded from the score; an entirely unassessed framework shows no
+score. Existing frozen reports retain the vocabulary used when they were created.

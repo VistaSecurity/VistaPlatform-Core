@@ -170,7 +170,7 @@ export interface FrameworkControlRow {
   control_id: string;
   title: string;
   description: string;
-  baseline_severity: string; // Low | Med | High | Critical
+  baseline_severity: string; // low | medium | high | critical
   crypto_relevant: boolean;
   measurements?: MeasurementRow[];
 }

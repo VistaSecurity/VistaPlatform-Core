@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/healthbands"
 )
 
 // HealthScorer handles the calculation of tenant health scores
@@ -351,18 +352,7 @@ func (hs *HealthScorer) calculateResourceCostScore(resourceCost float64) float64
 
 // determineHealthStatus converts score to status
 func (hs *HealthScorer) determineHealthStatus(score float64) string {
-	switch {
-	case score >= 90:
-		return "excellent"
-	case score >= 75:
-		return "good"
-	case score >= 60:
-		return "fair"
-	case score >= 40:
-		return "poor"
-	default:
-		return "critical"
-	}
+	return healthbands.Status(&score)
 }
 
 // generateRecommendations creates actionable recommendations

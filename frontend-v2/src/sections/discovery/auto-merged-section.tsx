@@ -12,10 +12,10 @@
 // zero. A section that appeared and said "nothing" would imply the capability
 // was on.
 import { Link } from 'react-router';
-import { Icon, MiniBar } from '../../components/ui';
+import { Icon, MiniBar, matcherConfidencePercent, percentLabel } from '../../components/ui';
 import { classLabel } from '../inventory/asset-shape';
 import type { MergeCandidate, MergeProposal } from '../inventory/asset-queries';
-import { candidateName, scoreLabel, topReasons } from './merge-proposal-row';
+import { candidateName, topReasons } from './merge-proposal-row';
 
 /**
  * The caption under the heading.
@@ -54,7 +54,8 @@ export function isReviewed(p: MergeProposal): boolean {
 function AutoMergedRow({ proposal }: { proposal: MergeProposal }) {
   const winner = acceptedCandidate(proposal);
   const others = remainingCandidates(proposal);
-  const pct = scoreLabel(proposal.accepted_score ?? 0);
+  const confidence = matcherConfidencePercent(proposal.accepted_score);
+  const pct = confidence === null ? null : percentLabel(confidence);
   const reasons = winner ? topReasons(winner) : [];
 
   return (
@@ -86,11 +87,11 @@ function AutoMergedRow({ proposal }: { proposal: MergeProposal }) {
           </Link>
         )}
         <div style={{ flex: 1 }} />
-        {pct && (
+        {confidence !== null && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <div style={{ width: 44 }}>
               <MiniBar
-                pct={Math.round((proposal.accepted_score ?? 0) * 100)}
+                pct={confidence}
                 color={(proposal.accepted_score ?? 0) >= 0.8 ? 'var(--ok)' : 'var(--warn)'}
               />
             </div>

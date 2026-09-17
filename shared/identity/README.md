@@ -155,6 +155,50 @@ EXPLAINS; with the threshold at zero it decides nothing. `matcher: none` is
 still selectable and still leaves every candidate unscored. See
 [matcher/MATCHER.md](matcher/MATCHER.md).
 
+**Floating addresses.** A MAC that resolves to one asset while the address
+beside it resolves to another is a cross-kind conflict in every case but one:
+when that is *all* the observation says. MetalLB L2, kube-vip, keepalived,
+Windows NLB, VRRP, HSRP and CARP announce a floating address by gratuitous ARP
+from whichever node holds it, using that node's own NIC, so "MAC of node X at
+address Y" is a correct L2 fact and not evidence that X and Y are one thing.
+`Engine.Resolve` recognises the shape (`floating.go`) — the observation is
+**L2-only** (source `measured`, identifiers nothing but `mac_address` and
+`ip_address`, at least one of each), every MAC resolves to X and every address
+to Y, and the store is healthy — and resolves it to **Y**, the address's asset:
+Y is touched and updated, the MAC is reported in `Unattached` (a deliberate
+skip, not a swallowed error), the fact is recorded through
+`Repository.RecordAnnouncement` (Postgres: an `asset_relationships` row of type
+`hosted_on`, Y → X, evidence in `attributes.floating_address`), X is touched
+and gets an `announces` history entry, and **no proposal is opened**.
+`Resolution.FloatingAddress` says so. The qualifier is pinned by
+`TestFloatingAddressL2OnlyIsExactlyMACAndIP`: the node's MAC arriving with a
+name, host key, serial, agent or cloud id of Y is a re-imaged, cloned or
+spoofed host, and still gets the proposal. Virtual router MACs (VRRP, HSRP,
+GLBP, CARP — `shared/hostobs.VirtualMACProtocol`) never reach the engine as
+identifiers at all; the rule here is for the nodes that announce from a real
+NIC.
+
+**Decision memory.** `kept_separate` used to be write-only. Before any proposal
+is opened, `Engine.priorDecision` asks `Repository.LastKeptSeparate` for the
+most recent proposal a reviewer resolved `kept_separate` that named every one
+of today's candidates (unordered; the earlier proposal's observation asset
+counts as one of them). Two gates, both in the engine: it must be a **pair**
+(two or more candidates — one candidate is not a decision about the next thing
+to share an identifier with it), and today's evidence must be the **same kinds
+or a subset** of what the reviewer saw (identifiers that matched the earlier
+proposal's own observation asset excepted — they were its identity, not
+evidence about the pair). A conflict that now carries an SSH host key where the
+reviewer weighed a MAC against an address is a new question and is proposed
+again. When the decision holds, the observation is resolved to the earlier
+proposal's **observation asset** if it had one (it was created to be exactly
+this observation), otherwise to the candidate the **weakest evidence** names —
+the reviewer set aside the strong kind's claim, so the address or name that
+remains says where it belongs. History records `suppressed_proposal`,
+`Resolution.Suppressed` carries the proposal, date and reviewer, and the
+auto-accept threshold never applies: no score overturns a human's no.
+Separately, `ProposalRef.Reused` lets the engine write its `merge_proposed`
+pointer entry once per question rather than once per observation.
+
 ## The floor: never an asset with no identifier
 
 `Resolve` will not create an asset that would carry no identifier. Such an asset

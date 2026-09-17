@@ -8,5 +8,8 @@
   "dependencies": {
     "fs-extra": "^11.4.0",
     "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
   }
 }

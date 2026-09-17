@@ -103,6 +103,25 @@ type activeScanBatch struct {
 	targets   []string
 	ports     []int
 	protocols []string
+	// assetsByHost keys the same assets by target host, so a batch split
+	// across executors stamps each asset by the job that actually
+	// probes its host.
+	assetsByHost map[string][]uuid.UUID
+}
+
+// subset returns the part of this batch covering only the given hosts.
+func (b activeScanBatch) subset(hosts []string) activeScanBatch {
+	out := activeScanBatch{ports: b.ports, protocols: b.protocols, assetsByHost: make(map[string][]uuid.UUID, len(hosts))}
+	for _, h := range hosts {
+		assets, ok := b.assetsByHost[h]
+		if !ok {
+			continue
+		}
+		out.targets = append(out.targets, h)
+		out.assetIDs = append(out.assetIDs, assets...)
+		out.assetsByHost[h] = assets
+	}
+	return out
 }
 
 // deriveActiveScanProtocols decides what to probe an asset with, instead of
@@ -218,14 +237,17 @@ func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
 			}
 			hosts := sh.hosts[start:end]
 			var assetIDs []uuid.UUID
+			byHost := make(map[string][]uuid.UUID, len(hosts))
 			for _, h := range hosts {
 				assetIDs = append(assetIDs, sh.assetsByHost[h]...)
+				byHost[h] = sh.assetsByHost[h]
 			}
 			out = append(out, activeScanBatch{
-				assetIDs:  assetIDs,
-				targets:   hosts,
-				ports:     sh.ports,
-				protocols: sh.protocols,
+				assetIDs:     assetIDs,
+				targets:      hosts,
+				ports:        sh.ports,
+				protocols:    sh.protocols,
+				assetsByHost: byHost,
 			})
 		}
 	}

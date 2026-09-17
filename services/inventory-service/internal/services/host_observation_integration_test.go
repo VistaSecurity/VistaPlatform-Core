@@ -188,28 +188,40 @@ func TestIntegration_HostObservation_BecomesAnAssetWithIdentifiersAndFacts(t *te
 		t.Errorf("primary_address = %q, want 192.0.2.50", primaryAddress)
 	}
 
+	// kind|value → scope. A kind can hold several rows (the mDNS name is filed
+	// twice: whole and short), so the map is keyed on both.
 	identifiers := map[string]string{}
-	rows, err := db.Query(`SELECT kind, value FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID)
+	rows, err := db.Query(`SELECT kind, value, coalesce(scope, '') FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID)
 	if err != nil {
 		t.Fatalf("read identifiers: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var kind, value string
-		if err := rows.Scan(&kind, &value); err != nil {
+		var kind, value, scope string
+		if err := rows.Scan(&kind, &value, &scope); err != nil {
 			t.Fatal(err)
 		}
-		identifiers[kind] = value
+		identifiers[kind+"|"+value] = scope
 	}
-	for kind, want := range map[string]string{
-		"mac_address": "28:cf:da:11:22:33",
-		"fqdn":        "hp-printer.local",
-		"hostname":    "hp-printer",
-		"ip_address":  "192.0.2.50",
+	for _, want := range []string{
+		"mac_address|28:cf:da:11:22:33",
+		// The `.local` name is link-scoped (RFC 6762 §3) and is filed as a
+		// SCOPED hostname, whole, never as a globally unique fqdn — an
+		// unscoped `.local` fqdn is what let a reflector's copy of one host's
+		// name absorb the host itself from another segment.
+		"hostname|hp-printer.local",
+		"hostname|hp-printer",
+		"ip_address|192.0.2.50",
 	} {
-		if got := identifiers[kind]; got != want {
-			t.Errorf("%s identifier = %q, want %q (all: %v)", kind, got, want, identifiers)
+		if _, ok := identifiers[want]; !ok {
+			t.Errorf("%s identifier missing (all: %v)", want, identifiers)
 		}
+	}
+	if scope := identifiers["hostname|hp-printer.local"]; scope == "" {
+		t.Errorf("the .local name was stored without a scope; it must identify only within the segment it was heard in (all: %v)", identifiers)
+	}
+	if scope, ok := identifiers["fqdn|hp-printer.local"]; ok {
+		t.Errorf("the .local name was stored as a globally unique fqdn (scope %q); a link-scoped name must not decide matches across segments", scope)
 	}
 
 	facts := map[string]string{}

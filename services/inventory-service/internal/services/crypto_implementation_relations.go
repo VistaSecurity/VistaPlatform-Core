@@ -59,6 +59,14 @@ func enrichCryptoImplementationsWithRelations(db *database.DB, tenantID uuid.UUI
 	if len(implementations) == 0 {
 		return nil
 	}
+	// discovery_methods is NOT NULL in the schema, but a pq.StringArray scanned
+	// from '{}' can still come back nil, and nil serialises as JSON null. The
+	// contract promises an array.
+	for i := range implementations {
+		if implementations[i].DiscoveryMethods == nil {
+			implementations[i].DiscoveryMethods = pq.StringArray{}
+		}
+	}
 
 	implementationIDs := make([]uuid.UUID, 0, len(implementations))
 	for _, implementation := range implementations {

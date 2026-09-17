@@ -137,8 +137,8 @@ describe('confidencePct', () => {
     expect(confidencePct(0.82)).toBe('82%');
   });
 
-  it('passes a value already in percent through', () => {
-    expect(confidencePct(82)).toBe('82%');
+  it('does not guess that a whole-number value uses a different unit', () => {
+    expect(confidencePct(82)).toBeNull();
   });
 
   it('treats zero as UNSCORED rather than as certainty of wrongness', () => {

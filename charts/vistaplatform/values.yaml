@@ -437,6 +437,37 @@ backends:
       # variable simply does not exist in the pod, os.Getenv returns "", and an
       # unset value means ON. The switch would be documented and unreachable.
       - {name: CLASSIFIER_MODEL_ENABLED, value: "true"}
+      # Automatic active scanning: the platform probes a newly observed INTERNAL
+      # host as soon as it appears, and probes every internal host again once the
+      # tenant's rescan interval has elapsed. Default on — the product's job is
+      # to build the inventory without being asked.
+      #
+      # This is the OPERATOR's switch; the tenant's own controls live at
+      # Settings -> Discovery -> Active Scanning. Set to "false" to stop both
+      # triggers for the whole deployment (e.g. to stage the rollout on a
+      # cluster with a large existing inventory).
+      #
+      # Here for the same reason CLASSIFIER_MODEL_ENABLED is: the code reads it
+      # with os.Getenv, and a backend's env is the shared ConfigMap plus this
+      # list. Without an entry the variable does not exist in the pod, os.Getenv
+      # returns "", an unset value means ON — and the switch is documented and
+      # unreachable.
+      - {name: DISCOVERY_AUTO_SCAN_WORKER_ENABLED, value: "true"}
+      # How often the sweep LOOKS for hosts that have become due. Not the rescan
+      # interval, which is the tenant's and is set in hours on their settings
+      # page; this only decides how promptly a due host is noticed.
+      - {name: DISCOVERY_AUTO_SCAN_SWEEP_INTERVAL, value: "15m"}
+      # How often tenants that reported a new observation are looked at. Short,
+      # because "scan it when we first see it" is the point; bounded, because it
+      # is also the window a burst of new hosts coalesces into.
+      - {name: DISCOVERY_AUTO_SCAN_TRIGGER_INTERVAL, value: "60s"}
+      # Ranges the platform must never probe on its own initiative, comma
+      # separated. The worker already excludes its own pod's addresses, but it
+      # cannot discover the cluster's pod/service CIDRs from inside a pod — name
+      # them here if they overlap ranges a tenant has registered as theirs.
+      # Empty is the right default: a cluster on its own RFC 1918 range that no
+      # tenant has claimed is already out of scope.
+      - {name: DISCOVERY_AUTO_SCAN_EXCLUDE_CIDRS, value: ""}
     image:
       digest: ""
 
@@ -628,6 +659,22 @@ backends:
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
+    extraEnv:
+      # Sensor discovery retention: once a raw sensor_discoveries row has been
+      # PROCESSED (materialized, suppressed, deferred or routed — an
+      # unprocessed row is never touched, whatever its age), it is purged
+      # after the retention window so the ingestion queue does not grow
+      # without bound. Default on — a one-sensor lab accumulated ~13.8k rows
+      # in 24 hours with nothing bounding the total before this existed.
+      #
+      # Here for the same reason DISCOVERY_AUTO_SCAN_WORKER_ENABLED is: the
+      # code reads it with os.Getenv, and a backend's env is the shared
+      # ConfigMap plus this list — without an entry the variable does not
+      # exist in the pod, os.Getenv returns "", and an unset value means ON.
+      - {name: SENSOR_DISCOVERY_RETENTION_ENABLED, value: "true"}
+      # How many hours a PROCESSED row is kept before the sweep deletes it.
+      # 168 = 7 days.
+      - {name: SENSOR_DISCOVERY_RETENTION_HOURS, value: "168"}
     image:
       digest: ""
 

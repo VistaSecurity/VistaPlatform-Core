@@ -1,0 +1,124 @@
+# Reviewed distinct policies and canonical owners. Fingerprints pin the reviewed syntax.
+# Do not regenerate blindly: a changed exception needs a semantic review.
+services/admin-service/internal/jobs/catalogfeeds/nvd.go#normalizeSeverity:
+  concept: external_cvss
+  reason: NVD source CVSS 0..10 severity with None distinct from findings Info.
+  fingerprint: 753e75c276e9a9ff0235196bc9805fe3998a418f3d868b1497c85474812cb162
+services/audit-service/internal/services/alert_service.go#getDefaultRules:
+  concept: audit_alert_policy
+  reason: Independent event count/window rules choose notification severity;
+    values are counts and minutes, not a risk index.
+  fingerprint: 3457af85cf728707bab3ef93cff7874c8b7ae5a3e03b5c83700e4fe95dab1f9a
+services/cbom-service/internal/xbom/ocsf.go#ocsfSeverityIDFor:
+  concept: external_ocsf
+  reason: OCSF severity IDs are an external serialization contract, not platform
+    ordinal ranks.
+  fingerprint: 380599222cecef59aa76703ad57215f2784e8ec8ab9882dfcad09f96ba6eecde
+services/cbom-service/internal/xbom/ocsf.go#ocsfSeverityLabel:
+  concept: external_ocsf
+  reason: OCSF numeric severity IDs map to external labels required by that
+    serialization format.
+  fingerprint: f0faccf9300e0222429d53bebe665b6425c78ea11664d37978ad3ba382a74d50
+services/compliance-engine/internal/services/alert_subscriber.go#handleCertificateExpiring:
+  concept: certificate_expiry_policy
+  reason: Days-to-expiry chooses alert urgency; it is not a numeric risk or health
+    index.
+  fingerprint: b53384ccdeb7bac6ce8dd0aa35cd643cf98df01c0809b97393750a822c059ee3
+services/compliance-engine/internal/services/findings_service.go#GetFindingsByControl:
+  concept: finding_counts
+  reason: Projects per-severity counts and paginates; comparisons are counts, not
+    score thresholds.
+  fingerprint: bbbc6b8f4f35f9b8aaa3c70641ef15661bb14e44685ef6e4802fb8bfbe0b300e
+services/inventory-service/internal/services/remediation_service.go#getKeySizeRemediation:
+  concept: key_size_remediation
+  reason: Key-size remediation urgency uses bits by algorithm family, not risk
+    score bands.
+  fingerprint: eb99c6e6fbcaca7aecc62700536b13cc5e9eca0d1b857df81d43ffb6d9c135f5
+services/resource-tracker-service/internal/service/resource_service.go#generateOptimizationSuggestions:
+  concept: resource_optimization
+  reason: CPU/memory utilization policies choose workflow priority; backend-only
+    index cleanup is deferred.
+  fingerprint: c33cfa50ca1c271831d3554b10f8739aa64d8797292fe3f45f23e49ff0a22ebc
+services/tenant-health-service/internal/scoring/health_scorer.go#generateRecommendations:
+  concept: health_recommendation_policy
+  reason: Individual resource/security/usage conditions select workflow
+    priorities, separate from overall health bands.
+  fingerprint: aa921ee30c6350fbe444350bdd605747107dc3d307b2677d2cf128569505103e
+services/tenant-health-service/internal/service/health_service.go#generateInsights:
+  concept: health_insight_policy
+  reason: Factor deficits produce advisory messages and workflow priorities, not a
+    second overall health band.
+  fingerprint: f4d62643760f753fd3396826d4fb546f9df247beb761ccc38c6764bbb674f761
+shared/cryptoparse/keysize.go#WeakCryptoSeverityScore:
+  concept: detector_score_policy
+  reason: Published existing detector contributions 90/70/50/20 are representative
+    scores, not band minima.
+  fingerprint: b20657d9beaac39a00dc22a468adcf0a50f3565573930bc589c10f6d60b1bd6d
+shared/deviceinterrogation/cisco.go#parseRunningCryptoConfig:
+  concept: cisco_rule_policy
+  reason: Vendor configuration rules report protocol/algorithm weakness; they do
+    not convert a platform score.
+  fingerprint: 0f20aa208b740a8112c1e0b1ce2b3358c6b713fe7213fc5f5ed249ea0ce9fb65
+shared/findings/producer/validate.go#validate:
+  concept: finding_validation
+  reason: Validates registry constraints, score range, subjects and severity
+    membership; no grade is computed.
+  fingerprint: 49070cb6574684a1cdd9f7c1bc8d0f3b77f6b88be8313ce160b2de5db032987d
+shared/healthbands/healthbands.go#const:Excellent:
+  concept: canonical_health_owner
+  reason: Authoritative tenant-health boundaries; generated JSON/TypeScript parity
+    tests protect consumers.
+  fingerprint: 623ba209a5e9c5ad8b908140e1c058bc241da94ee7feab2eb355300469f005ed
+shared/query/catalog/ladder/ladder.go#FromRungs:
+  concept: query_adapter
+  reason: Generic injectable constructor validates descending caller-supplied
+    rungs; production CVSS imports canonical risk bands.
+  fingerprint: 381f0567807ad920479547a809b3da4a3945dc1211d6af4ae3a902956fcadf56
+shared/riskbands/riskbands.go#RiskBands:
+  concept: canonical_risk_owner
+  reason: Authoritative risk boundaries; generated JSON/TypeScript and SQL parity
+    tests protect consumers.
+  fingerprint: 896ce213ee3305b9916eb929ab8d5d68ae8450b8ac165f08e332b8779d84adeb
+shared/severity/severity.go#Definitions:
+  concept: canonical_severity_owner
+  reason: Authoritative finding ranks and separate four-value control weights;
+    generated parity protects consumers.
+  fingerprint: dd05a4c76939e3353738f410b178dfcee4a21feb05f62564daab9856194ce110
+frontend-v2/src/sections/dashboard/dashboard-page.tsx#DashboardPage:
+  concept: dashboard_counts
+  reason: Displays per-grade counts and trends; unrelated count/length comparisons
+    are not a ladder.
+  fingerprint: 5eaa27d2a58c1409d70af50293a71117ab25f34ac8d12a6f1e8dd7ac85592b3e
+frontend-v2/src/sections/findings/findings-page.tsx#FindingsPage:
+  concept: findings_loaded_view_counts
+  reason: UI comparisons and conditional labels describe row counts, filters and
+    the bounded loaded prefix. Severity mapping delegates to shared sevLevel;
+    this component defines no numeric risk thresholds.
+  fingerprint: 1fa0306a14d7bc6279d54824d70c75d57ae17ac6ec398c589432f3a2ad754fc2
+frontend-v2/src/sections/inventory/inventory-page.tsx#InventoryPage:
+  concept: inventory_counts
+  reason: Displays grade groups and asset counts; risk conversion delegates to
+    shared helpers.
+  fingerprint: 7d39ba77c2d12db6e687b6042b3ac253796b4611f52d7f4b959ea1277e81f2fa
+frontend-v2/src/sections/posture/algorithm-reference.tsx#AlgorithmReference:
+  concept: catalogue_display
+  reason: Strength filter values, row counts and column alignment coexist; score
+    sorting does not assign strength or risk bands.
+  fingerprint: 4c796bc30e153ce4000df86dcfd650370c75f783a068527930218ea230c58fde
+frontend-v2/src/sections/posture/posture-overview.tsx#PostureOverview:
+  concept: finding_counts
+  reason: Copies server per-severity counts for exposure summaries; numeric counts
+    are not ordinal ranks.
+  fingerprint: 869a838c35479bfe78b45b53045fd074034a610d9ca480843452b949d402b21e
+shared/strength/strength.go#Definitions:
+  concept: canonical_strength_owner
+  reason: Authoritative catalogue strength vocabulary and ranks; generated
+    JSON/TypeScript parity tests protect consumers independently of numeric
+    risk.
+  fingerprint: f605fd5d1c5752bbe2f354985f2664d356d86e3186ae8172d110e9f87d109df6
+services/inventory-service/internal/services/crypto_risks_service.go#classifyConfigurationRisk:
+  concept: crypto_judgment_projection
+  reason: Qualitative reason selection compares component/rule counts. Numeric
+    bands delegate to riskbands and lifecycle severity delegates to named expiry
+    policy; no local numeric score thresholds.
+  fingerprint: e94f93ed7df454a15b402c3dd4aa4748225162ac59269e0613bc3a10dbbedb23

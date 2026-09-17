@@ -10,6 +10,7 @@
 // shared with admin-ui-v2's copy of this in
 // @vistasecurity/primitives/authoring; what lives here is the chrome and the
 // tenant endpoints.
+import { severityLabel } from '@vistasecurity/primitives/ratings';
 import { useMemo, useReducer, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -37,10 +38,10 @@ type MeasurementType = complianceEngineComponents['schemas']['MeasurementType'];
 type ComplianceClient = typeof clients.compliance;
 
 const SEVERITY_COLOR: Record<string, string> = {
-  Critical: 'var(--danger)',
-  High: 'var(--warn-strong)',
-  Med: 'var(--warn)',
-  Low: 'var(--ok-lime)',
+  critical: 'var(--danger)',
+  high: 'var(--warn-strong)',
+  medium: 'var(--warn)',
+  low: 'var(--ok-lime)',
 };
 
 /**
@@ -334,7 +335,7 @@ function DraftCard({
         {draft.control_id && <span className="mono" style={{ fontSize: 11, fontWeight: 600, color: 'var(--app-t2)' }}>{draft.control_id}</span>}
         <span style={{ flex: 1, fontSize: 13, fontWeight: 700, color: 'var(--app-t1)' }}>{draft.title}</span>
         {draft.severity && (
-          <span style={{ fontSize: 11, fontWeight: 600, color: SEVERITY_COLOR[draft.severity] ?? 'var(--app-t3)' }}>{draft.severity}</span>
+          <span style={{ fontSize: 11, fontWeight: 600, color: SEVERITY_COLOR[draft.severity] ?? 'var(--app-t3)' }}>{severityLabel(draft.severity)}</span>
         )}
         <STag color="var(--info)">unpublished</STag>
       </div>

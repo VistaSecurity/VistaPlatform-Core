@@ -94,6 +94,50 @@ func TestIntegration_JobMaterialization_NonZeroFindingsWithExplicitZeroMateriali
 	}
 }
 
+// `observed` (host observations) and `suppressed` (archived/denied assets)
+// must not be counted as pending_approval — that was the bug: the old filter
+// was `approval_status <> 'auto_approved'`, so both landed in the same bucket
+// as a row genuinely awaiting a human in Discovery → Approvals, permanently
+// overstating it. `suppressed` gets its own count; `observed` gets none — it
+// simply must not inflate pending_approval.
+//
+// Mutation that proves it: restore `approval_status <> 'auto_approved'` for
+// pending_approval — this test's pending_approval assertion goes red (4
+// instead of 1: it re-absorbs the one `observed` row and both `suppressed`
+// rows), and TestIntegration_JobMaterialization_ReportsBothNumbersSeparately
+// stays green (it never exercises `observed` or `suppressed`), which is why
+// that older test alone could not have caught the regression. (Verified by
+// running the mutation: it does NOT also move the `suppressed` count, which
+// is a separate FILTER clause the old predicate never touched.)
+func TestIntegration_JobMaterialization_ObservedAndSuppressedAreNotPendingApproval(t *testing.T) {
+	svc, raw, tenant := materializationFixture(t)
+	jobID := uuid.New().String()
+
+	queueRow(t, raw, tenant, jobID, "192.0.2.31", "pending", true)    // genuinely awaiting a human
+	queueRow(t, raw, tenant, jobID, "192.0.2.32", "observed", true)   // host observation — never awaits approval
+	queueRow(t, raw, tenant, jobID, "192.0.2.33", "suppressed", true) // archived asset — nothing to approve
+	queueRow(t, raw, tenant, jobID, "192.0.2.34", "suppressed", true) // denied asset — nothing to approve
+	queueRow(t, raw, tenant, jobID, "192.0.2.35", "auto_approved", true)
+
+	m := svc.getJobMaterialization(jobID, 5)
+	if m == nil {
+		t.Fatal("materialization unavailable")
+	}
+	if m.PendingApproval != 1 {
+		t.Errorf("pending_approval = %d, want 1 — the observed and suppressed rows must not be counted as "+
+			"awaiting a human", m.PendingApproval)
+	}
+	if m.Suppressed != 2 {
+		t.Errorf("suppressed = %d, want 2", m.Suppressed)
+	}
+	if m.AutoApproved != 1 {
+		t.Errorf("auto_approved = %d, want 1", m.AutoApproved)
+	}
+	if m.Queued != 5 {
+		t.Errorf("queued = %d, want 5 — every row still reached the queue, whatever its disposition", m.Queued)
+	}
+}
+
 // One job's counts must not include another's.
 func TestIntegration_JobMaterialization_ScopedToTheJob(t *testing.T) {
 	svc, raw, tenant := materializationFixture(t)

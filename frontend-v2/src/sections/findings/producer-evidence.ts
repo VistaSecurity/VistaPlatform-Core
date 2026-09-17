@@ -42,7 +42,7 @@ export function kindFeedsRisk(kind: string | undefined): boolean {
 }
 
 function ev(f: ComplianceFinding | undefined): Record<string, unknown> {
-  return (f?.evidence ?? {}) as Record<string, unknown>;
+  return f?.evidence ?? {};
 }
 
 function str(v: unknown): string | null {
@@ -135,18 +135,58 @@ export function cveList(f: ComplianceFinding): CVEEntry[] {
     const id = str(rec.cve_id);
     if (!id) continue;
     const score = rec.cvss_score;
+    const scored = rec.cvss_scored !== false && typeof score === 'number' && Number.isFinite(score);
     out.push({
       id,
-      cvss: typeof score === 'number' && Number.isFinite(score) ? score : null,
+      cvss: scored ? score : null,
       // Absent `cvss_scored` with a numeric score means scored; the producer
       // writes the key only when it is false.
-      scored: typeof score === 'number' && Number.isFinite(score),
+      scored,
       vector: str(rec.cvss_vector),
       href: isHttpURL(rec.source_url) ? rec.source_url : null,
       matchedBy: str(rec.matched_by),
     });
   }
   return out;
+}
+
+/** A limitation that can be proved from the evidence already on findings. */
+export interface AssessmentLimitations {
+  unscoredCves: number;
+  totalCves: number;
+  unscoredSummaries: number;
+  crypto: string[];
+}
+
+/**
+ * Derives the visible assessment limit from every CVE entry, not from the
+ * headline/worst CVE. A scored worst CVE can coexist with an unscored entry.
+ *
+ * Crypto completeness is intentionally absent here: current crypto evidence
+ * contains resolved catalogue components only, so its length cannot establish
+ * whether an observed component failed to resolve.
+ */
+export function assessmentLimitations(findings: ComplianceFinding[]): AssessmentLimitations | null {
+  const cves = findings
+    .filter((f) => f.producer === 'vulnerability')
+    .flatMap(cveList);
+  const unscoredCves = cves.filter((cve) => !cve.scored).length;
+  // Older evidence can disclose an unscored headline without listing each CVE.
+  // That proves a limitation, but supplies no denominator for a CVE count.
+  const unscoredSummaries = findings.filter((f) => f.producer === 'vulnerability'
+    && cveList(f).length === 0 && ev(f).worst_cvss_scored === false).length;
+  const crypto = [...new Set(findings
+    .filter((f) => f.producer === 'crypto')
+    .flatMap((f) => cryptoEvidence(f)?.assessmentLimitations ?? []))];
+  return unscoredCves > 0 || unscoredSummaries > 0 || crypto.length > 0
+    ? { unscoredCves, totalCves: cves.length, unscoredSummaries, crypto }
+    : null;
+}
+
+export function assessmentLimitText(limit: AssessmentLimitations): string {
+  if (limit.unscoredSummaries > 0) return 'Assessment incomplete: matching vulnerability evidence includes an unscored CVE; the full CVE list is unavailable.';
+  if (limit.unscoredCves === 0) return 'Assessment incomplete.';
+  return `Assessment incomplete: ${limit.unscoredCves} of ${limit.totalCves} matching CVE${limit.totalCves === 1 ? '' : 's'} ${limit.unscoredCves === 1 ? 'has' : 'have'} no CVSS score.`;
 }
 
 /** How many CVEs the finding claims, for a header count. */
@@ -413,6 +453,9 @@ export interface CryptoEvidence {
   /** pqc_vulnerable: the Shor-breakable codes, and the standard behind them. */
   vulnerableAlgorithms: string[];
   authority: string | null;
+  /** Exact gaps proved by the producer; absence does not prove completeness. */
+  assessmentLimitations: string[];
+  reassessmentRequired: boolean;
 }
 
 /** One catalogue component behind a configuration's score. */
@@ -474,6 +517,8 @@ export function cryptoEvidence(f: ComplianceFinding): CryptoEvidence | null {
     riskFactors: strList(e.risk_factors),
     vulnerableAlgorithms: strList(e.vulnerable_algorithms),
     authority: str(e.authority),
+    assessmentLimitations: strList(e.assessment_limitations),
+    reassessmentRequired: e.reassessment_required === true,
   };
   const anything =
     out.score !== null ||
@@ -482,6 +527,8 @@ export function cryptoEvidence(f: ComplianceFinding): CryptoEvidence | null {
     out.publicKeyAlgorithm !== null ||
     out.signatureAlgorithm !== null ||
     out.riskFactors.length > 0 ||
-    out.vulnerableAlgorithms.length > 0;
+    out.vulnerableAlgorithms.length > 0 ||
+    out.assessmentLimitations.length > 0 ||
+    out.reassessmentRequired;
   return anything ? out : null;
 }
