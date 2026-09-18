@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-17T09:45:34Z",
-  "generated_date": "2026-09-17",
+  "generated_at": "2026-09-18T09:19:14Z",
+  "generated_date": "2026-09-18",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/35206711727",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/35328766942",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -58,7 +58,7 @@
           "package": "google.golang.org/grpc",
           "installed": "v1.82.1",
           "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
-          "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.82.2 and ...",
+          "title": "google.golang.org/grpc: gRPC-Go: Denial of Service via malformed RPC requests",
           "target": "usr/bin/caddy"
         }
       ]
@@ -198,7 +198,7 @@
           "package": "google.golang.org/grpc",
           "installed": "v1.82.1",
           "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
-          "title": "gRPC-Go is the Go language implementation of gRPC. Prior to 1.82.2 and ...",
+          "title": "google.golang.org/grpc: gRPC-Go: Denial of Service via malformed RPC requests",
           "target": "usr/bin/caddy"
         }
       ]
