@@ -250,7 +250,8 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
   // does this row: with more than one candidate still available the reviewer
   // chooses, and with none available there is nothing to merge into.
   const mustChoose = alive.length > 1;
-  const canMerge = !!survivor && alive.some((c) => c.asset_id === survivor);
+  const hasObservation = !!proposal.observation_asset_id;
+  const canMerge = hasObservation && !!survivor && alive.some((c) => c.asset_id === survivor);
 
   return (
     <div
@@ -283,8 +284,10 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
             disabled={busy || !canMerge}
             title={canMerge
               ? 'Merge into the selected asset. Its History records what was merged in.'
-              : 'No candidate is available to merge into.'}
-            onClick={() => { if (survivor) onAccept(survivor); }}
+              : !hasObservation
+                ? 'This proposal has no observation asset to merge.'
+                : 'No candidate is available to merge into.'}
+            onClick={() => { if (canMerge && survivor) onAccept(survivor); }}
             style={{ opacity: canMerge ? 1 : 0.5 }}
           >
             <Icon name="git-merge" size={12} />Merge
@@ -299,6 +302,12 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
           </button>
         </PermissionGate>
       </div>
+
+      {!hasObservation && (
+        <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>
+          This sighting has no separate asset to merge. Review the candidates; choose Keep separate only if they are different assets.
+        </div>
+      )}
 
       {proposal.reason && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>{proposal.reason}</div>

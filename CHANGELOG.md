@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0-rc.13] - 2026-09-17
+## [1.0.0-rc.14] - 2026-09-17
 
 This is the first release of the **general asset inventory**: the product now
 inventories every kind of asset, not only cryptographic material. Assets are
@@ -121,6 +121,8 @@ the product documentation so this file stays readable.
 <!-- release-notes-end -->
 
 ### Fixed
+
+- Merge proposals without an observation asset now return a conflict and disable Merge in Approvals, preventing invalid merge attempts from tripping the inventory gateway circuit breaker and interrupting dashboard reads.
 
 - Host name enrichment preserves declared and legacy human names, keeps UniFi
   aliases out of identity matching, records name changes, and treats observed

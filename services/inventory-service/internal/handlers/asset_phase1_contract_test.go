@@ -366,6 +366,7 @@ func TestContract_MergeProposals_ErrorStatuses(t *testing.T) {
 	}{
 		{services.ErrMergeProposalNotFound, http.StatusNotFound},
 		{services.ErrMergeProposalResolved, http.StatusConflict},
+		{services.ErrMergeObservationMissing, http.StatusConflict},
 		{services.ErrMergeCandidateNotInProposal, http.StatusBadRequest},
 		{errors.New("boom"), http.StatusInternalServerError},
 	} {

@@ -79,3 +79,24 @@ describe('identity confidence component wiring', () => {
     expect(unscored).not.toContain('>0%</span>');
   });
 });
+
+describe('merge source eligibility', () => {
+  it.each([undefined, '', 'source-asset'])('requires an observation asset (%s)', (observationId) => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <MergeProposalRow
+          proposal={proposal({
+            observation_asset_id: observationId,
+            candidates: [candidate('survivor', 'Survivor', 0.8)],
+          })}
+          onAccept={vi.fn()}
+          onKeepSeparate={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    const mergeButton = html.match(/<button[^>]*>.*?Merge<\/button>/)?.[0];
+    expect(mergeButton).toBeDefined();
+    expect(mergeButton?.includes('disabled')).toBe(!observationId);
+    expect(html.includes('This sighting has no separate asset to merge.')).toBe(!observationId);
+  });
+});

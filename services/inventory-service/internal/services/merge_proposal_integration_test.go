@@ -685,3 +685,42 @@ func TestIntegration_MergeProposal_MovesEveryReferrer(t *testing.T) {
 		}
 	}
 }
+
+// A conflicted sighting may never create an observation asset. Trying to
+// accept it is a domain conflict, and must leave both candidates untouched.
+func TestIntegration_MergeProposal_MissingObservation(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	svc := NewMergeProposalService(db)
+	source := seedAsset(t, db, tenant, "conflict-source", "server", "hardware.computer.server", "production", 0, 0)
+	target := seedAsset(t, db, tenant, "conflict-target", "server", "hardware.computer.server", "production", 0, 0)
+	for _, autoAccepted := range []bool{false, true} {
+		proposal := openProposal(t, db, tenant, source, target)
+		_, err := db.Exec(`UPDATE asset_history SET changes_json = changes_json ||
+   jsonb_build_object('observation_asset_id', '', 'auto_accepted', $2::boolean)
+   WHERE id = $1`, proposal, autoAccepted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = svc.Accept(context.Background(), tenant, proposal, target, uuid.Nil)
+		if !errors.Is(err, ErrMergeObservationMissing) {
+			t.Fatalf("auto=%v: got %v", autoAccepted, err)
+		}
+		var status string
+		if err := db.QueryRow(`SELECT changes_json->>'status' FROM asset_history WHERE id=$1`, proposal).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "pending" {
+			t.Fatalf("proposal changed: %s", status)
+		}
+	}
+	var archived int
+	if err := db.QueryRow(`SELECT count(*) FROM assets WHERE tenant_id=$1 AND asset_status='archived'`, tenant).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived != 0 {
+		t.Fatal("a candidate was archived")
+	}
+}

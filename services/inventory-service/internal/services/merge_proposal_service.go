@@ -127,6 +127,9 @@ var ErrMergeProposalResolved = errors.New("merge proposal has already been decid
 // API merge two assets a reviewer never saw compared.
 var ErrMergeCandidateNotInProposal = errors.New("the chosen asset is not a candidate of this proposal")
 
+// ErrMergeObservationMissing means the proposal has no source record to merge.
+var ErrMergeObservationMissing = errors.New("this proposal has no observation asset to merge")
+
 // ErrMergeSurvivorArchived is returned when the chosen survivor is archived or
 // soft-deleted — most often because an EARLIER proposal already merged it away.
 // Merging into a tombstone buries the observation behind a pointer to somewhere
@@ -377,12 +380,10 @@ func (s *MergeProposalService) Accept(ctx context.Context, tenantID, proposalID,
 			return err
 		}
 		if v.ObservationAssetID == nil {
-			// An auto-accepted proposal already wrote the observation into an
-			// existing asset, so there is no third asset to merge away. The
-			// remaining work is the reviewer's decision about the OTHER
-			// candidates, which is a separate act; accepting here would have
-			// nothing to move.
-			return fmt.Errorf("this proposal has no observation asset to merge (it was auto-accepted into %v)", v.AcceptedAssetID)
+			// Conflicting identifiers and auto-accepted sightings can both
+			// produce proposals without a separate observation asset. This is
+			// a domain conflict, not a service failure.
+			return ErrMergeObservationMissing
 		}
 		if *v.ObservationAssetID == survivorID {
 			return ErrMergeCandidateNotInProposal

@@ -463,6 +463,11 @@ func writeMergeProposalError(c *gin.Context, err error) bool {
 			"error":   "Invalid survivor_asset_id",
 			"message": "the chosen asset is not one of this proposal's candidates",
 		})
+	case errors.Is(err, services.ErrMergeObservationMissing):
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "This proposal has no observation asset to merge",
+			"message": "Review the candidate assets; this proposal cannot merge them without a source asset.",
+		})
 	case errors.Is(err, services.ErrMergeSurvivorArchived):
 		// 409, not 400: the request was valid when the page was rendered. Some
 		// OTHER decision archived this candidate since, which is a conflict
