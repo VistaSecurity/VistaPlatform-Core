@@ -64,7 +64,8 @@ const (
 	// It is spelled to match the `os.name` fact key a host inventory writes,
 	// so an intake holding that fact passes it straight through under a name
 	// that means the same thing on both sides.
-	FactOSName = "os_name"
+	FactOSName    = "os_name"
+	FactOSVersion = "os_version"
 )
 
 // RuleClassifier answers the Classifier seam from the curated rule table
@@ -162,6 +163,7 @@ func classifyInput(facts AssetFacts) classify.ClassifyInput {
 		LLDPCapabilities:  factStrings(facts.Facts, FactLLDPCapabilities),
 		CDPCapabilities:   factStrings(facts.Facts, FactCDPCapabilities),
 		OS:                factString(facts.Facts, FactOSName),
+		OSVersion:         factString(facts.Facts, FactOSVersion),
 	}
 }
 

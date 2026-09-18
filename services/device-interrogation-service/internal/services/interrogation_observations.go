@@ -31,9 +31,11 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -43,10 +45,12 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 	"github.com/vistasecurity/vistaplatform/shared/classify/classifystore"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/classproposal"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identityaudit"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
@@ -209,6 +213,18 @@ func (s *ObservationSink) Persist(
 	at := time.Now().UTC()
 	self := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	var errs []error
+
+	// DHCP-backed VLANs must exist as cidr segments BEFORE peers are resolved,
+	// so ScopeForAddress can mark lease IPs dynamic and they cannot vote.
+	for _, f := range wrapped.Facts {
+		if f.Key != facts.KeyNetVlans {
+			continue
+		}
+		ctx = context.WithValue(ctx, observedDHCPKey{}, append(observedDHCP(ctx), vlanSegmentSpecs(f.Value)...))
+		if err := s.ensureVLANSegments(ctx, tenantID, f.Value); err != nil {
+			return fmt.Errorf("vlan segments: %w", err)
+		}
+	}
 
 	if wrapped.DeviceIdentity != nil {
 		if err := s.persistIdentity(ctx, repo, self, source, at, wrapped.DeviceIdentity); err != nil {
@@ -521,6 +537,11 @@ func (s *ObservationSink) resolveObservationWith(
 			if rErr != nil {
 				return rErr
 			}
+			if intent.FirstHand && !res.Asset.Zero() && res.Outcome != identity.OutcomeConflict {
+				if err := r.ProjectSegmentLocation(ctx, res.Asset, obs.Network.SegmentID, obs.Source); err != nil {
+					return err
+				}
+			}
 			// Reset per attempt. The retry below runs this whole closure a
 			// second time against a different asset, and a `Promoted` left over
 			// from the attempt that rolled back would be a promotion nothing
@@ -640,6 +661,14 @@ var errPeerContested = errors.New("the peer's identity is contested, so the edge
 // context and a database to do it with.
 func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUID, peer di.PeerRef, source identity.Source, at time.Time) (identity.Observation, classify.ClassProposal, error) {
 	scope, dynamicScope := s.scopeFor(ctx, tenantID, peer)
+	if addr, err := netip.ParseAddr(peer.Identifier(di.IdentifierIPAddress)); err == nil {
+		for _, segment := range observedDHCP(ctx) {
+			prefix, err := netip.ParsePrefix(segment.CIDR)
+			if err == nil && segment.Dynamic && prefix.Contains(addr.Unmap()) {
+				dynamicScope = true
+			}
+		}
+	}
 	obs := identity.Observation{
 		TenantID:    tenantID.String(),
 		ClassHint:   peer.ClassHint,
@@ -666,7 +695,14 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 			return identity.Observation{}, classify.ClassProposal{}, fmt.Errorf("peer identifier kind %q is not one of the nine", id.Kind)
 		}
 		if kind == identity.KindHostname && strings.Contains(strings.TrimSuffix(id.Value, "."), ".") {
-			kind = identity.KindFQDN
+			// A dotted name is usually an FQDN — except `.local`, which is
+			// link-scoped (RFC 6762 §3). Filing those as unscoped FQDNs is the
+			// mDNS reflector merge: a gateway that reflected a laptop's
+			// announcement absorbed the laptop by name. Keep `.local` as a
+			// scoped hostname, the same rule host-observation ingest uses.
+			if !hostnamequality.IsMDNSLocalName(id.Value) {
+				kind = identity.KindFQDN
+			}
 		}
 		// hostname and ip_address identify only WITHIN a scope; the other kinds
 		// a collector can report about a peer are globally unique, and a scope
@@ -678,12 +714,21 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
 			Kind: kind, Value: id.Value, Scope: identifierScope, Confidence: 1,
 		})
-		if obs.DisplayName == "" {
-			obs.DisplayName = id.Value
+	}
+	var names []string
+	if obs.DisplayName != "" {
+		names = append(names, obs.DisplayName)
+	}
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindHostname || id.Kind == identity.KindFQDN {
+			names = append(names, id.Value)
 		}
-		if kind == identity.KindHostname || kind == identity.KindFQDN {
-			obs.Hostname = strings.ToLower(id.Value)
-		}
+	}
+	if d := hostnamequality.Best(names...); d != "" {
+		obs.DisplayName = d
+	}
+	if h := hostnamequality.BestHostname(peerIdentifierNames(obs.Identifiers)...); h != "" {
+		obs.Hostname = strings.ToLower(h)
 	}
 
 	// A peer the COLLECTOR could not class — an LLDP neighbour that advertised
@@ -804,4 +849,102 @@ func (s *ObservationSink) applyPeerClassRules(ctx context.Context, obs *identity
 	// gets fixed rather than the asset guessed at.
 	classproposal.Apply(obs, out)
 	return out
+}
+
+type observedDHCPKey struct{}
+
+func observedDHCP(ctx context.Context) []vlanSegmentSpec {
+	specs, _ := ctx.Value(observedDHCPKey{}).([]vlanSegmentSpec)
+	return specs
+}
+
+type vlanSegmentSpec struct {
+	CIDR    string
+	Name    string
+	Dynamic bool
+}
+
+// vlanSegmentSpecs extracts cidr segments from a net.vlans fact. Only entries
+// that declare dhcp_enabled are UniFi-style networks with DHCP posture; a
+// Cisco VLAN id with no prefix is not a scope.
+func vlanSegmentSpecs(value any) []vlanSegmentSpec {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil
+	}
+	var out []vlanSegmentSpec
+	for _, e := range entries {
+		dhcp, hasDHCP := e["dhcp_enabled"].(bool)
+		if !hasDHCP {
+			continue
+		}
+		subnet, _ := e["subnet"].(string)
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(subnet))
+		if err != nil {
+			continue
+		}
+		name, _ := e["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			name = prefix.Masked().String()
+		}
+		out = append(out, vlanSegmentSpec{
+			CIDR:    prefix.Masked().String(),
+			Name:    name,
+			Dynamic: dhcp,
+		})
+	}
+	return out
+}
+
+func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID uuid.UUID, value any) error {
+	if s.db == nil {
+		return nil
+	}
+	specs := vlanSegmentSpecs(value)
+	if len(specs) == 0 {
+		return nil
+	}
+	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		for _, spec := range specs {
+			metadata, err := json.Marshal(map[string]any{
+				"dynamic": spec.Dynamic,
+				"source":  "unifi",
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO public.network_segments
+					(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
+				VALUES ($1, $2, 'cidr', $3, 'private', 'production'::public.environment_type, true, $4::jsonb)
+				ON CONFLICT (tenant_id, value, coalesce(cloud_network_ref, ''::text)) DO NOTHING`,
+				tenantID, spec.Name, spec.CIDR, string(metadata)); err != nil {
+				return fmt.Errorf("insert vlan segment %s: %w", spec.CIDR, err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE public.network_segments
+				SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+				    updated_at = now()
+				WHERE tenant_id = $1 AND value = $2 AND segment_type = 'cidr'
+				  AND metadata->>'source' = 'unifi' AND coalesce(cloud_network_ref, '') = ''`,
+				tenantID, spec.CIDR, string(metadata)); err != nil {
+				return fmt.Errorf("update vlan segment %s: %w", spec.CIDR, err)
+			}
+		}
+		return nil
+	})
+}
+
+func peerIdentifierNames(ids []identity.Identifier) []string {
+	var names []string
+	for _, id := range ids {
+		if id.Kind == identity.KindHostname || id.Kind == identity.KindFQDN {
+			names = append(names, id.Value)
+		}
+	}
+	return names
 }

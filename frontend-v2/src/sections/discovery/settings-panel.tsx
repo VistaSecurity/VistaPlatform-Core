@@ -26,7 +26,7 @@ import {
   type SettingValue,
   type VersionInfo,
 } from './agent-config';
-import { NeedsConfirmation, type SaveResult } from './agent-config-queries';
+import { NeedsConfirmation, saveResultFrom, type SaveResult } from './agent-config-queries';
 
 const TONE: Record<string, string> = {
   ok: 'var(--ok)',
@@ -75,7 +75,7 @@ export function SettingsPanel({
     setError(null);
     try {
       const out = await save(overridesToSend(settings, edited, scope), confirmed);
-      setResult(out);
+      setResult(saveResultFrom(out));
       setEdited({});
       setConfirming(null);
     } catch (e) {
@@ -221,7 +221,7 @@ export function SettingsPanel({
               className="ui-btn sm ghost"
               disabled={saving}
               title="Remove this device's overrides and follow the fleet defaults"
-              onClick={() => { setEdited({}); void save({}, false).then(setResult).catch((e) => setError(e instanceof Error ? e.message : 'Could not revert')); }}
+              onClick={() => { setEdited({}); void save({}, false).then((out) => setResult(saveResultFrom(out))).catch((e) => setError(e instanceof Error ? e.message : 'Could not revert')); }}
             >
               Revert to fleet defaults
             </button>

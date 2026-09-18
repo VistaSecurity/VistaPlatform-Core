@@ -5309,6 +5309,11 @@ export interface components {
             tenant_id: string;
             /** Format: uuid */
             asset_id: string;
+            /**
+             * Format: uuid
+             * @description The endpoint carrying this crypto configuration, when known.
+             */
+            endpoint_id?: string | null;
             protocol: string;
             protocol_version: string | null;
             cipher_suite: string | null;

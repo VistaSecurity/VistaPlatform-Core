@@ -128,10 +128,16 @@ func TestIntegration_SensorDesiredConfig_DNSNeedsConfirmation(t *testing.T) {
 		t.Errorf("DNS decoding = %v after a REFUSED save; a 409 must not be a partial write", got)
 	}
 
-	// With the flag: accepted.
-	if w := call(t, h.PutSensorDesiredConfig, tenant, http.MethodPut,
-		`{"values":{"host_observation_dns":true},"confirmed":true}`, p); w.Code != http.StatusOK {
+	// With the flag: accepted. The write body must carry JSON arrays, never
+	// null — a nil `adjusted` is how turning DNS on saved and then crashed the
+	// settings panel on `result.adjusted.map`.
+	w = call(t, h.PutSensorDesiredConfig, tenant, http.MethodPut,
+		`{"values":{"host_observation_dns":true},"confirmed":true}`, p)
+	if w.Code != http.StatusOK {
 		t.Fatalf("PUT with confirmation = %d: %s", w.Code, w.Body.String())
+	}
+	if _, ok := decode(t, w)["adjusted"].([]any); !ok {
+		t.Fatalf("adjusted = %v, want a JSON array (nil encodes as null and the web UI maps it)", decode(t, w)["adjusted"])
 	}
 	if got := settingValue(t, call(t, h.GetSensorDesiredConfig, tenant, http.MethodGet, "", p),
 		agentconfig.KeyHostObservationDNS); got != true {

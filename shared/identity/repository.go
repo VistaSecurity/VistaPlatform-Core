@@ -36,6 +36,7 @@ type AssetSummary struct {
 	Ref         AssetRef     `json:"ref"`
 	ClassKey    string       `json:"class_key"`
 	DisplayName string       `json:"display_name"`
+	Hostname    string       `json:"hostname,omitempty"`
 	Identifiers []Identifier `json:"identifiers,omitempty"`
 	Status      string       `json:"status"`
 
@@ -508,6 +509,12 @@ type Repository interface {
 	// late-arriving old observation is still evidence the asset existed then,
 	// not evidence it has not been seen since.
 	Touch(ctx context.Context, asset AssetRef, seenAt time.Time) error
+
+	// PromoteNames raises hostname and display_name when the incoming names
+	// are strictly better quality, or equal quality with a higher identity
+	// source rank. It never demotes and never overwrites a declared (human
+	// edited) name. Empty incoming values are ignored.
+	PromoteNames(ctx context.Context, asset AssetRef, hostname, displayName, sourceKind string) error
 
 	// RecordHistory appends one `asset_history` row.
 	RecordHistory(ctx context.Context, e HistoryEntry) error

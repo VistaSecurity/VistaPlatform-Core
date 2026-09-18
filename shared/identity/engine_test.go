@@ -112,6 +112,53 @@ func TestResolveMatchesOnSerialAndUpdates(t *testing.T) {
 	assertHistory(t, repo, res.Asset.ID, identity.ActionCreated, identity.ActionUpdated)
 }
 
+func TestResolvePromotesLinux2OverHexLocal(t *testing.T) {
+	e, repo := newEngine(t, identity.Config{})
+	first := obs(assetclass.KeyUnknownHost,
+		scoped(identity.KindHostname, "4c6e0a87d480.local", identity.ScopeTenantDefault),
+		scoped(identity.KindIPAddress, "192.168.1.68", identity.ScopeTenantDefault),
+	)
+	first.Hostname = "4c6e0a87d480.local"
+	first.DisplayName = "4c6e0a87d480.local"
+	created := mustResolve(t, e, first)
+	if repo.Hostname(created.Asset) != "4c6e0a87d480.local" {
+		t.Fatalf("created hostname = %q, want the first-seen hex .local", repo.Hostname(created.Asset))
+	}
+
+	second := obs(assetclass.KeyUnknownHost,
+		scoped(identity.KindHostname, "linux-2", identity.ScopeTenantDefault),
+		scoped(identity.KindIPAddress, "192.168.1.68", identity.ScopeTenantDefault),
+	)
+	second.Hostname = "linux-2"
+	second.ObservedAt = observedAt.Add(time.Minute)
+	matched := mustResolve(t, e, second)
+	if matched.Outcome != identity.OutcomeMatched || matched.Asset.ID != created.Asset.ID {
+		t.Fatalf("outcome = %s asset %s, want matched on %s", matched.Outcome, matched.Asset.ID, created.Asset.ID)
+	}
+	if got := repo.Hostname(matched.Asset); got != "linux-2" {
+		t.Fatalf("hostname after linux-2 = %q", got)
+	}
+	if got := repo.DisplayName(matched.Asset); got != "linux-2" {
+		t.Fatalf("display after linux-2 = %q", got)
+	}
+
+	third := first
+	third.ObservedAt = observedAt.Add(2 * time.Minute)
+	again := mustResolve(t, e, third)
+	if got := repo.Hostname(again.Asset); got != "linux-2" {
+		t.Fatalf("later hex mDNS reverted hostname to %q", got)
+	}
+
+	repo.SetNameSourceDeclared(created.Asset)
+	fourth := second
+	fourth.Hostname = "bobbydubs"
+	fourth.ObservedAt = observedAt.Add(3 * time.Minute)
+	_ = mustResolve(t, e, fourth)
+	if got := repo.Hostname(created.Asset); got != "linux-2" {
+		t.Fatalf("declared name was overwritten: %q", got)
+	}
+}
+
 // TestResolvePrecedenceHigherKindDecides is the mutation target for the
 // precedence walk: a lower-precedence kind matching the same asset must NOT
 // take the decision from a higher one.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 )
 
 // Outcome is what [Engine.Resolve] decided.
@@ -684,7 +685,7 @@ func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Tim
 		ClassSourceRef:  classRef,
 		ClassConfidence: classConf,
 		DisplayName:     displayNameFor(obs, attach),
-		Hostname:        obs.Hostname,
+		Hostname:        hostnameFor(obs, attach),
 		PrimaryAddress:  primaryAddressFor(obs, attach),
 		Status:          StatusPendingApproval,
 		Ownership:       obs.Network.Ownership,
@@ -803,7 +804,7 @@ func (e *Engine) conflictOutcome(
 		ClassSourceRef:  classRef,
 		ClassConfidence: classConf,
 		DisplayName:     displayNameFor(obs, attach),
-		Hostname:        obs.Hostname,
+		Hostname:        hostnameFor(obs, attach),
 		PrimaryAddress:  primaryAddressFor(obs, attach),
 		Status:          StatusPendingApproval,
 		Ownership:       obs.Network.Ownership,
@@ -957,8 +958,39 @@ func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation
 	if err := e.repo.Touch(ctx, ref, at); err != nil {
 		return fmt.Errorf("identity: touching %s: %w", ref.ID, err)
 	}
+	before, err := e.repo.LoadSummaries(ctx, ref.TenantID, []string{ref.ID})
+	if err != nil {
+		return err
+	}
+	// A name belonging to another asset is not context for this one either.
+	for _, id := range unattached {
+		if id.Kind != KindHostname && id.Kind != KindFQDN && id.Kind != KindName {
+			continue
+		}
+		if strings.EqualFold(obs.Hostname, id.Value) {
+			obs.Hostname = ""
+		}
+		if strings.EqualFold(obs.DisplayName, id.Value) {
+			obs.DisplayName = ""
+		}
+	}
+	if err := e.repo.PromoteNames(ctx, ref, hostnameFor(obs, attach), hostnamequality.Best(nameCandidates(obs, attach)...), obs.Source.NameKind()); err != nil {
+		return fmt.Errorf("identity: promoting names on %s: %w", ref.ID, err)
+	}
 	if changes == nil {
 		changes = map[string]any{}
+	}
+	after, err := e.repo.LoadSummaries(ctx, ref.TenantID, []string{ref.ID})
+	if err != nil {
+		return err
+	}
+	if len(before) == 1 && len(after) == 1 {
+		if before[0].Hostname != after[0].Hostname {
+			changes["hostname"] = map[string]string{"from": before[0].Hostname, "to": after[0].Hostname}
+		}
+		if before[0].DisplayName != after[0].DisplayName {
+			changes["display_name"] = map[string]string{"from": before[0].DisplayName, "to": after[0].DisplayName}
+		}
 	}
 	changes["identifiers"] = identifierKeys(attach)
 	changes["endpoints"] = endpointKeys(eps)
@@ -1283,13 +1315,10 @@ func stampEndpoints(eps []EndpointObservation, src Source, at time.Time) []Endpo
 }
 
 func displayNameFor(obs Observation, ids []Identifier) string {
-	if obs.DisplayName != "" {
-		return obs.DisplayName
+	if picked := hostnamequality.Best(nameCandidates(obs, ids)...); picked != "" {
+		return picked
 	}
-	if obs.Hostname != "" {
-		return obs.Hostname
-	}
-	for _, want := range []Kind{KindFQDN, KindHostname, KindCloudResourceID, KindSerialNumber, KindIPAddress} {
+	for _, want := range []Kind{KindCloudResourceID, KindSerialNumber, KindIPAddress} {
 		for _, id := range ids {
 			if id.Kind == want {
 				return id.Value
@@ -1305,6 +1334,28 @@ func displayNameFor(obs Observation, ids []Identifier) string {
 		}
 	}
 	return "unidentified"
+}
+
+func hostnameFor(obs Observation, ids []Identifier) string {
+	obs.DisplayName = "" // display aliases are not hostnames
+	return hostnamequality.BestHostname(nameCandidates(obs, ids)...)
+}
+
+func nameCandidates(obs Observation, ids []Identifier) []string {
+	out := make([]string, 0, 4+len(ids))
+	if obs.DisplayName != "" {
+		out = append(out, obs.DisplayName)
+	}
+	if obs.Hostname != "" {
+		out = append(out, obs.Hostname)
+	}
+	for _, id := range ids {
+		switch id.Kind {
+		case KindFQDN, KindHostname, KindName:
+			out = append(out, id.Value)
+		}
+	}
+	return out
 }
 
 func primaryAddressFor(obs Observation, ids []Identifier) string {

@@ -723,9 +723,9 @@ func TestIntegration_HostObservation_IngestIsTenantIsolatedUnderRLS(t *testing.T
 			}
 		})
 
-		// The FQDN, because hostObservationBestName prefers a qualified name —
-		// it is the one a CMDB can join on.
-		if want := strings.ToLower(name) + "-printer.local"; hostname != want {
+		// The short hostname, because hostObservationBestName ranks a DHCP-style
+		// name above a human `.local` (hex `.local` is even lower).
+		if want := strings.ToLower(name) + "-printer"; hostname != want {
 			t.Errorf("tenant %s sees hostname %q, want %q — one MAC on two segments is two assets", name, hostname, want)
 		}
 		if identifiers != 1 {
@@ -756,4 +756,50 @@ func asTenant(t *testing.T, db *sql.DB, tenant uuid.UUID, fn func(tx *sql.Tx)) {
 		t.Fatalf("set app.tenant_id: %v", err)
 	}
 	fn(tx)
+}
+
+func TestIntegration_HostObservation_ProjectsSiteWithoutListeners(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	location, segment := uuid.New(), uuid.New()
+	if _, err := db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'North','site')`, location, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'North','cidr','192.0.2.0/24','production',$3)`, segment, tenant, location); err != nil {
+		t.Fatal(err)
+	}
+	ho := &hostobs.HostObservation{Source: hostobs.SourceARP, MAC: "00:1a:2b:11:22:33", Addresses: addrsFor(t, "192.0.2.50"), ObservedAt: time.Now().UTC()}
+	var firstID uuid.UUID
+	for i := 0; i < 2; i++ {
+		if i == 1 {
+			ho.Source = hostobs.SourceMDNS
+			ho.FQDNs = []string{"improved.example.test"}
+		}
+		if _, err := svc.IngestFindings(tenant, []IngestFinding{observationFinding(t, ho)}); err != nil {
+			t.Fatal(err)
+		}
+		var id uuid.UUID
+		var site, loc, class, name string
+		if err := db.QueryRow(`SELECT id,site,location_id::text,class_key,coalesce(hostname,'') FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant).Scan(&id, &site, &loc, &class, &name); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			firstID = id
+		} else if firstID != id {
+			t.Fatal("name changed identity")
+		}
+		if i == 1 && name != "improved.example.test" {
+			t.Fatalf("name promotion=%q", name)
+		}
+
+		if site != "North" || loc != location.String() || class != "unknown_host" {
+			t.Fatalf("placement/class=%s %s %s", site, loc, class)
+		}
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json ? 'location_id'`, firstID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("placement histories=%d", n)
+	}
 }

@@ -178,3 +178,10 @@ func TestClassFacts_RoundTripsEveryKindOfEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestClassFactsCarriesSplitWindowsRelease(t *testing.T) {
+	got := Explain(context.Background(), RuleClassifier{Engine: classify.Default()}, ClassFacts(classify.ClassifyInput{OS: "Windows", OSVersion: "11"}))
+	if got.Class != "computer" {
+		t.Fatalf("split OS release lost across seam: %+v", got)
+	}
+}

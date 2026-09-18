@@ -215,6 +215,24 @@ func (s Source) Producer() string {
 	return s.Ref
 }
 
+// NameKind is the value stored in `assets.metadata.name_source_kind` so a later
+// observation can decide whether it may promote hostname / display_name.
+func (s Source) NameKind() string {
+	switch s.Kind {
+	case SourceDeclared:
+		return "declared"
+	case SourceImported:
+		return "imported"
+	case SourceInferred:
+		return "inferred"
+	case SourceMeasured:
+		if s.Mode == ModeActive {
+			return "measured-active"
+		}
+	}
+	return "measured-passive"
+}
+
 // Valid reports whether the source is usable: a known kind and a non-empty
 // ref. A value with no producer cannot be audited, reconciled or filtered, and
 // all three of those are the point.

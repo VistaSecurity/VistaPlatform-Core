@@ -17,6 +17,8 @@ export type PqcProgressRollup = {
 };
 
 export type DashboardPqcMetric = {
+  /** Whole percent. `pqc_percentage` is a float (ready/total), so a tenant with
+   *  4 of 11 implementations read "36.36363636363637%" on the tiles. */
   adoptionPercent: number;
   /** PQC-ready + symmetric-only (no asymmetric component to migrate). */
   pqcReady: number;
@@ -98,7 +100,7 @@ export const DASHBOARD_HIGH_RISK_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_HI
 export const DASHBOARD_UNSCORED_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_UNSCORED_QUERY);
 
 export function getDashboardPqcMetric(progress: PqcProgressRollup | null | undefined): DashboardPqcMetric {
-  const adoptionPercent = progress?.pqc_percentage ?? 0;
+  const adoptionPercent = Math.round(progress?.pqc_percentage ?? 0);
   const pqcReadyOnly = progress?.pqc_ready ?? 0;
   const symmetricSafe = progress?.symmetric_safe ?? 0;
   const total = progress?.total_implementations ?? 0;

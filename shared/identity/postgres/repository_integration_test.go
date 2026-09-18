@@ -446,6 +446,10 @@ func (c *contractRepo) Touch(ctx context.Context, asset identity.AssetRef, seenA
 	return c.inner.Touch(ctx, c.ref(asset), seenAt)
 }
 
+func (c *contractRepo) PromoteNames(ctx context.Context, asset identity.AssetRef, hostname, displayName, sourceKind string) error {
+	return c.inner.PromoteNames(ctx, c.ref(asset), hostname, displayName, sourceKind)
+}
+
 func (c *contractRepo) RecordHistory(ctx context.Context, e identity.HistoryEntry) error {
 	e.TenantID = c.tenantID(e.TenantID)
 	e.AssetID = c.assetID(e.AssetID)

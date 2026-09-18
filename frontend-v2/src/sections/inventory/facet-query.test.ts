@@ -12,7 +12,7 @@ import { check, defaultOptions, newRegistryCatalog, CVSS_LADDER, withLadder } fr
 import { OPEN_FINDINGS_QUERY } from '@vistasecurity/primitives/findings';
 import {
   applyFacetChange, cycleFindings, emptyFacets, facetCount, facetsEmpty, facetsToQuery,
-  FACET_LABEL, OPEN_FINDINGS, queryToFacets, quoteValue, setFacetClass, toggleFacetValue,
+  FACET_LABEL, OPEN_FINDINGS, queryToFacets, quoteValue, setFacetClass, toggleFacetValue, UNSET_BUCKET,
   type FacetState,
 } from './facet-query';
 
@@ -46,6 +46,14 @@ describe('facetsToQuery', () => {
     const q = facetsToQuery(facets({ class: 'hardware' }));
     expect(q).toBe('class:hardware');
     assertValid(q);
+    // A nested pick writes the PATH. `class:server` is a valid key and the SQL
+    // translator looks it up, but the facet buckets and the evaluator both
+    // prefix-match the literal against class_path.
+    const nested = facetsToQuery(facets({ class: 'server' }));
+    expect(nested).toBe('class:hardware.computer.server');
+    assertValid(nested);
+    expect(queryToFacets(nested).facets.class).toBe('server');
+    expect(queryToFacets('class:server').facets.class).toBe('server');
   });
 
   it('writes one value as field:value and several as a field:(a or b) group', () => {
@@ -61,7 +69,7 @@ describe('facetsToQuery', () => {
 
   it('ANDs across facets and ORs within one', () => {
     const q = facetsToQuery(facets({ class: 'server', environment: ['production', 'staging'], status: ['monitoring'] }));
-    expect(q).toBe('class:server and status:monitoring and (environment:production or environment:staging)');
+    expect(q).toBe('class:hardware.computer.server and status:monitoring and (environment:production or environment:staging)');
     assertValid(q);
   });
 
@@ -78,6 +86,49 @@ describe('facetsToQuery', () => {
     const kv = facetsToQuery(facets({ tag: ['tier=gold'] }));
     expect(kv).toBe('tag.tier:gold');
     assertValid(kv);
+  });
+
+  it('writes unset owner and business unit as not exists, not as the sentinel string', () => {
+    // The facet SQL is COALESCE(col, 'Unknown'). Writing owner_email:Unknown
+    // matches the literal, so a preview of 39 unset assets applied to an empty
+    // list. environment:Unknown is worse: the field is a closed enum and the
+    // server answers 400.
+    const owner = facetsToQuery(facets({ owner: [UNSET_BUCKET] }));
+    expect(owner).toBe('not exists(owner_email) or owner_email=""');
+    assertValid(owner);
+    const bu = facetsToQuery(facets({ business_unit: [UNSET_BUCKET] }));
+    expect(bu).toBe('not exists(business_unit) or business_unit=""');
+    assertValid(bu);
+    const env = facetsToQuery(facets({ environment: [UNSET_BUCKET] }));
+    expect(env).toBe('not exists(environment)');
+    assertValid(env);
+    const segment = facetsToQuery(facets({ segment: ['Unsegmented'] }));
+    expect(segment).toBe('not exists(segment_id)');
+    assertValid(segment);
+    const named = facetsToQuery(facets({ segment: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'] }));
+    expect(named).toBe('segment_id:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    assertValid(named);
+    // A human segment NAME is what the old facet buckets emitted, and it is
+    // not a uuid — that click is the 400.
+    expect(() => assertValid('segment_id:DMZ')).toThrow(/invalid query|type_mismatch|uuid/i);
+  });
+
+  it('ORs unset with a real value on the same field', () => {
+    const q = facetsToQuery(facets({ owner: [UNSET_BUCKET, 'ops@example.com'] }));
+    assertValid(q);
+    const back = queryToFacets(q);
+    expect(back.extra).toEqual([]);
+    expect(back.facets.owner.sort()).toEqual(['Unknown', 'ops@example.com'].sort());
+  });
+
+  it('ANDs unset owner with unset business unit — the click that hid every asset', () => {
+    const q = facetsToQuery(facets({ owner: [UNSET_BUCKET], business_unit: [UNSET_BUCKET] }));
+    expect(q).toBe('(not exists(owner_email) or owner_email="") and (not exists(business_unit) or business_unit="")');
+    assertValid(q);
+    const back = queryToFacets(q);
+    expect(back.facets.owner).toEqual([UNSET_BUCKET]);
+    expect(back.facets.business_unit).toEqual([UNSET_BUCKET]);
+    expect(back.extra).toEqual([]);
   });
 
   it('quotes a value that is not a safe bareword', () => {
@@ -102,7 +153,7 @@ describe('facetsToQuery', () => {
 
   it('appends terms the rail cannot express, unchanged', () => {
     const q = facetsToQuery(facets({ class: 'server' }), ['depends_on:(class=database_instance)']);
-    expect(q).toContain('class:server');
+    expect(q).toContain('class:hardware.computer.server');
     expect(q).toContain('depends_on:(class=database_instance)');
     assertValid(q);
   });
@@ -297,7 +348,7 @@ describe('the findings facet', () => {
   it('writes that term back unchanged when a facet is clicked', () => {
     const read = queryToFacets('class:server and finding:(producer:eol and severity >= high)');
     const out = facetsToQuery(setFacetClass(read.facets, 'switch'), read.extra);
-    expect(out).toContain('class:switch');
+    expect(out).toContain('class:hardware.network_device.switch');
     expect(out).toContain('producer:eol');
     assertValid(out);
   });
@@ -319,7 +370,7 @@ describe('a facet click over an unparsable query (gate1 C2)', () => {
     expect(read.unparsed).toBe(false);
     const out = applyFacetChange(read, setFacetClass(read.facets, 'server'));
     expect(out).not.toBeNull();
-    expect(out).toContain('class:server');
+    expect(out).toContain('class:hardware.computer.server');
     expect(out).toContain('environment:production');
   });
 
@@ -331,4 +382,32 @@ describe('a facet click over an unparsable query (gate1 C2)', () => {
     const out = applyFacetChange(read, setFacetClass(read.facets, 'server'));
     expect(out).toContain('risk:high');
   });
+});
+
+
+describe('unset facet semantics', () => {
+  it('does not broaden a manually entered NULL-only or empty-only filter', () => {
+    for (const q of ['not exists(owner_email)', 'owner_email=""']) {
+      const read = queryToFacets(q);
+      expect(read.facets.owner).toEqual([]);
+      expect(read.extra).toHaveLength(1);
+      expect(facetsToQuery(read.facets, read.extra)).toBe(q);
+    }
+  });
+  it('round trips unset together with multiple named values', () => {
+    const state = facets({owner: [UNSET_BUCKET, 'one@example.test', 'two@example.test']});
+    const q = facetsToQuery(state);
+    assertValid(q);
+    const read = queryToFacets(q);
+    expect(read.extra).toEqual([]);
+    expect(read.facets.owner.sort()).toEqual(state.owner.sort());
+  });
+});
+
+
+it('preserves a tenant-defined class path when another facet changes', () => {
+  const path = 'hardware.computer.server.customer_worker';
+  const read = queryToFacets(`class:${path}`);
+  const out = facetsToQuery({...read.facets, owner: ['ops@example.test']}, read.extra);
+  expect(out).toContain(`class:${path}`);
 });

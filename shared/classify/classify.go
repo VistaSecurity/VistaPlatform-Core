@@ -149,22 +149,12 @@ type ClassifyInput struct {
 	// fact this table exists to avoid.
 	CDPCapabilities []string
 
-	// OS is the operating system the host named when asked — the `os.name`
-	// fact a host inventory writes ("Microsoft Windows 11 Pro", "Ubuntu"), or
-	// the OS a vendor management API reported.
-	//
-	// The only field here whose evidence comes from INSIDE the host. Every
-	// other input is something the subject emitted onto a network or an
-	// identifier registered to a manufacturer, which is why a general-purpose
-	// computer — no OUI worth a class, no sysObjectID, no advertised
-	// capability, a model string no catalogue enumerates — used to match
-	// nothing at all.
-	//
-	// The VERSION is deliberately not part of it. `os.name` and `os.version`
-	// are separate facts, the version's spelling varies by collector far more
-	// than the name's, and no shipped rule needs it: "Windows Server" is the
-	// claim, not "Windows Server 2022 build 20348".
+	// OS is the reported operating-system caption, such as "Windows Server"
+	// or "Microsoft Windows 11 Pro". A generic Windows name can be paired
+	// with an explicit client release in OSVersion.
 	OS string
+	// OSVersion is the separately reported release; kernel/build numbers do not establish an edition.
+	OSVersion string
 }
 
 // ClassProposal is what the engine concluded, and why.
@@ -487,7 +477,7 @@ func (e *Engine) match(facts ClassifyInput) []Rule {
 	out = append(out, e.matchCapabilities(KindCDPCapabilities, facts.CDPCapabilities)...)
 	out = append(out, e.matchCapabilities(KindLLDPCapability, facts.LLDPCapabilities)...)
 	out = append(out, e.matchMDNSServices(facts.MDNSServices)...)
-	out = append(out, e.matchOSName(facts.OS)...)
+	out = append(out, e.matchOSName(osRuleEvidence(facts.OS, facts.OSVersion))...)
 
 	return out
 }
@@ -921,6 +911,13 @@ func foldVendor(s string) string {
 			b.WriteRune(r - 'A' + 'a')
 		}
 	}
+	// Collector abbreviations and the OUI registry name describe the same vendor.
+	switch b.String() {
+	case "hpe":
+		return "hewlettpackardenterprise"
+	case "hp":
+		return "hewlettpackard"
+	}
 	return b.String()
 }
 
@@ -980,4 +977,24 @@ func topString(refs []RuleRef, get func(RuleRef) string) (string, bool) {
 		break
 	}
 	return leader, false
+}
+
+// osRuleEvidence accepts a named client release alongside a generic Windows
+// name. Full captions pass through unchanged. A kernel version (10.0.22631)
+// cannot distinguish Windows 10, Windows 11 or Windows Server.
+func osRuleEvidence(name, version string) string {
+	name = strings.TrimSpace(name)
+	if !strings.EqualFold(name, "Windows") && !strings.EqualFold(name, "Microsoft Windows") {
+		return name
+	}
+	fields := strings.Fields(version)
+	if len(fields) == 0 {
+		return name
+	}
+	switch strings.ToLower(fields[0]) {
+	case "xp", "vista", "7", "8", "8.1", "10", "11":
+		return name + " " + strings.TrimSpace(version)
+	default:
+		return name
+	}
 }

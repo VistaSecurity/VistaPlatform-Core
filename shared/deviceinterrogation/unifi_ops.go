@@ -4,6 +4,9 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 )
 
 // UniFi ops facts and observed topology (asset-inventory ADR-0004 D1 item 1).
@@ -27,8 +30,10 @@ import (
 //     this projection exists to close was exactly those.
 //   - An LLDP neighbour's `system_desc`. It is a vendor banner, unbounded, and
 //     no consumer reads it; the neighbour's name, MAC and port are the identity.
-//   - The client list (`stat/sta`). Endpoint discovery from clients is its own
-//     decision with its own privacy shape, deliberately out of this workstream.
+//
+// Clients (`stat/sta`) are collected as PeerRefs: MAC (skipping LAA and
+// virtual-router addresses), scoped IP, DHCP hostname. `.local` stays a
+// hostname. Secrets, fingerprints and notes are not on the allowlist.
 
 // unifiDeviceStructuredFields names the device-object fields that are READ for
 // facts and edges but never copied into asset metadata.
@@ -527,6 +532,179 @@ func unifiTableEntries(device map[string]interface{}, table string) []map[string
 		}
 	}
 	return out
+}
+
+// unifiClientInventoryFields is the allowlist of `stat/sta` fields we keep.
+// Fingerprints, notes (emails), raw user objects and every `x_*` secret stay
+// off this list — the same discipline as unifiDeviceInventoryFields.
+var unifiClientInventoryFields = []string{
+	"mac",       // hardware identity; skipped when LAA or virtual-router
+	"ip",        // lease address; recorded, does not vote on a DHCP segment
+	"hostname",  // DHCP hostname
+	"name",      // controller alias → DisplayName, even with spaces
+	"oui",       // manufacturer prefix; class evidence, not identity
+	"is_wired",  // wired vs wireless
+	"ap_mac",    // wireless attachment
+	"sw_mac",    // wired attachment
+	"essid",     // SSID
+	"network",   // UniFi network name
+	"vlan",      // 802.1Q tag
+	"last_seen", // unix seconds
+}
+
+// unifiEmitClientObservations turns the controller's station list into peer
+// subjects and connects_to edges to the AP or switch they attach to.
+//
+// A client with no AP/switch MAC still has to land as an identity observation
+// — that is how a DHCP hostname joins an existing ARP row. Subject facts are
+// the ingest vehicle when there is no edge; ObservationSink resolves a fact's
+// Subject the same way it resolves a relationship end.
+func unifiEmitClientObservations(result *InterrogateResult, clients []map[string]interface{}) {
+	if result == nil {
+		return
+	}
+	for _, raw := range clients {
+		client := unifiProject(raw, unifiClientInventoryFields)
+		peer := unifiClientPeer(client)
+		if len(peer.Identifiers) == 0 {
+			continue
+		}
+		if oui := firstUnifiString(client, "oui"); oui != "" {
+			result.addSubjectFact(peer, factHWVendor, oui, ConfidenceDerived)
+		}
+		if iface := unifiClientInterface(client); len(iface) > 0 {
+			result.addSubjectFact(peer, factNetInterfaces, []map[string]interface{}{iface}, ConfidenceReported)
+		}
+		attrs := map[string]interface{}{}
+		if essid := firstUnifiString(client, "essid"); essid != "" {
+			attrs["essid"] = essid
+		}
+		if netName := firstUnifiString(client, "network"); netName != "" {
+			attrs["network"] = netName
+		}
+		if wired, ok := client["is_wired"].(bool); ok {
+			attrs["is_wired"] = wired
+		}
+		if vlan := firstUnifiNumber(client, "vlan"); vlan > 0 {
+			attrs["vlan"] = vlan
+		}
+		if seen := firstUnifiNumber(client, "last_seen"); seen > 0 {
+			attrs["last_seen"] = seen
+		}
+		for _, key := range []string{"ap_mac", "sw_mac"} {
+			mac := firstUnifiString(client, key)
+			if unifiSkipHardwareMAC(mac) {
+				continue
+			}
+			infra := PeerRef{}
+			if !infra.AddIdentifier(IdentifierMACAddress, mac) {
+				continue
+			}
+			edgeAttrs := map[string]interface{}{}
+			for k, v := range attrs {
+				edgeAttrs[k] = v
+			}
+			edgeAttrs["via"] = key
+			result.addRelationship(RelationshipObservation{
+				Type:       relTypeConnectsTo,
+				Direction:  SubjectToPeer,
+				Subject:    peer,
+				Peer:       infra,
+				Attributes: edgeAttrs,
+			})
+		}
+	}
+}
+
+// unifiClientPeer builds the PeerRef naming a controller-reported client.
+func unifiClientPeer(client map[string]interface{}) PeerRef {
+	alias := firstUnifiString(client, "name")
+	hostname := firstUnifiString(client, "hostname")
+	display := alias
+	if display == "" {
+		display = hostname
+	}
+	peer := peerRef(display, "")
+	mac := firstUnifiString(client, "mac")
+	if !unifiSkipHardwareMAC(mac) {
+		peer.AddIdentifier(IdentifierMACAddress, mac)
+	}
+	peer.AddIdentifier(IdentifierIPAddress, firstUnifiString(client, "ip"))
+	unifiAddClientName(&peer, hostname)
+	return peer
+}
+
+// unifiAddClientName files a client name as hostname or FQDN. `.local` stays
+// a hostname so ingest cannot promote it to an unscoped FQDN.
+func unifiAddClientName(peer *PeerRef, name string) {
+	if peer == nil || strings.TrimSpace(name) == "" {
+		return
+	}
+	if _, err := canonicalIP(name); err == nil {
+		return
+	}
+	if _, err := canonicalMAC(name); err == nil {
+		return
+	}
+	if hostnamequality.IsMDNSLocalName(name) || !strings.Contains(strings.TrimSuffix(name, "."), ".") {
+		peer.AddIdentifier(IdentifierHostname, name)
+		return
+	}
+	peer.AddIdentifier(IdentifierFQDN, name)
+	peer.AddIdentifier(IdentifierHostname, name)
+}
+
+// unifiSkipHardwareMAC reports MACs that must not become identifiers: empty,
+// locally-administered, and virtual-router addresses. Relayed mDNS plus a
+// rotating phone MAC is how one host becomes many CIs.
+func unifiSkipHardwareMAC(mac string) bool {
+	mac = strings.TrimSpace(mac)
+	if mac == "" {
+		return true
+	}
+	if hostobs.MACLocallyAdministered(mac) {
+		return true
+	}
+	_, virtual := hostobs.VirtualMACProtocol(mac)
+	return virtual
+}
+
+// unifiClientInterface projects the station's MAC/IP/VLAN onto one
+// net.interfaces item so ObservationSink can resolve the peer even when there
+// is no AP/switch edge. LAA/virtual MACs stay off the item — they are not
+// identity, and putting them here would reintroduce the rotating-CI path
+// through a fact instead of an identifier.
+func unifiClientInterface(client map[string]interface{}) map[string]interface{} {
+	entry := map[string]interface{}{}
+	if wired, ok := client["is_wired"].(bool); ok && wired {
+		entry["name"] = "lan"
+	} else {
+		entry["name"] = "wlan"
+	}
+	mac := firstUnifiString(client, "mac")
+	if !unifiSkipHardwareMAC(mac) {
+		if canon, err := canonicalMAC(mac); err == nil {
+			entry["mac"] = canon
+		}
+	}
+	if ip := firstUnifiString(client, "ip"); ip != "" {
+		if addr, err := netip.ParseAddr(ip); err == nil {
+			bits := 32
+			if addr.Is6() {
+				bits = 128
+			}
+			entry["addresses"] = []string{netip.PrefixFrom(addr, bits).String()}
+		}
+	}
+	if vlan := firstUnifiNumber(client, "vlan"); vlan > 0 {
+		entry["vlan"] = vlan
+	}
+	if _, hasMAC := entry["mac"]; !hasMAC {
+		if _, hasAddr := entry["addresses"]; !hasAddr {
+			return nil
+		}
+	}
+	return entry
 }
 
 // unifiProject copies the allowlisted fields of one vendor object and nothing

@@ -218,6 +218,7 @@ func TestProjectionAllowlists_NameNoSecretFields(t *testing.T) {
 		"unifiEthernetFields":            unifiEthernetFields,
 		"unifiLLDPFields":                unifiLLDPFields,
 		"unifiUplinkFields":              unifiUplinkFields,
+		"unifiClientInventoryFields":     unifiClientInventoryFields,
 		"httpCertificateFields":          httpCertificateFields,
 	}
 

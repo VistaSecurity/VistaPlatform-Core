@@ -180,7 +180,6 @@ func (s *AgentService) RegisterAgent(ctx context.Context, tenantID uuid.UUID, re
 	`
 
 	agent := &models.Agent{}
-	var tenantIDOut uuid.UUID
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		// Global uniqueness check — deliberately on the bypass handle rather than
 		// this tx, so a key already burned by another tenant is still rejected.
@@ -190,7 +189,7 @@ func (s *AgentService) RegisterAgent(ctx context.Context, tenantID uuid.UUID, re
 		return tx.QueryRowContext(ctx, query,
 			agentID, tenantID, req.RegistrationKey, req.Platform, req.Version, "active", now, now,
 		).Scan(
-			&agent.ID, &tenantIDOut, &agent.RegistrationKey, &agent.Platform, &agent.Version,
+			&agent.ID, &agent.TenantID, &agent.RegistrationKey, &agent.Platform, &agent.Version,
 			&agent.Status, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
 		)
 	})
@@ -322,10 +321,9 @@ func (s *AgentService) ListAgents(ctx context.Context, tenantID uuid.UUID) ([]*m
 
 		for rows.Next() {
 			agent := &models.Agent{}
-			var tenantIDOut uuid.UUID
 			var addressesJSON []byte
 			if scanErr := rows.Scan(
-				&agent.ID, &tenantIDOut, &agent.Name, &agent.Description, &agent.Platform,
+				&agent.ID, &agent.TenantID, &agent.Name, &agent.Description, &agent.Platform,
 				&agent.Profile, &agent.Version, &agent.Status, &agent.IPAddress,
 				&agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
 				&agent.JobCount, &agent.LastJobAt, &addressesJSON,

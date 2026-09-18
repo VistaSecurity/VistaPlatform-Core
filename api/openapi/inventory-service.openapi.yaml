@@ -10460,6 +10460,12 @@ components:
         asset_id:
           type: string
           format: uuid
+        endpoint_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
+          description: The endpoint carrying this crypto configuration, when known.
         protocol:
           type: string
         protocol_version:

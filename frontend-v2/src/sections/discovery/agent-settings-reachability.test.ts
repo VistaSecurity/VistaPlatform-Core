@@ -303,6 +303,13 @@ describe('the settings surface is wired to the API', () => {
     expect(panel).toMatch(/await save\(overridesToSend\(/);
   });
 
+  it('a successful save with JSON-null arrays cannot crash the panel', () => {
+    // Go encodes a nil slice as `null`. The settings panel then did
+    // `result.adjusted.map` after turning host_observation_dns on — the write
+    // landed, the ErrorBoundary swallowed the drawer.
+    expect(panel).toMatch(/setResult\(saveResultFrom\(/);
+  });
+
   it('passes its own scope to overridesToSend', () => {
     // Belt and braces. `scope` is a required parameter, so dropping it is a
     // compile error — but TS2554 says "expected 3 arguments", which tells a
@@ -522,7 +529,7 @@ describe('each runtime talks to its own service', () => {
     // config surface — so an operator would edit a sensor and silently write
     // an agent's settings.
     expect(sensorQueries).toMatch(/clients\.sensors\.GET\('\/sensors\/\{sensor_id\}\/desired-config'/);
-    expect(sensorQueries).toMatch(/clients\.sensors\.PUT\('\/sensors\/\{sensor_id\}\/desired-config'/);
+    expect(sensorQueries).toMatch(/return saveResultFrom\(data\)/);
     expect(sensorQueries).toMatch(/clients\.sensors\.(GET|PUT)\('\/sensors\/config\/defaults'/);
     expect(sensorQueries).not.toMatch(/clients\.devices\./);
 
@@ -539,6 +546,7 @@ describe('each runtime talks to its own service', () => {
   it('agent queries use the device-interrogation client and its paths', () => {
     expect(agentQueries).toMatch(/clients\.devices\.GET\('\/agents\/\{id\}\/config'/);
     expect(agentQueries).toMatch(/clients\.devices\.PUT\('\/agents\/\{id\}\/config'/);
+    expect(agentQueries).toMatch(/return saveResultFrom\(data\)/);
     expect(agentQueries).not.toMatch(/clients\.sensors\./);
   });
 });

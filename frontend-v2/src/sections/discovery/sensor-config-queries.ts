@@ -13,7 +13,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import type { ConfigStatus, Setting, SettingValue, VersionInfo } from './agent-config';
-import { NeedsConfirmation, problemText, type ConfigChange, type SaveResult } from './agent-config-queries';
+import { NeedsConfirmation, problemText, saveResultFrom, type ConfigChange, type SaveResult } from './agent-config-queries';
 
 export interface SensorConfig {
   settings: Setting[];
@@ -62,7 +62,7 @@ export function useSaveSensorConfig(sensorId: string) {
       });
       if (response.status === 409) throw new NeedsConfirmation(confirmationFrom(error));
       if (error || !data) throw new Error(problemText(error) ?? 'Failed to save the configuration');
-      return data;
+      return saveResultFrom(data);
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-config', sensorId] });
@@ -80,7 +80,7 @@ export function useSaveSensorFleetDefaults() {
       });
       if (response.status === 409) throw new NeedsConfirmation(confirmationFrom(error));
       if (error || !data) throw new Error(problemText(error) ?? 'Failed to save the fleet defaults');
-      return data;
+      return saveResultFrom(data);
     },
     onSuccess: () => {
       // Every inheriting sensor's effective settings just changed, so the

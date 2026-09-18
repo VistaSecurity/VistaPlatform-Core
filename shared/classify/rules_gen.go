@@ -10,7 +10,7 @@ package classify
 // device agent, a unit test) classifies exactly as a service with one does
 // until an admin curates the table.
 //
-// 567 rules: oui 462, sysobjectid 24, enip 1, cloud_type 18, banner 8, port_profile 2, model 32, platform 7, cdp_capabilities 3, lldp_capability 3, mdns_service 4, os_name 3.
+// 570 rules: oui 462, sysobjectid 24, enip 1, cloud_type 18, banner 8, port_profile 2, model 34, platform 7, cdp_capabilities 3, lldp_capability 3, mdns_service 5, os_name 3.
 var generatedRules = []Rule{
 	{Kind: "oui", Pattern: "000001", Vendor: "Xerox", Confidence: 0.85, SourceURL: "https://standards-oui.ieee.org/"},
 	{Kind: "oui", Pattern: "00000A", Class: "ot_device", Vendor: "Omron", Confidence: 0.7, SourceURL: "https://standards-oui.ieee.org/"},
@@ -552,6 +552,8 @@ var generatedRules = []Rule{
 	{Kind: "model", Pattern: "N5K-", Class: "switch", Vendor: "Cisco Systems", Confidence: 0.85, SourceURL: "https://www.cisco.com/c/en/us/products/switches/nexus-5000-series-switches/index.html"},
 	{Kind: "model", Pattern: "N7K-", Class: "switch", Vendor: "Cisco Systems", Confidence: 0.85, SourceURL: "https://www.cisco.com/c/en/us/products/switches/nexus-7000-series-switches/index.html"},
 	{Kind: "model", Pattern: "N9K-", Class: "switch", Vendor: "Cisco Systems", Confidence: 0.85, SourceURL: "https://www.cisco.com/c/en/us/products/switches/nexus-9000-series-switches/index.html"},
+	{Kind: "model", Pattern: "PowerEdge", Class: "server", Vendor: "Dell", Confidence: 0.85, SourceURL: "https://www.dell.com/en-us/shop/servers-storage-and-networking/poweredge-r650-rack-server/spd/poweredge-r650"},
+	{Kind: "model", Pattern: "ProLiant", Class: "server", Vendor: "Hewlett Packard", Confidence: 0.85, SourceURL: "https://buy.hpe.com/us/en/compute/rack-servers/proliant-dl300-servers/hpe-proliant-dl360-gen10-server/p/1010007891"},
 	{Kind: "model", Pattern: "WS-C", Class: "switch", Vendor: "Cisco Systems", Confidence: 0.85, SourceURL: "https://www.cisco.com/c/en/us/products/switches/index.html"},
 	{Kind: "model", Pattern: "uap", Class: "access_point", Vendor: "Ubiquiti Networks", Confidence: 0.85, SourceURL: "https://help.ui.com/hc/en-us/articles/360012192813"},
 	{Kind: "model", Pattern: "uck", Class: "wireless_controller", Vendor: "Ubiquiti Networks", Confidence: 0.85, SourceURL: "https://help.ui.com/hc/en-us/articles/360012192813"},
@@ -574,6 +576,7 @@ var generatedRules = []Rule{
 	{Kind: "lldp_capability", Pattern: "wlan_access_point", Class: "access_point", Confidence: 0.75, SourceURL: "https://standards.ieee.org/ieee/802.1AB/7514/"},
 	{Kind: "mdns_service", Pattern: "_ipp._tcp", Class: "printer", Confidence: 0.75, SourceURL: "https://www.rfc-editor.org/rfc/rfc8011.html"},
 	{Kind: "mdns_service", Pattern: "_ipps._tcp", Class: "printer", Confidence: 0.75, SourceURL: "https://www.rfc-editor.org/rfc/rfc8010.html"},
+	{Kind: "mdns_service", Pattern: "_matter._tcp", Class: "iot_device", Confidence: 0.75, SourceURL: "https://csa-iot.org/all-solutions/matter/"},
 	{Kind: "mdns_service", Pattern: "_pdl-datastream._tcp", Class: "printer", Confidence: 0.7, SourceURL: "https://www.pwg.org/ipp/everywhere.html"},
 	{Kind: "mdns_service", Pattern: "_printer._tcp", Class: "printer", Confidence: 0.75, SourceURL: "https://datatracker.ietf.org/doc/html/rfc1179"},
 	{Kind: "os_name", Pattern: "(?i)\\bwindows[ ]+(xp|vista|7|8|8\\.1|10|11)\\b", Class: "computer", Confidence: 0.75, SourceURL: "https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information"},

@@ -33,12 +33,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -94,6 +97,13 @@ func newUniFiControllerForTest(t *testing.T, controllerName string) *httptest.Se
 				 "vlan_enabled":true,"vlan":20,"ip_subnet":"198.51.100.1/24",
 				 "dhcpd_enabled":false,"x_wpa_psk":"`+unifiPoison+`"}
 			]`)
+		case strings.HasSuffix(r.URL.Path, "/stat/sta"):
+			ok(w, `[{
+				"mac":"4c:6e:0a:87:d4:80","ip":"192.0.2.68","hostname":"linux-2","name":"linux-2",
+				"oui":"Intel","is_wired":true,"sw_mac":"78:8a:20:4b:ee:41","network":"Default","vlan":1,
+				"x_fingerprint":"`+unifiPoison+`","fingerprint":"`+unifiPoison+`",
+				"note":"operator@example.com `+unifiPoison+`"
+			}]`)
 		case strings.HasSuffix(r.URL.Path, "/stat/device"):
 			ok(w, `[{
 				"name":"Office Switch","ip":"192.0.2.11","mac":"78:8a:20:4b:ee:41",
@@ -155,6 +165,8 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
+
+	hexLocalID := seedHexLocalHost(t, db, tenant, "4c:6e:0a:87:d4:80", "4c6e0a87d480.local")
 
 	registry := di.NewRegistry()
 	interrogator, err := registry.Get("unifi")
@@ -241,6 +253,53 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 		t.Errorf("%d edges written, want at least the adoption and the neighbour link", seen)
 	}
 
+	// --- UniFi client joined the hex .local CI by MAC and promoted linux-2 --
+	clientID := assetByIdentifier(t, db, tenant, "mac_address", "4c:6e:0a:87:d4:80")
+	if clientID != hexLocalID {
+		t.Errorf("client MAC minted a new asset %s; want join onto hex .local CI %s", clientID, hexLocalID)
+	}
+	var hostName, display string
+	if err := db.QueryRow(`SELECT coalesce(hostname,''), coalesce(display_name,'') FROM assets WHERE tenant_id=$1 AND id=$2`,
+		tenant, hexLocalID).Scan(&hostName, &display); err != nil {
+		t.Fatalf("read hex-local CI names: %v", err)
+	}
+	if hostName != "linux-2" || display != "linux-2" {
+		t.Errorf("CI names hostname=%q display=%q, want linux-2 after STA ingest", hostName, display)
+	}
+	assertCollectorEdge(t, db, tenant, collectorEdge{
+		from: clientID, to: switchID, typ: "connects_to",
+		sourceRef: "interrogation:" + jobID.String(),
+		label:     "client-to-switch",
+	})
+
+	var dyn sql.NullBool
+	var src sql.NullString
+	if err := db.QueryRow(`
+		SELECT (metadata->>'dynamic')::boolean, metadata->>'source'
+		FROM network_segments
+		WHERE tenant_id = $1 AND value = '192.0.2.0/24' AND segment_type = 'cidr'`,
+		tenant).Scan(&dyn, &src); err != nil {
+		t.Fatalf("DHCP LAN segment: %v", err)
+	}
+	if !dyn.Valid || !dyn.Bool {
+		t.Errorf("DHCP LAN metadata.dynamic = %v, want true so lease IPs cannot vote", dyn)
+	}
+	if src.String != "unifi" {
+		t.Errorf("DHCP LAN metadata.source = %q, want unifi", src.String)
+	}
+
+	var iotDyn sql.NullBool
+	if err := db.QueryRow(`
+		SELECT (metadata->>'dynamic')::boolean
+		FROM network_segments
+		WHERE tenant_id = $1 AND value = '198.51.100.0/24' AND segment_type = 'cidr'`,
+		tenant).Scan(&iotDyn); err != nil {
+		t.Fatalf("static VLAN segment: %v", err)
+	}
+	if !iotDyn.Valid || iotDyn.Bool {
+		t.Errorf("static VLAN metadata.dynamic = %v, want false", iotDyn)
+	}
+
 	// --- and nothing the controller volunteered came with them ------------
 	//
 	// The mesh PSK, the SMTP relay password, the per-device auth key and the
@@ -270,6 +329,46 @@ func assertCollectorEdge(t *testing.T, db *sql.DB, tenant uuid.UUID, want collec
 	if kind != string(identity.SourceMeasured) || ref != want.sourceRef {
 		t.Errorf("%s edge provenance = (%q, %q), want (measured, %q)", want.typ, kind, ref, want.sourceRef)
 	}
+}
+
+func seedHexLocalHost(t *testing.T, db *sql.DB, tenant uuid.UUID, mac, hexLocal string) uuid.UUID {
+	t.Helper()
+	repo := pgidentity.New(db)
+	engine, err := identity.New(identity.Config{Repo: repo})
+	if err != nil {
+		t.Fatalf("identification engine: %v", err)
+	}
+	obs := identity.Observation{
+		TenantID:    tenant.String(),
+		ClassHint:   string(assetclass.KeyUnknownHost),
+		Source:      identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:host-identity-test", Mode: identity.ModePassive},
+		ObservedAt:  time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC),
+		Confidence:  0.85,
+		Network:     identity.Network{Ownership: identity.OwnershipInternal},
+		Hostname:    hexLocal,
+		DisplayName: hexLocal,
+		Identifiers: []identity.Identifier{
+			{Kind: identity.KindMACAddress, Value: mac, Confidence: 1},
+			{Kind: identity.KindHostname, Value: hexLocal, Scope: identity.ScopeTenantDefault, Confidence: 1},
+		},
+	}
+	clean, _ := obs.Sanitize()
+	var assetID uuid.UUID
+	err = repo.RunInTx(context.Background(), tenant.String(), func(r *pgidentity.Repository) error {
+		res, rErr := engine.WithRepository(r).Resolve(context.Background(), clean)
+		if rErr != nil {
+			return rErr
+		}
+		if res.Asset.Zero() {
+			t.Fatalf("hex .local sighting created no asset")
+		}
+		assetID = uuid.MustParse(res.Asset.ID)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed hex .local host: %v", err)
+	}
+	return assetID
 }
 
 func assetByIdentifier(t *testing.T, db *sql.DB, tenant uuid.UUID, kind, value string) uuid.UUID {

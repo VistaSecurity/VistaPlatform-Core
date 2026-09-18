@@ -63,6 +63,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
@@ -388,8 +389,7 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 // domain (`.local`, RFC 6762 §3), which is the one TLD a name can carry and
 // still identify a host only on the link it was heard on.
 func isMDNSLocalName(name string) bool {
-	n := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
-	return n == "local" || strings.HasSuffix(n, ".local")
+	return hostnamequality.IsMDNSLocalName(name)
 }
 
 // isIPLiteral reports whether a name is really an address written down.
@@ -423,18 +423,15 @@ func hostObservationPrimaryAddress(ho *hostobs.HostObservation) *string {
 	return nil
 }
 
-// hostObservationBestName picks the most specific name, preferring a qualified
-// one: it is the one a CMDB can join on. Nil when the host answered to none.
+// hostObservationBestName picks the highest-quality name the host answered to.
+// First-FQDN-wins kept hex `.local` advertisements in front of a later DHCP
+// hostname (`linux-2`). Nil when the host answered to none.
 func hostObservationBestName(ho *hostobs.HostObservation) *string {
-	for _, n := range ho.FQDNs {
-		if v := strings.TrimSpace(n); v != "" {
-			return &v
-		}
-	}
-	for _, n := range ho.Hostnames {
-		if v := strings.TrimSpace(n); v != "" {
-			return &v
-		}
+	names := make([]string, 0, len(ho.FQDNs)+len(ho.Hostnames))
+	names = append(names, ho.FQDNs...)
+	names = append(names, ho.Hostnames...)
+	if v := hostnamequality.Best(names...); v != "" {
+		return &v
 	}
 	return nil
 }
@@ -691,6 +688,11 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 		if perr != nil {
 			return fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, perr)
 		}
+		if res.Outcome != identity.OutcomeConflict {
+			if err := repo.ProjectSegmentLocation(ctx, res.Asset, obs.Network.SegmentID, obs.Source); err != nil {
+				return err
+			}
+		}
 		if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInput, obs.Source, res.Outcome); cerr != nil {
 			return cerr
 		}
@@ -749,19 +751,6 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 					return fmt.Errorf("upgrading class for sensor %s's host asset: %w", agentID, cerr)
 				}
 			}
-			// Same "fill the floor, never overwrite" shape for the display
-			// name: the identification engine's own asset writer
-			// (shared/identity/postgres.Repository.CreateAsset) only ever
-			// sets hostname/display_name at CREATION — there is no path today
-			// that backfills an unnamed EXISTING asset when a later
-			// observation finally carries a name, which is exactly the
-			// retro-link case (an anonymous MAC/IP-only unknown_host, seen
-			// passively, that this self-report is the first thing to name).
-			if obs.Hostname != "" {
-				if herr := backfillAssetHostname(ctx, tx, tenantID, assetID, obs.Hostname); herr != nil {
-					return fmt.Errorf("backfilling hostname for sensor %s's host asset: %w", agentID, herr)
-				}
-			}
 		}
 		if res.Outcome != identity.OutcomeConflict && assetStatus != "" && assetStatus != identity.StatusPendingApproval {
 			return s.setStatusUnlessArchived(tx, tenantID, assetID, assetStatus, obs.Source)
@@ -780,26 +769,6 @@ func (s *AssetService) linkSensorAsset(tx *sqlx.Tx, tenantID, sensorID, assetID 
 	_, err := tx.Exec(
 		`UPDATE sensors SET asset_id = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL`,
 		assetID, sensorID, tenantID,
-	)
-	return err
-}
-
-// backfillAssetHostname names an asset that has never had one, on the same
-// "fill the floor, never overwrite" principle as upgradeUnknownHostClass
-// below: the predicate is `hostname IS NULL OR hostname = ”`, so this is a
-// no-op for any asset a human has already named or that an earlier
-// observation already named. display_name follows hostname's value when it
-// was ALSO unset — a display_name an operator typed by hand (models.AssetInput's
-// own path, unrelated to this one) is left alone the same way.
-func backfillAssetHostname(ctx context.Context, tx *sqlx.Tx, tenantID, assetID uuid.UUID, hostname string) error {
-	_, err := tx.ExecContext(ctx, `
-		UPDATE assets
-		   SET hostname = $3,
-		       display_name = CASE WHEN display_name IS NULL OR display_name = '' THEN $3 ELSE display_name END,
-		       updated_at = now()
-		 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
-		   AND (hostname IS NULL OR hostname = '')`,
-		tenantID, assetID, hostname,
 	)
 	return err
 }

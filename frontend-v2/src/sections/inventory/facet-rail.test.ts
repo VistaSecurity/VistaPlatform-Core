@@ -4,6 +4,7 @@
 // Neither would fail loudly if it were wrong: a class tree of zeroes and a facet
 // section that is permanently empty both look like a tenant with no data, which
 // is exactly the reading they must not produce.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ASSET_CLASSES, CLASS_TREE, type AssetClassKey } from '@vistasecurity/primitives/assets';
 import { FACET_LEVELS, FACET_LEVEL_FOR, ancestorsOf, bucketFacetView, levelFailed, subtreeCount } from './facet-rail';
@@ -193,5 +194,19 @@ describe('a facet level that did not answer (gate1 C4)', () => {
     expect(levelFailed({ buckets: {}, failed: ['owner_email'] }, 'owner')).toBe(true);
     expect(levelFailed({ buckets: {}, failed: ['owner_email'] }, 'site')).toBe(false);
     expect(levelFailed(undefined, 'owner')).toBe(false);
+  });
+});
+
+describe('the rail starts collapsed', () => {
+  const src = readFileSync(new URL('./facet-rail.tsx', import.meta.url), 'utf8');
+
+  it('filter sections are closed until a value is selected', () => {
+    expect(src).toMatch(/useState\(\(\) => \(count \?\? 0\) > 0\)/);
+    expect(src).not.toMatch(/useState\(true\)/);
+  });
+
+  it('the class tree is closed, not pre-expanded to every top-level node', () => {
+    expect(src).toMatch(/useState<Set<string>>\(\(\) => new Set\(\)\)/);
+    expect(src).not.toMatch(/new Set\(CLASS_TREE\.map/);
   });
 });

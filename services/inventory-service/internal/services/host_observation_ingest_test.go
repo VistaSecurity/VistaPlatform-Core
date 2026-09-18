@@ -142,7 +142,7 @@ func TestHostObservationBuilder_PerSource(t *testing.T) {
 			// hostname, never as a globally unique fqdn — see
 			// TestHostObservationBuilder_MDNSLocalNamesAreSegmentScoped.
 			wantAbsent:  []identity.Kind{identity.KindFQDN},
-			wantDisplay: "hp-printer.local",
+			wantDisplay: "hp-printer",
 		},
 		{
 			// NetBIOS: a machine name from a node-status response.
@@ -798,10 +798,26 @@ func TestHostObservationBuilder_MDNSLocalNamesAreSegmentScoped(t *testing.T) {
 		}
 	}
 
-	// The display name is unchanged by the filing: the most specific name the
-	// host answered to is still what a person should see.
-	if obs.DisplayName != "mbp-m3-alice.local" {
-		t.Errorf("DisplayName = %q, want %q", obs.DisplayName, "mbp-m3-alice.local")
+	// The display name is the best name the host answered to, not the first
+	// FQDN: a corp FQDN outranks a human `.local`.
+	if obs.DisplayName != "alice-wired.corp.example" {
+		t.Errorf("DisplayName = %q, want alice-wired.corp.example", obs.DisplayName)
+	}
+}
+
+func TestHostObservationBuilder_BestNamePrefersDHCPOverHexLocal(t *testing.T) {
+	obs, err := buildHostObs(t, unscopedService(), &hostobs.HostObservation{
+		Source:    hostobs.SourceMDNS,
+		MAC:       "4c:6e:0a:87:d4:80",
+		Addresses: mustAddrs(t, "192.168.1.68"),
+		FQDNs:     []string{"4c6e0a87d480.local"},
+		Hostnames: []string{"linux-2"},
+	})
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	if obs.Hostname != "linux-2" || obs.DisplayName != "linux-2" {
+		t.Fatalf("Hostname=%q DisplayName=%q, want linux-2 (hex .local must not freeze the CI name)", obs.Hostname, obs.DisplayName)
 	}
 }
 

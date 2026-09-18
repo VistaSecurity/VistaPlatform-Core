@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 )
 
 // Repository is an in-memory asset store. The zero value is not usable; build
@@ -75,17 +76,19 @@ type memSegment struct {
 }
 
 type asset struct {
-	ref         identity.AssetRef
-	classKey    string
-	classConf   float64
-	displayName string
-	status      string
-	identifiers map[string]identity.Identifier // identifier key → identifier
-	identOrder  []string
-	endpoints   map[string]identity.EndpointObservation
-	epOrder     []string
-	firstSeen   time.Time
-	lastSeen    time.Time
+	ref            identity.AssetRef
+	classKey       string
+	classConf      float64
+	displayName    string
+	hostname       string
+	nameSourceKind string
+	status         string
+	identifiers    map[string]identity.Identifier // identifier key → identifier
+	identOrder     []string
+	endpoints      map[string]identity.EndpointObservation
+	epOrder        []string
+	firstSeen      time.Time
+	lastSeen       time.Time
 	// segment and attributes travel with the asset because a merge candidate's
 	// SUMMARY carries them (identity.AssetSummary): the matcher seam compares
 	// the segment and the comparable class attributes, and a fake that cannot
@@ -190,6 +193,7 @@ func (r *Repository) LoadSummaries(_ context.Context, tenantID string, ids []str
 			Ref:            a.ref,
 			ClassKey:       a.classKey,
 			DisplayName:    a.displayName,
+			Hostname:       a.hostname,
 			Identifiers:    a.identifierList(),
 			Status:         a.status,
 			NetworkSegment: a.segment,
@@ -224,16 +228,18 @@ func (r *Repository) CreateAsset(_ context.Context, tenantID string, in identity
 	}
 	ref := identity.AssetRef{TenantID: tenantID, ID: r.nextID("asset")}
 	a := &asset{
-		ref:         ref,
-		classKey:    in.ClassKey,
-		classConf:   in.ClassConfidence,
-		displayName: in.DisplayName,
-		status:      in.Status,
-		identifiers: make(map[string]identity.Identifier, len(in.Identifiers)),
-		endpoints:   make(map[string]identity.EndpointObservation, len(in.Endpoints)),
-		firstSeen:   in.FirstSeenAt,
-		lastSeen:    in.LastSeenAt,
-		segment:     in.NetworkSegment,
+		ref:            ref,
+		classKey:       in.ClassKey,
+		classConf:      in.ClassConfidence,
+		displayName:    in.DisplayName,
+		hostname:       in.Hostname,
+		nameSourceKind: in.Source.NameKind(),
+		status:         in.Status,
+		identifiers:    make(map[string]identity.Identifier, len(in.Identifiers)),
+		endpoints:      make(map[string]identity.EndpointObservation, len(in.Endpoints)),
+		firstSeen:      in.FirstSeenAt,
+		lastSeen:       in.LastSeenAt,
+		segment:        in.NetworkSegment,
 	}
 	r.assets[assetKey(tenantID, ref.ID)] = a
 	for _, id := range in.Identifiers {
@@ -335,6 +341,59 @@ func (r *Repository) Touch(_ context.Context, ref identity.AssetRef, seenAt time
 		a.lastSeen = seenAt
 	}
 	return nil
+}
+
+// PromoteNames implements identity.Repository.
+func (r *Repository) PromoteNames(_ context.Context, ref identity.AssetRef, hostname, displayName, sourceKind string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
+	if !ok {
+		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+	}
+	changed := false
+	if hostnamequality.ShouldPromote(a.hostname, hostname, a.nameSourceKind, sourceKind) {
+		a.hostname = strings.TrimSpace(hostname)
+		changed = true
+	}
+	if hostnamequality.ShouldPromote(a.displayName, displayName, a.nameSourceKind, sourceKind) {
+		a.displayName = strings.TrimSpace(displayName)
+		changed = true
+	}
+	if changed {
+		a.nameSourceKind = hostnamequality.NormalizeSource(sourceKind)
+	}
+	return nil
+}
+
+// Hostname is a test helper: the engine does not read hostname back except
+// through [Repository.LoadSummaries].
+func (r *Repository) Hostname(ref identity.AssetRef) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; ok {
+		return a.hostname
+	}
+	return ""
+}
+
+// DisplayName is a test helper matching [Repository.Hostname].
+func (r *Repository) DisplayName(ref identity.AssetRef) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; ok {
+		return a.displayName
+	}
+	return ""
+}
+
+// SetNameSourceDeclared is a test helper standing in for a human edit.
+func (r *Repository) SetNameSourceDeclared(ref identity.AssetRef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; ok {
+		a.nameSourceKind = hostnamequality.SourceDeclared
+	}
 }
 
 // RecordHistory implements identity.Repository.

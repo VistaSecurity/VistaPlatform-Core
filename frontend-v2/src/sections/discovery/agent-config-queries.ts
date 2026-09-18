@@ -54,6 +54,21 @@ export interface SaveResult {
   needs_restart: string[];
 }
 
+/** Coerce the write response into arrays. Go encodes a nil slice as JSON
+ *  `null`, and the settings panel maps `adjusted` after a successful save —
+ *  that is the crash that swallowed a working DNS-on write. */
+export function saveResultFrom(data: {
+  changed?: string[] | null;
+  adjusted?: string[] | null;
+  needs_restart?: string[] | null;
+} | null | undefined): SaveResult {
+  return {
+    changed: data?.changed ?? [],
+    adjusted: data?.adjusted ?? [],
+    needs_restart: data?.needs_restart ?? [],
+  };
+}
+
 /** A 409 carrying the settings the server wants acknowledged, with the text
  *  naming what begins to be collected. The server decides this, not the client:
  *  a client that simply never sent the flag must not be able to waive it. */
@@ -83,7 +98,7 @@ export function useSaveAgentConfig(agentId: string) {
       });
       if (response.status === 409) throw new NeedsConfirmation(confirmationFrom(error));
       if (error || !data) throw new Error(problemText(error) ?? 'Failed to save the configuration');
-      return data;
+      return saveResultFrom(data);
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['discovery', 'agent-config', agentId] });
@@ -101,7 +116,7 @@ export function useSaveAgentFleetDefaults() {
       });
       if (response.status === 409) throw new NeedsConfirmation(confirmationFrom(error));
       if (error || !data) throw new Error(problemText(error) ?? 'Failed to save the fleet defaults');
-      return data;
+      return saveResultFrom(data);
     },
     onSuccess: () => {
       // Every inheriting agent's effective settings just changed, so the

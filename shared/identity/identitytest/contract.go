@@ -225,6 +225,44 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 	})
 
+	t.Run("PromoteNames raises quality and never demotes", func(t *testing.T) {
+		r := newRepo()
+		ref, err := r.CreateAsset(ctx, tenant, identity.NewAsset{
+			ClassKey:        "server",
+			ClassSourceKind: identity.ClassSourceMeasured,
+			DisplayName:     "4c6e0a87d480.local",
+			Hostname:        "4c6e0a87d480.local",
+			Status:          identity.StatusPendingApproval,
+			Source:          identity.Source{Kind: identity.SourceMeasured, Ref: "contract", Mode: identity.ModePassive},
+			Identifiers:     []identity.Identifier{ident(identity.KindHostname, "4c6e0a87d480.local", "segment-1")},
+			FirstSeenAt:     now,
+			LastSeenAt:      now,
+		})
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		if err := r.PromoteNames(ctx, ref, "linux-2", "linux-2", "measured-passive"); err != nil {
+			t.Fatalf("PromoteNames linux-2: %v", err)
+		}
+		sums, err := r.LoadSummaries(ctx, tenant, []string{ref.ID})
+		if err != nil || len(sums) != 1 {
+			t.Fatalf("LoadSummaries = %+v (err %v)", sums, err)
+		}
+		if sums[0].Hostname != "linux-2" || sums[0].DisplayName != "linux-2" {
+			t.Fatalf("after linux-2 promote hostname=%q display=%q, want linux-2", sums[0].Hostname, sums[0].DisplayName)
+		}
+		if err := r.PromoteNames(ctx, ref, "4c6e0a87d480.local", "4c6e0a87d480.local", "measured-passive"); err != nil {
+			t.Fatalf("PromoteNames hex: %v", err)
+		}
+		sums, err = r.LoadSummaries(ctx, tenant, []string{ref.ID})
+		if err != nil || len(sums) != 1 {
+			t.Fatalf("LoadSummaries after hex: %+v (err %v)", sums, err)
+		}
+		if sums[0].Hostname != "linux-2" || sums[0].DisplayName != "linux-2" {
+			t.Fatalf("hex mDNS reverted the name: hostname=%q display=%q", sums[0].Hostname, sums[0].DisplayName)
+		}
+	})
+
 	t.Run("AttachIdentifiers is idempotent", func(t *testing.T) {
 		r := newRepo()
 		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-1"))
@@ -254,6 +292,9 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 		if err := r.Touch(ctx, ghost, now); !errors.Is(err, identity.ErrAssetNotFound) {
 			t.Errorf("Touch on a ghost: err = %v, want ErrAssetNotFound", err)
+		}
+		if err := r.PromoteNames(ctx, ghost, "linux-2", "linux-2", "measured-passive"); !errors.Is(err, identity.ErrAssetNotFound) {
+			t.Errorf("PromoteNames on a ghost: err = %v, want ErrAssetNotFound", err)
 		}
 		if err := r.UpsertEndpoints(ctx, ghost, []identity.EndpointObservation{{Address: "192.0.2.1", Port: 443, Transport: "tcp"}}); !errors.Is(err, identity.ErrAssetNotFound) {
 			t.Errorf("UpsertEndpoints on a ghost: err = %v, want ErrAssetNotFound", err)

@@ -142,16 +142,21 @@ func TestDisplayNameFallbacks(t *testing.T) {
 		want string
 	}{
 		{
-			name: "an explicit display name wins",
-			obs:  Observation{DisplayName: "Payments DB", Hostname: "db-1"},
-			ids:  []Identifier{{Kind: KindFQDN, Value: "db-1.example.com"}},
-			want: "Payments DB",
+			name: "an explicit display name wins when it is at least as good",
+			obs:  Observation{DisplayName: "db-1.example.com", Hostname: "db-1"},
+			ids:  []Identifier{{Kind: KindHostname, Value: "db-1"}},
+			want: "db-1.example.com",
 		},
 		{
-			name: "then the hostname",
+			name: "a better measured name beats a synthetic display name",
+			obs:  Observation{DisplayName: "4c6e0a87d480.local", Hostname: "linux-2"},
+			want: "linux-2",
+		},
+		{
+			name: "a canonical FQDN beats a short hostname",
 			obs:  Observation{Hostname: "db-1"},
 			ids:  []Identifier{{Kind: KindFQDN, Value: "db-1.example.com"}},
-			want: "db-1",
+			want: "db-1.example.com",
 		},
 		{
 			name: "then an fqdn before an ip",

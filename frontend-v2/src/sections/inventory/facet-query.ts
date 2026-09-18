@@ -22,6 +22,7 @@
 // Nothing here builds SQL. The server owns translation (see the query package's
 // README: "a second translator would be a second opinion about what a query
 // means").
+import { ASSET_CLASSES, type AssetClassKey } from '@vistasecurity/primitives/assets';
 import { format, parse, type Node, type Literal, type FieldRef } from '@vistasecurity/primitives/query';
 import { OPEN_FINDINGS_QUERY } from '@vistasecurity/primitives/findings';
 
@@ -97,12 +98,13 @@ export const RISK_BAND_LABEL: Readonly<Record<string, string>> = {
 };
 
 /** The provenance facet's values — the four `class_source_kind`s. */
-export const PROVENANCE_VALUES = ['measured', 'declared', 'imported', 'inferred'] as const;
+export const PROVENANCE_VALUES = ['measured', 'declared', 'imported', 'inferred', 'rule'] as const;
 export const PROVENANCE_LABEL: Readonly<Record<string, string>> = {
   measured: 'Discovered',
   declared: 'Declared',
   imported: 'Imported',
   inferred: 'Proposed',
+  rule: 'From a rule',
 };
 
 /**
@@ -198,14 +200,72 @@ export function quoteValue(v: string): string {
   return v;
 }
 
-/** `field:(a or b)` for many, `field:a` for one. The group form is used rather
- *  than `in (…)` because it is what the editor's own autocomplete teaches and
- *  what reads most like the checkbox list that produced it. */
+/**
+ * The bucket key GetAssetFacets uses for a NULL column
+ * (`COALESCE(col, 'Unknown')`). Clicking it used to write `owner_email:Unknown`,
+ * which matches the literal string — never the unset rows the count showed —
+ * and on a closed enum (`environment:Unknown`) the server answers 400.
+ *
+ * The language spells NULL as `not exists(field)`; string columns also
+ * need `field=""` to match the empty values counted in this bucket. Segment
+ * uses a different sentinel because the SQL does.
+ */
+export const UNSET_BUCKET = 'Unknown';
+export const UNSEGMENTED_BUCKET = 'Unsegmented';
+
+// These facet columns group NULL and the empty string into the same bucket.
+const EMPTY_IS_UNSET = new Set(['owner_email', 'business_unit', 'support_group', 'site', 'region', 'zone']);
+
+function unsetBucketFor(field: string): string {
+  return field === 'segment_id' ? UNSEGMENTED_BUCKET : UNSET_BUCKET;
+}
+
+function isUnsetBucket(field: string, value: string): boolean {
+  return value === unsetBucketFor(field);
+}
+
+/**
+ * `class:` matches a PREFIX of `class_path`. The rail stores the class KEY
+ * (so the tree can highlight the picked node) and writes the PATH, which is
+ * what the facet buckets, the dashboard hero and the command palette already
+ * emit. Writing the key (`class:server`) happens to work in SQL because the
+ * translator looks the key up and substitutes the path — but the in-memory
+ * evaluator and a tenant subclass that is not in the generated registry both
+ * prefix-match the literal, so the path is the one form that stays honest.
+ */
+function classSubtreeTerm(key: string): string {
+  const path = ASSET_CLASSES[key as AssetClassKey]?.path ?? key;
+  return `class:${quoteValue(path)}`;
+}
+
+/** Inverse of classSubtreeTerm: a path or a key both select that tree node. */
+function classKeyFromQueryValue(value: string): string {
+  if (Object.prototype.hasOwnProperty.call(ASSET_CLASSES, value)) return value;
+  for (const [key, entry] of Object.entries(ASSET_CLASSES)) {
+    if (entry.path === value) return key;
+  }
+  // Tenant-defined paths are not in the generated catalogue. Keep the entire
+  // path so another facet click cannot silently change the selected subtree.
+  return value;
+}
+
+/** `field:(a or b)` for many, `field:a` for one. The unset sentinel is written
+ *  `not exists(field)` so the click matches the same rows the facet counted. */
 function orTerm(field: string, values: string[]): string | null {
   const vs = values.filter((v) => v !== '');
   if (vs.length === 0) return null;
-  if (vs.length === 1) return `${field}:${quoteValue(vs[0])}`;
-  return `${field}:(${vs.map(quoteValue).join(' or ')})`;
+  const present = vs.filter((v) => !isUnsetBucket(field, v));
+  const absent = vs.some((v) => isUnsetBucket(field, v));
+  const parts: string[] = [];
+  if (absent) {
+    parts.push(`not exists(${field})`);
+    if (EMPTY_IS_UNSET.has(field)) parts.push(`${field} = ""`);
+  }
+  if (present.length === 1) parts.push(`${field}:${quoteValue(present[0])}`);
+  else if (present.length > 1) parts.push(`${field}:(${present.map(quoteValue).join(' or ')})`);
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+  return `(${parts.join(' or ')})`;
 }
 
 /** A tag entry is either `key` (present at all) or `key=value`. */
@@ -226,7 +286,7 @@ function tagTerm(entry: string): string {
 export function facetsToQuery(f: FacetState, extra: string[] = []): string {
   const terms: string[] = [];
 
-  if (f.class) terms.push(`class:${quoteValue(f.class)}`);
+  if (f.class) terms.push(classSubtreeTerm(f.class));
 
   // Ordered deliberately: clause order is preserved by the canonical form (§10),
   // so the query reads top-to-bottom in the same order as the rail's sections.
@@ -330,6 +390,51 @@ function sameFieldOr(node: Node): { field: string; values: string[] } | null {
   return field === null ? null : { field, values };
 }
 
+/** `not exists(field)` — the rail's spelling of the Unknown / Unsegmented bucket. */
+function notExistsField(node: Node): string | null {
+  if (node.kind !== 'not' || node.child.kind !== 'exists') return null;
+  return fieldPath(node.child.field);
+}
+
+/**
+ * A conjunct the rail wrote for one multi-select: either `field:a`,
+ * `field:(a or b)`, `not exists(field)`, or a mix of the last two. Anything
+ * else is extra.
+ */
+function fieldValues(node: Node): { field: string; values: string[] } | null {
+  const absent = notExistsField(node);
+  if (absent) return EMPTY_IS_UNSET.has(absent) ? null : { field: absent, values: [unsetBucketFor(absent)] };
+  const grouped = sameFieldOr(node);
+  if (grouped) return grouped;
+  if (node.kind !== 'or') return null;
+  let field: string | null = null;
+  const values: string[] = [];
+  let sawAbsent = false;
+  let sawEmpty = false;
+  const flattenOr = (n: Node): Node[] => n.kind === 'or' ? n.children.flatMap(flattenOr) : [n];
+  for (const child of node.children.flatMap(flattenOr)) {
+    const abs = notExistsField(child);
+    if (abs) {
+      if (field === null) field = abs;
+      else if (field !== abs) return null;
+      sawAbsent = true;
+      continue;
+    }
+    if (child.kind !== 'cmp') return null;
+    const path = fieldPath(child.field);
+    const empty = child.op === '=' && literalText(child.value) === '' && EMPTY_IS_UNSET.has(path);
+    if (child.op !== ':' && !empty) return null;
+    if (field === null) field = path;
+    else if (field !== path) return null;
+    if (empty) sawEmpty = true;
+    else values.push(literalText(child.value));
+  }
+  if (field === null) return null;
+  if (EMPTY_IS_UNSET.has(field) && sawAbsent !== sawEmpty) return null;
+  if (sawAbsent) values.push(unsetBucketFor(field));
+  return { field, values };
+}
+
 /**
  * Recognises the findings facet's own sub-predicate.
  *
@@ -394,8 +499,8 @@ export function queryToFacets(text: string): FacetRead {
     // A `finding:(…)` the user wrote THEMSELVES, with any other predicate, is
     // still not a facet: it falls through to `extra` and is carried forward
     // untouched, so their query keeps meaning what it said.
-    // `field:(a or b)`
-    const grouped = sameFieldOr(node);
+    // `field:(a or b)` / `not exists(field)` / a mix of those two.
+    const grouped = fieldValues(node);
     if (grouped) {
       const bucket = byField[grouped.field];
       if (bucket) { push(bucket, grouped.values); continue; }
@@ -410,7 +515,7 @@ export function queryToFacets(text: string): FacetRead {
     if (node.kind === 'cmp' && node.op === ':') {
       const path = fieldPath(node.field);
       const value = literalText(node.value);
-      if (path === 'class') { facets.class = value; continue; }
+      if (path === 'class') { facets.class = classKeyFromQueryValue(value); continue; }
       if (path === 'tag') { if (!facets.tag.includes(value)) facets.tag.push(value); continue; }
       if (path.startsWith('tag.')) {
         const entry = `${path.slice(4)}=${value}`;

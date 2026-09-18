@@ -28,25 +28,25 @@ import (
 // reaching SQL as an identifier.
 var assetFacetExpr = map[string]string{
 	// Assets / context
-	"business_unit": "COALESCE(a.business_unit, 'Unknown')",
+	"business_unit": "COALESCE(NULLIF(a.business_unit, ''), 'Unknown')",
 	"environment":   "COALESCE(a.environment::text, 'Unknown')",
-	"owner_email":   "COALESCE(a.owner_email, 'Unknown')",
-	"owner":         "COALESCE(a.owner_email, 'Unknown')",
-	"support_group": "COALESCE(a.support_group, 'Unknown')",
+	"owner_email":   "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
+	"owner":         "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
+	"support_group": "COALESCE(NULLIF(a.support_group, ''), 'Unknown')",
 	"status":        "COALESCE(a.asset_status::text, 'Unknown')",
 	"ownership":     "COALESCE(a.asset_ownership::text, 'Unknown')",
 	"stale_status":  "COALESCE(a.stale_status, 'Unknown')",
 
-	// Location
-	"site":              "COALESCE(a.site, a.tags->'location'->>'site', a.tags->>'site', 'Unknown')",
-	"region":            "COALESCE(a.region, a.tags->'location'->>'region', a.tags->>'region', 'Unknown')",
-	"zone":              "COALESCE(a.zone, a.tags->'location'->>'zone', a.tags->>'zone', 'Unknown')",
-	"location.site":     "COALESCE(a.site, a.tags->'location'->>'site', a.tags->>'site', 'Unknown')",
-	"location.region":   "COALESCE(a.region, a.tags->'location'->>'region', a.tags->>'region', 'Unknown')",
-	"location.zone":     "COALESCE(a.zone, a.tags->'location'->>'zone', a.tags->>'zone', 'Unknown')",
+	// Location — the QUERY LANGUAGE reads these columns, not the tags JSON.
+	// Counting tag fallbacks here made the rail preview a site that
+	// `site:X` then failed to select (same class of bug as owner Unknown).
+	"site":              "COALESCE(NULLIF(a.site, ''), 'Unknown')",
+	"region":            "COALESCE(NULLIF(a.region, ''), 'Unknown')",
+	"zone":              "COALESCE(NULLIF(a.zone, ''), 'Unknown')",
+	"location.site":     "COALESCE(NULLIF(a.site, ''), 'Unknown')",
+	"location.region":   "COALESCE(NULLIF(a.region, ''), 'Unknown')",
+	"location.zone":     "COALESCE(NULLIF(a.zone, ''), 'Unknown')",
 	"location.building": "COALESCE(a.tags->'location'->>'building', a.tags->>'building', 'Unknown')",
-
-	"segment": "COALESCE(ns.name, 'Unsegmented')",
 
 	// Class attributes
 	"operating_system": "COALESCE(" + assetOperatingSystemSQL + ", 'Unknown')",
@@ -65,6 +65,7 @@ const (
 	facetLevelClass        = "class"
 	facetLevelRisk         = "risk"
 	facetLevelTag          = "tag"
+	facetLevelSegment      = "segment"
 	facetLevelHasFindings  = "has_findings"
 	facetLevelHasEndpoints = "has_endpoints"
 )
@@ -140,6 +141,8 @@ func (s *AssetService) GetAssetFacets(tenantID uuid.UUID, filters models.AssetFi
 		return s.riskFacets(tenantID, where, args)
 	case facetLevelTag:
 		return s.tagFacets(tenantID, where, args, limit)
+	case facetLevelSegment:
+		return s.segmentFacets(tenantID, where, args, limit)
 	case facetLevelHasFindings:
 		return s.hasFindingsFacet(tenantID, where, args)
 	case facetLevelHasEndpoints:
@@ -239,6 +242,51 @@ func (s *AssetService) classFacets(tenantID uuid.UUID, where string, args []inte
 		rows[i].Label = classLabelForPath(rows[i].Key)
 	}
 	return rows, nil
+}
+
+// segmentFacets counts by network_segment_id, which is what `segment_id:`
+// matches. Grouping by ns.name used to put the human label in the bucket key,
+// so a click wrote `segment_id:DMZ` and the validator answered type_mismatch
+// (the field is a uuid). Unsegmented stays the absence sentinel the rail
+// already turns into `not exists(segment_id)`.
+func (s *AssetService) segmentFacets(tenantID uuid.UUID, where string, args []interface{}, limit int) ([]models.AssetFacetBucket, error) {
+	args = append(args, limit)
+	query := fmt.Sprintf(`
+		SELECT COALESCE(a.network_segment_id::text, 'Unsegmented') AS "key",
+		       COUNT(*) AS "count",
+		       COALESCE(MAX(ns.name), 'Unsegmented') AS "label"
+		FROM assets a
+		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
+		WHERE %s
+		GROUP BY 1
+		ORDER BY "count" DESC, "key" ASC
+		LIMIT $%d`, where, len(args))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var buckets []models.AssetFacetBucket
+	if err := database.WithTenantTxTimeout(ctx, s.db, tenantID, assetQueryStatementTimeout, func(tx *sqlx.Tx) error {
+		rows, e := tx.QueryxContext(ctx, query, args...)
+		if e != nil {
+			return fmt.Errorf("failed to get segment facets: %w", e)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var bucket models.AssetFacetBucket
+			if e := rows.Scan(&bucket.Key, &bucket.Count, &bucket.Label); e != nil {
+				return fmt.Errorf("failed to scan segment facet: %w", e)
+			}
+			buckets = append(buckets, bucket)
+		}
+		if e := rows.Err(); e != nil {
+			return fmt.Errorf("error iterating segment facet rows: %w", e)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return buckets, nil
 }
 
 func classLabelForPath(path string) string {
@@ -380,7 +428,7 @@ func (s *AssetService) facetRows(tenantID uuid.UUID, query string, args []interf
 // above so the two cannot disagree about what is supported.
 func AssetFacetLevels() []string {
 	seen := map[string]bool{}
-	out := []string{facetLevelClass, facetLevelRisk, facetLevelTag, facetLevelHasFindings, facetLevelHasEndpoints}
+	out := []string{facetLevelClass, facetLevelRisk, facetLevelTag, facetLevelSegment, facetLevelHasFindings, facetLevelHasEndpoints}
 	for _, l := range out {
 		seen[l] = true
 	}

@@ -774,6 +774,19 @@ rules:
   # no proposal at all.
 
   # --- Cisco: Catalyst and Nexus switching ---------------------------------
+  # Server product families identify function without guessing from Linux.
+  - kind: model
+    pattern: PowerEdge
+    class: server
+    vendor: Dell
+    confidence: 0.85
+    source_url: https://www.dell.com/en-us/shop/servers-storage-and-networking/poweredge-r650-rack-server/spd/poweredge-r650
+  - kind: model
+    pattern: ProLiant
+    class: server
+    vendor: Hewlett Packard
+    confidence: 0.85
+    source_url: https://buy.hpe.com/us/en/compute/rack-servers/proliant-dl300-servers/hpe-proliant-dl360-gen10-server/p/1010007891
   - kind: model
     pattern: WS-C
     class: switch
@@ -1165,8 +1178,8 @@ rules:
   # exactly what an SSH banner is not — every class in the taxonomy runs sshd,
   # and none of them advertise `_ipp._tcp` unless they accept print jobs.
   #
-  # Printers only, and that is not an oversight. The DNS-SD registry is large
-  # and almost every other entry describes software rather than a kind of
+  # Printers, plus Matter IoT. That is not an oversight. The DNS-SD registry is
+  # large and almost every other entry describes software rather than a kind of
   # device: `_smb._tcp` is a NAS, a server, a workstation and a printer with
   # scan-to-share; `_workstation._tcp` is whatever Avahi is installed on;
   # `_ssh._tcp` is the banner problem with a different transport.
@@ -1176,10 +1189,10 @@ rules:
   #
   #   * `_airplay._tcp` / `_googlecast._tcp` → a media-device class. There is
   #     none, and `iot_device` for a television is a category error of the same
-  #     shape as calling a desk phone one.
+  #     shape as calling a desk phone one. Deferred.
   #   * `_hap._tcp` (HomeKit) → `iot_device` is arguably right, but a HomeKit
   #     BRIDGE advertises it on behalf of accessories that are not themselves
-  #     on the network, so the advertiser is not reliably the thing.
+  #     on the network, so the advertiser is not reliably the thing. Deferred.
   - kind: mdns_service
     pattern: _ipp._tcp
     class: printer
@@ -1200,6 +1213,11 @@ rules:
     class: printer
     confidence: 0.75
     source_url: https://datatracker.ietf.org/doc/html/rfc1179
+  - kind: mdns_service
+    pattern: _matter._tcp
+    class: iot_device
+    confidence: 0.75
+    source_url: https://csa-iot.org/all-solutions/matter/
 
   # ===========================================================================
   # os_name — what the host says it runs

@@ -52,7 +52,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	// PQC surfaces reading the same underlying implementations.
 	query := `
 		SELECT
-			ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
+			ci.id, ci.tenant_id, ci.asset_id, ci.endpoint_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
 			ci.key_exchange_algorithm, ci.signature_algorithm, ci.symmetric_encryption,
 			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method, ci.discovery_methods,
 			ci.confidence_score, ci.source_sensor_id, ci.raw_data, ci.risk_score,
@@ -254,7 +254,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 			var certCommonName, certIssuerDN sql.NullString
 
 			err := rows.Scan(
-				&impl.ID, &impl.TenantID, &impl.AssetID, &impl.Protocol, &protocolVersion, &cipherSuite,
+				&impl.ID, &impl.TenantID, &impl.AssetID, &impl.EndpointID, &impl.Protocol, &protocolVersion, &cipherSuite,
 				&keyExchangeAlg, &sigAlg, &symEnc, &hashAlg, &keySize, &certID, &impl.DiscoveryMethod, &impl.DiscoveryMethods,
 				&confidenceScore, &sourceSensorID, &rawDataJSON, &riskScore, &impl.RiskScoreAssessed,
 				&complianceStatusJSON, &impl.FirstDiscoveredAt, &impl.LastVerifiedAt,
@@ -381,7 +381,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id uuid.UUID) (*models.CryptoImplementation, error) {
 	query := `
 		SELECT
-			ci.id, ci.tenant_id, ci.asset_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
+			ci.id, ci.tenant_id, ci.asset_id, ci.endpoint_id, ci.protocol, ci.protocol_version, ci.cipher_suite,
 			ci.key_exchange_algorithm, ci.signature_algorithm, ci.symmetric_encryption,
 			ci.hash_algorithm, ci.key_size, ci.certificate_id, ci.discovery_method, ci.discovery_methods,
 			ci.confidence_score, ci.source_sensor_id, ci.raw_data, ci.risk_score,
@@ -410,7 +410,7 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 	// RLS-scoped read over crypto_implementations (JOIN assets).
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(query, id, tenantID, pq.Array(cryptoassess.CatalogueRiskRoles)).Scan(
-			&impl.ID, &impl.TenantID, &impl.AssetID, &impl.Protocol, &protocolVersion, &cipherSuite,
+			&impl.ID, &impl.TenantID, &impl.AssetID, &impl.EndpointID, &impl.Protocol, &protocolVersion, &cipherSuite,
 			&keyExchangeAlg, &sigAlg, &symEnc, &hashAlg, &keySize, &certID, &impl.DiscoveryMethod, &impl.DiscoveryMethods,
 			&confidenceScore, &sourceSensorID, &rawDataJSON, &riskScore, &impl.RiskScoreAssessed,
 			&complianceStatusJSON, &impl.FirstDiscoveredAt, &impl.LastVerifiedAt,

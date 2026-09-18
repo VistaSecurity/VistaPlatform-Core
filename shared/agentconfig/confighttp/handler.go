@@ -284,6 +284,14 @@ func (h *Handler) write(
 	for _, k := range agentconfig.RestartRequired(changes) {
 		restart = append(restart, string(k))
 	}
+	// json.Marshal encodes a nil slice as `null`. The settings panel maps
+	// `adjusted` (and would map `needs_restart` the same way); a successful
+	// save with nothing raised then crashes the drawer even though the write
+	// landed. `changed` and `restart` are already allocated empty; notes is
+	// Normalize's leftover nil.
+	if notes == nil {
+		notes = []string{}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"changed": changed,

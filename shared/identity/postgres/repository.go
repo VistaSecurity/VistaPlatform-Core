@@ -44,6 +44,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/assetclasshistory"
 	"github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
 
@@ -258,7 +259,7 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 		// `attributes` — identity.SummaryAttributeKeys — because a candidate
 		// summary is what a seam needs to rank a pairing, not the asset.
 		rows, err := tx.QueryContext(ctx, `
-			SELECT id, class_key, coalesce(display_name, ''), asset_status,
+			SELECT id, class_key, coalesce(display_name, ''), coalesce(hostname, ''), asset_status,
 			       coalesce(network_segment_id::text, ''), last_seen_at,
 			       coalesce(attributes ->> 'vendor', ''), coalesce(attributes ->> 'model', '')
 			FROM public.assets
@@ -270,13 +271,13 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var (
-				id                            uuid.UUID
-				classKey, displayName, status string
-				segment                       string
-				lastSeen                      time.Time
-				vendor, model                 string
+				id                                      uuid.UUID
+				classKey, displayName, hostname, status string
+				segment                                 string
+				lastSeen                                time.Time
+				vendor, model                           string
 			)
-			if err := rows.Scan(&id, &classKey, &displayName, &status,
+			if err := rows.Scan(&id, &classKey, &displayName, &hostname, &status,
 				&segment, &lastSeen, &vendor, &model); err != nil {
 				return fmt.Errorf("identity/postgres: scan summary: %w", err)
 			}
@@ -284,6 +285,7 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 				Ref:            identity.AssetRef{TenantID: tenantID, ID: id.String()},
 				ClassKey:       classKey,
 				DisplayName:    displayName,
+				Hostname:       hostname,
 				Status:         status,
 				NetworkSegment: segment,
 				LastSeenAt:     lastSeen,
@@ -404,18 +406,19 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 					tenant_id, class_key, class_path, class_source_kind, class_source_ref,
 					class_confidence, display_name, hostname, primary_address,
 					asset_status, asset_ownership, network_segment_id, discovery_method,
-					confidence_score, first_discovered_at, last_seen_at
+					confidence_score, first_discovered_at, last_seen_at, metadata
 				) VALUES (
 					$1, $2, $3, $4, NULLIF($5, ''),
 					$6, NULLIF($7, ''), NULLIF($8, ''), $9::text::inet,
 					$10, $11, $12::uuid, NULLIF($13, ''),
-					$14, $15, $16
+					$14, $15, $16, $17::jsonb
 				)
 				RETURNING id`,
 				tenantID, classKey, classPath, classSourceKindOr(a.ClassSourceKind), classSourceRefOr(a),
 				nullFloat(a.ClassConfidence), a.DisplayName, a.Hostname, nullInet(a.PrimaryAddress),
 				status, ownership, nullUUID(a.NetworkSegment), a.DiscoveryMethod,
 				nullPercent(a.Confidence), timeOrNow(a.FirstSeenAt), timeOrNow(a.LastSeenAt),
+				nameMetadata(a.Source),
 			).Scan(&id)
 			if err != nil {
 				return fmt.Errorf("identity/postgres: insert asset: %w", err)
@@ -772,6 +775,72 @@ func (r *Repository) Touch(ctx context.Context, asset identity.AssetRef, seenAt 
 		n, err := res.RowsAffected()
 		if err != nil {
 			return fmt.Errorf("identity/postgres: touch: rows affected: %w", err)
+		}
+		if n == 0 {
+			return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, asset.ID)
+		}
+		return nil
+	})
+}
+
+func nameMetadata(src identity.Source) string {
+	raw, err := json.Marshal(map[string]string{"name_source_kind": src.NameKind()})
+	if err != nil {
+		return `{"name_source_kind":"measured-passive"}`
+	}
+	return string(raw)
+}
+
+// PromoteNames raises hostname and display_name when the incoming names are
+// strictly better quality. See [identity.Repository.PromoteNames].
+func (r *Repository) PromoteNames(ctx context.Context, asset identity.AssetRef, hostname, displayName, sourceKind string) error {
+	assetID, err := parseAsset(asset.ID)
+	if err != nil {
+		return err
+	}
+	return r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+		var currentHost, currentDisp, currentSrc string
+		err := tx.QueryRowContext(ctx, `
+			SELECT coalesce(hostname, ''), coalesce(display_name, ''),
+			       CASE WHEN EXISTS (SELECT 1 FROM public.asset_history h WHERE h.tenant_id = assets.tenant_id AND h.asset_id = assets.id AND (h.source = 'manual' OR h.changes_json->>'source_kind' = 'declared') AND (h.action = 'created' OR h.changes_json->>'hostname' IS NOT NULL OR h.changes_json->>'display_name' IS NOT NULL)) THEN 'declared' ELSE coalesce(metadata ->> 'name_source_kind', '') END
+			FROM public.assets
+			WHERE tenant_id = $1 AND id = $2
+			FOR UPDATE`,
+			asset.TenantID, assetID).Scan(&currentHost, &currentDisp, &currentSrc)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, asset.ID)
+		}
+		if err != nil {
+			return fmt.Errorf("identity/postgres: promote names load %s: %w", asset.ID, err)
+		}
+		newHost, newDisp := currentHost, currentDisp
+		changed := false
+		if hostnamequality.ShouldPromote(currentHost, hostname, currentSrc, sourceKind) {
+			newHost = strings.TrimSpace(hostname)
+			changed = true
+		}
+		if hostnamequality.ShouldPromote(currentDisp, displayName, currentSrc, sourceKind) {
+			newDisp = strings.TrimSpace(displayName)
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
+		kind := hostnamequality.NormalizeSource(sourceKind)
+		res, err := tx.ExecContext(ctx, `
+			UPDATE public.assets
+			SET hostname = NULLIF($3, ''),
+			    display_name = NULLIF($4, ''),
+			    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('name_source_kind', $5::text),
+			    updated_at = now()
+			WHERE tenant_id = $1 AND id = $2`,
+			asset.TenantID, assetID, newHost, newDisp, kind)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: promote names %s: %w", asset.ID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("identity/postgres: promote names: rows affected: %w", err)
 		}
 		if n == 0 {
 			return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, asset.ID)

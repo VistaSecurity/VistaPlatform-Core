@@ -138,7 +138,12 @@ function ClassNode({ node, depth, counts, countsFailed, selected, expanded, onTo
 }
 
 function Section({ label, children, count }: { label: string; children: React.ReactNode; count?: number }) {
-  const [open, setOpen] = useState(true);
+  // Start collapsed. A section that already has a selection opens so a shared
+  // link does not hide the filters that produced the list.
+  const [open, setOpen] = useState(() => (count ?? 0) > 0);
+  useEffect(() => {
+    if ((count ?? 0) > 0) setOpen(true);
+  }, [count]);
   return (
     <div style={{ borderTop: '1px solid var(--app-border)', padding: '9px 12px 10px' }}>
       <button
@@ -289,10 +294,10 @@ export function FacetRail({ facets, data, extra, unparsed = false, onChange, onC
 }) {
   const buckets = data?.buckets;
   const classCounts = useMemo(() => bucketMap(bucketsFor(buckets, 'class')), [buckets]);
-  // The top level starts open; a selected class opens its ancestry too, so a
-  // shared link opens showing WHERE its class sits in the tree rather than
-  // hiding the selection inside a collapsed branch.
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(CLASS_TREE.map((n) => n.key)));
+  // The tree starts collapsed. A selected class opens its ancestry so a shared
+  // link still shows WHERE that class sits, rather than hiding it inside a
+  // closed branch.
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   const selectedClass = facets.class;
   useEffect(() => {

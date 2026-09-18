@@ -196,6 +196,24 @@ describe('dashboard PQC metric', () => {
     expect(metric.needsMigration + metric.unclassified).toBe(metric.total - metric.pqcReady);
   });
 
+  // The gauge and the two "PQC configs" tiles are read at a glance, so the
+  // percentage is a whole number. /pqc/progress computes ready/total as a
+  // float, and 4 of 11 rendered as "36.36363636363637%" inside an 86px ring.
+  it('rounds the adoption percentage to a whole percent', () => {
+    const at = (pqc_percentage: number) => getDashboardPqcMetric({
+      pqc_percentage, pqc_ready: 0, symmetric_safe: 0, non_pqc: 0, unclassified: 0, total_implementations: 11,
+    }).adoptionPercent;
+
+    expect(at((4 / 11) * 100)).toBe(36);
+    expect(at((1 / 3) * 100)).toBe(33);
+    expect(at((2 / 3) * 100)).toBe(67);
+    expect(at(99.5)).toBe(100);
+    // A non-zero adoption must never round away to a bare 0 on a tenant that
+    // has some PQC — but 0.4% of a large estate legitimately reads 0%.
+    expect(at(0.4)).toBe(0);
+    expect(Number.isInteger(at(12.3456))).toBe(true);
+  });
+
   it('keeps new-tenant and loading states at zero', () => {
     expect(getDashboardPqcMetric(undefined)).toEqual({
       adoptionPercent: 0,

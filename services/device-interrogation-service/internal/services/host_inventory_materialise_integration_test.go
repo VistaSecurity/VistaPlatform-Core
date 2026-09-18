@@ -406,16 +406,16 @@ func TestIntegration_HostInventory_Materialises_LocalMode(t *testing.T) {
 		t.Errorf("fqdn identifiers = %v", got)
 	}
 
-	// The class is NOT guessed. An OS name and a model are evidence; turning
-	// them into a class is a rule's job, and a rule's answer is a proposal.
+	// The vendor-qualified PowerEdge rule classifies this measured host while
+	// discovery approval remains pending. Linux alone is not server evidence.
 	var classKey, classSourceKind, assetStatus string
 	if err := owner.QueryRow(
 		`SELECT class_key, class_source_kind, asset_status FROM assets WHERE tenant_id = $1 AND id = $2`,
 		tenantID, counts.AssetID).Scan(&classKey, &classSourceKind, &assetStatus); err != nil {
 		t.Fatalf("read asset: %v", err)
 	}
-	if classKey != "unknown_host" {
-		t.Errorf("class_key = %q, want unknown_host — a class from a rule is a PROPOSAL and 2.10b owns it", classKey)
+	if classKey != "server" || classSourceKind != "rule" {
+		t.Errorf("classification = %q/%q, want server/rule", classKey, classSourceKind)
 	}
 	if assetStatus != "pending_approval" {
 		t.Errorf("asset_status = %q, want pending_approval", assetStatus)
@@ -771,6 +771,14 @@ func TestIntegration_HostInventory_Materialises_ContestedSerialOpensAProposal(t 
 		t.Fatalf("first collection: %v", err)
 	}
 
+	// Placement is now available, but this contested observation must not project it.
+	location := uuid.New()
+	if _, err := owner.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'Contested Site','site')`, location, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,environment,location_id) VALUES($1,'Contested','cidr','198.51.100.0/24','production',$2)`, tenantID, location); err != nil {
+		t.Fatal(err)
+	}
 	// Same agent id, DIFFERENT serial.
 	second := hostReport(hostinventory.ModeLocal, agentID.String(), "DIFFERENT-CHASSIS", defaultPackages())
 	secondCounts, err := ingest.MaterialiseAndRecord(ctx, tenantID, agentID,
@@ -781,6 +789,9 @@ func TestIntegration_HostInventory_Materialises_ContestedSerialOpensAProposal(t 
 
 	if !secondCounts.Contested {
 		t.Fatalf("a disagreeing serial was not contested: %+v", secondCounts)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND (location_id IS NOT NULL OR coalesce(site,'')<>'')`, tenantID); n != 0 {
+		t.Fatalf("contested placement projected onto %d assets", n)
 	}
 	if secondCounts.AssetID == firstCounts.AssetID {
 		t.Fatal("the second chassis was folded onto the first asset; that is the auto-merge ADR-0002 D5 forbids")

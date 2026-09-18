@@ -260,14 +260,13 @@ func TestIntegration_SelfObservation_NeverOverwritesAnAlreadyClassifiedAsset(t *
 	}
 }
 
-// TestIntegration_SelfObservation_NeverOverwritesAnExistingHostname is
-// backfillAssetHostname's own guard, the hostname analogue of the class test
-// above: an asset that already has a name — from an import, a rule, or an
-// earlier observation — keeps it. A self-report only ever FILLS a blank.
+// TestIntegration_SelfObservation_NeverDemotesAnExistingHostname is the
+// hostname analogue of the class test above: a later self-report of a worse
+// (synthetic) name must not revert a better measured hostname. Equal-or-better
+// names still promote via the identity engine's ranker.
 //
-// Mutation check: dropping the `AND (hostname IS NULL OR hostname = ”)`
-// predicate from backfillAssetHostname's UPDATE makes this test fail.
-func TestIntegration_SelfObservation_NeverOverwritesAnExistingHostname(t *testing.T) {
+// Mutation check: last-write-wins on hostname makes this fail.
+func TestIntegration_SelfObservation_NeverDemotesAnExistingHostname(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
 
 	sensorID := uuid.New()
@@ -301,7 +300,7 @@ func TestIntegration_SelfObservation_NeverOverwritesAnExistingHostname(t *testin
 		Platform:  "linux",
 		Profile:   "datacenter_host",
 		MAC:       "28:cf:da:22:33:44",
-		Hostnames: []string{"xps16-sensor"},
+		Hostnames: []string{"4c6e0a87d480.local"},
 		Addresses: addrsFor(t, "192.0.2.175"),
 	})
 	if _, err := svc.IngestFindings(tenant, []IngestFinding{self}); err != nil {
@@ -313,6 +312,6 @@ func TestIntegration_SelfObservation_NeverOverwritesAnExistingHostname(t *testin
 		t.Fatalf("read the asset back: %v", err)
 	}
 	if hostname != "already-named-host" {
-		t.Errorf("hostname = %q after a self-report, want the pre-existing name UNCHANGED", hostname)
+		t.Errorf("hostname = %q after a worse self-report, want the pre-existing name UNCHANGED", hostname)
 	}
 }

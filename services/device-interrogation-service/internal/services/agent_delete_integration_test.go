@@ -366,6 +366,9 @@ func TestIntegration_ListAgents_ReturnsAgentShapedDetail(t *testing.T) {
 		t.Fatalf("agent %s not returned by ListAgents", agentID)
 	}
 
+	if got.TenantID != tenant {
+		t.Fatalf("tenant_id = %s, want %s", got.TenantID, tenant)
+	}
 	if got.Description == nil || *got.Description != "a test agent" {
 		t.Errorf("Description = %v, want %q", got.Description, "a test agent")
 	}

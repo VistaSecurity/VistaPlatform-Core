@@ -339,11 +339,11 @@ func TestIntegration_HostInventory_ReclassifiesAnAssetSeenPassivelyFirst(t *test
 	}
 
 	// --- the label ----------------------------------------------------------
-	if after.Hostname != "xps16" {
-		t.Errorf("hostname = %q, want xps16 — the engine never backfills one onto a matched asset", after.Hostname)
+	if after.Hostname != "xps16.example.net" {
+		t.Errorf("hostname = %q, want xps16.example.net — prefer the measured canonical name", after.Hostname)
 	}
-	if after.DisplayName != "xps16" {
-		t.Errorf("display_name = %q, want xps16: a bare address is not a name, and the platform knew the hostname",
+	if after.DisplayName != "xps16.example.net" {
+		t.Errorf("display_name = %q, want xps16.example.net: a bare address is not a name, and the platform knew the hostname",
 			after.DisplayName)
 	}
 
@@ -608,5 +608,51 @@ func TestIntegration_HostInventory_ConcurrentDeclarationWinsPromotion(t *testing
 	after := readAssetClass(t, owner, tenant, asset)
 	if after.Class != "unknown_host" || after.SourceKind != "declared" {
 		t.Fatalf("declaration lost: %+v", after)
+	}
+}
+
+func TestIntegration_HostInventory_SplitWindowsProjectsSiteWithoutListeners(t *testing.T) {
+	owner := reclassifyDB(t)
+	tenant := testdb.NewTenant(t, owner)
+	app := testdb.ConnectAsAppRole(t, owner)
+	agent := seedHostInventoryAgent(t, owner, tenant)
+	location, segment := uuid.New(), uuid.New()
+	if _, err := owner.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'North','site')`, location, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'North','cidr','198.51.100.0/24','production',$3)`, segment, tenant, location); err != nil {
+		t.Fatal(err)
+	}
+	report := windowsHostReport(agent.String(), "SPLIT-WINDOWS")
+	report.Host.OS = "Windows"
+	report.Host.OSVersion = "11 Enterprise"
+	report.Listeners = nil
+	ingest := NewHostInventoryIngest(app, owner)
+	var assetID string
+	for i := 0; i < 2; i++ {
+		job := newHostInventoryJob(t, app, owner, tenant, agent)
+		counts, err := ingest.MaterialiseAndRecord(context.Background(), tenant, agent, job, observationsFor(t, report))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			assetID = counts.AssetID
+		} else if assetID != counts.AssetID {
+			t.Fatal("inventory changed identity")
+		}
+		var site, class, loc string
+		if err = owner.QueryRow(`SELECT site,location_id::text,class_key FROM assets WHERE id=$1 AND tenant_id=$2`, assetID, tenant).Scan(&site, &loc, &class); err != nil {
+			t.Fatal(err)
+		}
+		if site != "North" || loc != location.String() || class != "computer" {
+			t.Fatalf("placement/class=%s %s %s", site, loc, class)
+		}
+	}
+	var n int
+	if err := owner.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json ? 'location_id'`, assetID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("placement histories=%d", n)
 	}
 }

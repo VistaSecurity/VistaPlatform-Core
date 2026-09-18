@@ -652,6 +652,22 @@ func TestGeneratedRules_EveryRuleCitesASource(t *testing.T) {
 // (kind, pattern) is the table's unique index, so a duplicate in the generated
 // set means the seed's ON CONFLICT silently collapses two rules into one while
 // the Go table keeps both — the two homes disagreeing, quietly.
+func TestGeneratedRules_MatterServiceIsIoTDevice(t *testing.T) {
+	e := Default()
+	got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{"_matter._tcp"}})
+	if got.Unknown || got.Class != "iot_device" {
+		t.Fatalf("Classify(_matter._tcp) = %+v, want iot_device", got)
+	}
+	// HAP and AirPlay stay deferred: a HomeKit bridge advertises for
+	// accessories it is not, and there is no media-device class.
+	if got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{"_hap._tcp"}}); !got.Unknown {
+		t.Errorf("_hap._tcp classified as %q; deferred until a bridge is not the accessory", got.Class)
+	}
+	if got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{"_airplay._tcp"}}); !got.Unknown {
+		t.Errorf("_airplay._tcp classified as %q; deferred until there is a media-device class", got.Class)
+	}
+}
+
 func TestGeneratedRules_HaveNoDuplicateIdentity(t *testing.T) {
 	seen := map[string]bool{}
 	for _, r := range generatedRules {
@@ -895,5 +911,31 @@ func TestGeneratedRules_AnOSClassIsRefinableByBetterEvidence(t *testing.T) {
 	}
 	if got.Conflict {
 		t.Errorf("reported a conflict between a class and its own ancestor: %v", got.ConflictingClasses)
+	}
+}
+
+func TestEstateHostClassificationEvidence(t *testing.T) {
+	for _, tc := range []struct{ vendor, model, os, version, want string }{
+		{"Dell", "PowerEdge R650", "Ubuntu", "24.04", "server"},
+		{"Dell Inc.", "PowerEdge R750", "Ubuntu", "22.04", "server"},
+		{"HPE", "ProLiant DL360", "Ubuntu", "22.04", "server"},
+		{"Hewlett Packard Enterprise", "ProLiant DL360 Gen10", "", "", "server"},
+		{"Cisco Systems", "C9300-48P", "IOS XE", "17.9", "switch"},
+		{"Other Vendor", "PowerEdge R650", "Ubuntu", "24.04", ""},
+		{"Dell", "XPS", "Ubuntu", "24.04", ""},
+		{"", "", "Windows", "11", "computer"},
+		{"", "", "Microsoft Windows", "11 Pro", "computer"},
+		{"", "", "Microsoft Windows 11 Pro", "10.0.22631", "computer"},
+		{"", "", "Windows Server 2022", "10.0.20348", "server"},
+		{"", "", "Windows", "10.0.22631", ""},
+		{"", "", "Windows", "2022", ""},
+		{"", "", "Windows", "", ""},
+	} {
+		t.Run(tc.vendor+tc.model+tc.os+tc.version, func(t *testing.T) {
+			got := Default().Classify(context.Background(), ClassifyInput{Vendor: tc.vendor, Model: tc.model, OS: tc.os, OSVersion: tc.version})
+			if got.Class != tc.want {
+				t.Fatalf("class=%s want %s (%+v)", got.Class, tc.want, got)
+			}
+		})
 	}
 }

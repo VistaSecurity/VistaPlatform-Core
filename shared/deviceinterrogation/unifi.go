@@ -16,8 +16,9 @@ import (
 
 // UnifiInterrogator interrogates Ubiquiti UniFi controllers (legacy software
 // controllers as well as UDM/UDR/UniFi-OS gateways) over the UniFi Network API.
-// It enumerates managed devices (name/IP/MAC/model/firmware) and emits one
-// synthetic TLS asset for the controller's management interface.
+// It enumerates managed devices (name/IP/MAC/model/firmware), associated
+// clients (`stat/sta`), and emits one synthetic TLS asset for the controller's
+// management interface.
 //
 // This is the union of the former device-agent and device-interrogation-service
 // copies. The base service copy contributed the apiPrefix logic that supports
@@ -191,6 +192,12 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	// net.vlans fact and, at ingest, the site's segments.
 	result.Assets = append(result.Assets, unifiVPNAssets(networkConfs, controllerHost)...)
 	unifiEmitNetworkFacts(result, networkConfs)
+
+	if clients, err := c.getClients(ctx, site); err != nil {
+		fmt.Printf("Warning: failed to get clients: %v\n", err)
+	} else {
+		unifiEmitClientObservations(result, clients)
+	}
 
 	// The controller's own management plane. Read off the URL we just
 	// authenticated against rather than assumed: a legacy software controller
@@ -400,6 +407,24 @@ func (c *unifiClient) getControllerIdentity(ctx context.Context, site string) (m
 func (c *unifiClient) getDevices(ctx context.Context, site string) ([]map[string]interface{}, error) {
 	resp, err := c.apiRequest(ctx, "GET", fmt.Sprintf("/api/s/%s/stat/device", site), nil)
 	if err != nil {
+		return nil, err
+	}
+	if resp.Data == nil {
+		return []map[string]interface{}{}, nil
+	}
+	return resp.Data, nil
+}
+
+// getClients retrieves the site's associated stations (wired and wireless
+// clients). A 404 is treated as "this controller has no station list" rather
+// than a failed interrogation — older mocks and some controller versions omit
+// the endpoint, and managed-device inventory still succeeded.
+func (c *unifiClient) getClients(ctx context.Context, site string) ([]map[string]interface{}, error) {
+	resp, err := c.apiRequest(ctx, "GET", fmt.Sprintf("/api/s/%s/stat/sta", site), nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "status 404") {
+			return []map[string]interface{}{}, nil
+		}
 		return nil, err
 	}
 	if resp.Data == nil {

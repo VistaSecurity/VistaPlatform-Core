@@ -11,6 +11,7 @@ import {
   versionNote,
   type Setting,
 } from './agent-config';
+import { saveResultFrom } from './agent-config-queries';
 
 const setting = (over: Partial<Setting> & Pick<Setting, 'key' | 'value'>): Setting => ({
   origin: 'built_in',
@@ -215,5 +216,20 @@ describe('versionNote', () => {
     const note = versionNote({ device: '1.2.0', expected: '1.0.0', state: 'ahead' })!;
     expect(note.tone).toBe('warn');
     expect(note.detail).toMatch(/mid-upgrade|newer/i);
+  });
+});
+
+describe('saveResultFrom', () => {
+  it('turns JSON-null slices into empty arrays', () => {
+    // The write handler used to emit `"adjusted": null` when nothing was
+    // raised. The panel maps that field after every successful save.
+    const got = saveResultFrom({
+      changed: ['host_observation_dns: false → true'],
+      adjusted: null,
+      needs_restart: null,
+    });
+    expect(got.adjusted).toEqual([]);
+    expect(got.needs_restart).toEqual([]);
+    expect(got.changed).toEqual(['host_observation_dns: false → true']);
   });
 });

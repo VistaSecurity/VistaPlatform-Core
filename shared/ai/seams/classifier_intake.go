@@ -111,6 +111,7 @@ func ClassFacts(in classify.ClassifyInput) AssetFacts {
 			FactLLDPCapabilities:  in.LLDPCapabilities,
 			FactCDPCapabilities:   in.CDPCapabilities,
 			FactOSName:            in.OS,
+			FactOSVersion:         in.OSVersion,
 		},
 	}
 }

@@ -174,6 +174,22 @@ func relationshipsOfType(result *InterrogateResult, relType string) []Relationsh
 	return out
 }
 
+func peerWithHostname(result *InterrogateResult, hostname string) *PeerRef {
+	for i := range result.Facts {
+		if result.Facts[i].Subject.Identifier(IdentifierHostname) == hostname {
+			p := result.Facts[i].Subject
+			return &p
+		}
+	}
+	for i := range result.Relationships {
+		if result.Relationships[i].Subject.Identifier(IdentifierHostname) == hostname {
+			p := result.Relationships[i].Subject
+			return &p
+		}
+	}
+	return nil
+}
+
 func TestUnifiNetworkFacts_ProjectsLANsAndDropsDHCPDetail(t *testing.T) {
 	result := &InterrogateResult{}
 	unifiEmitNetworkFacts(result, unifiNetworkConfFixture())
@@ -541,5 +557,113 @@ func TestUnifiManagementProtocol(t *testing.T) {
 	}
 	if proto, plaintext := unifiManagementProtocol("http://192.0.2.1:8080"); proto != "http" || !plaintext {
 		t.Errorf("a controller reached over plain HTTP must be recorded as plaintext, got %q plaintext=%v", proto, plaintext)
+	}
+}
+
+func TestUnifiClientObservations_AllowlistMACHostnameAndAPEdge(t *testing.T) {
+	result := &InterrogateResult{}
+	unifiEmitClientObservations(result, []map[string]interface{}{
+		{
+			"mac":           "4c:6e:0a:87:d4:80",
+			"ip":            "192.168.1.68",
+			"hostname":      "linux-2",
+			"name":          "linux-2",
+			"oui":           "Intel",
+			"is_wired":      false,
+			"ap_mac":        "78:8a:20:4b:ee:41",
+			"essid":         "corp-wifi",
+			"network":       "Default",
+			"vlan":          float64(1),
+			"last_seen":     float64(1_700_000_000),
+			"x_fingerprint": poison,
+			"fingerprint":   poison,
+			"note":          "operator@example.com " + poison,
+			"user_id":       poison,
+		},
+		{
+			// Locally-administered MAC must not become an identifier or a CI.
+			"mac":      "4e:6e:0a:87:d4:80",
+			"ip":       "192.168.1.99",
+			"hostname": "phone-random",
+			"ap_mac":   "78:8a:20:4b:ee:41",
+		},
+		{
+			// Globally-administered MAC, no AP: still a peer (via a subject
+			// fact). `.local` must stay a hostname, not an unscoped FQDN.
+			"mac":      "4c:6e:0a:87:d4:81",
+			"hostname": "4c6e0a87d480.local",
+			"ip":       "192.168.1.70",
+		},
+	})
+
+	assertObservationsValid(t, "unifi clients", result)
+	assertNoPoison(t, "unifi clients", result)
+
+	edges := relationshipsOfType(result, relTypeConnectsTo)
+	var linux2, laa *RelationshipObservation
+	for i := range edges {
+		h := edges[i].Subject.Identifier(IdentifierHostname)
+		switch h {
+		case "linux-2":
+			linux2 = &edges[i]
+		case "phone-random":
+			laa = &edges[i]
+		}
+	}
+	if linux2 == nil {
+		t.Fatalf("expected a connects_to edge for linux-2, got %+v", edges)
+	}
+	if linux2.Subject.Identifier(IdentifierMACAddress) != "4c:6e:0a:87:d4:80" {
+		t.Errorf("linux-2 MAC = %q", linux2.Subject.Identifier(IdentifierMACAddress))
+	}
+	if linux2.Subject.Identifier(IdentifierIPAddress) != "192.168.1.68" {
+		t.Errorf("linux-2 IP = %q", linux2.Subject.Identifier(IdentifierIPAddress))
+	}
+	if linux2.Peer.Identifier(IdentifierMACAddress) != "78:8a:20:4b:ee:41" {
+		t.Errorf("AP MAC = %q", linux2.Peer.Identifier(IdentifierMACAddress))
+	}
+	if linux2.Subject.Identifier(IdentifierFQDN) != "" {
+		t.Errorf("linux-2 must not be filed as an FQDN: %+v", linux2.Subject.Identifiers)
+	}
+
+	localName := peerWithHostname(result, "4c6e0a87d480.local")
+	if localName == nil {
+		t.Fatalf("expected a peer for the .local hostname (fact or edge), facts=%v edges=%+v", factKeys(result), edges)
+	}
+	if localName.Identifier(IdentifierFQDN) != "" {
+		t.Errorf(".local client was filed as FQDN: %+v", localName.Identifiers)
+	}
+	if localName.Identifier(IdentifierHostname) != "4c6e0a87d480.local" {
+		t.Errorf(".local hostname = %q", localName.Identifier(IdentifierHostname))
+	}
+	if localName.Identifier(IdentifierMACAddress) != "4c:6e:0a:87:d4:81" {
+		t.Errorf(".local MAC = %q, want the globally-administered station MAC", localName.Identifier(IdentifierMACAddress))
+	}
+	if laa != nil && laa.Subject.Identifier(IdentifierMACAddress) != "" {
+		t.Errorf("LAA MAC became an identifier: %+v", laa.Subject.Identifiers)
+	}
+	phone := peerWithHostname(result, "phone-random")
+	if phone != nil && phone.Identifier(IdentifierMACAddress) != "" {
+		t.Errorf("LAA MAC became an identifier on the fact subject: %+v", phone.Identifiers)
+	}
+
+	projected := unifiProject(map[string]interface{}{
+		"mac": "4c:6e:0a:87:d4:80", "hostname": "linux-2", "x_fingerprint": poison, "note": poison,
+	}, unifiClientInventoryFields)
+	assertNoPoison(t, "unifi sta projection", projected)
+	assertKeysWithin(t, "unifi sta projection", projected, unifiClientInventoryFields)
+}
+
+func TestUniFiAliasIsOnlyDisplayContext(t *testing.T) {
+	for _, alias := range []string{"printer", "printer.example.test", "Office Printer"} {
+		peer := unifiClientPeer(map[string]interface{}{"name": alias, "hostname": "actual-host", "mac": "00:1a:2b:3c:4d:5e"})
+		if peer.DisplayName != alias {
+			t.Fatalf("lost alias: %+v", peer)
+		}
+		for _, id := range peer.Identifiers {
+			if id.Value == alias {
+				t.Fatalf("alias became identifier: %+v", peer)
+			}
+		}
 	}
 }

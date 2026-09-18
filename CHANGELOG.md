@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0-rc.11] - 2026-09-17
+## [1.0.0-rc.12] - 2026-09-17
 
 This is the first release of the **general asset inventory**: the product now
 inventories every kind of asset, not only cryptographic material. Assets are
@@ -15,6 +15,10 @@ configuration items with endpoints as children, one identification engine sits
 behind every intake, relationships are a typed graph with a map, posture is one
 findings table with an explicit coverage record, and the AI seams default to no
 provider at all. Tracked as one epic in the private repository.
+
+Recent fixes improve host names, server and Windows classification, site placement,
+and certificate attachment evidence. Inventory facet filters and sensor/agent
+settings saves are corrected as well.
 
 ### Highlights
 
@@ -115,6 +119,22 @@ magnitude longer than a release entry normally is; it lives beside the rest of
 the product documentation so this file stays readable.
 
 <!-- release-notes-end -->
+
+### Fixed
+
+- Host name enrichment preserves declared and legacy human names, keeps UniFi
+  aliases out of identity matching, records name changes, and treats observed
+  DHCP leases as non-identifying even on operator-managed network segments.
+- Estate inventory recognizes vendor-qualified Dell PowerEdge and HPE ProLiant
+  servers and explicit Windows client releases, fills missing site placement
+  from the resolved tenant segment, and returns agent tenant IDs and crypto
+  endpoint IDs. Declared classification and conflicting placement stay intact.
+- Seed acceptance requires TLS endpoint/certificate attachment evidence, including
+  distinct certificates on separate sockets of one host.
+- Inventory facet clicks match NULL and empty context values, use segment UUIDs,
+  preserve tenant-defined class paths, and reset pagination when filters change.
+  Sensor and agent settings saves tolerate empty response arrays.
+
 
 ## [0.12.5] - 2026-09-08
 

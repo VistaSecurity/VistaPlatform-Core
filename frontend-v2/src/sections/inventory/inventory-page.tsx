@@ -734,8 +734,8 @@ export function InventoryPage() {
         {isConn && <FilterSelect label="Strength" value={fConnectionStrength} onChange={(v) => { setFConnectionStrength(v); setPage(1); }} options={CONNECTION_STRENGTH_OPTIONS} />}
         {!isConn && !isCert && !isKey && !isData && (
           <>
-            <FilterSelect label="Environment" value={fEnv} onChange={setFEnv} options={ENV_OPTS} />
-            <FilterSelect label={isConfig ? 'Risk band' : 'Risk'} value={effectiveRisk} onChange={setFRisk} options={isConfig ? CONFIGURATION_RISK_OPTS : RISK_OPTS} />
+            <FilterSelect label="Environment" value={fEnv} onChange={(v) => { setFEnv(v); setPage(1); }} options={ENV_OPTS} />
+            <FilterSelect label={isConfig ? 'Risk band' : 'Risk'} value={effectiveRisk} onChange={(v) => { setFRisk(v); setPage(1); }} options={isConfig ? CONFIGURATION_RISK_OPTS : RISK_OPTS} />
             {hasFilters && (
               <button onClick={clearFilters} className="ui-btn ghost" style={{ height: 31, padding: '0 9px', fontSize: 12.5 }}>
                 <Icon name="x" size={13} />Clear

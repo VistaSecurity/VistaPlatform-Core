@@ -3061,6 +3061,11 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		args = append(args, input.Hostname)
 		idx++
 	}
+	if input.DisplayName != nil {
+		setClauses = append(setClauses, fmt.Sprintf("display_name = $%d", idx))
+		args = append(args, input.DisplayName)
+		idx++
+	}
 	if input.IPAddress != nil {
 		setClauses = append(setClauses, fmt.Sprintf("primary_address = $%d::text::inet", idx))
 		args = append(args, input.IPAddress)
@@ -3179,14 +3184,29 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		args = append(args, tagsJSON)
 		idx++
 	}
-	if input.Metadata != nil {
-		metadataJSON, err := json.Marshal(input.Metadata)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to marshal metadata: %w", err)
+	// Metadata replacement must preserve internal name provenance. A combined
+	// name/metadata edit is ONE assignment; SQL does not permit two SETs.
+	if input.Metadata != nil || input.Hostname != nil || input.DisplayName != nil {
+		base := "COALESCE(metadata, '{}'::jsonb)"
+		if input.Metadata != nil {
+			payload := models.JSONB{}
+			for k, v := range input.Metadata {
+				if k != "name_source_kind" {
+					payload[k] = v
+				}
+			}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				return nil, nil, fmt.Errorf("marshal metadata: %w", err)
+			}
+			base = fmt.Sprintf("$%d::jsonb || CASE WHEN metadata ? 'name_source_kind' THEN jsonb_build_object('name_source_kind', metadata->'name_source_kind') ELSE '{}'::jsonb END", idx)
+			args = append(args, encoded)
+			idx++
 		}
-		setClauses = append(setClauses, fmt.Sprintf("metadata = $%d", idx))
-		args = append(args, metadataJSON)
-		idx++
+		if input.Hostname != nil || input.DisplayName != nil {
+			base += " || jsonb_build_object('name_source_kind', 'declared')"
+		}
+		setClauses = append(setClauses, "metadata = "+base)
 	}
 
 	if len(setClauses) == 0 {
@@ -3255,6 +3275,7 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 	changes := map[string]any{}
 	for k, v := range map[string]any{
 		"hostname":        input.Hostname,
+		"display_name":    input.DisplayName,
 		"primary_address": input.IPAddress,
 		"class_key":       input.ClassKey,
 		"environment":     input.Environment,

@@ -483,14 +483,6 @@ func (h *HostInventoryIngest) Materialise(
 		counts.EndpointsClosed = closed
 	}
 
-	// --- the label ----------------------------------------------------------
-	//
-	// Same "better evidence wins" shape as the class, one column over. See
-	// nameAsset.
-	if err := h.nameAsset(ctx, tenantID, assetID, observation.Hostname); err != nil {
-		counts.Errors = append(counts.Errors, fmt.Sprintf("naming the asset: %v", err))
-	}
-
 	log.Printf("[HostInventory] %s → asset %s (created=%t): %d identifiers, %d facts, %d endpoints (-%d closed), installs +%d ~%d -%d",
 		meta.label(), counts.AssetID, counts.AssetCreated,
 		counts.Identifiers, counts.Facts, counts.Endpoints, counts.EndpointsClosed,
@@ -1274,6 +1266,8 @@ func hostInventoryClassEvidence(obs *di.InterrogateResult) classify.ClassifyInpu
 			in.Vendor = factText(f.Value)
 		case facts.KeyHWModel:
 			in.Model = factText(f.Value)
+		case facts.KeyOSVersion:
+			in.OSVersion = factText(f.Value)
 		case facts.KeyOSName:
 			in.OS = factText(f.Value)
 		}
@@ -1314,78 +1308,6 @@ func (h *HostInventoryIngest) classifyHost(ctx context.Context, obs *di.Interrog
 	}
 	c := seams.ClassifierFor(h.sink.seamSet(), h.sink.classifier().Engine())
 	return seams.Explain(ctx, c, seams.ClassFacts(ev))
-}
-
-// nameAsset gives an asset the hostname this collection carries, on the same
-// "better evidence wins, never overwrite an answer" principle as the class.
-//
-// Two columns, two different rules, and the difference is the whole point:
-//
-//   - `hostname` is filled only when EMPTY. An asset that already has one has
-//     been named by something, and a host inventory does not overrule it.
-//   - `display_name` is filled when empty AND replaced when it is a bare IP
-//     ADDRESS. A label that is an address is not a name — it is what
-//     identity.displayNameFor falls back to when the creating observation
-//     carried nothing better, which is exactly what a passive sighting carries.
-//     This is the other half of the reported bug: the asset was displayed as
-//     a bare IP address while the platform knew its hostname, its model and
-//     OS, because the identification engine writes display_name at CREATION and
-//     no path backfilled it afterwards.
-//
-// A display name that is not an address is left alone, whatever it says. The
-// only way one gets there is a person typing it or a collector reporting a real
-// name, and both outrank this. That guard is why the IP test is done in Go on
-// the value read back rather than guessed at in SQL: `display_name` is free
-// text and there is no honest single-statement predicate for "this is an
-// address".
-//
-// It runs AFTER the engine's transaction, like the software and endpoint
-// writes, because it is repair rather than part of the resolution: a failure
-// here costs the label, not the collection.
-func (h *HostInventoryIngest) nameAsset(ctx context.Context, tenantID, assetID uuid.UUID, hostname string) error {
-	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	if hostname == "" {
-		return nil
-	}
-	// An address in the hostname field is an address, not a name — the same
-	// rule setAssetAddress applies, and the same reason: assets.hostname is what
-	// a hostname search looks at, and naming an asset after its address is the
-	// thing this function exists to undo.
-	if _, err := netip.ParseAddr(hostname); err == nil {
-		return nil
-	}
-	return shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
-		var current, display string
-		err := tx.QueryRowContext(ctx, `
-			SELECT COALESCE(hostname, ''), COALESCE(display_name, '')
-			  FROM assets
-			 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
-			tenantID, assetID).Scan(&current, &display)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-
-		nameIt := display == ""
-		if !nameIt {
-			if _, perr := netip.ParseAddr(display); perr == nil {
-				nameIt = true
-			}
-		}
-		if current != "" && !nameIt {
-			return nil
-		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE assets
-			   SET hostname     = CASE WHEN $3 THEN $4 ELSE hostname END,
-			       display_name = CASE WHEN $5 THEN $4 ELSE display_name END,
-			       updated_at   = now()
-			 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`,
-			tenantID, assetID, current == "", hostname, nameIt)
-		return err
-	})
 }
 
 // exposedPorts is the set of ports the host listens on that something else
