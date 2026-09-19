@@ -328,6 +328,16 @@ services:
       dependencies: [postgres, redis, nats]
       env_template: standard-go-service
     endpoints:
+      - path: /settings/identity-discovery
+        method: GET
+        description: "Read tenant identity admission and enrichment settings"
+        auth_required: true
+        rbac_permissions: [settings.read]
+      - path: /settings/identity-discovery
+        method: PUT
+        description: "Update audited tenant identity admission and enrichment settings"
+        auth_required: true
+        rbac_permissions: [settings.update]
       - path: /tenant/:id/activity-summary
         method: GET
         description: "Get activity metrics for a specific tenant (for tenant health service)"

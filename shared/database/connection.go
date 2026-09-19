@@ -137,5 +137,9 @@ func ConnectWithPool(databaseURL string, pool PoolConfig) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
+	if err := RegisterSessionPool(db, "postgres", databaseURL); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
 }

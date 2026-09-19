@@ -13,6 +13,7 @@ import (
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -178,6 +179,124 @@ func countRows(t *testing.T, db *sql.DB, query string, args ...any) int {
 	return n
 }
 
+func TestIntegration_HostInventoryRetainedReplayPreservesSnapshotTime(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	tenant := testdb.NewTenant(t, owner)
+	other := testdb.NewTenant(t, owner)
+	app := testdb.ConnectAsAppRole(t, owner)
+	app.SetMaxOpenConns(1)
+	agent := seedHostInventoryAgent(t, owner, tenant)
+	ingest := NewHostInventoryIngest(app, owner)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	report := hostReport(hostinventory.ModeLocal, agent.String(), "RETAINED-HOST", defaultPackages())
+	first, err := ingest.MaterialiseAndRecord(ctx, tenant, agent, newHostInventoryJob(t, app, owner, tenant, agent), observationsFor(t, report))
+	if err != nil || !first.FullyMaterialized() {
+		t.Fatalf("baseline: %+v %v", first, err)
+	}
+	if _, err = owner.Exec(`UPDATE assets SET asset_status='monitoring',class_key='unknown_host',class_source_kind='declared',site='Declared site' WHERE tenant_id=$1 AND id=$2`, tenant, first.AssetID); err != nil {
+		t.Fatal(err)
+	}
+	mode := func(value string) {
+		t.Helper()
+		if _, err := owner.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,jsonb_build_object('identity_admission',jsonb_build_object('mode',$2::text))) ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	enable := func(h *HostInventoryIngest) {
+		t.Helper()
+		_, repo, err := h.sink.engine()
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.sink.eng, err = identity.New(identity.Config{Repo: repo, AdmissionEnabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	enable(ingest)
+	mode("paused")
+	report.Collected = report.Collected.Add(time.Hour)
+	report.Packages = report.Packages[:1]
+	heldJob := newHostInventoryJob(t, app, owner, tenant, agent)
+	held, err := ingest.MaterialiseAndRecord(ctx, tenant, agent, heldJob, observationsFor(t, report))
+	if err != nil || held.IdentityOutcome != identity.OutcomeUnresolved || held.AssetID != "" || held.ObservationID == "" {
+		t.Fatalf("paused report not retained: %+v %v", held, err)
+	}
+	if _, err = owner.Exec(`UPDATE identity_observations SET state='linked',asset_id=$3 WHERE tenant_id=$1 AND id=$2`, tenant, held.ObservationID, first.AssetID); err != nil {
+		t.Fatal(err)
+	}
+	// The payload's lifetime is independent of the original job row.
+	if _, err = owner.Exec(`DELETE FROM device_jobs WHERE tenant_id=$1 AND id=$2`, tenant, heldJob); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewHostInventoryIngest(app, owner)
+	enable(restarted)
+	if err = restarted.ReplayRetainedHostInventories(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM identity_observation_host_inventories WHERE tenant_id=$1 AND materialized_at IS NOT NULL`, tenant); n != 0 {
+		t.Fatal("paused replay materialized a snapshot")
+	}
+	mode("enforce")
+	if err = restarted.ReplayRetainedHostInventories(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err = restarted.ReplayRetainedHostInventories(ctx, tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM assets WHERE tenant_id=$1`, tenant); n != 1 {
+		t.Fatalf("replay changed asset count: %d", n)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM software_installs WHERE tenant_id=$1 AND asset_id=$2 AND status='active'`, tenant, first.AssetID); n != 1 {
+		t.Fatalf("retained packages not materialized: %d", n)
+	}
+	var seen time.Time
+	var class, site string
+	if err = owner.QueryRow(`SELECT last_seen_at,class_key,site FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, first.AssetID).Scan(&seen, &class, &site); err != nil {
+		t.Fatal(err)
+	}
+	if !seen.Equal(report.Collected) || class != "unknown_host" || site != "Declared site" {
+		t.Fatalf("replay changed safeguards or fabricated time: %v %s %s", seen, class, site)
+	}
+	if err = owner.QueryRow(`SELECT last_seen_at FROM software_installs WHERE tenant_id=$1 AND asset_id=$2 AND status='active'`, tenant, first.AssetID).Scan(&seen); err != nil || !seen.Equal(report.Collected) {
+		t.Fatalf("install time is not collection time: %v %v", seen, err)
+	}
+	if err = owner.QueryRow(`SELECT observed_at FROM asset_facts WHERE tenant_id=$1 AND asset_id=$2 AND key='os.name'`, tenant, first.AssetID).Scan(&seen); err != nil || !seen.Equal(report.Collected) {
+		t.Fatalf("fact time is not collection time: %v %v", seen, err)
+	}
+	// Queue an older snapshot, then complete a newer live collection. Replaying
+	// the old snapshot must not retire the newer packages or listeners.
+	mode("paused")
+	report.Collected = report.Collected.Add(time.Hour)
+	older, err := restarted.MaterialiseAndRecord(ctx, tenant, agent, newHostInventoryJob(t, app, owner, tenant, agent), observationsFor(t, report))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = owner.Exec(`UPDATE identity_observations SET state='linked',asset_id=$3 WHERE tenant_id=$1 AND id=$2`, tenant, older.ObservationID, first.AssetID); err != nil {
+		t.Fatal(err)
+	}
+	mode("enforce")
+	report.Collected = report.Collected.Add(time.Hour)
+	report.Packages = defaultPackages()
+	latest, err := restarted.MaterialiseAndRecord(ctx, tenant, agent, newHostInventoryJob(t, app, owner, tenant, agent), observationsFor(t, report))
+	if err != nil || !latest.FullyMaterialized() {
+		t.Fatalf("newer snapshot: %+v %v", latest, err)
+	}
+	if err = restarted.ReplayRetainedHostInventories(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM software_installs WHERE tenant_id=$1 AND asset_id=$2 AND status='active'`, tenant, first.AssetID); n != len(defaultPackages()) {
+		t.Fatalf("older replay retired newer packages: %d", n)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM identity_observation_host_inventories WHERE tenant_id=$1 AND superseded_at IS NOT NULL`, tenant); n != 1 {
+		t.Fatalf("older completed snapshot not superseded: %d", n)
+	}
+}
+
 // TestIntegration_HostInventory_QueuesConnectionsThroughTheSharedPipeline
 // pins the production wiring: the real projection reaches Materialise, the
 // host is resolved first, and each valid peer becomes a sensor_discoveries row
@@ -244,6 +363,15 @@ func TestIntegration_HostInventory_QueuesConnectionsThroughTheSharedPipeline(t *
 	}
 	if got != 2 {
 		t.Fatalf("queued rows=%d, want 2", got)
+	}
+	_ = rows.Close()
+	replay, err := NewHostInventoryIngest(appDB, owner).MaterialiseAndRecord(t.Context(), tenantID, agentID, jobID, obs)
+	if err != nil || replay.ConnectionsQueued != 0 {
+		t.Fatalf("replayed connections duplicated: %+v %v", replay, err)
+	}
+	var seen time.Time
+	if err := owner.QueryRow(`SELECT min(timestamp) FROM sensor_discoveries WHERE tenant_id=$1 AND batch_id=$2`, tenantID, "host-inventory-connections:"+jobID.String()).Scan(&seen); err != nil || !seen.Equal(rep.Collected) {
+		t.Fatalf("connection clock changed: %v %v", seen, err)
 	}
 }
 

@@ -2,7 +2,9 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +18,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // otProbeAllowed is the canonical allowlist of OT probes the platform supports
@@ -155,6 +159,47 @@ func NewDiscoveryService(db, bypassDB *sqlx.DB) *DiscoveryService {
 // and why a request is refused) live in sensor_dispatch.go.
 
 func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateDiscoveryJobRequest) (*models.DiscoveryJob, error) {
+	// The coordinator persists this token before dispatch. A retry after remote
+	// commit must return the same job rather than perform another network probe.
+	requestID := ""
+	requestFingerprint := ""
+	if raw, exists := req.Options["identity_enrichment_request_id"]; exists {
+		value, ok := raw.(string)
+		parsed, parseErr := uuid.Parse(value)
+		if !ok || parseErr != nil || parsed == uuid.Nil {
+			return nil, fmt.Errorf("invalid identity enrichment request ID")
+		}
+		requestID = parsed.String()
+		encoded, encodeErr := json.Marshal(req)
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		sum := sha256.Sum256(encoded)
+		requestFingerprint = hex.EncodeToString(sum[:])
+	}
+
+	if requestID != "" {
+		tenant, err := uuid.Parse(tenantID)
+		if err != nil {
+			return nil, err
+		}
+		replay := &models.DiscoveryJob{TenantID: tenantID, ExecutionMode: req.ExecutionMode, RequestedSensorIDs: req.PreferredSensorIDs}
+		var storedFingerprint string
+		err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenant, func(tx *sql.Tx) error {
+			return tx.QueryRow(`SELECT id,status,created_at,updated_at,COALESCE(metadata->>'identity_enrichment_fingerprint','')
+    FROM discovery_jobs WHERE tenant_id=$1 AND metadata->'options'->>'identity_enrichment_request_id'=$2`, tenant, requestID).
+				Scan(&replay.ID, &replay.Status, &replay.CreatedAt, &replay.UpdatedAt, &storedFingerprint)
+		})
+		if err == nil {
+			if storedFingerprint != requestFingerprint {
+				return nil, fmt.Errorf("identity enrichment request ID reused with different inputs")
+			}
+			return replay, nil
+		}
+		if err != sql.ErrNoRows {
+			return nil, err
+		}
+	}
 	// A `sensors` job is refused HERE, with a reason, when the sensor it names
 	// is unknown, the platform's own, air-gapped or offline. Refusing at
 	// creation is what keeps "the job was created" meaning "the job can run":
@@ -239,6 +284,9 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 
 	// Build metadata JSON with scanning options
 	metadata := map[string]interface{}{}
+	if requestID != "" {
+		metadata["identity_enrichment_fingerprint"] = requestFingerprint
+	}
 	if req.Options != nil {
 		metadata["options"] = req.Options
 	}
@@ -266,6 +314,42 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 	createdBy := createdByOrNull(userID)
 
 	err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantUUID, func(tx *sql.Tx) error {
+		if requestID != "" {
+			if _, lockErr := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1,72047))`, tenantID+":"+requestID); lockErr != nil {
+				return lockErr
+			}
+			var fingerprint string
+			replayErr := tx.QueryRow(`SELECT id,status,created_at,updated_at,COALESCE(metadata->>'identity_enrichment_fingerprint','')
+    FROM discovery_jobs WHERE tenant_id=$1 AND metadata->'options'->>'identity_enrichment_request_id'=$2`, tenantID, requestID).
+				Scan(&job.ID, &job.Status, &job.CreatedAt, &job.UpdatedAt, &fingerprint)
+			if replayErr == nil {
+				if fingerprint != requestFingerprint {
+					return fmt.Errorf("identity enrichment request ID reused with different inputs")
+				}
+				return nil
+			}
+			if replayErr != sql.ErrNoRows {
+				return replayErr
+			}
+			if !isSensorExecutionMode(req.ExecutionMode) || len(req.PreferredSensorIDs) != 1 || len(req.OTProbeProtocols) != 0 {
+				return fmt.Errorf("identity probes require one scoped sensor and TLS/SSH only")
+			}
+			selectedSensor, err := uuid.Parse(req.PreferredSensorIDs[0])
+			if err != nil {
+				return err
+			}
+			if err := authorizeEnrichmentDispatch(tx, sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}, selectedSensor); err != nil {
+				return err
+			}
+		}
+		if dispatchguard.IsAutomaticScan(req.Options) {
+			if len(req.OTProbeProtocols) > 0 {
+				return fmt.Errorf("automatic scanning cannot request OT probes")
+			}
+			if err := dispatchguard.AuthorizeAutomaticScan(tx, sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}); err != nil {
+				return err
+			}
+		}
 		// Insert job. ot_probe_protocols is the audit column — captures which
 		// OT probes the operator opted in to for forensic traceability, even
 		// after the per-target rows have been pruned by retention.

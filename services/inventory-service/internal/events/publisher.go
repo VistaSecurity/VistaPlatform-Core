@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/nats-io/nats.go"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +17,7 @@ const subjectPrefix = "inventory.lifecycle"
 
 // LifecyclePublisher publishes discovery-lifecycle events to NATS.
 type LifecyclePublisher struct {
+	mu     sync.Mutex
 	client *events.NATSClient
 }
 
@@ -26,7 +29,10 @@ func NewLifecyclePublisher(client *events.NATSClient) *LifecyclePublisher {
 
 // Publish sends an event with the standard envelope to subject inventory.lifecycle.{eventType}.
 func (p *LifecyclePublisher) Publish(ctx context.Context, eventType string, tenantID uuid.UUID, source string, payload interface{}) error {
-	if p.client == nil || !p.client.IsConnected() {
+	p.mu.Lock()
+	client := p.client
+	p.mu.Unlock()
+	if client == nil || !client.IsConnected() {
 		return nil
 	}
 	env := Envelope{
@@ -42,7 +48,7 @@ func (p *LifecyclePublisher) Publish(ctx context.Context, eventType string, tena
 		return fmt.Errorf("marshal lifecycle event: %w", err)
 	}
 	subject := subjectPrefix + "." + eventType
-	if err := p.client.Publish(subject, data, env.EventID.String()); err != nil {
+	if err := client.Publish(subject, data, env.EventID.String()); err != nil {
 		return fmt.Errorf("publish %s: %w", eventType, err)
 	}
 	log.Printf("[LifecyclePublisher] Published %s to %s", eventType, subject)
@@ -58,4 +64,29 @@ func NewLifecyclePublisherFromEnv() *LifecyclePublisher {
 		return &LifecyclePublisher{} // client nil => no-op
 	}
 	return NewLifecyclePublisher(client)
+}
+
+// PublishDurable requires JetStream acknowledgement and preserves the persisted
+// event ID/time across retries. An unavailable bus is never reported as success.
+func (p *LifecyclePublisher) PublishDurable(ctx context.Context, env Envelope) error {
+	p.mu.Lock()
+	if p.client == nil {
+		client, err := events.NewNATSClientOnce("")
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		p.client = client
+	}
+	client := p.client
+	p.mu.Unlock()
+	if !client.IsConnected() || client.JetStream() == nil {
+		return fmt.Errorf("lifecycle event bus unavailable")
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	_, err = client.JetStream().Publish(subjectPrefix+"."+env.EventType, data, nats.MsgId(env.EventID.String()), nats.Context(ctx))
+	return err
 }

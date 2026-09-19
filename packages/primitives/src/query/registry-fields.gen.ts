@@ -205,6 +205,12 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       description: 'the row\'s own primary key; the any-kind identifier form is id.any (§13 A1)',
     },
     {
+      name: 'identity_status',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'identity_status', cast: 'text' },
+      enum: ['legacy', 'established', 'operator_confirmed'],
+    },
+    {
       name: 'last_seen',
       type: 'timestamp',
       accessor: { kind: 'column', column: 'last_seen_at' },

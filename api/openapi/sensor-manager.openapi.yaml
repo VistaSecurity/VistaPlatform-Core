@@ -1587,6 +1587,16 @@ components:
           - 'null'
           items:
             type: string
+        reported_dns_interfaces:
+          type: array
+          description: OS interfaces eligible for scoped DNS, reported by the current collector.
+          items:
+            type: string
+        reported_capabilities:
+          type: array
+          items:
+            type: string
+          description: Supported commands reported by the current sensor binary in its authenticated heartbeat. Missing reports clear prior capabilities.
         available_interfaces:
           description: Full host NIC inventory the sensor reports in its heartbeat; populates the UI interface picker. Distinct from network_interfaces (the monitored subset).
           type:

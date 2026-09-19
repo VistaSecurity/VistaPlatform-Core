@@ -133,6 +133,12 @@ body {
 .panel { background: var(--app-panel); border: 1px solid var(--app-border); border-radius: 16px; }
 .hero-glow { mix-blend-mode: var(--hero-glow-blend); }
 
+/* Shared native controls use the same theme tokens as the settings/modal kit. */
+.ui-input { display: block; width: 100%; min-height: 38px; margin-top: 6px; padding: 8px 12px; border-radius: 9px; border: 1px solid var(--app-border2); background: var(--app-panel2); color: var(--app-t1); font-family: var(--font-body); font-size: 13px; }
+.ui-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-input:disabled { opacity: .6; cursor: not-allowed; }
+.ui-input option { background: var(--app-panel2); color: var(--app-t1); }
+textarea.ui-input { resize: vertical; }
 .ui-btn { font-family: var(--font-body); font-weight: 600; font-size: 13px; letter-spacing: -.01em; border: 1px solid var(--app-border2); background: var(--app-panel2); color: var(--app-t1); height: 34px; padding: 0 14px; border-radius: 9px; display: inline-flex; align-items: center; gap: 7px; cursor: pointer; transition: all .15s ease; white-space: nowrap; }
 .ui-btn:hover { border-color: var(--app-t3); background: var(--app-hover); }
 .ui-btn.accent { background: var(--accent-gradient); color: var(--accent-fg); border: none; font-weight: 700; }

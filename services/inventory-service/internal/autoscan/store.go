@@ -23,6 +23,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	sharedautoscan "github.com/vistasecurity/vistaplatform/shared/autoscan"
 )
 
@@ -67,7 +68,13 @@ func (s *Store) GetPolicy(ctx context.Context, tenantID uuid.UUID) (Policy, erro
 	if err != nil {
 		return sharedautoscan.DefaultPolicy(), err
 	}
-	return sharedautoscan.FromConfig(config), nil
+	policy := sharedautoscan.FromConfig(config)
+	// The admission emergency stop also pauses automatic enrichment through
+	// this older scheduler. Incoming evidence continues to be retained.
+	if admission, ok := config["identity_admission"].(map[string]interface{}); ok && admission["mode"] == "paused" {
+		policy.Enabled = false
+	}
+	return policy, nil
 }
 
 // GetState returns the worker's record of its last sweep.
@@ -107,7 +114,9 @@ func (s *Store) readConfig(ctx context.Context, tenantID uuid.UUID) (map[string]
 	}
 	config := map[string]interface{}{}
 	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &config)
+		if err := json.Unmarshal(raw, &config); err != nil {
+			return nil, fmt.Errorf("invalid tenant automatic-scan settings: %w", err)
+		}
 	}
 	return config, nil
 }
@@ -236,25 +245,56 @@ func (s *Store) InScope(ctx context.Context, tenantID uuid.UUID, excluded []neti
 // scannableAssets is the one eligibility rule. `cutoff` nil means "ignore the
 // rescan interval".
 func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff *time.Time, excluded []netip.Prefix) ([]Target, map[sharedautoscan.Reason]int, error) {
+	config, err := s.readConfig(ctx, tenantID)
+	if err != nil {
+		return nil, nil, err
+	}
+	restrictions, err := sharedautoscan.RestrictionsFromConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	if restrictions.Paused {
+		return nil, map[sharedautoscan.Reason]int{}, nil
+	}
+	excluded = append(append([]netip.Prefix(nil), excluded...), restrictions.Excluded...)
+	protectedClasses := []string{}
+	for _, class := range assetclass.All {
+		if restrictions.ProtectsAsset(uuid.Nil, class.Key) {
+			protectedClasses = append(protectedClasses, class.Key)
+		}
+	}
+	protectedIDs := []string{}
+	for id := range restrictions.SensitiveAssetIDs {
+		protectedIDs = append(protectedIDs, id.String())
+	}
 	segments, err := s.segmentPrefixes(ctx, tenantID)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	type row struct {
-		id      uuid.UUID
-		address string
+		id        uuid.UUID
+		address   string
+		protected bool
 	}
 	var rows []row
 	err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		var sensitiveSegments []string
+		if err := tx.SelectContext(ctx, &sensitiveSegments, `SELECT value FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr' AND (COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')`, tenantID); err != nil {
+			return err
+		}
+		excluded = append(excluded, sharedautoscan.ParsePrefixes(sensitiveSegments)...)
 		// The CASE — rather than an OR chain — is what keeps a malformed stored
 		// timestamp from erroring the whole query: Postgres may reorder the arms
 		// of an OR and evaluate the cast anyway, while CASE is evaluated in
 		// order. An unparseable stamp is treated as "never scanned", which errs
 		// toward scanning rather than toward silently skipping an asset forever.
 		q, err := tx.QueryContext(ctx, `
-			SELECT a.id, host(a.primary_address)
-			FROM assets a
+			SELECT a.id, host(a.primary_address), EXISTS(
+       SELECT 1 FROM assets protected WHERE protected.tenant_id=a.tenant_id
+       AND (protected.id=ANY($4::uuid[]) OR protected.class_key=ANY($5::text[]) OR protected.class_key LIKE '%industrial%' OR protected.class_key LIKE '%medical%' OR protected.class_key LIKE 'ot\_%' ESCAPE '\')
+       AND (protected.primary_address=a.primary_address OR EXISTS(SELECT 1 FROM asset_endpoints e WHERE e.tenant_id=protected.tenant_id AND e.asset_id=protected.id AND e.address=a.primary_address)))
+   FROM assets a
 			WHERE a.tenant_id = $1
 			  AND a.deleted_at IS NULL
 			  AND a.primary_address IS NOT NULL
@@ -268,7 +308,7 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 			        ELSE true
 			      END
 			ORDER BY a.metadata ->> 'last_auto_scan_at' NULLS FIRST, a.last_seen_at DESC
-			LIMIT $3`, tenantID, cutoffArg(cutoff), candidateLimit)
+			LIMIT $3`, tenantID, cutoffArg(cutoff), candidateLimit, pq.Array(protectedIDs), pq.Array(protectedClasses))
 		if err != nil {
 			return err
 		}
@@ -276,7 +316,7 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 		for q.Next() {
 			var r row
 			var addr sql.NullString
-			if err := q.Scan(&r.id, &addr); err != nil {
+			if err := q.Scan(&r.id, &addr, &r.protected); err != nil {
 				return err
 			}
 			r.address = addr.String
@@ -291,6 +331,10 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 	refusals := map[sharedautoscan.Reason]int{}
 	var targets []Target
 	for _, r := range rows {
+		if r.protected {
+			refusals[sharedautoscan.ReasonExcluded]++
+			continue
+		}
 		addr, reason, ok := sharedautoscan.ParseTarget(r.address)
 		if !ok {
 			refusals[reason]++

@@ -692,6 +692,60 @@ paths:
                 $ref: '#/components/schemas/AgentConfigConfirmationRequired'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /cloud/interrogate:
+    post:
+      operationId: interrogateCloudResource
+      tags: [devices]
+      summary: Collect provider evidence for a cloud resource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [integration_id, resource_type]
+              properties:
+                integration_id:
+                  type: string
+                  format: uuid
+                cloud_provider:
+                  type: string
+                  enum: [aws, azure, gcp]
+                resource_type:
+                  type: string
+                resource_arn:
+                  type: string
+                resource_id:
+                  type: string
+      responses:
+        '200':
+          description: Resolved cloud resource and collected context.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device, resource_type]
+                properties:
+                  resource_arn:
+                    type: string
+                  resource_id:
+                    type: string
+                  resource_type:
+                    type: string
+                  device:
+                    $ref: '#/components/schemas/Device'
+        '202':
+          description: Provider evidence retained for identity resolution; no asset ID is fabricated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetainedDeviceObservation'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          description: The provider did not return the requested resource.
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /devices:
     get:
       operationId: listDevices
@@ -727,6 +781,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Device'
+        '202':
+          description: Identity evidence and encrypted management configuration retained for resolution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetainedDeviceObservation'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '500':
@@ -945,6 +1005,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Device'
+        '202':
+          description: Identity evidence and encrypted management configuration retained for resolution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetainedDeviceObservation'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '500':
@@ -1814,6 +1880,19 @@ components:
         message:
           type: string
         job_id:
+          type: string
+          format: uuid
+    RetainedDeviceObservation:
+      type: object
+      required: [outcome, observation_id]
+      properties:
+        outcome:
+          type: string
+          enum: [unresolved, conflict]
+        observation_id:
+          type: string
+          format: uuid
+        proposal_id:
           type: string
           format: uuid
     CreateDeviceRequest:
@@ -2696,6 +2775,8 @@ components:
           type: integer
         assets_discovered:
           type: integer
+        identity:
+          $ref: '#/components/schemas/CloudIdentitySummary'
         enumeration:
           $ref: '#/components/schemas/CloudEnumerationCounts'
         host_inventory:
@@ -2723,6 +2804,22 @@ components:
             Human-readable resolution of agent_id: "Platform Agent" when no
             device agent was assigned, otherwise the executing device agent's
             name (or "Device Agent" if it has none).
+    CloudIdentitySummary:
+      type: object
+      required: [assets_created, assets_matched, approval_pending, observations_retained, conflicts, rejected_inputs]
+      properties:
+        assets_created:
+          type: integer
+        assets_matched:
+          type: integer
+        approval_pending:
+          type: integer
+        observations_retained:
+          type: integer
+        conflicts:
+          type: integer
+        rejected_inputs:
+          type: integer
     CloudEnumerationCounts:
       type: object
       additionalProperties: false
@@ -2777,6 +2874,14 @@ components:
           description: |
             The asset this collection landed on. Absent when the identity was
             contested and the engine created nothing — see `contested`.
+        observation_id:
+          type: string
+          format: uuid
+          description: Durable identity evidence retained by the admission transaction.
+        identity_outcome:
+          type: string
+          enum: [created, matched, conflict, unresolved]
+          description: Identity resolution outcome, independently of monitoring approval.
         facts:
           type: integer
         endpoints:

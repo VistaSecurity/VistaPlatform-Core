@@ -255,6 +255,7 @@ export function runSummaryLine(run: ConnectorRun): string {
     `${s.segments_created} new segment${s.segments_created === 1 ? '' : 's'}`,
   ];
   if (s.assets_proposed > 0) parts.push(`${s.assets_proposed} needing review`);
+  if ((s.observations_retained ?? 0) > 0) parts.push(`${s.observations_retained} observations retained`);
   if (s.assets_skipped > 0) parts.push(`${s.assets_skipped} skipped`);
   if (s.unmapped_roles > 0) parts.push(`${s.unmapped_roles} unmapped role${s.unmapped_roles === 1 ? '' : 's'}`);
   if (s.errors > 0) parts.push(`${s.errors} error${s.errors === 1 ? '' : 's'}`);

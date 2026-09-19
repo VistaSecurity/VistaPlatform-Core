@@ -2235,6 +2235,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_partitioned (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2269,6 +2270,9 @@ PARTITION BY HASH (tenant_id);
 -- one statement covers all eight. It sits HERE, not in POST-MIGRATIONS, because
 -- the view immediately below selects the column.
 ALTER TABLE public.crypto_implementations_partitioned ADD COLUMN IF NOT EXISTS endpoint_id uuid;
+-- Nullable for historical rows: the selected leaf's own clock was not recorded.
+-- New observations maintain it independently of chainless configuration sightings.
+ALTER TABLE public.crypto_implementations_partitioned ADD COLUMN IF NOT EXISTS certificate_observed_at timestamptz;
 -- Same shape for the provenance array. NOT NULL with a DEFAULT is a
 -- metadata-only add (no rewrite); the POST-MIGRATIONS block at the bottom of
 -- this file backfills every existing row from its `discovery_method`.
@@ -2305,6 +2309,7 @@ CREATE VIEW public.crypto_implementations AS
     crypto_implementations_partitioned.hash_algorithm,
     crypto_implementations_partitioned.key_size,
     crypto_implementations_partitioned.certificate_id,
+    crypto_implementations_partitioned.certificate_observed_at,
     crypto_implementations_partitioned.discovery_method,
     crypto_implementations_partitioned.discovery_methods,
     crypto_implementations_partitioned.confidence_score,
@@ -2347,6 +2352,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_0 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2394,6 +2400,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_1 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2441,6 +2448,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_2 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2488,6 +2496,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_3 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2535,6 +2544,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_4 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2582,6 +2592,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_5 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2629,6 +2640,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_6 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -2676,6 +2688,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_implementations_part_7 (
     hash_algorithm character varying(100),
     key_size integer,
     certificate_id uuid,
+    certificate_observed_at timestamptz,
     discovery_method public.discovery_method NOT NULL,
     -- Every method that has contributed an observation to this row, primary
     -- (`discovery_method`) first. Subset absorption (crypto_dedup.go) folds a
@@ -5120,6 +5133,8 @@ CREATE TABLE IF NOT EXISTS public.sensors (
     -- can offer a real interface picker. Distinct from network_interfaces (the
     -- subset actually being monitored).
     available_interfaces text[] DEFAULT ARRAY[]::text[],
+    reported_capabilities text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    reported_dns_interfaces text[] DEFAULT ARRAY[]::text[] NOT NULL,
     tags text[],
     ip_address character varying(45),
     -- An air-gapped sensor is not expected to check in, heartbeat, or stream
@@ -21347,7 +21362,369 @@ BEGIN
 END $$;
 
 
+-- Identity quality is independent of monitoring approval, class and assessment.
+-- Existing rows deliberately remain legacy; only subsequent evidence can establish
+-- their identity. The constant default also supports older writers during rollout.
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS identity_status text NOT NULL DEFAULT 'legacy'
+    CHECK (identity_status IN ('legacy', 'established', 'operator_confirmed'));
+
+-- Inventory evaluates conflict presence for each displayed asset, including
+-- candidate-only proposals. Match that read predicate exactly so ordinary
+-- observation history is never rescanned for every asset on the page. The
+-- fingerprint uniqueness index has a different predicate and cannot serve it.
+CREATE INDEX IF NOT EXISTS idx_asset_history_pending_identity_conflict
+    ON public.asset_history (tenant_id)
+    WHERE changes_json ->> 'kind' = 'merge_proposal'
+      AND COALESCE(changes_json ->> 'status', 'pending') = 'pending';
+
+-- Durable evidence is not an asset. No asset FK is required until it resolves.
+CREATE TABLE IF NOT EXISTS public.identity_observations (
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    fingerprint text NOT NULL,
+    source_kind text NOT NULL,
+    source_ref text NOT NULL,
+    collector_version text NOT NULL DEFAULT '',
+    network_scope text NOT NULL DEFAULT '',
+    evidence jsonb NOT NULL,
+    admission_reasons text[] NOT NULL DEFAULT ARRAY[]::text[],
+    state text NOT NULL DEFAULT 'unresolved'
+        CHECK (state IN ('unresolved', 'linked', 'conflict', 'dismissed', 'expired')),
+    asset_id uuid,
+    proposal_id uuid,
+    first_seen_at timestamptz NOT NULL,
+    last_seen_at timestamptz NOT NULL,
+    occurrence_count bigint NOT NULL DEFAULT 1 CHECK (occurrence_count > 0),
+    enrichment_state text NOT NULL DEFAULT 'waiting'
+        CHECK (enrichment_state IN ('waiting', 'queued', 'running', 'completed', 'blocked', 'failed')),
+    enrichment_reason text NOT NULL DEFAULT '',
+    last_attempt_at timestamptz,
+    next_attempt_at timestamptz,
+    confirmed_by uuid,
+    confirmation_reason text,
+    confirmed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, fingerprint)
+);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conname='identity_observations_tenant_id_asset_id_fkey'
+          AND conrelid='public.identity_observations'::regclass) THEN
+        ALTER TABLE public.identity_observations
+            ADD CONSTRAINT identity_observations_tenant_id_asset_id_fkey
+            FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id);
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_identity_observations_state
+    ON public.identity_observations (tenant_id, state, last_seen_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_identity_observations_asset
+    ON public.identity_observations (tenant_id, asset_id) WHERE asset_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_identity_observations_confirmation_lookup
+    ON public.identity_observations (tenant_id, source_kind, source_ref, network_scope)
+    WHERE confirmed_by IS NOT NULL AND asset_id IS NOT NULL;
+ALTER TABLE public.identity_observations ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observations
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Receipt keys make transport replay different from a genuinely new sighting.
+CREATE TABLE IF NOT EXISTS public.identity_observation_receipts (
+    tenant_id uuid NOT NULL,
+    observation_id uuid NOT NULL,
+    receipt_key text NOT NULL,
+    observed_at timestamptz NOT NULL,
+    evidence jsonb NOT NULL,
+    PRIMARY KEY (tenant_id, observation_id, receipt_key),
+    FOREIGN KEY (tenant_id, observation_id)
+        REFERENCES public.identity_observations(tenant_id, id) ON DELETE CASCADE
+);
+ALTER TABLE public.identity_observation_receipts ADD COLUMN IF NOT EXISTS evidence jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE public.identity_observation_receipts ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_receipts
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+
 -- ============================================================================
+-- Observation decisions are separate from sightings and from asset approval.
+CREATE TABLE IF NOT EXISTS public.identity_observation_decisions (
+    tenant_id uuid NOT NULL,
+    id uuid NOT NULL DEFAULT gen_random_uuid(),
+    observation_id uuid NOT NULL,
+    actor_id uuid NOT NULL,
+    action text NOT NULL CHECK (action IN ('confirmed','linked','dismissed')),
+    reason text NOT NULL CHECK (length(trim(reason)) > 0),
+    details jsonb NOT NULL DEFAULT '{}',
+    decided_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id,id),
+    FOREIGN KEY (tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_identity_observation_decisions_observation
+    ON public.identity_observation_decisions(tenant_id,observation_id,decided_at);
+ALTER TABLE public.identity_observation_decisions ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_decisions
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Restricted ingestion payloads are never projected by observation read APIs.
+-- They survive raw-discovery retention and wait for identity AND approval.
+CREATE TABLE IF NOT EXISTS public.identity_observation_payloads (
+    tenant_id uuid NOT NULL,
+    observation_id uuid NOT NULL,
+    receipt_key text NOT NULL,
+    payload jsonb NOT NULL,
+    materialized_at timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    last_error text NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id,observation_id,receipt_key),
+    FOREIGN KEY (tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+ALTER TABLE public.identity_observation_payloads ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_payloads
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Management declarations may contain credentials, including nested metadata.
+-- Encrypt the complete context; observation browsing never projects this table.
+CREATE TABLE IF NOT EXISTS public.identity_observation_management (
+    tenant_id uuid NOT NULL,
+    observation_id uuid NOT NULL,
+    context_enc text NOT NULL CHECK (context_enc LIKE 'enc:v1:%'),
+    materialized_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id,observation_id),
+    FOREIGN KEY (tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+ALTER TABLE public.identity_observation_management ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_management
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Sanitized host snapshots survive job/raw-discovery retention and can replay
+-- after identity resolution. The original normalized envelope preserves scope.
+CREATE TABLE IF NOT EXISTS public.identity_observation_host_inventories (
+    tenant_id uuid NOT NULL,
+    observation_id uuid NOT NULL,
+    receipt_key text NOT NULL,
+    job_id uuid NOT NULL,
+    agent_id uuid NOT NULL,
+    observation jsonb NOT NULL,
+    payload jsonb NOT NULL,
+    observed_at timestamptz NOT NULL,
+    materialized_at timestamptz,
+    superseded_at timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    last_error text NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id,observation_id,receipt_key),
+    FOREIGN KEY (tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_identity_host_inventory_due ON public.identity_observation_host_inventories(tenant_id,next_attempt_at)
+    WHERE materialized_at IS NULL AND superseded_at IS NULL;
+ALTER TABLE public.identity_observation_host_inventories ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_host_inventories
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Typed peer evidence is retained independently of assets until every peer can
+-- be resolved. Payloads contain only sanitized collector projections.
+CREATE TABLE IF NOT EXISTS public.identity_observation_peer_contexts (
+    tenant_id uuid NOT NULL,
+    context_id text NOT NULL,
+    observation_id uuid NOT NULL,
+    origin_asset_id uuid NOT NULL,
+    payload jsonb NOT NULL,
+    observed_at timestamptz NOT NULL,
+    materialized_at timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    last_error text NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id,context_id),
+    FOREIGN KEY (tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_identity_peer_contexts_pending ON public.identity_observation_peer_contexts(tenant_id,next_attempt_at) WHERE materialized_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_identity_peer_contexts_observation ON public.identity_observation_peer_contexts(tenant_id,observation_id,observed_at DESC);
+ALTER TABLE public.identity_observation_peer_contexts ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_peer_contexts
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Cloud provider context outlives raw discovery retention while identity is
+-- unresolved. Keep provider metadata encrypted and replay each receipt once.
+CREATE TABLE IF NOT EXISTS public.identity_observation_cloud_contexts (
+    tenant_id uuid NOT NULL,
+    observation_id uuid NOT NULL,
+    receipt_key text NOT NULL,
+    context_enc text NOT NULL CHECK (context_enc LIKE 'enc:v1:%'),
+    observed_at timestamptz NOT NULL,
+    materialized_at timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    last_error text NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id,observation_id,receipt_key),
+    FOREIGN KEY (tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_identity_cloud_context_due ON public.identity_observation_cloud_contexts(tenant_id,next_attempt_at)
+    WHERE materialized_at IS NULL;
+ALTER TABLE public.identity_observation_cloud_contexts ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    CREATE POLICY tenant_isolation_policy ON public.identity_observation_cloud_contexts
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Encrypted historical management records; never projected in merge APIs.
+CREATE TABLE IF NOT EXISTS public.asset_merge_management_history (
+ tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+ id uuid NOT NULL,
+ asset_id uuid NOT NULL,
+ source_asset_id uuid NOT NULL,
+ record_table text NOT NULL CHECK(record_table IN ('asset_management','asset_credentials')),
+ record jsonb NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id)
+);
+ALTER TABLE public.asset_merge_management_history ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+ CREATE POLICY tenant_isolation_policy ON public.asset_merge_management_history
+ USING(tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid)
+ WITH CHECK(tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Original child evidence preserved when merge reconciliation coalesces rows.
+-- This internal store is not returned by inventory/history endpoints.
+CREATE TABLE IF NOT EXISTS public.asset_merge_record_snapshots (
+ tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+ merge_id uuid NOT NULL,
+ record_table text NOT NULL,
+ record_key text NOT NULL,
+ record jsonb NOT NULL,
+ PRIMARY KEY(tenant_id,merge_id,record_table,record_key)
+);
+ALTER TABLE public.asset_merge_record_snapshots ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+ CREATE POLICY tenant_isolation_policy ON public.asset_merge_record_snapshots
+ USING(tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid)
+ WITH CHECK(tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Durable merge decisions; source identifiers remain historical after archival.
+CREATE TABLE IF NOT EXISTS public.asset_merge_audits (
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    id uuid NOT NULL,
+    revision text NOT NULL,
+    actor_user_id uuid,
+    reason text NOT NULL,
+    survivor_asset_id uuid NOT NULL,
+    source_asset_ids uuid[] NOT NULL,
+    proposal_id uuid,
+    audit jsonb NOT NULL,
+    result jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id,id),
+    UNIQUE (tenant_id,revision)
+);
+ALTER TABLE public.asset_merge_audits ALTER COLUMN actor_user_id DROP NOT NULL;
+ALTER TABLE public.asset_merge_audits ADD COLUMN IF NOT EXISTS pending_events jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.asset_merge_audits ADD COLUMN IF NOT EXISTS events_published_at timestamptz;
+ALTER TABLE public.asset_merge_audits ADD COLUMN IF NOT EXISTS events_next_attempt_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS idx_asset_merge_audits_pending_events ON public.asset_merge_audits(tenant_id,events_next_attempt_at)
+ WHERE events_published_at IS NULL AND pending_events <> '[]'::jsonb;
+ALTER TABLE public.asset_merge_audits ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+ CREATE POLICY tenant_isolation_policy ON public.asset_merge_audits
+ USING (tenant_id = NULLIF(current_setting('app.tenant_id',true),'')::uuid)
+ WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id',true),'')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+-- Durable source-first enrichment requests. Credentials remain in device_jobs;
+-- this receipt stores only a hash and tenant-owned source/job associations.
+CREATE TABLE IF NOT EXISTS public.identity_source_refreshes (
+ tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+ id uuid NOT NULL,
+ observation_id uuid NOT NULL,
+ fingerprint text NOT NULL,
+ state text NOT NULL CHECK(state IN ('waiting','queued','running','completed','blocked','failed')),
+ reason text NOT NULL DEFAULT '',
+ device_job_id uuid,
+ attempts integer NOT NULL DEFAULT 0,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ FOREIGN KEY(tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_device_jobs_identity_refresh_source ON public.device_jobs(tenant_id,(parameters->>'identity_refresh_source_key'),created_at DESC) WHERE parameters?'identity_refresh_source_key' AND deleted_at IS NULL;
+ALTER TABLE public.identity_source_refreshes ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+ CREATE POLICY tenant_isolation_policy ON public.identity_source_refreshes
+ USING(tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid)
+ WITH CHECK(tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Enrichment is durable work around evidence, never an asset denominator.
+CREATE TABLE IF NOT EXISTS public.identity_enrichment_jobs (
+ tenant_id uuid NOT NULL,
+ id uuid NOT NULL DEFAULT gen_random_uuid(),
+ observation_id uuid NOT NULL,
+ generation text NOT NULL,
+ request_evidence jsonb NOT NULL DEFAULT '{}',
+ action text NOT NULL CHECK(action IN ('configured_source','dns','probe')),
+ executor_scope text NOT NULL,
+ plan jsonb NOT NULL,
+ state text NOT NULL DEFAULT 'waiting' CHECK(state IN ('waiting','queued','running','completed','blocked','failed')),
+ reason text NOT NULL DEFAULT '',
+ request_id uuid NOT NULL DEFAULT gen_random_uuid(),
+ attempts integer NOT NULL DEFAULT 0,
+ remote_id text NOT NULL DEFAULT '',
+ result jsonb NOT NULL DEFAULT '{}',
+ lease_id uuid,
+ lease_until timestamptz,
+ last_attempt_at timestamptz,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(tenant_id,id),
+ UNIQUE(tenant_id,observation_id,generation,action,executor_scope),
+ FOREIGN KEY(tenant_id,observation_id) REFERENCES public.identity_observations(tenant_id,id) ON DELETE CASCADE
+);
+ALTER TABLE public.identity_enrichment_jobs ADD COLUMN IF NOT EXISTS request_evidence jsonb NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS idx_identity_enrichment_due ON public.identity_enrichment_jobs(tenant_id,next_attempt_at) WHERE state<>'completed';
+ALTER TABLE public.identity_enrichment_jobs ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+ CREATE POLICY tenant_isolation_policy ON public.identity_enrichment_jobs
+ USING (tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid)
+ WITH CHECK (tenant_id=NULLIF(current_setting('app.tenant_id',true),'')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_jobs_identity_enrichment_request
+ ON public.discovery_jobs(tenant_id,(metadata->'options'->>'identity_enrichment_request_id'))
+ WHERE metadata->'options'->>'identity_enrichment_request_id' IS NOT NULL;
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -21572,6 +21949,8 @@ END $$;
 -- pick the columns up here; fresh installs already have them from the CREATE
 -- TABLE above.
 ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS asset_id uuid;
+ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS reported_capabilities text[] NOT NULL DEFAULT ARRAY[]::text[];
+ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS reported_dns_interfaces text[] NOT NULL DEFAULT ARRAY[]::text[];
 ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_hash text;
 ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_at timestamp with time zone;
 CREATE INDEX IF NOT EXISTS idx_sensors_asset_id ON public.sensors (asset_id) WHERE asset_id IS NOT NULL;

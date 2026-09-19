@@ -16,7 +16,10 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -59,7 +62,7 @@ var errNoIdentifiers = errors.New("observation carries no identifier; it could n
 func (s *AssetService) identityEngine() (*identity.Engine, error) {
 	s.identityOnce.Do(func() {
 		s.identityRepo = pgidentity.New(s.db.DB.DB)
-		s.identityEng, s.identityErr = identity.New(identity.Config{
+		s.identityEng, s.identityErr = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission,
 			Repo: s.identityRepo,
 			// AutoAcceptThreshold is left at zero HERE — never auto-merge
 			// (ADR-0002 D5) — and supplied per observation by
@@ -469,10 +472,29 @@ func observationLabel(obs identity.Observation) string {
 // and 10.0.0.5 are answers to a question only once you say where you were
 // standing. FromLegacyAsset in shared/identity documents the same gap.
 func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership string) (identity.Observation, error) {
+	if f.SourceSensorID != nil && findingCollectorSource(f) {
+		sensorID, err := uuid.Parse(strings.TrimSpace(*f.SourceSensorID))
+		if err != nil || sensorID == uuid.Nil || s.db == nil {
+			return identity.Observation{}, errors.New("invalid discovery collector identity")
+		}
+		var registered bool
+		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+			return tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sensors WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL)`, tenantID, sensorID).Scan(&registered)
+		}); err != nil {
+			return identity.Observation{}, fmt.Errorf("verify discovery collector: %w", err)
+		}
+		if !registered {
+			return identity.Observation{}, errors.New("discovery collector does not belong to tenant")
+		}
+	}
 	obs := identity.Observation{
 		TenantID:   tenantID.String(),
 		Source:     findingSource(f),
 		ObservedAt: findingObservedAt(f),
+		Admission: identity.AdmissionEvidence{
+			Direct:           f.Port != nil && *f.Port > 0 && (strings.TrimSpace(derefString(f.CipherSuite)) != "" || rawDataString(f.RawData, "ssh_host_key_fingerprint", "host_key_fingerprint") != ""),
+			CollectorVersion: rawDataString(f.RawData, "collector_version", "sensor_version"), ReceiptID: rawDataString(f.RawData, "discovery_id"),
+		},
 		Confidence: findingConfidence(f),
 		Network: identity.Network{
 			Ownership: ownership,
@@ -668,9 +690,24 @@ func dependentApplicationIdentity(parent, product, instance string) (identity.De
 // for context (owner, business unit, environment), which is the engine's job,
 // not this builder's.
 func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInput, source identity.Source) (identity.Observation, error) {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return identity.Observation{}, err
+	}
+	receipt := sha256.Sum256(body)
+	receiptID := in.ObservationReceiptID
+	if receiptID == "" {
+		receiptID = hex.EncodeToString(receipt[:])
+	}
+	observedAt := in.ObservationTime
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
 	obs := identity.Observation{
 		TenantID:   tenantID.String(),
 		Source:     source,
+		ObservedAt: observedAt,
+		Admission:  identity.AdmissionEvidence{ReceiptID: receiptID, Authoritative: source.Kind == identity.SourceImported && (strings.HasPrefix(source.Ref, "cmdb:") || strings.HasPrefix(source.Ref, "netbox:"))},
 		Confidence: 1, // a person or a system of record asserted it
 		// The class attributes, so the matcher seam has a vendor and a model to
 		// COMPARE when this turns out to be contested (workstream 4.6). The
@@ -695,6 +732,9 @@ func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInpu
 
 	for _, id := range in.Identifiers {
 		kind := identity.Kind(strings.TrimSpace(strings.ToLower(id.Kind)))
+		if kind == identity.KindDeclarationID {
+			return identity.Observation{}, fmt.Errorf("declaration identifiers are issued only by identity confirmation")
+		}
 		if !kind.Valid() {
 			log.Printf("[AssetService] identity: ignoring identifier of unknown kind %q", id.Kind)
 			continue
@@ -871,6 +911,11 @@ func parseObservedAddr(ip *string) (netip.Addr, bool) {
 // finding → observation field helpers
 // ---------------------------------------------------------------------------
 
+func findingCollectorSource(f IngestFinding) bool {
+	ref := findingSource(f).Ref
+	return ref == "sensor" || strings.HasPrefix(ref, "sensor:") || ref == "scan" || strings.HasPrefix(ref, "scan:")
+}
+
 func findingSource(f IngestFinding) identity.Source {
 	ref := "sensor"
 	mode := identity.ModePassive
@@ -889,6 +934,11 @@ func findingSource(f IngestFinding) identity.Source {
 	if provider := rawDataString(f.RawData, "cloud_provider"); provider != "" {
 		ref = "cloud:" + strings.ToLower(provider)
 		mode = identity.ModeActive
+	}
+	if (ref == "sensor" || ref == "sensor:pcap" || ref == "scan") && f.SourceSensorID != nil {
+		if sensorID, err := uuid.Parse(strings.TrimSpace(*f.SourceSensorID)); err == nil && sensorID != uuid.Nil {
+			ref += ":" + sensorID.String()
+		}
 	}
 	return identity.Source{Kind: identity.SourceMeasured, Ref: ref, Mode: mode}
 }
@@ -920,6 +970,9 @@ func findingNetworkType(f IngestFinding) string {
 // measurement time would put a number in the history that nothing measured.
 func findingObservedAt(f IngestFinding) time.Time {
 	for _, key := range []string{"observed_at", "discovered_at", "timestamp", "seen_at"} {
+		if t, ok := f.RawData[key].(time.Time); ok {
+			return t.UTC()
+		}
 		v, ok := f.RawData[key].(string)
 		if !ok || strings.TrimSpace(v) == "" {
 			continue

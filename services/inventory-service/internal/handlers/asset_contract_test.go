@@ -607,6 +607,18 @@ func TestContract_ApproveAssets_400_noValidIDs(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
+func TestContract_Approval_409_ArchivedSource(t *testing.T) {
+	for _, action := range []string{"approve", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			eng := newEngine(&stubAssetStore{}, &stubApprovalStore{approveErr: services.ErrAssetLifecycleConflict, denyErr: services.ErrAssetLifecycleConflict})
+			w := do(eng, http.MethodPost, "/api/v2/inventory-service/infrastructure-assets/"+action, strings.NewReader(`{"asset_ids":["`+uuid.NewString()+`"]}`))
+			if w.Code != http.StatusConflict {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 // TestContract_DriftIsCaught proves the guardrail actually validates: a body
 // that drifts from the contract (an Asset missing required fields, plus an
 // undeclared field that additionalProperties:false forbids) MUST be rejected.

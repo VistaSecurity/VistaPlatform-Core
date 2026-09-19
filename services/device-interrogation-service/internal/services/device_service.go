@@ -209,7 +209,7 @@ func maskPassword(password string) string {
 func (s *DeviceService) identityEngine() (*identity.Engine, error) {
 	s.identityOnce.Do(func() {
 		s.identityRepo = pgidentity.New(s.db)
-		s.identityEng, s.identityErr = identity.New(identity.Config{Repo: s.identityRepo})
+		s.identityEng, s.identityErr = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission, Repo: s.identityRepo})
 	})
 	return s.identityEng, s.identityErr
 }
@@ -412,7 +412,7 @@ func (s *DeviceService) CreateDevice(ctx context.Context, tenantID uuid.UUID, re
 			// transaction; returning an error rolls it back, and the message
 			// the operator then reads tells them to go and review the thing
 			// that was just erased. The outcome is mapped after the commit.
-			return nil
+			return s.retainManagement(ctx, r, obs, res, fields)
 		}
 		parsed, parseErr := uuid.Parse(res.Asset.ID)
 		if parseErr != nil {
@@ -425,6 +425,9 @@ func (s *DeviceService) CreateDevice(ctx context.Context, tenantID uuid.UUID, re
 		return nil, fmt.Errorf("failed to record device: %w", err)
 	}
 	if res.Asset.Zero() {
+		if res.ObservationID != "" {
+			return nil, &identity.RetainedObservation{Result: res.IngestResult()}
+		}
 		return nil, contestedFrom(res)
 	}
 

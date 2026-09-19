@@ -32,6 +32,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -801,5 +802,93 @@ func TestIntegration_HostObservation_ProjectsSiteWithoutListeners(t *testing.T) 
 	}
 	if n != 1 {
 		t.Fatalf("placement histories=%d", n)
+	}
+}
+
+func TestIntegration_HostObservation_RetainsTypedEvidenceBeforeResolution(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	if _, err := svc.identityEngine(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	svc.identityEng, err = identity.New(identity.Config{Repo: svc.identityRepo, AdmissionEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')
+ ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	seen := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
+	ho := &hostobs.HostObservation{ObservedAt: seen, Source: hostobs.SourceMDNS, FQDNs: []string{uuid.NewString() + ".local"},
+		Services: []string{"_ipp._tcp"}, Attributes: map[string]interface{}{"password": "must-not-persist", "mdns_service_port": 631}}
+	finding := observationFinding(t, ho)
+	finding.RawData["password"] = "must-not-persist"
+	finding.RawData["discovery_method"] = "pcap_upload"
+	finding.RawData["confidence_score"] = 0.45
+	res, err := svc.ingestHostObservation(context.Background(), tenant, finding, "monitoring")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Outcome != identity.OutcomeUnresolved || res.ObservationID == "" || !res.Asset.Zero() {
+		t.Fatalf("weak host created asset: %+v", res)
+	}
+	var payload []byte
+	if err := db.QueryRow(`SELECT payload FROM identity_observation_payloads WHERE tenant_id=$1 AND observation_id=$2`, tenant, res.ObservationID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "must-not-persist") {
+		t.Fatal("retained arbitrary secret metadata")
+	}
+	var retained IngestFinding
+	if err := json.Unmarshal(payload, &retained); err != nil {
+		t.Fatal(err)
+	}
+	if hostObservationSource(retained) != hostObservationSource(finding) || hostObservationFactProducer(retained) != hostObservationFactProducer(finding) || findingConfidence(retained) != 0.45 {
+		t.Fatal("retention changed source or confidence")
+	}
+	asset := seedAsset(t, db, tenant, "Operator selected host", "server", "hardware.computer.server", "production", 0, 0)
+	if err := svc.materializeRetainedHostObservation(context.Background(), tenant, asset, retained); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.materializeRetainedHostObservation(context.Background(), tenant, asset, retained); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM asset_facts WHERE tenant_id=$1 AND asset_id=$2 AND key='net.mdns_services'`, tenant, asset).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("typed retained service facts=%d want 1", count)
+	}
+}
+
+func TestIntegration_HostObservation_RetainedUnverifiedAgentCannotLinkSensor(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	sensor := uuid.New()
+	if _, err := db.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status)
+ VALUES($1,$2,'Real sensor','linux','1.0','datacenter_host','active')`, sensor, tenant); err != nil {
+		t.Fatal(err)
+	}
+	asset := seedAsset(t, db, tenant, "Operator selected host", "unknown_host", "unknown_host", "production", 0, 0)
+	for _, sourceSensor := range []string{"", uuid.NewString()} {
+		finding := observationFinding(t, &hostobs.HostObservation{ObservedAt: time.Now().UTC().Add(-time.Hour), Source: hostobs.SourceMDNS,
+			AgentID: sensor.String(), Platform: "linux", Profile: "datacenter_host", FQDNs: []string{"unverified.local"}})
+		finding.SourceSensorID = &sourceSensor
+		finding.RawData["discovery_method"] = "sensor_self_report"
+		if err := svc.materializeRetainedHostObservation(context.Background(), tenant, asset, finding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var linked sql.NullString
+	var class string
+	if err := db.QueryRow(`SELECT asset_id FROM sensors WHERE tenant_id=$1 AND id=$2`, tenant, sensor).Scan(&linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT class_key FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, asset).Scan(&class); err != nil {
+		t.Fatal(err)
+	}
+	if linked.Valid || class != "unknown_host" {
+		t.Fatalf("unverified agent changed association/class: %v %s", linked, class)
 	}
 }

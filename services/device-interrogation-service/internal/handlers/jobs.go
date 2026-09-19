@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 )
 
 // jobResultsPayload is used to parse device_jobs.results JSON for assets_discovered.
@@ -60,9 +61,11 @@ type CloudEnumerationCounts struct {
 type HostInventoryCounts struct {
 	// AssetID is the asset the collection landed on, empty when the identity
 	// was contested and nothing was created.
-	AssetID   string `json:"asset_id,omitempty"`
-	Facts     int    `json:"facts"`
-	Endpoints int    `json:"endpoints"`
+	AssetID         string `json:"asset_id,omitempty"`
+	ObservationID   string `json:"observation_id,omitempty"`
+	IdentityOutcome string `json:"identity_outcome,omitempty"`
+	Facts           int    `json:"facts"`
+	Endpoints       int    `json:"endpoints"`
 	// Packages is the number of ACTIVE measured installs after the run — the
 	// number an inventory query would return — not the number the collector
 	// enumerated. Absent when the package step failed, which is not the same as
@@ -111,6 +114,8 @@ func hostInventoryFromResults(resultsJSON string) *HostInventoryCounts {
 	}
 	var stored struct {
 		AssetID         string `json:"asset_id"`
+		ObservationID   string `json:"observation_id"`
+		IdentityOutcome string `json:"identity_outcome"`
 		Facts           int    `json:"facts"`
 		Endpoints       int    `json:"endpoints"`
 		InstallsActive  *int   `json:"installs_active"`
@@ -124,6 +129,8 @@ func hostInventoryFromResults(resultsJSON string) *HostInventoryCounts {
 	}
 	out := &HostInventoryCounts{
 		AssetID:         stored.AssetID,
+		ObservationID:   stored.ObservationID,
+		IdentityOutcome: stored.IdentityOutcome,
 		Facts:           stored.Facts,
 		Endpoints:       stored.Endpoints,
 		InstallsCreated: stored.InstallsCreated,
@@ -159,6 +166,18 @@ func hostInventoryFromResults(resultsJSON string) *HostInventoryCounts {
 // an empty account writes four zeros. Flattening them would make "we did not
 // look" and "there was nothing there" the same row, which is the three-valued
 // mistake this codebase keeps paying for.
+func cloudIdentityFromResults(raw string) *services.CloudIdentitySummary {
+	var result struct {
+		Metadata struct {
+			Identity *services.CloudIdentitySummary `json:"identity"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil
+	}
+	return result.Metadata.Identity
+}
+
 func enumerationFromResults(resultsJSON string) *CloudEnumerationCounts {
 	if resultsJSON == "" {
 		return nil
@@ -280,7 +299,8 @@ type InterrogationJob struct {
 	// Enumeration is present only on a cloud discovery run whose enumeration
 	// half actually ran (BUILD_PLAN 2.4). Absent means it did not run; four
 	// zeros mean it ran and found nothing.
-	Enumeration *CloudEnumerationCounts `json:"enumeration,omitempty"`
+	Enumeration *CloudEnumerationCounts        `json:"enumeration,omitempty"`
+	Identity    *services.CloudIdentitySummary `json:"identity,omitempty"`
 	// HostInventory is present only on a host_inventory run that reached the
 	// consumer (BUILD_PLAN 2.11b). Absent means it did not; zeros mean it ran
 	// and landed nothing.

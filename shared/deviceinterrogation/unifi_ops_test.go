@@ -537,14 +537,17 @@ func TestConvertDeviceToAsset_DisplayNameNotPromotedToHostname(t *testing.T) {
 		t.Errorf("display name was not preserved in Metadata for the UI: %#v", spaced.Metadata["name"])
 	}
 
-	// A device whose controller-assigned name happens to ALSO be DNS-valid
-	// (no space, no vendor punctuation) must still become the Hostname — the
-	// fix rejects invalid names, it does not blanket-suppress this field.
+	// DNS syntax does not turn a controller alias into hostname evidence.
 	dnsSafe := unifiSwitchFixture()
 	dnsSafe["name"] = "office-switch-1"
 	valid := c.convertDeviceToAsset(dnsSafe, "default")
-	if valid.Hostname != "office-switch-1" {
-		t.Errorf("Hostname = %q, want %q for a DNS-valid device name", valid.Hostname, "office-switch-1")
+	if valid.Hostname != "" {
+		t.Fatalf("DNS-shaped alias promoted: %q", valid.Hostname)
+	}
+	dnsSafe["hostname"] = "actual-switch"
+	valid = c.convertDeviceToAsset(dnsSafe, "default")
+	if valid.Hostname != "actual-switch" {
+		t.Fatalf("explicit hostname lost: %q", valid.Hostname)
 	}
 	if valid.Metadata["name"] != "office-switch-1" {
 		t.Errorf("display name was not preserved in Metadata: %#v", valid.Metadata["name"])
@@ -665,5 +668,36 @@ func TestUniFiAliasIsOnlyDisplayContext(t *testing.T) {
 				t.Fatalf("alias became identifier: %+v", peer)
 			}
 		}
+	}
+}
+
+func TestUniFiManagedPeerIdentityEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		adopted               bool
+		state                 int
+		authoritative, direct bool
+	}{
+		{"connected", true, 1, true, true}, {"offline", true, 0, true, false}, {"unadopted", false, 1, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := unifiDeviceSubject(map[string]interface{}{"name": "alias.example.test", "hostname": "actual-host", "adopted": tc.adopted, "state": float64(tc.state), "serial": "SERIAL", "mac": "00:1a:2b:3c:4d:5e"})
+			if peer.IdentityEvidence.ControllerInventory != tc.authoritative || peer.IdentityEvidence.ConnectedInterface != tc.direct {
+				t.Fatalf("incorrect controller proof: %+v", peer.IdentityEvidence)
+			}
+			if peer.DisplayName != "alias.example.test" || peer.Identifier(IdentifierHostname) != "actual-host" || peer.Identifier(IdentifierFQDN) != "" {
+				t.Fatalf("alias promoted as identity: %+v", peer)
+			}
+		})
+	}
+	controller := unifiControllerPeer("controller.example.test", map[string]interface{}{"controller_name": "alias.example.test"})
+	for _, id := range controller.Identifiers {
+		if id.Value == "alias.example.test" {
+			t.Fatalf("controller alias promoted: %+v", controller)
+		}
+	}
+	client := unifiClientPeer(map[string]interface{}{"hostname": "station", "mac": "00:1a:2b:3c:4d:5e"})
+	if !client.IdentityEvidence.ConnectedInterface || client.IdentityEvidence.ControllerInventory {
+		t.Fatalf("station proof: %+v", client.IdentityEvidence)
 	}
 }

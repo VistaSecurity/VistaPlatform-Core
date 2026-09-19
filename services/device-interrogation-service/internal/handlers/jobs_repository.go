@@ -171,6 +171,7 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 			if len(resultsRaw) > 0 {
 				job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
 				job.Enumeration = enumerationFromResults(string(resultsRaw))
+				job.Identity = cloudIdentityFromResults(string(resultsRaw))
 				job.HostInventory = hostInventoryFromResults(string(resultsRaw))
 			}
 			job.DeviceID = job.AssetID // deprecated alias, same value
@@ -344,6 +345,7 @@ func (r *jobRepository) GetJob(ctx context.Context, tenantID, jobID uuid.UUID) (
 	if len(resultsRaw) > 0 {
 		job.AssetsDiscovered = assetsDiscoveredFromResults(string(resultsRaw))
 		job.Enumeration = enumerationFromResults(string(resultsRaw))
+		job.Identity = cloudIdentityFromResults(string(resultsRaw))
 		job.HostInventory = hostInventoryFromResults(string(resultsRaw))
 	}
 	job.DeviceID = job.AssetID // deprecated alias, same value

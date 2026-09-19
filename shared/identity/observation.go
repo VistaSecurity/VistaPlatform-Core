@@ -178,6 +178,8 @@ type Observation struct {
 	// TenantID scopes everything. An observation with no tenant is rejected.
 	TenantID string `json:"tenant_id"`
 
+	Admission AdmissionEvidence `json:"admission,omitzero"`
+
 	// ClassHint is the class the intake path believes this is, empty when it
 	// has no opinion. It selects the identifier precedence and becomes the
 	// created asset's class; when empty the engine falls back to `external` or

@@ -28,6 +28,7 @@ package services
 // test-integration-db).
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -329,5 +331,215 @@ func leafLinkAliases() func(string) string {
 	return func(prefix string) string {
 		n++
 		return "llk_" + prefix + fmt.Sprint(n)
+	}
+}
+
+// Delayed delivery must preserve source freshness and the currently served leaf,
+// while keeping both historical certificates reachable from the asset.
+func TestIntegration_Ingest_OlderCertificateCannotReplaceNewerLeaf(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	const host, ip = "out-of-order.example.test", "198.51.100.29"
+	newer := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	older := newer.Add(-24 * time.Hour)
+	for _, observation := range []struct {
+		name string
+		at   time.Time
+	}{{"newer", newer}, {"older", older}, {"older", older}} {
+		finding := leafCertFinding(host, ip, 443, hexFingerprint(observation.name))
+		finding.RawData["observed_at"] = observation.at.Format(time.RFC3339Nano)
+		finding.RawData["measurement"] = observation.name
+		if _, err := f.svc.IngestFindings(f.tenant, []IngestFinding{finding}, "monitoring"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var fingerprint, measurement string
+	var first, last time.Time
+	if err := f.db.QueryRow(`SELECT c.fingerprint_sha256,ci.raw_data->>'measurement',ci.first_discovered_at,ci.last_verified_at
+ FROM crypto_implementations ci JOIN certificates c ON c.id=ci.certificate_id
+ WHERE ci.tenant_id=$1 AND ci.deleted_at IS NULL`, f.tenant).Scan(&fingerprint, &measurement, &first, &last); err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint != hexFingerprint("newer") || measurement != "newer" || !first.Equal(older) || !last.Equal(newer) {
+		t.Fatalf("delayed evidence changed latest selection/freshness: fingerprint=%s measurement=%s first=%s last=%s", fingerprint, measurement, first, last)
+	}
+	var links int
+	if err := f.db.QueryRow(`SELECT count(*) FROM crypto_implementation_certificates cic
+ JOIN crypto_implementations ci ON ci.id=cic.crypto_implementation_id WHERE ci.tenant_id=$1`, f.tenant).Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if links != 2 {
+		t.Fatalf("historical certificate attachments=%d, want 2", links)
+	}
+}
+
+func TestIntegration_Ingest_ProspectiveReceiptsSurvivePendingApproval(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	f.svc.networkSegmentService = NewNetworkSegmentService(f.db, nil)
+	if _, err := f.db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment)
+ VALUES($1,$2,'Receipt test','cidr','192.0.2.0/24','production')`, uuid.New(), f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')
+ ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason)
+ SELECT $1,id,'{"quantity":1}'::jsonb,'retained receipt regression' FROM billable_items WHERE key='max_assets'`, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.identityEngine(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	f.svc.identityEng, err = identity.New(identity.Config{Repo: f.svc.identityRepo, AdmissionEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	batch := make([]IngestFinding, 51)
+	for i := range batch {
+		batch[i] = leafCertFinding("receipt-device.example.test", "192.0.2.39", 443, hexFingerprint("receipt-cert"))
+		batch[i].RawData["observed_at"] = seen.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano)
+		batch[i].RawData["discovery_id"] = fmt.Sprintf("receipt-%d", i)
+	}
+	for replay := 0; replay < 2; replay++ {
+		if _, err := f.svc.IngestFindings(f.tenant, batch, "pending_approval"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var asset uuid.UUID
+	var deferred, receipts, materialized int
+	if err := f.db.QueryRow(`SELECT id,jsonb_array_length(COALESCE(metadata->'deferred_findings','[]')) FROM assets WHERE tenant_id=$1`, f.tenant).Scan(&asset, &deferred); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(`SELECT count(*),count(materialized_at) FROM identity_observation_payloads WHERE tenant_id=$1`, f.tenant).Scan(&receipts, &materialized); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 51 || materialized != 0 || deferred != 0 {
+		t.Fatalf("receipts=%d materialized=%d metadata buffer=%d", receipts, materialized, deferred)
+	}
+	if n, err := f.svc.SweepIdentityEvidence(context.Background(), f.tenant); err != nil || n != 0 {
+		t.Fatalf("unapproved replay=%d: %v", n, err)
+	}
+	if err := f.svc.ApproveAssets(f.tenant, []uuid.UUID{asset}, uuid.Nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []int{50, 1, 0} {
+		if n, err := f.svc.SweepIdentityEvidence(context.Background(), f.tenant); err != nil || n != want {
+			t.Fatalf("replay=%d want %d: %v", n, want, err)
+		}
+	}
+	if err := f.db.QueryRow(`SELECT count(*) FROM crypto_implementations WHERE tenant_id=$1`, f.tenant).Scan(&materialized); err != nil {
+		t.Fatal(err)
+	}
+	if materialized != 1 {
+		t.Fatalf("duplicate materialization: %d", materialized)
+	}
+}
+
+func TestIntegration_Ingest_CertificateClockIgnoresChainlessSightings(t *testing.T) {
+	for _, path := range []string{"exact", "partial", "enrich"} {
+		t.Run(path, func(t *testing.T) {
+			f := newLeafLinkFixture(t)
+			start := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
+			for _, step := range []struct {
+				name   string
+				offset int
+				cert   bool
+			}{{"A", 0, true}, {"chainless", 2, false}, {"B", 1, true}} {
+				finding := leafCertFinding("certificate-clock.example.test", "198.51.100.30", 443, hexFingerprint(step.name))
+				finding.RawData["observed_at"] = start.Add(time.Duration(step.offset) * time.Hour).Format(time.RFC3339Nano)
+				if !step.cert {
+					delete(finding.RawData, "certificates")
+				}
+				if (path == "partial" && step.name == "B") || (path == "enrich" && step.name != "B") {
+					finding.CipherSuite = nil
+				}
+				if _, err := f.svc.IngestFindings(f.tenant, []IngestFinding{finding}, "monitoring"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var selected string
+			var certAt, last time.Time
+			if err := f.db.QueryRow(`SELECT c.fingerprint_sha256,ci.certificate_observed_at,ci.last_verified_at
+   FROM crypto_implementations ci JOIN certificates c ON c.id=ci.certificate_id WHERE ci.tenant_id=$1`, f.tenant).Scan(&selected, &certAt, &last); err != nil {
+				t.Fatal(err)
+			}
+			if selected != hexFingerprint("B") || !certAt.Equal(start.Add(time.Hour)) || !last.Equal(start.Add(2*time.Hour)) {
+				t.Fatalf("chainless sighting blocked leaf replacement: %s certificate=%s configuration=%s", selected, certAt, last)
+			}
+		})
+	}
+}
+
+func TestIntegration_Ingest_DirectMaterializationFollowsMergeAndApproval(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	source := seedAsset(t, f.db, f.tenant, "merged-source", "server", "hardware.computer.server", "production", 0, 0)
+	survivor := seedAsset(t, f.db, f.tenant, "surviving-host", "server", "hardware.computer.server", "production", 0, 0)
+	if _, err := f.db.Exec(`UPDATE assets SET asset_status='monitoring' WHERE tenant_id=$1`, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`UPDATE assets SET asset_status='archived',metadata=jsonb_build_object('merged_into',$3::text)
+ WHERE tenant_id=$1 AND id=$2`, f.tenant, source, survivor.String()); err != nil {
+		t.Fatal(err)
+	}
+	finding := leafCertFinding("surviving-host.example.test", "198.51.100.32", 443, hexFingerprint("redirect-cert"))
+	if err := f.svc.processApprovedDiscoveryCryptoData(f.tenant, source, finding, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var owner uuid.UUID
+	if err := f.db.QueryRow(`SELECT asset_id FROM crypto_implementations WHERE tenant_id=$1`, f.tenant).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != survivor {
+		t.Fatalf("crypto attached to merged source: %s", owner)
+	}
+	if _, err := f.db.Exec(`UPDATE assets SET asset_status='denied' WHERE tenant_id=$1 AND id=$2`, f.tenant, survivor); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.processApprovedDiscoveryCryptoData(f.tenant, source, finding, nil, nil, nil); err == nil {
+		t.Fatal("denied survivor materialized new evidence")
+	}
+}
+
+func TestIntegration_Ingest_AtRestReplayKeepsOriginalPostureClock(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	asset := seedAsset(t, f.db, f.tenant, "bucket", "cloud_resource", "cloud_resource", "production", 0, 0)
+	latest := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	for _, step := range []struct {
+		at        time.Time
+		encrypted bool
+	}{{latest, false}, {latest.Add(-time.Hour), true}} {
+		finding := IngestFinding{RawData: map[string]interface{}{"resource_type": "s3_bucket", "arn": "arn:aws:s3:::retained-test-bucket",
+			"encrypted": step.encrypted, "encryption_determined": true, "observed_at": step.at.Format(time.RFC3339Nano)}}
+		if err := f.svc.processDiscoveryCryptoData(f.tenant, asset, finding, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var encrypted bool
+	var first, last time.Time
+	if err := f.db.QueryRow(`SELECT (configuration_data->>'encrypted')::boolean,first_discovered_at,last_verified_at
+ FROM crypto_applications WHERE tenant_id=$1 AND asset_id=$2`, f.tenant, asset).Scan(&encrypted, &first, &last); err != nil {
+		t.Fatal(err)
+	}
+	if encrypted || !first.Equal(latest.Add(-time.Hour)) || !last.Equal(latest) {
+		t.Fatalf("older at-rest replay replaced current posture: encrypted=%v first=%s last=%s", encrypted, first, last)
+	}
+	if _, err := f.db.Exec(`UPDATE crypto_applications SET last_verified_at=NULL WHERE tenant_id=$1 AND asset_id=$2`, f.tenant, asset); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.processDiscoveryCryptoData(f.tenant, asset, IngestFinding{RawData: map[string]interface{}{
+		"resource_type": "s3_bucket", "arn": "arn:aws:s3:::retained-test-bucket", "encrypted": true, "encryption_determined": true, "observed_at": latest.Format(time.RFC3339Nano),
+	}}, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(`SELECT (configuration_data->>'encrypted')::boolean FROM crypto_applications WHERE tenant_id=$1 AND asset_id=$2`, f.tenant, asset).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	if !encrypted {
+		t.Fatal("legacy NULL clock blocked the first measured posture")
+	}
+	if err := f.svc.produceAtRestApplication(f.tenant, uuid.New(), atRestPosture{ResourceType: "cloud_storage", ResourceIdentifier: "missing-asset"}, latest); err == nil {
+		t.Fatal("failed at-rest write was acknowledged")
 	}
 }

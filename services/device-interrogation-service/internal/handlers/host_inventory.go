@@ -292,13 +292,16 @@ func (h *HostInventoryHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	log.Printf("host inventory materialised: job=%s agent=%s platform=%s asset=%s created=%t facts=%d endpoints=%d installs=+%d~%d-%d sections=%v",
+	log.Printf("host inventory processed: job=%s agent=%s platform=%s asset=%s created=%t facts=%d endpoints=%d installs=+%d~%d-%d sections=%v",
 		jobID, agentID, body.Report.Platform, counts.AssetID, counts.AssetCreated,
 		counts.Facts, counts.Endpoints,
 		counts.InstallsCreated, counts.InstallsUpdated, counts.InstallsRemoved,
 		body.Report.Sections)
 
 	status := "materialised"
+	if counts.IdentityOutcome == "unresolved" {
+		status = "unresolved"
+	}
 	if counts.Contested {
 		// Not a failure and not a success: the engine opened a merge proposal
 		// because a human has to say which machine this is. Naming it as its

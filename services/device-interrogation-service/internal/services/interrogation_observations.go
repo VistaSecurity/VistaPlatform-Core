@@ -62,6 +62,7 @@ import (
 // this sink persists, named separately because the agent path reconstructs it
 // from a JSON payload rather than holding the core's type.
 type InterrogationObservations struct {
+	ObservedAt     time.Time
 	DeviceIdentity *di.DeviceIdentity
 	Facts          []di.FactObservation
 	Relationships  []di.RelationshipObservation
@@ -173,7 +174,7 @@ func (s *ObservationSink) engine() (*identity.Engine, *pgidentity.Repository, er
 		// be auto-merged whatever the tenant set. The four fences that govern
 		// an auto-accept are [identity.Engine]'s and were never the gap; the
 		// number was.
-		s.eng, s.err = identity.New(identity.Config{Repo: s.repo})
+		s.eng, s.err = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission, Repo: s.repo})
 	})
 	return s.eng, s.repo, s.err
 }
@@ -194,6 +195,17 @@ func (s *ObservationSink) Persist(
 	if obs.Empty() {
 		return nil
 	}
+	return shareddatabase.WithSessionAdvisoryLocks(ctx, s.db, []shareddatabase.SessionAdvisoryLock{{Key: pgidentity.HostSnapshotLockKey(tenantID)}}, func() error {
+		return s.persist(ctx, tenantID, assetID, source, obs)
+	})
+}
+
+// persist runs under the tenant snapshot lock, including calls from host
+// materialization, which already owns that lock.
+func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UUID, source identity.Source, obs InterrogationObservations) error {
+	if obs.Empty() {
+		return nil
+	}
 	engine, repo, err := s.engine()
 	if err != nil {
 		return fmt.Errorf("identification engine unavailable: %w", err)
@@ -210,7 +222,10 @@ func (s *ObservationSink) Persist(
 	}
 	di.Sanitize(wrapped)
 
-	at := time.Now().UTC()
+	at := obs.ObservedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
 	self := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	var errs []error
 
@@ -224,6 +239,12 @@ func (s *ObservationSink) Persist(
 		if err := s.ensureVLANSegments(ctx, tenantID, f.Value); err != nil {
 			return fmt.Errorf("vlan segments: %w", err)
 		}
+	}
+
+	obs.DeviceIdentity, obs.Facts, obs.Relationships = wrapped.DeviceIdentity, wrapped.Facts, wrapped.Relationships
+	ctx, retained, err := s.preparePeerContext(ctx, tenantID, assetID, source, at, obs)
+	if err != nil {
+		return err
 	}
 
 	if wrapped.DeviceIdentity != nil {
@@ -242,6 +263,10 @@ func (s *ObservationSink) Persist(
 		if !f.Subject.IsZero() {
 			resolved, resolveErr := s.resolvePeer(ctx, engine, tenantID, f.Subject, source, at)
 			if resolveErr != nil {
+				var retained *identity.RetainedObservation
+				if errors.As(resolveErr, &retained) {
+					continue
+				}
 				errs = append(errs, fmt.Errorf("fact %s: resolving subject: %w", f.Key, resolveErr))
 				continue
 			}
@@ -267,7 +292,10 @@ func (s *ObservationSink) Persist(
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	return s.finishPeerContext(ctx, tenantID, retained)
 }
 
 // persistIdentity records the hardware identity an interrogation measured.
@@ -343,6 +371,10 @@ func (s *ObservationSink) persistRelationship(
 	if !rel.Subject.IsZero() {
 		resolved, err := s.resolvePeer(ctx, engine, tenantID, rel.Subject, source, at)
 		if err != nil {
+			var retained *identity.RetainedObservation
+			if errors.As(err, &retained) {
+				return nil
+			}
 			if errors.Is(err, errPeerContested) {
 				log.Printf("[ObservationSink] %s edge skipped: subject %v", rel.Type, err)
 				return nil
@@ -353,6 +385,10 @@ func (s *ObservationSink) persistRelationship(
 	}
 	peer, err := s.resolvePeer(ctx, engine, tenantID, rel.Peer, source, at)
 	if err != nil {
+		var retained *identity.RetainedObservation
+		if errors.As(err, &retained) {
+			return nil
+		}
 		if errors.Is(err, errPeerContested) {
 			// Not a failure of the interrogation: one edge could not be
 			// attached because a human has to settle who its far end is.
@@ -425,12 +461,22 @@ func (s *ObservationSink) resolvePeer(
 	if err != nil {
 		return identity.AssetRef{}, err
 	}
+	if state, ok := ctx.Value(peerContextKey{}).(*retainedPeerContext); ok {
+		if original, found := state.Peers[identifierKey(peer)]; found {
+			obs = original
+		}
+	}
 	// No FirstHand: a peer is described by somebody else. See [classIntent].
-	res, _, err := s.resolveObservationWith(ctx, engine, obs, classIntent{Proposal: prop})
+	res, _, err := s.resolveObservationWith(ctx, engine, obs, classIntent{Proposal: prop}, func(repo *pgidentity.Repository, res identity.Resolution) error {
+		return retainPeerContext(ctx, repo, tenantID, res)
+	})
 	if err != nil {
 		return identity.AssetRef{}, err
 	}
 	if res.Asset.Zero() {
+		if res.ObservationID != "" {
+			return identity.AssetRef{}, retainedPeerOutcome(ctx, res)
+		}
 		// The identity floor: every identifier the collector gave for this peer
 		// already belongs to some other asset and none of them may decide, so
 		// the engine opened a merge proposal and created nothing.
@@ -442,6 +488,17 @@ func (s *ObservationSink) resolvePeer(
 		// is a proposal waiting that the message never mentioned.
 		return identity.AssetRef{}, fmt.Errorf("%w: peer %s (merge proposal %s is waiting in Approvals)",
 			errPeerContested, observationLabel(obs), res.Proposal.ID)
+	}
+	if state, ok := ctx.Value(peerContextKey{}).(*retainedPeerContext); ok && state.Replay {
+		ready := false
+		if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE tenant_id=$1 AND id=$2 AND asset_status='monitoring' AND deleted_at IS NULL)`, tenantID, res.Asset.ID).Scan(&ready)
+		}); err != nil {
+			return identity.AssetRef{}, err
+		}
+		if !ready {
+			return identity.AssetRef{}, retainedPeerOutcome(ctx, res)
+		}
 	}
 	return res.Asset, nil
 }
@@ -517,6 +574,7 @@ func (s *ObservationSink) resolveObservationWith(
 	engine *identity.Engine,
 	obs identity.Observation,
 	intent classIntent,
+	after ...func(*pgidentity.Repository, identity.Resolution) error,
 ) (identity.Resolution, classOutcome, error) {
 	var res identity.Resolution
 	var class classOutcome
@@ -549,7 +607,15 @@ func (s *ObservationSink) resolveObservationWith(
 			class = classOutcome{}
 			var cErr error
 			class, cErr = s.recordClassOutcome(ctx, r, obs, res, intent)
-			return cErr
+			if cErr != nil {
+				return cErr
+			}
+			for _, callback := range after {
+				if err := callback(r, res); err != nil {
+					return err
+				}
+			}
+			return nil
 		})
 	}
 	err := run()
@@ -674,6 +740,7 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 		ClassHint:   peer.ClassHint,
 		Source:      source,
 		ObservedAt:  at,
+		Admission:   identity.AdmissionEvidence{Direct: peer.IdentityEvidence.ConnectedInterface, Authoritative: peer.IdentityEvidence.ControllerInventory},
 		DisplayName: strings.TrimSpace(peer.DisplayName),
 		// A peer of the tenant's own device, on the tenant's own network.
 		Network: identity.Network{Ownership: identity.OwnershipInternal},

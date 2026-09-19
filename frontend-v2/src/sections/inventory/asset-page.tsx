@@ -16,6 +16,8 @@ import type { Asset } from '@vistasecurity/api-contract';
 import { parseSeverity, severityRank } from '@vistasecurity/primitives/ratings';
 import { Icon, MetaRow, RiskGauge, RiskChip, SectionLabel } from '../../components/ui';
 import { ASSET_TABS, DEFAULT_ASSET_TAB, assetTabPath, findAssetTab, type AssetTab } from './asset-tabs';
+import { AssetMergeModal } from '../discovery/asset-merge-modal';
+import { IdentityStatus } from './identity-status';
 import {
   useAsset, useAssetClassHistory, useAssetConfigs, useAssetEndpoints, useAssetHistory, useAssetIdentifiers,
   CLASS_CHANGE_SOURCE_LABELS,
@@ -219,6 +221,8 @@ function OverviewTab({ asset }: { asset: Asset }) {
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.35fr) minmax(0,1fr)', gap: 26, alignItems: 'start' }}>
       <div>
         <SectionLabel icon="fingerprint">Identity</SectionLabel>
+        <IdentityStatus asset={asset} />
+        {asset.id && <Link to={`/discovery/observations?asset_id=${asset.id}`}>Inspect discovery evidence</Link>}
         <MetaRow k="Class" v={
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <Icon name={classIcon(asset.class_key)} size={13} style={{ color: 'var(--app-t3)' }} />
@@ -240,11 +244,8 @@ function OverviewTab({ asset }: { asset: Asset }) {
 
         <SectionLabel icon="scan-barcode">Identifiers ({identifiers.length})</SectionLabel>
         {identifiers.length === 0 ? (
-          // The engine's floor: an asset is never created with no identifier
-          // (a declared service's `name` is the only borderline case). Seeing
-          // none here means the read did not carry them, not that there are none.
           <div style={{ fontSize: 12.5, color: 'var(--app-t3)', padding: '8px 0', lineHeight: 1.55 }}>
-            No identifiers on this record. Every asset is created with at least one, so this usually means the list was not returned — reload the page.
+            No identifiers are recorded for this asset. Legacy records may have incomplete identity evidence. Inspect discovery evidence to see what was collected and how it was linked.
           </div>
         ) : (
           <div>
@@ -1079,6 +1080,7 @@ export function AssetPage() {
   const tab = findAssetTab(tabParam);
   const q = useAsset(id);
   const [editOpen, setEditOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
   const [configStack, setConfigStack] = useState<CryptoConfig[]>([]);
   const openConfig: OpenConfig = (c) => setConfigStack((s) => [...s, c]);
 
@@ -1156,6 +1158,7 @@ export function AssetPage() {
           </div>
         </div>
         <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
+          {!survivorId && asset.asset_status !== 'archived' && asset.asset_status !== 'denied' && <button className="ui-btn" onClick={() => setMergeOpen(true)}><Icon name="git-merge" size={13} />Review merge</button>}
           <button className="ui-btn" onClick={() => setEditOpen(true)} style={{ height: 31, fontSize: 12.5 }}>
             <Icon name="sliders-horizontal" size={13} />Edit
           </button>
@@ -1199,6 +1202,7 @@ export function AssetPage() {
           : <OverviewTab asset={asset} />}
       </div>
 
+      {mergeOpen && <AssetMergeModal initialAssets={[{ asset_id: asset.id, display_name: asset.display_name, hostname: asset.hostname, class_key: asset.class_key, asset_status: asset.asset_status, deleted: false, score: 0, matched_identifiers: [] }]} onClose={() => setMergeOpen(false)} />}
       {configStack.map((c, i) => (
         <ConfigDrawer
           key={i}

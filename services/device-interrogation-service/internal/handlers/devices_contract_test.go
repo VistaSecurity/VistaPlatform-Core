@@ -22,6 +22,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
 // deviceTestTenant is the tenant the harness injects; GetDevice enforces that
@@ -31,17 +32,18 @@ var deviceTestTenant = uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 // --- stub deviceStore ------------------------------------------------------
 
 type stubDeviceStore struct {
-	list    []*models.Device
-	listErr error
-	device  *models.Device
-	devErr  error
-	created *models.Device
-	updated *models.Device
-	stored  services.StoredDeviceCredentials
+	list      []*models.Device
+	listErr   error
+	device    *models.Device
+	devErr    error
+	created   *models.Device
+	createErr error
+	updated   *models.Device
+	stored    services.StoredDeviceCredentials
 }
 
 func (s *stubDeviceStore) CreateDevice(context.Context, uuid.UUID, models.CreateDeviceRequest) (*models.Device, error) {
-	return s.created, nil
+	return s.created, s.createErr
 }
 func (s *stubDeviceStore) GetDevice(context.Context, uuid.UUID, uuid.UUID) (*models.Device, error) {
 	return s.device, s.devErr
@@ -182,6 +184,23 @@ func TestContract_CreateDevice_201(t *testing.T) {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "Device", w.Body.Bytes())
+}
+
+func TestContract_CreateDevice_Retained202(t *testing.T) {
+	for _, outcome := range []string{"unresolved", "conflict"} {
+		t.Run(outcome, func(t *testing.T) {
+			retained := &identity.RetainedObservation{Result: identity.IngestResult{Outcome: outcome, ObservationID: aUUID}}
+			eng := newDeviceEngine(&stubDeviceStore{createErr: retained})
+			w := do(eng, http.MethodPost, base+"/devices", strings.NewReader(`{"device_type":"f5"}`))
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("status=%d, body=%s", w.Code, w.Body.String())
+			}
+			loadSpec(t).assertConforms(t, "RetainedDeviceObservation", w.Body.Bytes())
+			if strings.Contains(w.Body.String(), "asset_id") {
+				t.Fatal("retained evidence manufactured an asset ID")
+			}
+		})
+	}
 }
 
 func TestContract_CreateDevice_400(t *testing.T) {

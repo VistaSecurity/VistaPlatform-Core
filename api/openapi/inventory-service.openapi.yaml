@@ -1291,6 +1291,11 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AssetResponse'
+        '202':
+          description: Evidence retained pending identity admission; no asset was created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityIngestResult' }
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
@@ -1476,6 +1481,12 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          description: A merged source cannot be restored; refresh the selection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /infrastructure-assets/{id}/hard:
@@ -1526,6 +1537,12 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          description: An archived or merged asset cannot undergo this lifecycle change; refresh the selection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /infrastructure-assets/deny:
@@ -1551,6 +1568,12 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          description: An archived or merged asset cannot undergo this lifecycle change; refresh the selection.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /certificates:
@@ -4411,6 +4434,190 @@ paths:
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
+  /approvals/merge-proposals/{id}/preview:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: previewProposalAssetMerge
+      tags: [approvals]
+      summary: Preview explicitly selected assets
+      description: Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetMergeSelection'
+      responses:
+        '200':
+          description: Current asset comparison and evidence revision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [preview]
+                properties:
+                  preview:
+                    $ref: '#/components/schemas/AssetMergePreview'
+        '400':
+          description: Invalid explicit selection or missing reason.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Asset update permission is required.
+        '404':
+          description: A selected asset or proposal does not exist in this tenant.
+        '409':
+          description: Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, message, refresh_required]
+                properties:
+                  error: { type: string }
+                  message: { type: string }
+                  refresh_required: { type: boolean, const: true }
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /approvals/merge-proposals/{id}/merge:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: executeProposalAssetMerge
+      tags: [approvals]
+      summary: Merge selected assets against the preview revision
+      description: Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetMergeExecutionRequest'
+      responses:
+        '200':
+          description: Durable merge decision, or an idempotent replay of it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [merge]
+                properties:
+                  merge:
+                    $ref: '#/components/schemas/AssetMergeResult'
+        '400':
+          description: Invalid explicit selection or missing reason.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Asset update permission is required.
+        '404':
+          description: A selected asset or proposal does not exist in this tenant.
+        '409':
+          description: Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, message, refresh_required]
+                properties:
+                  error: { type: string }
+                  message: { type: string }
+                  refresh_required: { type: boolean, const: true }
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/merge/preview:
+    post:
+      operationId: previewAssetMerge
+      tags: [approvals]
+      summary: Preview explicitly selected assets
+      description: Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetMergeSelection'
+      responses:
+        '200':
+          description: Current asset comparison and evidence revision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [preview]
+                properties:
+                  preview:
+                    $ref: '#/components/schemas/AssetMergePreview'
+        '400':
+          description: Invalid explicit selection or missing reason.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Asset update permission is required.
+        '404':
+          description: A selected asset or proposal does not exist in this tenant.
+        '409':
+          description: Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, message, refresh_required]
+                properties:
+                  error: { type: string }
+                  message: { type: string }
+                  refresh_required: { type: boolean, const: true }
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /infrastructure-assets/merge:
+    post:
+      operationId: executeAssetMerge
+      tags: [approvals]
+      summary: Merge selected assets against the preview revision
+      description: Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetMergeExecutionRequest'
+      responses:
+        '200':
+          description: Durable merge decision, or an idempotent replay of it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [merge]
+                properties:
+                  merge:
+                    $ref: '#/components/schemas/AssetMergeResult'
+        '400':
+          description: Invalid explicit selection or missing reason.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Asset update permission is required.
+        '404':
+          description: A selected asset or proposal does not exist in this tenant.
+        '409':
+          description: Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, message, refresh_required]
+                properties:
+                  error: { type: string }
+                  message: { type: string }
+                  refresh_required: { type: boolean, const: true }
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
   /approvals/merge-proposals/{id}/accept:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -5122,6 +5329,164 @@ paths:
               schema:
                 $ref: '#/components/schemas/LegacyError'
 
+  /identity/summary:
+    get:
+      operationId: getIdentitySummary
+      summary: Identity coverage, separately from approval and assessment
+      responses:
+        '200':
+          description: Tenant identity coverage
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentitySummary' }
+  /discovery/observations:
+    get:
+      operationId: listIdentityObservations
+      summary: Browse retained identity evidence
+      parameters:
+      - { name: state, in: query, schema: { type: string, enum: [unresolved, linked, conflict, dismissed, expired, all], default: unresolved } }
+      - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+      - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      - { name: asset_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Paginated observations with provenance and enrichment state
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [observations, total, page, page_size]
+                properties:
+                  observations: { type: array, items: { $ref: '#/components/schemas/IdentityObservation' } }
+                  total: { type: integer }
+                  page: { type: integer }
+                  page_size: { type: integer }
+  /discovery/observations/{id}:
+    get:
+      operationId: getIdentityObservation
+      summary: Read retained identity evidence
+      parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Observation evidence
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityObservation' }
+        '404': { description: Observation not found in this tenant }
+  /discovery/observations/{id}/confirm:
+    post:
+      operationId: confirmIdentityObservation
+      summary: Confirm identity with a reason, independently of monitoring approval
+      parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ObservationDecisionInput' }
+      responses:
+        '200':
+          description: Committed identity confirmation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityIngestResult' }
+        '402': { description: Asset allowance reached; evidence remains retained }
+        '409': { description: Conflicting ownership or a changed observation; refresh before deciding }
+  /discovery/observations/{id}/link:
+    post:
+      operationId: linkIdentityObservation
+      summary: Explicitly link evidence to an existing asset
+      parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason, asset_id]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 2000 }
+                asset_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Committed evidence link
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityIngestResult' }
+        '409': { description: Conflicting ownership or a changed observation; refresh before deciding }
+  /discovery/observations/{id}/dismiss:
+    post:
+      operationId: dismissIdentityObservation
+      summary: Hide an observation from active work without asserting separate devices
+      parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ObservationDecisionInput' }
+      responses:
+        '200':
+          description: Committed dismissal
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityIngestResult' }
+        '409': { description: Observation already linked or held by an open identity conflict }
+  /settings/identity-discovery:
+    get:
+      operationId: getIdentityDiscoverySettings
+      tags: [settings]
+      summary: Read tenant identity admission and enrichment controls
+      description: Requires settings.read. Reports release capabilities independently from saved policy. Existing inventory is never bulk reclassified.
+      responses:
+        '200':
+          description: Saved policy, activation history, concurrency version and release capabilities.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityDiscoverySettings' }
+        '401': { $ref: '#/components/responses/LegacyUnauthorized' }
+        '403': { description: Missing settings.read permission. }
+        '500': { $ref: '#/components/responses/LegacyServerError' }
+    put:
+      operationId: updateIdentityDiscoverySettings
+      tags: [settings]
+      summary: Update audited tenant identity admission and enrichment controls
+      description: >-
+        Requires settings.update and an authenticated user. Send every writable field,
+        a reason, and the version from GET. Writes preserve unrelated settings.
+        Activating observe/enforce (or an initial pause) or enrichment requires the corresponding release
+        capability. First enforcement records activated_at. After activation, only
+        enforce or paused modes are permitted; pause retains incoming evidence and
+        never restores permissive creation. Pausing can preserve enabled enrichment
+        while preventing execution. Existing inventory remains unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IdentityDiscoverySettingsUpdate' }
+      responses:
+        '200':
+          description: Saved settings with incremented version.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityDiscoverySettings' }
+        '400':
+          description: Invalid or missing fields, excessive input, or sensitive assets outside this tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityDiscoverySettingsError' }
+        '401': { $ref: '#/components/responses/LegacyUnauthorized' }
+        '403': { description: Missing settings.update permission. }
+        '409':
+          description: stale_version, activation_required_release, or pause_required_after_activation. Refresh settings before retrying.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityDiscoverySettingsError' }
+        '500': { $ref: '#/components/responses/LegacyServerError' }
   /discovery/auto-scan:
     get:
       operationId: getAutoScanPolicy
@@ -5517,6 +5882,59 @@ components:
           schema:
             $ref: '#/components/schemas/LegacyError'
   schemas:
+    IdentityDiscoveryEnrichment:
+      type: object
+      additionalProperties: false
+      required: [enabled, excluded_cidrs, sensitive_asset_ids]
+      properties:
+        enabled: { type: boolean }
+        excluded_cidrs:
+          type: array
+          maxItems: 128
+          items: { type: string, maxLength: 64 }
+        sensitive_asset_ids:
+          type: array
+          maxItems: 256
+          items: { type: string, format: uuid }
+    IdentityDiscoverySettings:
+      type: object
+      additionalProperties: false
+      required: [mode, enrichment, version, activated_at, capabilities, limits]
+      properties:
+        mode: { type: string, enum: [disabled, observe, enforce, paused] }
+        enrichment: { $ref: '#/components/schemas/IdentityDiscoveryEnrichment' }
+        version: { type: integer, minimum: 1 }
+        activated_at: { type: [string, "null"], format: date-time }
+        capabilities:
+          type: object
+          additionalProperties: false
+          required: [admission, enrichment]
+          properties:
+            admission: { type: boolean }
+            enrichment: { type: boolean }
+        limits:
+          type: object
+          additionalProperties: false
+          required: [max_excluded_cidrs, max_sensitive_asset_ids, max_reason_length]
+          properties:
+            max_excluded_cidrs: { type: integer }
+            max_sensitive_asset_ids: { type: integer }
+            max_reason_length: { type: integer }
+    IdentityDiscoverySettingsUpdate:
+      type: object
+      additionalProperties: false
+      required: [mode, enrichment, version, reason]
+      properties:
+        mode: { type: string, enum: [disabled, observe, enforce, paused] }
+        enrichment: { $ref: '#/components/schemas/IdentityDiscoveryEnrichment' }
+        version: { type: integer, minimum: 1 }
+        reason: { type: string, minLength: 3, maxLength: 2000 }
+    IdentityDiscoverySettingsError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        message: { type: string }
     # The asset class taxonomy (ADR-0002 D2). Declared here as a reusable
     # schema so the Asset shape can reference it in phase 1; nothing references
     # it yet, deliberately — workstream 0.1 ships the registry, not the model
@@ -7102,6 +7520,119 @@ components:
           format: date-time
         last_scan_status:
           type: string
+    IdentityIngestResult:
+      type: object
+      additionalProperties: false
+      required: [outcome]
+      properties:
+        outcome: { type: string, enum: [created, matched, unresolved, conflict, linked, dismissed, rejected, routed] }
+        asset_id: { type: string, format: uuid }
+        observation_id: { type: string, format: uuid }
+        proposal_id: { type: string, format: uuid }
+    ObservationDecisionInput:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+        name: { type: string, maxLength: 255 }
+        asset_id: { type: string, format: uuid }
+    IdentitySummary:
+      type: object
+      additionalProperties: false
+      required: [established, operator_confirmed, legacy, unresolved, conflicted]
+      properties:
+        established: { type: integer }
+        operator_confirmed: { type: integer }
+        legacy: { type: integer }
+        unresolved: { type: integer }
+        conflicted: { type: integer }
+    RetainedCertificateSummary:
+      type: object
+      additionalProperties: false
+      required: [sha256_fingerprint]
+      properties:
+        sha256_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time }
+        expired: { type: boolean }
+        self_signed: { type: boolean }
+    RetainedEvidenceSummary:
+      type: object
+      additionalProperties: false
+      required: [kind, scope, source_ref, observed_at, materialization_state, facts_count, software_count, endpoints_count, relationships_count, protocols, certificates_count, certificates, keys_count, crypto_configurations_count]
+      properties:
+        kind: { type: string, enum: [passive_host, host_inventory, peer, cloud, crypto] }
+        scope: { type: string, enum: [observation, source_context] }
+        source_ref: { type: string }
+        observed_at: { type: [string, 'null'], format: date-time }
+        collector_version: { type: string }
+        materialization_state: { type: string, enum: [pending, completed, superseded, retrying] }
+        reason: { type: string }
+        facts_count: { type: integer, minimum: 0 }
+        software_count: { type: integer, minimum: 0 }
+        endpoints_count: { type: integer, minimum: 0 }
+        relationships_count: { type: integer, minimum: 0 }
+        protocols: { type: array, items: { type: string } }
+        certificates_count: { type: integer, minimum: 0 }
+        certificates:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/RetainedCertificateSummary' }
+        keys_count: { type: integer, minimum: 0 }
+        crypto_configurations_count: { type: integer, minimum: 0 }
+    RetainedEvidencePage:
+      type: object
+      additionalProperties: false
+      required: [items, total, limit, has_more]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/RetainedEvidenceSummary' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, const: 50 }
+        has_more: { type: boolean }
+    IdentityEnrichmentJob:
+      type: object
+      additionalProperties: false
+      required: [id, action, executor_scope, state, reason, attempts, last_attempt_at, next_attempt_at]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, enum: [configured_source, dns, probe] }
+        executor_scope: { type: string }
+        state: { type: string, enum: [waiting, queued, running, completed, blocked, failed] }
+        reason: { type: string }
+        attempts: { type: integer }
+        last_attempt_at: { type: [string, 'null'], format: date-time }
+        next_attempt_at: { type: string, format: date-time }
+    IdentityObservation:
+      type: object
+      additionalProperties: false
+      required: [id, source_kind, source_ref, collector_version, network_scope, evidence, admission_reasons, state, asset_id, proposal_id, first_seen_at, last_seen_at, occurrence_count, enrichment_state, enrichment_reason, last_attempt_at, next_attempt_at]
+      properties:
+        retained_evidence: { $ref: '#/components/schemas/RetainedEvidencePage' }
+        id: { type: string, format: uuid }
+        source_kind: { type: string }
+        source_ref: { type: string }
+        enrichment_jobs:
+          type: array
+          items: { $ref: '#/components/schemas/IdentityEnrichmentJob' }
+          description: Recent bounded enrichment attempts, available on detail reads. Source credentials and raw job results are never projected.
+        collector_version: { type: string }
+        network_scope: { type: string }
+        evidence: { type: object, additionalProperties: true }
+        admission_reasons: { type: array, items: { type: string } }
+        state: { type: string, enum: [unresolved, linked, conflict, dismissed, expired] }
+        asset_id: { type: [string, 'null'], format: uuid }
+        proposal_id: { type: [string, 'null'], format: uuid }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        occurrence_count: { type: integer }
+        enrichment_state: { type: string, enum: [waiting, queued, running, completed, blocked, failed] }
+        enrichment_reason: { type: string }
+        last_attempt_at: { type: [string, 'null'], format: date-time }
+        next_attempt_at: { type: [string, 'null'], format: date-time }
     Asset:
       type: object
       additionalProperties: false
@@ -7133,6 +7664,13 @@ components:
       - risk_assessed_by
       - risk_level
       properties:
+        identity_status:
+          type: string
+          enum: [legacy, established, operator_confirmed]
+          description: Evidence for entity identity, independently of approval, classification and assessment. Missing on older servers.
+        has_identity_conflict:
+          type: boolean
+          description: Whether this asset participates in an unresolved identity proposal.
         id:
           type: string
           format: uuid
@@ -8456,7 +8994,7 @@ components:
         tenant_id: { type: string, format: uuid }
         status:
           type: string
-          enum: [pending, merged, kept_separate]
+          enum: [pending, merged, kept_separate, superseded]
         reason: { type: string }
         source: { type: string }
         source_kind: { type: string }
@@ -8617,6 +9155,90 @@ components:
       properties:
         merge_proposal:
           $ref: '#/components/schemas/MergeProposal'
+    AssetMergeSelection:
+      type: object
+      required: [source_asset_ids, survivor_asset_id]
+      properties:
+        source_asset_ids:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        survivor_asset_id: { type: string, format: uuid }
+        field_resolutions:
+          type: object
+          description: Field name to the explicitly selected asset providing its value. management_profile selects the connection and credential reference together; inactive encrypted profiles remain historical and are referenced in the audit.
+          additionalProperties: { type: string, format: uuid }
+    AssetMergeExecutionRequest:
+      allOf:
+        - $ref: '#/components/schemas/AssetMergeSelection'
+        - type: object
+          required: [revision, reason]
+          properties:
+            revision: { type: string, minLength: 64, maxLength: 64 }
+            reason: { type: string, minLength: 3, maxLength: 2000 }
+    AssetMergePreview:
+      allOf:
+        - $ref: '#/components/schemas/AssetMergeSelection'
+        - type: object
+          required: [revision, assets, conflicts, selected_fields, children, evidence]
+          properties:
+            revision: { type: string }
+            assets:
+              type: array
+              items:
+                type: object
+                required: [asset_id, display_name, hostname, class_key, asset_status, identity_status, fields]
+                properties:
+                  asset_id: { type: string, format: uuid }
+                  display_name: { type: string }
+                  hostname: { type: string }
+                  class_key: { type: string }
+                  asset_status: { type: string }
+                  identity_status: { type: string }
+                  fields: { type: object, additionalProperties: true }
+            conflicts:
+              type: array
+              items:
+                type: object
+                required: [field, values, requires_resolution]
+                properties:
+                  field: { type: string }
+                  requires_resolution: { type: boolean }
+                  values:
+                    type: array
+                    items:
+                      type: object
+                      required: [asset_id, value, declared]
+                      properties:
+                        asset_id: { type: string, format: uuid }
+                        value: {}
+                        declared: { type: boolean }
+            selected_fields: { type: object, additionalProperties: true }
+            children:
+              type: array
+              items:
+                type: object
+                required: [table, count]
+                properties:
+                  table: { type: string }
+                  count: { type: integer }
+            evidence:
+              type: array
+              items: { type: object, additionalProperties: true }
+    AssetMergeResult:
+      type: object
+      required: [id, survivor_asset_id, source_asset_ids, merged_at, replayed]
+      properties:
+        id: { type: string, format: uuid }
+        survivor_asset_id: { type: string, format: uuid }
+        source_asset_ids:
+          type: array
+          items: { type: string, format: uuid }
+        merged_at: { type: string, format: date-time }
+        replayed: { type: boolean }
+
     MergeProposalAcceptRequest:
       type: object
       additionalProperties: false
@@ -10319,7 +10941,7 @@ components:
           description: 0-based position of the row in the submitted batch, so the UI can line each result up against the uploaded file.
         status:
           type: string
-          enum: [created, skipped_duplicate, error]
+          enum: [created, skipped_duplicate, error, unresolved]
         id:
           type: string
           format: uuid
@@ -10327,6 +10949,7 @@ components:
         reason:
           type: string
           description: Human-readable explanation for a skipped or errored row.
+        observation_id: { type: string, format: uuid }
       additionalProperties: false
     BulkImportResult:
       type: object
@@ -10337,6 +10960,7 @@ components:
       - failed
       - results
       properties:
+        unresolved: { type: integer, description: Inputs retained outside asset inventory pending identity resolution. }
         created:
           type: integer
         skipped:
@@ -11270,6 +11894,9 @@ components:
         assets_proposed:
           type: integer
           description: Devices whose identifiers matched more than one existing asset; each left a merge proposal in Approvals.
+        observations_retained:
+          type: integer
+          description: Durable observations retained without creating an asset; absent on older servers.
         assets_skipped:
           type: integer
           description: Devices carrying no identifier at all, which could never be recognised again.

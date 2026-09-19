@@ -9,25 +9,38 @@ const (
 	BulkRowCreated          BulkRowStatus = "created"
 	BulkRowSkippedDuplicate BulkRowStatus = "skipped_duplicate"
 	BulkRowError            BulkRowStatus = "error"
+	BulkRowUnresolved       BulkRowStatus = "unresolved"
 )
 
 // BulkRowResult is the per-row outcome of a bulk import. Index is the 0-based
 // position of the row in the submitted batch, so the UI can line each result
 // up against the row the user uploaded.
 type BulkRowResult struct {
-	Index  int           `json:"index"`
-	Status BulkRowStatus `json:"status"`
-	ID     *uuid.UUID    `json:"id,omitempty"`
-	Reason string        `json:"reason,omitempty"`
+	Index         int           `json:"index"`
+	Status        BulkRowStatus `json:"status"`
+	ID            *uuid.UUID    `json:"id,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
+	ObservationID *uuid.UUID    `json:"observation_id,omitempty"`
 }
 
 // BulkImportResult is the aggregate response for a bulk import. Partial success
 // is the norm: one bad row never rolls back the rest of the batch.
 type BulkImportResult struct {
-	Created int             `json:"created"`
-	Skipped int             `json:"skipped"`
-	Failed  int             `json:"failed"`
-	Results []BulkRowResult `json:"results"`
+	Created    int             `json:"created"`
+	Skipped    int             `json:"skipped"`
+	Failed     int             `json:"failed"`
+	Unresolved int             `json:"unresolved"`
+	Results    []BulkRowResult `json:"results"`
+}
+
+func (r *BulkImportResult) AddObservation(index int, id, outcome string) {
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		r.Add(index, BulkRowError, nil, "durable observation ID unavailable")
+		return
+	}
+	r.Unresolved++
+	r.Results = append(r.Results, BulkRowResult{Index: index, Status: BulkRowUnresolved, ObservationID: &parsed, Reason: outcome})
 }
 
 // NewBulkImportResult returns a result sized for the given batch length.

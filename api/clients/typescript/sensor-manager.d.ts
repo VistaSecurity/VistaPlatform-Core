@@ -982,6 +982,10 @@ export interface components {
             /** @description 'pending' | 'active' | 'inactive' | 'error' | 'offline'. */
             status: string;
             network_interfaces: string[] | null;
+            /** @description OS interfaces eligible for scoped DNS, reported by the current collector. */
+            reported_dns_interfaces?: string[];
+            /** @description Supported commands reported by the current sensor binary in its authenticated heartbeat. Missing reports clear prior capabilities. */
+            reported_capabilities?: string[];
             /** @description Full host NIC inventory the sensor reports in its heartbeat; populates the UI interface picker. Distinct from network_interfaces (the monitored subset). */
             available_interfaces: string[] | null;
             tags: string[] | null;

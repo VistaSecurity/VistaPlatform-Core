@@ -176,6 +176,7 @@ var assetFields = []catalog.FieldInfo{
 	enumAs("status", "asset_status", "pending_approval", "monitoring", "denied", "archived"),
 	enumAs("ownership", "asset_ownership", "internal", "third_party", "unknown"),
 	enumAs("stale_status", "stale_status", "active", "stale", "archived"),
+	enumAs("identity_status", "identity_status", "legacy", "established", "operator_confirmed"),
 	// Five, and ONLY on the asset target. `assets.class_source_kind` is the one
 	// column that accepts `rule` (asset-inventory workstream 2.10b): a class
 	// argued from a curated classification_rules row is not `measured` — the MAC

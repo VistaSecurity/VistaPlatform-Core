@@ -21,6 +21,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -110,6 +111,11 @@ func (h *DeviceHandlers) CreateDevice(c *gin.Context) {
 // server error" for this left them with a device that would not save and no
 // explanation anywhere.
 func writeDeviceIdentityConflict(c *gin.Context, err error) bool {
+	var retained *identity.RetainedObservation
+	if errors.As(err, &retained) {
+		c.JSON(http.StatusAccepted, retained.Result)
+		return true
+	}
 	var contested *services.DeviceIdentityContestedError
 	if !errors.As(err, &contested) {
 		return false
@@ -211,6 +217,9 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 	// Create the device
 	device, err := h.deviceService.CreateDevice(c.Request.Context(), tenantID, createReq)
 	if err != nil {
+		if writeDeviceIdentityConflict(c, err) {
+			return
+		}
 		fmt.Printf("Failed to create device after discovery: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create device"})
 		return

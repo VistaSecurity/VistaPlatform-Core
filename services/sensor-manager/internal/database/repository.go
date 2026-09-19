@@ -111,7 +111,7 @@ func (r *sensorRepository) GetSensorByID(ctx context.Context, id uuid.UUID) (*mo
 	return r.getSensorBy(ctx, r.bypassDB,
 		`SELECT id, tenant_id, name, description, platform, version, profile, status,
 		        network_interfaces, tags, last_heartbeat, created_at, updated_at, deleted_at,
-		        air_gapped, available_interfaces, ip_address, reporting_interval, asset_id
+		        air_gapped, available_interfaces, ip_address, reporting_interval, asset_id, reported_capabilities, reported_dns_interfaces
 		 FROM sensors
 		 WHERE id = $1 AND deleted_at IS NULL`, id)
 }
@@ -127,7 +127,7 @@ func (r *sensorRepository) GetSensorByIDForTenant(ctx context.Context, id, tenan
 		s, e := r.getSensorBy(ctx, tx,
 			`SELECT id, tenant_id, name, description, platform, version, profile, status,
 			        network_interfaces, tags, last_heartbeat, created_at, updated_at, deleted_at,
-			        air_gapped, available_interfaces, ip_address, reporting_interval, asset_id
+			        air_gapped, available_interfaces, ip_address, reporting_interval, asset_id, reported_capabilities, reported_dns_interfaces
 			 FROM sensors
 			 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`, id, tenantID)
 		if e != nil {
@@ -157,7 +157,7 @@ func (r *sensorRepository) getSensorBy(ctx context.Context, q rowQuerier, query 
 		&platform, &version, &profile, &sensor.Status,
 		pq.Array(&sensor.NetworkInterfaces), pq.Array(&sensor.Tags), &sensor.LastHeartbeat,
 		&sensor.CreatedAt, &sensor.UpdatedAt, &sensor.DeletedAt,
-		&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &ipAddress, &reportingInterval, &assetID,
+		&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &ipAddress, &reportingInterval, &assetID, pq.Array(&sensor.ReportedCapabilities), pq.Array(&sensor.ReportedDNSInterfaces),
 	)
 
 	if err != nil {
@@ -208,7 +208,7 @@ func (r *sensorRepository) ListSensorsByTenant(ctx context.Context, tenantID uui
 	query := `
 		SELECT id, tenant_id, name, description, platform, version, profile, status,
 		       network_interfaces, tags, ip_address, last_heartbeat, created_at, updated_at, deleted_at,
-		       air_gapped, available_interfaces, reporting_interval, asset_id
+		       air_gapped, available_interfaces, reporting_interval, asset_id, reported_capabilities, reported_dns_interfaces
 		FROM sensors
 		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC`
@@ -238,7 +238,7 @@ func (r *sensorRepository) ListSensorsByTenant(ctx context.Context, tenantID uui
 				&platform, &version, &profile, &sensor.Status,
 				pq.Array(&sensor.NetworkInterfaces), pq.Array(&sensor.Tags), &ipAddress, &sensor.LastHeartbeat,
 				&sensor.CreatedAt, &sensor.UpdatedAt, &sensor.DeletedAt,
-				&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &reportingInterval, &assetID,
+				&sensor.AirGapped, pq.Array(&sensor.AvailableInterfaces), &reportingInterval, &assetID, pq.Array(&sensor.ReportedCapabilities), pq.Array(&sensor.ReportedDNSInterfaces),
 			); e != nil {
 				return e
 			}

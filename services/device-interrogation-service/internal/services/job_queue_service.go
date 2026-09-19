@@ -48,6 +48,23 @@ func (s *JobQueueService) SetNATSClient(client *events.NATSClient) {
 // CreateJob creates a new device interrogation or cloud discovery job
 func (s *JobQueueService) CreateJob(ctx context.Context, req models.CreateDeviceJobRequest) (*models.DeviceJob, error) {
 	jobID := uuid.New()
+	var job *models.DeviceJob
+	err := shareddatabase.WithTenantTx(ctx, s.db, req.TenantID, func(tx *sql.Tx) error {
+		var err error
+		job, err = s.createJobTx(ctx, tx, jobID, req)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.publishJob(job)
+	return job, nil
+}
+
+// createJobTx lets durable producers commit their receipt and job together.
+// The caller publishes only after that transaction commits; polling recovers a
+// process exit between commit and publish.
+func (s *JobQueueService) createJobTx(ctx context.Context, tx *sql.Tx, jobID uuid.UUID, req models.CreateDeviceJobRequest) (*models.DeviceJob, error) {
 	now := time.Now()
 
 	// Set default expiration (1 hour for pending jobs)
@@ -96,16 +113,14 @@ func (s *JobQueueService) CreateJob(ctx context.Context, req models.CreateDevice
 
 	// RLS-scoped write on `device_jobs`: req.TenantID is an input, so set
 	// app.tenant_id to it for the INSERT (satisfies WITH CHECK).
-	err := shareddatabase.WithTenantTx(ctx, s.db, req.TenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, query,
-			jobID, req.TenantID, string(req.JobType), req.AssetID, req.IntegrationID, req.AgentID,
-			string(models.JobStatusPending), credentialsJSON, parametersJSON, now, expiresAt,
-		).Scan(
-			&job.ID, &job.TenantID, &job.JobType, &assetID, &agentID, &job.Status,
-			&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
-			&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
-		)
-	})
+	err := tx.QueryRowContext(ctx, query,
+		jobID, req.TenantID, string(req.JobType), req.AssetID, req.IntegrationID, req.AgentID,
+		string(models.JobStatusPending), credentialsJSON, parametersJSON, now, expiresAt,
+	).Scan(
+		&job.ID, &job.TenantID, &job.JobType, &assetID, &agentID, &job.Status,
+		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
+		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
+	)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create job: %w", err)
@@ -130,23 +145,27 @@ func (s *JobQueueService) CreateJob(ctx context.Context, req models.CreateDevice
 		_ = json.Unmarshal(resultsJSONB, &job.Results)
 	}
 
+	job.IntegrationID = req.IntegrationID
+	return job, nil
+}
+
+func (s *JobQueueService) publishJob(job *models.DeviceJob) {
 	// Publish job event to NATS for immediate processing by subscribers
 	if s.natsClient != nil && s.natsClient.IsConnected() {
 		jobEvent := events.DeviceJobEvent{
 			EventID:   uuid.New(),
-			TenantID:  req.TenantID,
-			JobID:     jobID.String(),
-			JobType:   string(req.JobType),
-			Timestamp: now,
+			TenantID:  job.TenantID,
+			JobID:     job.ID.String(),
+			JobType:   string(job.JobType),
+			Timestamp: job.CreatedAt,
 		}
 		if err := events.PublishJSON(s.natsClient, events.SubjectDeviceJobsSubmit, jobEvent); err != nil {
 			log.Printf("[JobQueueService] Failed to publish device job to NATS (will rely on DB polling): %v", err)
 		} else {
-			log.Printf("[JobQueueService] Published device job %s to NATS", jobID)
+			log.Printf("[JobQueueService] Published device job %s to NATS", job.ID)
 		}
 	}
 
-	return job, nil
 }
 
 // resolveAgentTenant returns the owning tenant of a registered device agent.
@@ -200,74 +219,7 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 	}
 	defer s.redis.Del(ctx, lockKey)
 
-	// Atomically claim the next pending job for this agent (or unassigned
-	// device_interrogation jobs) WITHIN THE AGENT'S OWN TENANT. The row lock must
-	// live in the same statement that marks the job assigned; a standalone SELECT
-	// ... FOR UPDATE in autocommit releases the lock before the UPDATE.
-	now := time.Now()
-	query := `
-		WITH candidate AS (
-			SELECT id
-			FROM device_jobs
-			WHERE status = 'pending'
-				AND deleted_at IS NULL
-				AND tenant_id = $2
-				AND (expires_at IS NULL OR expires_at > NOW())
-				AND (
-					(agent_id = $1 AND job_type = 'device_interrogation') OR
-					(agent_id IS NULL AND job_type = 'device_interrogation')
-				)
-			ORDER BY created_at ASC
-			LIMIT 1
-			FOR UPDATE SKIP LOCKED
-		)
-		UPDATE device_jobs dj
-		SET agent_id = $1, status = 'assigned', assigned_at = $3, updated_at = $3
-		FROM candidate
-		WHERE dj.id = candidate.id
-		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.asset_id, dj.agent_id, dj.status,
-			credentials, parameters, results, error_message,
-			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
-	`
-
-	// RLS: agent-outbound — keyed by agent id, tenant is the OUTPUT → bypass role.
-	job := &models.DeviceJob{}
-	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var assetID, agentIDStr sql.NullString
-
-	err = s.bypassDB.QueryRowContext(ctx, query, agentID, agentTenant, now).Scan(
-		&job.ID, &job.TenantID, &job.JobType, &assetID, &agentIDStr, &job.Status,
-		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
-		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil // No job available
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to query job: %w", err)
-	}
-
-	// Parse JSONB fields
-	if assetID.Valid {
-		id, _ := uuid.Parse(assetID.String)
-		job.AssetID = &id
-	}
-	if agentIDStr.Valid {
-		id, _ := uuid.Parse(agentIDStr.String)
-		job.AgentID = &id
-	}
-	if len(credentialsJSONB) > 0 {
-		_ = json.Unmarshal(credentialsJSONB, &job.Credentials)
-	}
-	if len(parametersJSONB) > 0 {
-		_ = json.Unmarshal(parametersJSONB, &job.Parameters)
-	}
-	if len(resultsJSONB) > 0 {
-		_ = json.Unmarshal(resultsJSONB, &job.Results)
-	}
-
-	return job, nil
+	return s.claimAuthorizedJob(ctx, &agentID, &agentTenant)
 }
 
 // GetNextJobForPlatform retrieves the next pending job for platform internal agent
@@ -287,76 +239,7 @@ func (s *JobQueueService) GetNextJobForPlatform(ctx context.Context) (*models.De
 	}
 	defer s.redis.Del(ctx, lockKey)
 
-	// Atomically claim the next pending job for platform (cloud_discovery or
-	// device_interrogation with no agent_id). Keep the lock and status update in
-	// one statement so an agent poll cannot claim the same unassigned job.
-	now := time.Now()
-	query := `
-		WITH candidate AS (
-			SELECT id
-			FROM device_jobs
-			WHERE status = 'pending'
-				AND deleted_at IS NULL
-				AND (expires_at IS NULL OR expires_at > NOW())
-				AND (
-					job_type = 'cloud_discovery' OR
-					(job_type = 'device_interrogation' AND agent_id IS NULL)
-				)
-			ORDER BY created_at ASC
-			LIMIT 1
-			FOR UPDATE SKIP LOCKED
-		)
-		UPDATE device_jobs dj
-		SET status = 'assigned', assigned_at = $1, updated_at = $1
-		FROM candidate
-		WHERE dj.id = candidate.id
-		RETURNING dj.id, dj.tenant_id, dj.job_type, dj.asset_id, dj.agent_id, dj.integration_id, dj.status,
-			credentials, parameters, results, error_message,
-			created_at, assigned_at, started_at, completed_at, expires_at, deleted_at
-	`
-
-	// RLS: cross-tenant background sweep (no single tenant) → bypass role.
-	job := &models.DeviceJob{}
-	var credentialsJSONB, parametersJSONB, resultsJSONB []byte
-	var assetID, agentIDStr, integrationIDStr sql.NullString
-
-	err = s.bypassDB.QueryRowContext(ctx, query, now).Scan(
-		&job.ID, &job.TenantID, &job.JobType, &assetID, &agentIDStr, &integrationIDStr, &job.Status,
-		&credentialsJSONB, &parametersJSONB, &resultsJSONB, &job.ErrorMessage,
-		&job.CreatedAt, &job.AssignedAt, &job.StartedAt, &job.CompletedAt, &job.ExpiresAt, &job.DeletedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil // No job available
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to query job: %w", err)
-	}
-
-	// Parse JSONB fields and UUIDs
-	if assetID.Valid {
-		id, _ := uuid.Parse(assetID.String)
-		job.AssetID = &id
-	}
-	if agentIDStr.Valid {
-		id, _ := uuid.Parse(agentIDStr.String)
-		job.AgentID = &id
-	}
-	if integrationIDStr.Valid {
-		id, _ := uuid.Parse(integrationIDStr.String)
-		job.IntegrationID = &id
-	}
-	if len(credentialsJSONB) > 0 {
-		_ = json.Unmarshal(credentialsJSONB, &job.Credentials)
-	}
-	if len(parametersJSONB) > 0 {
-		_ = json.Unmarshal(parametersJSONB, &job.Parameters)
-	}
-	if len(resultsJSONB) > 0 {
-		_ = json.Unmarshal(resultsJSONB, &job.Results)
-	}
-
-	return job, nil
+	return s.claimAuthorizedJob(ctx, nil, nil)
 }
 
 // UpdateJobStatus updates job status and optionally stores results.

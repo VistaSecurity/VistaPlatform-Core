@@ -73,3 +73,10 @@ func TestHostInventoryFromResults_BlankFatalIsNotAFailure(t *testing.T) {
 		t.Fatalf("got %+v, want a block with no failure", got)
 	}
 }
+
+func TestHostInventoryFromResults_RetainedEvidenceIsNotAProcessingFailure(t *testing.T) {
+	got := hostInventoryFromResults(`{"processing":{"host_inventory":{"observation_id":"retained-observation","identity_outcome":"unresolved","facts":0,"endpoints":0}}}`)
+	if got == nil || got.Failed != "" || got.AssetID != "" || got.IdentityOutcome != "unresolved" || got.ObservationID != "retained-observation" {
+		t.Fatalf("retained outcome lost: %+v", got)
+	}
+}

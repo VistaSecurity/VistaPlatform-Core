@@ -25,6 +25,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq" // registers the "postgres" driver
+	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // URLEnv names the environment variable that points at the integration database.
@@ -45,7 +46,11 @@ func Connect(t *testing.T) *sql.DB {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("testdb: ping %s: %v", url, err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	if err := shareddb.RegisterSessionPool(db, "postgres", url); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = shareddb.CloseWithSessionPool(db) })
 	return db
 }
 

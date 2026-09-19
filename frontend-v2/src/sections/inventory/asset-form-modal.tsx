@@ -170,7 +170,7 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
   const serviceBranch = isServiceBranch(classKey);
 
   const save = useMutation({
-    mutationFn: async (): Promise<{ asset: Asset; kept: IdentifierChange[] }> => {
+    mutationFn: async (): Promise<{ asset?: Asset; observationID?: string; kept: IdentifierChange[] }> => {
       const tagsObj: Record<string, unknown> = {};
       tags.forEach(({ key, value }) => { if (key.trim()) tagsObj[key.trim()] = value; });
       const body: AssetInput = {
@@ -205,12 +205,24 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
       }
       const { data, error } = await clients.inventory.POST('/infrastructure-assets', { body });
       if (error || !data) throw new Error('Failed to create asset');
+      if (!('asset' in data)) {
+        if (!data.observation_id) throw new Error('The server did not return an asset or retained observation');
+        return { observationID: data.observation_id, kept: [] };
+      }
       return { asset: data.asset, kept: [] };
     },
-    onSuccess: ({ asset: a, kept }) => {
-      qc.invalidateQueries({ queryKey: ['inventory'] });
-      qc.invalidateQueries({ queryKey: ['asset-detail', a.id] });
-      qc.invalidateQueries({ queryKey: ['asset-configs', a.id] });
+    onSuccess: ({ asset: a, observationID, kept }) => {
+      void qc.invalidateQueries({ queryKey: ['inventory'] });
+      void qc.invalidateQueries({ queryKey: ['identity-summary'] });
+      if (observationID) {
+        void qc.invalidateQueries({ queryKey: ['identity-observations'] });
+        toast('Evidence saved. Review it in Discovery → Observations to establish its identity.', { duration: 7000 });
+        onClose();
+        return;
+      }
+      if (!a) return;
+      void qc.invalidateQueries({ queryKey: ['asset-detail', a.id] });
+      void qc.invalidateQueries({ queryKey: ['asset-configs', a.id] });
       if (kept.length > 0) toast(keptIdentifiersMessage(kept), { icon: 'ℹ️', duration: 7000 });
       onSaved?.(a);
       onClose();

@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -183,7 +184,8 @@ type ImportFindingsRequest struct {
 
 // ImportFindingsResponse represents the response from importing findings
 type ImportFindingsResponse struct {
-	Imported int `json:"imported"`
+	Results  []identity.IngestResult `json:"results,omitempty"`
+	Imported int                     `json:"imported"`
 
 	// AssetStatuses is index-aligned with the findings that were sent: entry i
 	// is the asset_status the i-th finding's asset ACTUALLY has after the

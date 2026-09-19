@@ -27,7 +27,8 @@ const (
 	// OutcomeConflict — the identifiers disagree, either within one kind or
 	// across kinds. The observation was created as its own pending asset and a
 	// merge proposal was opened. NEVER auto-merged (ADR-0002 D5).
-	OutcomeConflict Outcome = "conflict"
+	OutcomeConflict   Outcome = "conflict"
+	OutcomeUnresolved Outcome = "unresolved"
 )
 
 // Resolution is the answer, with the evidence for it.
@@ -41,7 +42,9 @@ const (
 //
 // Unattached is set on any outcome.
 type Resolution struct {
-	Outcome Outcome `json:"outcome"`
+	Outcome         Outcome `json:"outcome"`
+	ObservationID   string  `json:"observation_id,omitempty"`
+	AdmissionReason string  `json:"admission_reason,omitempty"`
 
 	// Asset is the asset the observation ended up on: the matched one, the
 	// created one, or the new pending one a conflict produced.
@@ -96,6 +99,10 @@ type Resolution struct {
 
 // Config configures an [Engine].
 type Config struct {
+	// AdmissionEnabled is a release capability, separate from tenant rollout
+	// policy. Producers and consumers must opt in together after their nullable
+	// asset contracts are deployed.
+	AdmissionEnabled bool
 	// Repo is required.
 	Repo Repository
 
@@ -133,12 +140,15 @@ type Config struct {
 // Engine is the identification engine. It is safe for concurrent use if the
 // Repository is.
 type Engine struct {
-	repo      Repository
-	matcher   seams.Matcher
-	threshold float64
-	dynamic   map[string]bool
-	prec      func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
-	now       func() time.Time
+	admissionEnabled   bool
+	admissionDecision  *AdmissionDecision
+	admissionCandidate *AssetRef
+	repo               Repository
+	matcher            seams.Matcher
+	threshold          float64
+	dynamic            map[string]bool
+	prec               func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
+	now                func() time.Time
 }
 
 // New builds an engine. It fails only on a missing repository: every other
@@ -152,12 +162,13 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("identity: Config.AutoAcceptThreshold %v is outside 0..1", cfg.AutoAcceptThreshold)
 	}
 	e := &Engine{
-		repo:      cfg.Repo,
-		matcher:   cfg.Matcher,
-		threshold: cfg.AutoAcceptThreshold,
-		dynamic:   cfg.DynamicScopes,
-		prec:      cfg.Precedence,
-		now:       cfg.Now,
+		admissionEnabled: cfg.AdmissionEnabled,
+		repo:             cfg.Repo,
+		matcher:          cfg.Matcher,
+		threshold:        cfg.AutoAcceptThreshold,
+		dynamic:          cfg.DynamicScopes,
+		prec:             cfg.Precedence,
+		now:              cfg.Now,
 	}
 	if e.matcher == nil {
 		e.matcher = seams.Default().Matcher
@@ -253,7 +264,7 @@ func (e *Engine) AutoAcceptThreshold() float64 { return e.threshold }
 // Kinds requiring a scope (hostname, ip_address) do not vote without one, and
 // ip_address does not vote inside a scope flagged dynamic. Their identifiers
 // are still recorded.
-func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, error) {
+func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, error) {
 	if strings.TrimSpace(obs.TenantID) == "" {
 		return Resolution{}, fmt.Errorf("%w: no tenant", ErrInvalidObservation)
 	}
@@ -288,6 +299,14 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 
 	// Step 3: the precedence walk.
 	precedence := e.precedenceFor(ctx, obs.TenantID, obs.ClassHint)
+	if obs.Admission.Authoritative {
+		// A validated source identity remains usable before classification is
+		// known. In particular unknown_host's normal precedence omits CMDB IDs.
+		precedence = append([]Kind{KindAgentID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber}, precedence...)
+	}
+	if obs.Source.Kind == SourceDeclared && obs.Admission.OperatorConfirmed {
+		precedence = append([]Kind{KindDeclarationID}, precedence...)
+	}
 	byKind := groupByKind(ids)
 
 	var (
@@ -304,6 +323,11 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 			candidateSeq = append(candidateSeq, assetID)
 		}
 		evidence[assetID] = append(evidence[assetID], id)
+	}
+	if e.admissionCandidate != nil {
+		decided, decidedBy = e.admissionCandidate.ID, KindDeclarationID
+		candidateSeq = append(candidateSeq, decided)
+		evidence[decided] = nil
 	}
 
 	for _, kind := range precedence {
@@ -375,6 +399,13 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 				decidedBy, observed.Kind, observed.Value, existing.Value, observed.Kind)
 			return e.resolveSingletonConflict(ctx, obs, at, ids, owners, ref, why)
 		}
+		if e.admissionDecision != nil && (e.admissionCandidate != nil || decidedBy == KindHostname || decidedBy == KindFQDN || decidedBy == KindIPAddress) {
+			if disagrees, err := e.interfaceBindingConflict(ctx, ids, ref); err != nil {
+				return Resolution{}, err
+			} else if disagrees {
+				return e.resolveSingletonConflict(ctx, obs, at, ids, owners, ref, "a name or address matches, but the directly observed interface differs from the asset's known interfaces")
+			}
+		}
 
 		// Identifiers owned by another asset cannot be written here: one
 		// identifier value, at most one asset.
@@ -391,6 +422,20 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 			Unattached: unattached,
 		}, nil
 	default:
+		if e.admissionDecision != nil && !e.admissionDecision.Established {
+			claimed := map[string]bool{}
+			for _, refs := range owners {
+				for _, ref := range refs {
+					claimed[ref.ID] = true
+				}
+			}
+			if len(claimed) > 1 {
+				return e.resolveContested(ctx, obs, at, ids, owners)
+			}
+			// Matching has run, but this evidence cannot establish a new
+			// entity. The caller already stored it in this transaction.
+			return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
+		}
 		// Nothing DECIDED. That is not the same as nothing being known, and the
 		// difference is the floor below.
 		attach, unattached := splitByOwner(ids, owners, "")
@@ -640,6 +685,14 @@ func (e *Engine) proposeWithoutCreating(
 // should be unreachable. It stays because the consequence of reaching it —
 // silently, on one kind, in one intake path — was three assets for one host.
 func (e *Engine) kindVotes(obs Observation, id Identifier) bool {
+	if e.admissionDecision != nil && !e.admissionDecision.Established {
+		// Weak aliases can be retained and compared for review, but cannot
+		// decide ownership. Direct device identifiers may still match an
+		// existing entity when its network placement is not yet resolved.
+		if id.Kind != KindMACAddress || !obs.Admission.Direct || obs.Admission.Relayed {
+			return false
+		}
+	}
 	if id.Kind.RequiresScope() && id.Scope == "" {
 		return false
 	}
@@ -671,6 +724,21 @@ func (e *Engine) precedenceFor(ctx context.Context, tenantID, classKey string) [
 }
 
 func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Time, attach, unattached []Identifier) (Resolution, error) {
+	if e.admissionDecision != nil {
+		guard, ok := e.repo.(interface {
+			CheckAdmissionAllowance(context.Context, string) (bool, error)
+		})
+		if !ok {
+			return Resolution{}, fmt.Errorf("admission requires an asset allowance guard")
+		}
+		allowed, err := guard.CheckAdmissionAllowance(ctx, obs.TenantID)
+		if err != nil {
+			return Resolution{}, err
+		}
+		if !allowed {
+			return Resolution{Outcome: OutcomeUnresolved, Unattached: append(attach, unattached...), AdmissionReason: "asset_allowance_exhausted"}, nil
+		}
+	}
 	// The floor, restated at the only place that creates. Resolve's default
 	// branch already routes an empty attach elsewhere; this is here so a future
 	// caller cannot reach the INSERT without one, because an asset with no
@@ -781,6 +849,9 @@ func (e *Engine) conflictOutcome(
 	r ranking,
 	why string,
 ) (Resolution, error) {
+	if e.admissionDecision != nil {
+		return e.proposeWithoutCreating(ctx, obs, at, ids, r, why)
+	}
 	candidates, top := r.candidates, r.top
 	// The conflicting identifiers belong to the candidates, so the new pending
 	// asset gets only the ones nobody owns. The evidence lives on the

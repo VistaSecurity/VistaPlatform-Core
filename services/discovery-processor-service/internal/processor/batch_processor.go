@@ -757,6 +757,34 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 			continue
 		}
 		adoptEffectiveStatus(discoveries[start:end], response.AssetStatuses)
+		if len(response.Results) != 0 {
+			if len(response.Results) != end-start {
+				return imported, fmt.Errorf("inventory returned %d outcomes for %d findings", len(response.Results), end-start)
+			}
+			for i, result := range response.Results {
+				d := discoveries[start+i]
+				switch result.Outcome {
+				case "unresolved", "conflict":
+					// Evidence was committed, but identity admission made no
+					// monitoring approval. Do not retry retained evidence.
+					if result.Outcome == "unresolved" && result.ObservationID == "" {
+						return imported, fmt.Errorf("unresolved ingestion omitted durable observation ID")
+					}
+					if result.AssetID == "" && d != nil {
+						d.ApprovalStatus = "observed"
+						d.AutoApprovalRuleID = nil
+					}
+				case "created", "matched", "routed":
+				case "rejected":
+					if d != nil {
+						d.ApprovalStatus = "suppressed"
+						d.AutoApprovalRuleID = nil
+					}
+				default:
+					return imported, fmt.Errorf("inventory returned unrecognized outcome %q", result.Outcome)
+				}
+			}
+		}
 	}
 	return imported, nil
 }

@@ -228,6 +228,7 @@ describe('run summaries', () => {
   it('mentions review, skips and unmapped roles only when there are any', () => {
     expect(runSummaryLine(run())).not.toContain('needing review');
     expect(runSummaryLine(run({ assets_proposed: 2 }))).toContain('2 needing review');
+    expect(runSummaryLine(run({ observations_retained: 2 }))).toContain('2 observations retained');
     expect(runSummaryLine(run({ assets_skipped: 1 }))).toContain('1 skipped');
     expect(runSummaryLine(run({ unmapped_roles: 1 }))).toContain('1 unmapped role');
     expect(runSummaryLine(run({ unmapped_roles: 3 }))).toContain('3 unmapped roles');

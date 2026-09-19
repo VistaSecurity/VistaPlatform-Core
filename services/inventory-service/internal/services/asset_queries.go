@@ -17,6 +17,15 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 )
 
+// The proposal owns conflict state; a cached boolean on assets would become
+// stale when a different candidate is merged or a reviewer keeps them separate.
+const assetIdentityConflictSQL = `EXISTS (
+ SELECT 1 FROM asset_history h WHERE h.tenant_id=a.tenant_id
+ AND h.changes_json->>'kind'='merge_proposal'
+ AND COALESCE(h.changes_json->>'status','pending')='pending'
+ AND (h.asset_id=a.id OR h.changes_json->'candidates' @> jsonb_build_array(jsonb_build_object('asset_id',a.id::text)))
+)`
+
 // GetAssets returns one page of ASSETS — never an asset once per endpoint —
 // with the page's endpoints and identifiers loaded alongside.
 //
@@ -67,6 +76,7 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 			a.attributes::text, a.environment, a.business_unit, a.owner_email, a.support_group,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.stale_status, a.risk_score, a.risk_assessed_by,
+			a.identity_status, ` + assetIdentityConflictSQL + `,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
 			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
@@ -213,6 +223,7 @@ func scanAssetListRow(rows *sqlx.Rows) (*models.Asset, error) {
 		&attributesText, &asset.Environment, &asset.BusinessUnit, &asset.OwnerEmail, &asset.SupportGroup,
 		&asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
 		&asset.StaleStatus, &asset.RiskScore, &assessedBy,
+		&asset.IdentityStatus, &asset.HasIdentityConflict,
 		&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 		&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName,
 		&asset.Site, &asset.Region, &asset.Zone,
@@ -268,6 +279,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			` + assetOperatingSystemSQL + `, a.attributes::text, a.environment, a.business_unit, a.owner_email,
 			a.support_group, a.description, a.tags::text, a.metadata::text,
 			a.asset_ownership, a.asset_status, a.stale_status,
+			a.identity_status, ` + assetIdentityConflictSQL + `,
 			a.discovery_method, a.confidence_score,
 			a.risk_score, a.risk_assessed_by,
 			a.first_discovered_at, a.last_seen_at,
@@ -290,6 +302,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			&operatingSystem, &attributesText, &asset.Environment, &asset.BusinessUnit, &asset.OwnerEmail,
 			&asset.SupportGroup, &asset.Description, &tagsText, &metadataText,
 			&asset.AssetOwnership, &asset.AssetStatus, &asset.StaleStatus,
+			&asset.IdentityStatus, &asset.HasIdentityConflict,
 			&asset.DiscoveryMethod, &asset.ConfidenceScore,
 			&asset.RiskScore, &assessedBy,
 			&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,

@@ -208,28 +208,32 @@ func (p cloudEnumerationPlan) counts() CloudEnumerationCounts {
 type CloudDiscoveryResult struct {
 	Devices     []models.Device
 	Enumeration CloudEnumerationCounts
+	Identity    CloudIdentitySummary
+	Retained    map[string]identity.IngestResult
 	// EnumerationSkipped names why enumeration did not run, or "" when it did.
 	// Reported rather than left blank so a job whose counts are all zero says
 	// whether it found nothing or was switched off.
 	EnumerationSkipped string
 }
 
-// DiscoverResources runs a cloud discovery job end to end: the crypto and
-// at-rest collectors the caller asked for, then compute/network enumeration
-// when the integration has it on.
-//
-// It is the entry point the JOB paths use (the interactive Discover handler and
-// the scheduled platform-agent worker). The per-provider Discover*Resources
-// methods keep their signatures and their behaviour — the single-resource
-// interrogation handler still calls one directly, and enumerating a whole
-// account to answer "tell me about this one ARN" would be absurd.
-func (s *CloudDiscoveryService) DiscoverResources(
+// DiscoverResourceEvidence runs the requested provider collectors, preserving
+// retained outcomes and persistence failures for both job and single-resource
+// callers. Account-wide compute enumeration belongs to DiscoverResources.
+func (s *CloudDiscoveryService) DiscoverResourceEvidence(
 	ctx context.Context,
 	tenantID, integrationID uuid.UUID,
 	cloudProvider string,
 	resourceTypes, regions, resourceGroups []string,
 ) (*CloudDiscoveryResult, error) {
 	out := &CloudDiscoveryResult{}
+	run := &cloudRunEvidence{}
+	ctx = context.WithValue(ctx, cloudRunKey{}, run)
+	defer func() {
+		run.mu.Lock()
+		out.Identity = run.summary
+		out.Retained = run.retained
+		run.mu.Unlock()
+	}()
 
 	var err error
 	switch cloudProvider {
@@ -245,6 +249,27 @@ func (s *CloudDiscoveryService) DiscoverResources(
 	if err != nil {
 		return nil, err
 	}
+
+	run.mu.Lock()
+	recordErr := run.failure
+	run.mu.Unlock()
+	if recordErr != nil {
+		return nil, fmt.Errorf("persist cloud evidence: %w", recordErr)
+	}
+
+	return out, nil
+}
+
+// DiscoverResources also enumerates configured compute/network inventory.
+func (s *CloudDiscoveryService) DiscoverResources(ctx context.Context, tenantID, integrationID uuid.UUID, cloudProvider string, resourceTypes, regions, resourceGroups []string) (*CloudDiscoveryResult, error) {
+	out, err := s.DiscoverResourceEvidence(ctx, tenantID, integrationID, cloudProvider, resourceTypes, regions, resourceGroups)
+	if err != nil {
+		return nil, err
+	}
+	run := &cloudRunEvidence{summary: out.Identity, retained: out.Retained}
+	ctx = context.WithValue(ctx, cloudRunKey{}, run)
+	defer func() { run.mu.Lock(); out.Identity = run.summary; out.Retained = run.retained; run.mu.Unlock() }()
+	var recordErr error
 
 	settings, err := loadCloudIntegrationSettings(ctx, s.bypassDB, tenantID, integrationID)
 	if err != nil {
@@ -270,6 +295,12 @@ func (s *CloudDiscoveryService) DiscoverResources(
 	}
 	out.Devices = append(out.Devices, enumerated...)
 	out.Enumeration = counts
+	run.mu.Lock()
+	recordErr = run.failure
+	run.mu.Unlock()
+	if recordErr != nil {
+		return nil, fmt.Errorf("persist cloud enumeration: %w", recordErr)
+	}
 	return out, nil
 }
 
@@ -427,6 +458,7 @@ func (s *CloudDiscoveryService) recordCloudResource(
 	factRows := cloudFactRows(res.Facts, cloudSource(device.Vendor), time.Now().UTC())
 	attrs := filterClassAttributes(classKey, res.Attributes, res.DeviceType)
 
+	ctx = context.WithValue(ctx, cloudEnumerationContextKey{}, &res)
 	err := s.upsertDeviceAssetWith(ctx, &device, res.ResourceID, res.CloudNetworkRef, func(r *pgidentity.Repository, assetID uuid.UUID) error {
 		ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 		if len(factRows) > 0 {

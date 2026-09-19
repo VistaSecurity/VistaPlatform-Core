@@ -14,7 +14,19 @@ import { JobDetailModal } from './job-detail-modal';
 
 type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
 type EnumerationCounts = deviceInterrogationComponents['schemas']['CloudEnumerationCounts'];
+type CloudIdentitySummary = deviceInterrogationComponents['schemas']['CloudIdentitySummary'];
 type HostInventoryCounts = deviceInterrogationComponents['schemas']['HostInventoryCounts'];
+
+export function cloudIdentitySummary(identity: CloudIdentitySummary | undefined): string | null {
+  if (!identity) return null;
+  return [
+    `${identity.assets_created} created, ${identity.assets_matched} matched`,
+    identity.observations_retained ? `${identity.observations_retained} observations retained — awaiting identity resolution` : null,
+    identity.approval_pending ? `${identity.approval_pending} awaiting approval` : null,
+    identity.conflicts ? `${identity.conflicts} identity conflicts` : null,
+    identity.rejected_inputs ? `${identity.rejected_inputs} rejected inputs` : null,
+  ].filter(Boolean).join(' · ');
+}
 
 /**
  * The enumeration half of a cloud discovery run, as one log-line fragment.
@@ -66,6 +78,7 @@ export function hostInventorySummary(h: HostInventoryCounts | undefined): string
   // success for a host that was not in the inventory. The failure is the whole
   // line; nothing after it is true of the inventory.
   if (h.failed) return `host inventory NOT materialised — ${h.failed}`;
+  if (h.identity_outcome === 'unresolved') return 'evidence retained — awaiting identity resolution in Discovery → Observations';
   const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
   const parts = [
     h.contested ? 'identity contested — merge proposal waiting' : null,
@@ -118,8 +131,9 @@ export function LogsPage() {
                       // "N assets": it materialises ONE host, and "1 assets"
                       // beside 412 packages is the least informative thing the
                       // line could say.
-                      j.host_inventory ? null : (j.assets_discovered != null ? `${j.assets_discovered} assets` : null),
+                      j.host_inventory || j.identity ? null : (j.assets_discovered != null ? `${j.assets_discovered} assets` : null),
                       enumerationSummary(j.enumeration),
+                      cloudIdentitySummary(j.identity),
                       hostInventorySummary(j.host_inventory),
                       j.duration_seconds != null ? durationFmt(j.duration_seconds) : null,
                     ].filter(Boolean).join(' · ')}

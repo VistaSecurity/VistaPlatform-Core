@@ -59,8 +59,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/classify"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
@@ -205,19 +207,39 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 		// about the host it runs on, not a guess. See
 		// classHintForSelfReport — it is still a HINT, exactly like
 		// KeyUnknownHost is, and the rule table below can still override it.
-		ClassHint: classHintForSelfReport(ho),
+		ClassHint: assetclass.KeyUnknownHost,
+	}
+	obs.Admission = identity.AdmissionEvidence{
+		Relayed: ho.Relayed(), CollectorVersion: rawDataString(f.RawData, "collector_version", "sensor_version"),
+		ReceiptID: rawDataString(f.RawData, "discovery_id"),
+	}
+	// Only protocols that directly bind a device/interface provide admission
+	// evidence. DNS replies and service advertisements never imply a device.
+	switch ho.Source {
+	case hostobs.SourceARP, hostobs.SourceDHCP, hostobs.SourceLLDP, hostobs.SourceCDP:
+		obs.Admission.Direct = true
 	}
 
 	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
+		if sensorID, err := uuid.Parse(agentID); err == nil && s.db != nil && f.SourceSensorID != nil && *f.SourceSensorID == agentID {
+			if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+				return tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sensors WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL)`, tenantID, sensorID).Scan(&obs.Admission.Authoritative)
+			}); err != nil {
+				return identity.Observation{}, fmt.Errorf("verify sensor identity: %w", err)
+			}
+		}
 		// The strongest identifier kind there is (shared/identity/identifier.go:
 		// "a host agent's own installation id... because we issued it"). Set
 		// ONLY on a sensor's self-report of the host it runs on — every
 		// passively decoded observation leaves AgentID empty. Confidence 1: an
 		// agent's own id is not graded on the arp/dhcp/mdns ladder that grades
 		// how directly a THIRD PARTY's frame states an identity.
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindAgentID, Value: agentID, Confidence: 1,
-		})
+		if obs.Admission.Authoritative {
+			obs.ClassHint = classHintForSelfReport(ho)
+			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
+				Kind: identity.KindAgentID, Value: agentID, Confidence: 1,
+			})
+		}
 	}
 
 	// The scope weak identifiers live in. Addresses are scoped individually
@@ -666,8 +688,52 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 	// because there was nowhere honest to record one. `class_source_kind: rule`
 	// is that place.
 	classProp := s.applyClassProposal(ctx, &obs, hostObservationClassEvidence(ho))
+	ctxInput := s.hostObservationContextInput(tenantID, f, ho)
 
-	facts := hostObservationFacts(ho, obs.Source, obs.ObservedAt, obs.Confidence)
+	return s.resolveObservationWithRepo(ctx, obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
+		if res.Asset.Zero() {
+			if res.ObservationID == "" {
+				return nil
+			}
+			// Keep the typed passive evidence beyond raw-discovery retention.
+			// Arbitrary raw metadata is excluded from the retained payload.
+			safeHost := retainedHostEvidence(ho)
+			retained := IngestFinding{Kind: KindHostObservation, SourceSensorID: f.SourceSensorID,
+				RawData: map[string]interface{}{"host_observation": safeHost, "source": rawDataString(f.RawData, "source"),
+					"discovery_method": rawDataString(f.RawData, "discovery_method"), "confidence_score": obs.Confidence,
+					"discovery_id": obs.Admission.ReceiptID, "collector_version": obs.Admission.CollectorVersion,
+					"observed_at": obs.ObservedAt.Format(time.RFC3339Nano)}}
+			payload, err := json.Marshal(retained)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO identity_observation_payloads(tenant_id,observation_id,receipt_key,payload)
+			 VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenantID, res.ObservationID, identity.ObservationReceiptKey(obs), string(payload))
+			return err
+		}
+		return s.applyHostObservationContext(ctx, repo, tx, tenantID, f, ho, obs, res, assetStatus, classProp, ctxInput)
+	})
+}
+
+// Retain decoder-owned fields and regenerate registered facts. Unrecognized
+// metadata is not evidence and must not become a long-lived credential store.
+func retainedHostEvidence(ho *hostobs.HostObservation) *hostobs.HostObservation {
+	copy := *ho
+	copy.Attributes = make(map[string]interface{})
+	for _, key := range []string{"virtual_mac_protocol", "mdns_relayed", "mdns_service_port", "capture_interface",
+		"dhcp_vendor_class", "dhcp_param_request_list", "dhcp_address_requested_only", "dhcp_message_type",
+		"lldp_chassis_id", "lldp_port_id", "lldp_port_description", "lldp_system_description", "lldp_capabilities", "lldp_med_manufacturer",
+		"cdp_port_id", "cdp_capabilities", "cdp_software_version", "cdp_platform", "arp_gratuitous", "arp_probe", "arp_operation"} {
+		if value, ok := ho.Attributes[key]; ok {
+			copy.Attributes[key] = value
+		}
+	}
+	copy.Finalize()
+	return &copy
+}
+
+func (s *AssetService) hostObservationContextInput(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) models.AssetInput {
+
 	ctxInput := models.AssetInput{
 		Metadata: hostObservationMetadata(f, ho),
 	}
@@ -677,86 +743,105 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 		ctxInput.Tags = mergeTags(models.JSONB{}, tags)
 	}
 
-	return s.resolveObservationWithRepo(ctx, obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
-		if res.Asset.Zero() {
-			// The identity floor: every identifier belongs to somebody else and
-			// none could decide, so the engine opened a merge proposal and wrote
-			// nothing. There is no asset to hang facts or context on.
-			return nil
-		}
-		assetID, perr := uuid.Parse(res.Asset.ID)
-		if perr != nil {
-			return fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, perr)
-		}
-		if res.Outcome != identity.OutcomeConflict {
-			if err := repo.ProjectSegmentLocation(ctx, res.Asset, obs.Network.SegmentID, obs.Source); err != nil {
-				return err
-			}
-		}
-		if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInput, obs.Source, res.Outcome); cerr != nil {
-			return cerr
-		}
-		if len(facts) > 0 {
-			// On the ENGINE's repository, so the facts share its transaction.
-			// Going through s.identityRepo here would open a second transaction
-			// on the pool while this one still holds the asset row uncommitted,
-			// and UpsertFacts' assertAssetExists would not be able to see it.
-			if ferr := repo.UpsertFacts(ctx, res.Asset, hostObservationFactProducer(f), facts); ferr != nil {
-				return fmt.Errorf("writing host-observation facts: %w", ferr)
-			}
-		}
-		if cerr := s.recordClassOutcome(ctx, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
-			return cerr
-		}
-		if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
-			// Link the sensor to the asset its own self-report resolved to —
-			// in the SAME transaction as everything else this observation
-			// wrote, so the link is atomic with the asset it points at. This
-			// is also the RETRO-LINK path: an existing anonymous unknown_host
-			// asset holding only this host's MAC/IP (a real deployment shape:
-			// seen passively by another sensor before this one ever reported
-			// itself) is exactly what res.Asset already is when the engine
-			// matched on mac_address/ip_address, so linking here covers both
-			// "created fresh" and "matched existing" without a separate code
-			// path.
-			//
-			// `sensors` belongs to sensor-manager, not this service, but both
-			// read/write the one shared database — sensorrouting.Store
-			// already SELECTs from `sensors` for the same reason (see its
-			// TenantSensors). agentID is the sensor's own id (it set AgentID
-			// to sensorID.String() — see sensor-manager's
-			// selfHostObservation), so no separate lookup is needed.
-			if sensorID, perr := uuid.Parse(agentID); perr == nil {
-				if lerr := s.linkSensorAsset(tx, tenantID, sensorID, assetID); lerr != nil {
-					return fmt.Errorf("linking sensor %s to its host asset: %w", sensorID, lerr)
-				}
-			}
-			// Upgrade the class on the RETRO-LINK path (asset MATCHED an
-			// existing row rather than being created): classForCreate's
-			// ClassHint only ever applies at creation, by design — an
-			// observation must not overwrite a class an asset already HAS,
-			// the same invariant classproposal documents ("It never sets a
-			// class on an existing asset... a rule that changed its mind six
-			// months after somebody approved a class would be a silent
-			// rewrite"). This is the one narrow, deliberate exception: it
-			// fires ONLY while the asset's class is still the unassigned
-			// floor (unknown_host) — nothing has been decided yet, by a rule,
-			// a human, or anything else — and the evidence is the sensor's
-			// own self-report, not a guess. Flagged for the owner in the PR:
-			// this reaches past the ordinary class-proposal review queue on
-			// the reasoning that "nothing was ever decided" is different from
-			// "something was decided and this disagrees."
-			if hint := classHintForSelfReport(ho); hint != assetclass.KeyUnknownHost {
-				if cerr := upgradeUnknownHostClass(ctx, tx, tenantID, assetID, hint, "sensor:"+agentID); cerr != nil {
-					return fmt.Errorf("upgrading class for sensor %s's host asset: %w", agentID, cerr)
-				}
-			}
-		}
-		if res.Outcome != identity.OutcomeConflict && assetStatus != "" && assetStatus != identity.StatusPendingApproval {
-			return s.setStatusUnlessArchived(tx, tenantID, assetID, assetStatus, obs.Source)
-		}
-		return nil
+	return ctxInput
+}
+
+// materializeRetainedHostObservation applies the original typed evidence to the
+// explicitly resolved asset. It never creates another asset or claims aliases.
+func (s *AssetService) materializeRetainedHostObservation(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) error {
+	ho, ok := hostObservationPayload(f)
+	if !ok {
+		return fmt.Errorf("retained host observation has no typed payload")
+	}
+	obs, err := s.hostObservationObservation(tenantID, f, ho)
+	if err != nil {
+		return err
+	}
+	classProp := s.applyClassProposal(ctx, &obs, hostObservationClassEvidence(ho))
+	ctxInput := s.hostObservationContextInput(tenantID, f, ho)
+	repo := pgidentity.New(s.db.DB.DB)
+	return repo.RunInTx(ctx, tenantID.String(), func(bound *pgidentity.Repository) error {
+		res := identity.Resolution{Outcome: identity.OutcomeMatched, Asset: identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}}
+		return s.applyHostObservationContext(ctx, bound, s.sqlxOver(bound.Tx()), tenantID, f, ho, obs, res, "", classProp, ctxInput)
 	})
+}
+
+func (s *AssetService) applyHostObservationContext(ctx context.Context, repo *pgidentity.Repository, tx *sqlx.Tx, tenantID uuid.UUID,
+	f IngestFinding, ho *hostobs.HostObservation, obs identity.Observation, res identity.Resolution, assetStatus string, classProp classify.ClassProposal, ctxInput models.AssetInput) error {
+
+	facts := hostObservationFacts(ho, obs.Source, obs.ObservedAt, obs.Confidence)
+	assetID, perr := uuid.Parse(res.Asset.ID)
+	if perr != nil {
+		return fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, perr)
+	}
+	if res.Outcome != identity.OutcomeConflict {
+		if err := repo.ProjectSegmentLocation(ctx, res.Asset, obs.Network.SegmentID, obs.Source); err != nil {
+			return err
+		}
+	}
+	if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInput, obs.Source, res.Outcome); cerr != nil {
+		return cerr
+	}
+	if len(facts) > 0 {
+		// On the ENGINE's repository, so the facts share its transaction.
+		// Going through s.identityRepo here would open a second transaction
+		// on the pool while this one still holds the asset row uncommitted,
+		// and UpsertFacts' assertAssetExists would not be able to see it.
+		if ferr := repo.UpsertFacts(ctx, res.Asset, hostObservationFactProducer(f), facts); ferr != nil {
+			return fmt.Errorf("writing host-observation facts: %w", ferr)
+		}
+	}
+	if cerr := s.recordClassOutcome(ctx, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
+		return cerr
+	}
+	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" && obs.Admission.Authoritative {
+		// Link the sensor to the asset its own self-report resolved to —
+		// in the SAME transaction as everything else this observation
+		// wrote, so the link is atomic with the asset it points at. This
+		// is also the RETRO-LINK path: an existing anonymous unknown_host
+		// asset holding only this host's MAC/IP (a real deployment shape:
+		// seen passively by another sensor before this one ever reported
+		// itself) is exactly what res.Asset already is when the engine
+		// matched on mac_address/ip_address, so linking here covers both
+		// "created fresh" and "matched existing" without a separate code
+		// path.
+		//
+		// `sensors` belongs to sensor-manager, not this service, but both
+		// read/write the one shared database — sensorrouting.Store
+		// already SELECTs from `sensors` for the same reason (see its
+		// TenantSensors). agentID is the sensor's own id (it set AgentID
+		// to sensorID.String() — see sensor-manager's
+		// selfHostObservation), so no separate lookup is needed.
+		if sensorID, perr := uuid.Parse(agentID); perr == nil {
+			if lerr := s.linkSensorAsset(tx, tenantID, sensorID, assetID); lerr != nil {
+				return fmt.Errorf("linking sensor %s to its host asset: %w", sensorID, lerr)
+			}
+		}
+		// Upgrade the class on the RETRO-LINK path (asset MATCHED an
+		// existing row rather than being created): classForCreate's
+		// ClassHint only ever applies at creation, by design — an
+		// observation must not overwrite a class an asset already HAS,
+		// the same invariant classproposal documents ("It never sets a
+		// class on an existing asset... a rule that changed its mind six
+		// months after somebody approved a class would be a silent
+		// rewrite"). This is the one narrow, deliberate exception: it
+		// fires ONLY while the asset's class is still the unassigned
+		// floor (unknown_host) — nothing has been decided yet, by a rule,
+		// a human, or anything else — and the evidence is the sensor's
+		// own self-report, not a guess. Flagged for the owner in the PR:
+		// this reaches past the ordinary class-proposal review queue on
+		// the reasoning that "nothing was ever decided" is different from
+		// "something was decided and this disagrees."
+		if hint := classHintForSelfReport(ho); hint != assetclass.KeyUnknownHost {
+			if cerr := upgradeUnknownHostClass(ctx, tx, tenantID, assetID, hint, "sensor:"+agentID); cerr != nil {
+				return fmt.Errorf("upgrading class for sensor %s's host asset: %w", agentID, cerr)
+			}
+		}
+	}
+	if res.Outcome != identity.OutcomeConflict && assetStatus != "" && assetStatus != identity.StatusPendingApproval {
+		return s.setStatusUnlessArchived(tx, tenantID, assetID, assetStatus, obs.Source)
+	}
+	return nil
 }
 
 // linkSensorAsset records that sensorID's own host resolved to assetID — the
@@ -790,7 +875,8 @@ func upgradeUnknownHostClass(ctx context.Context, tx *sqlx.Tx, tenantID, assetID
 		       class_source_ref = $5,
 		       class_confidence = 1,
 		       updated_at = now()
-		 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND class_key = 'unknown_host'`,
+		 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND class_key = 'unknown_host'
+           AND class_source_kind IS DISTINCT FROM 'declared'`,
 		tenantID, assetID, string(hint), classPathForKey(string(hint)), sourceRef,
 	)
 	return err

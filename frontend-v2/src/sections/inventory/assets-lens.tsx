@@ -18,6 +18,8 @@ import { FACET_LEVELS, FacetRail } from './facet-rail';
 import { applyFacetChange, queryToFacets, type FacetState } from './facet-query';
 import { QueryChip, QueryEditor, ServerQueryErrors } from './query-editor';
 import { SavedViews } from './saved-views';
+import { IdentityStatus } from './identity-status';
+import { IdentityCoverage } from '../discovery/observations-page';
 
 function Header({ cols, grid }: { cols: AssetColumn[]; grid: string }) {
   return (
@@ -50,6 +52,7 @@ function AssetRow({ asset, cols, grid, onOpen }: {
         <Icon name={classIcon(asset.class_key)} size={14} style={{ color: 'var(--app-t3)', flex: 'none' }} />
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.primary}</div>
+          <IdentityStatus asset={asset} />
           {ident.secondary && (
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.secondary}</div>
           )}
@@ -266,6 +269,7 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
       </div>
 
       <AppliedQuery typed={query} applied={assetsQ.data?.appliedQuery ?? ''} />
+      <IdentityCoverage />
 
       {pendingCount > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 26px 10px', padding: '8px 14px', borderRadius: 12, border: '1px solid color-mix(in srgb, var(--warn) 35%, transparent)', background: 'color-mix(in srgb, var(--warn) 8%, transparent)' }}>

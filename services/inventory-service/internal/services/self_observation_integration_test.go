@@ -30,6 +30,8 @@ func selfObservationFinding(t *testing.T, sensorID uuid.UUID, ho *hostobs.HostOb
 	t.Helper()
 	ho.AgentID = sensorID.String()
 	f := observationFinding(t, ho)
+	sensorRef := sensorID.String()
+	f.SourceSensorID = &sensorRef
 	f.RawData["discovery_method"] = "sensor_self_report"
 	f.RawData["confidence_score"] = 1.0
 	return f
@@ -211,52 +213,56 @@ func TestIntegration_SelfObservation_RetroLinksAnonymousUnknownHost(t *testing.T
 // from upgradeUnknownHostClass's UPDATE makes this test fail (class_key
 // becomes "server").
 func TestIntegration_SelfObservation_NeverOverwritesAnAlreadyClassifiedAsset(t *testing.T) {
-	svc, db, tenant := newHostObsFixture(t)
+	for _, declaredClass := range []string{"network_device", "unknown_host"} {
+		t.Run(declaredClass, func(t *testing.T) {
+			svc, db, tenant := newHostObsFixture(t)
 
-	sensorID := uuid.New()
-	if _, err := db.Exec(`
+			sensorID := uuid.New()
+			if _, err := db.Exec(`
 		INSERT INTO sensors (id, tenant_id, name, platform, version, profile, status)
 		VALUES ($1, $2, 'xps16-sensor', 'linux', '1.0.0', 'datacenter_host', 'active')`,
-		sensorID, tenant); err != nil {
-		t.Fatalf("insert sensor fixture: %v", err)
-	}
+				sensorID, tenant); err != nil {
+				t.Fatalf("insert sensor fixture: %v", err)
+			}
 
-	// An asset a human (or a rule) already classified, sharing the MAC the
-	// self-report will carry.
-	passive := observationFinding(t, &hostobs.HostObservation{
-		Source:    hostobs.SourceARP,
-		MAC:       "28:cf:da:11:aa:bb",
-		Addresses: addrsFor(t, "192.0.2.174"),
-	})
-	if _, err := svc.IngestFindings(tenant, []IngestFinding{passive}); err != nil {
-		t.Fatalf("IngestFindings(passive): %v", err)
-	}
-	var existingID uuid.UUID
-	if err := db.QueryRow(`SELECT id FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenant).
-		Scan(&existingID); err != nil {
-		t.Fatalf("read the pre-existing asset: %v", err)
-	}
-	if _, err := db.Exec(`UPDATE assets SET class_key = 'network_device', class_source_kind = 'declared' WHERE id = $1`, existingID); err != nil {
-		t.Fatalf("simulate a human-approved class: %v", err)
-	}
+			// An asset a human (or a rule) already classified, sharing the MAC the
+			// self-report will carry.
+			passive := observationFinding(t, &hostobs.HostObservation{
+				Source:    hostobs.SourceARP,
+				MAC:       "28:cf:da:11:aa:bb",
+				Addresses: addrsFor(t, "192.0.2.174"),
+			})
+			if _, err := svc.IngestFindings(tenant, []IngestFinding{passive}); err != nil {
+				t.Fatalf("IngestFindings(passive): %v", err)
+			}
+			var existingID uuid.UUID
+			if err := db.QueryRow(`SELECT id FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenant).
+				Scan(&existingID); err != nil {
+				t.Fatalf("read the pre-existing asset: %v", err)
+			}
+			if _, err := db.Exec(`UPDATE assets SET class_key = $2, class_source_kind = 'declared' WHERE id = $1`, existingID, declaredClass); err != nil {
+				t.Fatalf("simulate a human-approved class: %v", err)
+			}
 
-	self := selfObservationFinding(t, sensorID, &hostobs.HostObservation{
-		Platform:  "linux",
-		Profile:   "datacenter_host",
-		MAC:       "28:cf:da:11:aa:bb",
-		Hostnames: []string{"xps16-sensor"},
-		Addresses: addrsFor(t, "192.0.2.174"),
-	})
-	if _, err := svc.IngestFindings(tenant, []IngestFinding{self}); err != nil {
-		t.Fatalf("IngestFindings(self): %v", err)
-	}
+			self := selfObservationFinding(t, sensorID, &hostobs.HostObservation{
+				Platform:  "linux",
+				Profile:   "datacenter_host",
+				MAC:       "28:cf:da:11:aa:bb",
+				Hostnames: []string{"xps16-sensor"},
+				Addresses: addrsFor(t, "192.0.2.174"),
+			})
+			if _, err := svc.IngestFindings(tenant, []IngestFinding{self}); err != nil {
+				t.Fatalf("IngestFindings(self): %v", err)
+			}
 
-	var classKey string
-	if err := db.QueryRow(`SELECT class_key FROM assets WHERE id = $1`, existingID).Scan(&classKey); err != nil {
-		t.Fatalf("read the asset back: %v", err)
-	}
-	if classKey != "network_device" {
-		t.Errorf("class_key = %q after a self-report, want the pre-existing network_device UNCHANGED", classKey)
+			var classKey string
+			if err := db.QueryRow(`SELECT class_key FROM assets WHERE id = $1`, existingID).Scan(&classKey); err != nil {
+				t.Fatalf("read the asset back: %v", err)
+			}
+			if classKey != declaredClass {
+				t.Errorf("class_key = %q after a self-report, want the declared class %s UNCHANGED", classKey, declaredClass)
+			}
+		})
 	}
 }
 

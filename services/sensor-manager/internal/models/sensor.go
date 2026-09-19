@@ -10,15 +10,17 @@ import (
 
 // Sensor represents a sensor in the system
 type Sensor struct {
-	ID          uuid.UUID `json:"id" db:"id"`
-	TenantID    uuid.UUID `json:"tenant_id" db:"tenant_id"`
-	Name        string    `json:"name" db:"name"`
-	SensorType  string    `json:"sensor_type" db:"sensor_type"` // 'network', 'endpoint', 'cloud', 'api'
-	Description *string   `json:"description" db:"description"`
-	Platform    string    `json:"platform" db:"platform"`
-	Version     string    `json:"version" db:"version"`
-	Profile     string    `json:"profile" db:"profile"`
-	Status      string    `json:"status" db:"status"` // 'pending', 'active', 'inactive', 'error', 'offline'
+	ReportedDNSInterfaces []string  `json:"reported_dns_interfaces,omitempty" db:"reported_dns_interfaces"`
+	ReportedCapabilities  []string  `json:"reported_capabilities,omitempty" db:"reported_capabilities"`
+	ID                    uuid.UUID `json:"id" db:"id"`
+	TenantID              uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	Name                  string    `json:"name" db:"name"`
+	SensorType            string    `json:"sensor_type" db:"sensor_type"` // 'network', 'endpoint', 'cloud', 'api'
+	Description           *string   `json:"description" db:"description"`
+	Platform              string    `json:"platform" db:"platform"`
+	Version               string    `json:"version" db:"version"`
+	Profile               string    `json:"profile" db:"profile"`
+	Status                string    `json:"status" db:"status"` // 'pending', 'active', 'inactive', 'error', 'offline'
 	// AirGapped marks a sensor that does not check in / heartbeat / stream
 	// discoveries; the platform still shows it registered and imports findings
 	// out-of-band. Replaces the deprecated profile selector.
@@ -402,19 +404,21 @@ type HostIdentity struct {
 
 // SensorHealth represents sensor health status
 type SensorHealth struct {
-	ID          uuid.UUID              `json:"id" db:"id"`
-	SensorID    uuid.UUID              `json:"sensor_id" db:"sensor_id"`
-	TenantID    uuid.UUID              `json:"tenant_id" db:"tenant_id"`
-	Status      string                 `json:"status" db:"status"` // "healthy", "degraded", "unhealthy"
-	Message     string                 `json:"message" db:"message"`
-	LastSeen    time.Time              `json:"last_seen" db:"last_seen"`
-	Uptime      int64                  `json:"uptime" db:"uptime"` // seconds
-	CPUUsage    float64                `json:"cpu_usage" db:"cpu_usage"`
-	MemoryUsage float64                `json:"memory_usage" db:"memory_usage"`
-	DiskUsage   float64                `json:"disk_usage" db:"disk_usage"`
-	NetworkIO   int64                  `json:"network_io" db:"network_io"`
-	HealthData  map[string]interface{} `json:"health_data" db:"health_data"`
-	Metrics     map[string]interface{} `json:"metrics" db:"metrics"`
+	DNSInterfaces []string               `json:"dns_interfaces"`
+	Capabilities  []string               `json:"capabilities" db:"-"`
+	ID            uuid.UUID              `json:"id" db:"id"`
+	SensorID      uuid.UUID              `json:"sensor_id" db:"sensor_id"`
+	TenantID      uuid.UUID              `json:"tenant_id" db:"tenant_id"`
+	Status        string                 `json:"status" db:"status"` // "healthy", "degraded", "unhealthy"
+	Message       string                 `json:"message" db:"message"`
+	LastSeen      time.Time              `json:"last_seen" db:"last_seen"`
+	Uptime        int64                  `json:"uptime" db:"uptime"` // seconds
+	CPUUsage      float64                `json:"cpu_usage" db:"cpu_usage"`
+	MemoryUsage   float64                `json:"memory_usage" db:"memory_usage"`
+	DiskUsage     float64                `json:"disk_usage" db:"disk_usage"`
+	NetworkIO     int64                  `json:"network_io" db:"network_io"`
+	HealthData    map[string]interface{} `json:"health_data" db:"health_data"`
+	Metrics       map[string]interface{} `json:"metrics" db:"metrics"`
 	// AvailableInterfaces is the host's NIC inventory, reported with the
 	// heartbeat so the platform can keep the sensor's available-interface list
 	// current for the UI picker.

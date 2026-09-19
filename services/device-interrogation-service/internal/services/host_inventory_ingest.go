@@ -90,6 +90,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/classproposal"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/software"
 	swpostgres "github.com/vistasecurity/vistaplatform/shared/software/postgres"
 )
@@ -104,7 +105,9 @@ import (
 // `materialized: 0` rather than nothing at all.
 type HostInventoryCounts struct {
 	// AssetID is the asset the report landed on, empty when none did.
-	AssetID string `json:"asset_id,omitempty"`
+	AssetID         string           `json:"asset_id,omitempty"`
+	ObservationID   string           `json:"observation_id,omitempty"`
+	IdentityOutcome identity.Outcome `json:"identity_outcome,omitempty"`
 	// AssetCreated distinguishes a host we have never seen from one we have.
 	AssetCreated bool `json:"asset_created"`
 	// Contested means the engine could not settle which asset this is and
@@ -312,6 +315,16 @@ func (h *HostInventoryIngest) Materialise(
 	tenantID, agentID, jobID uuid.UUID,
 	obs *di.InterrogateResult,
 ) (HostInventoryCounts, error) {
+	var counts HostInventoryCounts
+	err := h.withRunLock(ctx, tenantID, func() error {
+		var err error
+		counts, err = h.materialise(ctx, tenantID, agentID, jobID, obs, nil, "")
+		return err
+	})
+	return counts, err
+}
+
+func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID, jobID uuid.UUID, obs *di.InterrogateResult, original *identity.Observation, expectedAsset string) (HostInventoryCounts, error) {
 	counts := HostInventoryCounts{}
 	if obs == nil {
 		return counts, fmt.Errorf("host inventory: no observations to materialise")
@@ -336,6 +349,9 @@ func (h *HostInventoryIngest) Materialise(
 	if err != nil {
 		return counts, err
 	}
+	if original != nil {
+		observation = *original
+	}
 	counts.Identifiers = len(observation.Identifiers)
 	counts.Endpoints = len(observation.Endpoints)
 
@@ -356,10 +372,17 @@ func (h *HostInventoryIngest) Materialise(
 	// it or over an authenticated session to it. See [classIntent] for why that
 	// entitles this path to promote and the peer path does not.
 	res, class, err := h.sink.resolveObservationWith(ctx, engine, observation,
-		classIntent{Proposal: prop, FirstHand: true})
+		classIntent{Proposal: prop, FirstHand: true}, func(repo *pgidentity.Repository, res identity.Resolution) error {
+			if expectedAsset != "" && !res.Asset.Zero() && res.Asset.ID != expectedAsset {
+				return fmt.Errorf("retained inventory identity changed during replay")
+			}
+			return h.retainHostInventory(ctx, repo, observation, res, agentID, jobID, obs)
+		})
 	if err != nil {
 		return counts, fmt.Errorf("host inventory: resolving %s: %w", meta.label(), err)
 	}
+	counts.ObservationID = res.ObservationID
+	counts.IdentityOutcome = res.Outcome
 	// A CONFLICT is not a failure and it is not a success. It is the engine
 	// saying two things that share an identifier are two things, which is the
 	// answer ADR-0002 D5 requires rather than an auto-merge.
@@ -423,9 +446,10 @@ func (h *HostInventoryIngest) Materialise(
 		// is already an identifier on the subject the engine just resolved.
 		// Passing it as well would write the same values a second time under a
 		// second confidence, which is two opinions about one measurement.
-		err := h.sink.Persist(ctx, tenantID, assetID, source, InterrogationObservations{
-			Facts:    factObs,
-			Producer: facts.ProducerDeviceAgent,
+		err := h.sink.persist(ctx, tenantID, assetID, source, InterrogationObservations{
+			ObservedAt: observation.ObservedAt,
+			Facts:      factObs,
+			Producer:   facts.ProducerDeviceAgent,
 		})
 		if err != nil {
 			counts.Errors = append(counts.Errors, fmt.Sprintf("writing facts: %v", err))
@@ -441,7 +465,7 @@ func (h *HostInventoryIngest) Materialise(
 	if ready, snapshotErr := connectionSnapshotReady(meta, obs); snapshotErr != nil {
 		counts.Errors = append(counts.Errors, snapshotErr.Error())
 	} else if ready {
-		if queued, qerr := h.writeConnections(ctx, tenantID, agentID, jobID, assetID, obs); qerr != nil {
+		if queued, qerr := h.writeConnections(ctx, tenantID, agentID, jobID, assetID, obs, observation.ObservedAt); qerr != nil {
 			counts.Errors = append(counts.Errors, fmt.Sprintf("queueing outbound connections: %v", qerr))
 		} else {
 			counts.ConnectionsQueued = queued
@@ -458,7 +482,7 @@ func (h *HostInventoryIngest) Materialise(
 	if enumerated != nil {
 		if reason, ok := softwareListArrived(*enumerated, len(products)); !ok {
 			counts.Errors = append(counts.Errors, reason)
-		} else if err := h.writeSoftware(ctx, tenantID, assetID, hostInventoryRunRef(agentID, jobID), source.Ref, products, &counts); err != nil {
+		} else if err := h.writeSoftwareAt(ctx, tenantID, assetID, hostInventoryRunRef(agentID, jobID), source.Ref, products, &counts, observation.ObservedAt); err != nil {
 			counts.Errors = append(counts.Errors, fmt.Sprintf("writing software installs: %v", err))
 		}
 	}
@@ -477,7 +501,7 @@ func (h *HostInventoryIngest) Materialise(
 			counts.Errors = append(counts.Errors, reason)
 		}
 	} else if closed, err := h.closeAbsentEndpoints(ctx, tenantID, assetID,
-		hostInventorySourceRef(agentID, jobID)+":", hostInventoryRunRef(agentID, jobID)); err != nil {
+		hostInventorySourceRef(agentID, jobID)+":", hostInventoryRunRef(agentID, jobID), observation.ObservedAt); err != nil {
 		counts.Errors = append(counts.Errors, fmt.Sprintf("closing absent endpoints: %v", err))
 	} else {
 		counts.EndpointsClosed = closed
@@ -487,6 +511,11 @@ func (h *HostInventoryIngest) Materialise(
 		meta.label(), counts.AssetID, counts.AssetCreated,
 		counts.Identifiers, counts.Facts, counts.Endpoints, counts.EndpointsClosed,
 		counts.InstallsCreated, counts.InstallsUpdated, counts.InstallsRemoved)
+	if counts.FullyMaterialized() && res.ObservationID != "" {
+		if err := h.finishRetainedHostInventory(ctx, tenantID, res.ObservationID, identity.ObservationReceiptKey(observation)); err != nil {
+			return counts, err
+		}
+	}
 	return counts, nil
 }
 
@@ -589,7 +618,7 @@ func hostInventoryConnections(obs *di.InterrogateResult, subject di.PeerRef) ([]
 	return out, nil
 }
 
-func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, agentID, jobID, assetID uuid.UUID, obs *di.InterrogateResult) (int, error) {
+func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, agentID, jobID, assetID uuid.UUID, obs *di.InterrogateResult, observedAt ...time.Time) (int, error) {
 	subject, ok := hostInventorySubject(obs)
 	if !ok {
 		return 0, errors.New("host report has no subject")
@@ -610,6 +639,9 @@ func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, ag
 	}
 
 	now := time.Now().UTC()
+	if len(observedAt) > 0 && !observedAt[0].IsZero() {
+		now = observedAt[0]
+	}
 	batchID := "host-inventory-connections:" + jobID.String()
 	queued := 0
 	err = shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
@@ -629,16 +661,20 @@ func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, ag
 			if err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, `
+			result, err := tx.ExecContext(ctx, `
 				INSERT INTO sensor_discoveries
 				(id,sensor_id,tenant_id,batch_id,protocol,dest_ip,port,confidence,metadata,source_ip,timestamp,created_at)
-				VALUES($1,$2,$3,$4,$5,$6::inet,$7,$8,$9,$10::inet,$11,$11)`,
-				uuid.New(), sensorID, tenantID, batchID, c.Transport, remote.String(), c.RemotePort,
+				VALUES($1,$2,$3,$4,$5,$6::inet,$7,$8,$9,$10::inet,$11,now()) ON CONFLICT(tenant_id,id) DO NOTHING`,
+				uuid.NewSHA1(jobID, []byte(fmt.Sprintf("%s|%s|%s|%d", c.Transport, local, remote, c.RemotePort))), sensorID, tenantID, batchID, c.Transport, remote.String(), c.RemotePort,
 				1.0, blob, local.String(), now)
 			if err != nil {
 				return err
 			}
-			queued++
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			queued += int(changed)
 		}
 		return nil
 	})
@@ -732,8 +768,13 @@ func hasFact(obs *di.InterrogateResult, key string) bool {
 // which is the state it was in a moment earlier anyway.
 func (h *HostInventoryIngest) closeAbsentEndpoints(
 	ctx context.Context, tenantID, assetID uuid.UUID, agentPrefix, runRef string,
+	observedAt ...time.Time,
 ) (int, error) {
 	var closed int
+	at := time.Now().UTC()
+	if len(observedAt) > 0 && !observedAt[0].IsZero() {
+		at = observedAt[0]
+	}
 	err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, `
 			UPDATE asset_endpoints
@@ -743,8 +784,8 @@ func (h *HostInventoryIngest) closeAbsentEndpoints(
 			   AND status <> 'closed'
 			   AND source_ref IS NOT NULL
 			   AND starts_with(source_ref, $3)
-			   AND source_ref <> $4`,
-			tenantID, assetID, agentPrefix, runRef)
+			   AND source_ref <> $4 AND last_seen_at <= $5`,
+			tenantID, assetID, agentPrefix, runRef, at)
 		if err != nil {
 			return err
 		}
@@ -787,6 +828,7 @@ func (h *HostInventoryIngest) observationFor(
 		ClassHint:  assetclass.KeyUnknownHost,
 		Source:     source,
 		ObservedAt: meta.collectedAt(),
+		Admission:  identity.AdmissionEvidence{Direct: true, Authoritative: true, ReceiptID: runRef},
 		// The host said this about itself, either as the agent installed on it
 		// or through an authenticated session to it. There is no more direct
 		// measurement available anywhere in the product.
@@ -1076,13 +1118,7 @@ func softwareListArrived(enumerated, arrived int) (reason string, ok bool) {
 // `runRef` names this collection and is what the sweep compares against;
 // `factRef` names the agent and is what the package-count fact is keyed on. See
 // hostInventorySourceRef for why they differ.
-func (h *HostInventoryIngest) writeSoftware(
-	ctx context.Context,
-	tenantID, assetID uuid.UUID,
-	runRef, factRef string,
-	products []software.Product,
-	counts *HostInventoryCounts,
-) error {
+func (h *HostInventoryIngest) writeSoftwareAt(ctx context.Context, tenantID, assetID uuid.UUID, runRef, factRef string, products []software.Product, counts *HostInventoryCounts, at time.Time) error {
 	return shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
 		for _, p := range products {
 			productID, created, err := swpostgres.UpsertProduct(ctx, tx, tenantID, p, software.SourceMeasured)
@@ -1101,8 +1137,8 @@ func (h *HostInventoryIngest) writeSoftware(
 			// there is nothing honest to put here. The unique index coalesces
 			// NULL to '' precisely so repeated observations of a pathless
 			// install converge on one row.
-			installCreated, err := swpostgres.UpsertInstall(ctx, tx, tenantID, assetID, productID,
-				"", software.SourceMeasured, runRef)
+			installCreated, err := swpostgres.UpsertInstallAt(ctx, tx, tenantID, assetID, productID,
+				"", software.SourceMeasured, runRef, at)
 			if err != nil {
 				return fmt.Errorf("upserting install of %q: %w", p.Name, err)
 			}
@@ -1113,7 +1149,7 @@ func (h *HostInventoryIngest) writeSoftware(
 			}
 		}
 
-		removed, err := swpostgres.MarkAbsentRemoved(ctx, tx, tenantID, assetID, software.SourceMeasured, runRef)
+		removed, err := swpostgres.MarkAbsentRemovedAt(ctx, tx, tenantID, assetID, software.SourceMeasured, runRef, at)
 		if err != nil {
 			return fmt.Errorf("marking absent installs removed: %w", err)
 		}
@@ -1124,7 +1160,7 @@ func (h *HostInventoryIngest) writeSoftware(
 			return fmt.Errorf("counting active installs: %w", err)
 		}
 		counts.InstallsActive = active
-		return refreshPackageCount(ctx, tx, tenantID, assetID, factRef, active)
+		return refreshPackageCountAt(ctx, tx, tenantID, assetID, factRef, active, at)
 	})
 }
 
@@ -1200,7 +1236,7 @@ func hostInventoryProducts(obs *di.InterrogateResult) []software.Product {
 // Scoped to `measured` and written under the agent's source ref, so an SBOM
 // upload's count and an agent's count are two rows and neither claims the
 // other's coverage.
-func refreshPackageCount(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UUID, sourceRef string, count int) error {
+func refreshPackageCountAt(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UUID, sourceRef string, count int, at time.Time) error {
 	// The key column has no CHECK constraint and the value column is jsonb, so
 	// this validator is the only thing between a producer and a fact nobody can
 	// read back. Checked even though the value is an int we just counted: the
@@ -1214,14 +1250,14 @@ func refreshPackageCount(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid
 	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO asset_facts (tenant_id, asset_id, key, value, source_kind, source_ref, observed_at)
-		VALUES ($1, $2, $3, $4::jsonb, $5, $6, now())
+		VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)
 		ON CONFLICT (tenant_id, asset_id, key, source_ref)
 		DO UPDATE SET value = excluded.value,
 		              source_kind = excluded.source_kind,
 		              observed_at = excluded.observed_at,
-		              updated_at = now()`,
+		              updated_at = now() WHERE excluded.observed_at >= asset_facts.observed_at`,
 		tenantID, assetID, facts.KeySWPackageCount, string(value),
-		software.SourceMeasured, sourceRef)
+		software.SourceMeasured, sourceRef, at)
 	return err
 }
 

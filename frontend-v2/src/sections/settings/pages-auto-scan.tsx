@@ -20,6 +20,7 @@ import {
   describePolicy, draftFromPolicy, draftToPayload, formatPorts, isDirty, validateDraft,
 } from './auto-scan-form';
 import { describeNotScanned, notScannedHeadline } from './auto-scan-not-scanned';
+import { IdentityDiscoverySettings } from './identity-discovery-settings';
 
 interface AutoScanData {
   policy: AutoScanPolicy;
@@ -45,6 +46,7 @@ export function AutoScanPage({ meta }: { meta: SettingsNavItem }) {
 
   return (
     <SPage eyebrow="Discovery" title="Active Scanning" job={meta.job} maxWidth={1000}>
+      <IdentityDiscoverySettings />
       {isError ? (
         <SCard>
           <StateNote

@@ -452,10 +452,10 @@ export function InventoryPage() {
       // `asset_type`. An importer reading the old header against the new export
       // gets nothing rather than something wrong, which is the point.
       downloadCsv(`vista-inventory-${lens}-${stamp}.csv`,
-        ['name', 'address', 'class', 'environment', 'segment', 'status', 'last_seen_at', 'risk_score'],
+        ['name', 'address', 'class', 'environment', 'segment', 'status', 'identity_status', 'has_identity_conflict', 'last_seen_at', 'risk_score'],
         rows.map((a) => {
           const ident = assetIdentity(a);
-          return [ident.primary, primaryAddressPort(a), classLabel(a.class_key), a.environment, a.network_segment_name || a.business_unit, a.asset_status, a.last_seen_at, typeof a.risk_score === 'number' ? a.risk_score : 0];
+          return [ident.primary, primaryAddressPort(a), classLabel(a.class_key), a.environment, a.network_segment_name || a.business_unit, a.asset_status, a.identity_status, String(a.has_identity_conflict ?? false), a.last_seen_at, typeof a.risk_score === 'number' ? a.risk_score : 0];
         }));
     }
   };

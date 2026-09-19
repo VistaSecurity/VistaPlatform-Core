@@ -126,6 +126,7 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 	}
 	// Add source information
 	rawData["sensor_id"] = sd.SensorID.String()
+	rawData["discovery_id"] = sd.ID.String()
 	rawData["batch_id"] = sd.BatchID
 	rawData["confidence"] = sd.Confidence
 	rawData["timestamp"] = sd.Timestamp

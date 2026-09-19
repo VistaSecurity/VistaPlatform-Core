@@ -74,6 +74,8 @@ export interface AssetLike {
   zone?: string | null;
   network_segment_name?: string | null;
   asset_status?: string | null;
+  identity_status?: 'legacy' | 'established' | 'operator_confirmed' | null;
+  has_identity_conflict?: boolean;
   asset_ownership?: string | null;
   stale_status?: string | null;
   last_seen_at?: string | null;

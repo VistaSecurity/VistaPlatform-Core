@@ -45,7 +45,7 @@ const SPEC_FIELDS: Record<string, string[]> = {
     'primary_address',
     'environment',
     'business_unit', 'owner_email', 'support_group', 'site', 'region', 'zone',
-    'status', 'ownership', 'stale_status', 'source', 'proposed_by',
+    'status', 'ownership', 'stale_status', 'identity_status', 'source', 'proposed_by',
     'risk', 'risk_score', 'risk_assessed_by',
     'confidence_score', 'class_confidence',
     'first_seen', 'last_seen', 'created_at', 'updated_at',
@@ -143,7 +143,9 @@ describe('the identifier registry (ADR-0002 D3)', () => {
   }
 
   it('matches the kinds the generated class taxonomy uses', () => {
-    expect([...IDENTIFIER_KINDS].sort()).toEqual([...fromClasses].sort());
+    // Declarations are issued by the confirmation operation for any class;
+    // they are not a class-specific matching rule for collected evidence.
+    expect([...IDENTIFIER_KINDS].sort()).toEqual([...fromClasses, 'declaration_id'].sort());
   });
 
   it('separates the stored kinds from the spellings id.<kind> accepts', () => {

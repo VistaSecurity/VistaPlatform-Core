@@ -4,6 +4,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -460,73 +461,60 @@ func trimmedOrNil(s *string) *string {
 }
 
 // classifyAndLinkAlgorithms classifies algorithms from a finding and links them to crypto configuration.
-func (s *AssetService) classifyAndLinkAlgorithms(implID uuid.UUID, finding IngestFinding) {
-	// SSH first: its components come from raw metadata, and linking the
-	// measured ones before anything else means an algorithm that is both
-	// negotiated and merely offered keeps its is_inferred=false row.
-	s.classifyAndLinkSSH(implID, sshObservationFromFinding(finding))
-
-	if finding.ProtocolVersion != nil && *finding.ProtocolVersion != "" {
-		alg, err := s.algorithmService.ClassifyAlgorithm(*finding.ProtocolVersion, "protocol_version")
-		if err == nil && alg != nil {
-			_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "protocol_version", false)
+func (s *AssetService) classifyAndLinkAlgorithms(implID uuid.UUID, finding IngestFinding) error {
+	if s.algorithmService == nil {
+		return nil
+	}
+	var errs []error
+	link := func(value, category string, inferred bool) {
+		if err := s.classifyAndLinkComponent(implID, value, category, inferred); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	if finding.CipherSuite != nil && *finding.CipherSuite != "" {
-		alg, err := s.algorithmService.ClassifyAlgorithm(*finding.CipherSuite, "cipher_suite")
-		if err == nil && alg != nil {
-			_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "cipher_suite", false)
+	// Measured SSH components precede offered components so inferred evidence cannot replace measurements.
+	if err := s.classifyAndLinkSSH(implID, sshObservationFromFinding(finding)); err != nil {
+		errs = append(errs, err)
+	}
+	value := func(v *string) string {
+		if v == nil {
+			return ""
 		}
+		return *v
+	}
+	link(value(finding.ProtocolVersion), "protocol_version", false)
+	link(value(finding.CipherSuite), "cipher_suite", false)
+	if finding.CipherSuite != nil {
+		// An unrecognized suite is valid evidence; parsing failure does not make ingestion retryable.
 		components, err := s.algorithmService.ParseCipherSuite(*finding.CipherSuite)
 		if err == nil && components != nil {
-			// An observed key exchange beats one inferred from the suite name.
-			// TLS 1.3 suites name no key exchange, so ParseCipherSuite infers a
-			// classical ECDHE — which is exactly wrong when the handshake actually
-			// negotiated a post-quantum or hybrid group and reported it separately.
-			// Linking both made every PQC endpoint look like it still used ECDHE.
-			if components.KeyExchange != "" && (finding.KeyExchangeAlgorithm == nil || *finding.KeyExchangeAlgorithm == "") {
-				alg, err := s.algorithmService.ClassifyAlgorithm(components.KeyExchange, "key_exchange")
-				if err == nil && alg != nil {
-					_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "key_exchange", components.IsInferred)
-				}
+			if value(finding.KeyExchangeAlgorithm) == "" {
+				link(components.KeyExchange, "key_exchange", components.IsInferred)
 			}
-			if components.Signature != "" {
-				alg, err := s.algorithmService.ClassifyAlgorithm(components.Signature, "signature")
-				if err == nil && alg != nil {
-					_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "signature", components.IsInferred)
-				}
-			}
-			if components.Symmetric != "" {
-				alg, err := s.algorithmService.ClassifyAlgorithm(components.Symmetric, "symmetric")
-				if err == nil && alg != nil {
-					_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "symmetric", components.IsInferred)
-				}
-			}
-			if components.Hash != "" {
-				alg, err := s.algorithmService.ClassifyAlgorithm(components.Hash, "hash")
-				if err == nil && alg != nil {
-					_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "hash", components.IsInferred)
-				}
-			}
+			link(components.Signature, "signature", components.IsInferred)
+			link(components.Symmetric, "symmetric", components.IsInferred)
+			link(components.Hash, "hash", components.IsInferred)
 		}
 	}
-	// The explicitly-reported key exchange. This is NOT derivable from the cipher
-	// suite for modern handshakes: TLS 1.3 suite names carry no
-	// key-exchange component at all, and a post-quantum or hybrid group
-	// (ML-KEM-768, X25519MLKEM768) is negotiated separately and reported here.
-	// Without linking them, an implementation using PQC key establishment looked
-	// exactly like one using RSA, so post-quantum readiness could never see a PQC
-	// key exchange in discovered data.
-	if finding.KeyExchangeAlgorithm != nil && *finding.KeyExchangeAlgorithm != "" {
-		alg, err := s.algorithmService.ClassifyAlgorithm(*finding.KeyExchangeAlgorithm, "key_exchange")
-		if err == nil && alg != nil {
-			_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "key_exchange", false)
-		}
+	link(value(finding.KeyExchangeAlgorithm), "key_exchange", false)
+	link(value(finding.HashAlgorithm), "hash", false)
+	return errors.Join(errs...)
+}
+
+// Unknown catalogue entries are retained without a link. Storage failures must
+// propagate so durable receipts remain retryable instead of losing assessment evidence.
+func (s *AssetService) classifyAndLinkComponent(implID uuid.UUID, value, category string, inferred bool) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
 	}
-	if finding.HashAlgorithm != nil && *finding.HashAlgorithm != "" {
-		alg, err := s.algorithmService.ClassifyAlgorithm(*finding.HashAlgorithm, "hash")
-		if err == nil && alg != nil {
-			_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, "hash", false)
-		}
+	alg, err := s.algorithmService.ClassifyAlgorithm(value, category)
+	if err != nil {
+		return fmt.Errorf("classify %s: %w", category, err)
 	}
+	if alg == nil {
+		return nil
+	}
+	if err := s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, category, inferred); err != nil {
+		return fmt.Errorf("link %s: %w", category, err)
+	}
+	return nil
 }

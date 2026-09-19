@@ -2,6 +2,7 @@ package entitlements
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -40,6 +41,31 @@ func GetQuantity(ctx context.Context, r Resolver, tenantID uuid.UUID, itemKey st
 	if err != nil {
 		return nil, err
 	}
+	return quantityFor(ent, itemKey)
+}
+
+// GetQuantityInTx reads an allowance on the caller's tenant-scoped transaction.
+// Admission holds a creation lock on that transaction; opening another pool
+// connection here can deadlock a saturated ingestion pool.
+func GetQuantityInTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, itemKey string) (*int, error) {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id=$1 AND current_setting('app.tenant_id',true)=$1::text`, tenantID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUnknownTenant
+		}
+		return nil, err
+	}
+	ent, err := scanEntitlement(tx.QueryRowContext(ctx, resolveOneSQL, tenantID, itemKey).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUnknownItem
+	}
+	if err != nil {
+		return nil, err
+	}
+	return quantityFor(ent, itemKey)
+}
+
+func quantityFor(ent *EffectiveEntitlement, itemKey string) (*int, error) {
 	if ent.Item.Kind != KindNumericCap && ent.Item.Kind != KindNumericMetered {
 		return nil, fmt.Errorf("entitlements: item %s is %s, expected numeric_cap or numeric_metered", itemKey, ent.Item.Kind)
 	}

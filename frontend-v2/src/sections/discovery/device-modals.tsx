@@ -5,6 +5,7 @@
 // Composes the shared Modal primitive (same idiom as asset-form-modal.tsx).
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
@@ -24,6 +25,7 @@ export function DeviceFormModal({ open, device, onClose }: {
 }) {
   const isEdit = !!device?.id;
   const qc = useQueryClient();
+  const navigate = useNavigate();
 
   const [deviceType, setDeviceType] = useState('f5');
   const [name, setName] = useState('');
@@ -93,8 +95,13 @@ export function DeviceFormModal({ open, device, onClose }: {
       if (error || !data) throw new Error('Failed to create device');
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['discovery', 'devices'] });
+      if ('observation_id' in result) {
+        void qc.invalidateQueries({ queryKey: ['identity-observations'] });
+        void qc.invalidateQueries({ queryKey: ['identity-summary'] });
+        void navigate(`/discovery/observations?observation_id=${result.observation_id}`);
+      }
       onClose();
     },
   });
@@ -254,6 +261,7 @@ export function TestConnectionModal({ open, device, onClose }: {
 // Device is returned and the devices list is invalidated.
 export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [deviceType, setDeviceType] = useState('f5');
   const [managementUrl, setManagementUrl] = useState('');
   const [username, setUsername] = useState('');
@@ -281,8 +289,13 @@ export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose:
       if (error || !data) throw new Error('Discovery failed — check the URL and credentials.');
       return data;
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['discovery', 'devices'] });
+      if ('observation_id' in result) {
+        void qc.invalidateQueries({ queryKey: ['identity-observations'] });
+        void qc.invalidateQueries({ queryKey: ['identity-summary'] });
+        void navigate(`/discovery/observations?observation_id=${result.observation_id}`);
+      }
       onClose();
     },
   });
@@ -299,7 +312,7 @@ export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose:
       icon="radar"
       eyebrow="Discovery"
       title="Discover & add device"
-      description="Probe a management endpoint with credentials. On success the device is identified and registered for interrogation."
+      description="Probe a management endpoint with configured credentials. Evidence awaiting identity resolution is retained in Discovery observations."
       primary={
         <button className="ui-btn accent" disabled={!valid || discover.isPending} onClick={() => discover.mutate()}>
           {discover.isPending ? 'Probing…' : 'Discover & add'}

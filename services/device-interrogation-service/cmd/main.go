@@ -32,7 +32,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = shareddatabase.CloseWithSessionPool(db) }()
 
 	// Bypass connection for the deliberately cross-tenant paths (agent
 	// bootstrap/auth resolution, agent outbound jobs/results/heartbeat,
@@ -44,7 +44,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to bypass database: %v", err)
 	}
-	defer func() { _ = bypassDB.Close() }()
+	defer func() { _ = shareddatabase.CloseWithSessionPool(bypassDB) }()
 
 	// Initialize Redis
 	redis, err := database.ConnectRedis(cfg.RedisURL)
@@ -61,6 +61,12 @@ func main() {
 	// Initialize services for platform agent worker
 	cloudService := services.NewCloudDiscoveryService(db, bypassDB, cfg.EncryptionMasterKey)
 	deviceService := services.NewDeviceService(db)
+	managementCtx, cancelManagement := context.WithCancel(context.Background())
+	defer cancelManagement()
+	go deviceService.RunRetainedManagement(managementCtx, bypassDB)
+	go services.NewObservationSink(db).RunRetainedPeers(managementCtx, bypassDB)
+	go cloudService.RunRetainedCloudContext(managementCtx)
+	go services.NewHostInventoryIngest(db, bypassDB).RunRetainedHostInventories(managementCtx)
 	deviceInterrogationService := services.NewDeviceInterrogationService(db, bypassDB, cfg.EncryptionMasterKey)
 
 	// Initialize platform agent worker

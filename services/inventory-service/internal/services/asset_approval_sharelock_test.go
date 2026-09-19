@@ -56,6 +56,9 @@ import (
 // unguarded, so TestIntegration_SharedFixtureGuard_CoversEveryFile fails until
 // it is.
 var sharedFixtureTestFiles = []string{
+	"identity_observations_integration_test.go",
+	"identity_dismissal_replay_integration_test.go",
+	"identity_retained_evidence_integration_test.go",
 	"asset_approval_test.go",
 	"network_space_test.go",
 	"network_space_settings_integration_test.go",

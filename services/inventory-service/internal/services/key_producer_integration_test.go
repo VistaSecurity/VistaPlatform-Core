@@ -101,7 +101,9 @@ func TestIntegration_KeyProducer_FromCertificate(t *testing.T) {
 		NotAfter:           time.Now().Add(24 * time.Hour),
 	}
 
-	svc.produceKeyFromCertificate(tenant, implID, cert, data)
+	if err := svc.produceKeyFromCertificate(tenant, implID, cert, data); err != nil {
+		t.Fatal(err)
+	}
 
 	keys, err := svc.ListKeys(tenant)
 	if err != nil {
@@ -176,8 +178,12 @@ func TestIntegration_KeyProducer_DedupsSameKeyAcrossAssets(t *testing.T) {
 	// Same public key presented on two different assets/implementations.
 	_, impl1 := insertAssetAndImpl(t, db, tenant)
 	_, impl2 := insertAssetAndImpl(t, db, tenant)
-	svc.produceKeyFromCertificate(tenant, impl1, mkCert(), data)
-	svc.produceKeyFromCertificate(tenant, impl2, mkCert(), data)
+	if err := svc.produceKeyFromCertificate(tenant, impl1, mkCert(), data); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.produceKeyFromCertificate(tenant, impl2, mkCert(), data); err != nil {
+		t.Fatal(err)
+	}
 
 	keys, err := svc.ListKeys(tenant)
 	if err != nil {
@@ -265,7 +271,9 @@ func TestIntegration_KeyProducer_ECKeysResolveTheirCatalogueRow(t *testing.T) {
 				NotAfter:           time.Now().Add(24 * time.Hour),
 			}
 
-			svc.produceKeyFromCertificate(tenant, implID, cert, data)
+			if err := svc.produceKeyFromCertificate(tenant, implID, cert, data); err != nil {
+				t.Fatal(err)
+			}
 
 			keys, err := svc.ListKeys(tenant)
 			if err != nil {

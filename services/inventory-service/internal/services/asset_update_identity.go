@@ -55,6 +55,7 @@ import (
 // sighting mint a duplicate of the asset being edited.
 var collectorMintedKinds = map[identity.Kind]bool{
 	identity.KindAgentID:         true,
+	identity.KindDeclarationID:   true,
 	identity.KindCloudResourceID: true,
 }
 
@@ -213,6 +214,9 @@ func (s *AssetService) updateAssetIdentifiers(
 	for _, id := range want {
 		if _, mine := haveKeys[id.Key()]; mine {
 			continue // already this asset's; AttachIdentifiers would only refresh last-seen
+		}
+		if id.Kind == identity.KindDeclarationID {
+			return nil, fmt.Errorf("declaration identifiers are issued only by identity confirmation")
 		}
 		owners, ferr := s.identityRepo.FindByIdentifier(ctx, tenantID.String(), id.Kind, id.Value, id.Scope)
 		if ferr != nil {

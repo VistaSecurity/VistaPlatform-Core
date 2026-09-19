@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hostInventorySummary } from './logs-page';
+import { hostInventorySummary, cloudIdentitySummary } from './logs-page';
 
 // The Job Logs line for a host-inventory run (asset-inventory 2.11b).
 //
@@ -10,6 +10,11 @@ import { hostInventorySummary } from './logs-page';
 // silently does nothing is the failure this whole workstream exists to avoid.
 
 describe('hostInventorySummary', () => {
+  it('explains retained evidence without claiming that nothing was collected', () => {
+    expect(hostInventorySummary({ facts: 0, endpoints: 0, installs_created: 0, installs_removed: 0,
+      identity_outcome: 'unresolved', observation_id: 'retained-observation' }))
+      .toBe('evidence retained — awaiting identity resolution in Discovery → Observations');
+  });
   it('omits the fragment entirely for a job that is not a host inventory', () => {
     // Absent and zeroed are different answers: absent means this is a device
     // interrogation or a cloud discovery, and the cloud fragment beside it
@@ -79,5 +84,15 @@ describe('hostInventorySummary', () => {
 
   it('does not treat an absent failure as one', () => {
     expect(hostInventorySummary({ facts: 1, endpoints: 0, installs_created: 0, installs_removed: 0 })).toBe('1 fact');
+  });
+});
+
+
+describe('cloudIdentitySummary', () => {
+  it('distinguishes retained observations from inventory and approval', () => {
+    expect(cloudIdentitySummary({ assets_created: 0, assets_matched: 2, approval_pending: 1,
+      observations_retained: 3, conflicts: 1, rejected_inputs: 0 }))
+      .toBe('0 created, 2 matched · 3 observations retained — awaiting identity resolution · 1 awaiting approval · 1 identity conflicts');
+    expect(cloudIdentitySummary(undefined)).toBeNull();
   });
 });

@@ -402,6 +402,7 @@ type deviceObservationInput struct {
 	DiscoveryMethod string
 	Source          identity.Source
 	ObservedAt      time.Time
+	Admission       identity.AdmissionEvidence
 }
 
 // deviceObservation builds the identity.Observation for a managed device.
@@ -435,6 +436,7 @@ func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUI
 		ClassHint:   DeviceTypeClassKey(in.DeviceType),
 		Source:      in.Source,
 		ObservedAt:  in.ObservedAt,
+		Admission:   in.Admission,
 		Confidence:  1, // a person asserted it, or a provider API answered
 		DisplayName: host,
 		// A device the tenant holds credentials for is the tenant's own gear by

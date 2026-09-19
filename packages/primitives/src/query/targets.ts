@@ -13,6 +13,7 @@
 // `REGISTRY_TARGETS`, so a target that changes on the Go side fails here.
 
 import type { Target } from './catalog';
+import { ASSET_IDENTIFIER_KINDS } from '../assets/classes.gen';
 
 /** §4.1's targets, with the physical shape a translator joins. */
 export const TARGETS: readonly Target[] = [
@@ -146,20 +147,7 @@ export const NAMESPACES_BY_TARGET: Readonly<
  * `identifierPrecedence` in `@vistasecurity/primitives/assets` — in both
  * directions, so a kind added to the YAML and not here fails.
  */
-export const IDENTIFIER_KINDS: readonly string[] = [
-  'agent_id',
-  'cloud_resource_id',
-  'serial_number',
-  'cmdb_sys_id',
-  'ssh_host_key_fingerprint',
-  'mac_address',
-  'fqdn',
-  'hostname',
-  'ip_address',
-  // Tenth kind (ADR-0002 D3 erratum, phase 1): declared service classes
-  // identify by name, scoped by class key.
-  'name',
-];
+export const IDENTIFIER_KINDS: readonly string[] = ASSET_IDENTIFIER_KINDS;
 
 /**
  * The kinds a COLLECTOR mints, which a person must never type.
@@ -169,7 +157,7 @@ export const IDENTIFIER_KINDS: readonly string[] = [
  * claim an identity the platform assigns — which is how two real assets get
  * merged into one by hand, with no proposal and nothing to review.
  */
-export const COLLECTOR_MINTED_KINDS: readonly string[] = ['agent_id', 'cloud_resource_id'];
+export const COLLECTOR_MINTED_KINDS: readonly string[] = ['declaration_id', 'agent_id', 'cloud_resource_id'];
 
 /**
  * The kinds a person may enter, and the only ones an editor may retire: every

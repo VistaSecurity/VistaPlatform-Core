@@ -2391,6 +2391,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/approvals/merge-proposals/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview explicitly selected assets
+         * @description Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+         */
+        post: operations["previewProposalAssetMerge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/approvals/merge-proposals/{id}/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge selected assets against the preview revision
+         * @description Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+         */
+        post: operations["executeProposalAssetMerge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/infrastructure-assets/merge/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview explicitly selected assets
+         * @description Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+         */
+        post: operations["previewAssetMerge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/infrastructure-assets/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge selected assets against the preview revision
+         * @description Requires assets.update. Sources must be selected explicitly; populated survivor fields are preserved unless explicitly resolved. Existing Keep Separate decisions are honored. Archived sources redirect to the survivor. Merge undo is unavailable.
+         */
+        post: operations["executeAssetMerge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/approvals/merge-proposals/{id}/accept": {
         parameters: {
             query?: never;
@@ -2698,6 +2782,132 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/identity/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Identity coverage, separately from approval and assessment */
+        get: operations["getIdentitySummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discovery/observations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Browse retained identity evidence */
+        get: operations["listIdentityObservations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discovery/observations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read retained identity evidence */
+        get: operations["getIdentityObservation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discovery/observations/{id}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm identity with a reason, independently of monitoring approval */
+        post: operations["confirmIdentityObservation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discovery/observations/{id}/link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Explicitly link evidence to an existing asset */
+        post: operations["linkIdentityObservation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/discovery/observations/{id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Hide an observation from active work without asserting separate devices */
+        post: operations["dismissIdentityObservation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/settings/identity-discovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read tenant identity admission and enrichment controls
+         * @description Requires settings.read. Reports release capabilities independently from saved policy. Existing inventory is never bulk reclassified.
+         */
+        get: operations["getIdentityDiscoverySettings"];
+        /**
+         * Update audited tenant identity admission and enrichment controls
+         * @description Requires settings.update and an authenticated user. Send every writable field, a reason, and the version from GET. Writes preserve unrelated settings. Activating observe/enforce (or an initial pause) or enrichment requires the corresponding release capability. First enforcement records activated_at. After activation, only enforce or paused modes are permitted; pause retains incoming evidence and never restores permissive creation. Pausing can preserve enabled enrichment while preventing execution. Existing inventory remains unchanged.
+         */
+        put: operations["updateIdentityDiscoverySettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/discovery/auto-scan": {
         parameters: {
             query?: never;
@@ -2854,6 +3064,39 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        IdentityDiscoveryEnrichment: {
+            enabled: boolean;
+            excluded_cidrs: string[];
+            sensitive_asset_ids: string[];
+        };
+        IdentityDiscoverySettings: {
+            /** @enum {string} */
+            mode: "disabled" | "observe" | "enforce" | "paused";
+            enrichment: components["schemas"]["IdentityDiscoveryEnrichment"];
+            version: number;
+            /** Format: date-time */
+            activated_at: string | null;
+            capabilities: {
+                admission: boolean;
+                enrichment: boolean;
+            };
+            limits: {
+                max_excluded_cidrs: number;
+                max_sensitive_asset_ids: number;
+                max_reason_length: number;
+            };
+        };
+        IdentityDiscoverySettingsUpdate: {
+            /** @enum {string} */
+            mode: "disabled" | "observe" | "enforce" | "paused";
+            enrichment: components["schemas"]["IdentityDiscoveryEnrichment"];
+            version: number;
+            reason: string;
+        };
+        IdentityDiscoverySettingsError: {
+            error: string;
+            message?: string;
+        };
         /**
          * @description Asset class key from the fixed platform taxonomy (ADR-0002 D2, standards/asset-classes.yaml). Tenant leaf subclasses are runtime rows and are NOT members of this enum.
          * @enum {string}
@@ -3539,8 +3782,124 @@ export interface components {
             last_scanned_at?: string;
             last_scan_status?: string;
         };
+        IdentityIngestResult: {
+            /** @enum {string} */
+            outcome: "created" | "matched" | "unresolved" | "conflict" | "linked" | "dismissed" | "rejected" | "routed";
+            /** Format: uuid */
+            asset_id?: string;
+            /** Format: uuid */
+            observation_id?: string;
+            /** Format: uuid */
+            proposal_id?: string;
+        };
+        ObservationDecisionInput: {
+            reason: string;
+            name?: string;
+            /** Format: uuid */
+            asset_id?: string;
+        };
+        IdentitySummary: {
+            established: number;
+            operator_confirmed: number;
+            legacy: number;
+            unresolved: number;
+            conflicted: number;
+        };
+        RetainedCertificateSummary: {
+            sha256_fingerprint: string;
+            /** Format: date-time */
+            not_before?: string;
+            /** Format: date-time */
+            not_after?: string;
+            expired?: boolean;
+            self_signed?: boolean;
+        };
+        RetainedEvidenceSummary: {
+            /** @enum {string} */
+            kind: "passive_host" | "host_inventory" | "peer" | "cloud" | "crypto";
+            /** @enum {string} */
+            scope: "observation" | "source_context";
+            source_ref: string;
+            /** Format: date-time */
+            observed_at: string | null;
+            collector_version?: string;
+            /** @enum {string} */
+            materialization_state: "pending" | "completed" | "superseded" | "retrying";
+            reason?: string;
+            facts_count: number;
+            software_count: number;
+            endpoints_count: number;
+            relationships_count: number;
+            protocols: string[];
+            certificates_count: number;
+            certificates: components["schemas"]["RetainedCertificateSummary"][];
+            keys_count: number;
+            crypto_configurations_count: number;
+        };
+        RetainedEvidencePage: {
+            items: components["schemas"]["RetainedEvidenceSummary"][];
+            total: number;
+            /** @constant */
+            limit: 50;
+            has_more: boolean;
+        };
+        IdentityEnrichmentJob: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            action: "configured_source" | "dns" | "probe";
+            executor_scope: string;
+            /** @enum {string} */
+            state: "waiting" | "queued" | "running" | "completed" | "blocked" | "failed";
+            reason: string;
+            attempts: number;
+            /** Format: date-time */
+            last_attempt_at: string | null;
+            /** Format: date-time */
+            next_attempt_at: string;
+        };
+        IdentityObservation: {
+            retained_evidence?: components["schemas"]["RetainedEvidencePage"];
+            /** Format: uuid */
+            id: string;
+            source_kind: string;
+            source_ref: string;
+            /** @description Recent bounded enrichment attempts, available on detail reads. Source credentials and raw job results are never projected. */
+            enrichment_jobs?: components["schemas"]["IdentityEnrichmentJob"][];
+            collector_version: string;
+            network_scope: string;
+            evidence: {
+                [key: string]: unknown;
+            };
+            admission_reasons: string[];
+            /** @enum {string} */
+            state: "unresolved" | "linked" | "conflict" | "dismissed" | "expired";
+            /** Format: uuid */
+            asset_id: string | null;
+            /** Format: uuid */
+            proposal_id: string | null;
+            /** Format: date-time */
+            first_seen_at: string;
+            /** Format: date-time */
+            last_seen_at: string;
+            occurrence_count: number;
+            /** @enum {string} */
+            enrichment_state: "waiting" | "queued" | "running" | "completed" | "blocked" | "failed";
+            enrichment_reason: string;
+            /** Format: date-time */
+            last_attempt_at: string | null;
+            /** Format: date-time */
+            next_attempt_at: string | null;
+        };
         /** @description An infrastructure asset (CMDB configuration item). Field presence follows models.Asset's json tags: fields without `omitempty` are always present (nullable pointers serialize as null); `omitempty` fields are omitted when zero/empty. */
         Asset: {
+            /**
+             * @description Evidence for entity identity, independently of approval, classification and assessment. Missing on older servers.
+             * @enum {string}
+             */
+            identity_status?: "legacy" | "established" | "operator_confirmed";
+            /** @description Whether this asset participates in an unresolved identity proposal. */
+            has_identity_conflict?: boolean;
             /** Format: uuid */
             id: string;
             /** Format: uuid */
@@ -4130,7 +4489,7 @@ export interface components {
             /** Format: uuid */
             tenant_id: string;
             /** @enum {string} */
-            status: "pending" | "merged" | "kept_separate";
+            status: "pending" | "merged" | "kept_separate" | "superseded";
             reason?: string;
             source: string;
             source_kind?: string;
@@ -4210,6 +4569,64 @@ export interface components {
         };
         MergeProposalResponse: {
             merge_proposal: components["schemas"]["MergeProposal"];
+        };
+        AssetMergeSelection: {
+            source_asset_ids: string[];
+            /** Format: uuid */
+            survivor_asset_id: string;
+            /** @description Field name to the explicitly selected asset providing its value. management_profile selects the connection and credential reference together; inactive encrypted profiles remain historical and are referenced in the audit. */
+            field_resolutions?: {
+                [key: string]: string;
+            };
+        };
+        AssetMergeExecutionRequest: components["schemas"]["AssetMergeSelection"] & {
+            revision: string;
+            reason: string;
+        };
+        AssetMergePreview: components["schemas"]["AssetMergeSelection"] & {
+            revision: string;
+            assets: {
+                /** Format: uuid */
+                asset_id: string;
+                display_name: string;
+                hostname: string;
+                class_key: string;
+                asset_status: string;
+                identity_status: string;
+                fields: {
+                    [key: string]: unknown;
+                };
+            }[];
+            conflicts: {
+                field: string;
+                requires_resolution: boolean;
+                values: {
+                    /** Format: uuid */
+                    asset_id: string;
+                    value: unknown;
+                    declared: boolean;
+                }[];
+            }[];
+            selected_fields: {
+                [key: string]: unknown;
+            };
+            children: {
+                table: string;
+                count: number;
+            }[];
+            evidence: {
+                [key: string]: unknown;
+            }[];
+        };
+        AssetMergeResult: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            survivor_asset_id: string;
+            source_asset_ids: string[];
+            /** Format: date-time */
+            merged_at: string;
+            replayed: boolean;
         };
         MergeProposalAcceptRequest: {
             /**
@@ -5255,7 +5672,7 @@ export interface components {
             /** @description 0-based position of the row in the submitted batch, so the UI can line each result up against the uploaded file. */
             index: number;
             /** @enum {string} */
-            status: "created" | "skipped_duplicate" | "error";
+            status: "created" | "skipped_duplicate" | "error" | "unresolved";
             /**
              * Format: uuid
              * @description Present only when status is `created` — the id of the new asset/segment.
@@ -5263,9 +5680,13 @@ export interface components {
             id?: string;
             /** @description Human-readable explanation for a skipped or errored row. */
             reason?: string;
+            /** Format: uuid */
+            observation_id?: string;
         };
         /** @description Aggregate result of a bulk import. Partial success is normal — one bad row never rolls back the rest of the batch. */
         BulkImportResult: {
+            /** @description Inputs retained outside asset inventory pending identity resolution. */
+            unresolved?: number;
             created: number;
             skipped: number;
             failed: number;
@@ -5694,6 +6115,8 @@ export interface components {
             assets_matched: number;
             /** @description Devices whose identifiers matched more than one existing asset; each left a merge proposal in Approvals. */
             assets_proposed: number;
+            /** @description Durable observations retained without creating an asset; absent on older servers. */
+            observations_retained?: number;
             /** @description Devices carrying no identifier at all, which could never be recognised again. */
             assets_skipped: number;
             /** @description Devices whose NetBox role mapped to no asset class; each became unknown_host rather than a guess. */
@@ -7269,6 +7692,15 @@ export interface operations {
                     "application/json": components["schemas"]["AssetResponse"];
                 };
             };
+            /** @description Evidence retained pending identity admission; no asset was created. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityIngestResult"];
+                };
+            };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
         };
@@ -7453,6 +7885,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description A merged source cannot be restored; refresh the selection. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7505,6 +7946,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description An archived or merged asset cannot undergo this lifecycle change; refresh the selection. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7532,6 +7982,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description An archived or merged asset cannot undergo this lifecycle change; refresh the selection. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9946,6 +10405,262 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    previewProposalAssetMerge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetMergeSelection"];
+            };
+        };
+        responses: {
+            /** @description Current asset comparison and evidence revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        preview: components["schemas"]["AssetMergePreview"];
+                    };
+                };
+            };
+            /** @description Invalid explicit selection or missing reason. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Asset update permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A selected asset or proposal does not exist in this tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error: string;
+                        message: string;
+                        /** @constant */
+                        refresh_required: true;
+                    };
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    executeProposalAssetMerge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetMergeExecutionRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable merge decision, or an idempotent replay of it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        merge: components["schemas"]["AssetMergeResult"];
+                    };
+                };
+            };
+            /** @description Invalid explicit selection or missing reason. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Asset update permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A selected asset or proposal does not exist in this tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error: string;
+                        message: string;
+                        /** @constant */
+                        refresh_required: true;
+                    };
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    previewAssetMerge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetMergeSelection"];
+            };
+        };
+        responses: {
+            /** @description Current asset comparison and evidence revision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        preview: components["schemas"]["AssetMergePreview"];
+                    };
+                };
+            };
+            /** @description Invalid explicit selection or missing reason. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Asset update permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A selected asset or proposal does not exist in this tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error: string;
+                        message: string;
+                        /** @constant */
+                        refresh_required: true;
+                    };
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    executeAssetMerge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetMergeExecutionRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable merge decision, or an idempotent replay of it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        merge: components["schemas"]["AssetMergeResult"];
+                    };
+                };
+            };
+            /** @description Invalid explicit selection or missing reason. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Asset update permission is required. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A selected asset or proposal does not exist in this tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Refresh the preview after changed evidence, conflicting declared values, or a Keep Separate decision. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error: string;
+                        message: string;
+                        /** @constant */
+                        refresh_required: true;
+                    };
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     acceptMergeProposal: {
         parameters: {
             query?: never;
@@ -10503,6 +11218,275 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
+        };
+    };
+    getIdentitySummary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Tenant identity coverage */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentitySummary"];
+                };
+            };
+        };
+    };
+    listIdentityObservations: {
+        parameters: {
+            query?: {
+                state?: "unresolved" | "linked" | "conflict" | "dismissed" | "expired" | "all";
+                page?: number;
+                page_size?: number;
+                asset_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated observations with provenance and enrichment state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        observations: components["schemas"]["IdentityObservation"][];
+                        total: number;
+                        page: number;
+                        page_size: number;
+                    };
+                };
+            };
+        };
+    };
+    getIdentityObservation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Observation evidence */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityObservation"];
+                };
+            };
+            /** @description Observation not found in this tenant */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    confirmIdentityObservation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObservationDecisionInput"];
+            };
+        };
+        responses: {
+            /** @description Committed identity confirmation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityIngestResult"];
+                };
+            };
+            /** @description Asset allowance reached; evidence remains retained */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Conflicting ownership or a changed observation; refresh before deciding */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    linkIdentityObservation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    reason: string;
+                    /** Format: uuid */
+                    asset_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Committed evidence link */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityIngestResult"];
+                };
+            };
+            /** @description Conflicting ownership or a changed observation; refresh before deciding */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    dismissIdentityObservation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObservationDecisionInput"];
+            };
+        };
+        responses: {
+            /** @description Committed dismissal */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityIngestResult"];
+                };
+            };
+            /** @description Observation already linked or held by an open identity conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    getIdentityDiscoverySettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Saved policy, activation history, concurrency version and release capabilities. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityDiscoverySettings"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Missing settings.read permission. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    updateIdentityDiscoverySettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IdentityDiscoverySettingsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Saved settings with incremented version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityDiscoverySettings"];
+                };
+            };
+            /** @description Invalid or missing fields, excessive input, or sensitive assets outside this tenant. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityDiscoverySettingsError"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Missing settings.update permission. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description stale_version, activation_required_release, or pause_required_after_activation. Refresh settings before retrying. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdentityDiscoverySettingsError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
         };
     };
     getAutoScanPolicy: {

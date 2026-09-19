@@ -14,7 +14,7 @@
 // they need to see both, and they need to see WHICH identifiers matched, because
 // that is the whole of the evidence. A proposal showing only a confidence number
 // is asking for a coin flip.
-import { Fragment, useState } from 'react';
+import { Fragment } from 'react';
 import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon, MiniBar, matcherConfidencePercent, percentLabel } from '../../components/ui';
@@ -239,19 +239,15 @@ export function defaultSurvivor(candidates: MergeCandidate[]): string | undefine
 
 export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
   proposal: MergeProposal;
-  onAccept: (survivorAssetId: string) => void;
+  onAccept: () => void;
   onKeepSeparate: () => void;
   busy?: boolean;
 }) {
-  const [survivor, setSurvivor] = useState<string | undefined>(() => defaultSurvivor(proposal.candidates));
   const source = sourceOfProposal(proposal);
-  const alive = proposal.candidates.filter((c) => !c.deleted);
-  // Merging is destructive, so the server refuses to pick a survivor and neither
-  // does this row: with more than one candidate still available the reviewer
-  // chooses, and with none available there is nothing to merge into.
-  const mustChoose = alive.length > 1;
+  const aliveIDs = new Set(proposal.candidates.filter((c) => !c.deleted && c.asset_status !== 'archived' && c.asset_status !== 'denied').map((c) => c.asset_id));
+  if (proposal.observation && !proposal.observation.deleted && proposal.observation.asset_status !== 'archived' && proposal.observation.asset_status !== 'denied') aliveIDs.add(proposal.observation.asset_id);
   const hasObservation = !!proposal.observation_asset_id;
-  const canMerge = hasObservation && !!survivor && alive.some((c) => c.asset_id === survivor);
+  const canMerge = aliveIDs.size >= 2;
 
   return (
     <div
@@ -282,15 +278,11 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
           <button
             className="ui-btn sm accent"
             disabled={busy || !canMerge}
-            title={canMerge
-              ? 'Merge into the selected asset. Its History records what was merged in.'
-              : !hasObservation
-                ? 'This proposal has no observation asset to merge.'
-                : 'No candidate is available to merge into.'}
-            onClick={() => { if (canMerge && survivor) onAccept(survivor); }}
+            title={canMerge ? 'Select records and review the merge before applying it.' : 'At least two available asset records are needed.'}
+            onClick={onAccept}
             style={{ opacity: canMerge ? 1 : 0.5 }}
           >
-            <Icon name="git-merge" size={12} />Merge
+            <Icon name="git-merge" size={12} />Review merge
           </button>
           <button
             className="ui-btn sm"
@@ -305,20 +297,12 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
 
       {!hasObservation && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>
-          This sighting has no separate asset to merge. Review the candidates; choose Keep separate only if they are different assets.
+          This question involves existing assets. Review merge to select the records that represent the same device, or Keep separate if they are different.
         </div>
       )}
 
       {proposal.reason && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>{proposal.reason}</div>
-      )}
-
-      {mustChoose && (
-        // Which record SURVIVES is a real decision, not a formality: the other
-        // one's id becomes a tombstone pointing at it.
-        <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>
-          Pick which asset survives the merge — the discovery is folded into it, and everything on the others moves across.
-        </div>
       )}
 
       <div style={{ display: 'flex', gap: 11, alignItems: 'stretch', flexWrap: 'wrap' }}>
@@ -330,9 +314,9 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
             </div>
             <CandidateCard
               candidate={c}
-              selected={survivor === c.asset_id}
-              selectable={proposal.candidates.length > 1}
-              onSelect={() => setSurvivor(c.asset_id)}
+              selected={false}
+              selectable={false}
+              onSelect={() => {}}
             />
           </Fragment>
         ))}

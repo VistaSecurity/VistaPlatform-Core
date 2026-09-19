@@ -51,7 +51,7 @@ export const SECTIONS: NavSection[] = [
           { path: '/discovery/scans', label: 'Scheduled Scans' },
         ],
       },
-      { label: 'Review', items: [{ path: '/discovery/approvals', label: 'Approvals' }] },
+      { label: 'Review', items: [{ path: '/discovery/observations', label: 'Observations' }, { path: '/discovery/approvals', label: 'Approvals' }] },
       { label: 'Logs', items: [{ path: '/discovery/logs', label: 'Job Logs' }] },
       {
         label: 'Sources',

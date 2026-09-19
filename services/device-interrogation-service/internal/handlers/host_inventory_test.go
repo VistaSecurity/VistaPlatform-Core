@@ -269,6 +269,28 @@ func TestHostInventorySubmit_AContestedIdentityIsSaidOutLoud(t *testing.T) {
 	}
 }
 
+func TestHostInventorySubmit_RetainedEvidenceIsAcknowledgedWithoutAnAsset(t *testing.T) {
+	agentID, tenantID := uuid.New(), uuid.New()
+	store := &fakeHostInventoryStore{}
+	mat := defaultFakeMaterialiser(store)
+	id := uuid.NewString()
+	mat.counts = services.HostInventoryCounts{ObservationID: id, IdentityOutcome: "unresolved"}
+	w := postSubmission(t, newIntakeRouterWith(store, mat, agentID, tenantID), validSubmission(agentID))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Status string                       `json:"status"`
+		Counts services.HostInventoryCounts `json:"counts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != "unresolved" || response.Counts.ObservationID != id || response.Counts.AssetID != "" || store.calls != 1 {
+		t.Fatalf("retained acknowledgement = %+v, stores=%d", response, store.calls)
+	}
+}
+
 // A remote collection is a JOB and submits through /results. Accepting one here
 // would create a device_jobs row that no job produced, and the job list would
 // then contain a job nobody queued.

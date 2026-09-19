@@ -758,6 +758,7 @@ func (s *ResultProcessor) recordInterrogationObservations(
 	result *models.JobResult,
 ) {
 	obs := InterrogationObservations{
+		ObservedAt:    result.CompletedAt,
 		Facts:         result.Facts,
 		Relationships: result.Relationships,
 	}

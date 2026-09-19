@@ -20,6 +20,9 @@ type Kind string
 // most durable first. A class may reorder or drop kinds; it may not invent
 // one.
 const (
+	// KindDeclarationID is issued by the server for an explicit operator
+	// confirmation. It never makes an observed alias authoritative.
+	KindDeclarationID Kind = "declaration_id"
 	// KindAgentID is a host agent's own installation id: the strongest
 	// identifier we have, because we issued it.
 	KindAgentID Kind = "agent_id"
@@ -103,7 +106,7 @@ var defaultPrecedence = []Kind{
 // `name`, which is valid but never votes unless a class lists it. Validity and
 // precedence are different questions, and conflating them is what would let a
 // `name` identifier decide a server's identity.
-var allKinds = append(append([]Kind{}, defaultPrecedence...), KindName)
+var allKinds = append([]Kind{KindDeclarationID}, append(append([]Kind{}, defaultPrecedence...), KindName)...)
 
 // DefaultPrecedenceList returns a copy of the default precedence order.
 //
@@ -192,7 +195,7 @@ func (k Kind) Singleton() bool {
 // (no scope, no vote) produced an identifier that could not match and an asset
 // that could not be recognised again; see [ScopeTenantDefault].
 func (k Kind) RequiresScope() bool {
-	return k == KindHostname || k == KindIPAddress || k == KindName
+	return k == KindHostname || k == KindIPAddress || k == KindName || k == KindDeclarationID
 }
 
 // DefaultScopeFor returns the scope a value of this kind carries when the
@@ -354,7 +357,7 @@ func Normalize(kind Kind, value string) (string, error) {
 		return normalizeIP(v)
 	case KindName:
 		return normalizeName(v)
-	case KindAgentID, KindCloudResourceID, KindSerialNumber, KindCMDBSysID, KindSSHHostKeyFingerprint:
+	case KindDeclarationID, KindAgentID, KindCloudResourceID, KindSerialNumber, KindCMDBSysID, KindSSHHostKeyFingerprint:
 		// Opaque: trimmed only. See the doc comment for why case survives.
 		return v, nil
 	default:

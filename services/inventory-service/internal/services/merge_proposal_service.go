@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,8 +14,8 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
-	invevents "github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
 // A merge proposal is an `asset_history` row, not a table.
@@ -135,6 +134,8 @@ var ErrMergeObservationMissing = errors.New("this proposal has no observation as
 // Merging into a tombstone buries the observation behind a pointer to somewhere
 // else.
 var ErrMergeSurvivorArchived = errors.New("the chosen survivor is archived; pick a live candidate")
+
+var ErrMergeProposalChanged = errors.New("merge candidates changed; refresh the proposal")
 
 // MergeProposalService reads and decides merge proposals.
 type MergeProposalService struct {
@@ -375,137 +376,57 @@ func ClampMergeProposalPage(limit, offset int) (int, int) {
 func (s *MergeProposalService) Accept(ctx context.Context, tenantID, proposalID, survivorID, actorUserID uuid.UUID) (*MergeProposalView, error) {
 	var view *MergeProposalView
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-		v, candidateIDs, err := lockProposal(ctx, tx, tenantID, proposalID)
+		var candidates []uuid.UUID
+		var err error
+		view, candidates, err = readProposal(ctx, tx, tenantID, proposalID, false)
 		if err != nil {
 			return err
 		}
-		if v.ObservationAssetID == nil {
-			// Conflicting identifiers and auto-accepted sightings can both
-			// produce proposals without a separate observation asset. This is
-			// a domain conflict, not a service failure.
+		if view.ObservationAssetID == nil {
 			return ErrMergeObservationMissing
 		}
-		if *v.ObservationAssetID == survivorID {
-			return ErrMergeCandidateNotInProposal
-		}
 		found := false
-		for _, id := range candidateIDs {
-			if id == survivorID {
+		for _, candidate := range candidates {
+			if candidate == survivorID {
 				found = true
-				break
 			}
 		}
-		if !found {
+		if !found || *view.ObservationAssetID == survivorID {
 			return ErrMergeCandidateNotInProposal
 		}
-
-		// The survivor must still be a live asset.
-		//
-		// A candidate that was archived — or merged away by an EARLIER proposal
-		// — is a tombstone, and merging into one buries everything the
-		// observation carries behind a pointer to somewhere else. The list
-		// already marks such a candidate `deleted`; the server has to refuse it
-		// too, because the reviewer may be looking at a page rendered before
-		// the other decision was made.
-		var survivorStatus string
-		var survivorDeleted bool
-		if err := tx.QueryRowContext(ctx,
-			`SELECT asset_status, deleted_at IS NOT NULL FROM assets WHERE tenant_id = $1 AND id = $2`,
-			tenantID, survivorID).Scan(&survivorStatus, &survivorDeleted); err != nil {
-			return fmt.Errorf("read the chosen survivor: %w", err)
+		for _, id := range []uuid.UUID{*view.ObservationAssetID, survivorID} {
+			var live bool
+			if err := tx.QueryRowContext(ctx, `SELECT asset_status<>'archived' AND deleted_at IS NULL AND NULLIF(metadata->>'merged_into','') IS NULL FROM assets WHERE tenant_id=$1 AND id=$2`, tenantID, id).Scan(&live); err != nil {
+				return err
+			}
+			if !live {
+				if id == survivorID {
+					return ErrMergeSurvivorArchived
+				}
+				return ErrMergeProposalChanged
+			}
 		}
-		if survivorDeleted || survivorStatus == identity.StatusArchived {
-			return ErrMergeSurvivorArchived
-		}
-
-		obs := *v.ObservationAssetID
-		if err := moveAssetChildren(ctx, tx, tenantID, obs, survivorID); err != nil {
-			return err
-		}
-
-		// The survivor just absorbed the source's crypto configurations, and
-		// the source just lost them — so both rollups now describe a set of
-		// configurations neither asset owns. Nothing recomputed them: INGEST
-		// was the only caller of the recompute, so a survivor that inherited a
-		// TLS 1.0 configuration went on reading risk 0 in the list, in the
-		// facets and on the dashboard until something happened to re-ingest it.
-		//
-		// In THIS transaction, because a committed move with an uncommitted
-		// rollup is the same divergence one step later.
-		//
-		// `moveAssetChildren` has already carried the producer COVERAGE across
-		// with the subjects it describes, so the recompute below sees the
-		// survivor's inherited findings AND the claim that something evaluated
-		// them.
-		if err := recomputeAssetRiskTx(tx, tenantID, survivorID); err != nil {
-			return fmt.Errorf("recompute the survivor's risk: %w", err)
-		}
-		if err := recomputeAssetRiskTx(tx, tenantID, obs); err != nil {
-			return fmt.Errorf("recompute the merged asset's risk: %w", err)
-		}
-
-		// Archive rather than delete. `merged` is not an asset_status value, so
-		// the state is recorded where it belongs: archived + stale_status, with
-		// the pointer in metadata and the story in history.
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE assets
-			   SET asset_status = 'archived',
-			       stale_status = 'archived',
-			       metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('merged_into', $3::text),
-			       updated_at = now()
-			 WHERE tenant_id = $1 AND id = $2`,
-			tenantID, obs, survivorID.String()); err != nil {
-			return fmt.Errorf("archive merged asset: %w", err)
-		}
-
-		if err := writeMergeHistory(ctx, tx, tenantID, obs, actorUserID, "merged_into", map[string]any{
-			"proposal_id": proposalID.String(),
-			"merged_into": survivorID.String(),
-		}); err != nil {
-			return err
-		}
-		if err := writeMergeHistory(ctx, tx, tenantID, survivorID, actorUserID, "merged_from", map[string]any{
-			"proposal_id": proposalID.String(),
-			"merged_from": obs.String(),
-		}); err != nil {
-			return err
-		}
-		if err := resolveProposal(ctx, tx, tenantID, proposalID, mergeStatusMerged, survivorID, actorUserID); err != nil {
-			return err
-		}
-		v.Status = mergeStatusMerged
-		v.AcceptedAssetID = &survivorID
-		view = v
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	// AFTER the commit. An event announcing a merge that then rolled back is
-	// worse than a late one: a subscriber that repointed its cache at the
-	// survivor would be pointing at a merge that never happened.
-	if s.events != nil && view.ObservationAssetID != nil {
-		var classKey string
-		for _, c := range view.Candidates {
-			if c.AssetID == survivorID {
-				classKey = c.ClassKey
-				break
-			}
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{*view.ObservationAssetID}, SurvivorAssetID: survivorID}
+	preview, err := s.PreviewMerge(ctx, tenantID, proposalID, selection)
+	if err != nil {
+		if errors.Is(err, ErrMergePreviewChanged) {
+			return nil, ErrMergeProposalChanged
 		}
-		decided := ""
-		if actorUserID != uuid.Nil {
-			decided = actorUserID.String()
-		}
-		if e := s.events.PublishAssetMerged(ctx, tenantID, &invevents.AssetMergedPayload{
-			SurvivorAssetID: survivorID,
-			MergedAssetID:   *view.ObservationAssetID,
-			ClassKey:        classKey,
-			ProposalID:      proposalID,
-			DecidedBy:       decided,
-		}, "approvals"); e != nil {
-			log.Printf("[MergeProposalService] merge %s committed but asset.merged was not published: %v", proposalID, e)
-		}
+		return nil, err
 	}
+	if _, err := s.ExecuteMerge(ctx, tenantID, proposalID, actorUserID, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Operator accepted the observation-to-asset merge proposal"}); err != nil {
+		if errors.Is(err, ErrMergePreviewChanged) {
+			return nil, ErrMergeProposalChanged
+		}
+		return nil, err
+	}
+	view.Status = mergeStatusMerged
+	view.AcceptedAssetID = &survivorID
 	return view, nil
 }
 
@@ -516,6 +437,16 @@ func (s *MergeProposalService) Accept(ctx context.Context, tenantID, proposalID,
 // answered "this is not that", not "this belongs in inventory". Promoting it
 // here would turn one decision into two, and the second one would be ours.
 func (s *MergeProposalService) KeepSeparate(ctx context.Context, tenantID, proposalID, actorUserID uuid.UUID) (*MergeProposalView, error) {
+	var result *MergeProposalView
+	err := pgidentity.WithAssetLifecycleWriteLocks(ctx, s.db.DB.DB, tenantID, nil, func() error {
+		var err error
+		result, err = s.keepSeparate(ctx, tenantID, proposalID, actorUserID)
+		return err
+	})
+	return result, err
+}
+
+func (s *MergeProposalService) keepSeparate(ctx context.Context, tenantID, proposalID, actorUserID uuid.UUID) (*MergeProposalView, error) {
 	var view *MergeProposalView
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		v, _, err := lockProposal(ctx, tx, tenantID, proposalID)
@@ -552,12 +483,19 @@ func (s *MergeProposalService) KeepSeparate(ctx context.Context, tenantID, propo
 // cannot both merge it. Without the lock the second merge would find the
 // observation already archived and move nothing, reporting success.
 func lockProposal(ctx context.Context, tx *sqlx.Tx, tenantID, proposalID uuid.UUID) (*MergeProposalView, []uuid.UUID, error) {
-	rows, err := tx.QueryContext(ctx, `
+	return readProposal(ctx, tx, tenantID, proposalID, true)
+}
+
+func readProposal(ctx context.Context, tx *sqlx.Tx, tenantID, proposalID uuid.UUID, lock bool) (*MergeProposalView, []uuid.UUID, error) {
+	query := `
 		SELECT id, asset_id, source, changes_json::text, created_at
 		FROM asset_history
 		WHERE tenant_id = $1 AND id = $2 AND action = $3
-		  AND changes_json->>'kind' = 'merge_proposal'
-		FOR UPDATE`,
+		  AND changes_json->>'kind' = 'merge_proposal'`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, query,
 		tenantID, proposalID, string(identity.ActionMergeProposed))
 	if err != nil {
 		return nil, nil, fmt.Errorf("lock merge proposal: %w", err)
@@ -755,6 +693,7 @@ type fkRef struct{ table, column string }
 
 var (
 	assetReferrers = []fkRef{
+		{"identity_observations", "asset_id"},
 		// The class timeline follows the asset. A merge is two records of one
 		// thing becoming one, so the classes the duplicate was believed to be
 		// are part of the survivor's history — and the FK is ON DELETE CASCADE,
@@ -789,7 +728,11 @@ var (
 // The rule for a collision is the same on both tables: the survivor's row wins,
 // and the source's observation timestamps are folded into it so nothing about
 // when the thing was seen is lost. Then the source row goes.
-func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid.UUID) error {
+func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid.UUID, managementSelected ...bool) error {
+	if err := moveMergePolymorphicChildren(ctx, tx, tenantID, from, to); err != nil {
+		return err
+	}
+
 	// Endpoints first, and in four steps, because crypto configurations point
 	// at endpoint ids: a configuration on a source endpoint that is about to be
 	// deleted has to be re-pointed at the survivor's equivalent BEFORE the row
@@ -832,7 +775,12 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 	//    merge never makes an endpoint look newer or shorter-lived than it was.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE asset_endpoints dst
-		   SET first_seen_at = LEAST(dst.first_seen_at, src.first_seen_at),
+		   SET status = CASE WHEN `+preferNewerMergeState+` THEN src.status ELSE dst.status END,
+               source_kind = CASE WHEN `+preferNewerMergeState+` THEN src.source_kind ELSE dst.source_kind END,
+               source_ref = CASE WHEN `+preferNewerMergeState+` THEN src.source_ref ELSE dst.source_ref END,
+               last_scan_status = CASE WHEN src.last_scanned_at > dst.last_scanned_at OR dst.last_scanned_at IS NULL THEN src.last_scan_status ELSE dst.last_scan_status END,
+               last_scanned_at = GREATEST(dst.last_scanned_at, src.last_scanned_at),
+               first_seen_at = LEAST(dst.first_seen_at, src.first_seen_at),
 		       last_seen_at  = GREATEST(dst.last_seen_at, src.last_seen_at),
 		       updated_at    = now()
 		  FROM asset_endpoints src
@@ -895,7 +843,10 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 		// Software installs. Unique per (tenant, asset, product, path); fold the
 		// observation window as the endpoints do, then drop and move.
 		{"software install windows", `UPDATE software_installs dst
-		                   SET first_seen_at = LEAST(dst.first_seen_at, src.first_seen_at),
+		                   SET status = CASE WHEN ` + preferNewerMergeState + ` THEN src.status ELSE dst.status END,
+                           source_kind = CASE WHEN ` + preferNewerMergeState + ` THEN src.source_kind ELSE dst.source_kind END,
+                           source_ref = CASE WHEN ` + preferNewerMergeState + ` THEN src.source_ref ELSE dst.source_ref END,
+                           first_seen_at = LEAST(dst.first_seen_at, src.first_seen_at),
 		                       last_seen_at  = GREATEST(dst.last_seen_at, src.last_seen_at),
 		                       updated_at    = now()
 		                  FROM software_installs src
@@ -956,6 +907,11 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 		})
 	}
 	for _, step := range steps {
+		// Paired profile selection includes deliberate absences. A later
+		// source must not fill a missing URL/credential from a different pair.
+		if len(managementSelected) > 0 && managementSelected[0] && (step.what == "management" || step.what == "credentials") {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, step.sql, tenantID, from, to); err != nil {
 			return fmt.Errorf("merge: move %s: %w", step.what, err)
 		}

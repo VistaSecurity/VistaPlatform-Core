@@ -51,12 +51,16 @@ func NewConnection(cfg *config.Config) (*DB, error) {
 	db.SetMaxIdleConns(pool.MaxIdleConns)
 	db.SetConnMaxLifetime(pool.ConnMaxLifetime)
 	db.SetConnMaxIdleTime(pool.ConnMaxIdleTime)
+	if err := shareddb.RegisterSessionPool(db.DB, "postgres", dsn); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &DB{db}, nil
 }
 
 func (db *DB) Close() error {
-	return db.DB.Close()
+	return shareddb.CloseWithSessionPool(db.DB.DB)
 }
 
 func (db *DB) Health() error {

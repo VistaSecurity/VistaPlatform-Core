@@ -81,22 +81,13 @@ describe('identity confidence component wiring', () => {
 });
 
 describe('merge source eligibility', () => {
-  it.each([undefined, '', 'source-asset'])('requires an observation asset (%s)', (observationId) => {
-    const html = renderToStaticMarkup(
-      <MemoryRouter>
-        <MergeProposalRow
-          proposal={proposal({
-            observation_asset_id: observationId,
-            candidates: [candidate('survivor', 'Survivor', 0.8)],
-          })}
-          onAccept={vi.fn()}
-          onKeepSeparate={vi.fn()}
-        />
-      </MemoryRouter>,
-    );
-    const mergeButton = html.match(/<button[^>]*>.*?Merge<\/button>/)?.[0];
+  it.each([1, 2, 3])('allows candidate-only review when %s records are available', (count) => {
+    const html = renderToStaticMarkup(<MemoryRouter><MergeProposalRow
+      proposal={proposal({ candidates: Array.from({ length: count }, (_, i) => candidate(`asset-${i}`, `Asset ${i}`, 0.8)) })}
+      onAccept={vi.fn()} onKeepSeparate={vi.fn()} /></MemoryRouter>);
+    const mergeButton = html.match(/<button[^>]*>.*?Review merge<\/button>/)?.[0];
     expect(mergeButton).toBeDefined();
-    expect(mergeButton?.includes('disabled')).toBe(!observationId);
-    expect(html.includes('This sighting has no separate asset to merge.')).toBe(!observationId);
+    expect(mergeButton?.includes('disabled')).toBe(count < 2);
+    expect(html).toContain('This question involves existing assets.');
   });
 });

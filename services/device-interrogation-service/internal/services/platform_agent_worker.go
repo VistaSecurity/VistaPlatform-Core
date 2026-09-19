@@ -289,8 +289,17 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		cloudProvider = detected
 	}
 
-	discovery, err := w.cloudService.DiscoverResources(ctx, job.TenantID, integrationID,
-		cloudProvider, resourceTypes, regions, resourceGroups)
+	var discovery *CloudDiscoveryResult
+	var err error
+	if sourceOnly, _ := job.Parameters["source_refresh_only"].(bool); sourceOnly {
+		// Enrichment refreshes the identified configured collector; it must not
+		// silently add account-wide compute enumeration.
+		discovery, err = w.cloudService.DiscoverResourceEvidence(ctx, job.TenantID, integrationID,
+			cloudProvider, resourceTypes, regions, resourceGroups)
+	} else {
+		discovery, err = w.cloudService.DiscoverResources(ctx, job.TenantID, integrationID,
+			cloudProvider, resourceTypes, regions, resourceGroups)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover %s resources: %w", cloudProvider, err)
 	}
@@ -328,10 +337,10 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 	metadata := map[string]interface{}{
 		"cloud_provider": cloudProvider,
 		"devices_count":  len(devices),
-		// Enumerated resources produce no crypto asset, so they are added
-		// explicitly: a scheduled run that found 200 instances and no TLS
-		// listener otherwise reports zero.
-		"assets_count": len(assets) + discovery.Enumeration.Total(),
+		"identity":       discovery.Identity,
+		// Count resolved resources, independently of their crypto endpoints
+		// and of unresolved resources included in enumeration statistics.
+		"assets_count": len(devices),
 	}
 	if !discovery.Enumeration.Empty() {
 		metadata["enumeration"] = discovery.Enumeration
@@ -384,6 +393,9 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	// tell that the results are already materialized and creates a second,
 	// never-executed discovery job — see RecordDiscoveryJob.
 	if err := w.jobQueue.RecordDiscoveryJob(ctx, job.ID, discoveryJobID); err != nil {
+		if _, refresh := job.Parameters["identity_refresh_request_id"]; refresh {
+			return nil, err
+		}
 		log.Printf("Warning: failed to record discovery job %s on device job %s: %v", discoveryJobID, job.ID, err)
 	}
 
@@ -411,6 +423,9 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 		},
 	}
 
+	if _, refresh := job.Parameters["identity_refresh_request_id"]; refresh {
+		result.Metadata["identity_refresh_materialized"] = true
+	}
 	return result, nil
 }
 

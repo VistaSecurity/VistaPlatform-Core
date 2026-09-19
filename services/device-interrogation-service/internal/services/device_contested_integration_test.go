@@ -14,12 +14,141 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
+
+func TestIntegration_RetainedDeviceManagementEncryptedAndReplayedAfterApproval(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+	tenant := testdb.NewTenant(t, db)
+	other := testdb.NewTenant(t, db)
+	ctx := context.Background()
+	svc := NewDeviceService(db)
+	// Seed an existing unmanaged target using the unchanged disabled behavior.
+	targetName := "retained-target.example.test"
+	target, err := svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{DeviceType: "f5", Hostname: &targetName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DELETE FROM asset_management WHERE tenant_id=$1 AND asset_id=$2`, tenant, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	svc.identityEng, err = identity.New(identity.Config{Repo: svc.identityRepo, AdmissionEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, url, password := "retained-device.example.test", "https://retained-device.example.test", "test-device-secret-for-encrypted-retention"
+	_, err = svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{DeviceType: "f5", Hostname: &name, ManagementURL: &url, Password: &password, Metadata: map[string]interface{}{"nested_secret": password}})
+	var retained *identity.RetainedObservation
+	if !errors.As(err, &retained) || retained.Result.ObservationID == "" || retained.Result.AssetID != "" {
+		t.Fatalf("want retained result without asset: %v", err)
+	}
+	var sealed, evidence string
+	if err = db.QueryRow(`SELECT m.context_enc,o.evidence::text FROM identity_observation_management m JOIN identity_observations o ON o.id=m.observation_id AND o.tenant_id=m.tenant_id WHERE m.tenant_id=$1 AND m.observation_id=$2`, tenant, retained.Result.ObservationID).Scan(&sealed, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(sealed, "enc:v1:") || strings.Contains(sealed, password) || strings.Contains(evidence, password) {
+		t.Fatal("credential escaped encrypted context")
+	}
+	if _, err = db.Exec(`UPDATE identity_observations SET state='linked',asset_id=$3 WHERE tenant_id=$1 AND id=$2`, tenant, retained.Result.ObservationID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.ReplayRetainedManagement(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = db.QueryRow(`SELECT count(*) FROM asset_management WHERE tenant_id=$1 AND asset_id=$2`, tenant, target.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unapproved context materialized: count=%d err=%v", count, err)
+	}
+	if _, err = db.Exec(`UPDATE assets SET asset_status='monitoring' WHERE tenant_id=$1 AND id=$2`, tenant, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	var seenBefore, seenAfter time.Time
+	if err = db.QueryRow(`SELECT last_seen_at FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, target.ID).Scan(&seenBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.ReplayRetainedManagement(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	// A new service instance models a restart after ingestion committed.
+	restarted := NewDeviceService(db)
+	for range 2 {
+		if err = restarted.ReplayRetainedManagement(ctx, tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var storedURL, storedPassword string
+	if err = db.QueryRow(`SELECT m.management_url,c.password_enc FROM asset_management m JOIN asset_credentials c ON c.tenant_id=m.tenant_id AND c.asset_id=m.asset_id WHERE m.tenant_id=$1 AND m.asset_id=$2`, tenant, target.ID).Scan(&storedURL, &storedPassword); err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := restarted.cipher.DecryptValue(storedPassword)
+	if err != nil || decrypted != password || storedURL != url || storedPassword == password {
+		t.Fatal("encrypted management did not replay correctly")
+	}
+	// Another observation linked to an already-managed asset must not replace
+	// its populated configuration or credentials.
+	otherName, replacementURL := "another-retained-device.example.test", "https://replacement.example.test"
+	_, err = svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{DeviceType: "f5", Hostname: &otherName, ManagementURL: &replacementURL})
+	var second *identity.RetainedObservation
+	if !errors.As(err, &second) {
+		t.Fatalf("second retained context: %v", err)
+	}
+	if _, err = db.Exec(`UPDATE identity_observations SET state='linked',asset_id=$3 WHERE tenant_id=$1 AND id=$2`, tenant, second.Result.ObservationID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = restarted.ReplayRetainedManagement(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT management_url FROM asset_management WHERE tenant_id=$1 AND asset_id=$2`, tenant, target.ID).Scan(&storedURL); err != nil || storedURL != url {
+		t.Fatalf("populated management was overwritten: %q %v", storedURL, err)
+	}
+	if err = db.QueryRow(`SELECT last_seen_at FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, target.ID).Scan(&seenAfter); err != nil || !seenBefore.Equal(seenAfter) {
+		t.Fatalf("configuration replay changed observation freshness: %v", err)
+	}
+	if err = db.QueryRow(`SELECT count(*) FROM identity_observation_management WHERE tenant_id=$1 AND materialized_at IS NOT NULL`, tenant).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("replay was not recorded exactly once: %d %v", count, err)
+	}
+}
+
+func TestIntegration_PausedCloudResourceRetainsManagement(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+	tenant := testdb.NewTenant(t, db)
+	cloud := NewCloudDiscoveryService(db, db, "test-retained-cloud-master-key")
+	if _, err := cloud.devices.identityEngine(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	cloud.devices.identityEng, err = identity.New(identity.Config{Repo: cloud.devices.identityRepo, AdmissionEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"paused"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	vendor := "AWS"
+	device := models.Device{ID: uuid.New(), TenantID: tenant, DeviceType: "aws_alb", Vendor: &vendor}
+	err = cloud.upsertDeviceAsset(context.Background(), &device, "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/retained/123")
+	var retained *identity.RetainedObservation
+	if !errors.As(err, &retained) || retained.Result.ObservationID == "" {
+		t.Fatalf("cloud did not expose retained outcome: %v", err)
+	}
+	var count int
+	if err = db.QueryRow(`SELECT count(*) FROM identity_observation_management WHERE tenant_id=$1`, tenant).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("cloud context not retained: %d %v", count, err)
+	}
+}
 
 // TestIntegration_CreateDevice_Contested_LeavesTheProposal: two devices, then a
 // third whose only identifier is already taken. The create is refused — and the

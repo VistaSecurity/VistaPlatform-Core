@@ -9,6 +9,7 @@ package matcher
 // lists and identity's ever disagree. A comment claiming they agree would be
 // worth nothing; the test is the mechanism.
 const (
+	KindDeclarationID         = "declaration_id"
 	KindAgentID               = "agent_id"
 	KindCloudResourceID       = "cloud_resource_id"
 	KindSerialNumber          = "serial_number"
@@ -24,6 +25,7 @@ const (
 // allKinds is the whole vocabulary, default-precedence order first and `name`
 // last — the order [identity.AllKinds] returns.
 var allKinds = []string{
+	KindDeclarationID,
 	KindAgentID,
 	KindCloudResourceID,
 	KindSerialNumber,
@@ -71,6 +73,7 @@ func IsSingleton(kind string) bool { return singletonKinds[kind] }
 // strongKinds are the non-singleton kinds that are unique across the tenant by
 // construction: a matching one is real evidence, short of a singleton's.
 var strongKinds = map[string]bool{
+	KindDeclarationID:         true,
 	KindSSHHostKeyFingerprint: true,
 	KindMACAddress:            true,
 	KindFQDN:                  true,

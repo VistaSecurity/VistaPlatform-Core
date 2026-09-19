@@ -603,7 +603,24 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 // so they are processed by the discovery-processor-service through the unified pipeline.
 // It uses the "Platform Device Interrogation Agent" system sensor as the sensor_id.
 func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tenantID uuid.UUID, batchID string, integrationID uuid.UUID, cloudProvider string, devices []models.Device) (int, error) {
-	if len(devices) == 0 {
+	inserted := 0
+	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		var err error
+		inserted, err = s.writeSensorDiscoveriesTx(ctx, tx, tenantID, batchID, integrationID, cloudProvider, devices, time.Time{}, true)
+		return err
+	})
+	return inserted, err
+}
+
+func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, batchID string, integrationID uuid.UUID, cloudProvider string, devices []models.Device, observedAt time.Time, resolveDNS bool) (int, error) {
+	hasFindings := false
+	for _, device := range devices {
+		if !inventoryOnlyDeviceTypes[device.DeviceType] {
+			hasFindings = true
+			break
+		}
+	}
+	if !hasFindings {
 		return 0, nil
 	}
 
@@ -615,9 +632,7 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 		WHERE tenant_id = $1 AND profile = 'device_interrogation' AND 'system' = ANY(tags)
 		LIMIT 1
 	`
-	if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, sensorQuery, tenantID).Scan(&systemSensorID)
-	}); err != nil {
+	if err := tx.QueryRowContext(ctx, sensorQuery, tenantID).Scan(&systemSensorID); err != nil {
 		return 0, fmt.Errorf("failed to find system sensor for tenant %s: %w (ensure system sensors are provisioned)", tenantID, err)
 	}
 
@@ -625,13 +640,20 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 		INSERT INTO sensor_discoveries (
 			id, sensor_id, tenant_id, batch_id, protocol, dest_ip, port,
 			confidence, metadata, hostname, timestamp, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10, $11, $12)
+		) VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10, $11, $12) ON CONFLICT DO NOTHING
 	`
 
 	inserted := 0
 	now := time.Now()
 
 	for _, device := range devices {
+		seen := observedAt
+		if seen.IsZero() {
+			seen = device.CreatedAt
+		}
+		if seen.IsZero() {
+			seen = now
+		}
 		// An ENUMERATED resource is inventory, not a crypto finding. It
 		// negotiated no protocol and states no at-rest encryption, so the
 		// crypto-config-less fallback below would write it as a TLS endpoint on
@@ -661,7 +683,7 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 		destIP := "0.0.0.0"
 		if device.IPAddress != nil && *device.IPAddress != "" {
 			destIP = *device.IPAddress
-		} else if hostname != "" {
+		} else if hostname != "" && resolveDNS {
 			// Try DNS resolution
 			ips, err := net.LookupIP(hostname)
 			if err == nil && len(ips) > 0 {
@@ -731,7 +753,7 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 					// from the metadata but never computes them; the ACM/handshake
 					// path never produced them, so they were silently empty.
 					if pems := canonicalCertPEMs(certs); len(pems) > 0 {
-						if v := discovery.ClassifyCertChainFromPEMs(pems, true); v != nil {
+						if v := discovery.ClassifyCertChainFromPEMs(pems, resolveDNS); v != nil {
 							for k, val := range v.QualityFlags {
 								metadata[k] = val
 							}
@@ -776,26 +798,25 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 
 				metadataJSON, err := json.Marshal(metadata)
 				if err != nil {
-					log.Printf("Warning: failed to marshal metadata for device %s: %v", device.ID, err)
-					continue
+					return inserted, fmt.Errorf("marshal cloud discovery metadata: %w", err)
 				}
 
-				err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-					_, e := tx.ExecContext(ctx, insertQuery,
-						uuid.New(), systemSensorID, tenantID, batchID,
-						// Canonical protocol_type spelling — see
-						// cryptoparse.NormalizeProtocol.
-						cryptoparse.NormalizeProtocol(protocol), destIP, port,
-						1.0, metadataJSON, stringPtr(cfgHostname),
-						now, now,
-					)
-					return e
-				})
+				result, err := tx.ExecContext(ctx, insertQuery,
+					cloudDiscoveryReceiptID(tenantID, batchID, protocol, destIP, port, metadataJSON), systemSensorID, tenantID, batchID,
+					// Canonical protocol_type spelling — see
+					// cryptoparse.NormalizeProtocol.
+					cryptoparse.NormalizeProtocol(protocol), destIP, port,
+					1.0, metadataJSON, stringPtr(cfgHostname),
+					seen, now,
+				)
 				if err != nil {
-					log.Printf("Warning: failed to insert sensor_discovery for device %s: %v", device.ID, err)
-					continue
+					return inserted, fmt.Errorf("persist cloud discovery: %w", err)
 				}
-				inserted++
+				affected, err := result.RowsAffected()
+				if err != nil {
+					return inserted, err
+				}
+				inserted += int(affected)
 			}
 		} else {
 			// No crypto configs - create a single default entry. No asset_id /
@@ -811,8 +832,7 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 
 			metadataJSON, err := json.Marshal(metadata)
 			if err != nil {
-				log.Printf("Warning: failed to marshal metadata for device %s: %v", device.ID, err)
-				continue
+				return inserted, fmt.Errorf("marshal cloud discovery metadata: %w", err)
 			}
 
 			// Protocol/port for the fallback row.
@@ -832,27 +852,26 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 				var remarshalErr error
 				metadataJSON, remarshalErr = json.Marshal(metadata)
 				if remarshalErr != nil {
-					log.Printf("Warning: failed to marshal metadata for device %s: %v", device.ID, remarshalErr)
-					continue
+					return inserted, fmt.Errorf("marshal at-rest discovery metadata: %w", remarshalErr)
 				}
 			}
 
-			err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-				_, e := tx.ExecContext(ctx, insertQuery,
-					uuid.New(), systemSensorID, tenantID, batchID,
-					// Canonical protocol_type spelling; empty stays empty, which
-					// is what an at-rest resource honestly has.
-					cryptoparse.NormalizeProtocol(protocol), destIP, port,
-					0.8, metadataJSON, stringPtr(hostname),
-					now, now,
-				)
-				return e
-			})
+			result, err := tx.ExecContext(ctx, insertQuery,
+				cloudDiscoveryReceiptID(tenantID, batchID, protocol, destIP, port, metadataJSON), systemSensorID, tenantID, batchID,
+				// Canonical protocol_type spelling; empty stays empty, which
+				// is what an at-rest resource honestly has.
+				cryptoparse.NormalizeProtocol(protocol), destIP, port,
+				0.8, metadataJSON, stringPtr(hostname),
+				seen, now,
+			)
 			if err != nil {
-				log.Printf("Warning: failed to insert sensor_discovery for device %s: %v", device.ID, err)
-				continue
+				return inserted, fmt.Errorf("persist cloud discovery: %w", err)
 			}
-			inserted++
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return inserted, err
+			}
+			inserted += int(affected)
 		}
 	}
 
@@ -1110,7 +1129,14 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 	cloudNetworkRef string,
 	extra func(r *pgidentity.Repository, assetID uuid.UUID) error,
 ) error {
-	now := time.Now().UTC()
+	now := device.CreatedAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	receipt := device.ID.String()
+	if device.ID == uuid.Nil {
+		receipt = uuid.NewString()
+	}
 	obs, err := s.devices.deviceObservation(ctx, device.TenantID, deviceObservationInput{
 		DeviceType:      device.DeviceType,
 		Hostname:        derefStr(device.Hostname),
@@ -1121,9 +1147,11 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		CloudNetworkRef: cloudNetworkRef,
 		DiscoveryMethod: device.DiscoveryMethod,
 		Source:          cloudSource(device.Vendor),
+		Admission:       identity.AdmissionEvidence{Authoritative: true, ReceiptID: receipt},
 		ObservedAt:      now,
 	})
 	if err != nil {
+		recordCloudOutcome(ctx, resourceID, identity.Resolution{}, false, err)
 		return err
 	}
 
@@ -1150,6 +1178,7 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		CreateManagement: true,
 	}
 
+	pending := false
 	res, err := s.devices.resolveObservation(ctx, obs, func(r *pgidentity.Repository, res identity.Resolution) error {
 		if res.Asset.Zero() {
 			// Every identifier this resource carries belongs to another asset.
@@ -1159,11 +1188,17 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 			//
 			// nil, NOT an error — see DeviceIdentityContestedError. The proposal
 			// was written in this transaction and an error here would erase it.
-			return nil
+			if err := s.devices.retainManagement(ctx, r, obs, res, fields); err != nil {
+				return err
+			}
+			return s.retainCloudContext(ctx, r, obs, res, device)
 		}
 		assetID, parseErr := uuid.Parse(res.Asset.ID)
 		if parseErr != nil {
 			return fmt.Errorf("identification returned an unusable asset id %q: %w", res.Asset.ID, parseErr)
+		}
+		if err := r.Tx().QueryRowContext(ctx, `SELECT asset_status='pending_approval' FROM assets WHERE tenant_id=$1 AND id=$2`, device.TenantID, assetID).Scan(&pending); err != nil {
+			return err
 		}
 		device.ID = assetID
 		if err := s.devices.applyDeviceFields(ctx, r, device.TenantID, assetID, fields); err != nil {
@@ -1174,10 +1209,14 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		}
 		return extra(r, assetID)
 	})
+	recordCloudOutcome(ctx, firstNonEmpty(resourceID, cloudResourceIDFromMetadata(device.Metadata)), res, pending, err)
 	if err != nil {
 		return fmt.Errorf("failed to record cloud resource: %w", err)
 	}
 	if res.Asset.Zero() {
+		if res.ObservationID != "" {
+			return &identity.RetainedObservation{Result: res.IngestResult()}
+		}
 		return contestedFrom(res)
 	}
 	return nil
@@ -1189,8 +1228,12 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 // `observation` query target's `source` facet matches on.
 func cloudSource(vendor *string) identity.Source {
 	ref := "cloud"
-	if v := strings.ToLower(strings.TrimSpace(derefStr(vendor))); v != "" {
-		ref = "cloud:" + v
+	provider := cloudProviderForDevice(models.Device{Vendor: vendor})
+	if provider == "" {
+		provider = strings.ToLower(strings.TrimSpace(derefStr(vendor)))
+	}
+	if provider != "" {
+		ref = "cloud:" + provider
 	}
 	return identity.Source{Kind: identity.SourceMeasured, Ref: ref, Mode: identity.ModeActive}
 }

@@ -404,7 +404,7 @@ func tenantAndUser(c *gin.Context) (uuid.UUID, uuid.UUID, bool) {
 		return uuid.Nil, uuid.Nil, false
 	}
 	userID, ok := v.(uuid.UUID)
-	if !ok {
+	if !ok || userID == uuid.Nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return uuid.Nil, uuid.Nil, false
 	}
@@ -454,10 +454,14 @@ func writeMergeProposalError(c *gin.Context, err error) bool {
 		return false
 	}
 	switch {
+	case errors.Is(err, services.ErrMergePreviewChanged), errors.Is(err, services.ErrMergeFieldResolution), errors.Is(err, services.ErrMergeKeptSeparate):
+		c.JSON(http.StatusConflict, gin.H{"error": "merge_conflict", "message": err.Error(), "refresh_required": true})
 	case errors.Is(err, services.ErrMergeProposalNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "Merge proposal not found"})
 	case errors.Is(err, services.ErrMergeProposalResolved):
 		c.JSON(http.StatusConflict, gin.H{"error": "This merge proposal has already been decided"})
+	case errors.Is(err, services.ErrMergeProposalChanged):
+		c.JSON(http.StatusConflict, gin.H{"error": "Merge candidates changed; refresh the proposal"})
 	case errors.Is(err, services.ErrMergeCandidateNotInProposal):
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid survivor_asset_id",

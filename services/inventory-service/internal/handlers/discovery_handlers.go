@@ -11,6 +11,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 
 	"github.com/gin-gonic/gin"
@@ -433,12 +434,26 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"imported":       imported,
 		"asset_statuses": alignToRequest(len(rawBody.Findings), requestIndex, report.EffectiveStatus),
+		"results":        alignResultsToRequest(len(rawBody.Findings), requestIndex, report.Results),
 	})
 }
 
 // alignToRequest maps a per-finding result from the slice IngestFindingsReport
 // saw back onto the slice the caller sent, filling the gaps left by findings
 // this handler could not parse.
+func alignResultsToRequest(requested int, requestIndex []int, results []identity.IngestResult) []identity.IngestResult {
+	out := make([]identity.IngestResult, requested)
+	for i := range out {
+		out[i].Outcome = "rejected"
+	}
+	for i, result := range results {
+		if i < len(requestIndex) && requestIndex[i] >= 0 && requestIndex[i] < requested {
+			out[requestIndex[i]] = result
+		}
+	}
+	return out
+}
+
 func alignToRequest(requested int, requestIndex []int, statuses []string) []string {
 	out := make([]string, requested)
 	for i, status := range statuses {

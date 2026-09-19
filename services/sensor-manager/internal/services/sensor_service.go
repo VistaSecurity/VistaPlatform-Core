@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +18,9 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // SensorService handles sensor operations
@@ -27,7 +31,8 @@ type SensorService struct {
 	// cross-tenant paths annotated `// RLS: cross-tenant — runs on the bypass role`
 	// (registration bootstrap, by-id lookup with no tenant input). Pre-flip it
 	// resolves to the same connection as db.
-	bypassDB *sql.DB
+	bypassDB            *sql.DB
+	enrichmentAvailable bool
 }
 
 // GetDB returns the RLS-scoped (crypto_app) database connection (for handlers
@@ -49,9 +54,10 @@ func (s *SensorService) GetBypassDB() *sql.DB {
 // connection.
 func NewSensorService(db, bypassDB *sql.DB) *SensorService {
 	return &SensorService{
-		db:       db,
-		repo:     database.NewSensorRepository(db, bypassDB),
-		bypassDB: bypassDB,
+		db:                  db,
+		repo:                database.NewSensorRepository(db, bypassDB),
+		bypassDB:            bypassDB,
+		enrichmentAvailable: identity.AvailableCapabilities().Admission && identity.AvailableCapabilities().Enrichment,
 	}
 }
 
@@ -107,6 +113,8 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 		    available_interfaces = CASE WHEN $5::text[] IS NOT NULL THEN $5::text[] ELSE available_interfaces END,
 		    reporting_interval = COALESCE($6, reporting_interval),
 		    version = COALESCE(NULLIF($7, ''), version),
+		    reported_capabilities = $8::text[],
+ reported_dns_interfaces = $9::text[],
 		    updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`
 
@@ -122,7 +130,7 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 		return err
 	}
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, sensorID, now, health.Status, ipAddress, availableIfaces, reportingIntervalArg, health.Version)
+		_, e := tx.ExecContext(ctx, query, sensorID, now, health.Status, ipAddress, availableIfaces, reportingIntervalArg, health.Version, pq.Array(normalizeSensorCapabilities(health.Capabilities)), pq.Array(normalizeDNSInterfaces(health.DNSInterfaces)))
 		return e
 	})
 	if err != nil {
@@ -315,13 +323,17 @@ func getIntFromMap(m map[string]interface{}, key string) int {
 	}
 }
 
-// GetPendingCommands retrieves pending commands for a sensor
+// GetPendingCommands atomically authorizes and claims pending commands for a sensor.
+// Current policy remains locked through delivery, and concurrent polls cannot
+// claim the same command. Paused automatic work remains pending until resume.
 func (s *SensorService) GetPendingCommands(sensorID string) ([]models.Command, error) {
 	query := `
 		SELECT id, sensor_id, command_type, payload, status, created_at, expires_at
 		FROM sensor_commands
 		WHERE sensor_id = $1 AND status = 'pending' AND (expires_at IS NULL OR expires_at > NOW())
-		ORDER BY created_at ASC`
+		ORDER BY CASE WHEN command_type='resolve_identity_dns' OR
+          (command_type='discovery_job' AND (payload->'options' ? 'identity_enrichment_request_id' OR payload->'options'->>'origin'='auto_scan'))
+          THEN 1 ELSE 0 END, created_at ASC, id ASC LIMIT 128 FOR UPDATE SKIP LOCKED`
 
 	// Sensor-facing poll (ingestion): sensor_commands isolates via an EXISTS
 	// subquery through sensors, so resolve the owning tenant and set app.tenant_id
@@ -333,11 +345,17 @@ func (s *SensorService) GetPendingCommands(sensorID string) ([]models.Command, e
 	}
 	var commands []models.Command
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		// Lock policy before command rows, matching the producer's lock order.
+		var policy []byte
+		if e := tx.QueryRowContext(ctx, `SELECT config FROM tenant_admin_settings WHERE tenant_id=$1 FOR SHARE`, tenantID).Scan(&policy); e != nil && !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
 		rows, e := tx.QueryContext(ctx, query, sensorID)
 		if e != nil {
 			return e
 		}
 		defer func() { _ = rows.Close() }()
+		var candidates []models.Command
 
 		for rows.Next() {
 			var cmd models.Command
@@ -363,9 +381,41 @@ func (s *SensorService) GetPendingCommands(sensorID string) ([]models.Command, e
 			if cmd.Type == "" {
 				cmd.Type = cmd.CommandType
 			}
-			commands = append(commands, cmd)
+			candidates = append(candidates, cmd)
 		}
-		return rows.Err()
+		if e := rows.Err(); e != nil {
+			return e
+		}
+		if e := rows.Close(); e != nil {
+			return e
+		}
+		for _, cmd := range candidates {
+			allowed, e := s.authorizeCommandPickup(tx, tenantID, cmd)
+			if e != nil {
+				return e
+			}
+			if !allowed {
+				continue
+			}
+			// Recheck wall-clock expiry after lock waits and policy validation.
+			result, e := tx.ExecContext(ctx, `UPDATE sensor_commands SET status='delivered',delivered_at=clock_timestamp(),updated_at=clock_timestamp() WHERE id=$1 AND sensor_id=$2 AND status='pending' AND (expires_at IS NULL OR expires_at>clock_timestamp())`, cmd.ID, sensorID)
+			if e != nil {
+				return e
+			}
+			count, e := result.RowsAffected()
+			if e != nil {
+				return e
+			}
+			if count == 0 {
+				continue
+			}
+			cmd.Status = "delivered"
+			commands = append(commands, cmd)
+			if len(commands) == 32 {
+				break
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pending commands: %w", err)
@@ -393,7 +443,7 @@ func (s *SensorService) MarkCommandsAsDelivered(sensorID string, commandIDs []st
 	query := fmt.Sprintf(`
 		UPDATE sensor_commands
 		SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-		WHERE sensor_id = $1 AND id IN (%s)`,
+		WHERE sensor_id = $1 AND status='pending' AND (expires_at IS NULL OR expires_at>clock_timestamp()) AND id IN (%s)`,
 		strings.Join(placeholders, ", "))
 
 	// Sensor-facing write (ingestion): sensor_commands isolates via an EXISTS
@@ -1310,4 +1360,85 @@ func (s *SensorService) UpdateSensor(sensor *models.Sensor) error {
 		)
 		return e
 	})
+}
+
+// Missing capabilities clear the prior report: replacing a sensor with an older
+// binary must not leave it eligible for commands it can no longer execute.
+func normalizeSensorCapabilities(values []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if len(out) >= 64 {
+			break
+		}
+		if len(value) == 0 || len(value) > 64 || seen[value] {
+			continue
+		}
+		valid := true
+		for _, ch := range value {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '_' && ch != '-' {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			out = append(out, value)
+			seen[value] = true
+		}
+	}
+	return out
+}
+
+func normalizeDNSInterfaces(values []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if len(out) >= 64 {
+			break
+		}
+		if value == "" || len(value) > 256 || strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n") || seen[value] {
+			continue
+		}
+		out = append(out, value)
+		seen[value] = true
+	}
+	return out
+}
+
+// authorizeCommandPickup deliberately leaves policy-blocked commands pending.
+// SQL failures abort the claim transaction so dispatch never acknowledges a
+// command whose authorization or delivery could not be committed.
+func (s *SensorService) authorizeCommandPickup(tx *sql.Tx, tenant uuid.UUID, cmd models.Command) (bool, error) {
+	var err error
+	switch cmd.CommandType {
+	case sensordispatch.IdentityDNSCommand:
+		if !s.enrichmentAvailable || cmd.ExpiresAt == nil {
+			return false, nil
+		}
+		req, parseErr := sensordispatch.ParseIdentityDNSRequest(cmd.Payload)
+		if parseErr != nil {
+			return false, nil
+		}
+		err = dispatchguard.AuthorizeDNS(tx, tenant, cmd.SensorID, req)
+	case sensordispatch.CommandType:
+		options, _ := cmd.Payload["options"].(map[string]interface{})
+		_, enrichment := options["identity_enrichment_request_id"]
+		if !enrichment && !dispatchguard.IsAutomaticScan(options) {
+			return true, nil
+		}
+		if (enrichment && !s.enrichmentAvailable) || cmd.ExpiresAt == nil {
+			return false, nil
+		}
+		payload, parseErr := sensordispatch.ParsePayload(cmd.Payload)
+		if parseErr != nil || payload.TenantID != tenant.String() {
+			return false, nil
+		}
+		err = dispatchguard.AuthorizeProbe(tx, payload, cmd.SensorID)
+	default:
+		return true, nil
+	}
+	if errors.Is(err, dispatchguard.ErrPaused) || errors.Is(err, dispatchguard.ErrDenied) || errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }

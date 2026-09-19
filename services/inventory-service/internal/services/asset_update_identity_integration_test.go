@@ -34,6 +34,26 @@ func identifierRows(t *testing.T, svc *AssetService, tenant, asset uuid.UUID) ma
 	return out
 }
 
+func TestIntegration_UpdateAsset_CannotMintADeclarationIdentifier(t *testing.T) {
+	svc, _, tenant := newIdentityFixture(t)
+	created, err := svc.CreateAsset(tenant, models.AssetInput{ClassKey: assetclass.KeyServer, Hostname: ptr("declaration-guard.example.test")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := tenant.String()
+	_, _, err = svc.UpdateAsset(tenant, created.ID, models.AssetInput{Identifiers: []models.AssetIdentifierInput{
+		{Kind: string(identity.KindDeclarationID), Value: uuid.NewString(), Scope: &scope},
+	}}, uuid.New())
+	if err == nil || !strings.Contains(err.Error(), "issued only by identity confirmation") {
+		t.Fatalf("declaration forgery accepted: %v", err)
+	}
+	for key := range identifierRows(t, svc, tenant, created.ID) {
+		if strings.HasPrefix(key, "declaration_id|") {
+			t.Fatalf("forged identifier persisted: %s", key)
+		}
+	}
+}
+
 // TestIntegration_UpdateAsset_AttachesDeclaredIdentifiers is the regression for
 // B6 and C3 together: the form sent `identifiers` and the server dropped them,
 // so editing an asset's identity was a silent no-op that reported success.

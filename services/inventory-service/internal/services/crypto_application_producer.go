@@ -21,8 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -290,7 +290,7 @@ func boolField(m map[string]interface{}, key string) bool {
 // crypto_applications. Idempotent on the natural key
 // (tenant_id, resource_identifier, encryption_context) — a re-discovery of the
 // same bucket updates its posture in place rather than accumulating a row per
-// run. first_discovered_at is preserved; last_verified_at moves.
+// run. Observation bounds expand only from actual evidence timestamps.
 const upsertCryptoApplicationSQL = `
 	INSERT INTO crypto_applications (
 		tenant_id, asset_id, resource_type, resource_identifier, resource_name,
@@ -303,27 +303,29 @@ const upsertCryptoApplicationSQL = `
 		(SELECT id FROM algorithms WHERE code ILIKE $6 ORDER BY code LIMIT 1),
 		$7, $8::jsonb,
 		'cloud_api', $9, $10,
-		NOW(), NOW(), NOW(), NOW()
+		$11::timestamptz, $11::timestamptz, NOW(), NOW()
 	)
 	ON CONFLICT (tenant_id, resource_identifier, encryption_context) WHERE deleted_at IS NULL
 	DO UPDATE SET
 		asset_id             = COALESCE(EXCLUDED.asset_id, crypto_applications.asset_id),
-		resource_type        = EXCLUDED.resource_type,
-		resource_name        = EXCLUDED.resource_name,
-		algorithm_id         = COALESCE(EXCLUDED.algorithm_id, crypto_applications.algorithm_id),
-		configuration_source = EXCLUDED.configuration_source,
-		configuration_data   = EXCLUDED.configuration_data,
-		discovery_method     = EXCLUDED.discovery_method,
-		confidence_score     = EXCLUDED.confidence_score,
-		risk_score           = EXCLUDED.risk_score,
-		last_verified_at     = NOW(),
+		resource_type        = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.resource_type ELSE crypto_applications.resource_type END,
+		resource_name        = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.resource_name ELSE crypto_applications.resource_name END,
+		algorithm_id         = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN COALESCE(EXCLUDED.algorithm_id, crypto_applications.algorithm_id) ELSE crypto_applications.algorithm_id END,
+		configuration_source = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.configuration_source ELSE crypto_applications.configuration_source END,
+		configuration_data   = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.configuration_data ELSE crypto_applications.configuration_data END,
+		discovery_method     = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.discovery_method ELSE crypto_applications.discovery_method END,
+		confidence_score     = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.confidence_score ELSE crypto_applications.confidence_score END,
+		risk_score           = CASE WHEN crypto_applications.last_verified_at IS NULL OR EXCLUDED.last_verified_at >= crypto_applications.last_verified_at THEN EXCLUDED.risk_score ELSE crypto_applications.risk_score END,
+		first_discovered_at = LEAST(crypto_applications.first_discovered_at,EXCLUDED.first_discovered_at),
+		last_verified_at = GREATEST(crypto_applications.last_verified_at,EXCLUDED.last_verified_at),
 		updated_at           = NOW()`
 
 // produceAtRestApplication derives (or refreshes) the crypto_applications row
-// for an at-rest cloud resource. Best-effort by design, exactly like the key
-// producer: a failure is logged and swallowed so it can never fail ingest of
-// the rest of a batch.
-func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p atRestPosture) {
+// for an at-rest cloud resource. Errors keep retained receipts retryable.
+func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p atRestPosture, observedAt time.Time) error {
+	if observedAt.IsZero() {
+		observedAt = time.Now().UTC()
+	}
 	config := map[string]interface{}{
 		"encrypted":             p.Encrypted,
 		"encryption_determined": p.Determined,
@@ -342,8 +344,7 @@ func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p a
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		log.Printf("[AssetService] Warning: failed to marshal at-rest posture for %s: %v", p.ResourceIdentifier, err)
-		return
+		return fmt.Errorf("marshal at-rest posture: %w", err)
 	}
 
 	var assetArg interface{}
@@ -352,19 +353,16 @@ func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p a
 	}
 
 	// RLS-scoped write over crypto_applications.
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		_, e := tx.Exec(
 			upsertCryptoApplicationSQL,
 			tenantID, assetArg, p.ResourceType, p.ResourceIdentifier, p.ResourceName,
 			algorithmCodeForAtRest(p.Algorithm), "cloud_api", string(configJSON),
-			p.confidence(), p.riskScore(),
+			p.confidence(), p.riskScore(), observedAt,
 		)
 		if e != nil {
 			return fmt.Errorf("upsert crypto_application: %w", e)
 		}
 		return nil
-	}); err != nil {
-		log.Printf("[AssetService] Warning: failed to produce at-rest posture for %s (asset %s): %v",
-			p.ResourceIdentifier, assetID, err)
-	}
+	})
 }

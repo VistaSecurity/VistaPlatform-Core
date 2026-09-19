@@ -52,21 +52,23 @@ type Asset struct {
 	OwnerEmail   *string `json:"owner_email" db:"owner_email"`
 	// SupportGroup is the team on the hook for it — ADR-0001 D3 Q5, the one
 	// context field the CMDB buyer asked for that the old model had no home for.
-	SupportGroup       *string                `json:"support_group,omitempty" db:"support_group"`
-	Description        *string                `json:"description" db:"description"`
-	Site               *string                `json:"site,omitempty" db:"site"`
-	Region             *string                `json:"region,omitempty" db:"region"`
-	Zone               *string                `json:"zone,omitempty" db:"zone"`
-	LocationID         *uuid.UUID             `json:"location_id,omitempty" db:"location_id"`
-	NetworkSegmentID   *uuid.UUID             `json:"network_segment_id,omitempty" db:"network_segment_id"`
-	NetworkSegmentName *string                `json:"network_segment_name,omitempty" db:"network_segment_name"`
-	DiscoveryMethod    *string                `json:"discovery_method,omitempty" db:"discovery_method"`
-	ConfidenceScore    *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
-	Tags               map[string]interface{} `json:"tags" db:"tags"`
-	Metadata           map[string]interface{} `json:"metadata" db:"metadata"`
-	AssetOwnership     string                 `json:"asset_ownership" db:"asset_ownership"`
-	AssetStatus        string                 `json:"asset_status" db:"asset_status"`
-	StaleStatus        *string                `json:"stale_status,omitempty" db:"stale_status"`
+	SupportGroup        *string                `json:"support_group,omitempty" db:"support_group"`
+	Description         *string                `json:"description" db:"description"`
+	Site                *string                `json:"site,omitempty" db:"site"`
+	Region              *string                `json:"region,omitempty" db:"region"`
+	Zone                *string                `json:"zone,omitempty" db:"zone"`
+	LocationID          *uuid.UUID             `json:"location_id,omitempty" db:"location_id"`
+	NetworkSegmentID    *uuid.UUID             `json:"network_segment_id,omitempty" db:"network_segment_id"`
+	NetworkSegmentName  *string                `json:"network_segment_name,omitempty" db:"network_segment_name"`
+	DiscoveryMethod     *string                `json:"discovery_method,omitempty" db:"discovery_method"`
+	ConfidenceScore     *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
+	Tags                map[string]interface{} `json:"tags" db:"tags"`
+	Metadata            map[string]interface{} `json:"metadata" db:"metadata"`
+	AssetOwnership      string                 `json:"asset_ownership" db:"asset_ownership"`
+	AssetStatus         string                 `json:"asset_status" db:"asset_status"`
+	IdentityStatus      string                 `json:"identity_status,omitempty" db:"identity_status"`
+	HasIdentityConflict bool                   `json:"has_identity_conflict" db:"has_identity_conflict"`
+	StaleStatus         *string                `json:"stale_status,omitempty" db:"stale_status"`
 	// MergedInto is the asset this one was merged into — the tombstone pointer.
 	//
 	// Accepting a merge ARCHIVES the observation rather than deleting it, so its
@@ -371,6 +373,11 @@ type AssetFilters struct {
 // those carry (serial, MAC, FQDN, cloud resource id) arrive as Identifiers and
 // go through the identification engine like every other intake.
 type AssetInput struct {
+	// Internal collector delivery identity; never accepted from asset-edit JSON.
+	// A replay keeps these values, while a new import run supplies a new receipt.
+	ObservationReceiptID string    `json:"-"`
+	ObservationTime      time.Time `json:"-"`
+
 	// ClassKey is required on create and is validated against the class
 	// registry. The old `asset_type` had four values, no validation in Go, and
 	// an import wizard offering ten of which nine were invalid in the database.

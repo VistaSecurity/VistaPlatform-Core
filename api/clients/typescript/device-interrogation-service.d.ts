@@ -401,6 +401,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/cloud/interrogate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Collect provider evidence for a cloud resource */
+        post: operations["interrogateCloudResource"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/devices": {
         parameters: {
             query?: never;
@@ -1160,6 +1177,14 @@ export interface components {
             /** Format: uuid */
             job_id?: string;
         };
+        RetainedDeviceObservation: {
+            /** @enum {string} */
+            outcome: "unresolved" | "conflict";
+            /** Format: uuid */
+            observation_id: string;
+            /** Format: uuid */
+            proposal_id?: string;
+        };
         /** @description Request body for POST /devices. `password` is encrypted at rest. */
         CreateDeviceRequest: {
             device_type: string;
@@ -1678,6 +1703,7 @@ export interface components {
             error_message?: string;
             progress?: number;
             assets_discovered?: number;
+            identity?: components["schemas"]["CloudIdentitySummary"];
             enumeration?: components["schemas"]["CloudEnumerationCounts"];
             host_inventory?: components["schemas"]["HostInventoryCounts"];
             duration_seconds?: number;
@@ -1700,6 +1726,14 @@ export interface components {
              *     name (or "Device Agent" if it has none).
              */
             executor: string;
+        };
+        CloudIdentitySummary: {
+            assets_created: number;
+            assets_matched: number;
+            approval_pending: number;
+            observations_retained: number;
+            conflicts: number;
+            rejected_inputs: number;
         };
         /**
          * @description What a cloud discovery run's enumeration half found: compute instances,
@@ -1738,6 +1772,16 @@ export interface components {
              *     contested and the engine created nothing — see `contested`.
              */
             asset_id?: string;
+            /**
+             * Format: uuid
+             * @description Durable identity evidence retained by the admission transaction.
+             */
+            observation_id?: string;
+            /**
+             * @description Identity resolution outcome, independently of monitoring approval.
+             * @enum {string}
+             */
+            identity_outcome?: "created" | "matched" | "conflict" | "unresolved";
             facts: number;
             /** @description Listening sockets recorded as endpoints on the host's asset. */
             endpoints: number;
@@ -2761,6 +2805,61 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    interrogateCloudResource: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Format: uuid */
+                    integration_id: string;
+                    /** @enum {string} */
+                    cloud_provider?: "aws" | "azure" | "gcp";
+                    resource_type: string;
+                    resource_arn?: string;
+                    resource_id?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Resolved cloud resource and collected context. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        resource_arn?: string;
+                        resource_id?: string;
+                        resource_type: string;
+                        device: components["schemas"]["Device"];
+                    };
+                };
+            };
+            /** @description Provider evidence retained for identity resolution; no asset ID is fabricated. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetainedDeviceObservation"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description The provider did not return the requested resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     listDevices: {
         parameters: {
             query?: never;
@@ -2803,6 +2902,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Device"];
+                };
+            };
+            /** @description Identity evidence and encrypted management configuration retained for resolution. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetainedDeviceObservation"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
@@ -2992,6 +3100,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Device"];
+                };
+            };
+            /** @description Identity evidence and encrypted management configuration retained for resolution. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetainedDeviceObservation"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];

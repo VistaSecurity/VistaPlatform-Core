@@ -146,9 +146,17 @@ type PeerIdentifier struct {
 // PeerRef is the other end of an observed relationship, or the subject of a
 // fact — described by identifiers rather than by an id, because a collector
 // cannot resolve an asset. The identification engine does that at ingest.
+// PeerIdentityEvidence describes what the configured collector actually verified.
+// Names, OUI guesses, configured targets and relayed advertisements never set it.
+type PeerIdentityEvidence struct {
+	ControllerInventory bool `json:"controller_inventory,omitempty"`
+	ConnectedInterface  bool `json:"connected_interface,omitempty"`
+}
+
 type PeerRef struct {
-	Identifiers []PeerIdentifier `json:"identifiers,omitempty"`
-	DisplayName string           `json:"display_name,omitempty"`
+	IdentityEvidence PeerIdentityEvidence `json:"identity_evidence,omitempty"`
+	Identifiers      []PeerIdentifier     `json:"identifiers,omitempty"`
+	DisplayName      string               `json:"display_name,omitempty"`
 	// ClassHint is an asset-class key (shared/assetclass) proposing what the
 	// peer is. A hint, never a decision: classification is a proposal that goes
 	// through Approvals (ADR-0002 classifier seam).

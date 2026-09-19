@@ -18,6 +18,7 @@ import (
 
 // ADR-0002 D3, in default precedence order.
 var allowedIdentifierKinds = map[string]int{
+	"declaration_id":           0,
 	"agent_id":                 1,
 	"cloud_resource_id":        2,
 	"serial_number":            3,

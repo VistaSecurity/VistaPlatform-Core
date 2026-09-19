@@ -73,6 +73,7 @@ func hostObservationFinding(sd *models.SensorDiscovery, metadata map[string]inte
 		rawData[k] = v
 	}
 	rawData["sensor_id"] = sd.SensorID.String()
+	rawData["discovery_id"] = sd.ID.String()
 	rawData["batch_id"] = sd.BatchID
 	rawData["confidence"] = sd.Confidence
 	rawData["timestamp"] = sd.Timestamp

@@ -17,6 +17,7 @@ import (
 // matches no row for ever, because nothing stores that string. That is the
 // divergence-from-the-registry the parity test now refuses.
 var storedIdentifierKinds = []string{
+	"declaration_id",
 	"agent_id",
 	"cloud_resource_id",
 	"serial_number",

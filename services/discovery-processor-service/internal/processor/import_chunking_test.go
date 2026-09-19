@@ -16,7 +16,43 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
+
+func TestImportRetainedEvidenceAcknowledgement(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		results []identity.IngestResult
+		wantErr bool
+	}{
+		{"retained", []identity.IngestResult{{Outcome: "unresolved", ObservationID: uuid.NewString()}}, false},
+		{"missing durable receipt", []identity.IngestResult{{Outcome: "unresolved"}}, true},
+		{"unknown outcome", []identity.IngestResult{{Outcome: "unknown"}}, true},
+		{"misaligned results", []identity.IngestResult{{Outcome: "rejected"}, {Outcome: "rejected"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"imported": 0, "results": tc.results})
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.NewInventoryClient(&config.Config{InventoryServiceURL: srv.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := &BatchProcessor{inventoryClient: c}
+			rule := uuid.New()
+			row := &models.SensorDiscovery{ID: uuid.New(), ApprovalStatus: "auto_approved", AutoApprovalRuleID: &rule}
+			imported, err := p.importInChunks(uuid.New(), uuid.New(), []converter.IngestFinding{{Kind: "host"}}, []*models.SensorDiscovery{row}, "monitoring")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("import error=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (imported != 0 || row.ApprovalStatus != "observed" || row.AutoApprovalRuleID != nil || row.AssetID != nil) {
+				t.Fatalf("retained evidence acquired an asset/approval: imported=%d row=%+v", imported, row)
+			}
+		})
+	}
+}
 
 // The import must go over in pieces small enough to answer inside
 // client.ImportTimeout.

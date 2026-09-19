@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -43,10 +42,10 @@ type producedCertRef struct {
 // Idempotent: keys are upserted on (tenant_id, public_fingerprint), so the same
 // public key seen across many certificates or assets collapses to a single row —
 // exactly what the Keys lens "used by N assets" count is built on. Any failure
-// is logged and swallowed; it must never fail crypto ingest.
-func (s *AssetService) produceKeyFromCertificate(tenantID, cryptoID uuid.UUID, cert *models.Certificate, data models.CertificateData) {
+// is returned so a retained receipt retries its missing attachment.
+func (s *AssetService) produceKeyFromCertificate(tenantID, cryptoID uuid.UUID, cert *models.Certificate, data models.CertificateData) error {
 	if cert == nil {
-		return
+		return nil
 	}
 
 	// key_type from the extraction (already "RSA"/"ECDSA"/"Ed25519" via
@@ -73,7 +72,7 @@ func (s *AssetService) produceKeyFromCertificate(tenantID, cryptoID uuid.UUID, c
 	}
 	if pubFP == "" {
 		// Nothing stable to dedup on — skip rather than write an anonymous row.
-		return
+		return nil
 	}
 	if keyType == "" {
 		keyType = "unknown"
@@ -162,10 +161,7 @@ func (s *AssetService) produceKeyFromCertificate(tenantID, cryptoID uuid.UUID, c
 		}
 		return nil
 	})
-	if err != nil {
-		log.Printf("[AssetService] Warning: failed to produce key from certificate %s (impl %s): %v",
-			cert.ID, cryptoID, err)
-	}
+	return err
 }
 
 // mapCertStateToKeyState maps a certificate lifecycle state onto the key state

@@ -42,6 +42,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -140,13 +141,19 @@ func UpsertInstall(
 	tenantID, assetID, productID uuid.UUID,
 	installPath, sourceKind, sourceRef string,
 ) (created bool, err error) {
+	return UpsertInstallAt(ctx, tx, tenantID, assetID, productID, installPath, sourceKind, sourceRef, time.Now().UTC())
+}
+
+// UpsertInstallAt preserves the measurement clock when a retained collection
+// is materialized later. Older evidence cannot replace a newer installation.
+func UpsertInstallAt(ctx context.Context, tx Execer, tenantID, assetID, productID uuid.UUID, installPath, sourceKind, sourceRef string, at time.Time) (created bool, err error) {
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO software_installs
 			(tenant_id, asset_id, product_id, install_path, source_kind, source_ref, status, first_seen_at, last_seen_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), now())
+		VALUES ($1, $2, $3, $4, $5, $6, 'active', $8, $8)
 		ON CONFLICT (tenant_id, asset_id, product_id, coalesce(install_path, ''))
 		DO UPDATE SET
-			last_seen_at = now(),
+			last_seen_at = excluded.last_seen_at,
 			status       = 'active',
 			source_ref   = excluded.source_ref,
 			-- A measured install is not downgraded to 'imported' because a
@@ -156,10 +163,14 @@ func UpsertInstall(
 			                    THEN software_installs.source_kind
 			                    ELSE excluded.source_kind END,
 			updated_at   = now()
+		WHERE software_installs.last_seen_at <= excluded.last_seen_at
 		RETURNING (xmax = 0)`,
 		tenantID, assetID, productID, nullable(installPath), sourceKind, sourceRef,
-		software.SourceMeasured,
+		software.SourceMeasured, at,
 	).Scan(&created)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -189,6 +200,11 @@ func UpsertInstall(
 func MarkAbsentRemoved(
 	ctx context.Context, tx Execer, tenantID, assetID uuid.UUID, sourceKind, sourceRef string,
 ) (int, error) {
+	return MarkAbsentRemovedAt(ctx, tx, tenantID, assetID, sourceKind, sourceRef, time.Now().UTC())
+}
+
+// MarkAbsentRemovedAt cannot retire software observed after this snapshot.
+func MarkAbsentRemovedAt(ctx context.Context, tx Execer, tenantID, assetID uuid.UUID, sourceKind, sourceRef string, at time.Time) (int, error) {
 	res, err := tx.ExecContext(ctx, `
 		UPDATE software_installs
 		   SET status = 'removed', updated_at = now()
@@ -196,8 +212,8 @@ func MarkAbsentRemoved(
 		   AND asset_id = $2
 		   AND source_kind = $3
 		   AND status <> 'removed'
-		   AND coalesce(source_ref, '') <> $4`,
-		tenantID, assetID, sourceKind, sourceRef)
+		   AND coalesce(source_ref, '') <> $4 AND last_seen_at <= $5`,
+		tenantID, assetID, sourceKind, sourceRef, at)
 	if err != nil {
 		return 0, err
 	}

@@ -28,14 +28,15 @@ import (
 // reaching SQL as an identifier.
 var assetFacetExpr = map[string]string{
 	// Assets / context
-	"business_unit": "COALESCE(NULLIF(a.business_unit, ''), 'Unknown')",
-	"environment":   "COALESCE(a.environment::text, 'Unknown')",
-	"owner_email":   "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
-	"owner":         "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
-	"support_group": "COALESCE(NULLIF(a.support_group, ''), 'Unknown')",
-	"status":        "COALESCE(a.asset_status::text, 'Unknown')",
-	"ownership":     "COALESCE(a.asset_ownership::text, 'Unknown')",
-	"stale_status":  "COALESCE(a.stale_status, 'Unknown')",
+	"business_unit":   "COALESCE(NULLIF(a.business_unit, ''), 'Unknown')",
+	"environment":     "COALESCE(a.environment::text, 'Unknown')",
+	"owner_email":     "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
+	"owner":           "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
+	"support_group":   "COALESCE(NULLIF(a.support_group, ''), 'Unknown')",
+	"status":          "COALESCE(a.asset_status::text, 'Unknown')",
+	"ownership":       "COALESCE(a.asset_ownership::text, 'Unknown')",
+	"stale_status":    "COALESCE(a.stale_status, 'Unknown')",
+	"identity_status": "a.identity_status",
 
 	// Location — the QUERY LANGUAGE reads these columns, not the tags JSON.
 	// Counting tag fallbacks here made the rail preview a site that

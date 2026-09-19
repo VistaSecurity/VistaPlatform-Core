@@ -15,6 +15,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/driftsettings"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/identityenrichment"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/identitysettings"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/jobs"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
@@ -25,6 +27,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
@@ -116,6 +119,8 @@ func main() {
 	// policy plus the read-only account of what the sweep has been doing.
 	autoScanStore := autoscan.NewStore(db)
 	autoScanHandler := handlers.NewAutoScanHandler(autoScanStore)
+	identityDiscoverySettingsHandler := handlers.NewIdentityDiscoverySettingsHandler(identitysettings.NewStore(db))
+	identityObservationHandler := handlers.NewIdentityObservationHandler(assetService)
 	cryptoAssetsHandler := handlers.NewCryptoAssetsHandler(assetService)
 	cryptoApplicationsHandler := handlers.NewCryptoApplicationsHandler(assetService)
 	integrationsHandler := handlers.NewIntegrationsHandler(assetService)
@@ -327,6 +332,10 @@ func main() {
 		api.PUT("/inventory-service/settings/identification", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identificationSettingsHandler.UpdateIdentificationSettings)
 		api.GET("/inventory-service/settings/drift", driftSettingsHandler.GetDriftSettings)
 		api.PUT("/inventory-service/settings/drift", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), driftSettingsHandler.UpdateDriftSettings)
+		api.POST("/inventory-service/approvals/merge-proposals/:id/preview", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.PreviewAssetMerge)
+		api.POST("/inventory-service/approvals/merge-proposals/:id/merge", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.ExecuteAssetMerge)
+		api.POST("/inventory-service/infrastructure-assets/merge/preview", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.PreviewAssetMerge)
+		api.POST("/inventory-service/infrastructure-assets/merge", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.ExecuteAssetMerge)
 		api.POST("/inventory-service/approvals/merge-proposals/:id/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.AcceptMergeProposal)
 		api.POST("/inventory-service/approvals/merge-proposals/:id/keep-separate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.KeepMergeProposalSeparate)
 		// Relationship proposals are the same surface and the same permission:
@@ -456,6 +465,8 @@ func main() {
 		// settings.update because it decides whether the platform probes the
 		// tenant's own network without being asked.
 		api.GET("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), autoScanHandler.GetAutoScan)
+		api.GET("/inventory-service/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), identityDiscoverySettingsHandler.Get)
+		api.PUT("/inventory-service/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), identityDiscoverySettingsHandler.Update)
 		api.PUT("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), autoScanHandler.UpdateAutoScan)
 		// Gated the same as the auto-scan summary above (settings.read), not
 		// discovery.read: the unified Jobs page is reached the same way the
@@ -531,6 +542,8 @@ func main() {
 		// settings.update because it decides whether the platform probes the
 		// tenant's own network without being asked.
 		api.GET("/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), autoScanHandler.GetAutoScan)
+		api.GET("/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), identityDiscoverySettingsHandler.Get)
+		api.PUT("/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), identityDiscoverySettingsHandler.Update)
 		api.PUT("/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), autoScanHandler.UpdateAutoScan)
 		api.OPTIONS("/discovery/jobs", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 		api.GET("/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), discoveryHandler.ListJobs)
@@ -618,6 +631,10 @@ func main() {
 		apiv2.PUT("/inventory-service/settings/identification", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identificationSettingsHandler.UpdateIdentificationSettings)
 		apiv2.GET("/inventory-service/settings/drift", driftSettingsHandler.GetDriftSettings)
 		apiv2.PUT("/inventory-service/settings/drift", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), driftSettingsHandler.UpdateDriftSettings)
+		apiv2.POST("/inventory-service/approvals/merge-proposals/:id/preview", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.PreviewAssetMerge)
+		apiv2.POST("/inventory-service/approvals/merge-proposals/:id/merge", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.ExecuteAssetMerge)
+		apiv2.POST("/inventory-service/infrastructure-assets/merge/preview", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.PreviewAssetMerge)
+		apiv2.POST("/inventory-service/infrastructure-assets/merge", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.ExecuteAssetMerge)
 		apiv2.POST("/inventory-service/approvals/merge-proposals/:id/accept", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.AcceptMergeProposal)
 		apiv2.POST("/inventory-service/approvals/merge-proposals/:id/keep-separate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetPhase1Handler.KeepMergeProposalSeparate)
 		apiv2.GET("/inventory-service/approvals/relationships", relationshipHandler.ListRelationshipProposals)
@@ -777,6 +794,14 @@ func main() {
 		// settings.update because it decides whether the platform probes the
 		// tenant's own network without being asked.
 		apiv2.GET("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), autoScanHandler.GetAutoScan)
+		apiv2.GET("/inventory-service/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), identityDiscoverySettingsHandler.Get)
+		apiv2.PUT("/inventory-service/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), identityDiscoverySettingsHandler.Update)
+		apiv2.GET("/inventory-service/discovery/observations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), identityObservationHandler.List)
+		apiv2.GET("/inventory-service/discovery/observations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), identityObservationHandler.Detail)
+		apiv2.POST("/inventory-service/discovery/observations/:id/confirm", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identityObservationHandler.Confirm)
+		apiv2.POST("/inventory-service/discovery/observations/:id/link", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identityObservationHandler.Link)
+		apiv2.POST("/inventory-service/discovery/observations/:id/dismiss", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identityObservationHandler.Dismiss)
+		apiv2.GET("/inventory-service/identity/summary", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), identityObservationHandler.Summary)
 		apiv2.PUT("/inventory-service/discovery/auto-scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), autoScanHandler.UpdateAutoScan)
 		apiv2.GET("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), discoveryHandler.ListJobs)
 		apiv2.POST("/inventory-service/discovery/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
@@ -947,6 +972,12 @@ func main() {
 	// that observed the host instead of the platform; without it every scan
 	// runs from the cluster and a host only a sensor can reach is never scanned.
 	autoScanJob := jobs.NewAutoActiveScanJob(autoScanStore, discoveryService, sensorrouting.NewStore(db), bypassDB)
+	go jobs.StartIdentityEvidenceWorker(ctx, bypassDB, assetService, mergeProposalService)
+
+	go jobs.StartIdentityEnrichmentWorker(ctx, bypassDB, &identityenrichment.Coordinator{
+		Store: &identityenrichment.Store{DB: db}, Backend: services.NewIdentityEnrichmentBackend(assetService, discoveryService),
+		Enabled: identity.AvailableCapabilities().Enrichment, Excluded: autoscan.PlatformExcludedPrefixes(),
+	})
 	go autoScanJob.Start(ctx)
 	if natsClient != nil {
 		autoScanSubscriber := subscribers.NewAutoScanSubscriber(natsClient, autoScanJob)

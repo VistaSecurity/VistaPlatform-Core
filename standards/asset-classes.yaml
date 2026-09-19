@@ -82,6 +82,7 @@ version: 1
 # `name` — which is NOT in the default order and is never used by a class that
 # does not list it explicitly.
 identifier_kinds:
+  - declaration_id              # server-issued operator confirmation, tenant scoped
   - agent_id                    # a host agent's own installation id
   - cloud_resource_id           # ARN, Azure resource id, GCP self-link
   - serial_number

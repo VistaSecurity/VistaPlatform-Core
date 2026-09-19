@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // appRolePassword is a throwaway password the harness assigns RLSAppRole (which
@@ -94,7 +95,11 @@ func openAsRole(t *testing.T, role, password string) *sql.DB {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("testdb: ping as %s: %v", role, err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	if err := shareddb.RegisterSessionPool(db, "postgres", u.String()); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = shareddb.CloseWithSessionPool(db) })
 	return db
 }
 

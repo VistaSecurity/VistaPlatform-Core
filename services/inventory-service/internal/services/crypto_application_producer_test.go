@@ -268,13 +268,13 @@ func TestUpsertCryptoApplicationSQL_ConflictsOnNaturalKey(t *testing.T) {
 		"ON CONFLICT (tenant_id, resource_identifier, encryption_context)",
 		"WHERE deleted_at IS NULL",
 		"DO UPDATE SET",
-		"last_verified_at     = NOW()",
+		"last_verified_at = GREATEST(crypto_applications.last_verified_at,EXCLUDED.last_verified_at)",
 	} {
 		if !strings.Contains(upsertCryptoApplicationSQL, want) {
 			t.Errorf("upsertCryptoApplicationSQL is missing %q — re-discovery would duplicate rows", want)
 		}
 	}
-	if strings.Contains(upsertCryptoApplicationSQL, "first_discovered_at  = ") {
-		t.Error("the upsert must not move first_discovered_at on conflict")
+	if !strings.Contains(upsertCryptoApplicationSQL, "first_discovered_at = LEAST(crypto_applications.first_discovered_at,EXCLUDED.first_discovered_at)") {
+		t.Error("the upsert must preserve the earliest actual observation")
 	}
 }

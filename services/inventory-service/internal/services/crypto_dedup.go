@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -262,24 +263,18 @@ const recordDiscoveryMethodSQL = `CASE
 
 // refreshCryptoImplementationSQL re-observes an existing configuration.
 //
-// first_discovered_at is deliberately untouched and last_verified_at is
-// refreshed: the two are a genuine first-seen/last-seen pair, both exposed by
-// the API and both offered as sort keys on the crypto-configuration list
-// (last_verified_at is the default sort). Collapsing them would make a
-// long-standing configuration look newly discovered.
-//
-// certificate_id and source_sensor_id are COALESCEd so a later observation that
-// captured no chain, or arrived from a sensor-less path, cannot erase a link an
-// earlier one established. raw_data is replaced outright — it is the latest
-// measurement's evidence (quality flags, enumerated versions), and stale
-// evidence is worse than none.
+// Source observation times maintain the first/last seen pair. Delayed receipts
+// can extend the historical range but cannot replace the latest measurement or
+// its selected certificate. Every observed certificate remains linked separately.
 const refreshCryptoImplementationSQL = `
 		UPDATE crypto_implementations
-		   SET certificate_id    = COALESCE($2::uuid, certificate_id),
-		       source_sensor_id  = COALESCE($3::uuid, source_sensor_id),
-		       raw_data          = $4::jsonb,
+		   SET certificate_id    = CASE WHEN certificate_id IS NULL OR $6 >= COALESCE(certificate_observed_at,last_verified_at) THEN COALESCE($2::uuid, certificate_id) ELSE certificate_id END,
+		       certificate_observed_at = CASE WHEN $2::uuid IS NOT NULL AND (certificate_id IS NULL OR $6 >= COALESCE(certificate_observed_at,last_verified_at)) THEN $6 ELSE certificate_observed_at END,
+		       source_sensor_id  = CASE WHEN $6 >= last_verified_at THEN COALESCE($3::uuid, source_sensor_id) ELSE source_sensor_id END,
+		       raw_data          = CASE WHEN $6 >= last_verified_at THEN $4::jsonb ELSE raw_data END,
 		       discovery_methods = ` + recordDiscoveryMethodSQL + `,
-		       last_verified_at  = NOW(),
+		       first_discovered_at = LEAST(first_discovered_at,$6),
+		       last_verified_at  = GREATEST(last_verified_at,$6),
 		       updated_at        = NOW()
 		 WHERE id = $1`
 
@@ -294,11 +289,13 @@ const refreshCryptoImplementationSQL = `
 // observation did measure still wins on its own keys.
 const reobserveCryptoImplementationSQL = `
 		UPDATE crypto_implementations
-		   SET certificate_id    = COALESCE($2::uuid, certificate_id),
-		       source_sensor_id  = COALESCE($3::uuid, source_sensor_id),
-		       raw_data          = COALESCE(raw_data, '{}'::jsonb) || $4::jsonb,
+		   SET certificate_id    = CASE WHEN certificate_id IS NULL OR $6 >= COALESCE(certificate_observed_at,last_verified_at) THEN COALESCE($2::uuid, certificate_id) ELSE certificate_id END,
+		       certificate_observed_at = CASE WHEN $2::uuid IS NOT NULL AND (certificate_id IS NULL OR $6 >= COALESCE(certificate_observed_at,last_verified_at)) THEN $6 ELSE certificate_observed_at END,
+		       source_sensor_id  = CASE WHEN $6 >= last_verified_at THEN COALESCE($3::uuid, source_sensor_id) ELSE source_sensor_id END,
+		       raw_data          = CASE WHEN $6 >= last_verified_at THEN COALESCE(raw_data, '{}'::jsonb) || $4::jsonb ELSE $4::jsonb || COALESCE(raw_data, '{}'::jsonb) END,
 		       discovery_methods = ` + recordDiscoveryMethodSQL + `,
-		       last_verified_at  = NOW(),
+		       first_discovered_at = LEAST(first_discovered_at,$6),
+		       last_verified_at  = GREATEST(last_verified_at,$6),
 		       updated_at        = NOW()
 		 WHERE id = $1`
 
@@ -327,11 +324,13 @@ const enrichCryptoImplementationSQL = `
 		       symmetric_encryption   = COALESCE(symmetric_encryption,   $10::text),
 		       hash_algorithm         = COALESCE(hash_algorithm,         $11::text),
 		       key_size               = COALESCE(key_size,               $12::integer),
-		       certificate_id         = COALESCE($2::uuid, certificate_id),
-		       source_sensor_id       = COALESCE($3::uuid, source_sensor_id),
-		       raw_data               = COALESCE(raw_data, '{}'::jsonb) || $4::jsonb,
+		       certificate_id         = CASE WHEN certificate_id IS NULL OR $13 >= COALESCE(certificate_observed_at,last_verified_at) THEN COALESCE($2::uuid, certificate_id) ELSE certificate_id END,
+		       certificate_observed_at = CASE WHEN $2::uuid IS NOT NULL AND (certificate_id IS NULL OR $13 >= COALESCE(certificate_observed_at,last_verified_at)) THEN $13 ELSE certificate_observed_at END,
+		       source_sensor_id       = CASE WHEN $13 >= last_verified_at THEN COALESCE($3::uuid, source_sensor_id) ELSE source_sensor_id END,
+		       raw_data               = CASE WHEN $13 >= last_verified_at THEN COALESCE(raw_data, '{}'::jsonb) || $4::jsonb ELSE $4::jsonb || COALESCE(raw_data, '{}'::jsonb) END,
 		       discovery_methods      = ` + recordDiscoveryMethodSQL + `,
-		       last_verified_at       = NOW(),
+		       first_discovered_at    = LEAST(first_discovered_at,$13),
+		       last_verified_at       = GREATEST(last_verified_at,$13),
 		       updated_at             = NOW()
 		 WHERE id = $1`
 
@@ -555,8 +554,13 @@ func upsertCryptoImplementation(
 	certificateID interface{},
 	sourceSensorID interface{},
 	rawJSON []byte,
+	observationTimes ...time.Time,
 ) (uuid.UUID, cryptoUpsertOutcome, error) {
 	endpoint := nullUUIDValue(k.EndpointID)
+	observedAt := time.Now().UTC()
+	if len(observationTimes) > 0 && !observationTimes[0].IsZero() {
+		observedAt = observationTimes[0].UTC()
+	}
 
 	var existing uuid.UUID
 	err := tx.QueryRow(
@@ -567,10 +571,10 @@ func upsertCryptoImplementation(
 		endpoint,
 	).Scan(&existing)
 	if err == nil {
-		if _, e := tx.Exec(refreshCryptoImplementationSQL, existing, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod); e != nil {
+		if _, e := tx.Exec(refreshCryptoImplementationSQL, existing, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
 			return uuid.Nil, cryptoUpsertRefreshed, fmt.Errorf("refresh crypto implementation %s: %w", existing, e)
 		}
-		if e := linkLeafCertificate(tx, existing); e != nil {
+		if e := linkLeafCertificate(tx, existing, certificateID); e != nil {
 			return uuid.Nil, cryptoUpsertRefreshed, e
 		}
 		return existing, cryptoUpsertRefreshed, nil
@@ -595,11 +599,11 @@ func upsertCryptoImplementation(
 			enrichCryptoImplementationSQL,
 			partial, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod,
 			k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
-			k.Symmetric, k.Hash, k.KeySize,
+			k.Symmetric, k.Hash, k.KeySize, observedAt,
 		); e != nil {
 			return uuid.Nil, cryptoUpsertEnriched, fmt.Errorf("enrich crypto implementation %s: %w", partial, e)
 		}
-		if e := linkLeafCertificate(tx, partial); e != nil {
+		if e := linkLeafCertificate(tx, partial, certificateID); e != nil {
 			return uuid.Nil, cryptoUpsertEnriched, e
 		}
 		return partial, cryptoUpsertEnriched, nil
@@ -611,10 +615,10 @@ func upsertCryptoImplementation(
 	var superset uuid.UUID
 	err = tx.QueryRow(findSupersetCryptoImplementationSQL, subsetArgs...).Scan(&superset)
 	if err == nil {
-		if _, e := tx.Exec(reobserveCryptoImplementationSQL, superset, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod); e != nil {
+		if _, e := tx.Exec(reobserveCryptoImplementationSQL, superset, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
 			return uuid.Nil, cryptoUpsertPartialReobserved, fmt.Errorf("re-observe crypto implementation %s: %w", superset, e)
 		}
-		if e := linkLeafCertificate(tx, superset); e != nil {
+		if e := linkLeafCertificate(tx, superset, certificateID); e != nil {
 			return uuid.Nil, cryptoUpsertPartialReobserved, e
 		}
 		return superset, cryptoUpsertPartialReobserved, nil
@@ -629,7 +633,7 @@ func upsertCryptoImplementation(
 		id, tenantID, k.AssetID, k.Protocol, k.ProtocolVersion, k.CipherSuite,
 		k.Hash, k.KeySize, certificateID, sourceSensorID, rawJSON,
 		k.KeyExchange, k.Signature, k.Symmetric,
-		k.DiscoveryMethod, endpoint,
+		k.DiscoveryMethod, endpoint, observedAt,
 	); e != nil {
 		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("insert crypto implementation: %w", e)
 	}
@@ -648,9 +652,19 @@ func upsertCryptoImplementation(
 // successful ingest. Rolling the transaction back leaves no configuration at
 // all, which is the honest outcome: the certificate link is not decoration, it
 // is how the certificate is found.
-func linkLeafCertificate(tx *sqlx.Tx, implID uuid.UUID) error {
+func linkLeafCertificate(tx *sqlx.Tx, implID uuid.UUID, observedCertificate ...interface{}) error {
 	if _, err := tx.Exec(linkLeafCertificateSQL, implID); err != nil {
 		return fmt.Errorf("link leaf certificate for crypto implementation %s: %w", implID, err)
+	}
+	if len(observedCertificate) > 0 {
+		// Keep historical evidence even when an older receipt cannot replace
+		// the currently selected leaf certificate.
+		_, err := tx.Exec(`INSERT INTO crypto_implementation_certificates(crypto_implementation_id,certificate_id,certificate_role,certificate_order)
+		 SELECT id,$2::uuid,'leaf',0 FROM crypto_implementations WHERE id=$1 AND $2::uuid IS NOT NULL
+		 ON CONFLICT(crypto_implementation_id,certificate_id) DO NOTHING`, implID, observedCertificate[0])
+		if err != nil {
+			return fmt.Errorf("link observed leaf certificate: %w", err)
+		}
 	}
 	return nil
 }

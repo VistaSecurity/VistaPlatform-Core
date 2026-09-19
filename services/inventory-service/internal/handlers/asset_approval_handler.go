@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 )
 
 // assetApprovalStore is the narrow persistence surface the approval handler needs.
@@ -59,6 +61,10 @@ func (h *AssetApprovalHandler) ApproveAssets(c *gin.Context) {
 	}
 
 	if err := h.assetService.ApproveAssets(tenantID, ids, approvalActor(c)); err != nil {
+		if errors.Is(err, services.ErrAssetLifecycleConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to approve assets"})
 		return
 	}
@@ -119,6 +125,10 @@ func (h *AssetApprovalHandler) DenyAssets(c *gin.Context) {
 	}
 
 	if err := h.assetService.DenyAssets(tenantID, ids, userID); err != nil {
+		if errors.Is(err, services.ErrAssetLifecycleConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to deny assets"})
 		return
 	}

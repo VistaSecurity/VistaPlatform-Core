@@ -15,6 +15,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -133,7 +134,11 @@ func (jp *JobProcessor) dispatchToSensor(job *models.DiscoveryJob) error {
 		jp.failDispatch(job, fmt.Sprintf("could not read the job's targets: %v", err))
 		return nil
 	}
-	payload := buildDispatchPayload(job, rows, jp.getJobOptions(job.TenantID, job.ID))
+	options, err := jp.getJobOptions(job.TenantID, job.ID)
+	if err != nil {
+		return fmt.Errorf("read discovery job policy markers: %w", err)
+	}
+	payload := buildDispatchPayload(job, rows, options)
 	if len(payload.Targets) == 0 {
 		jp.failDispatch(job, "job has no targets; nothing was dispatched")
 		return nil
@@ -151,6 +156,9 @@ func (jp *JobProcessor) dispatchToSensor(job *models.DiscoveryJob) error {
 	// no tenant_id; its RLS policy isolates through sensors, so the tenant
 	// transaction satisfies its WITH CHECK the same way it does the job's.
 	err = jp.withTenantTxx(ctx, job.TenantID, func(tx *sqlx.Tx) error {
+		if err := authorizeEnrichmentDispatch(tx, payload, sensor.ID); err != nil {
+			return err
+		}
 		if _, e := tx.Exec(`
 			INSERT INTO sensor_commands (id, sensor_id, command_type, payload, status, created_at, expires_at)
 			VALUES ($1, $2, $3, $4::jsonb, 'pending', $5, $6)`,
@@ -170,6 +178,9 @@ func (jp *JobProcessor) dispatchToSensor(job *models.DiscoveryJob) error {
 		}
 		return nil
 	})
+	if errors.Is(err, errIdentityEnrichmentPaused) {
+		return nil
+	} // Retain queued work for the existing recovery sweep.
 	if err != nil {
 		// The transaction rolled back, so no command exists. If the job was
 		// simply not queued any more (a concurrent processor got there first)

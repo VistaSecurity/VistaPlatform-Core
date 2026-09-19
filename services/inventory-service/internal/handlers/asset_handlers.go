@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
@@ -131,6 +132,18 @@ func NewAssetHandler(assetService assetStore, db *database.DB) *AssetHandler {
 // fail-open the review flagged. Skipped only when no checker is wired
 // (DB-free contract tests), which is the one deliberately optional case.
 func (h *AssetHandler) enforceAssetCap(c *gin.Context, tenantUUID uuid.UUID, additional int) bool {
+	if gate, ok := h.assetService.(interface {
+		UsesIdentityAdmission(context.Context, uuid.UUID) (bool, error)
+	}); ok {
+		active, err := gate.UsesIdentityAdmission(c.Request.Context(), tenantUUID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Unable to read identity admission policy"})
+			return false
+		}
+		if active {
+			return true
+		} // The shared admission transaction checks actual creation.
+	}
 	if h.limits == nil {
 		return true
 	}
@@ -686,6 +699,11 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 
 	asset, err := h.assetService.CreateAsset(tenantUUID, input)
 	if err != nil {
+		var retained *identity.RetainedObservation
+		if errors.As(err, &retained) {
+			c.JSON(http.StatusAccepted, retained.Result)
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to create asset"})
 		return
 	}
@@ -741,21 +759,8 @@ func (h *AssetHandler) CreateAssetsBulk(c *gin.Context) {
 	// inserting anything, mirroring single-asset creation. v1 rejects the
 	// entire import if it would exceed the cap; filling up to the remaining
 	// headroom is a possible follow-up.
-	if h.limits != nil {
-		result, err := h.limits.CheckAssetLimit(tenantUUID, len(req.Rows))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check asset limit"})
-			return
-		}
-		if !result.Allowed {
-			c.JSON(http.StatusPaymentRequired, gin.H{
-				"error":          result.Message,
-				"current_usage":  result.CurrentUsage,
-				"limit":          result.Limit,
-				"upgrade_prompt": result.UpgradePrompt,
-			})
-			return
-		}
+	if !h.enforceAssetCap(c, tenantUUID, len(req.Rows)) {
+		return
 	}
 
 	res := h.assetService.BulkCreateAssets(tenantUUID, req.Rows)
@@ -1023,6 +1028,10 @@ func (h *AssetHandler) RestoreAsset(c *gin.Context) {
 	}
 
 	if err := h.assetService.RestoreAsset(tenantUUID, assetID); err != nil {
+		if errors.Is(err, services.ErrAssetLifecycleConflict) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to restore asset"})
 		return
 	}

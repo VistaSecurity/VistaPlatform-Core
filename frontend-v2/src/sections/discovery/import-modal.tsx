@@ -402,10 +402,12 @@ export function ImportSpreadsheetModal({
     onSuccess: (data) => {
       setResult(data);
       setPhase('result');
-      toast.success(`Imported ${data.created} ${TARGET_LABEL[target]}`);
-      qc.invalidateQueries({ queryKey: ['inventory'] });
-      qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] });
-      qc.invalidateQueries({ queryKey: ['discovery'] });
+      toast.success(`Imported ${data.created} ${TARGET_LABEL[target]}${data.unresolved ? `; retained ${data.unresolved} unresolved observations` : ''}`);
+      void qc.invalidateQueries({ queryKey: ['inventory'] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] });
+      void qc.invalidateQueries({ queryKey: ['discovery'] });
+      void qc.invalidateQueries({ queryKey: ['identity-observations'] });
+      void qc.invalidateQueries({ queryKey: ['identity-summary'] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Import failed'),
   });
@@ -545,10 +547,11 @@ export function ImportSpreadsheetModal({
         <div>
           <div style={{ display: 'flex', gap: 16, marginBottom: 14 }}>
             <Stat label="Created" value={result.created} tone="var(--ok)" />
+            {!!result.unresolved && <Stat label="Unresolved" value={result.unresolved} tone="var(--warn-strong)" />}
             <Stat label="Skipped" value={result.skipped} tone="var(--warn-strong)" />
             <Stat label="Failed" value={result.failed} tone={result.failed ? 'var(--danger)' : 'var(--app-t3)'} />
           </div>
-          {(result.skipped > 0 || result.failed > 0) && (
+          {(result.skipped > 0 || result.failed > 0 || !!result.unresolved) && (
             <ResultTable result={result} />
           )}
           {target === 'segments' && result.created > 0 && (

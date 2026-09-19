@@ -50,6 +50,7 @@
 package services
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/google/uuid"
@@ -295,20 +296,16 @@ func (obs sshObservation) sshDerivedColumns() derivedCipherColumns {
 //
 // Anything that does not resolve against the catalogue is left unlinked, per
 // the standing rule that an unassessed algorithm must not be invented.
-func (s *AssetService) classifyAndLinkSSH(implID uuid.UUID, obs sshObservation) {
+func (s *AssetService) classifyAndLinkSSH(implID uuid.UUID, obs sshObservation) error {
 	if s.algorithmService == nil || !obs.Present {
-		return
+		return nil
 	}
 
+	var errs []error
 	link := func(value, category string, inferred bool) {
-		if strings.TrimSpace(value) == "" {
-			return
+		if err := s.classifyAndLinkComponent(implID, value, category, inferred); err != nil {
+			errs = append(errs, err)
 		}
-		alg, err := s.algorithmService.ClassifyAlgorithm(value, category)
-		if err != nil || alg == nil {
-			return
-		}
-		_ = s.algorithmService.LinkAlgorithmToImplementation(implID, alg.ID, category, inferred)
 	}
 
 	// Measured.
@@ -336,4 +333,5 @@ func (s *AssetService) classifyAndLinkSSH(implID uuid.UUID, obs sshObservation) 
 	linkOffered(obs.OfferedHostKeys, "signature")
 	linkOffered(obs.OfferedCiphers, "symmetric")
 	linkOffered(obs.OfferedMACs, "hash")
+	return errors.Join(errs...)
 }

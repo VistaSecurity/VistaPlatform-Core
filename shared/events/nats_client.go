@@ -29,6 +29,15 @@ type NATSClient struct {
 //
 // An empty url with no NATS_URL env var returns an error.
 func NewNATSClient(url string) (*NATSClient, error) {
+	return newNATSClient(url, 5)
+}
+
+// NewNATSClientOnce makes one connection attempt for an already retrying durable worker.
+func NewNATSClientOnce(url string) (*NATSClient, error) {
+	return newNATSClient(url, 1)
+}
+
+func newNATSClient(url string, attempts int) (*NATSClient, error) {
 	if url == "" {
 		url = os.Getenv("NATS_URL")
 		if url == "" {
@@ -41,7 +50,7 @@ func NewNATSClient(url string) (*NATSClient, error) {
 		stop: make(chan struct{}),
 	}
 
-	if err := client.connect(); err != nil {
+	if err := client.connectAttempts(attempts); err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
@@ -60,7 +69,10 @@ func NewNATSClient(url string) (*NATSClient, error) {
 
 // connect establishes connection to NATS with retry logic
 func (c *NATSClient) connect() error {
-	maxRetries := 5
+	return c.connectAttempts(5)
+}
+
+func (c *NATSClient) connectAttempts(maxRetries int) error {
 	retryDelay := 2 * time.Second
 
 	for i := 0; i < maxRetries; i++ {

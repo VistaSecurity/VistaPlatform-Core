@@ -11,6 +11,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -27,6 +28,33 @@ import (
 //   TEST_DATABASE_URL='postgres://postgres:p@localhost:15433/test?sslmode=disable' go test ./entitlements/...
 
 const skipMessage = "TEST_DATABASE_URL not set; skipping DB-backed entitlement resolver tests"
+
+func TestIntegration_QuantityInTxUsesUncommittedAllowanceAndTenantScope(t *testing.T) {
+	_, db, tenant := setupResolver(t, "starter")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// With one pool connection, attempting a nested transaction would block.
+	db.SetMaxOpenConns(1)
+	defer db.SetMaxOpenConns(0)
+	rollback := errors.New("test rollback")
+	err := shareddatabase.WithTenantTx(ctx, db, tenant, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason)
+		 SELECT $1,id,'{"quantity":7}'::jsonb,'transaction regression' FROM billable_items WHERE key='max_assets'`, tenant); err != nil {
+			return err
+		}
+		quantity, err := entitlements.GetQuantityInTx(ctx, tx, tenant, "max_assets")
+		if err != nil || quantity == nil || *quantity != 7 {
+			t.Fatalf("uncommitted allowance unavailable: quantity=%v err=%v", quantity, err)
+		}
+		if _, err := entitlements.GetQuantityInTx(ctx, tx, uuid.New(), "max_assets"); !errors.Is(err, entitlements.ErrUnknownTenant) {
+			t.Fatalf("foreign transaction scope accepted: %v", err)
+		}
+		return rollback
+	})
+	if !errors.Is(err, rollback) {
+		t.Fatal(err)
+	}
+}
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()

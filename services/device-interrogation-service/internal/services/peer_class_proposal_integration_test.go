@@ -39,6 +39,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -646,4 +647,171 @@ func peerAssetByHostname(t *testing.T, db *sql.DB, tenant uuid.UUID, hostname st
 		t.Fatalf("find the peer asset by hostname %s: %v", hostname, err)
 	}
 	return id
+}
+
+func TestIntegration_ObservationSink_RetainsWeakPeerFactsAndEdges(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	tenant, other := testdb.NewTenant(t, owner), testdb.NewTenant(t, owner)
+	app := testdb.ConnectAsAppRole(t, owner)
+	app.SetMaxOpenConns(1)
+	self := subjectAsset(t, owner, tenant, "controller")
+	target := subjectAsset(t, owner, tenant, "verified-target")
+	oldSeen := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+	if _, err := owner.Exec(`UPDATE assets SET last_seen_at=$3,class_key='unknown_host',class_source_kind='declared',site='Operator site' WHERE tenant_id=$1 AND id=$2`, tenant, target, oldSeen); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	enable := func(s *ObservationSink) {
+		t.Helper()
+		_, repo, err := s.engine()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.eng, err = identity.New(identity.Config{Repo: repo, AdmissionEnabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sink := NewObservationSink(app)
+	enable(sink)
+	seen := oldSeen.Add(time.Hour)
+	peer := di.PeerRef{DisplayName: "mystery.local", Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierHostname, Value: "mystery.local"}}}
+	obs := InterrogationObservations{ObservedAt: seen,
+		Facts:         []di.FactObservation{{Subject: peer, Key: "hw.model", Value: "Access point", Confidence: .8}},
+		Relationships: []di.RelationshipObservation{{Type: string(relationships.ConnectsTo), Direction: di.SubjectToPeer, Peer: peer, Attributes: map[string]interface{}{"port": "4", "auth_key": "must-not-retain-this-secret"}}},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for range 2 {
+		if err := sink.Persist(ctx, tenant, self, peerSource("interrogation:retained-peer"), obs); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM assets WHERE tenant_id=$1`, tenant); n != 2 {
+		t.Fatalf("weak peer created asset: %d", n)
+	}
+	var observation uuid.UUID
+	var body string
+	if err := owner.QueryRow(`SELECT observation_id,payload::text FROM identity_observation_peer_contexts WHERE tenant_id=$1`, tenant).Scan(&observation, &body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, "must-not-retain-this-secret") || !strings.Contains(body, "Access point") {
+		t.Fatalf("retained payload lost typed context or kept secrets")
+	}
+	if n := countRows(t, owner, `SELECT occurrence_count FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, observation); n != 1 {
+		t.Fatalf("repeated delivery counted as corroboration: %d", n)
+	}
+	if _, err := owner.Exec(`UPDATE identity_observations SET state='linked',asset_id=$3,confirmed_by=$4 WHERE tenant_id=$1 AND id=$2`, tenant, observation, target, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(`UPDATE assets SET asset_status='pending_approval' WHERE tenant_id=$1 AND id=$2`, tenant, target); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewObservationSink(app)
+	enable(restarted)
+	if err := restarted.ReplayRetainedPeers(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.ReplayRetainedPeers(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM asset_facts WHERE tenant_id=$1 AND asset_id=$2 AND key='hw.model'`, tenant, target); n != 0 {
+		t.Fatal("unapproved linked peer materialized")
+	}
+	survivor := subjectAsset(t, owner, tenant, "controller-survivor")
+	if _, err := owner.Exec(`UPDATE assets SET asset_status='archived',metadata=jsonb_build_object('merged_into',$3::text) WHERE tenant_id=$1 AND id=$2`, tenant, self, survivor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(`UPDATE assets SET asset_status='monitoring' WHERE tenant_id=$1 AND id=$2`, tenant, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.Exec(`UPDATE identity_observation_peer_contexts SET next_attempt_at=now() WHERE tenant_id=$1`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := restarted.ReplayRetainedPeers(ctx, tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM identity_observation_peer_contexts WHERE tenant_id=$1 AND materialized_at IS NOT NULL`, tenant); n != 1 {
+		t.Fatalf("context not acknowledged exactly once: %d", n)
+	}
+	var factTime, assetSeen time.Time
+	var class, site string
+	if err := owner.QueryRow(`SELECT observed_at FROM asset_facts WHERE tenant_id=$1 AND asset_id=$2 AND key='hw.model'`, tenant, target).Scan(&factTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.QueryRow(`SELECT last_seen_at,class_key,site FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, target).Scan(&assetSeen, &class, &site); err != nil {
+		t.Fatal(err)
+	}
+	if !factTime.Equal(seen) || !assetSeen.Equal(oldSeen) || class != "unknown_host" || site != "Operator site" {
+		t.Fatalf("replay changed clocks/safeguards: %v %v %s %s", factTime, assetSeen, class, site)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM asset_relationships WHERE tenant_id=$1 AND from_asset_id=$2 AND to_asset_id=$3`, tenant, survivor, target); n != 1 {
+		t.Fatalf("retained relationship did not follow controller redirect: %d", n)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND value='mystery.local'`, tenant, target); n != 0 {
+		t.Fatal("operator linkage promoted weak alias")
+	}
+}
+
+func TestIntegration_ObservationSink_UsesControllerProofWithoutTrustingAdvertisements(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	tenant := testdb.NewTenant(t, owner)
+	if _, err := owner.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'DHCP LAN','cidr','192.0.2.0/24','private','production',true,'{"dynamic":true}')`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	sink := NewObservationSink(testdb.ConnectAsAppRole(t, owner))
+	source := peerSource("interrogation:controller-proof")
+	for _, tc := range []struct {
+		name string
+		peer di.PeerRef
+		want bool
+	}{
+		{"active interface", di.PeerRef{IdentityEvidence: di.PeerIdentityEvidence{ConnectedInterface: true}, Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierMACAddress, Value: "00:1a:2b:3c:4d:5e"}, {Kind: di.IdentifierIPAddress, Value: "192.0.2.20"}}}, true},
+		{"dynamic address only", di.PeerRef{IdentityEvidence: di.PeerIdentityEvidence{ConnectedInterface: true}, Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierIPAddress, Value: "192.0.2.20"}}}, false},
+		{"advertised interface", di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierMACAddress, Value: "00:1a:2b:3c:4d:5e"}, {Kind: di.IdentifierIPAddress, Value: "192.0.2.20"}}}, false},
+		{"offline inventory serial", di.PeerRef{IdentityEvidence: di.PeerIdentityEvidence{ControllerInventory: true}, Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierSerialNumber, Value: "DEVICE-SERIAL"}}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs, _, err := sink.peerObservation(context.Background(), tenant, tc.peer, source, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := identity.AssessAdmission(obs); got.Established != tc.want {
+				t.Fatalf("admission=%+v want established=%t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIntegration_ObservationSink_SegmentPreparationFailureStopsPeers(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	tenant := testdb.NewTenant(t, owner)
+	self := subjectAsset(t, owner, tenant, "controller")
+	name := "reject_test_segment_" + strings.ReplaceAll(tenant.String(), "-", "")
+	if _, err := owner.Exec(`CREATE FUNCTION ` + name + `() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.tenant_id='` + tenant.String() + `'::uuid THEN RAISE EXCEPTION 'test segment preparation failure'; END IF; RETURN NEW; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = owner.Exec(`DROP FUNCTION IF EXISTS ` + name + `() CASCADE`) })
+	if _, err := owner.Exec(`CREATE TRIGGER ` + name + ` BEFORE INSERT ON network_segments FOR EACH ROW EXECUTE FUNCTION ` + name + `() `); err != nil {
+		t.Fatal(err)
+	}
+	peer := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierMACAddress, Value: "00:1a:2b:3c:4d:5e"}, {Kind: di.IdentifierIPAddress, Value: "192.0.2.20"}}}
+	sink := NewObservationSink(testdb.ConnectAsAppRole(t, owner))
+	err := sink.Persist(context.Background(), tenant, self, peerSource("interrogation:preparation-failure"), InterrogationObservations{Facts: []di.FactObservation{
+		{Key: "net.vlans", Value: []map[string]interface{}{{"subnet": "192.0.2.0/24", "dhcp_enabled": true}}},
+		{Subject: peer, Key: "hw.vendor", Value: "Example", Confidence: 1},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "vlan segments") {
+		t.Fatalf("preparation failure not reported: %v", err)
+	}
+	if n := countRows(t, owner, `SELECT count(*) FROM assets WHERE tenant_id=$1`, tenant); n != 1 {
+		t.Fatalf("peer resolved after segment failure: %d", n)
+	}
 }

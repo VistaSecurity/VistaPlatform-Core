@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -368,6 +369,7 @@ func TestContract_MergeProposals_ErrorStatuses(t *testing.T) {
 		{services.ErrMergeProposalResolved, http.StatusConflict},
 		{services.ErrMergeObservationMissing, http.StatusConflict},
 		{services.ErrMergeCandidateNotInProposal, http.StatusBadRequest},
+		{services.ErrMergeProposalChanged, http.StatusConflict},
 		{errors.New("boom"), http.StatusInternalServerError},
 	} {
 		eng := newPhase1Engine(NewAssetPhase1Handler(nil, nil, nil, &stubProposalStore{err: tc.err}))
@@ -459,5 +461,44 @@ func TestContract_MergeProposals_LimitIsCapped(t *testing.T) {
 			t.Errorf("%q: echo limit=%d offset=%d, want %d/%d",
 				tc.query, got.Limit, got.Offset, tc.wantLimit, tc.wantOff)
 		}
+	}
+}
+
+type stubMergePreviewStore struct {
+	stubProposalStore
+	preview   *services.AssetMergePreview
+	merge     *services.AssetMergeResult
+	selection services.MergeSelection
+}
+
+func (s *stubMergePreviewStore) PreviewMerge(_ context.Context, _ uuid.UUID, _ uuid.UUID, in services.MergeSelection) (*services.AssetMergePreview, error) {
+	s.selection = in
+	return s.preview, s.err
+}
+func (s *stubMergePreviewStore) ExecuteMerge(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, in services.MergeExecutionRequest) (*services.AssetMergeResult, error) {
+	s.selection = in.MergeSelection
+	return s.merge, s.err
+}
+
+func TestMergePreviewHandlers_ExplicitSelectionAndRefreshConflict(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	source, survivor := uuid.New(), uuid.New()
+	store := &stubMergePreviewStore{preview: &services.AssetMergePreview{MergeSelection: services.MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}, Revision: strings.Repeat("a", 64), Assets: []services.MergePreviewAsset{}, Conflicts: []services.MergeFieldConflict{}, SelectedFields: map[string]any{}, Children: []services.MergeChildCount{}, Evidence: []json.RawMessage{}}}
+	h := NewAssetPhase1Handler(nil, nil, nil, store)
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set("tenantID", uuid.New()); c.Set("userID", uuid.New()) })
+	r.POST("/preview", h.PreviewAssetMerge)
+	r.POST("/merge", h.ExecuteAssetMerge)
+	body := `{"source_asset_ids":["` + source.String() + `"],"survivor_asset_id":"` + survivor.String() + `"}`
+	response := httptest.NewRecorder()
+	r.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(body)))
+	if response.Code != http.StatusOK || len(store.selection.SourceAssetIDs) != 1 || store.selection.SourceAssetIDs[0] != source {
+		t.Fatalf("explicit selection lost: %d %s", response.Code, response.Body.String())
+	}
+	store.err = services.ErrMergePreviewChanged
+	response = httptest.NewRecorder()
+	r.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/merge", strings.NewReader(body)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"refresh_required":true`) {
+		t.Fatalf("stale response not refreshable: %d %s", response.Code, response.Body.String())
 	}
 }

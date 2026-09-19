@@ -385,6 +385,9 @@ func comparableAttributes(vendor, model string) map[string]any {
 func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identity.NewAsset) (identity.AssetRef, error) {
 	var ref identity.AssetRef
 	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
+		if err := lockIdentifiers(ctx, tx, tenantID, a.Identifiers); err != nil {
+			return err
+		}
 		return r.savepoint(ctx, tx, "identity_create_asset", func() error {
 			classKey := strings.TrimSpace(a.ClassKey)
 			if classKey == "" {
@@ -469,8 +472,15 @@ func (r *Repository) AttachIdentifiers(ctx context.Context, asset identity.Asset
 		return nil
 	}
 	return r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
-		if err := assertAssetExists(ctx, tx, asset); err != nil {
+		if err := lockIdentifiers(ctx, tx, asset.TenantID, ids); err != nil {
 			return err
+		}
+		writable, err := lockWritableAsset(ctx, tx, asset)
+		if err != nil {
+			return err
+		}
+		if !writable {
+			return nil
 		}
 		return r.savepoint(ctx, tx, "identity_attach", func() error {
 			return r.attach(ctx, tx, asset, ids)
@@ -534,8 +544,12 @@ func (r *Repository) UpsertEndpoints(ctx context.Context, asset identity.AssetRe
 		return nil
 	}
 	return r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
-		if err := assertAssetExists(ctx, tx, asset); err != nil {
+		writable, err := lockWritableAsset(ctx, tx, asset)
+		if err != nil {
 			return err
+		}
+		if !writable {
+			return nil
 		}
 		return r.savepoint(ctx, tx, "identity_endpoints", func() error {
 			return r.upsertEndpoints(ctx, tx, asset, eps)
@@ -1025,6 +1039,14 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 				LIMIT 1`, tenantID, fingerprint).Scan(&id); err != nil {
 				return fmt.Errorf("identity/postgres: find the existing merge proposal: %w", err)
 			}
+			// A recurring sighting refreshes the pending question's evidence,
+			// without changing its original proposal time or any decision.
+			if _, err := tx.ExecContext(ctx, `UPDATE public.asset_history
+             SET changes_json=changes_json||$3::jsonb||jsonb_build_object('latest_evidence_at',$4::timestamptz)
+             WHERE tenant_id=$1 AND id=$2 AND coalesce(changes_json->>'status','pending')='pending'
+             AND coalesce((changes_json->>'latest_evidence_at')::timestamptz,created_at)<=$4`, tenantID, id, payload, timeOrNow(p.ProposedAt)); err != nil {
+				return fmt.Errorf("identity/postgres: refresh pending merge evidence: %w", err)
+			}
 			reused = true
 			// Still refresh the observation's status below: the asset is
 			// contested whether or not this is the first time we said so.
@@ -1336,6 +1358,21 @@ func (r *Repository) Endpoints(ref identity.AssetRef) []identity.EndpointObserva
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// lockWritableAsset prevents post-resolution writes racing a merge. Ordinary
+// archived records still match historical evidence without receiving children;
+// merged/deleted references must be resolved again to their current owner.
+func lockWritableAsset(ctx context.Context, tx *sql.Tx, ref identity.AssetRef) (bool, error) {
+	var archived, unavailable bool
+	err := tx.QueryRowContext(ctx, `SELECT asset_status='archived',deleted_at IS NOT NULL OR NULLIF(metadata->>'merged_into','') IS NOT NULL FROM assets WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, ref.TenantID, ref.ID).Scan(&archived, &unavailable)
+	if errors.Is(err, sql.ErrNoRows) || unavailable {
+		return false, fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+	}
+	if err != nil {
+		return false, err
+	}
+	return !archived, nil
+}
 
 func assertAssetExists(ctx context.Context, tx *sql.Tx, ref identity.AssetRef) error {
 	assetID, err := parseAsset(ref.ID)

@@ -106,6 +106,7 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 
 	// Initialize handlers
 	deviceHandlers := handlers.NewDeviceHandlers(deviceService, db, bypassDB, redis)
+	deviceHandlers.RegisterSourceRefresh(router, services.NewConfiguredSourceRefresh(db, jobQueueService, deviceService, deviceHandlers.PrepareSourceRefreshJob))
 	scheduleHandlers := handlers.NewScheduleHandlers(schedulerService)
 	healthHandlers := handlers.NewHealthHandlers(healthMetricsService)
 	integrationHandlers := handlers.NewIntegrationHandlers(db, bypassDB, encryptionKey)
@@ -821,6 +822,18 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 			inserted, sdErr := cloudService.WriteSensorDiscoveries(ctx, tenantID, jobID.String(), req.IntegrationID, cloudProvider, devices)
 			if sdErr != nil {
 				log.Printf("ERROR: Failed to write sensor discoveries: %v", sdErr)
+				failure := "Cloud evidence could not be persisted; retry discovery"
+				if err := discoveryIntegration.UpdateJobStatus(ctx, jobID, "failed", &failure); err != nil {
+					log.Printf("Failed to record cloud persistence failure: %v", err)
+				}
+				statusUpdated = true
+				if deviceJob != nil {
+					if err := jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &failure); err != nil {
+						log.Printf("Failed to record cloud device job failure: %v", err)
+					}
+					deviceJobStatusUpdated = true
+				}
+				return
 			} else {
 				log.Printf("Cloud discovery wrote %d sensor_discoveries for batch %s (%d devices)", inserted, jobID.String(), len(devices))
 			}
@@ -873,38 +886,16 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 						log.Printf("ERROR: Failed to update device_job status to failed: %v", updateErr)
 					}
 				} else {
-					// assets_count is what the UI's "Found" column and the Cloud page
-					// card sum — it must reflect what the run actually produced, not
-					// just how many devices happened to carry an extractable crypto
-					// config. `inserted` is the number of sensor_discoveries rows this
-					// run actually wrote (the same figure the fleet table's
-					// discovery-counts derive from), so a resource discovered with no
-					// crypto config still counts as "found" instead of reading as 0.
-					assetsCount := inserted
-					// Enumerated resources write NO sensor_discoveries — they
-					// are inventory, not crypto findings — so `inserted` does
-					// not see them. Without this an account whose run found 200
-					// instances and no TLS listener would report "0 found".
-					if discovery != nil {
-						assetsCount += discovery.Enumeration.Total()
-					}
-					if assetsCount == 0 {
-						// Fall back to the crypto-config-derived count on the (unexpected)
-						// chance more configs were extracted than sensor_discoveries rows
-						// were written for — keeps the number honest in either direction.
-						for i := range devices {
-							if devices[i].Metadata != nil {
-								if configs, ok := devices[i].Metadata["crypto_configs"].([]interface{}); ok {
-									assetsCount += len(configs)
-								}
-							}
-						}
-					}
+					// Count resolved resources separately from retained observations
+					// and downstream crypto findings; one device can have many endpoints.
+					assetsCount := len(devices)
+
 					metadata := map[string]interface{}{
 						"devices_count": len(devices),
 						"assets_count":  assetsCount,
 					}
 					if discovery != nil {
+						metadata["identity"] = discovery.Identity
 						// Only when enumeration actually ran: four zeros on a
 						// run that was switched off would read as "found
 						// nothing", which is a different statement.
@@ -987,41 +978,12 @@ func interrogateCloudResourceHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 
 		// For now, use the same discovery logic but filter to the specific resource
 		// In the future, this could be enhanced to do deeper interrogation of a single resource
-		var devices []models.Device
-		var err error
-		switch cloudProvider {
-		case "aws":
-			devices, err = cloudService.DiscoverAWSResources(
-				c.Request.Context(),
-				tenantID,
-				req.IntegrationID,
-				[]string{req.ResourceType},
-				[]string{}, // Empty regions means all regions
-			)
-		case "azure":
-			devices, err = cloudService.DiscoverAzureResources(
-				c.Request.Context(),
-				tenantID,
-				req.IntegrationID,
-				[]string{req.ResourceType},
-				[]string{}, // Empty resource groups means all
-			)
-		case "gcp":
-			devices, err = cloudService.DiscoverGCPResources(
-				c.Request.Context(),
-				tenantID,
-				req.IntegrationID,
-				[]string{req.ResourceType},
-			)
-		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Unknown cloud provider: %s", cloudProvider)})
-			return
-		}
-
+		discovery, err := cloudService.DiscoverResourceEvidence(c.Request.Context(), tenantID, req.IntegrationID, cloudProvider, []string{req.ResourceType}, nil, nil)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 			return
 		}
+		devices := discovery.Devices
 
 		// Filter to the specific resource by identifier (ARN for AWS, resource ID for Azure)
 		var targetDevice *models.Device
@@ -1044,6 +1006,16 @@ func interrogateCloudResourceHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 			}
 		}
 
+		if targetDevice == nil {
+			resource := req.ResourceARN
+			if resource == "" {
+				resource = req.ResourceID
+			}
+			if retained, ok := discovery.Retained[resource]; ok {
+				c.JSON(http.StatusAccepted, retained)
+				return
+			}
+		}
 		if targetDevice == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Resource not found"})
 			return

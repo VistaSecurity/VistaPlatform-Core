@@ -97,7 +97,9 @@ type Sensor struct {
 	// worker. Bounded: a platform that queues more than the sensor can hold
 	// gets a failed acknowledgement for the overflow rather than an
 	// unbounded backlog of scans the operator never asked to run at once.
-	jobQueue chan models.Command
+	jobQueue           chan models.Command
+	identityDNSQueue   chan models.Command
+	identityDNSPending map[string]bool
 
 	// lastHostHash and lastHostSentAt are the heartbeat's own host-block
 	// throttle (asset-inventory decision 9): the block is resent only when it
@@ -1092,6 +1094,8 @@ func (s *Sensor) sendHeartbeat() {
 		SensorID:            s.config.SensorID,
 		Status:              status,
 		Version:             Version,
+		Capabilities:        []string{sensordispatch.IdentityDNSCapability},
+		DNSInterfaces:       s.reportedDNSInterfaces(),
 		LastHeartbeat:       time.Now(),
 		Uptime:              uptime,
 		MemoryUsage:         memoryUsage,
@@ -1330,6 +1334,8 @@ func (s *Sensor) processCommand(command models.Command) {
 		result = s.handleSetLogLevel(command)
 	case "export_logs":
 		result = s.handleExportLogs(command)
+	case sensordispatch.IdentityDNSCommand:
+		result = s.queueIdentityDNS(command)
 	case sensordispatch.CommandType:
 		// A discovery job the platform handed to this sensor. Runs on
 		// the job worker, one at a time, so a thousand-target sweep cannot

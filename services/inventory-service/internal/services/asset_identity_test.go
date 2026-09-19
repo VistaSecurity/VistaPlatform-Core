@@ -11,6 +11,7 @@ package services
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -274,5 +275,17 @@ func TestFindingSourceNamesTheProducer(t *testing.T) {
 		if got.Producer() != tc.wantProducer || got.Mode != tc.wantMode {
 			t.Errorf("%v → %+v, want producer %q mode %q", tc.raw, got, tc.wantProducer, tc.wantMode)
 		}
+	}
+}
+
+func TestManualObservation_ImportReceiptUsesCollectorClock(t *testing.T) {
+	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	input := models.AssetInput{ClassKey: assetclass.KeyServer, Hostname: ptr("import.example.test"), ObservationReceiptID: "run-1:record-1", ObservationTime: at}
+	obs, err := unscopedService().manualObservation(uuid.New(), input, identity.Source{Kind: identity.SourceImported, Ref: "cmdb:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.ObservedAt.Equal(at) || obs.Admission.ReceiptID != input.ObservationReceiptID {
+		t.Fatalf("lost collector delivery metadata: %+v", obs)
 	}
 }

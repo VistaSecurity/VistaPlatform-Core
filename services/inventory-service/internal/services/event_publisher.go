@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -13,7 +14,10 @@ import (
 // EventPublisherService handles publishing events to NATS (compliance + lifecycle).
 type EventPublisherService struct {
 	publisher sharedevents.Publisher
-	lifecycle *invevents.LifecyclePublisher
+	lifecycle interface {
+		Publish(context.Context, string, uuid.UUID, string, interface{}) error
+		PublishDurable(context.Context, invevents.Envelope) error
+	}
 }
 
 // NewEventPublisherService creates a new event publisher service
@@ -178,4 +182,12 @@ func (n *noOpPublisher) PublishBulkAssetChanged(ctx context.Context, tenantID uu
 
 func (n *noOpPublisher) Close() error {
 	return nil
+}
+
+// PublishMergeEvent publishes the exact durable envelope written by the merge transaction.
+func (s *EventPublisherService) PublishMergeEvent(ctx context.Context, event invevents.Envelope) error {
+	if s.lifecycle == nil {
+		return fmt.Errorf("lifecycle event publisher unavailable")
+	}
+	return s.lifecycle.PublishDurable(ctx, event)
 }

@@ -9,7 +9,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
+	identitypg "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -722,5 +727,633 @@ func TestIntegration_MergeProposal_MissingObservation(t *testing.T) {
 	}
 	if archived != 0 {
 		t.Fatal("a candidate was archived")
+	}
+}
+
+func TestIntegration_MergePreview_CandidateSelectionRevisionAndReplay(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	actor := seedUser(t, db, tenant)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 2)
+	source := seedAsset(t, db, tenant, "source.example.test", "server", "hardware.computer.server", "production", 0, 3)
+	untouched := seedAsset(t, db, tenant, "third.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	proposal := openProposal(t, db, tenant, source, survivor)
+	candidates, _ := json.Marshal([]map[string]any{{"asset_id": survivor}, {"asset_id": source}, {"asset_id": untouched}})
+	if _, err := db.Exec(`UPDATE asset_history SET changes_json=(changes_json-'observation_asset_id')||jsonb_build_object('candidates',$2::jsonb) WHERE id=$1`, proposal, candidates); err != nil {
+		t.Fatal(err)
+	}
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"display_name": survivor, "hostname": survivor}}
+	preview, err := svc.PreviewMerge(ctx, tenant, proposal, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Assets) != 2 || preview.Revision == "" {
+		t.Fatalf("bad preview: %+v", preview)
+	}
+	request := MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Confirmed same device from controller evidence"}
+	if _, err := db.Exec(`UPDATE assets SET description='changed concurrently' WHERE tenant_id=$1 AND id=$2`, tenant, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, tenant, proposal, actor, request); !errors.Is(err, ErrMergePreviewChanged) {
+		t.Fatalf("stale preview: %v", err)
+	}
+	preview, err = svc.PreviewMerge(ctx, tenant, proposal, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Revision = preview.Revision
+	result, err := svc.ExecuteMerge(ctx, tenant, proposal, actor, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := svc.ExecuteMerge(ctx, tenant, proposal, actor, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replay.Replayed || replay.ID != result.ID {
+		t.Fatalf("bad replay: %+v", replay)
+	}
+	var status string
+	var count int
+	if err := db.QueryRow(`SELECT asset_status FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, untouched).Scan(&status); err != nil || status == "archived" {
+		t.Fatalf("unselected candidate changed: %s %v", status, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2`, tenant, survivor).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("endpoint preservation: %d %v", count, err)
+	}
+	if err := db.QueryRow(`SELECT changes_json->>'status' FROM asset_history WHERE tenant_id=$1 AND id=$2`, tenant, proposal).Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("third candidate question lost: %s %v", status, err)
+	}
+	other := testdb.NewTenant(t, raw)
+	if _, err := svc.PreviewMerge(ctx, other, uuid.Nil, selection); !errors.Is(err, ErrMergeProposalNotFound) {
+		t.Fatalf("cross-tenant preview: %v", err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, other, proposal, actor, request); !errors.Is(err, ErrMergeProposalNotFound) {
+		t.Fatalf("cross-tenant replay: %v", err)
+	}
+}
+
+func TestIntegration_MergePreview_DeclaredFieldsAndManagementHistory(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	actor := seedUser(t, db, tenant)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+	survivor := seedAsset(t, db, tenant, "old.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "new.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	for _, id := range []uuid.UUID{source, survivor} {
+		if _, err := db.Exec(`INSERT INTO asset_management(tenant_id,asset_id,management_url,management_protocol) VALUES($1,$2,$3,'ssh')`, tenant, id, "ssh://"+id.String()+".example.test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(ctx, tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Same physical server verified"}
+	if _, err := svc.ExecuteMerge(ctx, tenant, uuid.Nil, actor, request); !errors.Is(err, ErrMergeFieldResolution) {
+		t.Fatalf("declared conflict merged: %v", err)
+	}
+	selection.FieldResolutions = map[string]uuid.UUID{"hostname": survivor, "display_name": survivor, "management_profile": source}
+	preview, err = svc.PreviewMerge(ctx, tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.MergeSelection = selection
+	request.Revision = preview.Revision
+	result, err := svc.ExecuteMerge(ctx, tenant, uuid.Nil, actor, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var url string
+	if err := db.QueryRow(`SELECT management_url FROM asset_management WHERE tenant_id=$1 AND asset_id=$2`, tenant, survivor).Scan(&url); err != nil || url != "ssh://"+source.String()+".example.test" {
+		t.Fatalf("selected management: %s %v", url, err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM asset_merge_management_history WHERE tenant_id=$1 AND asset_id=$2`, tenant, survivor).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("previous profile lost: %d %v", count, err)
+	}
+	var audit string
+	if err := db.QueryRow(`SELECT audit::text FROM asset_merge_audits WHERE tenant_id=$1 AND id=$2`, tenant, result.ID).Scan(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(audit, "management_profile_references") || strings.Contains(audit, "password_enc") {
+		t.Fatalf("incorrect profile audit projection: %s", audit)
+	}
+}
+
+func TestIntegration_MergePreview_KeepSeparateSurvivesOtherMerge(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	actor := seedUser(t, db, tenant)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+	a := seedAsset(t, db, tenant, "a.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	b := seedAsset(t, db, tenant, "b.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	c := seedAsset(t, db, tenant, "c.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	proposal := openProposal(t, db, tenant, a, c)
+	if _, err := svc.KeepSeparate(ctx, tenant, proposal, actor); err != nil {
+		t.Fatal(err)
+	}
+	blocked := MergeSelection{SourceAssetIDs: []uuid.UUID{a}, SurvivorAssetID: c}
+	if _, err := svc.PreviewMerge(ctx, tenant, uuid.Nil, blocked); !errors.Is(err, ErrMergeKeptSeparate) {
+		t.Fatalf("ignored keep separate: %v", err)
+	}
+	selected := MergeSelection{SourceAssetIDs: []uuid.UUID{a}, SurvivorAssetID: b, FieldResolutions: map[string]uuid.UUID{"hostname": b, "display_name": b}}
+	preview, err := svc.PreviewMerge(ctx, tenant, uuid.Nil, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selected, Revision: preview.Revision, Reason: "Operator verified A and B"}); err != nil {
+		t.Fatal(err)
+	}
+	blocked.SourceAssetIDs = []uuid.UUID{b}
+	if _, err := svc.PreviewMerge(ctx, tenant, uuid.Nil, blocked); !errors.Is(err, ErrMergeKeptSeparate) {
+		t.Fatalf("lost inherited keep separate: %v", err)
+	}
+}
+
+func TestIntegration_MergePreview_PreservesDistinctEndpointCertificatesAndFindingHistory(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	ctx := context.Background()
+	actor := seedUser(t, f.db, f.tenant)
+	survivor := seedAsset(t, f.db, f.tenant, "stable.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, f.db, f.tenant, "alias.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	seen := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Microsecond)
+	for index, id := range []uuid.UUID{survivor, source} {
+		finding := leafCertFinding("stable.example.test", "198.51.100.70", 443+index*400, strings.Repeat(string(rune('a'+index)), 64))
+		finding.RawData["observed_at"] = seen.Format(time.RFC3339Nano)
+		if err := f.svc.processDiscoveryCryptoData(f.tenant, id, finding, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.Exec(`UPDATE assets SET last_seen_at=$3 WHERE tenant_id=$1 AND id=ANY($2)`, f.tenant, pq.Array([]uuid.UUID{source, survivor}), seen); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uuid.UUID{survivor, source} {
+		if _, err := f.db.Exec(`INSERT INTO findings(tenant_id,producer,kind,subject_type,subject_id,severity,summary,workflow_status,first_seen,last_seen) VALUES($1,'crypto','weak_protocol','asset',$2,'high','historical finding','SUPPRESSED',$3,$3)`, f.tenant, id, seen); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewMergeProposalService(f.db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"hostname": survivor, "display_name": survivor}}
+	preview, err := svc.PreviewMerge(ctx, f.tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, f.tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Verified endpoints on one physical asset"}); err != nil {
+		t.Fatal(err)
+	}
+	var endpoints, certificates, attachments int
+	if err := f.db.QueryRow(`SELECT count(DISTINCT i.endpoint_id),count(DISTINCT c.certificate_id),count(*) FROM crypto_implementations i JOIN crypto_implementation_certificates c ON c.crypto_implementation_id=i.id WHERE i.tenant_id=$1 AND i.asset_id=$2`, f.tenant, survivor).Scan(&endpoints, &certificates, &attachments); err != nil || endpoints != 2 || certificates != 2 || attachments != 2 {
+		t.Fatalf("attachments lost: endpoints=%d certs=%d attachments=%d err=%v", endpoints, certificates, attachments, err)
+	}
+	var retained, suppressed int
+	if err := f.db.QueryRow(`SELECT count(*),count(*) FILTER(WHERE workflow_status='SUPPRESSED') FROM findings WHERE tenant_id=$1 AND subject_type='asset' AND subject_id=$2`, f.tenant, survivor).Scan(&retained, &suppressed); err != nil || retained != 2 || suppressed != 2 {
+		t.Fatalf("finding history lost: %d/%d %v", retained, suppressed, err)
+	}
+	var lastSeen time.Time
+	if err := f.db.QueryRow(`SELECT last_seen_at FROM assets WHERE tenant_id=$1 AND id=$2`, f.tenant, survivor).Scan(&lastSeen); err != nil || !lastSeen.Equal(seen) {
+		t.Fatalf("merge fabricated freshness: %s %v", lastSeen, err)
+	}
+	repo := identitypg.New(f.db.DB.DB)
+	err = repo.UpsertEndpoints(ctx, identity.AssetRef{TenantID: f.tenant.String(), ID: source.String()}, []identity.EndpointObservation{{Address: "198.51.100.71", Port: 443, Transport: "tcp"}})
+	if !errors.Is(err, identity.ErrAssetNotFound) {
+		t.Fatalf("late endpoint attached to archived source: %v", err)
+	}
+}
+
+func TestIntegration_MergePreview_ConcurrentEvidenceInvalidatesRevision(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	actor := seedUser(t, f.db, f.tenant)
+	survivor := seedAsset(t, f.db, f.tenant, "race-keep.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, f.db, f.tenant, "race-source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	svc := NewMergeProposalService(f.db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(ctx, f.tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	err = identitypg.WithAssetLifecycleReadLock(ctx, f.db.DB.DB, f.tenant, source, func() error {
+		go func() {
+			_, err := svc.ExecuteMerge(ctx, f.tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Review before the next observation"})
+			result <- err
+		}()
+		waitForIdentityReplayLock(t, ctx, f, identitypg.AssetLifecycleLockKey(f.tenant, source), "ExclusiveLock", false)
+		return identitypg.New(f.db.DB.DB).UpsertEndpoints(ctx, identity.AssetRef{TenantID: f.tenant.String(), ID: source.String()}, []identity.EndpointObservation{{Address: "198.51.100.78", Port: 8443, Transport: "tcp", SeenAt: time.Now().UTC()}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrMergePreviewChanged) {
+			t.Fatalf("concurrent evidence was not refreshable: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	var status string
+	var count int
+	if err := f.db.QueryRow(`SELECT asset_status FROM assets WHERE tenant_id=$1 AND id=$2`, f.tenant, source).Scan(&status); err != nil || status == "archived" {
+		t.Fatalf("stale decision archived source: %s %v", status, err)
+	}
+	if err := f.db.QueryRow(`SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2`, f.tenant, source).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("lost concurrent evidence: %d %v", count, err)
+	}
+}
+
+func TestIntegration_MergePreview_SharedCertificateAndAlgorithmRowsKeepDistinctAuditKeys(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	ctx := context.Background()
+	actor := seedUser(t, f.db, f.tenant)
+	survivor := seedAsset(t, f.db, f.tenant, "shared-cert-keep.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, f.db, f.tenant, "shared-cert-source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	for index, id := range []uuid.UUID{survivor, source} {
+		finding := leafCertFinding("shared-cert.example.test", "198.51.100.74", 443+index*400, strings.Repeat("d", 64))
+		if err := f.svc.processDiscoveryCryptoData(f.tenant, id, finding, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.Exec(`UPDATE crypto_implementation_certificates SET certificate_role='intermediate' WHERE crypto_implementation_id IN(SELECT id FROM crypto_implementations WHERE tenant_id=$1 AND asset_id=$2)`, f.tenant, source); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewMergeProposalService(f.db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(ctx, f.tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := svc.ExecuteMerge(ctx, f.tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Confirmed two endpoints serving shared certificate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var certRows, roleCount, algorithmRows int
+	if err := f.db.QueryRow(`SELECT count(*),count(DISTINCT record->>'certificate_role') FROM asset_merge_record_snapshots WHERE tenant_id=$1 AND merge_id=$2 AND record_table='crypto_implementation_certificates'`, f.tenant, merged.ID).Scan(&certRows, &roleCount); err != nil || certRows != 2 || roleCount != 2 {
+		t.Fatalf("shared certificate snapshots collided: rows=%d roles=%d err=%v", certRows, roleCount, err)
+	}
+	if err := f.db.QueryRow(`SELECT count(*) FROM asset_merge_record_snapshots WHERE tenant_id=$1 AND merge_id=$2 AND record_table='crypto_implementation_algorithms'`, f.tenant, merged.ID).Scan(&algorithmRows); err != nil || algorithmRows < 2 {
+		t.Fatalf("algorithm snapshots collided: rows=%d err=%v", algorithmRows, err)
+	}
+}
+
+func TestIntegration_MergePreview_RelatedCandidateQuestionsAreSuperseded(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	actor := seedUser(t, db, tenant)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+	survivor := seedAsset(t, db, tenant, "group-keep.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "group-source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	third := seedAsset(t, db, tenant, "group-third.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	for _, id := range []uuid.UUID{source, survivor} {
+		proposal := openProposal(t, db, tenant, id, third)
+		changes := map[string]any{"kind": "merge_proposal", "status": "pending", "candidates": []any{map[string]any{"asset_id": id.String()}, map[string]any{"asset_id": third.String()}}}
+		changes["fingerprint"] = reconciledProposalFingerprint(changes)
+		encoded, _ := json.Marshal(changes)
+		if _, err := db.Exec(`UPDATE asset_history SET changes_json=$2::jsonb WHERE id=$1`, proposal, encoded); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(ctx, tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Merge selected records; keep third candidate unresolved"}); err != nil {
+		t.Fatal(err)
+	}
+	var pending, superseded int
+	if err := db.QueryRow(`SELECT count(*) FILTER(WHERE changes_json->>'status'='pending'),count(*) FILTER(WHERE changes_json->>'status'='superseded') FROM asset_history WHERE tenant_id=$1 AND action='merge_proposed'`, tenant).Scan(&pending, &superseded); err != nil || pending != 1 || superseded != 1 {
+		t.Fatalf("duplicate questions persisted: pending=%d superseded=%d err=%v", pending, superseded, err)
+	}
+}
+
+func TestIntegration_MergePreview_MissingFieldsUseRawValues(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	source := seedAsset(t, db, tenant, "source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	if _, err := db.Exec(`UPDATE assets SET attributes=CASE WHEN id=$2 THEN '{"api_token":"preserve-original-private-value","model":"R650"}'::jsonb ELSE '{}'::jsonb END WHERE tenant_id=$1`, tenant, source); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewMergeProposalService(db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"hostname": survivor, "display_name": survivor}}
+	preview, err := svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, _ := json.Marshal(preview)
+	if strings.Contains(string(projected), "preserve-original-private-value") {
+		t.Fatal("preview leaked private field")
+	}
+	result, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, seedUser(t, db, tenant), MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Operator verified duplicate inventory records"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value, audit string
+	if err := db.QueryRow(`SELECT attributes->>'api_token' FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, survivor).Scan(&value); err != nil || value != "preserve-original-private-value" {
+		t.Fatalf("redacted projection corrupted stored field: %q %v", value, err)
+	}
+	if err := db.QueryRow(`SELECT audit::text FROM asset_merge_audits WHERE tenant_id=$1 AND id=$2`, tenant, result.ID).Scan(&audit); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(audit, "preserve-original-private-value") {
+		t.Fatal("public merge audit leaked private field")
+	}
+}
+
+func TestIntegration_MergePreview_ManagementSelectionPreservesAbsentHalf(t *testing.T) {
+	for _, absent := range []string{"credential", "connection"} {
+		t.Run(absent, func(t *testing.T) {
+			raw := testdb.Connect(t)
+			testdb.ApplySchemaAndSeed(t, raw)
+			db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+			tenant := testdb.NewTenant(t, raw)
+			survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+			chosen := seedAsset(t, db, tenant, "chosen.example.test", "server", "hardware.computer.server", "production", 0, 0)
+			other := seedAsset(t, db, tenant, "other.example.test", "server", "hardware.computer.server", "production", 0, 0)
+			for _, asset := range []uuid.UUID{survivor, chosen, other} {
+				if asset != chosen || absent != "connection" {
+					if _, err := db.Exec(`INSERT INTO asset_management(tenant_id,asset_id,management_url,management_protocol) VALUES($1,$2,$3,'ssh')`, tenant, asset, "ssh://"+asset.String()+".example.test"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if asset != chosen || absent != "credential" {
+					if _, err := db.Exec(`INSERT INTO asset_credentials(tenant_id,asset_id,username) VALUES($1,$2,$3)`, tenant, asset, asset.String()); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			svc := NewMergeProposalService(db)
+			selection := MergeSelection{SourceAssetIDs: []uuid.UUID{chosen, other}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"hostname": survivor, "display_name": survivor, "management_profile": chosen}}
+			preview, err := svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, seedUser(t, db, tenant), MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Verified explicit management profile selection"}); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			table := "asset_credentials"
+			if absent == "connection" {
+				table = "asset_management"
+			}
+			if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE tenant_id=$1 AND asset_id=$2`, tenant, survivor).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("unselected source filled intentionally absent %s: %d %v", absent, count, err)
+			}
+			table = "asset_management"
+			column := "management_url"
+			want := "ssh://" + chosen.String() + ".example.test"
+			if absent == "connection" {
+				table = "asset_credentials"
+				column = "username"
+				want = chosen.String()
+			}
+			var value string
+			if err := db.QueryRow(`SELECT `+column+` FROM `+table+` WHERE tenant_id=$1 AND asset_id=$2`, tenant, survivor).Scan(&value); err != nil || value != want {
+				t.Fatalf("selected profile changed: %q %v", value, err)
+			}
+		})
+	}
+}
+
+func TestIntegration_MergePreview_RejectsNonexistentManagementChoice(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	empty := seedAsset(t, db, tenant, "empty.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	if _, err := db.Exec(`INSERT INTO asset_management(tenant_id,asset_id,management_url) VALUES($1,$2,'ssh://survivor.example.test')`, tenant, survivor); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewMergeProposalService(db).PreviewMerge(t.Context(), tenant, uuid.Nil, MergeSelection{SourceAssetIDs: []uuid.UUID{empty}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"management_profile": empty}})
+	if !errors.Is(err, ErrMergeSelection) {
+		t.Fatalf("forged profile choice accepted: %v", err)
+	}
+}
+
+func TestIntegration_MergePreview_ReconcilesObservedStateAndCoverage(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	old := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
+	newer := old.Add(time.Hour)
+	type stateCase struct {
+		name, dstKind, srcKind, dstStatus, srcStatus, want string
+		srcTime                                            time.Time
+	}
+	cases := []stateCase{{"newer presence", "measured", "measured", "removed", "active", "active", newer}, {"older presence", "measured", "measured", "removed", "active", "removed", old.Add(-time.Hour)}, {"preserve declared", "declared", "measured", "removed", "active", "removed", newer}, {"no provenance demotion", "measured", "imported", "removed", "active", "removed", newer}}
+	for i, tc := range cases {
+		var product uuid.UUID
+		if err := db.QueryRow(`INSERT INTO software_products(tenant_id,name,version) VALUES($1,$2,'1') RETURNING id`, tenant, tc.name).Scan(&product); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range []struct {
+			asset             uuid.UUID
+			kind, status, ref string
+			at                time.Time
+		}{{survivor, tc.dstKind, tc.dstStatus, "old", old}, {source, tc.srcKind, tc.srcStatus, "new", tc.srcTime}} {
+			if _, err := db.Exec(`INSERT INTO software_installs(tenant_id,asset_id,product_id,source_kind,source_ref,status,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,$5,$6,$7,$7)`, tenant, row.asset, product, row.kind, row.ref, row.status, row.at); err != nil {
+				t.Fatal(err)
+			}
+			status := row.status
+			if status == "removed" {
+				status = "closed"
+			}
+			if _, err := db.Exec(`INSERT INTO asset_endpoints(tenant_id,asset_id,address,port,transport,source_kind,source_ref,status,first_seen_at,last_seen_at) VALUES($1,$2,'192.0.2.20',$3,'tcp',$4,$5,$6,$7,$7)`, tenant, row.asset, 8440+i, row.kind, row.ref, status, row.at); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// A disjoint measured package and an imported package must count separately.
+	for _, kind := range []string{"measured", "imported"} {
+		var product uuid.UUID
+		if err := db.QueryRow(`INSERT INTO software_products(tenant_id,name,version) VALUES($1,$2,'1') RETURNING id`, tenant, "only-source-"+kind).Scan(&product); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO software_installs(tenant_id,asset_id,product_id,source_kind,status,first_seen_at,last_seen_at) VALUES($1,$2,$3,$4,'active',$5,$5)`, tenant, source, product, kind, newer); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, kind := range []string{"measured", "imported", "declared"} {
+		if _, err := db.Exec(`INSERT INTO asset_facts(tenant_id,asset_id,key,value,source_kind,source_ref,observed_at) VALUES($1,$2,'sw.package_count','99'::jsonb,$3,$3,$4)`, tenant, survivor, kind, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewMergeProposalService(db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"hostname": survivor, "display_name": survivor}}
+	preview, err := svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, seedUser(t, db, tenant), MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Confirmed duplicate device records"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range cases {
+		var status, ref string
+		if err := db.QueryRow(`SELECT i.status,i.source_ref FROM software_installs i JOIN software_products p ON p.tenant_id=i.tenant_id AND p.id=i.product_id WHERE i.tenant_id=$1 AND i.asset_id=$2 AND p.name=$3`, tenant, survivor, tc.name).Scan(&status, &ref); err != nil || status != tc.want {
+			t.Fatalf("%s software state=%s err=%v", tc.name, status, err)
+		}
+		wantRef := "old"
+		if tc.want == "active" {
+			wantRef = "new"
+		}
+		if ref != wantRef {
+			t.Fatalf("%s provenance=%s", tc.name, ref)
+		}
+		want := tc.want
+		if want == "removed" {
+			want = "closed"
+		}
+		if err := db.QueryRow(`SELECT status,source_ref FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2 AND port=$3`, tenant, survivor, 8440+i).Scan(&status, &ref); err != nil || status != want || ref != wantRef {
+			t.Fatalf("%s endpoint state=%s source=%s err=%v", tc.name, status, ref, err)
+		}
+	}
+	for kind, want := range map[string]int{"measured": 2, "imported": 1, "declared": 99} {
+		var count int
+		var at time.Time
+		if err := db.QueryRow(`SELECT value::text::int,observed_at FROM asset_facts WHERE tenant_id=$1 AND asset_id=$2 AND key='sw.package_count' AND source_kind=$3`, tenant, survivor, kind).Scan(&count, &at); err != nil || count != want || !at.Equal(old) {
+			t.Fatalf("%s package count=%d at=%v err=%v", kind, count, at, err)
+		}
+	}
+}
+
+func TestIntegration_MergePreview_RetainedContextsInvalidateRevisionAndRemainAuditable(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	svc := NewMergeProposalService(db)
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	observation := uuid.New()
+	if _, err := db.Exec(`INSERT INTO identity_observations(id,tenant_id,fingerprint,source_kind,source_ref,evidence,asset_id,first_seen_at,last_seen_at) VALUES($1::uuid,$2,$1::text,'measured','controller','{}',$3,now()-interval '1 day',now()-interval '1 day')`, observation, tenant, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identity_observation_peer_contexts(tenant_id,context_id,observation_id,origin_asset_id,payload,observed_at) VALUES($1,'peer-receipt',$2,$3,'{}',now()-interval '1 day')`, tenant, observation, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identity_observation_cloud_contexts(tenant_id,observation_id,receipt_key,context_enc,observed_at) VALUES($1,$2,'cloud-receipt','enc:v1:opaque-test-context',now()-interval '1 day')`, tenant, observation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identity_enrichment_jobs(tenant_id,observation_id,generation,action,executor_scope,plan) VALUES($1,$2,'generation','configured_source','configured_sources','{}')`, tenant, observation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identity_source_refreshes(tenant_id,id,observation_id,fingerprint,state) VALUES($1,$2,$2,'fingerprint','queued')`, tenant, observation); err != nil {
+		t.Fatal(err)
+	}
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE identity_observation_peer_contexts SET payload='{"new_evidence":true}' WHERE tenant_id=$1 AND observation_id=$2`, tenant, observation); err != nil {
+		t.Fatal(err)
+	}
+	actor := seedUser(t, db, tenant)
+	request := MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Operator verified device against controller and provider"}
+	if _, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, actor, request); !errors.Is(err, ErrMergePreviewChanged) {
+		t.Fatalf("changed retained evidence accepted: %v", err)
+	}
+	preview, err = svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"identity_enrichment_jobs", "identity_source_refreshes"} {
+		if _, err := db.Exec(`UPDATE `+table+` SET state='completed' WHERE tenant_id=$1 AND observation_id=$2`, tenant, observation); err != nil {
+			t.Fatal(err)
+		}
+		request.Revision = preview.Revision
+		if _, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, actor, request); !errors.Is(err, ErrMergePreviewChanged) {
+			t.Fatalf("changed enrichment job accepted: %v", err)
+		}
+		preview, err = svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	request.Revision = preview.Revision
+	result, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, actor, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var linked uuid.UUID
+	if err := db.QueryRow(`SELECT asset_id FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, observation).Scan(&linked); err != nil || linked != survivor {
+		t.Fatalf("link=%s err=%v", linked, err)
+	}
+	for _, table := range []string{"identity_enrichment_jobs", "identity_source_refreshes"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM asset_merge_record_snapshots WHERE tenant_id=$1 AND merge_id=$2 AND record_table=$3`, tenant, result.ID, table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("audit %s=%d err=%v", table, count, err)
+		}
+		if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE tenant_id=$1 AND observation_id=$2 AND state='completed'`, tenant, observation).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("retained job %s=%d err=%v", table, count, err)
+		}
+	}
+	for _, table := range []string{"identity_observation_peer_contexts", "identity_observation_cloud_contexts"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM asset_merge_record_snapshots WHERE tenant_id=$1 AND merge_id=$2 AND record_table=$3`, tenant, result.ID, table).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("audit %s=%d err=%v", table, count, err)
+		}
+		if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE tenant_id=$1 AND observation_id=$2 AND materialized_at IS NULL`, tenant, observation).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("pending context %s=%d err=%v", table, count, err)
+		}
+	}
+}
+
+func TestIntegration_MergePreview_PreservesDeclaredDonorNamesAgainstPromotion(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "operator.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	if _, err := db.Exec(`UPDATE assets SET hostname=NULL,display_name=NULL,metadata='{"name_source_kind":"measured-passive","preserve_me":true}' WHERE id=$1`, survivor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE assets SET metadata='{"name_source_kind":"declared","do_not_copy":true}' WHERE id=$1`, source); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewMergeProposalService(db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, seedUser(t, db, tenant), MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Confirmed same operator-named device"}); err != nil {
+		t.Fatal(err)
+	}
+	repo := identitypg.New(raw)
+	if err := repo.PromoteNames(t.Context(), identity.AssetRef{ID: survivor.String(), TenantID: tenant.String()}, "better-observed.example.test", "better-observed.example.test", "measured-active"); err != nil {
+		t.Fatal(err)
+	}
+	var name, kind string
+	var preserved, copied bool
+	if err := db.QueryRow(`SELECT hostname,metadata->>'name_source_kind',metadata ? 'preserve_me',metadata ? 'do_not_copy' FROM assets WHERE id=$1`, survivor).Scan(&name, &kind, &preserved, &copied); err != nil {
+		t.Fatal(err)
+	}
+	if name != "operator.example.test" || kind != "declared" || !preserved || copied {
+		t.Fatalf("name=%s provenance=%s preserved=%v copied=%v", name, kind, preserved, copied)
 	}
 }

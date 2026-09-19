@@ -12,6 +12,8 @@ import {
   useMergeProposals, useResolveMergeProposal,
 } from '../inventory/asset-queries';
 import { assetIdentity, classLabel, primaryAddressPort } from '../inventory/asset-shape';
+import { AssetMergeModal } from './asset-merge-modal';
+import type { MergeProposal } from '../inventory/asset-queries';
 import { MergeProposalRow } from './merge-proposal-row';
 import { AutoMergedSection } from './auto-merged-section';
 import { RelationshipProposalRow } from './relationship-proposal-row';
@@ -80,6 +82,7 @@ export function ApprovalsPage() {
   const [proposalOffset, setProposalOffset] = useState(0);
   const proposalsQ = useMergeProposals(true, proposalOffset);
   const resolve = useResolveMergeProposal();
+  const [mergeReview, setMergeReview] = useState<MergeProposal>();
   // The third row kind (ADR-0006 D6). Its own read, its own error state: a
   // failed relationship read is an unknown number of proposals a person still
   // has to decide, exactly as a failed merge read is.
@@ -323,14 +326,15 @@ export function ApprovalsPage() {
               key={p.id}
               proposal={p}
               busy={resolve.isPending}
-              // The survivor comes from the ROW, because the row is where the
-              // reviewer chose it. The server requires one and refuses to pick.
-              onAccept={(survivorAssetId) => resolve.mutate({ action: 'accept', id: p.id, survivorAssetId })}
+              // Explicit source and survivor selection happens in the preview.
+              onAccept={() => setMergeReview(p)}
               onKeepSeparate={() => resolve.mutate({ action: 'keep-separate', id: p.id })}
             />
           ))}
         </div>
       )}
+
+      {mergeReview && <AssetMergeModal proposal={mergeReview} onClose={() => setMergeReview(undefined)} />}
 
       {relProposals.length > 0 && (
         <div data-testid="relationship-proposals-section" style={{ marginBottom: 16 }}>

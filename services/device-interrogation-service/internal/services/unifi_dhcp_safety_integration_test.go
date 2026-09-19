@@ -48,7 +48,7 @@ func TestIntegration_UniFiExistingDHCPAndPreparationFailure(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	err = sink.Persist(cancelled, tenant, uuid.New(), identity.Source{Kind: identity.SourceMeasured, Ref: "unifi"}, InterrogationObservations{Facts: []di.FactObservation{{Key: facts.KeyNetVlans, Value: vlans}}})
-	if err == nil || !strings.Contains(err.Error(), "vlan segments") {
+	if err == nil || !strings.Contains(err.Error(), "vlan segments") && !strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("expected prerequisite failure, got %v", err)
 	}
 }

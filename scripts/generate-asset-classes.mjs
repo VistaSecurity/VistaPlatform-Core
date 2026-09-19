@@ -676,7 +676,7 @@ export function attributeSchema(key: string): AssetAttributeSchema | undefined {
 `;
 }
 
-function emitTS(rows) {
+function emitTS(rows, identifierKinds) {
   const union = rows.map((r) => `  | ${tsStr(r.key)}`).join('\n');
   const records = rows.map((r) => `  ${tsStr(r.key)}: {
     key: ${tsStr(r.key)},
@@ -717,6 +717,8 @@ function emitTS(rows) {
 // and the per-class column/form registry import it as
 // \`@vistasecurity/primitives/assets\`. The Go mirror is shared/assetclass; the
 // DB mirror is the asset_classes table. All three come from the same YAML.
+
+export const ASSET_IDENTIFIER_KINDS = [${identifierKinds.map(tsStr).join(', ')}] as const;
 
 /** Every platform class key. Tenant leaf subclasses are runtime data and are
  *  deliberately NOT in this union — they are typed as \`string\`. */
@@ -828,7 +830,7 @@ async function main() {
     [path.join(root, 'shared', 'assetclass', 'classes_gen.go'),
       emitGo(rows, identifierKinds, cyclonedxTypes, legacyTypes)],
     [path.join(root, 'shared', 'assetclass', 'attribute_schemas_gen.json'), emitSchemasJSON(rows)],
-    [path.join(root, 'packages', 'primitives', 'src', 'assets', 'classes.gen.ts'), emitTS(rows)],
+    [path.join(root, 'packages', 'primitives', 'src', 'assets', 'classes.gen.ts'), emitTS(rows, identifierKinds)],
     [path.join(root, 'packages', 'primitives', 'src', 'assets', 'attribute-schemas.gen.ts'),
       emitAttributeSchemasTS(rows, reg.attribute_types)],
     [specPath, spec],

@@ -192,9 +192,12 @@ func unifiDeviceSubject(device map[string]interface{}) PeerRef {
 	subject.AddIdentifier(IdentifierMACAddress, firstUnifiString(device, "mac"))
 	subject.AddIdentifier(IdentifierIPAddress, firstUnifiString(device, "ip"))
 	subject.AddIdentifier(IdentifierSerialNumber, firstUnifiString(device, "serial"))
-	// A name without a space may well BE the hostname; one with a space is a
-	// label. canonicalDNSName is the arbiter, not a guess here.
-	subject.AddIdentifier(IdentifierHostname, name)
+	// The controller's name is an operator alias, including DNS-shaped aliases.
+	// Only its explicit hostname field may supply a hostname identifier.
+	unifiAddClientName(&subject, firstUnifiString(device, "hostname"))
+	adopted, _ := device["adopted"].(bool)
+	subject.IdentityEvidence.ControllerInventory = adopted
+	subject.IdentityEvidence.ConnectedInterface = adopted && firstUnifiNumber(device, "state") == 1
 	return subject
 }
 
@@ -206,13 +209,14 @@ func unifiControllerPeer(host string, deviceInfo map[string]interface{}) PeerRef
 		display, _ = deviceInfo["controller_hostname"].(string)
 	}
 	peer := peerRef(display, unifiControllerClassHint())
+	peer.IdentityEvidence.ConnectedInterface = true
 	if !peer.AddIdentifier(IdentifierIPAddress, host) {
 		if !peer.AddIdentifier(IdentifierFQDN, host) {
 			peer.AddIdentifier(IdentifierHostname, host)
 		}
 	}
-	if display != "" {
-		peer.AddIdentifier(IdentifierHostname, display)
+	if hostname, _ := deviceInfo["controller_hostname"].(string); hostname != "" {
+		unifiAddClientName(&peer, hostname)
 	}
 	return peer
 }
@@ -625,6 +629,7 @@ func unifiClientPeer(client map[string]interface{}) PeerRef {
 		display = hostname
 	}
 	peer := peerRef(display, "")
+	peer.IdentityEvidence.ConnectedInterface = true
 	mac := firstUnifiString(client, "mac")
 	if !unifiSkipHardwareMAC(mac) {
 		peer.AddIdentifier(IdentifierMACAddress, mac)

@@ -231,7 +231,7 @@ func (s *AssetService) isSuppressed(tenantID uuid.UUID, hostname *string, ipAddr
 	return exists, nil
 }
 
-func (s *AssetService) addSuppression(tenantID uuid.UUID, hostname *string, ipAddress *string, port *int, userID *uuid.UUID, reason string) error {
+func addSuppressionTx(tx *sqlx.Tx, tenantID uuid.UUID, hostname *string, ipAddress *string, port *int, userID *uuid.UUID, reason string) error {
 	key := buildSuppressionKey(hostname, ipAddress, port)
 	var h interface{}
 	if hostname != nil {
@@ -254,11 +254,7 @@ func (s *AssetService) addSuppression(tenantID uuid.UUID, hostname *string, ipAd
 	if userID != nil {
 		createdBy = *userID
 	}
-	// RLS-scoped write over asset_suppressions (tenant_isolation policy).
-	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(query, tenantID, h, ip, p, reason, createdBy, key)
-		return e
-	})
+	_, err := tx.Exec(query, tenantID, h, ip, p, reason, createdBy, key)
 	return err
 }
 
@@ -740,6 +736,7 @@ func isCloudManagedPlaceholder(f IngestFinding) bool {
 // ever looks at it again: the Approvals page lists pending ASSETS, and there is
 // no pending asset for an already-approved one.
 type IngestReport struct {
+	Results []identity.IngestResult
 	// Imported is the count IngestFindings has always returned: assets
 	// created, assets refreshed, and findings routed to external_connections.
 	Imported int
@@ -780,8 +777,12 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 	// A finding that reaches none of the branches below keeps its empty string,
 	// which the transport reads as "no asset, leave the row alone".
 	effective := make([]string, len(findings))
+	outcomes := make([]identity.IngestResult, len(findings))
+	for i := range outcomes {
+		outcomes[i].Outcome = "rejected"
+	}
 	result := func() IngestReport {
-		return IngestReport{Imported: inserted, EffectiveStatus: effective}
+		return IngestReport{Imported: inserted, EffectiveStatus: effective, Results: outcomes}
 	}
 	// Observability counters for the end-of-run import summary ().
 	// Without these, a third-party route that persists nothing looks identical to a
@@ -837,9 +838,13 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 				// A segment with fifty hosts on it produces fifty of these, and
 				// the common failure — an observation whose only identity was a
 				// rotating randomised MAC — is a property of that one device.
-				log.Printf("[AssetService] IngestFindings: skipping host observation %s: %v", label, hErr)
-				continue
+				if errors.Is(hErr, identity.ErrNoUsableIdentifier) || errors.Is(hErr, identity.ErrInvalidObservation) || errors.Is(hErr, errNoIdentifiers) {
+					log.Printf("[AssetService] IngestFindings: rejecting host observation %s: %v", label, hErr)
+					continue
+				}
+				return result(), fmt.Errorf("retaining host observation: %w", hErr)
 			}
+			outcomes[i] = res.IngestResult()
 			if res.Asset.Zero() {
 				// Contested: every identifier belongs to another asset and none
 				// could decide, so a merge proposal is waiting and nothing was
@@ -993,6 +998,7 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 				log.Printf("[AssetService] IngestFindings: ERROR routing third-party %s to external_connections: %v", findingLabel(f), err)
 			} else {
 				routedExternal++
+				outcomes[i].Outcome = "routed"
 				inserted++
 				log.Printf("[AssetService] IngestFindings: routed third-party %s to external_connections", findingLabel(f))
 			}
@@ -1022,10 +1028,11 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			}
 		}
 
-		res, resErr := s.resolveDiscoveryObservation(tenantID, f, effectiveIP, ownership, status)
+		res, durableMaterialization, resErr := s.resolveDiscoveryObservation(tenantID, f, effectiveIP, ownership, status)
 		if resErr != nil {
 			return result(), fmt.Errorf("failed to upsert asset: %w", resErr)
 		}
+		outcomes[i] = res.IngestResult()
 		if res.Asset.Zero() {
 			// The identity floor: every identifier this finding carries already
 			// belongs to another asset and none could decide, so the engine
@@ -1046,178 +1053,169 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 		if idErr != nil {
 			return result(), fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, idErr)
 		}
-		assetStatus := status
-		if res.Outcome == identity.OutcomeConflict {
-			// The observation is its own pending asset until a human settles the
-			// merge, whatever the segment rule said.
-			assetStatus = identity.StatusPendingApproval
-		}
-		if res.Outcome == identity.OutcomeMatched {
-			// The status the MATCHED asset actually has, which is not the one
-			// the batch requested. `status` is discovery-processor's answer for
-			// a row it ran the tenant's auto-approval rules over; it decides
-			// what a NEW asset lands as, and it says nothing about an asset that
-			// already exists.
-			//
-			// Deferring on that answer is how an access point the tenant
-			// approved months ago kept its TLS-on-8443 certificates and crypto
-			// configuration in `assets.metadata->'deferred_findings'` forever:
-			// the same host seen on an address in no registered segment matches
-			// no rule, so the row arrives `pending_approval` — and nothing ever
-			// replays a deferred finding except ApproveAssets, which only runs
-			// when a PENDING asset is approved. The asset was already
-			// monitoring, so that never happened again.
-			//
-			// Read AFTER the resolve and on every match, including a batch that
-			// asked for monitoring. After, because a rule that fired legitimately
-			// promotes a pending asset and this must report the promotion. On
-			// every match, because the asset may be ARCHIVED, which
-			// setStatusUnlessArchived has just declined to promote — reading only
-			// when the batch asked for something else would leave that case
-			// reporting an approval that did not happen, and materializing the
-			// crypto of a device the tenant retired.
-			assetStatus = s.matchedAssetStatus(tenantID, assetID, assetStatus)
-		}
-		effective[i] = assetStatus
-		changedAssetIDs = append(changedAssetIDs, assetID)
-		inserted++
-		switch res.Outcome {
-		case identity.OutcomeCreated, identity.OutcomeConflict:
-			createdManaged++
-			log.Printf("[AssetService] IngestFindings: created managed asset %s for %s (status=%s, outcome=%s)",
-				assetID, findingLabel(f), assetStatus, res.Outcome)
-			if s.eventPublisher != nil {
-				lifecycleDiscovered = append(lifecycleDiscovered, struct {
-					assetID   uuid.UUID
-					classKey  string
-					hostname  *string
-					ipAddress *string
-					port      *int
-				}{assetID, res.ClassKey, f.Hostname, effectiveIP, f.Port})
+		// All post-resolution writes share the lifecycle guard, including service
+		// endpoints and deferred buffering. A merge may have committed since
+		// Resolve returned; use its survivor and current approval under the lock.
+		if err := s.withResolvedAssetLifecycle(ctx, tenantID, assetID, func(current uuid.UUID, assetStatus string, deleted bool) error {
+			assetID = current
+			res.Asset.ID = current.String()
+			outcomes[i] = res.IngestResult()
+			effective[i] = assetStatus
+			changedAssetIDs = append(changedAssetIDs, assetID)
+			inserted++
+			switch res.Outcome {
+			case identity.OutcomeCreated, identity.OutcomeConflict:
+				createdManaged++
+				log.Printf("[AssetService] IngestFindings: created managed asset %s for %s (status=%s, outcome=%s)",
+					assetID, findingLabel(f), assetStatus, res.Outcome)
+				if s.eventPublisher != nil {
+					lifecycleDiscovered = append(lifecycleDiscovered, struct {
+						assetID   uuid.UUID
+						classKey  string
+						hostname  *string
+						ipAddress *string
+						port      *int
+					}{assetID, res.ClassKey, f.Hostname, effectiveIP, f.Port})
+				}
+			default:
+				updatedManaged++
+				log.Printf("[AssetService] IngestFindings: %s matched asset %s on %s", findingLabel(f), assetID, res.DecidedBy)
 			}
-		default:
-			updatedManaged++
-			log.Printf("[AssetService] IngestFindings: %s matched asset %s on %s", findingLabel(f), assetID, res.DecidedBy)
-		}
 
-		// Enrich asset with network segment (environment, location) and service identification when services are wired
-		if s.networkSegmentService != nil {
-			var cloudProvider, cloudRegion string
-			if f.RawData != nil {
-				cloudProvider, _ = f.RawData["cloud_provider"].(string)
-				cloudRegion, _ = f.RawData["cloud_region"].(string)
+			if deleted || assetStatus == identity.StatusArchived || assetStatus == "denied" {
+				return nil
 			}
-			if cloudProvider != "" && cloudRegion != "" {
-				vpcID, _ := f.RawData["vpc_id"].(string)
-				env, _ := f.RawData["environment"].(string)
-				if env == "" {
-					env = "production"
+
+			// Enrich asset with network segment (environment, location) and service identification when services are wired
+			if s.networkSegmentService != nil {
+				var cloudProvider, cloudRegion string
+				if f.RawData != nil {
+					cloudProvider, _ = f.RawData["cloud_provider"].(string)
+					cloudRegion, _ = f.RawData["cloud_region"].(string)
 				}
-				seg, err := s.networkSegmentService.FindOrCreateCloudSegment(tenantID, cloudProvider, cloudRegion, vpcID, env)
-				if err == nil && seg != nil {
-					// RLS-scoped write over assets.
-					_ = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-						_, _ = tx.Exec(`UPDATE assets SET environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3, updated_at = NOW() WHERE id = $4 AND tenant_id = $5`,
-							seg.Environment, seg.LocationID, seg.ID, assetID, tenantID)
-						return nil
-					})
+				if cloudProvider != "" && cloudRegion != "" {
+					vpcID, _ := f.RawData["vpc_id"].(string)
+					env, _ := f.RawData["environment"].(string)
+					if env == "" {
+						env = "production"
+					}
+					seg, err := s.networkSegmentService.FindOrCreateCloudSegment(tenantID, cloudProvider, cloudRegion, vpcID, env)
+					if err == nil && seg != nil {
+						// RLS-scoped write over assets.
+						_ = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+							_, _ = tx.Exec(`UPDATE assets SET environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3, updated_at = NOW() WHERE id = $4 AND tenant_id = $5`,
+								seg.Environment, seg.LocationID, seg.ID, assetID, tenantID)
+							return nil
+						})
+					}
+				} else {
+					_ = s.networkSegmentService.EnrichAssetByID(tenantID, assetID, effectiveIP, f.Hostname)
 				}
-			} else {
-				_ = s.networkSegmentService.EnrichAssetByID(tenantID, assetID, effectiveIP, f.Hostname)
 			}
-		}
-		var didSegment, didService bool
-		if s.serviceIdentificationSvc != nil {
-			port := 0
-			if f.Port != nil {
-				port = *f.Port
-			}
-			hints := s.serviceIdentificationSvc.IdentifyService(tenantID, port, f.Protocol, f.RawData)
-			if hints != nil {
-				ver := hints.ServiceVersion
-				// The identified service belongs to the ENDPOINT it was
-				// identified on (DATA_MODEL §2) — a host running HTTPS on 443
-				// and Postgres on 5432 is one asset with two services, and the
-				// asset-level columns this used to write no longer exist.
-				//
-				// Errors are logged, not discarded: the previous form swallowed
-				// both the Exec error and the transaction error, so after the
-				// columns moved this wrote nothing at all and still reported
-				// the asset as enriched.
-				epID, epErr := s.resolveEndpointForFinding(ctx, tenantID, assetID, f)
-				switch {
-				case epErr != nil:
-					log.Printf("[AssetService] IngestFindings: resolving the endpoint to record the identified service for %s failed: %v", findingLabel(f), epErr)
-				case epID == uuid.Nil:
-					// No endpoint at all — an at-rest resource. There is no
-					// socket for a service name to describe.
-				default:
-					wErr := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-						_, e := tx.Exec(`
+			var didSegment, didService bool
+			if s.serviceIdentificationSvc != nil {
+				port := 0
+				if f.Port != nil {
+					port = *f.Port
+				}
+				hints := s.serviceIdentificationSvc.IdentifyService(tenantID, port, f.Protocol, f.RawData)
+				if hints != nil {
+					ver := hints.ServiceVersion
+					// The identified service belongs to the ENDPOINT it was
+					// identified on (DATA_MODEL §2) — a host running HTTPS on 443
+					// and Postgres on 5432 is one asset with two services, and the
+					// asset-level columns this used to write no longer exist.
+					//
+					// Errors are logged, not discarded: the previous form swallowed
+					// both the Exec error and the transaction error, so after the
+					// columns moved this wrote nothing at all and still reported
+					// the asset as enriched.
+					epID, epErr := s.resolveEndpointForFinding(ctx, tenantID, assetID, f)
+					switch {
+					case epErr != nil:
+						log.Printf("[AssetService] IngestFindings: resolving the endpoint to record the identified service for %s failed: %v", findingLabel(f), epErr)
+					case epID == uuid.Nil:
+						// No endpoint at all — an at-rest resource. There is no
+						// socket for a service name to describe.
+					default:
+						wErr := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+							_, e := tx.Exec(`
 							UPDATE asset_endpoints SET service_name = $1, service_version = NULLIF($2, ''),
 								service_confidence = $3, service_identification_method = $4, updated_at = NOW()
 							WHERE id = $5 AND tenant_id = $6`,
-							hints.ServiceName, ver, hints.Confidence, hints.IdentificationMethod, epID, tenantID)
-						return e
-					})
-					if wErr != nil {
-						log.Printf("[AssetService] IngestFindings: recording the identified service on endpoint %s failed: %v", epID, wErr)
-					} else {
-						didService = true
+								hints.ServiceName, ver, hints.Confidence, hints.IdentificationMethod, epID, tenantID)
+							return e
+						})
+						if wErr != nil {
+							log.Printf("[AssetService] IngestFindings: recording the identified service on endpoint %s failed: %v", epID, wErr)
+						} else {
+							didService = true
+						}
 					}
 				}
 			}
-		}
-		if s.networkSegmentService != nil {
-			didSegment = true
-		}
-		if s.eventPublisher != nil && (didSegment || didService) {
-			es := "segment"
-			if didSegment && didService {
-				es = "segment,service_id"
-			} else if didService {
-				es = "service_id"
+			if s.networkSegmentService != nil {
+				didSegment = true
 			}
-			lifecycleEnriched = append(lifecycleEnriched, &events.AssetEnrichedPayload{
-				AssetID:          assetID,
-				ClassKey:         res.ClassKey,
-				EnrichmentSource: es,
-			})
-		}
-
-		// Three answers, not two, and they are decided on the status the asset
-		// HAS (see the effective-status block above) rather than the one the
-		// batch requested.
-		//
-		//   monitoring       materialize now, whatever the batch asked for
-		//   pending_approval defer into the asset's metadata, to be replayed
-		//                    when a human approves it — this is what keeps
-		//                    unapproved discoveries out of the certificates and
-		//                    crypto_implementations tables
-		//   archived         neither
-		//
-		// Archived is neither because both alternatives are wrong. Materializing
-		// puts a retired device's crypto back into the live inventory; deferring
-		// parks it where only an approval will replay it, and an archived asset
-		// is not in Approvals — that is the same dead end this whole change is
-		// about. Skipping matches what the `denied` branch above does, for the
-		// same reason: the tenant decided, and a re-discovery does not re-open it.
-		if assetStatus != identity.StatusMonitoring {
-			if assetStatus == identity.StatusArchived {
-				log.Printf("[AssetService] IngestFindings: %s matched archived asset %s; its crypto is neither materialized nor deferred", findingLabel(f), assetID)
-				continue
+			if s.eventPublisher != nil && (didSegment || didService) {
+				es := "segment"
+				if didSegment && didService {
+					es = "segment,service_id"
+				} else if didService {
+					es = "service_id"
+				}
+				lifecycleEnriched = append(lifecycleEnriched, &events.AssetEnrichedPayload{
+					AssetID:          assetID,
+					ClassKey:         res.ClassKey,
+					EnrichmentSource: es,
+				})
 			}
-			s.storeDeferredFinding(tenantID, assetID, f)
-			continue
-		}
 
-		// Extract and process certificate chain from discovery finding.
-		// Deliberately not propagated: this is a per-finding loop over a whole
-		// ingest batch, and one finding whose certificates or crypto rows fail to
-		// materialize must not abort the remaining findings. Logged rather than
-		// dropped so a silently half-materialized batch is still visible.
-		if err := s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
-			log.Printf("[AssetService] IngestFindings: materializing crypto data for asset %s failed (batch continues): %v", assetID, err)
+			if durableMaterialization {
+				// The same transaction as identity resolution retained this receipt.
+				// The restart-safe worker materializes it after identity and approval
+				// are both settled; ingestion success never depends on best-effort
+				// metadata buffering or synchronous crypto writes.
+				return nil
+			}
+
+			// Three answers, not two, and they are decided on the status the asset
+			// HAS (see the effective-status block above) rather than the one the
+			// batch requested.
+			//
+			//   monitoring       materialize now, whatever the batch asked for
+			//   pending_approval defer into the asset's metadata, to be replayed
+			//                    when a human approves it — this is what keeps
+			//                    unapproved discoveries out of the certificates and
+			//                    crypto_implementations tables
+			//   archived         neither
+			//
+			// Archived is neither because both alternatives are wrong. Materializing
+			// puts a retired device's crypto back into the live inventory; deferring
+			// parks it where only an approval will replay it, and an archived asset
+			// is not in Approvals — that is the same dead end this whole change is
+			// about. Skipping matches what the `denied` branch above does, for the
+			// same reason: the tenant decided, and a re-discovery does not re-open it.
+			if assetStatus != identity.StatusMonitoring {
+				if assetStatus == identity.StatusArchived {
+					log.Printf("[AssetService] IngestFindings: %s matched archived asset %s; its crypto is neither materialized nor deferred", findingLabel(f), assetID)
+					return nil
+				}
+				s.storeDeferredFinding(tenantID, assetID, f)
+				return nil
+			}
+
+			// Extract and process certificate chain from discovery finding.
+			// Deliberately not propagated: this is a per-finding loop over a whole
+			// ingest batch, and one finding whose certificates or crypto rows fail to
+			// materialize must not abort the remaining findings. Logged rather than
+			// dropped so a silently half-materialized batch is still visible.
+			if err := s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+				log.Printf("[AssetService] IngestFindings: materializing crypto data for asset %s failed (batch continues): %v", assetID, err)
+			}
+			return nil
+		}); err != nil {
+			return result(), fmt.Errorf("post-resolution enrichment for asset %s: %w", assetID, err)
 		}
 	}
 
@@ -1617,27 +1615,45 @@ func (s *AssetService) ElevateExternalConnection(tenantID, connID uuid.UUID) (*m
 		return nil, fmt.Errorf("create managed asset from connection %s: %w", conn.ID, err)
 	}
 
-	// Materialize the leaf certificate (if captured) via the canonical
-	// approved-discovery path so the vendor cert is created, linked to the asset,
-	// and assessed exactly like an internal one.
-	if conn.CertSubject != nil && *conn.CertSubject != "" && conn.CertIssuer != nil && *conn.CertIssuer != "" {
-		var lifecycleRiskChanged []*events.AssetRiskChangedPayload
-		var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
-		var lifecycleCertExpiring []*events.CertificateExpiringPayload
-		// Non-fatal, same rationale as the MarkElevated back-link below: the
-		// managed asset already exists and is the caller's return value, so a
-		// failed cert materialization is repairable (re-ingest re-materializes)
-		// and must not turn a successful elevation into an error. Surfaced, not
-		// swallowed.
-		if err := s.processDiscoveryCryptoData(tenantID, asset.ID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
-			log.Printf("[AssetService] ElevateExternalConnection: asset %s created but materializing certificate from connection %s failed: %v", asset.ID, conn.ID, err)
+	if err := s.withResolvedAssetLifecycle(context.Background(), tenantID, asset.ID, func(current uuid.UUID, status string, deleted bool) error {
+		if deleted || status != identity.StatusMonitoring {
+			return ErrAssetLifecycleConflict
 		}
-	}
+		if current != asset.ID {
+			var err error
+			asset, err = s.GetAssetByID(tenantID, current)
+			if err != nil {
+				return err
+			}
+			if asset == nil {
+				return fmt.Errorf("merged connection survivor no longer exists")
+			}
+		}
+		// Materialize the leaf certificate (if captured) via the canonical
+		// approved-discovery path so the vendor cert is created, linked to the asset,
+		// and assessed exactly like an internal one.
+		if conn.CertSubject != nil && *conn.CertSubject != "" && conn.CertIssuer != nil && *conn.CertIssuer != "" {
+			var lifecycleRiskChanged []*events.AssetRiskChangedPayload
+			var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
+			var lifecycleCertExpiring []*events.CertificateExpiringPayload
+			// Non-fatal, same rationale as the MarkElevated back-link below: the
+			// managed asset already exists and is the caller's return value, so a
+			// failed cert materialization is repairable (re-ingest re-materializes)
+			// and must not turn a successful elevation into an error. Surfaced, not
+			// swallowed.
+			if err := s.processDiscoveryCryptoData(tenantID, asset.ID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+				log.Printf("[AssetService] ElevateExternalConnection: asset %s created but materializing certificate from connection %s failed: %v", asset.ID, conn.ID, err)
+			}
+		}
 
-	if err := s.externalConnectionsSvc.MarkElevated(tenantID, conn.ID, asset.ID); err != nil {
-		// Non-fatal: the managed asset exists; only the back-link failed and can
-		// be repaired. Surface it rather than swallow it.
-		log.Printf("[AssetService] ElevateExternalConnection: asset %s created but linking connection %s failed: %v", asset.ID, conn.ID, err)
+		if err := s.externalConnectionsSvc.MarkElevated(tenantID, conn.ID, asset.ID); err != nil {
+			// Non-fatal: the managed asset exists; only the back-link failed and can
+			// be repaired. Surface it rather than swallow it.
+			log.Printf("[AssetService] ElevateExternalConnection: asset %s created but linking connection %s failed: %v", asset.ID, conn.ID, err)
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("finish connection elevation: %w", err)
 	}
 	log.Printf("[AssetService] ElevateExternalConnection: elevated connection %s → managed asset %s (%s)", conn.ID, asset.ID, findingLabel(f))
 	return asset, nil
@@ -1724,14 +1740,14 @@ const insertCryptoImplementationSQL = `
 			key_exchange_algorithm, signature_algorithm, symmetric_encryption,
 			hash_algorithm, key_size, certificate_id, discovery_method, discovery_methods,
 			confidence_score, source_sensor_id, raw_data, risk_score,
-			compliance_status, first_discovered_at, last_verified_at,
+			compliance_status, first_discovered_at, last_verified_at, certificate_observed_at,
 			created_at, updated_at
 		) VALUES (
 			$1,$2,$3,$16::uuid,$4,$5,$6,
 			$12,$13,$14,
 			$7,$8,$9,$15::public.discovery_method,ARRAY[$15::public.discovery_method],
 			NULL,$10,$11,NULL,
-			'{}'::jsonb, NOW(), NOW(),
+			'{}'::jsonb, $17::timestamptz, $17::timestamptz, CASE WHEN $9::uuid IS NOT NULL THEN $17::timestamptz ELSE NULL END,
 			NOW(), NOW()
 		)`
 
@@ -1928,8 +1944,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// which is precisely the phantom TLS endpoint this replaces. Its
 	// encryption posture is at-rest, so it belongs in crypto_applications.
 	if posture, ok := atRestPostureFromFinding(f); ok {
-		s.produceAtRestApplication(tenantID, assetID, posture)
-		return nil
+		return s.produceAtRestApplication(tenantID, assetID, posture, findingObservedAt(f))
 	}
 
 	// B-22: the same reasoning, for the at-rest resources that atRestResourceTypes
@@ -2054,8 +2069,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// is no fake port to invent, because there is no endpoint row.
 	endpointID, epErr := s.resolveEndpointForFinding(context.Background(), tenantID, assetID, f)
 	if epErr != nil {
-		log.Printf("[AssetService] Warning: resolving the endpoint for %s on asset %s failed; the configuration will hang off the asset alone: %v",
-			findingLabel(f), assetID, epErr)
+		return fmt.Errorf("resolve endpoint before materializing crypto: %w", epErr)
 	}
 
 	key, recordable := s.cryptoKeyForFindingOnEndpoint(assetID, endpointID, f)
@@ -2088,7 +2102,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
 			return fmt.Errorf("lock asset materialization: %w", e)
 		}
-		id, outcome, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON)
+		id, outcome, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON, findingObservedAt(f))
 		if e != nil {
 			return e
 		}
@@ -2155,7 +2169,9 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// junction a fresh insert of this observation would have — the links a
 	// partial row already held are a subset of these and the insert is
 	// ON CONFLICT DO NOTHING.
-	s.classifyAndLinkAlgorithms(cryptoID, f)
+	if err := s.classifyAndLinkAlgorithms(cryptoID, f); err != nil {
+		materializationErrs = append(materializationErrs, err)
+	}
 
 	// A less complete re-observation of a configuration already held is NOT
 	// scored. The row's score was computed from a fuller observation than this
@@ -2170,10 +2186,12 @@ func (s *AssetService) processDiscoveryCryptoData(
 	scoreThisPass := cryptoOutcome != cryptoUpsertPartialReobserved
 
 	// Populate the cryptographic-key inventory from the certificate public keys
-	// on this implementation (metadata only; never key material). Best-effort:
-	// a failure here must not fail crypto ingest.
+	// on this implementation (metadata only; never key material). Failed
+	// attachments leave a retained receipt eligible for retry.
 	for _, pc := range producedCerts {
-		s.produceKeyFromCertificate(tenantID, cryptoID, pc.cert, pc.data)
+		if err := s.produceKeyFromCertificate(tenantID, cryptoID, pc.cert, pc.data); err != nil {
+			materializationErrs = append(materializationErrs, fmt.Errorf("materialize certificate key: %w", err))
+		}
 	}
 
 	// Risk score = the worse of two assessments:
@@ -2200,11 +2218,10 @@ func (s *AssetService) processDiscoveryCryptoData(
 
 	// RLS-scoped read; runs even when the detector is absent.
 	if scoreThisPass {
-		_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 			worst, all, ok, e := catalogueRiskForImplementation(tx, cryptoID)
 			if e != nil {
-				log.Printf("[AssetService] Warning: catalogue risk lookup failed for %s: %v", cryptoID, e)
-				return nil
+				return e
 			}
 			if ok {
 				cryptoRiskScore = *worst.RiskScore
@@ -2213,7 +2230,9 @@ func (s *AssetService) processDiscoveryCryptoData(
 				cryptoRiskAssessed = true
 			}
 			return nil
-		})
+		}); err != nil {
+			materializationErrs = append(materializationErrs, fmt.Errorf("read catalogue risk: %w", err))
+		}
 	}
 
 	if scoreThisPass && s.weakCryptoDetector != nil {
@@ -2266,12 +2285,12 @@ func (s *AssetService) processDiscoveryCryptoData(
 		}
 		{
 			// RLS-scoped writes over crypto_implementations / assets.
-			_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-				if e := persistCryptoRiskScore(tx, cryptoID, cryptoRiskScore); e != nil {
-					log.Printf("[AssetService] Warning: Failed to update crypto implementation risk score: %v", e)
-				}
-				return nil
-			})
+			if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+				return persistCryptoRiskScore(tx, cryptoID, cryptoRiskScore)
+			}); err != nil {
+				materializationErrs = append(materializationErrs, fmt.Errorf("persist crypto risk: %w", err))
+			}
+
 			// The per-asset risk rollup is NOT computed here any more. It is
 			// MAX over the asset's open risk-feeding findings, and the finding
 			// for the configuration just scored is written by the `crypto`
@@ -2321,7 +2340,9 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 
 	// Commit approval before materializing deferred crypto data so a failed status
 	// update cannot leave certificates/crypto rows without clearing deferred_findings.
-	query := `UPDATE assets SET asset_status = 'monitoring', updated_at = NOW(), last_seen_at = NOW(), stale_status = NULL WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
+	// Approval is an administrative decision, not a new observation. Preserve
+	// both observation freshness and its stale classification.
+	query := `UPDATE assets SET asset_status = 'monitoring', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
 	// RLS-scoped write over assets + asset_relationships. The status change and
 	// the edge promotion are ONE transaction: an approval that promoted no edges
 	// because the second statement failed would leave a monitored asset whose
@@ -2332,7 +2353,10 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 	// asset, and it wrote nothing to `asset_history` at all. The timeline said
 	// the asset was discovered and then, with no entry in between, that it was
 	// being monitored — no record that anybody decided, and none of who.
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, assetIDs, func(tx *sqlx.Tx) error {
+		if err := checkAssetLifecycleMutable(context.Background(), tx, tenantID, assetIDs); err != nil {
+			return err
+		}
 		if _, e := tx.Exec(query, tenantID, pq.Array(assetIDs)); e != nil {
 			return e
 		}
@@ -2363,11 +2387,20 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 // processes each finding to create certificates and crypto configurations, then
 // clears the deferred_findings from metadata only after every finding succeeds.
 func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.UUID) error {
+	return withAssetLifecycleReadLock(context.Background(), s.db.DB.DB, tenantID, assetID, func() error {
+		return s.processDeferredFindingsLocked(tenantID, assetID)
+	})
+}
+
+func (s *AssetService) processDeferredFindingsLocked(tenantID uuid.UUID, assetID uuid.UUID) error {
 	var metadataJSON []byte
 	// RLS-scoped read over assets.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(`SELECT metadata FROM assets WHERE id = $1 AND tenant_id = $2`, assetID, tenantID).Scan(&metadataJSON)
+		return tx.QueryRow(`SELECT metadata FROM assets WHERE id = $1 AND tenant_id = $2 AND asset_status='monitoring' AND deleted_at IS NULL`, assetID, tenantID).Scan(&metadataJSON)
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil || len(metadataJSON) == 0 {
 		return err
 	}
@@ -2501,30 +2534,23 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 		FROM assets a
 		LEFT JOIN asset_endpoints e ON e.tenant_id = a.tenant_id AND e.asset_id = a.id
 		WHERE a.tenant_id = $1 AND a.id = ANY($2) AND a.deleted_at IS NULL`
-	// RLS-scoped read over assets.
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.Select(&assets, selectQuery, tenantID, pq.Array(assetIDs))
-	}); err != nil {
-		return fmt.Errorf("failed to load assets for suppression: %w", err)
-	}
-
-	// Suppress fingerprints.
-	//
-	// B-42: a failure here used to go to a bare stdout Printf while DenyAssets
-	// still returned nil, so the deny reported success with no suppression
-	// recorded — invisible to the user and to any caller. Suppression is half
-	// of what "deny" means, so its failure is the operation's failure.
-	for _, a := range assets {
-		if err := s.addSuppression(tenantID, a.Hostname, a.IPAddress, a.Port, &userID, "denied by user"); err != nil {
-			return fmt.Errorf("failed to record deny suppression for asset %s: %w", a.ID, err)
-		}
-	}
-
 	// Mark assets as denied and default ownership to third_party.
 	// RLS-scoped write over assets + asset_relationships, in one transaction
 	// for the same reason ApproveAssets is.
 	update := `UPDATE assets SET asset_status = 'denied', asset_ownership = COALESCE(NULLIF(asset_ownership,''), 'third_party'), updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, assetIDs, func(tx *sqlx.Tx) error {
+		if err := checkAssetLifecycleMutable(context.Background(), tx, tenantID, assetIDs); err != nil {
+			return err
+		}
+		if err := tx.Select(&assets, selectQuery, tenantID, pq.Array(assetIDs)); err != nil {
+			return fmt.Errorf("failed to load assets for suppression: %w", err)
+		}
+		for _, a := range assets {
+			if err := addSuppressionTx(tx, tenantID, a.Hostname, a.IPAddress, a.Port, &userID, "denied by user"); err != nil {
+				return fmt.Errorf("failed to record deny suppression for asset %s: %w", a.ID, err)
+			}
+		}
+
 		if _, e := tx.Exec(update, tenantID, pq.Array(assetIDs)); e != nil {
 			return e
 		}
@@ -2827,6 +2853,9 @@ func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.Asse
 		// identifiers all belong to other assets, and a human has a merge
 		// proposal to settle. Reporting it as a failure is the honest answer —
 		// the caller asked for an asset and there is none to return.
+		if res.ObservationID != "" {
+			return nil, res.Outcome, &identity.RetainedObservation{Result: res.IngestResult()}
+		}
 		return nil, res.Outcome, fmt.Errorf("this asset's identifiers already belong to %d existing asset(s); "+
 			"a merge proposal was opened in Approvals for review", len(res.Candidates))
 	}
@@ -2878,10 +2907,10 @@ func (s *AssetService) classKeyExists(tenantID uuid.UUID, key string) (bool, err
 // discovery. It is applied here rather than re-derived, so the two cannot
 // disagree — EXCEPT over a conflict, where the observation waits for the human
 // who has to settle the merge whatever the rule said.
-func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership, assetStatus string) (identity.Resolution, error) {
+func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership, assetStatus string) (identity.Resolution, bool, error) {
 	obs, err := s.discoveryObservation(tenantID, f, effectiveIP, ownership)
 	if err != nil {
-		return identity.Resolution{}, err
+		return identity.Resolution{}, false, err
 	}
 
 	// The rules (ADR-0004 D6, workstream 2.10b). A class they decide becomes a
@@ -2911,7 +2940,23 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 	}
 
 	var assetID uuid.UUID
-	res, err := s.resolveObservationWith(context.Background(), obs, func(tx *sqlx.Tx, res identity.Resolution) error {
+	var durableMaterialization bool
+	res, err := s.resolveObservationWithRepo(context.Background(), obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
+		mode, err := repo.AdmissionMode(ctxBG, tenantID.String())
+		if err != nil {
+			return err
+		}
+		durableMaterialization = res.ObservationID != "" && (mode == "enforce" || mode == "paused")
+		if durableMaterialization {
+			payload, err := json.Marshal(f)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(`INSERT INTO identity_observation_payloads(tenant_id,observation_id,receipt_key,payload) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenantID, res.ObservationID, identity.ObservationReceiptKey(obs), string(payload))
+			if err != nil {
+				return err
+			}
+		}
 		if res.Asset.Zero() {
 			return nil
 		}
@@ -2932,7 +2977,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		return nil
 	})
 	if err != nil {
-		return identity.Resolution{}, err
+		return identity.Resolution{}, false, err
 	}
 	if res.Asset.Zero() {
 		// The floor: every identifier this finding carries already belongs to
@@ -2941,7 +2986,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		// work item — but the caller must not treat it as an ingested asset.
 		log.Printf("[AssetService] IngestFindings: %s matched nothing it may claim; its identifiers belong to %d existing asset(s) and merge proposal %s was opened",
 			findingLabel(f), len(res.Candidates), res.Proposal.ID)
-		return res, nil
+		return res, durableMaterialization, nil
 	}
 
 	if res.Outcome == identity.OutcomeConflict {
@@ -2956,7 +3001,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		log.Printf("[AssetService] IngestFindings: %s carried %s=%q, which belongs to another asset; it was not attached",
 			findingLabel(f), un.Kind, un.Value)
 	}
-	return res, nil
+	return res, durableMaterialization, nil
 }
 
 // bulkAssetKey returns a stable dedupe key for an import row: the lowercased
@@ -2979,9 +3024,20 @@ func bulkAssetKey(in models.AssetInput) string {
 // row is recorded as an error and the rest of the batch proceeds. The caller is
 // responsible for enforcing the subscription asset cap before invoking this.
 func (s *AssetService) BulkCreateAssets(tenantID uuid.UUID, inputs []models.AssetInput) *models.BulkImportResult {
+	return s.BulkCreateAssetsFromSource(tenantID, inputs, identity.Source{Kind: identity.SourceImported, Ref: "import"})
+}
+
+func (s *AssetService) BulkCreateAssetsFromSource(tenantID uuid.UUID, inputs []models.AssetInput, source identity.Source) *models.BulkImportResult {
 	res := models.NewBulkImportResult(len(inputs))
+	runID, observedAt := uuid.NewString(), time.Now().UTC()
 	seen := make(map[string]struct{}, len(inputs))
 	for i, in := range inputs {
+		if in.ObservationReceiptID == "" {
+			in.ObservationReceiptID = fmt.Sprintf("%s:%d", runID, i)
+		}
+		if in.ObservationTime.IsZero() {
+			in.ObservationTime = observedAt
+		}
 		// Within-file duplicates are still caught here: two rows for one host in
 		// one upload are a data-entry mistake the importer should report, not an
 		// asset observed twice.
@@ -2998,9 +3054,14 @@ func (s *AssetService) BulkCreateAssets(tenantID uuid.UUID, inputs []models.Asse
 		// with no scope: it called two segments' `printer-2` one asset and
 		// missed a host whose only match was its serial number.
 		asset, outcome, err := s.createAssetResolved(tenantID, in,
-			identity.Source{Kind: identity.SourceImported, Ref: "import"},
+			source,
 			s.evaluateAssetApproval(tenantID, in.IPAddress, in.Hostname))
 		if err != nil {
+			var retained *identity.RetainedObservation
+			if errors.As(err, &retained) {
+				res.AddObservation(i, retained.Result.ObservationID, retained.Result.Outcome)
+				continue
+			}
 			res.Add(i, models.BulkRowError, nil, err.Error())
 			continue
 		}
@@ -3407,21 +3468,20 @@ func (s *AssetService) UpdateAssetService(tenantID, assetID uuid.UUID, input mod
 
 // DeleteAsset performs a soft delete on an asset by setting deleted_at.
 func (s *AssetService) DeleteAsset(tenantID, assetID uuid.UUID) error {
-	// Publish asset deleted event before deletion
+	query := `UPDATE assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`
+	// RLS-scoped write over assets.
+	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, []uuid.UUID{assetID}, func(tx *sqlx.Tx) error {
+		_, e := tx.Exec(query, tenantID, assetID)
+		return e
+	}); err != nil {
+		return fmt.Errorf("failed to delete asset: %w", err)
+	}
+	// Publish only after the delete transaction commits.
 	if s.eventPublisher != nil {
 		ctx := context.Background()
 		if err := s.eventPublisher.PublishAssetDeleted(ctx, tenantID, assetID, "manual"); err != nil {
 			log.Printf("[AssetService] Warning: Failed to publish asset deleted event: %v", err)
 		}
-	}
-
-	query := `UPDATE assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`
-	// RLS-scoped write over assets.
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(query, tenantID, assetID)
-		return e
-	}); err != nil {
-		return fmt.Errorf("failed to delete asset: %w", err)
 	}
 	return nil
 }
@@ -3430,7 +3490,10 @@ func (s *AssetService) DeleteAsset(tenantID, assetID uuid.UUID) error {
 func (s *AssetService) RestoreAsset(tenantID, assetID uuid.UUID) error {
 	query := `UPDATE assets SET deleted_at = NULL WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NOT NULL`
 	// RLS-scoped write over assets.
-	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, []uuid.UUID{assetID}, func(tx *sqlx.Tx) error {
+		if err := checkAssetRestoreMutable(context.Background(), tx, tenantID, assetID); err != nil {
+			return err
+		}
 		_, e := tx.Exec(query, tenantID, assetID)
 		return e
 	}); err != nil {
@@ -3444,7 +3507,7 @@ func (s *AssetService) RestoreAsset(tenantID, assetID uuid.UUID) error {
 func (s *AssetService) HardDeleteAsset(tenantID, assetID uuid.UUID) error {
 	// RLS-scoped reads/writes over assets / crypto_implementations — the
 	// verify + cascade-delete + delete run in one tenant tx.
-	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	return withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, []uuid.UUID{assetID}, func(tx *sqlx.Tx) error {
 		// First verify the asset exists and belongs to the tenant
 		var exists bool
 		checkQuery := `SELECT EXISTS(SELECT 1 FROM assets WHERE tenant_id = $1 AND id = $2)`

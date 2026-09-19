@@ -27,6 +27,7 @@ import { ScansPage } from './sections/discovery/scans-page';
 import { ActiveScanPage } from './sections/discovery/active-scan-page';
 import { CloudPage } from './sections/discovery/cloud-page';
 import { ApprovalsPage } from './sections/discovery/approvals-page';
+import { ObservationsPage } from './sections/discovery/observations-page';
 import { PcapPage } from './sections/discovery/pcap-page';
 import { SbomPage } from './sections/discovery/sbom-page';
 import { DashboardPage } from './sections/dashboard/dashboard-page';
@@ -108,6 +109,7 @@ export default function App() {
           <Route path="/discovery/scans" element={<ScansPage />} />
           <Route path="/discovery/active-scan" element={<ActiveScanPage />} />
           <Route path="/discovery/approvals" element={<ApprovalsPage />} />
+          <Route path="/discovery/observations" element={<ObservationsPage />} />
           <Route path="/discovery/logs" element={<LogsPage />} />
           <Route path="/discovery/cloud" element={<CloudPage />} />
           <Route path="/discovery/pcap" element={<PcapPage />} />

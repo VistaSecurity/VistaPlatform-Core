@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +14,8 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -224,6 +227,9 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 
 	// Process the job
 	err = jp.processDiscoveryJob(job)
+	if errors.Is(err, dispatchguard.ErrPaused) {
+		return jp.discoveryService.UpdateJobStatus(jobID, "queued", nil)
+	}
 	if err != nil {
 		log.Printf("Failed to process job %s: %v", jobID, err)
 		if alertErr := jp.alertService.SendJobFailedAlert(job.TenantID, jobID, err.Error()); alertErr != nil {
@@ -252,22 +258,28 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 // getJobOptions reads scanning options from the job's metadata JSONB.
 // RLS-scoped read over discovery_jobs; tenantID is threaded from the job so the
 // read runs inside a tenant-scoped transaction.
-func (jp *JobProcessor) getJobOptions(tenantID, jobID string) map[string]interface{} {
+func (jp *JobProcessor) getJobOptions(tenantID, jobID string) (map[string]interface{}, error) {
 	var metadataJSON []byte
 	err := jp.withTenantTxx(context.Background(), tenantID, func(tx *sqlx.Tx) error {
 		return tx.Get(&metadataJSON, `SELECT COALESCE(metadata, '{}'::jsonb) FROM discovery_jobs WHERE id = $1`, jobID)
 	})
-	if err != nil || len(metadataJSON) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(metadataJSON) == 0 {
+		return nil, nil
 	}
 	var metadata map[string]interface{}
-	if json.Unmarshal(metadataJSON, &metadata) != nil {
-		return nil
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		return nil, err
 	}
 	if opts, ok := metadata["options"].(map[string]interface{}); ok {
-		return opts
+		return opts, nil
 	}
-	return nil
+	if metadata["options"] != nil {
+		return nil, fmt.Errorf("invalid discovery job options")
+	}
+	return nil, nil
 }
 
 func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
@@ -295,7 +307,10 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 	}
 
 	// Read scanning options from job metadata
-	opts := jp.getJobOptions(job.TenantID, job.ID)
+	opts, err := jp.getJobOptions(job.TenantID, job.ID)
+	if err != nil {
+		return fmt.Errorf("read discovery job policy markers: %w", err)
+	}
 
 	// If active scanning is explicitly disabled, skip all scanning
 	if activeScanning, ok := opts["active_scanning"].(bool); ok && !activeScanning {
@@ -320,7 +335,7 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 	query := `SELECT id, job_id, input, protocols, ports, status, created_at, updated_at, completed_at
 	          FROM discovery_targets WHERE job_id = $1`
 	// RLS-scoped read over discovery_targets; job.TenantID scopes the tx.
-	err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
+	err = jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
 		return tx.Select(&targetRows, query, job.ID)
 	})
 	if err != nil {
@@ -345,7 +360,13 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 
 	// Process each target
 	for _, target := range targets {
+		if dispatchguard.IsAutomaticScan(opts) && target.Status == "completed" {
+			continue
+		}
 		err := jp.processTarget(job, target, opts)
+		if err != nil && (dispatchguard.IsAutomaticScan(opts) || errors.Is(err, dispatchguard.ErrPaused) || errors.Is(err, dispatchguard.ErrDenied)) {
+			return err
+		}
 		if err != nil {
 			log.Printf("Failed to process target %s: %v", target.Input, err)
 			// Continue with other targets
@@ -457,6 +478,13 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 	// job.TenantID scopes the tx.
 	query := `UPDATE discovery_targets SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE id = $1`
 	err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
+		ports := make([]int, len(target.Ports))
+		for i, p := range target.Ports {
+			ports[i] = int(p)
+		}
+		if err := dispatchguard.AuthorizeAutomaticScan(tx, sensordispatch.Payload{TenantID: job.TenantID, Targets: []string{target.Input}, Protocols: target.Protocols, Ports: ports, Options: probeOpts}); err != nil {
+			return err
+		}
 		_, e := tx.Exec(query, target.ID)
 		return e
 	})

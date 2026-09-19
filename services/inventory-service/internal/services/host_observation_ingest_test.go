@@ -823,15 +823,8 @@ func TestHostObservationBuilder_BestNamePrefersDHCPOverHexLocal(t *testing.T) {
 
 // --- sensor self-observation (asset-inventory decision 9) -------------------
 
-// TestHostObservationBuilder_SelfReport_CarriesAgentID pins the strongest-
-// identifier wiring: a self-report's AgentID becomes a KindAgentID
-// identifier, alongside the ordinary MAC/hostname/address identifiers the
-// payload also carries.
-//
-// Mutation check: deleting the `if agentID := ...` block in
-// hostObservationObservation makes this test fail (no KindAgentID
-// identifier at all).
-func TestHostObservationBuilder_SelfReport_CarriesAgentID(t *testing.T) {
+// A claimed agent ID without a matching authenticated sensor cannot claim identity.
+func TestHostObservationBuilder_UnverifiedSelfReportCannotClaimAgentID(t *testing.T) {
 	svc := unscopedService()
 	ho := &hostobs.HostObservation{
 		AgentID:   "22222222-2222-2222-2222-222222222222",
@@ -845,20 +838,13 @@ func TestHostObservationBuilder_SelfReport_CarriesAgentID(t *testing.T) {
 		t.Fatalf("hostObservationObservation: %v", err)
 	}
 
-	var found bool
 	for _, id := range obs.Identifiers {
 		if id.Kind == identity.KindAgentID {
-			found = true
-			if id.Value != "22222222-2222-2222-2222-222222222222" {
-				t.Errorf("agent_id value = %q", id.Value)
-			}
-			if id.Confidence != 1 {
-				t.Errorf("agent_id confidence = %v, want 1", id.Confidence)
-			}
+			t.Fatalf("unverified agent identifier: %+v", id)
 		}
 	}
-	if !found {
-		t.Fatalf("no agent_id identifier in %v", obs.Identifiers)
+	if obs.Admission.Authoritative || obs.ClassHint != assetclass.KeyUnknownHost {
+		t.Fatalf("unverified agent promoted identity/class: %+v", obs)
 	}
 }
 

@@ -3,7 +3,7 @@
 // Generated from standards/asset-classes.yaml by
 // scripts/generate-asset-classes.mjs; `make audit` fails on drift. Import as
 // `@vistasecurity/primitives/assets`.
-export { ASSET_CLASSES, ASSET_CLASS_KEYS, CLASS_TREE } from './classes.gen';
+export { ASSET_CLASSES, ASSET_CLASS_KEYS, CLASS_TREE, ASSET_IDENTIFIER_KINDS } from './classes.gen';
 export type {
   AssetClass,
   AssetClassCycloneDXType,

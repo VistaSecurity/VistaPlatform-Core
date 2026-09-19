@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0-rc.14] - 2026-09-17
+## [1.0.0-rc.15] - 2026-09-17
 
 This is the first release of the **general asset inventory**: the product now
 inventories every kind of asset, not only cryptographic material. Assets are
@@ -19,6 +19,12 @@ provider at all. Tracked as one epic in the private repository.
 Recent fixes improve host names, server and Windows classification, site placement,
 and certificate attachment evidence. Inventory facet filters and sensor/agent
 settings saves are corrected as well.
+
+The trustworthy-discovery RC work builds on the identity foundation,
+admission workflow and reviewed asset reconciliation, adding
+source-first enrichment and tenant settings. Activation is prospective and tenant-scoped;
+the coupled release passed 310 required isolated estate checks with admission
+enabled. The separate tenant 24-hour/two-cycle canary remains a rollout gate. See [identity and discovery evidence](docsv4/core/features/identity-evidence.md).
 
 ### Highlights
 

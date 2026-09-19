@@ -68,7 +68,7 @@ const (
 // IdentifierKinds is the allowed set of identifier kinds, in the default
 // precedence order of ADR-0002 D3. A class may drop and reorder kinds; it may
 // not invent one.
-var IdentifierKinds = []string{"agent_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"}
+var IdentifierKinds = []string{"declaration_id", "agent_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"}
 
 // CycloneDXTypes is the allowed set of Class.CycloneDXType values. "service" is
 // not a CycloneDX component type — a class carrying it is emitted into the

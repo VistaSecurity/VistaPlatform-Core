@@ -334,6 +334,13 @@ func evidenceKinds(candidates []MergeCandidate, except string) []Kind {
 // Identifiers owned by the other candidates are reported unattached, as on
 // any match; nothing is taken from them.
 func (e *Engine) resolveSuppressed(ctx context.Context, obs Observation, at time.Time, ids []Identifier, owners map[string][]AssetRef, candidates []MergeCandidate, d PriorDecision, why string) (Resolution, error) {
+	if e.admissionDecision != nil {
+		// Keep Separate records a negative identity decision. It does not
+		// authorize assigning contested evidence to the weakest candidate.
+		return Resolution{Outcome: OutcomeUnresolved, Unattached: ids,
+			Suppressed: &SuppressedProposal{ProposalID: d.ProposalID, DecidedAt: d.DecidedAt,
+				DecidedBy: d.DecidedBy, Candidates: candidateIDs(candidates), Reason: why}}, nil
+	}
 	target, decidedBy := suppressedTarget(candidates, d)
 	attach, unattached := splitByOwner(ids, owners, target.Ref.ID)
 	suppressed := &SuppressedProposal{

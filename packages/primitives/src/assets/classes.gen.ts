@@ -7,6 +7,8 @@
 // `@vistasecurity/primitives/assets`. The Go mirror is shared/assetclass; the
 // DB mirror is the asset_classes table. All three come from the same YAML.
 
+export const ASSET_IDENTIFIER_KINDS = ["declaration_id", "agent_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"] as const;
+
 /** Every platform class key. Tenant leaf subclasses are runtime data and are
  *  deliberately NOT in this union — they are typed as `string`. */
 export type AssetClassKey =
