@@ -29,7 +29,10 @@ it('pauses while preserving enrichment and submits a reason and saved revision',
   await render();
   expect(host.querySelector<HTMLOptionElement>('option[value="disabled"]')?.disabled).toBe(true);
   expect(host.querySelector<HTMLOptionElement>('option[value="observe"]')?.disabled).toBe(true);
-  await select('paused'); expect(button('Save identity policy').disabled).toBe(true);
+  await select('paused');
+  expect(button('Save identity policy').disabled).toBe(true);
+  expect(button('Save identity policy').title).toContain('reason of at least 3 characters');
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('Required for the audit history');
   await setReason('Investigating unexpected count growth');
   api.PUT.mockResolvedValue({ data: { ...settings, mode: 'paused', version: 8 }, response: { ok: true } });
   await act(async () => button('Save identity policy').click());

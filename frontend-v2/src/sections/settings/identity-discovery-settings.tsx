@@ -49,6 +49,7 @@ function IdentityDiscoveryForm({ current }: { current: Settings }) {
   const tooMany = payload.enrichment.excluded_cidrs.length > settings.limits.max_excluded_cidrs || payload.enrichment.sensitive_asset_ids.length > settings.limits.max_sensitive_asset_ids;
   const validMode = !enabled || mode === 'enforce' || mode === 'paused';
   const dirty = mode !== settings.mode || enabled !== settings.enrichment.enabled || excluded !== settings.enrichment.excluded_cidrs.join('\n') || sensitive !== settings.enrichment.sensitive_asset_ids.join('\n');
+  const reasonTooShort = reason.trim().length < 3;
   const save = useMutation({ mutationFn: async () => {
     const { data, error, response } = await clients.inventory.PUT('/settings/identity-discovery', { body: payload });
     if (!response.ok || !data) {
@@ -88,7 +89,10 @@ function IdentityDiscoveryForm({ current }: { current: Settings }) {
           <p style={{ margin: 0, fontSize: 12 }}>One CIDR per line, up to {settings.limits.max_excluded_cidrs}. These exclusions further restrict authorized networks.</p>
           <label>Sensitive asset IDs<textarea className="ui-input" rows={3} value={sensitive} onChange={(e) => setSensitive(e.target.value)} /></label>
           <p style={{ margin: 0, fontSize: 12 }}>One asset ID per line, up to {settings.limits.max_sensitive_asset_ids}. Copy the ID from its asset URL. Automatic enrichment skips these assets; only assets in this tenant are accepted.</p>
-          <label>Reason for change<textarea className="ui-input" required minLength={3} maxLength={settings.limits.max_reason_length} value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+          <label>Reason for change<textarea className="ui-input" required minLength={3} maxLength={settings.limits.max_reason_length} aria-describedby="identity-policy-reason-help" value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+          <p id="identity-policy-reason-help" role={dirty && reasonTooShort ? 'alert' : undefined} style={{ margin: 0, fontSize: 12 }}>
+            Required for the audit history. Enter at least 3 characters before saving.
+          </p>
         </fieldset>
         {tooMany && <p role="alert">Reduce the exclusions or sensitive asset list to the displayed limits.</p>}
         {!validMode && <p role="alert">Automatic enrichment requires active identity admission. Pausing preserves the setting without running enrichment.</p>}
@@ -96,7 +100,7 @@ function IdentityDiscoveryForm({ current }: { current: Settings }) {
         {stale && <p role="alert">A newer policy is available. Your draft has been preserved; reload the saved settings before making another change.</p>}
         {reload.isError && <p role="alert">{reload.error.message}</p>}
         {stale && <button type="button" className="ui-btn" disabled={reload.isPending} onClick={() => reload.mutate()}>Reload saved settings</button>}
-        <button className="ui-btn accent" type="submit" disabled={!dirty || stale || save.isPending || tooMany || !validMode || reason.trim().length < 3}>{save.isPending ? 'Saving…' : 'Save identity policy'}</button>
+        <button className="ui-btn accent" type="submit" title={dirty && reasonTooShort ? 'Enter a reason of at least 3 characters to save' : undefined} disabled={!dirty || stale || save.isPending || tooMany || !validMode || reasonTooShort}>{save.isPending ? 'Saving…' : 'Save identity policy'}</button>
       </form>
     </PermissionGate>
   </>;
