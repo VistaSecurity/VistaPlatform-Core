@@ -55,6 +55,7 @@ import (
 // sighting mint a duplicate of the asset being edited.
 var collectorMintedKinds = map[identity.Kind]bool{
 	identity.KindAgentID:         true,
+	identity.KindSensorID:        true,
 	identity.KindDeclarationID:   true,
 	identity.KindCloudResourceID: true,
 }

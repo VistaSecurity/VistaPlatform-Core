@@ -12,6 +12,7 @@ import {
   useMergeProposals, useResolveMergeProposal,
 } from '../inventory/asset-queries';
 import { assetIdentity, classLabel, primaryAddressPort } from '../inventory/asset-shape';
+import { IdentityStatus } from '../inventory/identity-status';
 import { AssetMergeModal } from './asset-merge-modal';
 import type { MergeProposal } from '../inventory/asset-queries';
 import { MergeProposalRow } from './merge-proposal-row';
@@ -415,7 +416,16 @@ export function ApprovalsPage() {
                 const source = sourceOfAsset(a);
                 return (
                   <>
-                    <CellMono v={assetIdentity(a).primary} />
+                    {/* A provisional item is an ordinary pending asset here —
+                        approving it monitors it, and its identity stays
+                        provisional. The badge is the same component the
+                        inventory row and the asset page use, so the three
+                        cannot drift into three different words for one state
+                        (#1898 D1). */}
+                    <span style={{ minWidth: 0 }}>
+                      <CellMono v={assetIdentity(a).primary} />
+                      {a.identity_status === 'provisional' && <IdentityStatus asset={a} />}
+                    </span>
                     {/* The primary endpoint's address, or blank. A pending asset
                         with no endpoint has none to show. */}
                     <CellMono v={primaryAddressPort(a)} c="var(--app-t3)" />

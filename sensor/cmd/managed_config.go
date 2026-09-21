@@ -48,6 +48,9 @@ func (s *Sensor) setupAgentConfig(version string) {
 // silently ignored, so a console offering a knob this binary does not implement
 // says so instead of showing it as applied.
 func (s *Sensor) registerManagedSettings(a *desiredstate.Applier) {
+	// Immutable baseline: config below records desired values, so comparing to
+	// its later contents would forget a pending change on the next revision.
+	running := s.config.Capture
 	a.Handle(agentconfig.KeyActiveProbing, desiredstate.BoolSetter(func(on bool) error {
 		s.config.Capture.ActiveProbing = on
 		return nil
@@ -69,18 +72,28 @@ func (s *Sensor) registerManagedSettings(a *desiredstate.Applier) {
 	// This is the case the whole five-state model exists for.
 	a.Handle(agentconfig.KeyHostObservation, desiredstate.BoolSetter(func(on bool) error {
 		if on != s.config.Capture.HostObservation {
-			log.Printf("📝 Host observation set to %v — applies on the next sensor restart (the capture filter is fixed at interface open)", on)
+			if err := s.persistCaptureSetting("hostObservation", on); err != nil {
+				return err
+			}
 		}
 		s.config.Capture.HostObservation = on
-		return desiredstate.ErrNeedsRestart
+		if on != running.HostObservation {
+			return desiredstate.ErrNeedsRestart
+		}
+		return nil
 	}))
 
 	a.Handle(agentconfig.KeyHostObservationDNS, desiredstate.BoolSetter(func(on bool) error {
 		if on != s.config.Capture.HostObservationDNS {
-			log.Printf("📝 DNS decoding set to %v — applies on the next sensor restart (the capture filter is fixed at interface open)", on)
+			if err := s.persistCaptureSetting("hostObservationDNS", on); err != nil {
+				return err
+			}
 		}
 		s.config.Capture.HostObservationDNS = on
-		return desiredstate.ErrNeedsRestart
+		if on != running.HostObservationDNS {
+			return desiredstate.ErrNeedsRestart
+		}
+		return nil
 	}))
 
 	// Recorded, not in force. The coalescing window is fixed when the
@@ -89,8 +102,17 @@ func (s *Sensor) registerManagedSettings(a *desiredstate.Applier) {
 	// this reports pending-restart like the two decoder toggles rather than
 	// claiming a merge window the sensor is not using.
 	a.Handle(agentconfig.KeyHostObservationWindow, desiredstate.DurationSetter(agentconfig.KeyHostObservationWindow, func(d time.Duration) error {
-		s.config.Capture.HostObservationWindowSeconds = int(d.Seconds())
-		return desiredstate.ErrNeedsRestart
+		seconds := int(d.Seconds())
+		if seconds != s.config.Capture.HostObservationWindowSeconds {
+			if err := s.persistCaptureSetting("hostObservationWindowSeconds", seconds); err != nil {
+				return err
+			}
+		}
+		s.config.Capture.HostObservationWindowSeconds = seconds
+		if seconds != running.HostObservationWindowSeconds {
+			return desiredstate.ErrNeedsRestart
+		}
+		return nil
 	}))
 
 	a.Handle(agentconfig.KeyDedupTTLMinutes, func(v agentconfig.Value) error {

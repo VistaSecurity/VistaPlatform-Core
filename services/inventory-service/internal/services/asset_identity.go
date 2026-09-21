@@ -64,6 +64,16 @@ func (s *AssetService) identityEngine() (*identity.Engine, error) {
 		s.identityRepo = pgidentity.New(s.db.DB.DB)
 		s.identityEng, s.identityErr = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission,
 			Repo: s.identityRepo,
+			// ProvisionalInventory is D2/D3, and THIS is the one
+			// constructor that turns it on. The flag defaults to false so every
+			// other engine — device-interrogation-service's, the memory-repo
+			// tests', a tool's — keeps behaving exactly as it did; inventory-service
+			// owns the asset table, the observation table and the enrichment
+			// worker, so it is the only place that can honour the whole rule
+			// (create provisional, corroborate in place, materialise retained
+			// evidence). A second caller enabling it without those pieces would
+			// create provisional assets nothing ever promotes.
+			ProvisionalInventory: true,
 			// AutoAcceptThreshold is left at zero HERE — never auto-merge
 			// (ADR-0002 D5) — and supplied per observation by
 			// resolveObservationWith, from the tenant's own setting. It has to

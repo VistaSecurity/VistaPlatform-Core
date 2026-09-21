@@ -27,7 +27,16 @@ function DecisionForm({ id }: { id: string }) {
       : action === 'link' ? await clients.inventory.POST('/discovery/observations/{id}/link', { params, body: { ...body, asset_id: assetID } })
       : await clients.inventory.POST('/discovery/observations/{id}/dismiss', { params, body });
     if (!result.response.ok) {
-      throw new Error(result.response.status === 409 ? 'This observation changed or has conflicting ownership. Refresh it and review the current evidence.'
+      // The 409 body is the CURRENT inventory-service error shape: a single
+      // string under `error`. Branching on it rather than on the status is what
+      // separates "somebody else moved this" from "this is a provisional item
+      // and linking is the wrong tool" — two different 409s with two different
+      // next actions ( D6).
+      const code = (result as { error?: { error?: unknown } }).error?.error;
+      throw new Error(result.response.status === 409
+        ? (code === 'provisional_item_requires_merge_review'
+          ? 'This observation already backs a provisional inventory item. To combine it with another asset, use merge review from Inventory.'
+          : 'This observation changed or has conflicting ownership. Refresh it and review the current evidence.')
         : result.response.status === 402 ? 'The asset allowance has been reached. This observation is still saved; you can link it to an existing asset.'
         : 'The decision could not be saved. Try again.');
     }

@@ -49,8 +49,15 @@ func TestIntegration_IdentityQuality_LegacyFreshnessAndObservationReads(t *testi
 			t.Fatalf("observation page=%+v err=%v", page, err)
 		}
 		summary, err := svc.IdentitySummary(ctx, tenant)
-		if err != nil || summary.Legacy != 1 || summary.Unresolved != 1 || summary.Established != 0 {
+		if err != nil || summary.Legacy != 1 || summary.Unresolved != 1 || summary.Established != 0 || summary.AdmissionMode != "disabled" {
 			t.Fatalf("summary=%+v err=%v", summary, err)
+		}
+		if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"paused"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=tenant_admin_settings.config || EXCLUDED.config`, tenant); err != nil {
+			t.Fatal(err)
+		}
+		summary, err = svc.IdentitySummary(ctx, tenant)
+		if err != nil || summary.AdmissionMode != "paused" {
+			t.Fatalf("policy summary=%+v err=%v", summary, err)
 		}
 		foreign, err := svc.ListIdentityObservations(ctx, uuid.New(), "all", 1, 50, nil)
 		if err != nil || foreign.Total != 0 {

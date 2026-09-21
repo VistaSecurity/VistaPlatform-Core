@@ -779,9 +779,9 @@ func TestReasonSummarises(t *testing.T) {
 
 // ── the vocabulary ─────────────────────────────────────────────────────────
 
-func TestSingletonKindsAreTheFour(t *testing.T) {
+func TestSingletonKindsIncludeBothCollectorTypes(t *testing.T) {
 	want := []string{
-		matcher.KindAgentID, matcher.KindCloudResourceID,
+		matcher.KindAgentID, matcher.KindSensorID, matcher.KindCloudResourceID,
 		matcher.KindSerialNumber, matcher.KindCMDBSysID,
 	}
 	got := matcher.SingletonKinds()

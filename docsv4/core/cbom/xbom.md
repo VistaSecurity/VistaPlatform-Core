@@ -260,6 +260,16 @@ not send a CSV.
 No. All four kinds resolve the scope through the same query, so a CBOM and a
 full inventory of the same scope always cover the same assets.
 
+**Why is my SBOM empty (0 components) when the agent reported software?**
+The default scope includes monitored assets. A newly discovered host in
+**Discovery → Approvals** is still pending approval, so its software installs
+are outside that scope even if the agent collected them. A host your own device
+agent runs on is approved automatically by its first host inventory; a host
+collected remotely over SSH, or seen only by a sensor, waits for you. Approve
+it, then generate the artifact again; the earlier one stays as a record of what
+was in scope at the time. A custom scope that explicitly includes pending
+assets can include the host before approval.
+
 **Why does my SBOM show fewer components than I have installed packages?**
 Components are per *product*, not per installation. Open a component's
 `evidence.occurrences` to see every asset it was found on.

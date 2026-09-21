@@ -51,6 +51,7 @@ describe('isEditableIdentifier (gate1 C3)', () => {
     // The server applies exactly this rule, and reports what it KEPT. A remove
     // button here would produce a click that reads as saved and changes nothing.
     expect(isEditableIdentifier({ kind: 'agent_id', value: 'agt-77', sourceKind: 'declared' })).toBe(false);
+    expect(isEditableIdentifier({ kind: 'sensor_id', value: 'sensor-77', sourceKind: 'declared' })).toBe(false);
     expect(isEditableIdentifier({ kind: 'cloud_resource_id', value: 'arn:…', sourceKind: 'declared' })).toBe(false);
   });
 

@@ -33,6 +33,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -890,5 +891,118 @@ func TestIntegration_HostObservation_RetainedUnverifiedAgentCannotLinkSensor(t *
 	}
 	if linked.Valid || class != "unknown_host" {
 		t.Fatalf("unverified agent changed association/class: %v %s", linked, class)
+	}
+}
+
+func TestIntegration_HostObservation_SelfReportUsesSensorNamespace(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	sensor := uuid.New()
+	if _, err := db.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status)
+ VALUES($1,$2,'Sensor','windows','1.0','datacenter_host','active')`, sensor, tenant); err != nil {
+		t.Fatal(err)
+	}
+	finding := observationFinding(t, &hostobs.HostObservation{
+		AgentID: sensor.String(), Platform: "windows", Hostnames: []string{"same-host"}, ObservedAt: time.Now().UTC(),
+		MAC: "00:11:22:33:44:55", Addresses: addrsFor(t, "192.0.2.10"),
+	})
+	finding.SourceSensorID = ptr(sensor.String())
+	finding.RawData["discovery_method"] = "sensor_self_report"
+	ho, ok := hostObservationPayload(finding)
+	if !ok {
+		t.Fatal("missing payload")
+	}
+	observation, err := svc.hostObservationObservation(tenant, finding, ho)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !observation.Admission.Authoritative {
+		t.Fatal("verified self-report lost authority")
+	}
+	found := false
+	for _, id := range observation.Identifiers {
+		if id.Kind == identity.KindAgentID {
+			t.Fatal("sensor still uses device-agent namespace")
+		}
+		found = found || (id.Kind == identity.KindSensorID && id.Value == sensor.String())
+	}
+	if !found {
+		t.Fatal("sensor identifier missing")
+	}
+	if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason) SELECT $1,id,'{"quantity":10}'::jsonb,'collector identity regression' FROM billable_items WHERE key='max_assets'`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	repo := pgidentity.New(db.DB.DB)
+	engine, err := identity.New(identity.Config{Repo: repo, AdmissionEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(obs identity.Observation) (identity.Resolution, error) {
+		var result identity.Resolution
+		err := repo.RunInTx(context.Background(), tenant.String(), func(bound *pgidentity.Repository) error {
+			var resolveErr error
+			result, resolveErr = engine.WithRepository(bound).Resolve(context.Background(), obs)
+			return resolveErr
+		})
+		return result, err
+	}
+	sensorResult, err := resolve(observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := identity.Observation{
+		TenantID: tenant.String(), ClassHint: "computer", ObservedAt: time.Now().UTC(),
+		Source:    identity.Source{Kind: identity.SourceMeasured, Ref: "agent:installation"},
+		Admission: identity.AdmissionEvidence{Authoritative: true},
+		Identifiers: []identity.Identifier{
+			{Kind: identity.KindAgentID, Value: "installation"},
+			{Kind: identity.KindSerialNumber, Value: "TEST-SERIAL"},
+			{Kind: identity.KindMACAddress, Value: "00:11:22:33:44:55"},
+			{Kind: identity.KindMACAddress, Value: "00:11:22:33:44:66"},
+		},
+	}
+	agentResult, err := resolve(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agentResult.Outcome != identity.OutcomeMatched || agentResult.Asset != sensorResult.Asset {
+		t.Fatalf("same host separated under enforcement: sensor=%+v agent=%+v", sensorResult, agentResult)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT identity_status FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, agentResult.Asset.ID).Scan(&status); err != nil || status != "established" {
+		t.Fatalf("identity status=%s err=%v", status, err)
+	}
+}
+
+func TestIntegration_HostObservation_UpgradePreservesSensorIdentifierOwnership(t *testing.T) {
+	_, db, tenant := newHostObsFixture(t)
+	sensor := uuid.New()
+	asset := seedAsset(t, db, tenant, "Existing sensor host", "workstation", "hardware.computer.workstation", "production", 0, 0)
+	seen := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	if _, err := db.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status)
+ VALUES($1,$2,'Sensor','windows','1.0','datacenter_host','active')`, sensor, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,source_kind,source_ref,confidence,first_seen_at,last_seen_at)
+ VALUES($1,$2,'agent_id',$3,'measured',$4,1,$5,$5),
+       ($1,$2,'agent_id','device-agent-installation','measured','agent:device-agent-installation',1,$5,$5)`, tenant, asset, sensor.String(), "sensor:"+sensor.String(), seen); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		testdb.ForceApplySchema(t, db.DB.DB)
+		var owner uuid.UUID
+		var firstSeen, lastSeen time.Time
+		if err := db.QueryRow(`SELECT asset_id,first_seen_at,last_seen_at FROM asset_identifiers WHERE tenant_id=$1 AND kind='sensor_id' AND value=$2`, tenant, sensor.String()).Scan(&owner, &firstSeen, &lastSeen); err != nil {
+			t.Fatal(err)
+		}
+		if owner != asset || !firstSeen.Equal(seen) || !lastSeen.Equal(seen) {
+			t.Fatalf("upgrade changed ownership or clocks: %v %v %v", owner, firstSeen, lastSeen)
+		}
+		var agents int
+		if err := db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='agent_id'`, tenant, asset).Scan(&agents); err != nil || agents != 1 {
+			t.Fatalf("device-agent identity changed: count=%d err=%v", agents, err)
+		}
 	}
 }

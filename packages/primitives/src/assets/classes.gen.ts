@@ -7,7 +7,7 @@
 // `@vistasecurity/primitives/assets`. The Go mirror is shared/assetclass; the
 // DB mirror is the asset_classes table. All three come from the same YAML.
 
-export const ASSET_IDENTIFIER_KINDS = ["declaration_id", "agent_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"] as const;
+export const ASSET_IDENTIFIER_KINDS = ["declaration_id", "agent_id", "sensor_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"] as const;
 
 /** Every platform class key. Tenant leaf subclasses are runtime data and are
  *  deliberately NOT in this union — they are typed as `string`. */
@@ -109,7 +109,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Computer",
     cmdbCiType: "cmdb_ci_computer",
     cyclonedxType: "device",
-    identifierPrecedence: ["agent_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "endpoint",
   },
   "server": {
@@ -121,7 +121,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Server",
     cmdbCiType: "cmdb_ci_server",
     cyclonedxType: "device",
-    identifierPrecedence: ["agent_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "server",
   },
   "workstation": {
@@ -133,7 +133,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Monitor",
     cmdbCiType: "cmdb_ci_pc_hardware",
     cyclonedxType: "device",
-    identifierPrecedence: ["agent_id", "serial_number", "cmdb_sys_id", "mac_address", "fqdn", "hostname"],
+    identifierPrecedence: ["agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "mac_address", "fqdn", "hostname"],
     legacyAssetType: "endpoint",
   },
   "laptop": {
@@ -145,7 +145,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Laptop",
     cmdbCiType: "cmdb_ci_pc_hardware",
     cyclonedxType: "device",
-    identifierPrecedence: ["agent_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"],
+    identifierPrecedence: ["agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"],
     legacyAssetType: "endpoint",
   },
   "mobile": {
@@ -157,7 +157,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Smartphone",
     cmdbCiType: null,
     cyclonedxType: "device",
-    identifierPrecedence: ["agent_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"],
+    identifierPrecedence: ["agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"],
     legacyAssetType: "endpoint",
   },
   "network_device": {
@@ -373,7 +373,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Layers",
     cmdbCiType: null,
     cyclonedxType: "platform",
-    identifierPrecedence: ["agent_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "server",
   },
   "virtual_machine": {
@@ -385,7 +385,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Box",
     cmdbCiType: "cmdb_ci_vm_instance",
     cyclonedxType: "platform",
-    identifierPrecedence: ["agent_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "server",
   },
   "container": {
@@ -397,7 +397,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "Container",
     cmdbCiType: null,
     cyclonedxType: "container",
-    identifierPrecedence: ["agent_id", "cloud_resource_id", "cmdb_sys_id", "hostname"],
+    identifierPrecedence: ["agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "hostname"],
     legacyAssetType: "service",
   },
   "cluster": {
@@ -421,7 +421,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "SquareStack",
     cmdbCiType: "cmdb_ci_server",
     cyclonedxType: "platform",
-    identifierPrecedence: ["agent_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "server",
   },
   "cloud_resource": {
@@ -445,7 +445,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "CloudCog",
     cmdbCiType: "cmdb_ci_vm_instance",
     cyclonedxType: "platform",
-    identifierPrecedence: ["agent_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "server",
   },
   "managed_database": {
@@ -673,7 +673,7 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     icon: "CircleQuestionMark",
     cmdbCiType: null,
     cyclonedxType: "device",
-    identifierPrecedence: ["serial_number", "agent_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
+    identifierPrecedence: ["serial_number", "agent_id", "sensor_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"],
     legacyAssetType: "endpoint",
   },
 };

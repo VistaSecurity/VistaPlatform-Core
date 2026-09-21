@@ -17,6 +17,12 @@ import { downloadArtifact, type CBOMArtifact, type DownloadFormat } from './quer
  * downloadFormatsFor). An always-visible OCSF item would 400 for three kinds
  * out of four, and the fastest way to teach someone a feature is broken is to
  * let them click something that never works.
+ *
+ * The button always NAMES the format, compact or not. The compact single-format
+ * button was once a bare icon, and on a list where the inventory row's menu
+ * spelled out "CycloneDX 1.7" while the CBOM, SBOM and HBOM rows showed only an
+ * arrow, the natural reading was that three of the four kinds had no CycloneDX
+ * export. They always did — the label just never said so.
  */
 export function DownloadControl({ artifact, compact }: { artifact: CBOMArtifact; compact?: boolean }) {
   const formats = downloadFormatsFor(artifact.artifact_kind);
@@ -61,7 +67,7 @@ export function DownloadControl({ artifact, compact }: { artifact: CBOMArtifact;
           onClick={(e) => { e.stopPropagation(); void run(only.format); }}
           disabled={busy !== null}
         >
-          <Icon name="download" size={13} />{compact ? null : only.label}
+          <Icon name="download" size={13} />{compact ? only.short : only.label}
         </button>
         {err && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{err}</span>}
       </span>
@@ -72,13 +78,13 @@ export function DownloadControl({ artifact, compact }: { artifact: CBOMArtifact;
     <div ref={ref} style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
       <button
         className={compact ? 'ui-btn sm' : 'ui-btn sm accent'}
-        title="Download"
+        title={`Download as ${formats.map((f) => f.label).join(' or ')}`}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         disabled={busy !== null}
       >
-        <Icon name="download" size={13} />{compact ? null : 'Download'}<Icon name="chevron-down" size={12} />
+        <Icon name="download" size={13} />{compact ? formats.map((f) => f.short).join(' / ') : 'Download'}<Icon name="chevron-down" size={12} />
       </button>
       {open && (
         <div role="menu" className="panel" style={{ position: 'absolute', right: 0, top: 'calc(100% + 5px)', zIndex: 30, minWidth: 272, borderRadius: 11, padding: 5, boxShadow: 'var(--app-shadow)' }}>

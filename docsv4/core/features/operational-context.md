@@ -60,10 +60,11 @@ Defining your segments is not bookkeeping. Four things fall out of it:
    Certificates lens sort by. With no segments defined, that distinction is a
    guess. See
    [Third-party and external connections](./third-party-and-external-connections.md).
-3. **What gets approved without you.** A segment with **auto-approve** on is the
-   one and only way a newly discovered asset joins active inventory without a
-   person accepting it. Everything else waits in **Discovery → Approvals** —
-   including assets you type in by hand. See
+3. **What gets approved without you.** A segment with **auto-approve** on is
+   the way a newly *discovered* asset joins active inventory without a person
+   accepting it. The one other automatic path is a host your own device agent
+   is installed on, which its first host inventory admits. Everything else waits
+   in **Discovery → Approvals** — including assets you type in by hand. See
    [Asset approval](./asset-approval.md).
 4. **What discovery scans.** Segments are what a scan is scoped against.
 
@@ -94,7 +95,7 @@ network-segments API instead.
 
 ## Related
 
-- [Asset approval](./asset-approval.md) — the one auto-approval rule, and the queue
+- [Asset approval](./asset-approval.md) — the two auto-approval rules, and the queue
 - [Third-party and external connections](./third-party-and-external-connections.md) — what internal-versus-external buys you
 - [Discovery](./discovery.md) — what segments scope
 - [Inventory and lenses](./inventory-and-lenses.md) — the Segment, Site and Environment filters

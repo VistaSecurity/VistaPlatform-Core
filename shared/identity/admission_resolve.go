@@ -15,6 +15,7 @@ type ObservationRepository interface {
 }
 
 func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, error) {
+	obs = canonicalSensorIdentity(obs)
 	if locker, ok := e.repo.(interface {
 		LockIdentifiers(context.Context, string, []Identifier) error
 	}); ok {
@@ -87,6 +88,10 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 	if mode == "enforce" {
 		engine = e.WithAutoAcceptThreshold(0)
 		engine.admissionDecision = &decision
+		// The evidence row this resolution is for, so the history entries the
+		// provisional rules write can name it. It is set on the per-observation
+		// COPY WithAutoAcceptThreshold just made, never on the shared engine.
+		engine.observationID = id
 		settled, err := engine.resolveConfirmedLink(ctx, obs, id, decision)
 		if err != nil {
 			return Resolution{}, err

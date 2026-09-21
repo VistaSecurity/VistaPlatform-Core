@@ -74,7 +74,7 @@ export interface AssetLike {
   zone?: string | null;
   network_segment_name?: string | null;
   asset_status?: string | null;
-  identity_status?: 'legacy' | 'established' | 'operator_confirmed' | null;
+  identity_status?: 'legacy' | 'established' | 'provisional' | 'operator_confirmed' | null;
   has_identity_conflict?: boolean;
   asset_ownership?: string | null;
   stale_status?: string | null;
@@ -290,6 +290,7 @@ export function assetRisk(a: AssetLike): AssetRiskView {
 /** The identifier kinds, as words a user can read. */
 export const IDENTIFIER_KIND_LABELS: Record<string, string> = {
   agent_id: 'Agent ID',
+  sensor_id: 'Sensor ID',
   cloud_resource_id: 'Cloud resource ID',
   serial_number: 'Serial number',
   cmdb_sys_id: 'CMDB sys_id',

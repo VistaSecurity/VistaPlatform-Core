@@ -13,7 +13,7 @@ import (
 
 func TestContract_IdentityObservationEvidence(t *testing.T) {
 	spec := loadSpec(t)
-	b, err := json.Marshal(services.IdentitySummary{Legacy: 2, Unresolved: 3})
+	b, err := json.Marshal(services.IdentitySummary{Legacy: 2, Unresolved: 3, AdmissionMode: "disabled"})
 	if err != nil {
 		t.Fatal(err)
 	}

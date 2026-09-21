@@ -290,6 +290,35 @@ describe('the findings facet', () => {
     expect(Object.keys(FACET_LABEL)).toContain('findings');
   });
 
+  //: identity status is the only way to find a provisional item. It is a
+  // separate facet from `status` on purpose — approval and identity are
+  // independent (ADR-0002), and a provisional item is `pending_approval` like
+  // every other unapproved asset, so filtering by status cannot isolate it.
+  it('writes and reads an identity-status filter, on the column the server queries', () => {
+    expect(Object.keys(FACET_LABEL)).toContain('identity');
+    expect(facetsToQuery(facets({ identity: ['provisional'] }))).toBe('identity_status:provisional');
+    const back = queryToFacets('identity_status:provisional');
+    expect(back.facets.identity).toEqual(['provisional']);
+    expect(back.extra).toEqual([]);
+    // And it does not leak into the approval facet, which is a different column.
+    expect(back.facets.status).toEqual([]);
+  });
+
+  it('round-trips several identity values without swallowing the rest of the query', () => {
+    const q = facetsToQuery(facets({ status: ['pending_approval'], identity: ['provisional', 'legacy'] }));
+    expect(q).toContain('identity_status:provisional or identity_status:legacy');
+    expect(q).toContain('status:pending_approval');
+    const back = queryToFacets(q);
+    expect(back.facets.identity).toEqual(['provisional', 'legacy']);
+    expect(back.facets.status).toEqual(['pending_approval']);
+    expect(back.unparsed).toBe(false);
+  });
+
+  it('counts an identity selection as a filter', () => {
+    expect(facetCount(facets({ identity: ['provisional'] }))).toBe(1);
+    expect(facetsEmpty(facets({ identity: ['provisional'] }))).toBe(false);
+  });
+
   it('writes no findings term when the facet is off', () => {
     const everything = facets({
       class: 'server', status: ['monitoring'], environment: ['production'],

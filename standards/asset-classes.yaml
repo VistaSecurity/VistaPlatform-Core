@@ -83,7 +83,8 @@ version: 1
 # does not list it explicitly.
 identifier_kinds:
   - declaration_id              # server-issued operator confirmation, tenant scoped
-  - agent_id                    # a host agent's own installation id
+  - agent_id                    # a device agent's own installation id
+  - sensor_id                   # a sensor installation on the host
   - cloud_resource_id           # ARN, Azure resource id, GCP self-link
   - serial_number
   - cmdb_sys_id                 # per CMDB sync profile
@@ -163,7 +164,7 @@ classes:
     cyclonedx_type: device
     legacy_asset_type: endpoint
     identifier_precedence:
-      [agent_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
+      [agent_id, sensor_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
        mac_address, fqdn, hostname, ip_address]
     attribute_schema:
       type: object
@@ -193,7 +194,7 @@ classes:
     cyclonedx_type: device
     legacy_asset_type: server
     identifier_precedence:
-      [agent_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
+      [agent_id, sensor_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
        mac_address, fqdn, hostname, ip_address]
     attribute_schema:
       type: object
@@ -213,7 +214,7 @@ classes:
     cyclonedx_type: device
     legacy_asset_type: endpoint
     identifier_precedence:
-      [agent_id, serial_number, cmdb_sys_id, mac_address, fqdn, hostname]
+      [agent_id, sensor_id, serial_number, cmdb_sys_id, mac_address, fqdn, hostname]
     attribute_schema:
       type: object
       properties:
@@ -230,7 +231,7 @@ classes:
     cyclonedx_type: device
     legacy_asset_type: endpoint
     identifier_precedence:
-      [agent_id, serial_number, cmdb_sys_id, mac_address, hostname]
+      [agent_id, sensor_id, serial_number, cmdb_sys_id, mac_address, hostname]
     attribute_schema:
       type: object
       properties:
@@ -247,7 +248,7 @@ classes:
     cyclonedx_type: device
     legacy_asset_type: endpoint
     identifier_precedence:
-      [agent_id, serial_number, cmdb_sys_id, mac_address, hostname]
+      [agent_id, sensor_id, serial_number, cmdb_sys_id, mac_address, hostname]
     attribute_schema:
       type: object
       properties:
@@ -626,7 +627,7 @@ classes:
     # MoRef or instance UUID, a Proxmox VMID): a provider-assigned handle, not
     # a public-cloud ARN. The identifier kind is "the platform's id for it".
     identifier_precedence:
-      [agent_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
+      [agent_id, sensor_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
        mac_address, fqdn, hostname, ip_address]
     attribute_schema:
       type: object
@@ -647,7 +648,7 @@ classes:
     cyclonedx_type: platform
     legacy_asset_type: server
     identifier_precedence:
-      [agent_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
+      [agent_id, sensor_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
        mac_address, fqdn, hostname, ip_address]
     attribute_schema:
       type: object
@@ -673,7 +674,7 @@ classes:
     cmdb_ci_type: null
     cyclonedx_type: container
     legacy_asset_type: service
-    identifier_precedence: [agent_id, cloud_resource_id, cmdb_sys_id, hostname]
+    identifier_precedence: [agent_id, sensor_id, cloud_resource_id, cmdb_sys_id, hostname]
     attribute_schema:
       type: object
       properties:
@@ -721,7 +722,7 @@ classes:
     cyclonedx_type: platform
     legacy_asset_type: server
     identifier_precedence:
-      [agent_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
+      [agent_id, sensor_id, serial_number, cmdb_sys_id, ssh_host_key_fingerprint,
        mac_address, fqdn, hostname, ip_address]
     attribute_schema:
       type: object
@@ -775,7 +776,7 @@ classes:
     cyclonedx_type: platform
     legacy_asset_type: server
     identifier_precedence:
-      [agent_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
+      [agent_id, sensor_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
        fqdn, hostname, ip_address]
     attribute_schema:
       type: object
@@ -1277,7 +1278,7 @@ classes:
     # The singleton guard is unaffected — a serial that DISAGREES with the one
     # the matched asset carries is still outcome three, at every class.
     identifier_precedence:
-      [serial_number, agent_id, ssh_host_key_fingerprint, mac_address, fqdn,
+      [serial_number, agent_id, sensor_id, ssh_host_key_fingerprint, mac_address, fqdn,
        hostname, ip_address]
     attribute_schema:
       type: object

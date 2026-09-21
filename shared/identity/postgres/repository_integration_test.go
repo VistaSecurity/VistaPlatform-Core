@@ -362,6 +362,9 @@ var _ identity.Repository = (*contractRepo)(nil)
 var _ identitytest.LastSeenReader = (*contractRepo)(nil)
 var _ identitytest.HistoryReader = (*contractRepo)(nil)
 var _ identitytest.SegmentWriter = (*contractRepo)(nil)
+var _ identity.ProvisionalScopeChecker = (*contractRepo)(nil)
+var _ identity.IdentifierReassigner = (*contractRepo)(nil)
+var _ identity.AssetArchiver = (*contractRepo)(nil)
 
 func (c *contractRepo) tenantID(name string) string {
 	c.mu.Lock()
@@ -622,6 +625,45 @@ func (c *contractRepo) segmentName(id string) (string, bool) {
 	defer c.mu.Unlock()
 	name, ok := c.segments[id]
 	return name, ok
+}
+
+// ProvisionalScope, ReassignIdentifier and ArchiveAsset are the D2/D3
+// capabilities, delegated to the real repository.
+//
+// The eligibility answer is DERIVED from `network_segments` here, so this
+// adapter deliberately does NOT implement identitytest.ProvisionalScopeWriter:
+// the contract's configurable subtest skips, and the derivation itself is
+// pinned by TestIntegration_ProvisionalScope below against real rows. What the
+// contract still holds this implementation to is the default — a segment
+// nobody configured answers no — which is the polarity that matters.
+func (c *contractRepo) ProvisionalScope(ctx context.Context, tenantID, segmentID string) (bool, string, error) {
+	// The contract names segments logically; a name it never registered has no
+	// row, and assetID mints a uuid that provably names none.
+	real := segmentID
+	if _, err := uuid.Parse(strings.TrimSpace(segmentID)); err != nil {
+		real = c.segmentIDFor(segmentID)
+	}
+	return c.inner.ProvisionalScope(ctx, c.tenantID(tenantID), real)
+}
+
+func (c *contractRepo) segmentIDFor(name string) string {
+	c.mu.Lock()
+	for id, scope := range c.segments {
+		if scope == name {
+			c.mu.Unlock()
+			return id
+		}
+	}
+	c.mu.Unlock()
+	return c.assetID(name)
+}
+
+func (c *contractRepo) ReassignIdentifier(ctx context.Context, id identity.Identifier, from, to identity.AssetRef) error {
+	return c.inner.ReassignIdentifier(ctx, id, c.ref(from), c.ref(to))
+}
+
+func (c *contractRepo) ArchiveAsset(ctx context.Context, asset identity.AssetRef) error {
+	return c.inner.ArchiveAsset(ctx, c.ref(asset))
 }
 
 func (c *contractRepo) LastSeen(ref identity.AssetRef) time.Time {

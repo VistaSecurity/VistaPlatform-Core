@@ -428,6 +428,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		// fails on that kind rather than hiding behind the two the rest of this
 		// contract happens to use.
 		values := map[identity.Kind]string{
+			identity.KindSensorID:              "sensor-1",
 			identity.KindAgentID:               "agent-7f3a",
 			identity.KindCloudResourceID:       "arn:aws:ec2:us-east-1:1:instance/i-0AbC",
 			identity.KindSerialNumber:          "J7K2L9",
@@ -921,6 +922,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 
 	runDecisionMemoryContract(t, newRepo, tenant, now, ident, newAsset)
 	runAnnouncementContract(t, newRepo, tenant, now, ident, newAsset)
+	runProvisionalContract(t, newRepo, tenant, ident, newAsset)
 }
 
 // ProposalResolver stamps a proposal's outcome the way the approvals path does
@@ -1608,5 +1610,214 @@ func RunUnknownHostSerialContract(t *testing.T, newRepo func() identity.Reposito
 				t.Errorf("the first asset's serial changed to %q", id.Value)
 			}
 		}
+	})
+}
+
+// ── provisional inventory ──────────────────────────────────────────
+
+// ProvisionalScopeWriter configures the answer
+// [identity.ProvisionalScopeChecker] will give for a segment.
+//
+// OPTIONAL, on the same terms as [SegmentWriter]: an implementation that reads
+// its segments from somewhere the contract cannot write skips the eligibility
+// subtests. The MOVE and the identity-status subtests are not optional — they
+// need no configuration, and an implementation that could skip them would be
+// held to nothing.
+type ProvisionalScopeWriter interface {
+	SetProvisionalScopeAnswer(tenantID, segmentID string, eligible bool, reason string)
+}
+
+// runProvisionalContract holds every implementation to the three storage
+// capabilities the provisional rules of rest on:
+//
+//  1. an asset can be CREATED with an identity status, and the summary the
+//     engine reads reports it. Without that the corroboration rule cannot see
+//     that an asset is a guess, and every provisional asset would be treated as
+//     an ordinary one;
+//  2. an identifier can be MOVED between assets atomically, and a move computed
+//     against the wrong owner is refused. A store that moved it anyway would let
+//     two assets swap halves of their identity under a stale lookup;
+//  3. a segment's eligibility can be ASKED, and an unknown segment answers no.
+func runProvisionalContract(
+	t *testing.T,
+	newRepo func() identity.Repository,
+	tenant string,
+	ident func(identity.Kind, string, string) identity.Identifier,
+	newAsset func(string, ...identity.Identifier) identity.NewAsset,
+) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("CreateAsset records an identity status the summary reports", func(t *testing.T) {
+		r := newRepo()
+		provisional := newAsset("advertised-host", ident(identity.KindHostname, "printer.local", "seg-b"))
+		provisional.IdentityStatus = string(identity.IdentityProvisional)
+		p, err := r.CreateAsset(ctx, tenant, provisional)
+		if err != nil {
+			t.Fatalf("CreateAsset(provisional): %v", err)
+		}
+		ordinary, err := r.CreateAsset(ctx, tenant, newAsset("met-host", ident(identity.KindSerialNumber, "SN-PROV-1", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(default): %v", err)
+		}
+
+		sums, err := r.LoadSummaries(ctx, tenant, []string{p.ID, ordinary.ID})
+		if err != nil {
+			t.Fatalf("LoadSummaries: %v", err)
+		}
+		if len(sums) != 2 {
+			t.Fatalf("LoadSummaries returned %d summaries, want 2", len(sums))
+		}
+		byID := map[string]identity.AssetSummary{sums[0].Ref.ID: sums[0], sums[1].Ref.ID: sums[1]}
+		if got := byID[p.ID].IdentityStatus; got != string(identity.IdentityProvisional) {
+			t.Errorf("IdentityStatus = %q, want provisional — the corroboration rule cannot see that "+
+				"an asset is a guess without it", got)
+		}
+		if got := byID[ordinary.ID].IdentityStatus; got != string(identity.IdentityLegacy) {
+			t.Errorf("IdentityStatus = %q for an asset created without one, want the store's default %q",
+				got, identity.IdentityLegacy)
+		}
+	})
+
+	t.Run("ReassignIdentifier moves ownership and refuses a foreign from", func(t *testing.T) {
+		r := newRepo()
+		mover, ok := r.(identity.IdentifierReassigner)
+		if !ok {
+			t.Fatalf("%T does not implement identity.IdentifierReassigner; the hearsay-yields rule of "+
+				"#1898 D3 cannot run against it", r)
+		}
+		addr := ident(identity.KindIPAddress, "192.168.1.50", "seg-b")
+		from, err := r.CreateAsset(ctx, tenant, newAsset("guess",
+			ident(identity.KindHostname, "printer.local", "seg-b"), addr))
+		if err != nil {
+			t.Fatalf("CreateAsset(from): %v", err)
+		}
+		to, err := r.CreateAsset(ctx, tenant, newAsset("met", ident(identity.KindMACAddress, "02:00:00:00:be:ef", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(to): %v", err)
+		}
+		stranger, err := r.CreateAsset(ctx, tenant, newAsset("stranger", ident(identity.KindSerialNumber, "SN-PROV-2", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(stranger): %v", err)
+		}
+
+		// A move computed against the WRONG owner is refused, and changes
+		// nothing. This polarity first, so a store that simply always moves
+		// cannot pass by being asked the easy question only.
+		if err := mover.ReassignIdentifier(ctx, addr, stranger, to); err == nil {
+			t.Error("ReassignIdentifier accepted a `from` that does not own the identifier; a move " +
+				"computed against stale ownership is how two assets swap halves of their identity")
+		}
+		owners, err := r.FindByIdentifier(ctx, tenant, addr.Kind, addr.Value, addr.Scope)
+		if err != nil {
+			t.Fatalf("FindByIdentifier after the refused move: %v", err)
+		}
+		if len(owners) != 1 || owners[0].ID != from.ID {
+			t.Fatalf("owners = %+v after a REFUSED move, want the original owner %s", owners, from.ID)
+		}
+
+		if err := mover.ReassignIdentifier(ctx, addr, from, to); err != nil {
+			t.Fatalf("ReassignIdentifier: %v", err)
+		}
+		owners, err = r.FindByIdentifier(ctx, tenant, addr.Kind, addr.Value, addr.Scope)
+		if err != nil {
+			t.Fatalf("FindByIdentifier: %v", err)
+		}
+		if len(owners) != 1 {
+			t.Fatalf("owners = %+v, want exactly one — an identifier value maps to at most one asset, "+
+				"and a move must not leave it on both or on neither", owners)
+		}
+		if owners[0].ID != to.ID {
+			t.Errorf("owner = %s, want %s", owners[0].ID, to.ID)
+		}
+		sums, err := r.LoadSummaries(ctx, tenant, []string{from.ID, to.ID})
+		if err != nil {
+			t.Fatalf("LoadSummaries: %v", err)
+		}
+		for _, s := range sums {
+			held := countKind(s.Identifiers, identity.KindIPAddress)
+			if s.Ref.ID == from.ID && held != 0 {
+				t.Errorf("%s still carries %d ip_address identifier(s) after the move", from.ID, held)
+			}
+			if s.Ref.ID == to.ID && held != 1 {
+				t.Errorf("%s carries %d ip_address identifier(s) after the move, want 1", to.ID, held)
+			}
+		}
+	})
+
+	t.Run("ArchiveAsset retires an emptied guess", func(t *testing.T) {
+		r := newRepo()
+		archiver, ok := r.(identity.AssetArchiver)
+		if !ok {
+			t.Fatalf("%T does not implement identity.AssetArchiver", r)
+		}
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("guess", ident(identity.KindHostname, "ghost.local", "seg-b")))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		if err := archiver.ArchiveAsset(ctx, ref); err != nil {
+			t.Fatalf("ArchiveAsset: %v", err)
+		}
+		sums, err := r.LoadSummaries(ctx, tenant, []string{ref.ID})
+		if err != nil {
+			t.Fatalf("LoadSummaries: %v", err)
+		}
+		if len(sums) != 1 || sums[0].Status != identity.StatusArchived {
+			t.Errorf("status = %+v, want archived", sums)
+		}
+	})
+
+	t.Run("ProvisionalScope answers, and an unknown segment answers no", func(t *testing.T) {
+		r := newRepo()
+		checker, ok := r.(identity.ProvisionalScopeChecker)
+		if !ok {
+			t.Fatalf("%T does not implement identity.ProvisionalScopeChecker; the engine would treat "+
+				"every segment as ineligible and no provisional asset would ever be created", r)
+		}
+
+		// The default polarity FIRST: a store that has not been told about a
+		// segment must not invent assets against it.
+		eligible, reason, err := checker.ProvisionalScope(ctx, tenant, "seg-nobody-configured")
+		if err != nil {
+			t.Fatalf("ProvisionalScope(unknown): %v", err)
+		}
+		if eligible {
+			t.Error("an unconfigured segment reported ELIGIBLE; the default direction is the one " +
+				"that ends with an inventory of guesses")
+		}
+		if reason != identity.ReasonNetworkScopeUnresolved {
+			t.Errorf("reason = %q, want %q", reason, identity.ReasonNetworkScopeUnresolved)
+		}
+
+		// The other polarity needs an implementation that can be TOLD which
+		// segments are eligible. It is a nested subtest so an implementation
+		// that derives the answer from its own rows (the SQL one, which pins
+		// that derivation in its own package) skips only this half and still
+		// reports the default above as run rather than skipped.
+		t.Run("a configured segment answers yes, and a bad one says why", func(t *testing.T) {
+			writer, ok := r.(ProvisionalScopeWriter)
+			if !ok {
+				t.Skipf("%T derives eligibility and cannot be told which segments are eligible", r)
+			}
+			writer.SetProvisionalScopeAnswer(tenant, "seg-ok", true, "")
+			writer.SetProvisionalScopeAnswer(tenant, "seg-overlap", false, identity.ReasonOverlappingNetworkScope)
+
+			eligible, reason, err := checker.ProvisionalScope(ctx, tenant, "seg-ok")
+			if err != nil {
+				t.Fatalf("ProvisionalScope(eligible): %v", err)
+			}
+			if !eligible || reason != "" {
+				t.Errorf("ProvisionalScope(eligible) = %v / %q, want true with no reason", eligible, reason)
+			}
+
+			eligible, reason, err = checker.ProvisionalScope(ctx, tenant, "seg-overlap")
+			if err != nil {
+				t.Fatalf("ProvisionalScope(overlapping): %v", err)
+			}
+			if eligible || reason != identity.ReasonOverlappingNetworkScope {
+				t.Errorf("ProvisionalScope(overlapping) = %v / %q, want false with %q",
+					eligible, reason, identity.ReasonOverlappingNetworkScope)
+			}
+		})
 	})
 }

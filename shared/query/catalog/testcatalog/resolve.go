@@ -19,6 +19,7 @@ import (
 var storedIdentifierKinds = []string{
 	"declaration_id",
 	"agent_id",
+	"sensor_id",
 	"cloud_resource_id",
 	"serial_number",
 	"cmdb_sys_id",

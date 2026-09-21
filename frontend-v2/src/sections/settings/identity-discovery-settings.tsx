@@ -72,7 +72,7 @@ function IdentityDiscoveryForm({ current }: { current: Settings }) {
       <dt>Saved network exclusions</dt><dd>{current.enrichment.excluded_cidrs.join(', ') || 'None'}</dd>
       <dt>Saved sensitive assets</dt><dd style={{ overflowWrap: 'anywhere' }}>{current.enrichment.sensitive_asset_ids.join(', ') || 'None'}</dd>
     </dl>
-    <p>Existing records stay visible as “Legacy — identity not reevaluated”. New qualifying evidence can establish their identity in place. Unresolved observations do not count toward the asset allowance.</p>
+    <p>Existing records stay visible as “Identity not evaluated”. New qualifying evidence can establish their identity in place. Unresolved observations do not count toward the asset allowance.</p>
     {!settings.capabilities.admission && <p role="status">This release has not enabled identity admission. Activation becomes available after the complete discovery capability is deployed.</p>}
     {settings.activated_at && <p>Activated {new Date(settings.activated_at).toLocaleString()}. You can pause processing while retaining incoming evidence.</p>}
     <PermissionGate permission={TENANT_PERMISSIONS.settings.update} fallback={<p>You can view this policy. Changing it requires settings update permission.</p>}>

@@ -29,6 +29,19 @@ const (
 	// merge proposal was opened. NEVER auto-merged (ADR-0002 D5).
 	OutcomeConflict   Outcome = "conflict"
 	OutcomeUnresolved Outcome = "unresolved"
+	// OutcomeProvisional — the evidence could not establish a new entity, but
+	// it placed a name or address on a configured, unambiguous tenant segment
+	// and no other asset owns any of it. The engine created the asset with
+	// [IdentityProvisional] and NO allowance check, and the observation stays
+	// `unresolved` so enrichment keeps working on it ( D2).
+	OutcomeProvisional Outcome = "provisional"
+	// OutcomeSupporting — the evidence could not establish anything either,
+	// but every identifier it carries already belongs to exactly ONE asset,
+	// so it is another sighting of a thing we already know about rather than
+	// a question. The engine advanced that asset's last-seen and, when the
+	// asset is provisional, attached the identifiers the observation added
+	// ( D3). It is NOT a match: nothing here was allowed to decide.
+	OutcomeSupporting Outcome = "supporting"
 )
 
 // Resolution is the answer, with the evidence for it.
@@ -120,6 +133,19 @@ type Config struct {
 	// regardless of how confident it is.
 	AutoAcceptThreshold float64
 
+	// ProvisionalInventory turns on's provisional inventory: rule D2
+	// (an advertisement on a configured, unambiguous segment becomes a
+	// provisional asset instead of an observation nobody can see) and rule D3
+	// (corroboration, supporting evidence, and the hearsay-yields
+	// reassignment).
+	//
+	// Default FALSE, and every caller but inventory-service's production
+	// constructor leaves it so. The rules it enables change what Resolve
+	// RETURNS for evidence that today produces `unresolved`, and a caller
+	// that has not learned the two new outcomes would read a provisional
+	// asset as an established one.
+	ProvisionalInventory bool
+
 	// DynamicScopes is the set of scope ids (network segments) whose addresses
 	// are handed out dynamically. An ip_address never matches within one:
 	// today's DHCP lease is tomorrow's other host, and matching on it merges
@@ -141,14 +167,27 @@ type Config struct {
 // Repository is.
 type Engine struct {
 	admissionEnabled   bool
+	provisional        bool
 	admissionDecision  *AdmissionDecision
 	admissionCandidate *AssetRef
-	repo               Repository
-	matcher            seams.Matcher
-	threshold          float64
-	dynamic            map[string]bool
-	prec               func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
-	now                func() time.Time
+	// observationID is the durable evidence row this resolution is for, when
+	// the caller stored one. It rides on the engine COPY the admission path
+	// makes per observation (see admission_resolve.go), never on a shared
+	// engine, and it exists so the history entries a provisional creation or a
+	// reassignment writes can name the evidence a reviewer should read.
+	observationID string
+	// muted are identifier keys that must not decide a match in THIS
+	// resolution, keyed by [Identifier.Key]. Only the hearsay-yields path sets
+	// it ( D3): a provisional asset's address is still owned — so nothing
+	// tries to write it — but it is not allowed to speak for that asset while
+	// the direct evidence is being resolved on its own merits.
+	muted     map[string]bool
+	repo      Repository
+	matcher   seams.Matcher
+	threshold float64
+	dynamic   map[string]bool
+	prec      func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
+	now       func() time.Time
 }
 
 // New builds an engine. It fails only on a missing repository: every other
@@ -163,6 +202,7 @@ func New(cfg Config) (*Engine, error) {
 	}
 	e := &Engine{
 		admissionEnabled: cfg.AdmissionEnabled,
+		provisional:      cfg.ProvisionalInventory,
 		repo:             cfg.Repo,
 		matcher:          cfg.Matcher,
 		threshold:        cfg.AutoAcceptThreshold,
@@ -302,7 +342,7 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 	if obs.Admission.Authoritative {
 		// A validated source identity remains usable before classification is
 		// known. In particular unknown_host's normal precedence omits CMDB IDs.
-		precedence = append([]Kind{KindAgentID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber}, precedence...)
+		precedence = append([]Kind{KindAgentID, KindSensorID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber}, precedence...)
 	}
 	if obs.Source.Kind == SourceDeclared && obs.Admission.OperatorConfirmed {
 		precedence = append([]Kind{KindDeclarationID}, precedence...)
@@ -407,12 +447,37 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			}
 		}
 
+		// D3: an established observation landing on a PROVISIONAL asset
+		// is either corroboration — the guess was right and this is the same
+		// item, met directly at last — or hearsay yielding, when all the two
+		// agree about is an address. Nothing here changes what an established
+		// asset does, and with Config.ProvisionalInventory off the mode is
+		// always `none`.
+		changes := map[string]any{"decided_by": string(decidedBy)}
+		mode, err := e.provisionalMatchMode(ctx, ref, evidence[decided])
+		if err != nil {
+			return Resolution{}, err
+		}
+		switch mode {
+		case provisionalCorroborate:
+			changes["corroborated_provisional"] = true
+		case provisionalYield:
+			res, handled, err := e.yieldToDirectEvidence(ctx, obs, at, ref, evidence[decided])
+			if err != nil {
+				return Resolution{}, err
+			}
+			if handled {
+				return res, nil
+			}
+			// The re-run found nowhere honest to move the address to. Fall
+			// through to the ordinary match, which keeps the observation
+			// attached to something a reviewer can find and undo.
+		}
+
 		// Identifiers owned by another asset cannot be written here: one
 		// identifier value, at most one asset.
 		attach, unattached := splitByOwner(ids, owners, decided)
-		if err := e.applyToAsset(ctx, ref, obs, at, attach, unattached, ActionUpdated, map[string]any{
-			"decided_by": string(decidedBy),
-		}); err != nil {
+		if err := e.applyToAsset(ctx, ref, obs, at, attach, unattached, ActionUpdated, changes); err != nil {
 			return Resolution{}, err
 		}
 		return Resolution{
@@ -431,6 +496,28 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			}
 			if len(claimed) > 1 {
 				return e.resolveContested(ctx, obs, at, ids, owners)
+			}
+			if e.provisional && len(claimed) == 1 {
+				// D3: every identifier anybody owns is owned by the SAME
+				// asset. This is another sighting of a thing we already know
+				// about, not a question — supporting evidence.
+				for id := range claimed {
+					return e.resolveSupporting(ctx, obs, at, ids, owners, AssetRef{TenantID: obs.TenantID, ID: id})
+				}
+			}
+			if e.provisional && len(claimed) == 0 && obs.Source.Kind == SourceMeasured {
+				// D2: an advertisement nobody else claims, placed on a
+				// configured and unambiguous tenant segment, becomes a
+				// PROVISIONAL asset rather than evidence no inventory surface
+				// can show.
+				placement, err := e.provisionalScopeFor(ctx, obs, ids)
+				if err != nil {
+					return Resolution{}, err
+				}
+				if placement.segment != "" {
+					return e.resolveProvisional(ctx, obs, at, ids, placement.segment)
+				}
+				return Resolution{Outcome: OutcomeUnresolved, Unattached: ids, AdmissionReason: placement.reason}, nil
 			}
 			// Matching has run, but this evidence cannot establish a new
 			// entity. The caller already stored it in this transaction.
@@ -685,6 +772,9 @@ func (e *Engine) proposeWithoutCreating(
 // should be unreachable. It stays because the consequence of reaching it —
 // silently, on one kind, in one intake path — was three assets for one host.
 func (e *Engine) kindVotes(obs Observation, id Identifier) bool {
+	if e.muted[id.Key()] {
+		return false
+	}
 	if e.admissionDecision != nil && !e.admissionDecision.Established {
 		// Weak aliases can be retained and compared for review, but cannot
 		// decide ownership. Direct device identifiers may still match an

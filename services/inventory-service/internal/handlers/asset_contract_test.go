@@ -216,6 +216,9 @@ func (s *stubApprovalStore) ApproveAssets(_ uuid.UUID, _ []uuid.UUID, _ uuid.UUI
 func (s *stubApprovalStore) DenyAssets(_ uuid.UUID, _ []uuid.UUID, _ uuid.UUID) error {
 	return s.denyErr
 }
+func (s *stubApprovalStore) AutoApproveAgentHost(_, _, _ uuid.UUID) (bool, error) {
+	return false, nil
+}
 
 // --- test harness ----------------------------------------------------------
 

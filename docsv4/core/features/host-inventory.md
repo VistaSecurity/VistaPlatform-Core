@@ -156,8 +156,14 @@ untouched.
 
 ### Approval and classification
 
-The asset lands in **Discovery → Approvals** unless a network-segment rule
-auto-approves it. Its measured operating system can match a curated
+A **local** collection — the agent describing the machine it is installed on —
+approves that host into inventory on its first report. Installing the agent
+took administrative access to the machine and your registration key, and that
+is the decision the queue would otherwise be asking you for. The host's history
+shows the approval as made by the agent, not by a user. A **remote** collection
+is a discovery like any other: the asset lands in **Discovery → Approvals**
+unless a network-segment rule auto-approves it. Its measured operating system
+can match a curated
 classification rule (for example, Windows client to `computer` or Windows
 Server to `server`); when no rule matches it remains `unknown_host`.
 
@@ -172,15 +178,17 @@ Server to `server`); when no rule matches it remains `unknown_host`.
   Approvals alongside everything else. See
   [Asset Approval](./asset-approval.md).
 
-If the host's address falls inside a network segment you have set to
-auto-approve, the asset skips the queue like any other discovery.
+If a remotely collected host's address falls inside a network segment you have
+set to auto-approve, the asset skips the queue like any other discovery. A host
+you have **denied** is left denied even when an agent is later installed on it;
+approve it from the queue if you have changed your mind.
 
 ## Where it shows up
 
 | Where | What you see |
 |---|---|
 | **Discovery → Sensors & Agents**, on the agent's row | *"Last host inventory: 2h ago — 412 packages, 18 listeners"*. It is a separate line from the job counts because it answers a different question: a host inventory is not work anybody queued, so an agent busy interrogating firewalls that has never described its own host still reads as healthy on "47 jobs · 2h ago". The line is **absent** when the agent has never reported one — usually because local collection was never turned on. |
-| **Discovery → Approvals** | The host waiting to be admitted, the first time it is seen. |
+| **Discovery → Approvals** | A remotely collected host waiting to be admitted, the first time it is seen. The agent's own host does not wait here. |
 | The asset's **Software** tab | Every package the collection found, with its version and where it came from. |
 | **Inventory → Software** | The same software across every asset — who has what version of what. |
 | The asset's **Services & Endpoints** tab | One row per listening socket, with the owning process name. |
@@ -194,5 +202,5 @@ is shown that way rather than as "0 packages".
 - [Device Agent Deployment](../operate/deployment/device-agent-deployment.md) — installing the agent, and the exact commands run per OS
 - [Sensor Registration & Management](./SENSOR_REGISTRATION.md) — registering the agent in the first place
 - [Discovery](./discovery.md) — the other ways things reach your inventory
-- [Asset Approval](./asset-approval.md) — the queue a collected host waits in
+- [Asset Approval](./asset-approval.md) — the queue a remotely collected host waits in, and why the agent's own host does not
 - [SBOM Upload](./sbom.md) — the other way software installs reach an asset

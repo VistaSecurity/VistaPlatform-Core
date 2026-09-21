@@ -228,8 +228,7 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 				return identity.Observation{}, fmt.Errorf("verify sensor identity: %w", err)
 			}
 		}
-		// The strongest identifier kind there is (shared/identity/identifier.go:
-		// "a host agent's own installation id... because we issued it"). Set
+		// A sensor installation is distinct from a device-agent installation. Set
 		// ONLY on a sensor's self-report of the host it runs on — every
 		// passively decoded observation leaves AgentID empty. Confidence 1: an
 		// agent's own id is not graded on the arp/dhcp/mdns ladder that grades
@@ -237,7 +236,7 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 		if obs.Admission.Authoritative {
 			obs.ClassHint = classHintForSelfReport(ho)
 			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindAgentID, Value: agentID, Confidence: 1,
+				Kind: identity.KindSensorID, Value: agentID, Confidence: 1,
 			})
 		}
 	}

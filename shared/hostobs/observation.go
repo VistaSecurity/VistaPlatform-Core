@@ -86,11 +86,9 @@ type HostObservation struct {
 	// AgentID is set ONLY for the one producer that is not a passive decoder:
 	// a sensor's SELF-report of the host it runs on (sensor-manager builds
 	// this from a heartbeat/registration `host` block; asset-inventory
-	// decision 9,. It carries the sensor's own id, which
-	// identity.KindAgentID ranks as the strongest identifier kind there is —
-	// "a host agent's own installation id: the strongest identifier we have,
-	// because we issued it" (shared/identity/identifier.go). Empty on every
-	// observation a passive decoder produces.
+	// decision 9,. The wire field keeps its historical name;
+	// inventory verifies the sender and records identity.KindSensorID.
+	// Empty on every observation a passive decoder produces.
 	AgentID string `json:"agent_id,omitempty"`
 
 	// Platform and Profile travel ONLY on a self-report (AgentID set): the

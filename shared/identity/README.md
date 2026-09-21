@@ -50,12 +50,14 @@ advances last-seen, opens the merge proposal, and writes `asset_history` — of
 which this package is the **first writer**. The caller acts on the outcome; it
 does not repeat the work.
 
-## The three outcomes
+## The outcomes
 
 | Outcome | When | What the engine did |
 |---|---|---|
 | `matched` | Exactly one existing asset resolved from the identifiers | Attached the new identifiers, upserted the endpoints, advanced last-seen, history `updated`. `DecidedBy` names the highest-precedence kind that matched. |
 | `created` | Nothing matched | Created a `pending_approval` asset with the class hint, or `unknown_host` / `external` per the network ownership. History `created`. |
+| `provisional` | Evidence that cannot establish anything, placed on a configured and unambiguous tenant segment, owned by nobody — and `Config.ProvisionalInventory` is on | Created a `pending_approval` asset with `identity_status = provisional`, WITHOUT an allowance check. See **Provisional identity** below. |
+| `supporting` | Evidence that cannot establish anything, every owned identifier belonging to ONE asset — and `Config.ProvisionalInventory` is on | Linked the observation to that asset. Advanced its last-seen — and, if the asset is itself provisional, attached the new identifiers — but ONLY when the observation is a sighting. Not a match: nothing was allowed to decide. |
 | `conflict` | One kind matched several assets, **or** two kinds matched different assets, **or** every identifier is owned by somebody else and none may vote | Opened a merge proposal listing every candidate with the identifiers that matched it. The observation becomes its own pending asset ONLY if it carries an identifier nobody owns (history `created` then `merge_proposed`); when everything is contested nothing is created and `Resolution.Asset` is ZERO — see the floor. **Never auto-merged.** |
 
 ## The rules, and why each exists
@@ -198,6 +200,63 @@ remains says where it belongs. History records `suppressed_proposal`,
 auto-accept threshold never applies: no score overturns a human's no.
 Separately, `ProposalRef.Reused` lets the engine write its `merge_proposed`
 pointer entry once per question rather than once per observation.
+
+## Provisional identity
+
+`Config.ProvisionalInventory` (off by default; inventory-service's production
+constructor is the only caller that turns it on) adds a third identity status
+and two outcomes, for the case #1898 names: a sensor on VLAN A hears a
+*reflected* mDNS advert for a printer that lives on VLAN B. The advert is
+hearsay — nothing touched the device — so admission refuses to establish
+anything from it, and without this the evidence is an observation no inventory
+surface can show and nothing can ever join to.
+
+**D2 — creation.** An advertisement becomes a `provisional` asset when ALL of:
+the observation is `measured`, admission returned NOT established, it carries a
+`hostname`, `fqdn` or `ip_address` whose scope is a REAL segment (never
+`tenant`), the store reports that segment eligible
+(`ProvisionalScopeChecker`: an active `cidr` segment with no other active cidr
+segment overlapping it and no cloud network ref), and no identifier is owned by
+anybody. The asset is `pending_approval` with `identity_status = provisional`,
+in that segment, and the observation stays `unresolved` so enrichment keeps
+working on it. Anything else stays an observation with a reason
+(`network_scope_unresolved`,
+`overlapping_network_scope_requires_source_resolution`,
+`no_device_or_address_binding`); a repository that cannot answer the
+eligibility question is treated as answering **no**.
+
+It carries **no allowance check** — the one create in this package that does
+not. A guess must not spend a customer's paid `max_assets`, and a chatty
+reflector that could exhaust it would then block the creation of assets that
+are real. The check moves to promotion, where the platform asserts the thing
+is real; an exhausted allowance there leaves the asset provisional, keeps the
+evidence, and records `asset_allowance_exhausted`.
+
+**D3 — what later evidence does.**
+
+| The observation | Against the provisional asset P | Outcome |
+|---|---|---|
+| Established (direct / authoritative / operator-confirmed) | at least one **name** kind agreed (`hostname`, `fqdn`, `name`) — or anything stronger than an address, a MAC included | `matched`. Ordinary match on P, plus `corroborated_provisional` in history. The observation then promotes P. |
+| Established | **only** `ip_address` agreed | **Hearsay yields.** The decision is re-run with P's addresses muted, the observation creates or matches on its own remaining evidence, and each address is then MOVED to that asset (`IdentifierReassigner`), with `identifier_reassigned` history on both. P emptied of every identifier is archived, reason `superseded_by_direct_evidence` — not merged; nothing was combined. |
+| Established, but an interface or singleton disagrees | — | Unchanged: a merge proposal. |
+| Not established, every owned identifier belongs to ONE asset X | the observation is a **sighting** | `supporting`. Touch X at the observation's own time; attach the new identifiers only when X is itself provisional, because an alias nobody checked must not join an identity somebody did. |
+| Not established, every owned identifier belongs to ONE asset X | the observation is **not** a sighting | `supporting`, and nothing is written: no touch, no attach, and a history entry carrying `sighting: false`. |
+| Not established, identifiers owned by two or more assets | — | Unchanged: the contested path. |
+
+An address is a lease and a MAC is a NIC, which is why only `ip_address`
+counts as "address alone": a provisional asset matched by MAC was met at the
+very interface the advert described, and moving that MAC to a second asset
+would duplicate the thing the rule exists to keep whole.
+
+**A sighting is evidence the THING was there**, not evidence about its name:
+every passive observation, and an active one that produced an endpoint. An
+ACTIVE observation with NO endpoint is a lookup — inventory-service's scoped
+DNS enrichment (`sensor:identity-dns:<id>`) answers "what does this name
+resolve to" on every rescan cycle without anything going near the device — and
+letting that advance last-seen would keep a device unplugged months ago
+permanently fresh and out of the stale lens. It still links to the asset, and
+its history entry says `sighting: false` so the timeline explains why an entry
+that looks like every other supporting one left the clock alone.
 
 ## The floor: never an asset with no identifier
 

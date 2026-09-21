@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,8 +34,21 @@ func (r *Repository) AdmissionMode(ctx context.Context, tenantID string) (string
 
 func (r *Repository) FinishObservation(ctx context.Context, obs identity.Observation, observationID string, res identity.Resolution, decision identity.AdmissionDecision, establish bool) error {
 	if res.AdmissionReason != "" {
+		// APPEND, never replace. The reasons array already carries the
+		// admission decision StoreObservation wrote — `unverified_relayed_advertisement`
+		// is the sentence the UI uses to explain why the evidence could not
+		// establish anything — and a resolution reason is a SECOND fact about
+		// the same evidence, not a correction of the first. Replacing was
+		// tolerable while `asset_allowance_exhausted` was the only value; the
+		// provisional refusals of D2 would otherwise overwrite the
+		// explanation with a segment complaint and leave the tenant reading a
+		// reason that does not answer their question.
 		return r.withTx(ctx, obs.TenantID, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET admission_reasons=ARRAY[$3::text],enrichment_state='blocked',enrichment_reason=$3,updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.AdmissionReason)
+			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET
+				admission_reasons=CASE WHEN $3 = ANY(admission_reasons) THEN admission_reasons
+				                       ELSE array_append(admission_reasons,$3::text) END,
+				enrichment_state='blocked',enrichment_reason=$3,updated_at=now()
+				WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.AdmissionReason)
 			return err
 		})
 	}
@@ -47,6 +61,27 @@ func (r *Repository) FinishObservation(ctx context.Context, obs identity.Observa
 	}
 	if res.Asset.Zero() {
 		return nil
+	}
+	// D2/D3. Both new outcomes attach the observation to an asset
+	// WITHOUT resolving it: a provisional asset is a guess, so the evidence
+	// stays `unresolved` and enrichment keeps working on it until something
+	// direct corroborates it. Supporting evidence for an ESTABLISHED asset is
+	// resolved, because there is nothing left to find out.
+	switch res.Outcome {
+	case identity.OutcomeProvisional:
+		return r.withTx(ctx, obs.TenantID, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET asset_id=$3,state='unresolved',
+			 updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID)
+			return err
+		})
+	case identity.OutcomeSupporting:
+		return r.withTx(ctx, obs.TenantID, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET asset_id=$3,
+			 state=CASE WHEN (SELECT identity_status FROM assets WHERE tenant_id=$1 AND id=$3)='provisional'
+			            THEN 'unresolved' ELSE 'linked' END,
+			 updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID)
+			return err
+		})
 	}
 	if establish && decision.Established {
 		status := identity.IdentityEstablished
@@ -71,14 +106,29 @@ func (r *Repository) CheckAdmissionAllowance(ctx context.Context, tenantID strin
 	if err := r.checkTenant(tenantID); err != nil {
 		return false, err
 	}
-	if _, err := r.tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,72041))`, tenantID); err != nil {
+	return checkAdmissionAllowance(ctx, r.tx, tenantID)
+}
+
+// checkAdmissionAllowance is the allowance test itself, on a caller's
+// transaction, so [Repository.LinkObservation] can apply it at PROMOTION
+// without going back through the Repository's own binding check.
+//
+// PROVISIONAL assets are excluded from the count ( D1). A provisional
+// asset is the platform's guess that something exists, made from evidence
+// nobody verified; charging a customer's `max_assets` for it would let a
+// chatty mDNS reflector exhaust a paid limit with hearsay, and would then
+// block the creation of assets that ARE real. The allowance is checked when a
+// provisional asset is promoted instead — the moment the platform asserts the
+// thing is real.
+func checkAdmissionAllowance(ctx context.Context, tx *sql.Tx, tenantID string) (bool, error) {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,72041))`, tenantID); err != nil {
 		return false, err
 	}
 	tenant, err := uuid.Parse(tenantID)
 	if err != nil {
 		return false, err
 	}
-	limit, err := entitlements.GetQuantityInTx(ctx, r.tx, tenant, "max_assets")
+	limit, err := entitlements.GetQuantityInTx(ctx, tx, tenant, "max_assets")
 	if err != nil {
 		return false, err
 	}
@@ -86,7 +136,8 @@ func (r *Repository) CheckAdmissionAllowance(ctx context.Context, tenantID strin
 		return true, nil
 	}
 	var count int
-	if err := r.tx.QueryRowContext(ctx, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenantID).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM assets
+		 WHERE tenant_id=$1 AND deleted_at IS NULL AND identity_status <> 'provisional'`, tenantID).Scan(&count); err != nil {
 		return false, err
 	}
 	return count < *limit, nil
@@ -186,11 +237,41 @@ func (r *Repository) LinkObservation(ctx context.Context, tenantID, observationI
 		if n != 1 {
 			return fmt.Errorf("observation missing or linked to another asset")
 		}
+		// D1: promoting a PROVISIONAL asset is the moment the platform
+		// asserts the thing is real, so it is the moment the tenant's
+		// `max_assets` allowance applies. When it is exhausted the evidence
+		// still lands — the observation above is already linked — and the
+		// asset simply stays provisional, with the reason recorded where the
+		// tenant can read it. Losing the evidence instead would make an
+		// exhausted allowance look like a discovery that never happened.
+		var previous string
+		err = tx.QueryRowContext(ctx, `SELECT identity_status FROM assets
+			WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenantID, assetID).Scan(&previous)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, assetID)
+		}
+		if err != nil {
+			return err
+		}
+		if previous == string(identity.IdentityProvisional) {
+			allowed, err := checkAdmissionAllowance(ctx, tx, tenantID)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET
+					admission_reasons=CASE WHEN $3 = ANY(admission_reasons) THEN admission_reasons
+					                       ELSE array_append(admission_reasons,$3) END,
+					updated_at=now() WHERE tenant_id=$1 AND id=$2`,
+					tenantID, observationID, identity.ReasonAssetAllowanceExhausted)
+				return err
+			}
+		}
 		_, err = tx.ExecContext(ctx, `WITH prior AS (
 			 SELECT identity_status FROM assets WHERE tenant_id=$1 AND id=$2 FOR UPDATE
 			), changed AS (
 			 UPDATE assets a SET identity_status=$3,updated_at=now() FROM prior p
-			 WHERE a.tenant_id=$1 AND a.id=$2 AND (p.identity_status='legacy'
+			 WHERE a.tenant_id=$1 AND a.id=$2 AND (p.identity_status IN ('legacy','provisional')
 			 OR (p.identity_status='operator_confirmed' AND $3='established'))
 			 RETURNING a.id,p.identity_status AS previous
 			) INSERT INTO asset_history(tenant_id,asset_id,source,action,changes_json)

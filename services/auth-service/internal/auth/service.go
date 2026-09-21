@@ -1292,7 +1292,14 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 			tenant.ID, tenant.Name, tenant.Slug, subscriptionTierID,
 			tenant.BillingEmail, tenant.PaymentStatus, "{}", tenant.CreatedAt, tenant.UpdatedAt,
 		)
-		return e
+		if e != nil {
+			return e
+		}
+		// New customers start with identity admission and enrichment enabled.
+		// Seed the stored policy atomically with the tenant so every reader sees
+		// the same defaults before discovery starts. Existing tenants retain
+		// their policy, including the historical unconfigured/disabled state.
+		return seedSignupIdentityPolicy(context.Background(), tx, tenantID)
 	}); err != nil {
 		return nil, err
 	}

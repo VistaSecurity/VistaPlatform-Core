@@ -245,6 +245,7 @@ export const FORM_IDENTIFIER_KINDS: readonly string[] = USER_ENTERABLE_IDENTIFIE
 
 export const IDENTIFIER_KIND_LABEL: Record<string, string> = {
   agent_id: 'Agent ID',
+  sensor_id: 'Sensor ID',
   cloud_resource_id: 'Cloud resource ID',
   fqdn: 'FQDN',
   hostname: 'Hostname',

@@ -744,7 +744,7 @@ export interface paths {
          *
          *     `hostname` and `ip_address` are identifier aliases. Setting either attaches the matching identifier (an `fqdn` when the hostname is dotted, a scoped `hostname` when it is a single label) — it does NOT retire the old one, because the old name was true. Remove it by leaving it out of an `identifiers` array.
          *
-         *     REMOVAL happens only when the request actually carries an `identifiers` array, and only for identifiers whose `source_kind` is `declared`. Collector-minted identifiers — `agent_id`, `cloud_resource_id`, and anything a sensor or an import produced — are KEPT, and the response's `identifiers.kept` says which and why. An edit may never leave an asset with no identifiers at all (400): it could never be matched again.
+         *     REMOVAL happens only when the request actually carries an `identifiers` array, and only for identifiers whose `source_kind` is `declared`. Collector-minted identifiers — `agent_id`, `sensor_id`, `cloud_resource_id`, and anything a sensor or an import produced — are KEPT, and the response's `identifiers.kept` says which and why. An edit may never leave an asset with no identifiers at all (400): it could never be matched again.
          *
          *     An identifier that already belongs to ANOTHER asset is answered 409 with `merge_proposal_id`; the proposal is committed and waiting in Approvals even though the edit was refused.
          */
@@ -3727,7 +3727,7 @@ export interface components {
             /** Format: uuid */
             asset_id?: string;
             /** @enum {string} */
-            kind: "agent_id" | "cloud_resource_id" | "serial_number" | "cmdb_sys_id" | "ssh_host_key_fingerprint" | "mac_address" | "fqdn" | "hostname" | "ip_address" | "name";
+            kind: "agent_id" | "sensor_id" | "cloud_resource_id" | "serial_number" | "cmdb_sys_id" | "ssh_host_key_fingerprint" | "mac_address" | "fqdn" | "hostname" | "ip_address" | "name";
             value: string;
             /** @description The segment for `hostname` and `ip_address`, the class key for `name`, the sync profile for `cmdb_sys_id`. Absent for the six globally unique kinds — a scope on one of those splits the uniqueness key. A `hostname` or `ip_address` in no configured segment carries the literal `tenant`, the tenant-wide default scope: there is always an answer, because an identifier with no scope could never decide a match. */
             scope?: string;
@@ -3799,11 +3799,18 @@ export interface components {
             asset_id?: string;
         };
         IdentitySummary: {
+            /**
+             * @description Current identity assessment policy; absent on older servers.
+             * @enum {string}
+             */
+            admission_mode?: "disabled" | "observe" | "enforce" | "paused";
             established: number;
             operator_confirmed: number;
             legacy: number;
             unresolved: number;
             conflicted: number;
+            /** @description Inventory items inferred from an advertisement that nothing has corroborated yet. Counted over assets that are not archived or denied — NOT over monitored assets like the three counts above, because a provisional item is pending approval by construction. */
+            provisional: number;
         };
         RetainedCertificateSummary: {
             sha256_fingerprint: string;
@@ -3858,8 +3865,33 @@ export interface components {
             /** Format: date-time */
             next_attempt_at: string;
         };
+        /** @description Which collector heard this evidence, which collector (if any) can act on it, and what is in the way. The two are not the same: a sensor on one VLAN routinely hears an advertisement about a device on another, and the enrichment work is then executed by whichever sensor actually has an interface on the target network. */
+        IdentityObservationCollector: {
+            /** @description The collector the evidence came from. Provenance only; its reachability no longer decides whether work can be done. */
+            observer: {
+                /**
+                 * Format: uuid
+                 * @description Null when the observation did not come from a sensor — a cloud collector or a device interrogation, for instance.
+                 */
+                sensor_id: string | null;
+                name: string;
+                reachable: boolean;
+                /** @description Empty when reachable. Otherwise one of observing_collector_offline, collector_has_no_interface_in_target_network, collector_network_checks_disabled, platform_collector_not_authorized_for_identity_enrichment. */
+                reason: string;
+            };
+            /** @description The collector that would run enrichment work for this observation. Null when none is eligible. */
+            executor: {
+                /** Format: uuid */
+                sensor_id: string;
+                name: string;
+            } | null;
+            /** @description Empty when an executor exists; otherwise why no collector can act — usually no_eligible_collector_in_target_network. */
+            reason: string;
+        };
         IdentityObservation: {
             retained_evidence?: components["schemas"]["RetainedEvidencePage"];
+            /** @description Present on both list and detail reads. Null when the observation's network cannot be resolved to a configured segment, because there is then no collector question to answer. */
+            collector?: components["schemas"]["IdentityObservationCollector"] | null;
             /** Format: uuid */
             id: string;
             source_kind: string;
@@ -3871,6 +3903,7 @@ export interface components {
             evidence: {
                 [key: string]: unknown;
             };
+            /** @description Why this evidence could not establish identity. May include asset_allowance_exhausted, meaning a provisional item could not be promoted because the tenant is at max_assets; the evidence is retained and the item stays provisional. */
             admission_reasons: string[];
             /** @enum {string} */
             state: "unresolved" | "linked" | "conflict" | "dismissed" | "expired";
@@ -3894,10 +3927,10 @@ export interface components {
         /** @description An infrastructure asset (CMDB configuration item). Field presence follows models.Asset's json tags: fields without `omitempty` are always present (nullable pointers serialize as null); `omitempty` fields are omitted when zero/empty. */
         Asset: {
             /**
-             * @description Evidence for entity identity, independently of approval, classification and assessment. Missing on older servers.
+             * @description Evidence for entity identity, independently of approval, classification and assessment. Missing on older servers. `provisional` is an item inferred from an advertisement a collector relayed rather than met — it is real inventory with a stable id, and becomes `established` in place when a collector on its own network corroborates it.
              * @enum {string}
              */
-            identity_status?: "legacy" | "established" | "operator_confirmed";
+            identity_status?: "legacy" | "established" | "provisional" | "operator_confirmed";
             /** @description Whether this asset participates in an unresolved identity proposal. */
             has_identity_conflict?: boolean;
             /** Format: uuid */
@@ -11367,12 +11400,14 @@ export interface operations {
                     "application/json": components["schemas"]["IdentityIngestResult"];
                 };
             };
-            /** @description Conflicting ownership or a changed observation; refresh before deciding */
+            /** @description Conflicting ownership or a changed observation; refresh before deciding. An observation that produced a provisional inventory item answers with `error: provisional_item_requires_merge_review` — combining it with another asset goes through merge review, not through this endpoint. */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
             };
         };
     };

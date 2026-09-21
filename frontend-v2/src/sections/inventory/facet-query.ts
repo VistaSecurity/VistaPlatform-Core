@@ -42,6 +42,7 @@ import { OPEN_FINDINGS_QUERY } from '@vistasecurity/primitives/findings';
 export type FacetKey =
   | 'class'
   | 'status'
+  | 'identity'
   | 'environment'
   | 'site'
   | 'segment'
@@ -56,6 +57,7 @@ export type FacetKey =
  *  `findings` are shaped differently and are handled on their own. */
 export const FACET_FIELD: Readonly<Record<Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings'>, string>> = {
   status: 'status',
+  identity: 'identity_status',
   environment: 'environment',
   site: 'site',
   segment: 'segment_id',
@@ -68,6 +70,7 @@ export const FACET_FIELD: Readonly<Record<Exclude<FacetKey, 'class' | 'risk' | '
 export const FACET_LABEL: Readonly<Record<FacetKey, string>> = {
   class: 'Class',
   status: 'Status',
+  identity: 'Identity',
   environment: 'Environment',
   site: 'Site',
   segment: 'Segment',
@@ -122,6 +125,25 @@ export const PROVENANCE_LABEL: Readonly<Record<string, string>> = {
  */
 export const OPEN_FINDINGS = OPEN_FINDINGS_QUERY;
 
+/**
+ * The identity facet's values — `assets_identity_status_check` ( D1).
+ *
+ * Identity is NOT approval: an asset can be monitored and still have an
+ * identity nothing established, and a provisional item is pending approval by
+ * construction. Two facets, because they answer two questions.
+ *
+ * The rail shows no counts beside these: the facets endpoint has no
+ * `identity_status` level, and a zero beside every value would read as "you
+ * have none of these" rather than as "nobody counted".
+ */
+export const IDENTITY_VALUES = ['established', 'operator_confirmed', 'provisional', 'legacy'] as const;
+export const IDENTITY_LABEL: Readonly<Record<string, string>> = {
+  established: 'Established',
+  operator_confirmed: 'Operator-confirmed',
+  provisional: 'Provisional',
+  legacy: 'Not evaluated',
+};
+
 /** The status facet's values — the four `asset_status`es. */
 export const STATUS_VALUES = ['monitoring', 'pending_approval', 'denied', 'archived'] as const;
 export const STATUS_LABEL: Readonly<Record<string, string>> = {
@@ -139,6 +161,9 @@ export interface FacetState {
    *  taxonomy is a tree and a multi-select over it reads as nonsense. */
   class?: string;
   status: string[];
+  /** `identity_status` values. A provisional item is found here and nowhere
+   *  else — it is `pending_approval` like every other unapproved asset. */
+  identity: string[];
   environment: string[];
   site: string[];
   segment: string[];
@@ -159,7 +184,7 @@ export interface FacetState {
 
 export function emptyFacets(): FacetState {
   return {
-    status: [], environment: [], site: [], segment: [], owner: [],
+    status: [], identity: [], environment: [], site: [], segment: [], owner: [],
     business_unit: [], tag: [], risk: [], provenance: [], text: [],
   };
 }
@@ -168,7 +193,7 @@ export function emptyFacets(): FacetState {
  *  the empty string (which matches everything under RLS). */
 export function facetsEmpty(f: FacetState): boolean {
   return !f.class && f.findings === undefined
-    && f.status.length === 0 && f.environment.length === 0 && f.site.length === 0
+    && f.status.length === 0 && f.identity.length === 0 && f.environment.length === 0 && f.site.length === 0
     && f.segment.length === 0 && f.owner.length === 0 && f.business_unit.length === 0
     && f.tag.length === 0 && f.risk.length === 0 && f.provenance.length === 0
     && f.text.length === 0;
@@ -177,7 +202,7 @@ export function facetsEmpty(f: FacetState): boolean {
 /** How many individual selections are active, for the "N filters" badge. */
 export function facetCount(f: FacetState): number {
   return (f.class ? 1 : 0) + (f.findings === undefined ? 0 : 1)
-    + f.status.length + f.environment.length + f.site.length + f.segment.length
+    + f.status.length + f.identity.length + f.environment.length + f.site.length + f.segment.length
     + f.owner.length + f.business_unit.length + f.tag.length + f.risk.length
     + f.provenance.length + f.text.length;
 }
@@ -291,7 +316,7 @@ export function facetsToQuery(f: FacetState, extra: string[] = []): string {
   // Ordered deliberately: clause order is preserved by the canonical form (§10),
   // so the query reads top-to-bottom in the same order as the rail's sections.
   const plain: Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings'>[] =
-    ['status', 'environment', 'site', 'segment', 'owner', 'business_unit', 'provenance'];
+    ['status', 'identity', 'environment', 'site', 'segment', 'owner', 'business_unit', 'provenance'];
   for (const key of plain) {
     const term = orTerm(FACET_FIELD[key], f[key]);
     if (term) terms.push(term);
@@ -472,6 +497,7 @@ export function queryToFacets(text: string): FacetRead {
 
   const byField: Record<string, keyof FacetState> = {
     status: 'status',
+    identity_status: 'identity',
     environment: 'environment',
     site: 'site',
     segment_id: 'segment',
@@ -554,6 +580,31 @@ export function toggleFacetValue(f: FacetState, key: Exclude<FacetKey, 'class' |
 export function setFacetClass(f: FacetState, classKey: string | undefined): FacetState {
   return { ...f, class: f.class === classKey ? undefined : classKey };
 }
+
+/**
+ * The Inventory URL that lists exactly the assets `IdentitySummary.provisional`
+ * counts ( D1), for the identity-coverage strip to link to.
+ *
+ * Two things make this less trivial than it looks, and both have bitten a count
+ * link before:
+ *
+ * 1. `/infrastructure-assets` defaults to `asset_status = monitoring` when the
+ *    caller constrains no status at all. A bare `identity_status:provisional`
+ *    would therefore be AND-ed with `status:monitoring` server-side — and a
+ *    provisional item is `pending_approval` by construction, so the link would
+ *    land on an EMPTY list beside a non-zero number.
+ * 2. The summary counts provisional assets that are "not archived or denied",
+ *    which over the four statuses is exactly `pending_approval or monitoring`.
+ *    Spelling that out is what makes the list and the number the same set.
+ *
+ * Written through `facetsToQuery` rather than hand-typed, so the rail reads it
+ * straight back into ticked checkboxes and the canonical form cannot drift from
+ * what the rail itself would write.
+ */
+export const PROVISIONAL_FACETS: FacetState = {
+  ...emptyFacets(), identity: ['provisional'], status: ['pending_approval', 'monitoring'],
+};
+export const PROVISIONAL_INVENTORY_HREF = `/inventory?query=${encodeURIComponent(facetsToQuery(PROVISIONAL_FACETS))}`;
 
 /** Cycles the findings facet: off → has open → has none → off. */
 export function cycleFindings(f: FacetState): FacetState {

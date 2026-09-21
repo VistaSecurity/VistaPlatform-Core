@@ -57,7 +57,7 @@ type fakeHostInventoryMaterialiser struct {
 	store           *fakeHostInventoryStore
 }
 
-func (m *fakeHostInventoryMaterialiser) MaterialiseAndRecord(
+func (m *fakeHostInventoryMaterialiser) MaterialiseSelfReportAndRecord(
 	_ context.Context, _, _, _ uuid.UUID, obs *di.InterrogateResult,
 ) (services.HostInventoryCounts, error) {
 	m.calls++

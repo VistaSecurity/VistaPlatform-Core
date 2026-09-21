@@ -23,6 +23,7 @@ import (
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	sharedmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
@@ -130,7 +131,7 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		// Registered on the SAME group as the rest of the outbound surface, so
 		// it cannot be added ungated by mistake, and BEFORE the `/:id/...`
 		// routes so the static segment is matched as a static segment.
-		agentOutbound.POST("/host-inventory", handlers.NewHostInventoryHandler(db, bypassDB).Submit)
+		agentOutbound.POST("/host-inventory", handlers.NewHostInventoryHandler(db, bypassDB, newAgentHostApprover(cfg)).Submit)
 
 		agentOutbound.GET("/:id/jobs", getAgentJobsHandler(db, bypassDB, redis))
 		agentOutbound.POST("/:id/results", submitAgentResultsHandler(db, bypassDB, redis))
@@ -1028,4 +1029,26 @@ func interrogateCloudResourceHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 			"device":        targetDevice,
 		})
 	}
+}
+
+// newAgentHostApprover builds the inventory-service client that admits the
+// host a device agent runs on, after a local host inventory. Same transport
+// discovery-processor-service uses for its imports: the peer URL follows the
+// process's mTLS mode, and under mTLS the client presents this service's cert.
+//
+// A client that cannot be built (a missing cert under mTLS) is logged and
+// left nil, which the ingest tolerates: hosts then wait in Approvals as they
+// did before, and the log says why, rather than the intake refusing to start.
+func newAgentHostApprover(cfg *config.Config) services.AgentHostApprover {
+	baseURL := sharedconfig.PeerServiceURLAuto("INVENTORY_SERVICE_URL", "inventory-service")
+	var client *http.Client
+	if cfg.UseMTLS {
+		c, err := sharedhttp.NewMTLSClient(cfg.ClientCertPath, cfg.ClientKeyPath, cfg.PlatformCACertPath)
+		if err != nil {
+			log.Printf("agent-host approval DISABLED: mTLS client for inventory-service could not be built: %v", err)
+			return nil
+		}
+		client = c
+	}
+	return services.NewInventoryAgentHostApprover(baseURL, client)
 }

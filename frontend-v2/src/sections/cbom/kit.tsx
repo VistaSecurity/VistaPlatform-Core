@@ -108,6 +108,15 @@ export function kindMeta(kind?: string | null): KindMeta {
   return KIND_BY_KEY[kind as ArtifactKind] ?? { key: kind as ArtifactKind, label: kind.toUpperCase(), blurb: '', icon: 'file-badge', tone: 'var(--app-t3)' };
 }
 
+/** One entry in the Download control. `label` is the full name for a menu
+ *  item or a wide button, `short` is what fits on the list row's compact
+ *  button, and `hint` is the one-line explanation shown under a menu item and
+ *  as the button tooltip. All three NAME the format: the compact button used
+ *  to be a bare download icon whose tooltip said only "the canonical bytes",
+ *  and a user reading the list concluded that only the inventory artifact —
+ *  the one kind with a menu — could be downloaded as CycloneDX. */
+export type DownloadOption = { format: 'cyclonedx' | 'ocsf'; label: string; short: string; hint: string };
+
 /**
  * Which download formats this artifact offers, and why the others are absent.
  *
@@ -119,12 +128,12 @@ export function kindMeta(kind?: string | null): KindMeta {
  * Mirrored, not guessed — if the two ever disagree the server refuses and the
  * user sees a clear 400, which is why the server keeps its own check.
  */
-export function downloadFormatsFor(kind?: string | null): Array<{ format: 'cyclonedx' | 'ocsf'; label: string; hint: string }> {
-  const out: Array<{ format: 'cyclonedx' | 'ocsf'; label: string; hint: string }> = [
-    { format: 'cyclonedx', label: 'CycloneDX 1.7', hint: 'The canonical bytes — what the content hash and signature cover.' },
+export function downloadFormatsFor(kind?: string | null): DownloadOption[] {
+  const out: DownloadOption[] = [
+    { format: 'cyclonedx', label: 'CycloneDX 1.7', short: 'CycloneDX', hint: 'CycloneDX 1.7 JSON — the canonical bytes, which the content hash and any signature cover.' },
   ];
   if ((kind ?? 'cbom') === 'inventory') {
-    out.push({ format: 'ocsf', label: 'OCSF 1.9 events', hint: 'JSON Lines for a SIEM: one Device Inventory Info per asset, one Vulnerability Finding per CVE.' });
+    out.push({ format: 'ocsf', label: 'OCSF 1.9 events', short: 'OCSF', hint: 'OCSF 1.9 JSON Lines for a SIEM: one Device Inventory Info per asset, one Vulnerability Finding per CVE.' });
   }
   return out;
 }

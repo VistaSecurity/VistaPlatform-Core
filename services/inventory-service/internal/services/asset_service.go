@@ -2383,6 +2383,106 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 	return errors.Join(materializationErrs...)
 }
 
+// AgentHostApprovalSourceRef is the `asset_history.source` an agent-driven
+// approval is recorded under: `agent:<agent id>`, the same producer prefix the
+// host inventory writes its facts and installs with, so the timeline attributes
+// the approval to the thing that earned it.
+func AgentHostApprovalSourceRef(agentID uuid.UUID) string {
+	return "agent:" + agentID.String()
+}
+
+// AutoApproveAgentHost admits a host the tenant's own device agent runs on.
+//
+// This is the second automatic path into inventory, beside the auto-approving
+// network segment, and it exists because the first one asked the wrong
+// question of an agent host. A segment rule answers "is this address somewhere
+// we trust?", which a discovery needs asked because the discovery is one
+// packet's worth of evidence. A local host inventory is not a discovery: someone
+// with administrative access to the machine installed the tenant's agent on it
+// and enrolled it with the tenant's registration key. That IS the approval a
+// person in Discovery → Approvals would be giving, already given, by the same
+// person, with more authority — and asking for it a second time left the one
+// host whose software inventory the platform had collected sitting outside the
+// SBOM it was collected for.
+//
+// What it does is exactly what ApproveAssets does — the status, the history
+// row, the edge promotion, the lifecycle event, the deferred-finding replay —
+// through the same code, because an approval that skipped any of those would
+// be an asset that is `monitoring` and still not in inventory. Two things
+// differ, and both are the reason it is a separate method rather than a flag:
+//
+//   - It approves ONLY a `pending_approval` asset, and says so with `false`
+//     rather than an error. A `denied` host is a decision a person took, and
+//     installing an agent on it afterwards is not that person changing their
+//     mind about the queue — it is the ordinary approval path's job to ask
+//     them. An archived or merged asset is not in the queue at all. A host
+//     already `monitoring` needs nothing. All three answer `false, nil`, and
+//     the caller — an agent that reports on a schedule — asks again next run.
+//   - The history row carries no actor and names the agent as its source, so
+//     the timeline reads "approved · agent:<id>" rather than an approval by
+//     nobody from "approvals".
+func (s *AssetService) AutoApproveAgentHost(tenantID, assetID, agentID uuid.UUID) (bool, error) {
+	if assetID == uuid.Nil {
+		return false, errors.New("auto-approve agent host: asset id is required")
+	}
+	if agentID == uuid.Nil {
+		return false, errors.New("auto-approve agent host: agent id is required")
+	}
+	source := identity.Source{Kind: identity.SourceMeasured, Ref: AgentHostApprovalSourceRef(agentID), Mode: identity.ModeActive}
+	ids := []uuid.UUID{assetID}
+
+	moved := false
+	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, ids, func(tx *sqlx.Tx) error {
+		// Read-then-write inside the lifecycle lock, so the status this tests
+		// is the one the UPDATE below acts on. The WHERE repeats the test as a
+		// second guard rather than trusting the read alone.
+		var current string
+		err := tx.QueryRow(`SELECT asset_status FROM assets WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`,
+			tenantID, assetID).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reading asset status: %w", err)
+		}
+		if current != identity.StatusPendingApproval {
+			log.Printf("[AssetService] agent %s host %s is %s, not pending; leaving it", agentID, assetID, current)
+			return nil
+		}
+		if err := checkAssetLifecycleMutable(context.Background(), tx, tenantID, ids); err != nil {
+			return err
+		}
+		res, err := tx.Exec(`UPDATE assets SET asset_status = 'monitoring', updated_at = NOW()
+			WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND asset_status = 'pending_approval'`,
+			tenantID, assetID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil
+		}
+		moved = true
+		s.recordAssetHistoryBy(tx, tenantID, assetID, uuid.Nil, identity.ActionApproved, source,
+			map[string]any{"asset_status": identity.StatusMonitoring, "reason": "agent_installed", "agent_id": agentID.String()})
+		return promoteEdgesForApprovedAssets(tx, tenantID, ids)
+	}); err != nil {
+		return false, err
+	}
+	if !moved {
+		return false, nil
+	}
+	s.publishLifecycleFrom(tenantID, ids, uuid.Nil, events.EventTypeAssetApproved, identity.StatusMonitoring, source.Producer())
+
+	// Same replay as a human approval: the findings a sensor deferred while the
+	// host waited are what make an approved host's certificates and crypto
+	// configurations appear. An agent-approved host with none of them would be
+	// approved and still not in the lenses.
+	if err := s.processDeferredFindings(tenantID, assetID); err != nil {
+		return true, fmt.Errorf("asset %s approved but its deferred findings did not replay: %w", assetID, err)
+	}
+	return true, nil
+}
+
 // processDeferredFindings reads the deferred_findings array from asset metadata,
 // processes each finding to create certificates and crypto configurations, then
 // clears the deferred_findings from metadata only after every finding succeeds.
@@ -2579,6 +2679,13 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 // triggers are IN-PROCESS and stay that way, because an approval that depended
 // on a subscriber would silently do nothing whenever NATS was down.
 func (s *AssetService) publishLifecycle(tenantID uuid.UUID, assetIDs []uuid.UUID, actor uuid.UUID, eventType, status string) {
+	s.publishLifecycleFrom(tenantID, assetIDs, actor, eventType, status, "approvals")
+}
+
+// publishLifecycleFrom is publishLifecycle with the event's source named by the
+// caller. "approvals" is the human queue; an approval the platform reached on
+// its own names what reached it, so a subscriber can tell the two apart.
+func (s *AssetService) publishLifecycleFrom(tenantID uuid.UUID, assetIDs []uuid.UUID, actor uuid.UUID, eventType, status, source string) {
 	if s.eventPublisher == nil {
 		return
 	}
@@ -2588,7 +2695,7 @@ func (s *AssetService) publishLifecycle(tenantID uuid.UUID, assetIDs []uuid.UUID
 	}
 	if err := s.eventPublisher.PublishAssetLifecycle(context.Background(), tenantID, eventType,
 		&events.AssetLifecyclePayload{AssetIDs: assetIDs, Status: status, DecidedBy: decided},
-		"approvals"); err != nil {
+		source); err != nil {
 		log.Printf("[AssetService] %s committed but the event was not published: %v", eventType, err)
 	}
 }

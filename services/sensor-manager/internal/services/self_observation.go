@@ -11,9 +11,8 @@ package services
 // in the lab: a sensor's own host asset showed up as
 // `<sensor's LAN address> · unknown_host · monitoring`.
 //
-// The fix reuses the device-agent's pattern: shared/identity's KindAgentID is
-// "a host agent's own installation id: the strongest identifier we have,
-// because we issued it" (shared/identity/identifier.go), and
+// The fix reuses the device-agent's self-report pattern, with a separate
+// sensor_id identifier namespace. In parallel,
 // device-interrogation-service already turns an agent's own host inventory
 // into a named asset this way. A sensor is not a device agent — it has no
 // command channel and does not run interrogations — but its heartbeat can
@@ -132,9 +131,8 @@ func derefString(s *string) string {
 // shared/hostobs.HostObservation, the same payload shape every passive
 // decoder produces.
 //
-// AgentID is the sensor's own id — identity.KindAgentID, the strongest
-// identifier kind there is, so this can never mis-merge with an unrelated
-// host that happens to share an address. Platform/Profile travel as raw
+// AgentID is the sensor's own id, recorded as identity.KindSensorID after
+// the inventory consumer verifies its source. Platform/Profile travel as raw
 // evidence for inventory-service's class HINT (never an applied
 // classification here — see that consumer's classHintForSelfReport); mapping
 // them to a class key is a decision the identification engine's caller makes,

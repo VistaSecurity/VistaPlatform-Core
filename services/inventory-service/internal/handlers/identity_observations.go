@@ -66,6 +66,11 @@ func writeObservationError(c *gin.Context, err error) bool {
 	switch {
 	case errors.Is(err, services.ErrObservationNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "Observation or asset not found"})
+	case errors.Is(err, services.ErrObservationProvisionalMerge):
+		// The body is the machine-readable CODE, not a sentence: the UI
+		// switches on it to open merge review, and a prose message would tie
+		// that behaviour to wording somebody will reasonably reword ( D8).
+		c.JSON(http.StatusConflict, gin.H{"error": "provisional_item_requires_merge_review"})
 	case errors.Is(err, services.ErrObservationChanged):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, services.ErrObservationAllowance):

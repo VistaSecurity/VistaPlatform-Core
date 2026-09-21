@@ -68,7 +68,7 @@ const (
 // IdentifierKinds is the allowed set of identifier kinds, in the default
 // precedence order of ADR-0002 D3. A class may drop and reorder kinds; it may
 // not invent one.
-var IdentifierKinds = []string{"declaration_id", "agent_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"}
+var IdentifierKinds = []string{"declaration_id", "agent_id", "sensor_id", "cloud_resource_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address", "name"}
 
 // CycloneDXTypes is the allowed set of Class.CycloneDXType values. "service" is
 // not a CycloneDX component type — a class carrying it is emitted into the
@@ -135,7 +135,7 @@ var All = []Class{
 		Icon:                 "Computer",
 		CMDBCIType:           "cmdb_ci_computer",
 		CycloneDXType:        "device",
-		IdentifierPrecedence: []string{"agent_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "endpoint",
 	},
 	{
@@ -146,7 +146,7 @@ var All = []Class{
 		Icon:                 "Server",
 		CMDBCIType:           "cmdb_ci_server",
 		CycloneDXType:        "device",
-		IdentifierPrecedence: []string{"agent_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "server",
 	},
 	{
@@ -157,7 +157,7 @@ var All = []Class{
 		Icon:                 "Monitor",
 		CMDBCIType:           "cmdb_ci_pc_hardware",
 		CycloneDXType:        "device",
-		IdentifierPrecedence: []string{"agent_id", "serial_number", "cmdb_sys_id", "mac_address", "fqdn", "hostname"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "mac_address", "fqdn", "hostname"},
 		LegacyAssetType:      "endpoint",
 	},
 	{
@@ -168,7 +168,7 @@ var All = []Class{
 		Icon:                 "Laptop",
 		CMDBCIType:           "cmdb_ci_pc_hardware",
 		CycloneDXType:        "device",
-		IdentifierPrecedence: []string{"agent_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"},
 		LegacyAssetType:      "endpoint",
 	},
 	{
@@ -179,7 +179,7 @@ var All = []Class{
 		Icon:                 "Smartphone",
 		CMDBCIType:           "",
 		CycloneDXType:        "device",
-		IdentifierPrecedence: []string{"agent_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "mac_address", "hostname"},
 		LegacyAssetType:      "endpoint",
 	},
 	{
@@ -377,7 +377,7 @@ var All = []Class{
 		Icon:                 "Layers",
 		CMDBCIType:           "",
 		CycloneDXType:        "platform",
-		IdentifierPrecedence: []string{"agent_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "server",
 	},
 	{
@@ -388,7 +388,7 @@ var All = []Class{
 		Icon:                 "Box",
 		CMDBCIType:           "cmdb_ci_vm_instance",
 		CycloneDXType:        "platform",
-		IdentifierPrecedence: []string{"agent_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "server",
 	},
 	{
@@ -399,7 +399,7 @@ var All = []Class{
 		Icon:                 "Container",
 		CMDBCIType:           "",
 		CycloneDXType:        "container",
-		IdentifierPrecedence: []string{"agent_id", "cloud_resource_id", "cmdb_sys_id", "hostname"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "hostname"},
 		LegacyAssetType:      "service",
 	},
 	{
@@ -421,7 +421,7 @@ var All = []Class{
 		Icon:                 "SquareStack",
 		CMDBCIType:           "cmdb_ci_server",
 		CycloneDXType:        "platform",
-		IdentifierPrecedence: []string{"agent_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "server",
 	},
 	{
@@ -443,7 +443,7 @@ var All = []Class{
 		Icon:                 "CloudCog",
 		CMDBCIType:           "cmdb_ci_vm_instance",
 		CycloneDXType:        "platform",
-		IdentifierPrecedence: []string{"agent_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "ssh_host_key_fingerprint", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "server",
 	},
 	{
@@ -652,7 +652,7 @@ var All = []Class{
 		Icon:                 "CircleQuestionMark",
 		CMDBCIType:           "",
 		CycloneDXType:        "device",
-		IdentifierPrecedence: []string{"serial_number", "agent_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
+		IdentifierPrecedence: []string{"serial_number", "agent_id", "sensor_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "endpoint",
 	},
 }

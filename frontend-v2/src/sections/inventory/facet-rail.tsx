@@ -13,7 +13,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { ASSET_CLASSES, CLASS_TREE, type AssetClassKey, type AssetClassNode } from '@vistasecurity/primitives/assets';
 import { Icon } from '../../components/ui';
 import {
-  FACET_LABEL, PROVENANCE_LABEL, PROVENANCE_VALUES, RISK_BANDS, RISK_BAND_LABEL,
+  FACET_LABEL, IDENTITY_LABEL, IDENTITY_VALUES, PROVENANCE_LABEL, PROVENANCE_VALUES,
+  RISK_BANDS, RISK_BAND_LABEL,
   STATUS_LABEL, STATUS_VALUES, cycleFindings, facetCount, setFacetClass, toggleFacetValue,
   type FacetKey, type FacetState,
 } from './facet-query';
@@ -415,6 +416,31 @@ export function FacetRail({ facets, data, extra, unparsed = false, onChange, onC
           />
         ))}
         {levelFailed(data, 'status') && <LevelFailed onRetry={onRetry} />}
+      </Section>
+
+      {/* Identity, and deliberately NOT under Status: an asset's approval state
+          and the evidence behind its identity are independent (ADR-0002), and
+          the one slice a tenant needs after a cross-VLAN advert — "show me the
+          items nothing has corroborated" — has no other control.
+
+          No counts: the facets endpoint serves no `identity_status` level, and
+          `FACET_LEVEL_FOR` is what the page asks it for. A fabricated zero
+          would read as "you have none". */}
+      <Section label={FACET_LABEL.identity} count={facets.identity.length}>
+        {IDENTITY_VALUES.map((v) => (
+          <CheckRow
+            key={v}
+            value={v}
+            label={IDENTITY_LABEL[v]}
+            checked={facets.identity.includes(v)}
+            onToggle={() => onChange(toggleFacetValue(facets, 'identity', v))}
+          />
+        ))}
+        {facets.identity.includes('provisional') && (
+          <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 5, lineHeight: 1.45 }}>
+            Provisional items were inferred from an advertisement no collector has verified directly.
+          </div>
+        )}
       </Section>
 
       <Section label={FACET_LABEL.provenance} count={facets.provenance.length}>

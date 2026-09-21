@@ -208,7 +208,7 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'identity_status',
       type: 'keyword',
       accessor: { kind: 'column', column: 'identity_status', cast: 'text' },
-      enum: ['legacy', 'established', 'operator_confirmed'],
+      enum: ['legacy', 'established', 'provisional', 'operator_confirmed'],
     },
     {
       name: 'last_seen',

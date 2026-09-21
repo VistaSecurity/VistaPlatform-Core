@@ -64,6 +64,7 @@ func TestEnumsMatchSchema(t *testing.T) {
 			want       []string
 		}{
 			{"assets_asset_status_check", assetStatusValues},
+			{"assets_identity_status_check", identityStatusValues},
 			{"assets_asset_ownership_check", assetOwnershipValues},
 			{"assets_stale_status_check", staleStatusValues},
 			{"assets_class_source_kind_check", classSourceKindValues},
@@ -178,10 +179,16 @@ func enumTypeValues(t *testing.T, body, typeName string) []string {
 // (`CHECK ((x)::text = ANY ((ARRAY[...])::text[]))`), so a lazy regex stops in
 // the middle of one and silently returns a prefix.
 func findCheckConstraint(body, name string) (string, error) {
-	idx := strings.Index(body, "CONSTRAINT "+name+" CHECK")
-	if idx < 0 {
+	// Whitespace-tolerant, because a named constraint that is wide enough to
+	// wrap puts a newline between its name and CHECK — which a fixed
+	// "CONSTRAINT <name> CHECK" search does not find, and a parity row that
+	// cannot find its constraint reads as "not in the schema" rather than as a
+	// parser limitation. assets_identity_status_check is written that way.
+	loc := regexp.MustCompile(`CONSTRAINT\s+` + regexp.QuoteMeta(name) + `\s+CHECK`).FindStringIndex(body)
+	if loc == nil {
 		return "", fmt.Errorf("no `CONSTRAINT %s CHECK (...)` in the schema", name)
 	}
+	idx := loc[0]
 	open := strings.Index(body[idx:], "(")
 	if open < 0 {
 		return "", fmt.Errorf("constraint %s has no parenthesised body", name)

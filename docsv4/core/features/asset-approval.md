@@ -7,24 +7,40 @@ The Asset Approval Workflow allows tenants to review and approve/deny assets dis
 Every discovered asset takes the same path, whatever found it:
 1. **Automatically processed** — discovery jobs, sensors and cloud discovery all
    feed one pipeline. There is no import step.
-2. **Auto-approved** if, and only if, the asset is on a network segment with
-   auto-approve enabled
+2. **Auto-approved** if the asset is on a network segment with auto-approve
+   enabled, or is a host the tenant's own device agent runs on
 3. **Reviewed** by security teams (everything else)
 4. **Approved** to move to `monitoring` status
 5. **Denied** to suppress from rediscovery
 
-## The one auto-approval rule
+## The two auto-approval rules
 
-An asset is auto-approved **only** when it falls inside a network segment you
-defined with **auto-approve enabled** (Settings → Infrastructure → Network
-Segments). That toggle is off by default, and it is the only control that skips
-the approval queue.
+An asset skips the queue in exactly two situations:
 
-Nothing else promotes an asset. Creating one by hand, importing a spreadsheet,
-pulling from a CMDB, or running a discovery scan all land in **Discovery →
-Approvals** unless the address is on an auto-approving segment — in which case
-all of them go straight to `monitoring`. The rule does not depend on how the
-asset was found.
+1. **It falls inside a network segment you defined with auto-approve enabled**
+   (Settings → Infrastructure → Network Segments). That toggle is off by
+   default. The rule does not depend on how the asset was found: creating one
+   by hand, importing a spreadsheet, pulling from a CMDB, or running a discovery
+   scan all land in **Discovery → Approvals** unless the address is on an
+   auto-approving segment, in which case all of them go straight to
+   `monitoring`.
+2. **It is a host your own device agent runs on.** When an agent reports a
+   [host inventory](./host-inventory.md) of the machine it is installed on, the
+   host is approved into inventory on that report. Installing the agent needed
+   administrative access to the machine and your tenant's registration key,
+   which is a stronger statement of "this host is ours" than any discovery can
+   make — it is the decision the queue exists to collect, already taken by the
+   person who took it. The asset's history records the approval as made by the
+   agent (`agent:<id>`), with no user, so it is never mistaken for a click.
+
+   This applies only to the agent's **own** host. A host inventory the agent
+   collects from some other machine over SSH is a discovery like any other and
+   waits in the queue. A host you have **denied** stays denied — installing an
+   agent on it afterwards does not overturn that decision; approve it from the
+   queue if you have changed your mind. There is no switch for this rule: an
+   enrolled agent is the switch.
+
+Nothing else promotes an asset.
 
 ### Which discoveries a segment auto-approves
 

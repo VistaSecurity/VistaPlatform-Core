@@ -199,17 +199,20 @@ func (a *Applier) Report() (revision string, failures map[string]string, pending
 // Echoing the pushed value instead would be the same lie as reporting a
 // revision that was handed over rather than adopted.
 //
-// A value recorded against [ErrNeedsRestart] IS in `current` and so reads as
-// running, which is what the device will run and what the platform already
-// tracks separately via the pending-restart list. It makes no difference to the
-// only decision that reads this map — the platform's one-time bootstrap from a
-// device's FIRST report, which happens before anything has been applied at all.
+// Pending values have not taken effect: retain their startup values until
+// the capture is rebuilt or the process restarts.
 func (a *Applier) Running() agentconfig.Values {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := a.local.Clone()
+	pending := make(map[agentconfig.Key]bool, len(a.pendingRestart))
+	for _, k := range a.pendingRestart {
+		pending[k] = true
+	}
 	for k, v := range a.current {
-		out[k] = v
+		if !pending[k] {
+			out[k] = v
+		}
 	}
 	return out
 }

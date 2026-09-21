@@ -68,6 +68,15 @@ var classSourceKindValues = []string{"measured", "declared", "imported", "inferr
 // assetStatusValues is `assets_asset_status_check`.
 var assetStatusValues = []string{"pending_approval", "monitoring", "denied", "archived"}
 
+// identityStatusValues is `assets_identity_status_check`.
+//
+// `provisional` ( D1) is a real inventory row whose identity nothing has
+// corroborated yet. It is in the column's CHECK, so it must be here too: a
+// value the column holds but the catalogue omits makes `identity_status:provisional`
+// answer "not a value of identity_status" for rows that exist — which is how
+// the one filter a tenant needs to find their provisional items would 400.
+var identityStatusValues = []string{"legacy", "established", "provisional", "operator_confirmed"}
+
 // assetOwnershipValues is `assets_asset_ownership_check`.
 var assetOwnershipValues = []string{"internal", "third_party", "unknown"}
 

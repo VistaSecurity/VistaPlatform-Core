@@ -3,8 +3,9 @@ import { Link, useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { PROVISIONAL_INVENTORY_HREF } from '../inventory/facet-query';
 import { ObservationActions } from './observation-actions';
-import { ObservationDetails, enrichmentExplanation } from './observation-details';
+import { CollectorReachability, ObservationDetails, enrichmentExplanation } from './observation-details';
 
 type Observation = inventoryComponents['schemas']['IdentityObservation'];
 type State = Observation['state'] | 'all';
@@ -18,6 +19,10 @@ const reasons: Record<string, string> = {
   direct_scoped_interface: 'A device interface was directly observed within its network.',
   direct_scoped_address: 'A network entity was directly observed at this address.',
   declared_service: 'An operator declared this service.',
+  // D1/D8: promotion is the only step that consumes the tenant's asset
+  // allowance, so an exhausted allowance stops the item becoming established
+  // WITHOUT throwing the evidence away. Saying both halves is the point.
+  asset_allowance_exhausted: 'Direct evidence was found, but the asset allowance is exhausted; the item stays provisional.',
 };
 
 export function IdentityCoverage() {
@@ -33,10 +38,19 @@ export function IdentityCoverage() {
     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
       <strong>Monitored inventory:</strong>
       <span>{d.established} established</span><span>{d.operator_confirmed} operator-confirmed</span>
-      <span title="Existing records remain visible and have not been reevaluated under the new identity rules.">{d.legacy} legacy</span>
+      <span title="These records have not had their identity established by the evidence checks. This does not describe their age or security posture.">{d.legacy} not evaluated</span>
     </div>
+    {d.admission_mode === 'disabled' && <span>Identity assessment is not activated. <Link to="/settings/sensor-config">Configure discovery</Link></span>}
+    {d.admission_mode === 'observe' && <span>Identity assessment is observing evidence; inventory identities are not being established.</span>}
+    {d.admission_mode === 'paused' && <span>Identity assessment and enrichment are paused.</span>}
     <Link to="/discovery/observations">{d.unresolved} unresolved observations</Link>
     <Link to="/discovery/approvals">{d.conflicted} assets with identity conflicts</Link>
+    {/* The inventory page's ONE filter is the query string (`?query=`), which is
+        what the facet rail writes and what a saved view stores. The predicate
+        itself is derived from the rail's own writer — see
+        PROVISIONAL_INVENTORY_HREF for why a bare `identity_status:provisional`
+        would land on an empty list. */}
+    <Link to={PROVISIONAL_INVENTORY_HREF}>{d.provisional} provisional items</Link>
   </div>;
 }
 
@@ -54,12 +68,20 @@ function ObservationEvidence({ observation: o, detail }: { observation: Observat
       <dt>Last observed</dt><dd>{new Date(o.last_seen_at).toLocaleString()} · {o.occurrence_count} sighting{o.occurrence_count === 1 ? '' : 's'}</dd>
       <dt>Enrichment</dt><dd>{o.enrichment_state}{o.enrichment_reason ? ` — ${enrichmentExplanation(o.enrichment_reason)}` : ''}</dd>
     </dl>
+    {o.collector && <CollectorReachability collector={o.collector} />}
     <details><summary>Observed identifiers</summary>
       {identifiers.length === 0 ? <p>No usable identifiers recorded.</p> : <ul>{identifiers.map((i, n) => <li key={n}>{String(i.kind ?? '')}: {String(i.value ?? '')}{i.scope ? ` (${String(i.scope)})` : ''}</li>)}</ul>}
     </details>
     {!detail && <p><Link to={`/discovery/observations?observation_id=${o.id}`}>Open observation details</Link></p>}
     {detail && <ObservationDetails observation={o} />}
-    {o.asset_id && <Link to={`/inventory/assets/${o.asset_id}`}>Open linked asset</Link>}
+    {/* A provisional item and a linked asset are the same kind of link to two
+        different things, so only one is shown. `unresolved` WITH an asset is
+        exactly the provisional shape (#1898 D2): the observation keeps working
+        — enrichment still runs on it — while the asset it created waits for
+        something to corroborate it. */}
+    {o.asset_id && (o.state === 'unresolved'
+      ? <p>Provisional inventory item: <Link to={`/inventory/assets/${o.asset_id}`}>Open provisional item</Link></p>
+      : <Link to={`/inventory/assets/${o.asset_id}`}>Open linked asset</Link>)}
     {o.proposal_id && <Link to="/discovery/approvals">Review identity conflict</Link>}
     {(o.state === 'unresolved' || o.state === 'expired' || o.state === 'dismissed') && <ObservationActions id={o.id} />}
   </article>;

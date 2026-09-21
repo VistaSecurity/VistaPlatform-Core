@@ -73,4 +73,21 @@ describe('downloadFormatsFor', () => {
       expect(f.hint.length, `${f.format} has no hint`).toBeGreaterThan(20);
     }
   });
+
+  it('names the format in every label, short name and hint, for every kind', () => {
+    // The compact list button shows `short` and its tooltip shows `hint`. A
+    // hint that described the bytes without naming the format ("the canonical
+    // bytes") is how three of the four kinds came to look like they had no
+    // CycloneDX export at all — only the inventory row's menu spelled it out.
+    const nameOf: Record<string, string> = { cyclonedx: 'CycloneDX', ocsf: 'OCSF' };
+    for (const k of [...ARTIFACT_KINDS.map((x) => x.key), undefined, null]) {
+      for (const f of downloadFormatsFor(k)) {
+        const name = nameOf[f.format];
+        expect(name, `no display name for format ${f.format}`).toBeTruthy();
+        expect(f.short, `kind ${k}: ${f.format} short name`).toBe(name);
+        expect(f.label, `kind ${k}: ${f.format} label`).toContain(name);
+        expect(f.hint, `kind ${k}: ${f.format} hint does not name the format`).toContain(name);
+      }
+    }
+  });
 });

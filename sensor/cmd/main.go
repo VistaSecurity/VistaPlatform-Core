@@ -1673,6 +1673,9 @@ func (s *Sensor) reinitCapture() error {
 	enr := enrichment.NewTLSEnricher(s.config, s.config.SensorID, pc.GetDiscoveriesWritable())
 	enr.Start(3)
 	s.tlsEnricher = enr
+	// The rebuilt capture now uses the recorded settings. Seed a fresh
+	// applier so its next exchange compares against this running baseline.
+	s.setupAgentConfig(Version)
 	return nil
 }
 

@@ -42,7 +42,7 @@ func (e *Engine) resolveConfirmedLink(ctx context.Context, obs Observation, obse
 				stable := id.Kind == KindMACAddress && obs.Admission.Direct && !obs.Admission.Relayed
 				if obs.Admission.Authoritative {
 					switch id.Kind {
-					case KindAgentID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber:
+					case KindAgentID, KindSensorID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber:
 						stable = true
 					}
 				}

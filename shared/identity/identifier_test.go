@@ -207,6 +207,7 @@ func TestClassPrecedence(t *testing.T) {
 func TestScopeIsRejectedOnAGlobalKind(t *testing.T) {
 	for _, k := range DefaultPrecedenceList() {
 		value := map[Kind]string{
+			KindSensorID:              "sensor-1",
 			KindAgentID:               "agent-1",
 			KindCloudResourceID:       "arn:aws:ec2:eu-west-1:1:instance/i-1",
 			KindSerialNumber:          "SN-1",

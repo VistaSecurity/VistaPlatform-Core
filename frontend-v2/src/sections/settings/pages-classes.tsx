@@ -136,6 +136,7 @@ export function ClassesPage({ meta }: { meta: Meta }) {
  */
 export const IDENTIFIER_KIND_NOTES: Readonly<Record<string, { label: string; scoped: boolean; why: string }>> = {
   agent_id: { label: 'Agent ID', scoped: false, why: 'Minted by the platform when an agent enrols. Names exactly one installation.' },
+  sensor_id: { label: 'Sensor ID', scoped: false, why: 'A sensor installation’s own identifier, issued at enrollment. Distinct from a device agent’s Agent ID — a single host can carry both.' },
   cloud_resource_id: { label: 'Cloud resource ID', scoped: false, why: 'The provider’s own ARN/ID. Unique by construction, and stable across restarts and address changes.' },
   serial_number: { label: 'Serial number', scoped: false, why: 'Burned in by the manufacturer. Survives reimaging, renaming and re-addressing.' },
   cmdb_sys_id: { label: 'CMDB sys_id', scoped: true, why: 'The connected CMDB’s own key. Scoped to the sync profile it came from, because two CMDBs can issue the same sys_id.' },

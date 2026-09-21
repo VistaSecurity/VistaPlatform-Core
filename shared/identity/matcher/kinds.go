@@ -11,6 +11,7 @@ package matcher
 const (
 	KindDeclarationID         = "declaration_id"
 	KindAgentID               = "agent_id"
+	KindSensorID              = "sensor_id"
 	KindCloudResourceID       = "cloud_resource_id"
 	KindSerialNumber          = "serial_number"
 	KindCMDBSysID             = "cmdb_sys_id"
@@ -27,6 +28,7 @@ const (
 var allKinds = []string{
 	KindDeclarationID,
 	KindAgentID,
+	KindSensorID,
 	KindCloudResourceID,
 	KindSerialNumber,
 	KindCMDBSysID,
@@ -51,6 +53,7 @@ func AllKinds() []string {
 // whatever a model thinks of the pair.
 var singletonKinds = map[string]bool{
 	KindAgentID:         true,
+	KindSensorID:        true,
 	KindCloudResourceID: true,
 	KindSerialNumber:    true,
 	KindCMDBSysID:       true,

@@ -280,6 +280,12 @@ func main() {
 		api.POST("/inventory-service/assets/approve", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetApprovalHandler.ApproveAssets)
 		log.Printf("[ROUTE] Registering POST /api/v1/inventory-service/assets/deny")
 		api.POST("/inventory-service/assets/deny", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetApprovalHandler.DenyAssets)
+		// INTERNAL ONLY — device-interrogation-service approves the host its
+		// tenant's device agent runs on, after a local host inventory. The
+		// handler rejects anything that is not an HMAC-verified internal call
+		// (same policy as the discovery import route above), so no tenant
+		// permission gates it. Before /:id like the other approval routes.
+		api.POST("/inventory-service/assets/auto-approve/agent-host", assetApprovalHandler.AutoApproveAgentHost)
 		api.GET("/inventory-service/assets/:id", assetHandler.GetAssetByID)
 		api.PUT("/inventory-service/assets/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetHandler.UpdateAsset)
 		api.DELETE("/inventory-service/assets/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), assetHandler.DeleteAsset)

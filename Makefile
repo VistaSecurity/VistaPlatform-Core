@@ -1016,6 +1016,12 @@ chart-lint: ## helm lint the chart against values.schema.json (catches schema/te
 changelog-audit-test: ## Mutation-test the CHANGELOG.md duplication guard
 	node ./scripts/audit-changelog.test.mjs
 
+mcp-tool-docs: ## Audit documented MCP tool count + names against the tool surface (alias for the strict run in 'make audit')
+	node ./scripts/audit-mcp-tool-docs.mjs --strict
+
+mcp-tool-docs-test: ## Mutation-test the MCP tool-docs drift guard (both polarities)
+	node ./scripts/audit-mcp-tool-docs.test.mjs
+
 # Workflow linting. This exists because `secrets` is not an available context in
 # `if:`, and a workflow that references it there does not fail a step — it fails
 # to COMPILE. GitHub surfaces that as a nameless "workflow file issue" with no
@@ -1047,7 +1053,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test lint-workflows  ## Generate, verify and run all standards checks
+standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test mcp-tool-docs-test lint-workflows  ## Generate, verify and run all standards checks
 
 registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

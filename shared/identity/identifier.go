@@ -26,6 +26,8 @@ const (
 	// KindAgentID is a host agent's own installation id: the strongest
 	// identifier we have, because we issued it.
 	KindAgentID Kind = "agent_id"
+	// KindSensorID identifies a sensor installation, independently of a device agent.
+	KindSensorID Kind = "sensor_id"
 	// KindCloudResourceID is an ARN, Azure resource id or GCP self-link.
 	KindCloudResourceID Kind = "cloud_resource_id"
 	// KindSerialNumber is the hardware serial.
@@ -92,6 +94,7 @@ const ScopeTenantDefault = "tenant"
 // not exported to keep it from being reordered in place by a caller.
 var defaultPrecedence = []Kind{
 	KindAgentID,
+	KindSensorID,
 	KindCloudResourceID,
 	KindSerialNumber,
 	KindCMDBSysID,
@@ -137,9 +140,10 @@ func (k Kind) Valid() bool {
 }
 
 // Singleton reports whether an asset may hold at most ONE value of this kind
-// (within one scope). Four of the ten are singletons:
+// (within one scope). Collector installations and durable resource IDs are singletons:
 //
-//	agent_id           one installation, one host
+//	agent_id           one device-agent installation per host
+//	sensor_id          one sensor installation per host
 //	cloud_resource_id  one ARN / resource id names one provider resource
 //	serial_number      one chassis, one serial
 //	cmdb_sys_id        one CI per sync profile (the profile IS the scope)
@@ -174,7 +178,7 @@ func (k Kind) Valid() bool {
 // per profile; two sys_ids in the SAME profile is the contradiction.
 func (k Kind) Singleton() bool {
 	switch k {
-	case KindAgentID, KindCloudResourceID, KindSerialNumber, KindCMDBSysID:
+	case KindAgentID, KindSensorID, KindCloudResourceID, KindSerialNumber, KindCMDBSysID:
 		return true
 	default:
 		return false
@@ -357,7 +361,7 @@ func Normalize(kind Kind, value string) (string, error) {
 		return normalizeIP(v)
 	case KindName:
 		return normalizeName(v)
-	case KindDeclarationID, KindAgentID, KindCloudResourceID, KindSerialNumber, KindCMDBSysID, KindSSHHostKeyFingerprint:
+	case KindDeclarationID, KindAgentID, KindSensorID, KindCloudResourceID, KindSerialNumber, KindCMDBSysID, KindSSHHostKeyFingerprint:
 		// Opaque: trimmed only. See the doc comment for why case survives.
 		return v, nil
 	default:

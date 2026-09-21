@@ -1,26 +1,38 @@
 # AI Assistant Integration (MCP)
 
 Vista exposes a read-only **MCP (Model Context Protocol) server** so your AI
-assistant — Claude.ai, ChatGPT, Gemini, or any MCP-capable agent — can query
+assistant — Claude.ai, ChatGPT, Claude Code, or any MCP-capable agent — can query
 your cryptographic inventory, compliance posture and CBOM artifacts directly.
 You bring your own AI; Vista only answers the questions your assistant asks,
 scoped to your tenant and role, read-only.
 
 ## What your assistant can do
 
-Once connected, your assistant has 18 tools:
+Once connected, your assistant has 23 tools:
 
 - **Inventory** — search your assets with the [query language](./query.md),
-  count them by any facet, read one asset in full (its class, identifiers,
-  endpoints, attributes and risk), read its change history, and browse the
-  asset class tree.
+  find them by free text when you don't know a field to filter on, count them
+  by any facet, read one asset in full (its class, identifiers, endpoints,
+  attributes and risk), read its change history, list the software installed on
+  it, and browse the asset class tree.
+- **Relationships** — the typed relationships on one asset (what it runs on,
+  hosts, depends on, connects to), the graph around it out to three hops, and
+  its blast radius: what else is affected if it changes. See
+  [Relationships](./relationships.md).
 - **Crypto** — certificates (by expiry, issuer, key algorithm), crypto
   configurations, and the platform's authoritative algorithm assessments.
 - **Risk & PQC** — your risk summary and post-quantum readiness breakdown.
 - **Compliance** — frameworks and scores, per-framework evaluation, and
   drill-down into a failing control's findings.
-- **CBOM** — list scopes and artifacts, and diff two snapshots ("did our
-  crypto posture regress since last quarter?").
+- **CBOM** — list your scopes and artifacts, and read one artifact's metadata:
+  the scope it was generated from, its content hash, component count, and how
+  fresh your inventory was when it was taken.
+
+Two of the 23 reach capabilities that are not part of Vista Platform Core —
+asking about your inventory in plain words, and comparing two CBOM artifacts.
+Both are offered to your assistant on every install, and on Core they answer
+*"not included in your subscription"* rather than failing obscurely.
+
 
 Everything is read-only. The assistant cannot change anything in your tenant
 through this connection.
@@ -65,7 +77,75 @@ and it's clean"** from **"nobody has looked"** — a score of 0 with an empty
 and the tool descriptions tell the assistant never to report the second as "no
 risk". If an answer sounds too clean, ask what has not been assessed.
 
-## Connect a GUI assistant (Claude.ai, ChatGPT, Gemini)
+## Connecting from outside your network
+
+Vista Platform runs in **your** cluster, on whatever address you gave it — very
+often a private one, with a certificate from your own internal CA. Your MCP URL
+inherits that. So before you paste it anywhere, answer one question:
+
+**Which machine opens the connection to your MCP URL?**
+
+| Your assistant | What dials your MCP URL | Reaches a private address? |
+|---|---|---|
+| Claude Code (CLI) | Your own machine | **Yes** |
+| A desktop assistant running an MCP bridge locally | Your own machine | **Yes** |
+| Claude.ai | Anthropic's servers | **No** |
+| ChatGPT | OpenAI's servers | **No** |
+
+If the program dialling your MCP URL sits on your network, a private address is
+fine and none of the rest of this section applies. If it is a hosted service, it
+is dialling from the internet, and **all three** of the following have to be
+true. Most people expect only the first.
+
+**1. A public address.** A hostname that resolves on the public internet and
+reaches your cluster ingress.
+
+**2. A publicly-trusted certificate.** A certificate from your internal CA will
+be rejected. There is no way to tell a vendor's servers to trust your private
+CA — you cannot install a root on machines you do not run. This is the one that
+catches people out: internal TLS that works perfectly in your own browser, on
+machines where you *have* installed that root, is not enough here.
+
+**3. A matching OAuth issuer.** Sign-in is discovered, not guessed. The client
+reads `https://<your-vista-host>/.well-known/oauth-authorization-server` and is
+handed the addresses of the authorize and token endpoints; the token step is
+then a back-channel call the client's own servers make. If those addresses
+still name your internal hostname, the client is handed an address it cannot
+resolve, and the connection fails *after* you have already signed in — which
+reads like a bug rather than a configuration gap. Check what is advertised
+today:
+
+```bash
+curl -s https://<your-vista-host>/.well-known/oauth-authorization-server
+```
+
+The chart derives those addresses from your `tls.dnsName`. If the public address
+differs, set `appConfig.oauthCallbackBaseURL` (the `OAUTH_CALLBACK_BASE_URL`
+environment variable) to the public one. When it is unset, the platform falls
+back to the first configured CORS origin — which is your tenant app host, not
+necessarily the address the assistant used.
+
+### A tunnel is the easier route
+
+For a hosted assistant, an outbound tunnel — Cloudflare Tunnel, Tailscale Funnel
+and similar — satisfies all three at once: it gives you a public hostname with a
+publicly-trusted certificate, and you point `appConfig.oauthCallbackBaseURL` at
+that same hostname. Your cluster only ever makes outbound connections, so no
+inbound port is opened in your firewall.
+
+Publishing your ingress directly works too, but it is a security decision rather
+than a networking one: the same hostname publishes your sign-in endpoints and
+your web UI to anyone who finds it. Make that choice deliberately.
+
+What you expose either way is a **read-only** surface, scoped to one tenant and
+one role — it cannot change anything in your platform. That lowers the stakes;
+it does not remove them.
+
+Taken together with the sign-in limitation below, the shortest working path for
+most people today is **Claude Code, on a machine inside your network, with a
+Personal Access Token**: no public address, no certificate change, no tunnel.
+
+## Connect a GUI assistant (Claude.ai, ChatGPT)
 
 > **Known limitation — the automatic sign-in flow does not work yet.**
 > Hosted AI clients register themselves with an OAuth server on the fly, using
@@ -98,7 +178,16 @@ location varies by client:
 |--------|----------------|
 | Claude.ai | Settings → Integrations → Add MCP server |
 | ChatGPT | Settings → Connected apps → Add custom connector |
-| Gemini | Settings → Extensions → Add MCP |
+
+**Gemini is not connectable today.** Vista Platform authorizes each AI client
+against an allow-list of that client's exact sign-in callback address, so a
+client whose address we cannot verify has nothing to match and every attempt is
+rejected. Google has not published the consumer Gemini app's address, and
+guessing at one would be a hole rather than a feature. Gemini CLI signs in
+through a loopback address on your own machine, which is a pattern Vista
+Platform already accepts, and is expected to work once it is registered as a
+client in its own right. If you want a command-line assistant in the meantime,
+use [Claude Code](#connect-claude-code-cli).
 
 **Step 3 — Approve access**
 
@@ -118,9 +207,10 @@ Good starting points:
 - "Which production servers have no owner? Show me the query you ran."
 - "Which certificates expire in the next 30 days, and which assets do they live on?"
 - "What's blocking my PCI-DSS score? Show me the worst control's findings."
-- "Compare my two most recent CBOM artifacts and tell me what regressed."
 - "How post-quantum ready are we? What should we migrate first?"
 - "When did this asset last change, and what changed?"
+- "What runs on this server, and what breaks if I take it down?"
+
 
 ## Connect Claude Code (CLI)
 
@@ -156,7 +246,7 @@ Go to **Settings → API Tokens → New token**:
 
 1. Name it for where it will live (e.g. "CI pipeline").
 2. Pick permissions — the default set (`assets.read`, `compliance.read`,
-   `reports.read`) covers all 18 MCP tools.
+   `reports.read`) covers all 23 MCP tools.
 3. Pick an expiry (default 90 days, max 1 year).
 4. **Copy the token immediately.** It is shown exactly once. Treat it like a
    password and store it in a secret manager.

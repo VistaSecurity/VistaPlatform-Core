@@ -15,8 +15,17 @@ import (
 type IdentityStatus string
 
 const (
-	IdentityLegacy            IdentityStatus = "legacy"
-	IdentityEstablished       IdentityStatus = "established"
+	IdentityLegacy      IdentityStatus = "legacy"
+	IdentityEstablished IdentityStatus = "established"
+	// IdentityProvisional is an entity the platform believes exists because
+	// something credible said so, without anything having met it directly: a
+	// reflected advertisement placed on a configured, unambiguous tenant
+	// segment ( D1/D2). It is weaker than legacy in a different
+	// direction — legacy means "we never asked", provisional means "we asked
+	// and the answer was hearsay" — and it is the ONLY status the engine
+	// writes without an asset allowance check, because a guess must not
+	// consume a customer's paid inventory.
+	IdentityProvisional       IdentityStatus = "provisional"
 	IdentityOperatorConfirmed IdentityStatus = "operator_confirmed"
 )
 
@@ -60,7 +69,7 @@ func AssessAdmission(obs Observation) AdmissionDecision {
 			if obs.Source.Kind == SourceDeclared && obs.Admission.OperatorConfirmed {
 				return allow("operator_confirmation")
 			}
-		case KindAgentID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber:
+		case KindAgentID, KindSensorID, KindCloudResourceID, KindCMDBSysID, KindSerialNumber:
 			if obs.Admission.Authoritative && obs.Source.Kind != SourceInferred {
 				return allow("authoritative_identifier")
 			}

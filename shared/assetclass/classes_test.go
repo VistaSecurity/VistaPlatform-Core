@@ -20,6 +20,7 @@ import (
 var allowedIdentifierKinds = map[string]int{
 	"declaration_id":           0,
 	"agent_id":                 1,
+	"sensor_id":                11,
 	"cloud_resource_id":        2,
 	"serial_number":            3,
 	"cmdb_sys_id":              4,

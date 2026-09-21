@@ -165,6 +165,17 @@ type HostInventoryCounts struct {
 	ClassProposal string `json:"class_proposal,omitempty"`
 	ClassApplied  bool   `json:"class_applied"`
 
+	// AutoApproved says this run moved the host from pending_approval into
+	// inventory, because the report was the agent's own account of the machine
+	// it runs on (see approveAgentHost). False is the ordinary case for every
+	// run after the first, and for every remote collection.
+	AutoApproved bool `json:"auto_approved,omitempty"`
+	// AutoApprovalError is why an approval that was due did not happen. Kept
+	// apart from Errors because it does not make the COLLECTION incomplete —
+	// the facts, sockets and installs all landed — and because the agent's next
+	// scheduled report retries it without anybody's help.
+	AutoApprovalError string `json:"auto_approval_error,omitempty"`
+
 	// Errors are the things that went wrong without losing the collection. One
 	// unregistered fact must not cost a host its package list.
 	Errors []string `json:"errors,omitempty"`
@@ -202,7 +213,16 @@ type HostInventoryIngest struct {
 	// reason the rest of the finalize path runs on the bypass handle.
 	bypassDB *sql.DB
 	sink     *ObservationSink
+	// approver admits the host a LOCAL report came from. Nil means this build
+	// never asks, and a self-report then lands pending like any discovery —
+	// tolerated for the same reason every other seam here is, and the intake
+	// wires the real one.
+	approver AgentHostApprover
 }
+
+// SetAgentHostApprover wires the inventory-service client that admits an
+// agent's own host. See approveAgentHost for when it is asked.
+func (h *HostInventoryIngest) SetAgentHostApprover(a AgentHostApprover) { h.approver = a }
 
 // NewHostInventoryIngest builds the consumer. db is the RLS-scoped connection
 // everything this file writes goes through; bypassDB is only for the job row's
@@ -227,7 +247,41 @@ func (h *HostInventoryIngest) MaterialiseAndRecord(
 	tenantID, agentID, jobID uuid.UUID,
 	obs *di.InterrogateResult,
 ) (HostInventoryCounts, error) {
+	return h.materialiseAndRecord(ctx, tenantID, agentID, jobID, obs, false)
+}
+
+// MaterialiseSelfReportAndRecord is MaterialiseAndRecord for the LOCAL intake:
+// the report is the authenticated agent's own account of the host it runs on,
+// and that is the one door through which a host may be admitted to inventory
+// without a person accepting it (approveAgentHost).
+//
+// A separate entry point rather than a flag read off the payload, because the
+// payload is the agent's claim and the DOOR is the platform's knowledge: the
+// intake route accepts only local collections from an authenticated agent,
+// while the result processor finalises remote jobs whose report an agent wrote
+// about some other machine. Both still have to agree — see approveAgentHost.
+func (h *HostInventoryIngest) MaterialiseSelfReportAndRecord(
+	ctx context.Context,
+	tenantID, agentID, jobID uuid.UUID,
+	obs *di.InterrogateResult,
+) (HostInventoryCounts, error) {
+	return h.materialiseAndRecord(ctx, tenantID, agentID, jobID, obs, true)
+}
+
+func (h *HostInventoryIngest) materialiseAndRecord(
+	ctx context.Context,
+	tenantID, agentID, jobID uuid.UUID,
+	obs *di.InterrogateResult,
+	selfReport bool,
+) (HostInventoryCounts, error) {
 	counts, err := h.Materialise(ctx, tenantID, agentID, jobID, obs)
+	if err == nil && selfReport {
+		// AFTER Materialise returns, so the tenant's host-snapshot advisory
+		// lock is released before the HTTP hop: inventory-service's approval
+		// takes locks of its own, and holding ours across a call into it
+		// would make the two services wait on each other.
+		h.approveAgentHost(ctx, tenantID, agentID, obs, &counts)
+	}
 
 	steps := &ProcessingLog{HostInventory: &counts}
 	if obs != nil {
@@ -243,6 +297,69 @@ func (h *HostInventoryIngest) MaterialiseAndRecord(
 		log.Printf("[HostInventory] job %s: failed to record the processing summary: %v", jobID, persistErr)
 	}
 	return counts, err
+}
+
+// approveAgentHost admits the host a LOCAL report came from, when it is
+// waiting in Approvals.
+//
+// Four conditions, each a reason on its own:
+//
+//   - The DOOR was the local intake (selfReport) AND the payload's own mode is
+//     `local`. The door is what the platform knows; the mode is what the agent
+//     said; a report where they disagree is not the agent's account of its own
+//     host and is left to the queue.
+//   - The report landed on an asset, and not by opening a merge proposal. A
+//     CONFLICT means the engine could not say which machine this is, and an
+//     approval would pre-empt the person who has to. The pending asset a
+//     conflict creates beside its proposal stays pending.
+//   - There is an agent to attribute it to. A local report without one cannot
+//     reach the intake, so this is the belt to that route's braces.
+//   - The asset is still `pending_approval`, read here so a host that is
+//     already monitoring — every run after the first — costs no call.
+//     inventory-service reads it again under its own lock and is the answer
+//     that counts; this read only avoids asking a question whose answer is
+//     known.
+//
+// The approval is inventory-service's (AgentHostApprover), not a status write
+// from here: it is the same code path a person's click runs, deferred-finding
+// replay included. A failure is recorded on the counts and on the job row and
+// otherwise changes nothing — the collection landed, and the agent's next
+// scheduled report asks again.
+func (h *HostInventoryIngest) approveAgentHost(ctx context.Context, tenantID, agentID uuid.UUID, obs *di.InterrogateResult, counts *HostInventoryCounts) {
+	if h.approver == nil || counts.AssetID == "" || counts.Contested || agentID == uuid.Nil || obs == nil {
+		return
+	}
+	if mode := hostInventoryMeta(obs).Mode; mode != string(hostinventory.ModeLocal) {
+		log.Printf("[HostInventory] agent %s: self-report door but payload mode %q; not approving", agentID, mode)
+		return
+	}
+	assetID, err := uuid.Parse(counts.AssetID)
+	if err != nil {
+		return
+	}
+	var status string
+	err = shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT asset_status FROM assets WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`,
+			tenantID, assetID).Scan(&status)
+	})
+	if err != nil {
+		counts.AutoApprovalError = fmt.Sprintf("reading the host's approval status: %v", err)
+		log.Printf("[HostInventory] agent %s host %s: %s", agentID, assetID, counts.AutoApprovalError)
+		return
+	}
+	if status != identity.StatusPendingApproval {
+		return
+	}
+	approved, err := h.approver.ApproveAgentHost(ctx, tenantID, assetID, agentID)
+	if err != nil {
+		counts.AutoApprovalError = err.Error()
+		log.Printf("[HostInventory] agent %s host %s: pending and not approved: %v", agentID, assetID, err)
+		return
+	}
+	counts.AutoApproved = approved
+	if approved {
+		log.Printf("[HostInventory] agent %s host %s: approved into inventory (agent installed on it)", agentID, assetID)
+	}
 }
 
 // There are TWO source refs, and the difference between them is load-bearing.

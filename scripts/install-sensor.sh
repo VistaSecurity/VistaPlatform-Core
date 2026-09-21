@@ -16,6 +16,7 @@ SERVICE_USER="crypto-sensor"
 VERBOSE=false
 EXPECTED_IP=""
 INTERACTIVE=false
+CHECK_DEPENDENCIES=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -58,6 +59,7 @@ Options:
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
     --ip IP_ADDRESS            Expected IP address for validation (required)
     --interactive              Run in interactive mode (ask for all settings)
+    --check-dependencies       Check ./crypto-sensor can load, then exit (no root needed)
     --verbose                  Enable verbose output
     -h, --help                 Show this help
 
@@ -125,6 +127,10 @@ while [[ $# -gt 0 ]]; do
             INTERACTIVE=true
             shift
             ;;
+        --check-dependencies)
+            CHECK_DEPENDENCIES=true
+            shift
+            ;;
         --verbose)
             VERBOSE=true
             shift
@@ -140,6 +146,50 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Run the actual binary: a library filename or installed package alone does not
+# prove that its architecture, SONAME and transitive dependencies are compatible.
+# --version exits before configuration, registration or packet capture.
+check_sensor_dependencies() {
+    local binary="./crypto-sensor" loader_output
+    if [[ ! -f "$binary" ]]; then
+        print_error "Sensor binary not found: $binary"
+        print_error "Download and verify the Linux sensor for this host's architecture, rename it crypto-sensor, and place it in the current directory."
+        return 1
+    fi
+    if [[ ! -x "$binary" ]]; then
+        print_error "Sensor binary is not executable. Run: chmod +x ./crypto-sensor"
+        return 1
+    fi
+    if loader_output=$(LC_ALL=C "$binary" --version 2>&1); then
+        print_status "Sensor runtime dependencies are available."
+        return 0
+    fi
+
+    print_error "The sensor cannot load. Installation stopped before creating users, writing configuration or registering with the control plane."
+    print_error "The Linux sensor requires the libpcap runtime and a compatible system loader."
+    printf '%s\n' "$loader_output"
+    print_status "If libpcap is missing, install it using your distribution's package manager:"
+    echo "  Debian / Ubuntu: sudo apt-get update && sudo apt-get install libpcap0.8"
+    echo "  Newer Debian / Ubuntu releases may name the package libpcap0.8t64."
+    echo "  RHEL / Fedora:   sudo dnf install libpcap"
+    echo "  SUSE:            sudo zypper install libpcap1"
+    echo "  For offline hosts, provide the distribution's libpcap package and its dependencies from an approved local repository."
+    print_error "If libpcap is installed, check that the binary matches this host's architecture and libc; installing libpcap alone cannot fix an incompatible build."
+    echo "  Retry: bash scripts/install-sensor.sh --check-dependencies"
+    return 1
+}
+
+# This installer installs a systemd service and uses Linux networking tools.
+if [[ $(uname -s) != Linux ]]; then
+    print_error "This installer requires Linux with systemd. On Windows use install-sensor.ps1; on macOS use the macOS sensor binary (libpcap is supplied by the OS)."
+    exit 1
+fi
+
+if [[ "$CHECK_DEPENDENCIES" == "true" ]]; then
+    check_sensor_dependencies
+    exit $?
+fi
 
 # Interactive mode function
 # Provides a guided, user-friendly installation experience
@@ -270,6 +320,9 @@ run_interactive_mode() {
 }
 
 # Run interactive mode if requested
+# Fail before prompts, installation side effects or control-plane registration.
+check_sensor_dependencies
+
 if [[ "$INTERACTIVE" == "true" ]]; then
     run_interactive_mode
 fi

@@ -1410,7 +1410,7 @@ paths:
 
         REMOVAL happens only when the request actually carries an `identifiers`
         array, and only for identifiers whose `source_kind` is `declared`.
-        Collector-minted identifiers — `agent_id`, `cloud_resource_id`, and
+        Collector-minted identifiers — `agent_id`, `sensor_id`, `cloud_resource_id`, and
         anything a sensor or an import produced — are KEPT, and the response's
         `identifiers.kept` says which and why. An edit may never leave an asset
         with no identifiers at all (400): it could never be matched again.
@@ -5417,7 +5417,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/IdentityIngestResult' }
-        '409': { description: Conflicting ownership or a changed observation; refresh before deciding }
+        '409':
+          description: 'Conflicting ownership or a changed observation; refresh before deciding. An observation that produced a provisional inventory item answers with `error: provisional_item_requires_merge_review` — combining it with another asset goes through merge review, not through this endpoint.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LegacyError' }
   /discovery/observations/{id}/dismiss:
     post:
       operationId: dismissIdentityObservation
@@ -7407,6 +7411,7 @@ components:
           type: string
           enum:
           - agent_id
+          - sensor_id
           - cloud_resource_id
           - serial_number
           - cmdb_sys_id
@@ -7540,13 +7545,17 @@ components:
     IdentitySummary:
       type: object
       additionalProperties: false
-      required: [established, operator_confirmed, legacy, unresolved, conflicted]
+      required: [established, operator_confirmed, legacy, unresolved, conflicted, provisional]
       properties:
+        admission_mode: { type: string, enum: [disabled, observe, enforce, paused], description: Current identity assessment policy; absent on older servers. }
         established: { type: integer }
         operator_confirmed: { type: integer }
         legacy: { type: integer }
         unresolved: { type: integer }
         conflicted: { type: integer }
+        provisional:
+          type: integer
+          description: 'Inventory items inferred from an advertisement that nothing has corroborated yet. Counted over assets that are not archived or denied — NOT over monitored assets like the three counts above, because a provisional item is pending approval by construction.'
     RetainedCertificateSummary:
       type: object
       additionalProperties: false
@@ -7606,12 +7615,46 @@ components:
         attempts: { type: integer }
         last_attempt_at: { type: [string, 'null'], format: date-time }
         next_attempt_at: { type: string, format: date-time }
+    IdentityObservationCollector:
+      type: object
+      additionalProperties: false
+      description: 'Which collector heard this evidence, which collector (if any) can act on it, and what is in the way. The two are not the same: a sensor on one VLAN routinely hears an advertisement about a device on another, and the enrichment work is then executed by whichever sensor actually has an interface on the target network.'
+      required: [observer, executor, reason]
+      properties:
+        observer:
+          type: object
+          additionalProperties: false
+          description: The collector the evidence came from. Provenance only; its reachability no longer decides whether work can be done.
+          required: [sensor_id, name, reachable, reason]
+          properties:
+            sensor_id: { type: [string, 'null'], format: uuid, description: 'Null when the observation did not come from a sensor — a cloud collector or a device interrogation, for instance.' }
+            name: { type: string }
+            reachable: { type: boolean }
+            reason:
+              type: string
+              description: 'Empty when reachable. Otherwise one of observing_collector_offline, collector_has_no_interface_in_target_network, collector_network_checks_disabled, platform_collector_not_authorized_for_identity_enrichment.'
+        executor:
+          type: [object, 'null']
+          additionalProperties: false
+          description: The collector that would run enrichment work for this observation. Null when none is eligible.
+          required: [sensor_id, name]
+          properties:
+            sensor_id: { type: string, format: uuid }
+            name: { type: string }
+        reason:
+          type: string
+          description: 'Empty when an executor exists; otherwise why no collector can act — usually no_eligible_collector_in_target_network.'
     IdentityObservation:
       type: object
       additionalProperties: false
       required: [id, source_kind, source_ref, collector_version, network_scope, evidence, admission_reasons, state, asset_id, proposal_id, first_seen_at, last_seen_at, occurrence_count, enrichment_state, enrichment_reason, last_attempt_at, next_attempt_at]
       properties:
         retained_evidence: { $ref: '#/components/schemas/RetainedEvidencePage' }
+        collector:
+          oneOf:
+          - $ref: '#/components/schemas/IdentityObservationCollector'
+          - type: 'null'
+          description: Present on both list and detail reads. Null when the observation's network cannot be resolved to a configured segment, because there is then no collector question to answer.
         id: { type: string, format: uuid }
         source_kind: { type: string }
         source_ref: { type: string }
@@ -7622,7 +7665,10 @@ components:
         collector_version: { type: string }
         network_scope: { type: string }
         evidence: { type: object, additionalProperties: true }
-        admission_reasons: { type: array, items: { type: string } }
+        admission_reasons:
+          type: array
+          items: { type: string }
+          description: 'Why this evidence could not establish identity. May include asset_allowance_exhausted, meaning a provisional item could not be promoted because the tenant is at max_assets; the evidence is retained and the item stays provisional.'
         state: { type: string, enum: [unresolved, linked, conflict, dismissed, expired] }
         asset_id: { type: [string, 'null'], format: uuid }
         proposal_id: { type: [string, 'null'], format: uuid }
@@ -7666,8 +7712,8 @@ components:
       properties:
         identity_status:
           type: string
-          enum: [legacy, established, operator_confirmed]
-          description: Evidence for entity identity, independently of approval, classification and assessment. Missing on older servers.
+          enum: [legacy, established, provisional, operator_confirmed]
+          description: 'Evidence for entity identity, independently of approval, classification and assessment. Missing on older servers. `provisional` is an item inferred from an advertisement a collector relayed rather than met — it is real inventory with a stable id, and becomes `established` in place when a collector on its own network corroborates it.'
         has_identity_conflict:
           type: boolean
           description: Whether this asset participates in an unresolved identity proposal.

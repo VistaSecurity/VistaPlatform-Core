@@ -839,7 +839,7 @@ func TestHostObservationBuilder_UnverifiedSelfReportCannotClaimAgentID(t *testin
 	}
 
 	for _, id := range obs.Identifiers {
-		if id.Kind == identity.KindAgentID {
+		if id.Kind == identity.KindAgentID || id.Kind == identity.KindSensorID {
 			t.Fatalf("unverified agent identifier: %+v", id)
 		}
 	}
@@ -863,7 +863,7 @@ func TestHostObservationBuilder_PassiveObservation_NeverCarriesAgentID(t *testin
 		t.Fatalf("hostObservationObservation: %v", err)
 	}
 	for _, id := range obs.Identifiers {
-		if id.Kind == identity.KindAgentID {
+		if id.Kind == identity.KindAgentID || id.Kind == identity.KindSensorID {
 			t.Fatalf("a passive observation with no AgentID produced an agent_id identifier: %v", id)
 		}
 	}

@@ -6,6 +6,33 @@ make build-sensor          # builds bin/crypto-sensor
 CROSS=1 make build-sensor  # builds cross-platform binaries
 ```
 
+## Runtime dependencies (pre-built binaries)
+
+Linux sensors dynamically link libpcap. Install the runtime with
+`sudo apt-get install libpcap0.8` on Debian/Ubuntu (`libpcap0.8t64` on newer
+releases), `sudo dnf install libpcap` on RHEL/Fedora, or
+`sudo zypper install libpcap1` on SUSE. Offline hosts need the distribution's
+packages and their dependencies supplied locally. macOS includes libpcap;
+Windows requires [Npcap](https://npcap.com/).
+
+The Linux systemd installer checks that the actual sensor binary can load before
+prompting for settings, creating users, writing files, or registering the sensor.
+It reports loader failures with libpcap installation instructions and preserves
+the original error to help diagnose incompatible architectures or libc versions.
+It does not install packages automatically.
+
+After verifying the downloaded Linux binary, place it in your current directory
+as `crypto-sensor`. From the repository root, check without root or registration:
+
+```bash
+chmod +x ./crypto-sensor
+bash scripts/install-sensor.sh --check-dependencies
+```
+
+This verifies startup dependencies; it does not test packet-capture permissions
+or connectivity to the control plane. Launching a bare binary bypasses the
+installer's diagnostics.
+
 ## Configuration
 The sensor currently reads configuration from environment variables. A sample YAML file is provided for reference/documentation and future file-based config support.
 

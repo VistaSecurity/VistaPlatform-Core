@@ -69,6 +69,24 @@ it('requires explicit asset selection before linking', async () => {
   });
 });
 
+it('sends a provisional item to merge review instead of blaming a stale read', async () => {
+  // Both are 409s and only the body tells them apart. Reading the status alone
+  // told the user to "refresh and review the current evidence" — advice that
+  // can never work here, because nothing changed and linking is simply the
+  // wrong tool for an item that already exists ( D6).
+  post.mockResolvedValue({ response: { ok: false, status: 409 }, error: { error: 'provisional_item_requires_merge_review' } });
+  await click('Link to an asset');
+  await reason('Same printer');
+  await act(async () => {
+    const select = host.querySelector('select')!;
+    select.value = 'selected-asset'; select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await click('Save decision');
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('This observation already backs a provisional inventory item. To combine it with another asset, use merge review from Inventory.');
+  expect(host.querySelector('[role="alert"]')?.textContent).not.toContain('conflicting ownership');
+});
+
 it('keeps a stale decision open with a refresh action', async () => {
   post.mockResolvedValue({ response: { ok: false, status: 409 } });
   await click('Dismiss'); await reason('No longer actionable'); await click('Save decision');

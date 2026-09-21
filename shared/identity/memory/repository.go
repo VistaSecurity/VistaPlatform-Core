@@ -56,9 +56,25 @@ type Repository struct {
 	// interesting one: a tenant with no segments must still get a usable scope.
 	segments map[string][]memSegment
 
+	// provScopes is the answer [Repository.ProvisionalScope] gives for a
+	// segment, keyed tenant|segment. Written through
+	// [Repository.SetProvisionalScope]; an ABSENT segment is not eligible,
+	// which is the same default the engine applies to a repository that cannot
+	// answer the question at all.
+	provScopes map[string]ProvisionalScopeAnswer
+
 	// IDFunc generates asset and proposal ids. Nil means a deterministic
 	// counter, which keeps test failures readable.
 	IDFunc func(prefix string, n int) string
+}
+
+// ProvisionalScopeAnswer is one segment's eligibility for provisional asset
+// creation, as [Repository.ProvisionalScope] will report it.
+type ProvisionalScopeAnswer struct {
+	Eligible bool
+	// Reason is one of the identity package's reason constants and is what the
+	// observation records when Eligible is false. It is ignored when eligible.
+	Reason string
 }
 
 // memSegment is one configured network segment: a prefix, the scope id an
@@ -83,6 +99,10 @@ type asset struct {
 	hostname       string
 	nameSourceKind string
 	status         string
+	// identityStatus mirrors `assets.identity_status`. Empty is the column's
+	// default, `legacy`; [Repository.LoadSummaries] reports it so the engine's
+	// corroboration rules can see that an asset is a guess ( D3).
+	identityStatus string
 	identifiers    map[string]identity.Identifier // identifier key → identifier
 	identOrder     []string
 	endpoints      map[string]identity.EndpointObservation
@@ -127,6 +147,31 @@ func (r *Repository) SetStatus(ref identity.AssetRef, status string) {
 	}
 }
 
+// SetIdentityStatus moves an existing asset's identity status. A test helper on
+// the same terms as [Repository.SetStatus]: the engine writes `provisional` on
+// a create and nothing else, and promotion to `established` is the observation
+// link's job in the SQL store — but a test of the corroboration rules has to be
+// able to put an asset into a status the engine did not write.
+func (r *Repository) SetIdentityStatus(ref identity.AssetRef, status identity.IdentityStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; ok {
+		a.identityStatus = string(status)
+	}
+}
+
+// IdentityStatusOf reads an asset's identity status back. Also a test helper:
+// the contract reads it through LoadSummaries, but a test asserting what the
+// engine wrote wants the row and not the summary.
+func (r *Repository) IdentityStatusOf(ref identity.AssetRef) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; ok {
+		return a.identityStatusOrDefault()
+	}
+	return ""
+}
+
 // proposalState is how a proposal was resolved, and by whom.
 type proposalState struct {
 	status     string
@@ -143,6 +188,7 @@ func New() *Repository {
 		propState:     make(map[string]proposalState),
 		announcements: make(map[string]*identity.AnnouncementRecord),
 		segments:      make(map[string][]memSegment),
+		provScopes:    make(map[string]ProvisionalScopeAnswer),
 	}
 }
 
@@ -196,12 +242,23 @@ func (r *Repository) LoadSummaries(_ context.Context, tenantID string, ids []str
 			Hostname:       a.hostname,
 			Identifiers:    a.identifierList(),
 			Status:         a.status,
+			IdentityStatus: a.identityStatusOrDefault(),
 			NetworkSegment: a.segment,
 			LastSeenAt:     a.lastSeen,
 			Attributes:     a.attributes,
 		})
 	}
 	return out, nil
+}
+
+// identityStatusOrDefault is the column's default made explicit: a row written
+// without an identity status is `legacy`, which is "we never asked", not an
+// assertion about anything.
+func (a *asset) identityStatusOrDefault() string {
+	if a.identityStatus == "" {
+		return string(identity.IdentityLegacy)
+	}
+	return a.identityStatus
 }
 
 func (a *asset) identifierList() []identity.Identifier {
@@ -235,6 +292,7 @@ func (r *Repository) CreateAsset(_ context.Context, tenantID string, in identity
 		hostname:       in.Hostname,
 		nameSourceKind: in.Source.NameKind(),
 		status:         in.Status,
+		identityStatus: in.IdentityStatus,
 		identifiers:    make(map[string]identity.Identifier, len(in.Identifiers)),
 		endpoints:      make(map[string]identity.EndpointObservation, len(in.Endpoints)),
 		firstSeen:      in.FirstSeenAt,
@@ -767,4 +825,134 @@ func pickMemSegment(matches []memSegment, want string) (memSegment, bool) {
 		}
 	}
 	return matches[0], true
+}
+
+// ── provisional inventory ──────────────────────────────────────────
+
+// SetProvisionalScope records the answer [Repository.ProvisionalScope] will
+// give for a segment.
+//
+// The SQL store derives the same answer from `network_segments` — an active
+// cidr segment, nothing else active overlapping it, no cloud network ref — and
+// a fake that computed its own version of that query would be testing this
+// package's reading of the rule rather than the rule. A settable answer keeps
+// the two implementations held to the same CONTRACT (an eligible segment, an
+// ineligible one with a reason, an unknown one) without pretending to share
+// the derivation.
+func (r *Repository) SetProvisionalScope(tenantID, segmentID string, answer ProvisionalScopeAnswer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.provScopes[tenantID+"|"+segmentID] = answer
+}
+
+// SetProvisionalScopeAnswer is [identitytest.ProvisionalScopeWriter]: the same
+// thing as [Repository.SetProvisionalScope] in the two-value shape the contract
+// package can express without importing this one.
+func (r *Repository) SetProvisionalScopeAnswer(tenantID, segmentID string, eligible bool, reason string) {
+	r.SetProvisionalScope(tenantID, segmentID, ProvisionalScopeAnswer{Eligible: eligible, Reason: reason})
+}
+
+// ProvisionalScope implements [identity.ProvisionalScopeChecker].
+//
+// A segment nobody has said anything about is NOT eligible, and the reason is
+// `network_scope_unresolved`. Defaulting to eligible would make every test that
+// forgot to configure a segment create provisional assets, which is the failure
+// direction that ends with an inventory of guesses.
+func (r *Repository) ProvisionalScope(_ context.Context, tenantID, segmentID string) (bool, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	answer, ok := r.provScopes[tenantID+"|"+segmentID]
+	switch {
+	case !ok:
+		return false, identity.ReasonNetworkScopeUnresolved, nil
+	case !answer.Eligible:
+		reason := answer.Reason
+		if reason == "" {
+			reason = identity.ReasonNetworkScopeUnresolved
+		}
+		return false, reason, nil
+	}
+	return true, "", nil
+}
+
+// ReassignIdentifier implements [identity.IdentifierReassigner].
+//
+// It moves the value in one step, keeping the owners map and the uniqueness
+// invariant true at every point a caller could observe — which is the whole
+// reason this is a repository method rather than a detach and an attach in the
+// engine.
+//
+// A `from` that is not the current owner is REFUSED. The engine computes the
+// move from an ownership lookup it made earlier in the same transaction, so a
+// disagreement here means that lookup is stale, and a reassignment computed
+// against stale ownership is how two assets swap halves of their identity.
+func (r *Repository) ReassignIdentifier(_ context.Context, id identity.Identifier, from, to identity.AssetRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if from.TenantID != to.TenantID {
+		return fmt.Errorf("memory: ReassignIdentifier: %s and %s are in different tenants", from.ID, to.ID)
+	}
+	if from.ID == to.ID {
+		return fmt.Errorf("memory: ReassignIdentifier: %s=%q is already %s's", id.Kind, id.Value, to.ID)
+	}
+	src, ok := r.assets[assetKey(from.TenantID, from.ID)]
+	if !ok {
+		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, from.ID)
+	}
+	dst, ok := r.assets[assetKey(to.TenantID, to.ID)]
+	if !ok {
+		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, to.ID)
+	}
+	key := ownerKey(from.TenantID, id)
+	owner, owned := r.owners[key]
+	if !owned || owner.ID != from.ID {
+		return fmt.Errorf("%w: %s=%q is not %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, from.ID)
+	}
+	held, ok := src.identifiers[id.Key()]
+	if !ok {
+		return fmt.Errorf("%w: %s does not carry %s=%q", identity.ErrIdentifierConflict, from.ID, id.Kind, id.Value)
+	}
+	src.dropIdentifier(id.Key())
+	dst.putIdentifier(held)
+	r.owners[key] = dst.ref
+	return nil
+}
+
+// ArchiveAsset implements [identity.AssetArchiver]: the one status change this
+// package's engine makes, for a provisional asset a reassignment left holding
+// no identifier at all.
+func (r *Repository) ArchiveAsset(_ context.Context, ref identity.AssetRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
+	if !ok {
+		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+	}
+	a.status = identity.StatusArchived
+	return nil
+}
+
+// StatusOf reads an asset's approval status back. A test helper, matching
+// [Repository.IdentityStatusOf].
+func (r *Repository) StatusOf(ref identity.AssetRef) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]; ok {
+		return a.status
+	}
+	return ""
+}
+
+func (a *asset) dropIdentifier(key string) {
+	if _, ok := a.identifiers[key]; !ok {
+		return
+	}
+	delete(a.identifiers, key)
+	kept := a.identOrder[:0]
+	for _, k := range a.identOrder {
+		if k != key {
+			kept = append(kept, k)
+		}
+	}
+	a.identOrder = kept
 }

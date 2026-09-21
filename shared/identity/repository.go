@@ -40,6 +40,15 @@ type AssetSummary struct {
 	Identifiers []Identifier `json:"identifiers,omitempty"`
 	Status      string       `json:"status"`
 
+	// IdentityStatus is the asset's `assets.identity_status`: what the
+	// evidence for this entity amounts to, which is a different question from
+	// Status (approval). It is here because the corroboration rules of
+	// D3 branch on it — an established observation landing on a PROVISIONAL
+	// asset is either corroboration or hearsay yielding to direct evidence,
+	// and the engine cannot tell those apart without knowing the asset is a
+	// guess. Empty means the store did not say; treat that as [IdentityLegacy].
+	IdentityStatus string `json:"identity_status,omitempty"`
+
 	// NetworkSegment is the segment the asset belongs to, empty when it is in
 	// none. It is what a scoped identifier (`hostname`, `ip_address`)
 	// identifies WITHIN, so two records agreeing on a hostname while
@@ -98,8 +107,15 @@ type NewAsset struct {
 	Hostname       string `json:"hostname,omitempty"`
 	PrimaryAddress string `json:"primary_address,omitempty"`
 
-	Status          string  `json:"status"`
-	Ownership       string  `json:"ownership,omitempty"`
+	Status    string `json:"status"`
+	Ownership string `json:"ownership,omitempty"`
+
+	// IdentityStatus is the row's `assets.identity_status`. EMPTY means "the
+	// store's default", which is `legacy` — not an assertion of anything —
+	// and is what every caller but the provisional path passes. The engine
+	// sets [IdentityProvisional] here and nowhere else: establishing an
+	// identity is `LinkObservation`'s job, after the admission decision.
+	IdentityStatus  string  `json:"identity_status,omitempty"`
 	NetworkSegment  string  `json:"network_segment_id,omitempty"`
 	DiscoveryMethod string  `json:"discovery_method,omitempty"`
 	Confidence      float64 `json:"confidence"`
@@ -202,6 +218,19 @@ const (
 	// The counts and the parser's warnings ride in changes_json, so the entry
 	// answers "what did that upload actually do" without a second lookup.
 	ActionSBOMImported HistoryAction = "sbom_imported"
+
+	// ActionIdentifierReassigned — an identifier moved from one asset to
+	// another ( D3, "hearsay yields"). It is written on BOTH assets, so
+	// the timeline on each side says where the value went or came from, and
+	// it is deliberately not spelled `updated`: an asset losing an identifier
+	// it was created from is the one event that changes what it IS, and
+	// burying it under the action every ordinary sighting writes would make
+	// it unfindable.
+	//
+	// Adding a value here needs the matching edit to the `actions` array in
+	// schema.sql's `asset_history_action_check` convergence block — in BOTH
+	// schema copies — and to [AllHistoryActions] below.
+	ActionIdentifierReassigned HistoryAction = "identifier_reassigned"
 )
 
 // AllHistoryActions returns every action this package writes, in declaration
@@ -222,6 +251,7 @@ func AllHistoryActions() []HistoryAction {
 		ActionEndpointAdded, ActionEdgeAdded, ActionEdgeRemoved, ActionEdgeAccepted,
 		ActionEdgeRejected, ActionArchived, ActionSBOMImported,
 		ActionClassProposed, ActionClassAccepted, ActionClassRejected,
+		ActionIdentifierReassigned,
 	}
 }
 

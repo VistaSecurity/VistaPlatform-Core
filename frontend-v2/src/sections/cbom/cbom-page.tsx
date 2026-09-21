@@ -13,7 +13,10 @@ import { GenerateModal } from './generate-modal';
 import { ArtifactDrawer } from './artifact-drawer';
 import { artifactName, useArtifacts, useScopes, type ArtifactKind, type CBOMArtifact } from './queries';
 
-const GRID = 'minmax(0,1.6fr) minmax(0,1.1fr) 140px 104px 96px 84px 132px';
+// The last column holds the Download control, which now names its format
+// ("CycloneDX", or "CycloneDX / OCSF" for an inventory artifact) beside the
+// Compare and Details icons — sized for the widest of those.
+const GRID = 'minmax(0,1.6fr) minmax(0,1.1fr) 140px 104px 96px 84px 232px';
 
 function Header() {
   const cell = (label: string, right?: boolean) => (

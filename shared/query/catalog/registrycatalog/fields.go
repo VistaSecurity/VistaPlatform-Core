@@ -175,7 +175,7 @@ var assetFields = []catalog.FieldInfo{
 	col("region", ast.TypeKeyword),
 	col("zone", ast.TypeKeyword),
 	enumAs("status", "asset_status", assetStatusValues...),
-	enumAs("identity_status", "identity_status", "legacy", "established", "operator_confirmed"),
+	enumAs("identity_status", "identity_status", identityStatusValues...),
 	enumAs("ownership", "asset_ownership", assetOwnershipValues...),
 	enumAs("stale_status", "stale_status", staleStatusValues...),
 	enumAs("source", "class_source_kind", classSourceKindValues...),

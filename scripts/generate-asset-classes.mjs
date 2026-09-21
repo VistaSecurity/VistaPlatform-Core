@@ -46,7 +46,7 @@ const ICON = /^[A-Z][A-Za-z0-9]*$/;
 // is not an identifier kind.
 const RESERVED_ATTRIBUTE_NAMES = new Set([
   // the ten kinds themselves
-  'agent_id', 'cloud_resource_id', 'serial_number', 'cmdb_sys_id',
+  'agent_id', 'sensor_id', 'cloud_resource_id', 'serial_number', 'cmdb_sys_id',
   'ssh_host_key_fingerprint', 'mac_address', 'fqdn', 'hostname', 'ip_address',
   'name',
   // spellings of the same thing

@@ -18,6 +18,7 @@ import { Icon, MetaRow, RiskGauge, RiskChip, SectionLabel } from '../../componen
 import { ASSET_TABS, DEFAULT_ASSET_TAB, assetTabPath, findAssetTab, type AssetTab } from './asset-tabs';
 import { AssetMergeModal } from '../discovery/asset-merge-modal';
 import { IdentityStatus } from './identity-status';
+import { ProvisionalIdentityPanel } from './provisional-identity-panel';
 import {
   useAsset, useAssetClassHistory, useAssetConfigs, useAssetEndpoints, useAssetHistory, useAssetIdentifiers,
   CLASS_CHANGE_SOURCE_LABELS,
@@ -222,7 +223,13 @@ function OverviewTab({ asset }: { asset: Asset }) {
       <div>
         <SectionLabel icon="fingerprint">Identity</SectionLabel>
         <IdentityStatus asset={asset} />
-        {asset.id && <Link to={`/discovery/observations?asset_id=${asset.id}`}>Inspect discovery evidence</Link>}
+        {/* The provisional panel REPLACES the bare evidence link for a
+            provisional item: the link is still there, inside the panel, next to
+            the explanation that makes it worth following. Rendering both would
+            put two "Inspect discovery evidence" links a line apart. */}
+        {asset.identity_status === 'provisional'
+          ? <ProvisionalIdentityPanel assetID={asset.id} />
+          : asset.id && <Link to={`/discovery/observations?asset_id=${asset.id}`}>Inspect discovery evidence</Link>}
         <MetaRow k="Class" v={
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <Icon name={classIcon(asset.class_key)} size={13} style={{ color: 'var(--app-t3)' }} />

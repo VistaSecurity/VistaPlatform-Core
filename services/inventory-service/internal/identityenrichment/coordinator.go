@@ -33,6 +33,16 @@ func (c *Coordinator) Sweep(ctx context.Context, tenant uuid.UUID) error {
 	if err != nil {
 		return err
 	}
+	// D5. Materialization runs on ADMISSION mode alone, before and
+	// independently of enrichment: it re-reads evidence the platform already
+	// holds under a rule that changed after that evidence was stored, and
+	// nothing about it touches the tenant's network. `paused` and `disabled`
+	// still create nothing — a paused tenant has asked for exactly that.
+	if policy.AdmissionMode == "enforce" {
+		if err := c.materialize(ctx, tenant, now); err != nil {
+			return err
+		}
+	}
 	if !policy.Active() {
 		return nil
 	}
@@ -54,6 +64,31 @@ func (c *Coordinator) Sweep(ctx context.Context, tenant uuid.UUID) error {
 			return nil
 		}
 		if err := c.enrich(ctx, tenant, o, policy, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// materialize re-resolves one bounded batch of retained observations that never
+// produced an asset ( D5).
+//
+// Bounded and restartable rather than a one-off backfill script: the rule that
+// decides whether an observation becomes a provisional item depends on tenant
+// state that keeps moving (segments are drawn, overlaps are resolved), so
+// "re-read them once at deploy" would fix the rows that happened to be ready
+// that minute and leave the rest retained for ever. Running it every sweep
+// costs one indexed read per tenant per minute when there is nothing to do.
+func (c *Coordinator) materialize(ctx context.Context, tenant uuid.UUID, now time.Time) error {
+	candidates, err := c.Store.MaterializationCandidates(ctx, tenant, now)
+	if err != nil {
+		return err
+	}
+	for _, o := range candidates {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := c.Backend.Materialize(ctx, tenant, o); err != nil {
 			return err
 		}
 	}

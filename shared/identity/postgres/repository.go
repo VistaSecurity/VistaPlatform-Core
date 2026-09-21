@@ -260,6 +260,7 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 		// summary is what a seam needs to rank a pairing, not the asset.
 		rows, err := tx.QueryContext(ctx, `
 			SELECT id, class_key, coalesce(display_name, ''), coalesce(hostname, ''), asset_status,
+			       identity_status,
 			       coalesce(network_segment_id::text, ''), last_seen_at,
 			       coalesce(attributes ->> 'vendor', ''), coalesce(attributes ->> 'model', '')
 			FROM public.assets
@@ -273,12 +274,12 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 			var (
 				id                                      uuid.UUID
 				classKey, displayName, hostname, status string
-				segment                                 string
+				identityStatus, segment                 string
 				lastSeen                                time.Time
 				vendor, model                           string
 			)
 			if err := rows.Scan(&id, &classKey, &displayName, &hostname, &status,
-				&segment, &lastSeen, &vendor, &model); err != nil {
+				&identityStatus, &segment, &lastSeen, &vendor, &model); err != nil {
 				return fmt.Errorf("identity/postgres: scan summary: %w", err)
 			}
 			byID[id.String()] = &identity.AssetSummary{
@@ -287,6 +288,7 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 				DisplayName:    displayName,
 				Hostname:       hostname,
 				Status:         status,
+				IdentityStatus: identityStatus,
 				NetworkSegment: segment,
 				LastSeenAt:     lastSeen,
 				Attributes:     comparableAttributes(vendor, model),
@@ -409,19 +411,21 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 					tenant_id, class_key, class_path, class_source_kind, class_source_ref,
 					class_confidence, display_name, hostname, primary_address,
 					asset_status, asset_ownership, network_segment_id, discovery_method,
-					confidence_score, first_discovered_at, last_seen_at, metadata
+					confidence_score, first_discovered_at, last_seen_at, metadata,
+					identity_status
 				) VALUES (
 					$1, $2, $3, $4, NULLIF($5, ''),
 					$6, NULLIF($7, ''), NULLIF($8, ''), $9::text::inet,
 					$10, $11, $12::uuid, NULLIF($13, ''),
-					$14, $15, $16, $17::jsonb
+					$14, $15, $16, $17::jsonb,
+					COALESCE(NULLIF($18, ''), 'legacy')
 				)
 				RETURNING id`,
 				tenantID, classKey, classPath, classSourceKindOr(a.ClassSourceKind), classSourceRefOr(a),
 				nullFloat(a.ClassConfidence), a.DisplayName, a.Hostname, nullInet(a.PrimaryAddress),
 				status, ownership, nullUUID(a.NetworkSegment), a.DiscoveryMethod,
 				nullPercent(a.Confidence), timeOrNow(a.FirstSeenAt), timeOrNow(a.LastSeenAt),
-				nameMetadata(a.Source),
+				nameMetadata(a.Source), strings.TrimSpace(a.IdentityStatus),
 			).Scan(&id)
 			if err != nil {
 				return fmt.Errorf("identity/postgres: insert asset: %w", err)

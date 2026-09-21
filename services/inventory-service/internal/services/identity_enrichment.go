@@ -384,7 +384,103 @@ func (b *IdentityEnrichmentBackend) Reevaluate(ctx context.Context, tenant uuid.
 	})
 }
 
+// Materialize implements D5: re-resolve ONE retained observation that
+// never produced an asset, and stamp when it was looked at.
+//
+// It is the tail of [IdentityEnrichmentBackend.Reevaluate] with one deliberate
+// difference: the gate is ADMISSION, not enrichment. Enrichment is work the
+// platform does on a tenant's network and a tenant may switch it off; this is
+// the platform re-reading evidence it already stored, and gating it on the
+// enrichment switch would leave those tenants' retained observations invisible
+// in the inventory for ever — which is the exact defect the pass exists to
+// repair, since the rows it is for were blocked precisely BECAUSE no collector
+// could reach their network.
+//
+// `materialized_at` is written whether or not an asset resulted, and it is a
+// CLOCK rather than a fingerprint of the evidence. Whether an observation can
+// become a provisional item is not a question about the evidence — the
+// identifiers and the scope are fixed — it is a question about tenant state
+// that keeps moving. An observation refused for an overlapping segment must be
+// reconsidered once the operator resolves the overlap, and nothing about the
+// stored evidence changes when they do. See
+// [identityenrichment.MaterializationInterval].
+//
+// The interval is re-checked HERE as well as in the candidate query, under the
+// row lock: the candidate list is read outside the transaction, so two workers
+// can both see the same row as due, and without this the loser would re-run
+// Resolve on a row the winner had just finished.
+func (b *IdentityEnrichmentBackend) Materialize(ctx context.Context, tenant uuid.UUID, o identityenrichment.Observation) error {
+	if o.Evidence.TenantID != tenant.String() {
+		return fmt.Errorf("observation tenant mismatch")
+	}
+	engine, err := b.assets.identityEngine()
+	if err != nil {
+		return err
+	}
+	return b.assets.identityRepo.RunInTx(ctx, tenant.String(), func(repo *pgidentity.Repository) error {
+		enforcing, err := admissionEnforcingTx(ctx, repo.Tx(), tenant)
+		if err != nil {
+			return err
+		}
+		if !enforcing {
+			return nil
+		}
+		if err := repo.LockIdentifiers(ctx, tenant.String(), o.Evidence.Identifiers); err != nil {
+			return err
+		}
+		var state string
+		var assetID sql.NullString
+		var raw []byte
+		var due bool
+		if err := repo.Tx().QueryRowContext(ctx, `SELECT state,asset_id::text,evidence,
+   (materialized_at IS NULL OR materialized_at<now()-$3::interval)
+   FROM identity_observations WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
+			tenant, o.ID, identityenrichment.MaterializationInterval.String()).Scan(&state, &assetID, &raw, &due); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		// Anything that already has an asset, or that a reviewer has decided,
+		// is not this pass's business. Re-resolving a dismissed observation
+		// would resurrect a decision somebody made on purpose.
+		if state != "unresolved" || assetID.Valid || !due {
+			return nil
+		}
+		var current identity.Observation
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return err
+		}
+		if _, err := engine.WithAutoAcceptThreshold(0).WithRepository(repo).Resolve(ctx, current); err != nil {
+			return err
+		}
+		_, err = repo.Tx().ExecContext(ctx, `UPDATE identity_observations SET materialized_at=now(),updated_at=now()
+   WHERE tenant_id=$1 AND id=$2`, tenant, o.ID)
+		return err
+	})
+}
+
 var errEnrichmentPaused = errors.New("identity enrichment is paused")
+
+// admissionEnforcingTx reads the tenant's admission mode under the same FOR
+// SHARE lock enrichmentActiveTx uses, so a policy change that commits first
+// cannot be overtaken by work already in flight.
+//
+// It asks a DIFFERENT question from enrichmentActiveTx: only whether admission
+// is enforcing. Materialization has nothing to do with the enrichment switch —
+// see [IdentityEnrichmentBackend.Materialize].
+func admissionEnforcingTx(ctx context.Context, tx *sql.Tx, tenant uuid.UUID) (bool, error) {
+	var raw []byte
+	err := tx.QueryRowContext(ctx, `SELECT config FROM tenant_admin_settings WHERE tenant_id=$1 FOR SHARE`, tenant).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	policy, err := identityenrichment.ParsePolicy(raw)
+	return policy.AdmissionMode == "enforce", err
+}
 
 func enrichmentActiveTx(ctx context.Context, tx *sql.Tx, tenant uuid.UUID) (bool, error) {
 	var raw []byte

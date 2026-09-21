@@ -79,15 +79,15 @@ func TestIntegration_SelfObservation_BecomesNamedClassedAssetAndLinksSensor(t *t
 		t.Errorf("hostname = %q, want xps16-sensor — no longer an anonymous unknown_host", hostname)
 	}
 
-	var agentIDValue string
+	var sensorIDValue string
 	if err := db.QueryRow(`
 		SELECT value FROM asset_identifiers
-		 WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'agent_id'`, tenant, assetID).
-		Scan(&agentIDValue); err != nil {
-		t.Fatalf("agent_id identifier missing: %v", err)
+		 WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'sensor_id'`, tenant, assetID).
+		Scan(&sensorIDValue); err != nil {
+		t.Fatalf("sensor_id identifier missing: %v", err)
 	}
-	if agentIDValue != sensorID.String() {
-		t.Errorf("agent_id identifier = %q, want %q", agentIDValue, sensorID.String())
+	if sensorIDValue != sensorID.String() {
+		t.Errorf("sensor_id identifier = %q, want %q", sensorIDValue, sensorID.String())
 	}
 
 	var linkedAssetID uuid.UUID
@@ -105,7 +105,7 @@ func TestIntegration_SelfObservation_BecomesNamedClassedAssetAndLinksSensor(t *t
 // anonymous unknown_host asset already exists holding only its MAC and IP. The
 // self-report must MATCH that asset (same MAC/IP resolve it) rather than
 // create a second one, and the match must upgrade it: hostname, class, and the
-// agent_id identifier all land on the asset that already existed.
+// sensor_id identifier all land on the asset that already existed.
 func TestIntegration_SelfObservation_RetroLinksAnonymousUnknownHost(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
 
@@ -180,15 +180,15 @@ func TestIntegration_SelfObservation_RetroLinksAnonymousUnknownHost(t *testing.T
 		t.Errorf("class_key = %q after retro-link, want server", classKey)
 	}
 
-	var agentIDValue string
+	var sensorIDValue string
 	if err := db.QueryRow(`
 		SELECT value FROM asset_identifiers
-		 WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'agent_id'`, tenant, anonAssetID).
-		Scan(&agentIDValue); err != nil {
-		t.Fatalf("agent_id identifier missing after retro-link: %v", err)
+		 WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'sensor_id'`, tenant, anonAssetID).
+		Scan(&sensorIDValue); err != nil {
+		t.Fatalf("sensor_id identifier missing after retro-link: %v", err)
 	}
-	if agentIDValue != sensorID.String() {
-		t.Errorf("agent_id = %q, want %q", agentIDValue, sensorID.String())
+	if sensorIDValue != sensorID.String() {
+		t.Errorf("sensor_id = %q, want %q", sensorIDValue, sensorID.String())
 	}
 
 	var linkedAssetID uuid.UUID

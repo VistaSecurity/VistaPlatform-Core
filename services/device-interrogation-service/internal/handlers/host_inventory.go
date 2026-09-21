@@ -90,7 +90,12 @@ type hostInventoryStore interface {
 // contract — what it accepts, what it refuses, what it answers — is testable
 // without a database behind it.
 type hostInventoryMaterialiser interface {
-	MaterialiseAndRecord(ctx context.Context, tenantID, agentID, jobID uuid.UUID, obs *di.InterrogateResult) (services.HostInventoryCounts, error)
+	// MaterialiseSelfReportAndRecord is the LOCAL door: the report is the
+	// authenticated agent's own account of the host it runs on, which is what
+	// lets the consumer admit that host to inventory. The remote door
+	// (MaterialiseAndRecord) belongs to the result processor, not to this
+	// handler.
+	MaterialiseSelfReportAndRecord(ctx context.Context, tenantID, agentID, jobID uuid.UUID, obs *di.InterrogateResult) (services.HostInventoryCounts, error)
 }
 
 // HostInventoryHandler serves the agent-authenticated intake route.
@@ -100,10 +105,15 @@ type HostInventoryHandler struct {
 }
 
 // NewHostInventoryHandler builds the handler over a real database.
-func NewHostInventoryHandler(db, bypassDB *sql.DB) *HostInventoryHandler {
+//
+// approver is the inventory-service client that admits an agent's own host;
+// nil leaves every self-reported host in Approvals like any other discovery.
+func NewHostInventoryHandler(db, bypassDB *sql.DB, approver services.AgentHostApprover) *HostInventoryHandler {
+	ingest := services.NewHostInventoryIngest(db, bypassDB)
+	ingest.SetAgentHostApprover(approver)
 	return &HostInventoryHandler{
 		store:        &hostInventoryRepository{db: db, bypassDB: bypassDB},
-		materialiser: services.NewHostInventoryIngest(db, bypassDB),
+		materialiser: ingest,
 	}
 }
 
@@ -280,7 +290,7 @@ func (h *HostInventoryHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	counts, err := h.materialiser.MaterialiseAndRecord(c.Request.Context(), tenantID, agentID, jobID, body.Observations)
+	counts, err := h.materialiser.MaterialiseSelfReportAndRecord(c.Request.Context(), tenantID, agentID, jobID, body.Observations)
 	if err != nil {
 		log.Printf("host inventory materialisation failed: job=%s agent=%s platform=%s: %v",
 			jobID, agentID, body.Report.Platform, err)
@@ -292,8 +302,8 @@ func (h *HostInventoryHandler) Submit(c *gin.Context) {
 		return
 	}
 
-	log.Printf("host inventory processed: job=%s agent=%s platform=%s asset=%s created=%t facts=%d endpoints=%d installs=+%d~%d-%d sections=%v",
-		jobID, agentID, body.Report.Platform, counts.AssetID, counts.AssetCreated,
+	log.Printf("host inventory processed: job=%s agent=%s platform=%s asset=%s created=%t auto_approved=%t facts=%d endpoints=%d installs=+%d~%d-%d sections=%v",
+		jobID, agentID, body.Report.Platform, counts.AssetID, counts.AssetCreated, counts.AutoApproved,
 		counts.Facts, counts.Endpoints,
 		counts.InstallsCreated, counts.InstallsUpdated, counts.InstallsRemoved,
 		body.Report.Sections)

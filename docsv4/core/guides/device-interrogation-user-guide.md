@@ -255,7 +255,9 @@ interruptible and will finish anyway.
 ## The approval queue
 
 Discovered assets wait on **Discovery → Approvals** — a page, not a button on
-some other page — unless the network segment they landed in auto-approves them.
+some other page — unless the network segment they landed in auto-approves them,
+or they are the host a device agent of yours is installed on (its first
+[host inventory](../features/host-inventory.md) admits it).
 
 The queue is shared by everything that proposes something: discovered assets,
 imported rows, assets declared by an uploaded SBOM, records pulled from a CMDB,

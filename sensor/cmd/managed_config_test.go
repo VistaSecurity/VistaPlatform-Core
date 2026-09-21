@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,8 +12,14 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
 )
 
-func testSensor() *Sensor {
+func testSensor(t *testing.T) *Sensor {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sensor-config.yaml")
+	if err := os.WriteFile(path, []byte("sensorId: test\ncapture:\n  hostObservation: true\n  hostObservationDNS: false\n  hostObservationWindowSeconds: 60\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	return &Sensor{
+		configPath: path,
 		config: &config.Config{
 			Capture: config.CaptureConfig{
 				ActiveProbing:                true,
@@ -29,7 +38,7 @@ func testSensor() *Sensor {
 // console offers knobs this binary silently cannot honour. This is the check
 // that catches a setting added to the platform and never wired here.
 func TestEverySensorSettingHasAHandler(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -50,7 +59,7 @@ func TestEverySensorSettingHasAHandler(t *testing.T) {
 // on mid-run leaves it running and receiving nothing. Reporting them as applied
 // would claim a change the sensor is not making.
 func TestCaptureFilterSettingsReportPendingRestart(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -85,12 +94,13 @@ func TestCaptureFilterSettingsReportPendingRestart(t *testing.T) {
 // unrelated revision bump and the console shows "applied" for a decoder that
 // is not running.
 func TestCaptureFilterSettingsStayPendingWhenUnchanged(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
-	// Apply the value the sensor already holds.
-	a.Apply("rev-1", agentconfig.Values{agentconfig.KeyHostObservation: agentconfig.Bool(true)})
+	// First request a real change, then receive that same desired value again.
+	a.Apply("rev-0", agentconfig.Values{agentconfig.KeyHostObservation: agentconfig.Bool(false)})
+	a.Apply("rev-1", agentconfig.Values{agentconfig.KeyHostObservation: agentconfig.Bool(false)})
 	if _, _, pending := a.Report(); len(pending) != 1 {
 		t.Errorf("pending = %v, want host_observation even though the value did not change", pending)
 	}
@@ -101,7 +111,7 @@ func TestCaptureFilterSettingsStayPendingWhenUnchanged(t *testing.T) {
 // it by pointing the observation-window setter at DedupTTLMinutes and watching
 // the suite stay green.
 func TestEachSettingWritesItsOwnField(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -138,7 +148,7 @@ func TestEachSettingWritesItsOwnField(t *testing.T) {
 // dedup_ttl_minutes is MINUTES. Running it through the seconds-based helper
 // would divide an operator's value by sixty and nothing would notice.
 func TestDedupTTLIsTreatedAsMinutes(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -154,7 +164,7 @@ func TestDedupTTLIsTreatedAsMinutes(t *testing.T) {
 }
 
 func TestReportingIntervalIsTreatedAsSeconds(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -168,7 +178,7 @@ func TestReportingIntervalIsTreatedAsSeconds(t *testing.T) {
 // A value of the wrong type is refused rather than coerced, and an unknown log
 // level is refused rather than silently mapped to something.
 func TestBadValuesAreRefused(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -188,7 +198,7 @@ func TestBadValuesAreRefused(t *testing.T) {
 // until review found that the console therefore showed "Applied" for a merge
 // window the sensor was not using.
 func TestObservationWindowReportsPendingRestart(t *testing.T) {
-	s := testSensor()
+	s := testSensor(t)
 	a := desiredstate.New()
 	s.registerManagedSettings(a)
 
@@ -225,7 +235,7 @@ func TestDedupTTLRespectsTheRegistryBounds(t *testing.T) {
 		{"an ordinary value is accepted", 60, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := testSensor()
+			s := testSensor(t)
 			a := desiredstate.New()
 			s.registerManagedSettings(a)
 
@@ -239,5 +249,112 @@ func TestDedupTTLRespectsTheRegistryBounds(t *testing.T) {
 				t.Errorf("%d minutes was refused: %v", tc.minutes, failures)
 			}
 		})
+	}
+}
+
+// Exercise startup, a real change, another revision, cancellation, and a new
+// process loading the saved file. None of these require opening a capture NIC.
+func TestRestartSettingsConvergeAgainstRunningCapture(t *testing.T) {
+	s := testSensor(t)
+	s.setupAgentConfig("test")
+	baseline := sensorLocalValues(s.config)
+	s.applier.Apply("initial", baseline)
+	if _, failures, pending := s.applier.Report(); len(failures) != 0 || len(pending) != 0 {
+		t.Fatalf("unchanged startup: failures=%v pending=%v", failures, pending)
+	}
+	changed := agentconfig.Values{
+		agentconfig.KeyHostObservation:       agentconfig.Bool(false),
+		agentconfig.KeyHostObservationDNS:    agentconfig.Bool(true),
+		agentconfig.KeyHostObservationWindow: agentconfig.Int(120),
+	}
+	for _, rev := range []string{"changed", "unrelated-revision"} {
+		s.applier.Apply(rev, changed)
+		if _, failures, pending := s.applier.Report(); len(failures) != 0 || len(pending) != 3 {
+			t.Fatalf("%s: failures=%v pending=%v", rev, failures, pending)
+		}
+		running := s.applier.Running()
+		for k := range changed {
+			if !running[k].Equal(baseline[k]) {
+				t.Fatalf("%s reported desired as running", k)
+			}
+		}
+	}
+	// Config reload uses the same loader as the next real process.
+	reloaded, err := config.LoadFromFile(s.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := &Sensor{config: reloaded, configPath: s.configPath}
+	restarted.setupAgentConfig("test")
+	restarted.applier.Apply("changed", changed)
+	if _, failures, pending := restarted.applier.Report(); len(failures) != 0 || len(pending) != 0 {
+		t.Fatalf("after restart: failures=%v pending=%v", failures, pending)
+	}
+	// Cancelling before restart restores the original process's baseline.
+	s.applier.Apply("cancelled", baseline)
+	if _, failures, pending := s.applier.Report(); len(failures) != 0 || len(pending) != 0 {
+		t.Fatalf("cancelled: failures=%v pending=%v", failures, pending)
+	}
+}
+
+func TestRestartSettingPersistenceFailureIsNotAccepted(t *testing.T) {
+	s := testSensor(t)
+	invalid := []byte("capture: [invalid-mapping]\n")
+	if err := os.WriteFile(s.configPath, invalid, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.setupAgentConfig("test")
+	s.applier.Apply("change", agentconfig.Values{agentconfig.KeyHostObservation: agentconfig.Bool(false)})
+	_, failures, pending := s.applier.Report()
+	if len(failures) != 1 || len(pending) != 0 || !s.config.Capture.HostObservation {
+		t.Fatalf("failed persistence accepted: %v %v", failures, pending)
+	}
+	data, err := os.ReadFile(s.configPath)
+	if err != nil || string(data) != string(invalid) {
+		t.Fatalf("invalid config was changed: %s %v", data, err)
+	}
+}
+
+func TestCaptureSettingPersistencePreservesUnrelatedConfiguration(t *testing.T) {
+	s := testSensor(t)
+	input := "# installation notes\ncontrolPlaneUrl: https://control.example.test\nsecurity:\n  clientKeyPath: key.pem\ncapture:\n  interfaces: [eth0]\n  hostObservation: true # operator note\n  futureSetting: kept\n"
+	if err := os.WriteFile(s.configPath, []byte(input), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persistCaptureSetting("hostObservation", false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(s.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, retained := range []string{"# installation notes", "https://control.example.test", "clientKeyPath: key.pem", "interfaces: [eth0]", "hostObservation: false # operator note", "futureSetting: kept"} {
+		if !strings.Contains(string(raw), retained) {
+			t.Fatalf("lost %q in %s", retained, raw)
+		}
+	}
+	info, err := os.Stat(s.configPath)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("file permissions changed: %v %v", info, err)
+	}
+}
+
+func TestPersistCaptureSettingKeepsInterfaceEditsWorking(t *testing.T) {
+	s := testSensor(t)
+	if err := os.WriteFile(s.configPath, []byte("capture:\n  interfaces:\n    - eth0\n  hostObservation: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persistCaptureSetting("hostObservation", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persistMonitoredInterfaces([]string{"eth1"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFromFile(s.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Capture.Interfaces) != 1 || cfg.Capture.Interfaces[0] != "eth1" || cfg.Capture.HostObservation {
+		t.Fatalf("capture settings changed incorrectly: %+v", cfg.Capture)
 	}
 }

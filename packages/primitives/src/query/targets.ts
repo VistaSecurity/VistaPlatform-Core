@@ -157,7 +157,7 @@ export const IDENTIFIER_KINDS: readonly string[] = ASSET_IDENTIFIER_KINDS;
  * claim an identity the platform assigns — which is how two real assets get
  * merged into one by hand, with no proposal and nothing to review.
  */
-export const COLLECTOR_MINTED_KINDS: readonly string[] = ['declaration_id', 'agent_id', 'cloud_resource_id'];
+export const COLLECTOR_MINTED_KINDS: readonly string[] = ['declaration_id', 'agent_id', 'sensor_id', 'cloud_resource_id'];
 
 /**
  * The kinds a person may enter, and the only ones an editor may retire: every

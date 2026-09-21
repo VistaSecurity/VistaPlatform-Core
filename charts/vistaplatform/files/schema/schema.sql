@@ -19777,7 +19777,8 @@ DECLARE
       'endpoint_added', 'edge_added', 'edge_removed',
       'edge_accepted', 'edge_rejected', 'archived',
       'sbom_imported',
-      'class_proposed', 'class_accepted', 'class_rejected'];
+      'class_proposed', 'class_accepted', 'class_rejected',
+      'identifier_reassigned'];
   def  text;
   list text;
 BEGIN
@@ -21366,7 +21367,48 @@ END $$;
 -- Existing rows deliberately remain legacy; only subsequent evidence can establish
 -- their identity. The constant default also supports older writers during rollout.
 ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS identity_status text NOT NULL DEFAULT 'legacy'
-    CHECK (identity_status IN ('legacy', 'established', 'operator_confirmed'));
+    CHECK (identity_status IN ('legacy', 'established', 'provisional', 'operator_confirmed'));
+
+-- POST-MIGRATIONS: 'provisional' ( D1) on a database that already has the
+-- column.
+--
+-- TWO edits are required and this is the second. `ADD COLUMN IF NOT EXISTS`
+-- above carries the inline CHECK only on a database that does not yet have the
+-- column; on every existing install the whole statement is a no-op, psql still
+-- exits 0, and the constraint keeps its old three values — the failure would
+-- then surface much later as `violates check constraint` from the engine's
+-- first provisional INSERT, on a customer's cluster, mid-upgrade.
+--
+-- Converges rather than unconditionally rewriting: it looks for the value in
+-- the DEPLOYED definition and returns when it is already there, so a re-apply
+-- costs one catalogue read and takes no lock. The constraint name is the one
+-- Postgres generated for the inline CHECK above (verified against a real
+-- database: `assets_identity_status_check`); a database that has lost the
+-- constraint entirely gets it back here.
+DO $$
+DECLARE
+  def text;
+BEGIN
+  IF to_regclass('public.assets') IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT pg_get_constraintdef(oid) INTO def
+    FROM pg_constraint
+   WHERE conname = 'assets_identity_status_check'
+     AND conrelid = to_regclass('public.assets');
+
+  IF def IS NOT NULL AND position(quote_literal('provisional') IN def) > 0 THEN
+    RETURN;
+  END IF;
+
+  IF def IS NOT NULL THEN
+    ALTER TABLE public.assets DROP CONSTRAINT assets_identity_status_check;
+  END IF;
+  ALTER TABLE public.assets ADD CONSTRAINT assets_identity_status_check
+    CHECK (identity_status = ANY (ARRAY['legacy'::text, 'established'::text,
+                                        'provisional'::text, 'operator_confirmed'::text]));
+END $$;
 
 -- Inventory evaluates conflict presence for each displayed asset, including
 -- candidate-only proposals. Match that read predicate exactly so ordinary
@@ -21417,6 +21459,23 @@ DO $$ BEGIN
             FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id);
     END IF;
 END $$;
+-- POST-MIGRATIONS: identity_observations.materialized_at ( D5)
+--
+-- When the enrichment worker's materialization pass last re-resolved this
+-- observation. It exists so that pass is bounded without being one-shot: a row
+-- is re-checked every six hours rather than every minute, and NULL means it has
+-- never been looked at.
+--
+-- A CLOCK rather than a hash of the evidence, deliberately. Whether an
+-- observation can become a provisional inventory item does not depend on the
+-- evidence at all — the identifiers and the network scope are fixed by the
+-- fingerprint — it depends on TENANT state that moves on its own: a segment is
+-- drawn, an overlap is resolved, a cloud reference is removed. Keyed on the
+-- evidence, an observation refused once for an overlapping scope would never be
+-- reconsidered after the operator fixed the overlap, which is the single case
+-- this pass exists for.
+ALTER TABLE public.identity_observations
+    ADD COLUMN IF NOT EXISTS materialized_at timestamptz;
 CREATE INDEX IF NOT EXISTS idx_identity_observations_state
     ON public.identity_observations (tenant_id, state, last_seen_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_identity_observations_asset
@@ -21954,3 +22013,20 @@ ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS reported_dns_interfaces text
 ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_hash text;
 ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_at timestamp with time zone;
 CREATE INDEX IF NOT EXISTS idx_sensors_asset_id ON public.sensors (asset_id) WHERE asset_id IS NOT NULL;
+
+-- Sensor and device-agent installation IDs are separate host identifiers.
+-- Preserve ownership, provenance and sighting clocks. Only IDs attributed to
+-- their issuing sensor in the same tenant qualify; never relabel an imported
+-- identifier or a device-agent ID. Existing conflicting assets remain separate
+-- until explicitly reconciled. This is idempotent on every chart upgrade.
+UPDATE public.asset_identifiers i
+SET kind = 'sensor_id'
+FROM public.sensors s
+WHERE i.tenant_id = s.tenant_id
+  AND i.kind = 'agent_id' AND i.value = s.id::text
+  AND i.source_kind = 'measured' AND i.source_ref = 'sensor:' || s.id::text
+  AND NOT EXISTS (
+    SELECT 1 FROM public.asset_identifiers existing
+    WHERE existing.tenant_id = i.tenant_id AND existing.kind = 'sensor_id'
+      AND existing.value = i.value AND coalesce(existing.scope, '') = coalesce(i.scope, '')
+  );
