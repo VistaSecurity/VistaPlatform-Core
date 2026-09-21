@@ -1270,7 +1270,28 @@ export interface paths {
          */
         put: operations["updateTicket"];
         post?: never;
-        /** Delete a ticket (comments cascade) */
+        /**
+         * Delete a ticket (comments cascade)
+         * @description Permanently removes a ticket. This is a HARD delete, not an archive:
+         *
+         *     - `ticket_comments` cascade — the whole thread goes with it
+         *     - `remediation_plan_items.ticket_id` is set to NULL; the plan item
+         *       survives, unlinked, because the finding behind it is still real
+         *     - any alert linked to it has `alerts.ticket_id` cleared, so the alert
+         *       stops advertising a ticket nobody can open. The alert itself stays
+         *       open, and its append-only evidence timeline is NOT rewritten: a
+         *       ticket WAS linked on that date, and that remains true.
+         *
+         *     The deletion is recorded in the audit trail as `ticket.deleted`, with
+         *     the ticket's content — title, category, status, priority, assignee, due
+         *     date, tags and every inventory link — in `old_values`. Since the row
+         *     itself is gone, that entry is the only surviving record of the ticket,
+         *     which is why it carries the content rather than just the id.
+         *
+         *     Requires `compliance.update`. Note that creating a ticket does not:
+         *     reporting a problem and destroying the record of one are different
+         *     authorities.
+         */
         delete: operations["deleteTicket"];
         options?: never;
         head?: never;
@@ -3003,7 +3024,7 @@ export interface components {
             id: string;
             /** Format: uuid */
             tenant_id: string;
-            /** @description Stored free-form on the row; the product surface uses six values (compliance, certificate, remediation, vulnerability, operational, general). Not pinned as an enum here because legacy rows may carry other strings. */
+            /** @description What the ticket is ABOUT. Eleven creatable values, one per finding producer plus certificate / operational / general; see the TicketCategoryFilter parameter. Deliberately NOT pinned as an enum on the RESPONSE: a client that hard-fails on an unrecognised category would break against a server one release newer than itself, and pre-split rows carry `remediation`. The write path is where the vocabulary is closed. */
             category: string;
             title: string;
             description?: string | null;
@@ -3074,6 +3095,8 @@ export interface components {
                 [key: string]: number;
             };
             overdue: number;
+            /** @description Open tickets due within the next 3 days and not already overdue. Disjoint from `overdue`, so the two never count the same ticket twice. */
+            due_soon: number;
             total: number;
         };
         TicketTrendPoint: {
@@ -3371,7 +3394,18 @@ export interface components {
         MeasurementId: string;
         /** @description Ticket UUID. */
         TicketId: string;
-        TicketCategoryFilter: "compliance" | "certificate" | "remediation" | "vulnerability" | "operational" | "general";
+        /**
+         * @description Filter by ticket category. One per finding producer, plus the three
+         *     with a non-finding origin: `certificate` (cert-lifecycle alerts),
+         *     `operational` (the alert engine) and `general` (a person).
+         *
+         * `remediation` is filterable but NOT creatable — it was the pre-
+         *     catch-all, and is a verb rather than a subject, which is how it came to
+         *     hold weak crypto, quantum exposure, end-of-life software, drift and
+         *     CMDB hygiene as one undifferentiated bucket. It stays here so the rows
+         *     written before the split can still be found; `POST /tickets` rejects it.
+         */
+        TicketCategoryFilter: "compliance" | "certificate" | "crypto" | "pqc" | "vulnerability" | "lifecycle" | "inventory" | "configuration" | "drift" | "operational" | "general" | "remediation";
         TicketStatusFilter: "open" | "in_progress" | "resolved" | "closed";
         TicketPriorityFilter: "low" | "medium" | "high" | "critical";
         TicketSeverityFilter: string;
@@ -5475,6 +5509,17 @@ export interface operations {
     listTickets: {
         parameters: {
             query?: {
+                /**
+                 * @description Filter by ticket category. One per finding producer, plus the three
+                 *     with a non-finding origin: `certificate` (cert-lifecycle alerts),
+                 *     `operational` (the alert engine) and `general` (a person).
+                 *
+                 * `remediation` is filterable but NOT creatable — it was the pre-
+                 *     catch-all, and is a verb rather than a subject, which is how it came to
+                 *     hold weak crypto, quantum exposure, end-of-life software, drift and
+                 *     CMDB hygiene as one undifferentiated bucket. It stays here so the rows
+                 *     written before the split can still be found; `POST /tickets` rejects it.
+                 */
                 category?: components["parameters"]["TicketCategoryFilter"];
                 status?: components["parameters"]["TicketStatusFilter"];
                 priority?: components["parameters"]["TicketPriorityFilter"];
@@ -5565,7 +5610,7 @@ export interface operations {
             query?: {
                 /** @description Trailing window size in days. Defaults to 30 when absent or non-positive. */
                 days?: number;
-                /** @description Optional category filter (compliance, certificate, remediation, vulnerability, operational, general). */
+                /** @description Optional category filter. See the TicketCategoryFilter parameter for the full set. */
                 category?: string;
             };
             header?: never;

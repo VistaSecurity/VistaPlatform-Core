@@ -17,6 +17,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { useAuth } from '@vistasecurity/primitives/auth';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { categoryForProducer, defaultDueDate } from '@vistasecurity/primitives/tickets';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import {
@@ -33,11 +34,13 @@ export type TicketTarget =
 export function ticketBody(t: TicketTarget) {
   if (t.kind === 'crypto') {
     const r = t.risk;
+    const rating = cryptoTicketRating(r.severity);
     return {
-      category: 'remediation',
+      category: cryptoRiskCategory(r),
       title: `${issueLabel(r)} — ${r.asset_hostname || r.asset_ip_address || r.asset_id.slice(0, 8)}`.slice(0, 200),
       description: `${r.description}\n\nObserved: ${r.current_value} (${catOf(r).label.toLowerCase()})\nRecommendation: ${r.recommendation}`,
-      ...cryptoTicketRating(r.severity),
+      ...rating,
+      due_date: defaultDueDate(rating.priority),
       asset_id: r.asset_id,
       crypto_implementation_id: r.crypto_implementation_id,
       source: 'manual',
@@ -46,13 +49,15 @@ export function ticketBody(t: TicketTarget) {
   }
   const f = t.finding;
   const sev = sevLevel(f.severity).toLowerCase();
-  // The ticket CATEGORY follows the producer. A ticket queue filtered to
-  // `compliance` that also held every end-of-life and CVE ticket would make the
-  // filter meaningless; `vulnerability` and `remediation` are existing
-  // categories on the unified tickets table and are what these are.
-  const category = f.producer === 'vulnerability'
-    ? 'vulnerability'
-    : f.producer === 'compliance' ? 'compliance' : 'remediation';
+  // The ticket CATEGORY follows the producer, one for one.
+  //
+  // This used to be a three-way branch that sent `vulnerability` and
+  // `compliance` to themselves and EVERYTHING ELSE to `remediation` — so
+  // end-of-life, configuration, hygiene and drift findings, four of the seven
+  // producers, arrived in one bucket and a category filter on the work queue
+  // could not tell them apart. `categoryForProducer` is the shared mapping and
+  // splits PQC out of cryptography on the finding's kind.
+  const category = categoryForProducer(f.producer, f.kind);
   // The context line. For a compliance finding it is the framework and control;
   // for anything else naming a framework would be a claim about a finding that
   // has none.
@@ -65,6 +70,9 @@ export function ticketBody(t: TicketTarget) {
     description: `${context}\n\n${f.summary}`,
     priority: sev === 'informational' ? 'low' : sev,
     severity: sev,
+    // Without a due date the ticket is invisible to the queue's SLA cards and
+    // to the backend's overdue / due-soon sweep. See DEFAULT_SLA_DAYS.
+    due_date: defaultDueDate(sev === 'informational' ? 'low' : sev),
     // The subject decides WHICH link the ticket carries. This used to be an
     // unconditional `asset_id: f.asset_id`, and on live data three findings in
     // four are about a certificate or a crypto configuration — so a certificate
@@ -93,16 +101,35 @@ export function bulkCryptoTicketBody(primary: CryptoRisk, sameIssue: CryptoRisk[
     .map((risk) => `• ${risk.asset_hostname || risk.asset_ip_address || risk.asset_id.slice(0, 8)} — ${risk.current_value}`)
     .join('\n');
 
+  const rating = cryptoTicketRating(worst === 'Unknown' ? null : worst);
   return {
-    category: 'remediation',
+    category: cryptoRiskCategory(primary),
     title: `${issueLabel(primary)} — ${sameIssue.length} configurations`.slice(0, 200),
     description: `${primary.recommendation}\n\nAffected configurations (${sameIssue.length}):\n${configurations}`,
-    ...cryptoTicketRating(worst === 'Unknown' ? null : worst),
+    ...rating,
+    due_date: defaultDueDate(rating.priority),
     asset_id: primary.asset_id,
     crypto_implementation_id: primary.crypto_implementation_id,
     source: 'manual',
     tags: ['findings', primary.category, 'bulk-remediation'],
   };
+}
+
+/**
+ * The ticket category for a crypto risk.
+ *
+ * A CryptoRisk is not a finding row — it comes from the weak-crypto detector,
+ * whose `category` says what KIND of thing is weak (protocol / algorithm /
+ * key_size / certificate / compliance). Two of those are about something other
+ * than the cipher itself and have their own ticket category; the rest are
+ * cryptography. The detector emits no PQC category, so `pqc` is unreachable
+ * from this path — quantum exposure arrives as a `pqc_vulnerable` FINDING and
+ * is mapped by categoryForProducer.
+ */
+function cryptoRiskCategory(risk: CryptoRisk): string {
+  if (risk.category === 'certificate') return 'certificate';
+  if (risk.category === 'compliance') return 'compliance';
+  return 'crypto';
 }
 
 /** The all-zero uuid `control_id` carries for every non-compliance producer. */

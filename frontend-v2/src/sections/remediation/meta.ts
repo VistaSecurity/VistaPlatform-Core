@@ -8,10 +8,10 @@ export const PRIORITY_COLOR: Record<string, string> = {
 export const STATUS_COLOR: Record<string, string> = {
   open: 'var(--info)', in_progress: 'var(--warn)', resolved: 'var(--ok)', closed: 'var(--neutral)',
 };
-export const CATEGORY_ICON: Record<string, string> = {
-  compliance: 'shield-check', certificate: 'file-badge', remediation: 'wrench',
-  vulnerability: 'circle-alert', operational: 'settings', general: 'file-text',
-};
+// The category icon/label map moved to `@vistasecurity/primitives/tickets`,
+// where it sits beside the category list itself — a second copy here went
+// stale the moment a category was added, and rendered a blank cell rather than
+// an error when it did.
 
 export type SlaState = 'overdue' | 'due_soon' | 'on_track' | 'none';
 export const SLA_META: Record<Exclude<SlaState, 'none'>, { color: string; label: string }> = {

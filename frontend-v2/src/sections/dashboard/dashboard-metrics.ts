@@ -76,7 +76,20 @@ export type DashboardPqcMetric = {
 // Written out even though it is the page default today: a default is a thing
 // that changes, and a tile's link has to survive it. FINDINGS_SUBJECT_LENS
 // names the same lens for the same reason.
-export const DASHBOARD_CRITICAL_FINDINGS_ROUTE = '/risk-compliance/findings?lens=producer&severity=critical';
+/**
+ * The Findings page, narrowed to one rung of the severity ladder.
+ *
+ * Factored out of the constant below because the Compliance dashboard links
+ * every rung, not just Critical, and two spellings of this URL is two things to
+ * keep in step — the lens name in particular, which is written out here even
+ * though it is the page default precisely because a default is a thing that
+ * changes and a tile's link has to survive it.
+ */
+export function findingsSeverityRoute(severity: string): string {
+  return `/risk-compliance/findings?lens=producer&severity=${encodeURIComponent(severity)}`;
+}
+
+export const DASHBOARD_CRITICAL_FINDINGS_ROUTE = findingsSeverityRoute('critical');
 
 // A tile that counts a subset must link to that subset. Both of these used to
 // link at `/inventory?lens=infrastructure` — a retired lens key that redirects

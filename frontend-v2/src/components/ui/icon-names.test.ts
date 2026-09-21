@@ -36,6 +36,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ASSET_CLASS_KEYS } from '@vistasecurity/primitives/assets';
+import { LEGACY_TICKET_CATEGORIES, TICKET_CATEGORIES, ticketCategory } from '@vistasecurity/primitives/tickets';
 import { ICON_NAMES } from './icon';
 import { INVENTORY_LENSES } from '../../sections/inventory/lenses';
 import { ASSET_TABS } from '../../sections/inventory/asset-tabs';
@@ -159,6 +160,20 @@ describe('icon names the UI uses', () => {
     expect(ASSET_CLASS_KEYS.length).toBeGreaterThan(20);
     const classes: Use[] = ASSET_CLASS_KEYS.map((key) => ({ where: `class ${key}`, name: classIcon(key) }));
     expect(unresolved([...classes, { where: 'class (unknown)', name: classIcon('not_a_class') }])).toEqual([]);
+  });
+
+  // Ticket categories live in packages/primitives, OUTSIDE the src/ tree the
+  // field scan below walks, so they are checked by importing the real
+  // registry — same reason as the asset classes above. The retired categories
+  // are checked too: a pre-split row still renders an icon.
+  it('every ticket category, writable and retired, resolves', () => {
+    const cats: Use[] = TICKET_CATEGORIES.map((c) => ({ where: `ticket category ${c.key}`, name: c.icon }));
+    const legacy: Use[] = LEGACY_TICKET_CATEGORIES.map((k) => ({
+      where: `retired ticket category ${k}`,
+      name: ticketCategory(k)!.icon,
+    }));
+    expect(cats.length).toBeGreaterThan(8);
+    expect(unresolved([...cats, ...legacy])).toEqual([]);
   });
 
   const scanned = scan();

@@ -274,8 +274,23 @@ function classKeyFromQueryValue(value: string): string {
   return value;
 }
 
-/** `field:(a or b)` for many, `field:a` for one. The unset sentinel is written
- *  `not exists(field)` so the click matches the same rows the facet counted. */
+/**
+ * `field:(a or b)` for many, `field:a` for one. The unset sentinel is written
+ * `not exists(field)` so the click matches the same rows the facet counted.
+ *
+ * Exported because the rail is not the only thing that turns a facet BUCKET
+ * into a query. The Assets dashboard drills through from bucket rows on facet
+ * levels the rail has no checkbox for (`ownership`, `stale_status`, `region`,
+ * `support_group`), and the two rules encoded here — the `Unknown` bucket means
+ * `not exists(field)` rather than the literal string "Unknown", and the
+ * string columns in EMPTY_IS_UNSET also need `field = ""` — are exactly the
+ * ones a second hand-written implementation gets wrong. `owner_email:Unknown`
+ * matched nothing and `environment:Unknown` was a 400; both were real.
+ */
+export function facetFieldTerm(field: string, values: string[]): string | null {
+  return orTerm(field, values);
+}
+
 function orTerm(field: string, values: string[]): string | null {
   const vs = values.filter((v) => v !== '');
   if (vs.length === 0) return null;

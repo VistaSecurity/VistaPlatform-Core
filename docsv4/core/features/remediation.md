@@ -6,13 +6,14 @@
 
 ## Where to find it
 
-**Remediation** is a top-level section in the main navigation. Opening it lands you on **Alerts**, with three sub-sections in the left nav:
+**Remediation** is a top-level section in the main navigation. Opening it lands you on **Alerts**, with four sub-sections in the left nav:
 
 | Sub-section | What it's for |
 |---|---|
 | **Alerts** | Everything the platform is asking you to look at — each with a full lifecycle and an audit-grade evidence trail |
 | **Queue** | The unified ticket list — everything that's been turned into trackable work |
 | **Plans** | Group related work into an initiative (e.g. a PQC migration) and watch progress as one number |
+| **Progress** | Are you keeping up? Opened against resolved over time, how long a fix takes, and where the backlog actually is |
 
 > **Where did Triage go?** Triage was a second alert inbox, fed by audit-rule
 > pattern detection. It never had anything to show: nothing persisted those
@@ -169,13 +170,28 @@ The Queue is the heart of Remediation: every ticket, from every source, in one S
 
 ### The summary cards
 
-Across the top, five cards both summarize and filter the list. Click any card to narrow the Queue to just that slice; click it again (or **clear the filter**) to go back to all open work:
+Across the top, five cards summarize **all** your tickets — not just the ones on
+screen. Click any card to narrow the list to that slice:
 
 - **Open work** — everything currently open or in progress
 - **Overdue** — open tickets past their due date
-- **Due soon** — open tickets due within the next three days
+- **Due soon** — open tickets due within the next three days, and not already overdue
 - **Resolved** — tickets that are resolved or closed
 - **Keeping pace** — the share of open work that's still on track, with a progress bar
+
+The counts are organization-wide and do not change when you filter the list
+below them: they are the total that the filtered list is a slice of. So a card
+reading 120 above a list of 8 is not a contradiction — it is telling you that
+your filter matched 8 of 120.
+
+### Filtering and finding a ticket
+
+Below the cards: filter by **category**, **status** or **assignee**, and search
+titles. The list is paginated, with the total count shown on the right. Clearing
+the filters returns you to all open work.
+
+Every ticket also has its own link. Opening one puts `?ticket=<id>` in the
+address bar, so you can send a colleague straight to it.
 
 ### Reading a ticket row
 
@@ -183,7 +199,7 @@ Each row shows, at a glance:
 
 - A **severity dot** (Critical / High / Medium / Low)
 - The **title**, with the current status and priority underneath
-- The **category** with its icon — one of **compliance, certificate, remediation, vulnerability, operational,** or **general**
+- The **category** with its icon — see [Categories](#categories) below
 - An **External** link, if the ticket is linked to an outside system (e.g. Jira or ServiceNow), showing the system name and external ID
 - The **SLA** state — **Overdue**, **Due soon**, or **On track** (resolved/closed tickets show no SLA)
 - The **Due** column — days remaining, or "Nd late" if it's overdue
@@ -195,25 +211,120 @@ Click any row to open the ticket drawer on the right. It shows everything about 
 - **Header** — category, title, status and priority pills, and the SLA state with days remaining or days late.
 - **Advance the status** — a single button walks the ticket through its lifecycle: **Start work** (open → in progress) → **Mark resolved** (in progress → resolved) → **Close ticket** (resolved → closed).
 - **Description** — the full write-up of the issue.
-- **Details** — due date, who it's assigned to, where it came from, created/updated dates, and any tags.
+- **Details** — due date, who it's assigned to (by name), where it came from, created/updated dates, any tags, and the resolution notes once it is resolved.
+- **Edit** — change anything about the ticket: reassign it, change its priority, severity or category, set or clear the due date, edit the description and tags, record resolution notes, or attach a link to a ticket in Jira, ServiceNow, GitHub or PagerDuty. Clearing the due date is allowed, but a ticket without one does not appear in any of the SLA views above.
 - **Linked** — what the ticket is attached to: an asset, a certificate, a finding, a crypto configuration, and/or an external ticket (with a clickable link out to the external system when a valid web URL is present). If the ticket was created from an alert, a **View alert** link takes you straight back to that alert's evidence timeline (see [Alerts](#alerts) above).
 - **Comments** — a running thread. Add a comment in the box at the bottom (⌘/Ctrl + Enter posts it) to collaborate with your team without leaving the ticket. Tickets created from an alert also receive automatic **System**-tagged comments whenever that alert changes state — an escalation, a snooze, an auto-resolution — so the ticket stays current with the underlying condition without anyone copying updates over by hand.
 
-Status changes and comments require remediation-management permission; read-only users can view the drawer but not advance or comment.
+Editing, advancing and commenting require remediation-management permission;
+read-only users can open the drawer and read everything, but not change it.
+**Creating** a ticket is different — see below.
+
+### Deleting a ticket
+
+**Edit → Delete ticket**, at the bottom of the edit panel, behind a
+confirmation.
+
+Most tickets should end their life **closed**, not deleted: a closed ticket
+still counts in your history, still shows in Progress, and still tells the
+story of what was found and fixed. Delete is for the ones that should never
+have existed — a duplicate, a test, something filed against the wrong thing.
+
+What happens:
+
+- The ticket and **its entire comment thread** are removed for everyone. This
+  cannot be undone.
+- If it came from an alert, **the alert stays open** and keeps its full
+  evidence timeline. It simply stops showing a link to a ticket that no longer
+  exists.
+- If it was part of a **Plan**, the plan item survives and becomes unlinked —
+  the finding behind it is still real.
+- The deletion is **recorded in the audit trail** under the name of whoever did
+  it, together with the ticket's details: title, category, status, priority,
+  assignee, due date, tags and everything it was linked to. Because the ticket
+  itself is gone, that audit entry is the only remaining record of it — which
+  is exactly why it holds the whole ticket rather than just an ID.
+
+Deleting requires remediation-management permission, even though **creating**
+does not. Reporting a problem and destroying the record of one are not the same
+authority.
 
 ### Due dates and SLA
 
-Tickets can carry a **due date**. Vista Platform watches those dates continuously: anything past due is flagged **Overdue**, and anything due within three days is flagged **Due soon** — both on the row and on the summary cards, and the same windows drive the email/notification reminders. That's what keeps the Queue honest about what needs attention now versus later.
+Every ticket gets a **due date**. Vista Platform watches those dates
+continuously: anything past due is flagged **Overdue**, and anything due within
+three days is flagged **Due soon** — on the row, on the summary cards, and in
+the email and in-app reminders.
+
+A ticket the platform files for you is dated from its priority:
+
+| Priority | Due in |
+|---|---|
+| Critical | 7 days |
+| High | 14 days |
+| Medium | 30 days |
+| Low | 60 days |
+
+These are starting points, not commitments your organization has made — change
+any of them when you file or edit the ticket. The shortest is deliberately a
+week rather than a day or two, so a new ticket is never born already flagged
+"due soon"; a warning that is on from the moment a ticket exists is a warning
+people learn to ignore.
+
+You can clear a due date entirely. A ticket without one never appears as
+overdue or due soon, is not counted in **Keeping pace**, and generates no
+reminders — which is occasionally what you want for a genuinely open-ended
+piece of work, and almost never what you want otherwise.
 
 ### Creating a ticket
 
-You rarely start in the Queue — tickets flow *into* it:
+**New ticket**, top right of the Queue, opens a blank ticket for anything you
+want tracked — whether or not Vista Platform found it itself. Give it a
+title, pick a category, and optionally set a priority, severity, due date,
+assignee, tags and a link to an external ticket. The due date is filled in for
+you from the priority; change it freely.
+
+**Anyone in your organization can file a ticket**, including read-only users.
+Reporting a problem and triaging it are different jobs: the person who notices
+something is often not the person who can fix it, and requiring permission to
+report would mean only the people who could already fix a problem could raise
+it. Changing a ticket afterwards still requires remediation-management
+permission.
+
+Tickets also flow *into* the Queue from elsewhere:
 
 - **From Alerts** — *Create ticket* on an alert (see above). The ticket inherits the alert's evidence and keeps a live link back to it.
-- **From Risk & Compliance → Crypto Risks** — each risk row has **Create ticket** / **View ticket** actions. Creating one opens a pre-filled ticket tied to that specific crypto configuration; it then lands in this same Queue (category **remediation**) and **View ticket** jumps you back to it. This is the same unified ticket — there's no separate tracking surface.
-- **From a finding or other surface** — wherever a *Create ticket* control appears, the resulting ticket lives here too.
+- **From Risk & Compliance → Findings** — each finding and crypto risk has a **Create ticket** action. Creating one opens a pre-filled ticket tied to that exact subject, categorized to match what the finding is about, and it lands in this same Queue. This is the same unified ticket — there's no separate tracking surface.
 
-Because it's one model, a ticket created from a crypto risk, a certificate problem, or a compliance finding all sort, filter, and advance identically in the Queue.
+Because it's one model, a ticket you typed by hand and a ticket raised from a
+compliance finding sort, filter, and advance identically.
+
+### Categories
+
+A ticket's **category** says what it is about. There is one for each kind of
+problem Vista Platform detects, plus three for work that comes from
+somewhere else:
+
+| Category | What it covers |
+|---|---|
+| **Compliance** | A framework control your inventory is failing |
+| **Cryptography** | A weak cipher, protocol version or key size |
+| **PQC migration** | Quantum-vulnerable cryptography that needs migrating |
+| **Certificate** | Certificate lifecycle — expiry, revocation, a broken chain |
+| **Vulnerability** | A known CVE in software installed on an asset |
+| **End of life** | An operating system, package or device past end-of-life or end-of-support |
+| **Inventory hygiene** | A gap in the inventory record itself — no owner, no class, no location, stale, or a suspected duplicate |
+| **Configuration** | Insecure exposure — plaintext management, default credentials, a service that should not be reachable |
+| **Drift** | Something changed against its baseline — a new issuer, an unexpected protocol, a changed port profile |
+| **Operational** | The platform itself — a sensor or agent offline, a service not responding |
+| **General** | Anything else worth tracking |
+
+A ticket raised from a finding is categorized automatically to match the finding.
+
+> **Tickets filed before this split** carry a **Remediation** category, which
+> was the single catch-all the platform used for most automatic tickets. Those
+> tickets still work exactly as they did and you can still filter for them —
+> they simply cannot be created any more. Re-categorize one by editing it.
 
 ---
 
@@ -246,12 +357,39 @@ One important rule: **an item's status mirrors its linked finding or ticket.** Y
 
 ---
 
+## Progress — are you keeping up?
+
+The Queue tells you what is open right now. **Progress** tells you whether that
+number is getting better or worse.
+
+Pick a window (7, 30 or 90 days) and the page shows:
+
+- **Opened** and **Resolved** in that window, and a **Keeping up** ratio of one
+  against the other. Above 1.0× means you closed more than arrived and the
+  backlog is shrinking; below 1.0× means it is growing. With nothing opened in
+  the window there is no ratio to report, and the page says so rather than
+  printing a number it cannot compute.
+- **Avg resolution** — how long a ticket takes from opened to resolved.
+- **Opened vs resolved** — a day-by-day bar for the window, so a bad week is
+  visible as a bad week rather than averaged away.
+- **Where the work is** — open tickets per category, ordered by how much is
+  still open rather than by how many there have ever been. Click a category to
+  open the Queue filtered to it.
+- **Quantum readiness** — the share of your cryptographic configurations that
+  need no post-quantum migration, split into PQC-ready, symmetric (nothing to
+  migrate), needs migration, and unclassified. **Unclassified counts against
+  readiness** rather than being assumed safe: a configuration whose algorithms
+  could not be resolved is an unknown, not a pass.
+
+---
+
 ## A typical flow
 
 1. An alert fires and shows up in **Alerts**. You decide it's real and **Create ticket**.
 2. The new ticket appears in the **Queue**. You open it, **Start work**, assign it, and leave a comment.
 3. If it's part of a larger effort (say, retiring TLS 1.0 everywhere), you add its finding to a **Plan** so leadership can watch the whole campaign in one number.
 4. As you fix and verify, you **Mark resolved** then **Close** the ticket — and the plan's progress ticks up on its own.
+5. At the end of the month, **Progress** tells you whether you closed more than arrived.
 
 ---
 

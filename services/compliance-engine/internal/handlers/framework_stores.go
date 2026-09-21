@@ -60,7 +60,9 @@ type ticketStore interface {
 	Create(tenantID, createdBy uuid.UUID, input models.CreateTicketInput) (*models.Ticket, error)
 	GetByID(tenantID, ticketID uuid.UUID) (*models.Ticket, error)
 	Update(tenantID, ticketID uuid.UUID, input models.UpdateTicketInput) (*models.Ticket, error)
-	Delete(tenantID, ticketID uuid.UUID) error
+	// Returns the deleted ticket so the handler can audit its CONTENT: the
+	// delete is hard, so the audit entry is the only surviving copy.
+	Delete(tenantID, ticketID uuid.UUID) (*models.Ticket, error)
 	GetProgress(tenantID uuid.UUID, days int, category string) (*models.TicketProgress, error)
 	GetStats(tenantID uuid.UUID) (*models.TicketStats, error)
 	ListComments(tenantID, ticketID uuid.UUID) ([]models.TicketComment, error)

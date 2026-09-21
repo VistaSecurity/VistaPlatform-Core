@@ -128,12 +128,20 @@ type TicketFilters struct {
 	PageSize      int    `json:"page_size"`
 }
 
-// TicketStats holds aggregate ticket counts
+// TicketStats holds aggregate ticket counts.
+//
+// TENANT-WIDE, and that is the point. The work queue used to compute these
+// numbers client-side from its own list response, which is a single PAGE —
+// twenty rows by default — so every card on the page described the newest
+// twenty tickets while claiming to describe the tenant.
 type TicketStats struct {
 	ByStatus   map[string]int `json:"by_status"`
 	ByCategory map[string]int `json:"by_category"`
 	Overdue    int            `json:"overdue"`
-	Total      int            `json:"total"`
+	// DueSoon counts open work inside the due-soon window and NOT already
+	// overdue, so Overdue and DueSoon never double-count the same ticket.
+	DueSoon int `json:"due_soon"`
+	Total   int `json:"total"`
 }
 
 // TicketProgress holds time-series remediation progress data

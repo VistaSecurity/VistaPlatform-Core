@@ -1,6 +1,7 @@
 // Vista Console primary navigation — the 5-section lifecycle IA, ported from the
 // design mock's Shell.jsx (the LOCKED structure in REDESIGN_RISK_COMPLIANCE_AND_REMEDIATION.md).
 // Settings and My Profile live in the profile dropdown, not the top rail.
+import { DASHBOARDS } from '../sections/dashboard/dashboards';
 
 export interface NavSubItem {
   path: string;
@@ -33,7 +34,20 @@ export interface NavSection {
 }
 
 export const SECTIONS: NavSection[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: 'LayoutDashboard', path: '/dashboard' },
+  {
+    // Four dashboards, not one. The section keeps `/dashboard` as its own path —
+    // Overview is still where the rail row lands and where `/` redirects — and
+    // gains a sub-nav group for the three focused pages.
+    //
+    // Items are DERIVED from the dashboard registry rather than restated here:
+    // a second copy of the list is a second thing to keep in step, which is the
+    // drift `inventory-nav.test.ts` exists to catch on the Inventory side.
+    id: 'dashboard',
+    label: 'Dashboard',
+    icon: 'LayoutDashboard',
+    path: '/dashboard',
+    groups: [{ items: DASHBOARDS.map((d) => ({ path: d.path, label: d.label })) }],
+  },
   {
     id: 'discovery',
     label: 'Discovery',
@@ -141,6 +155,10 @@ export const SECTIONS: NavSection[] = [
           { path: '/remediation/alerts', label: 'Alerts' },
           { path: '/remediation/queue', label: 'Queue' },
           { path: '/remediation/plans', label: 'Plans' },
+          // Progress consumes GET /tickets/progress, which had no caller at
+          // all before — a built endpoint with no way to reach it. The
+          // nav entry is what makes it a feature rather than a URL.
+          { path: '/remediation/progress', label: 'Progress' },
         ],
       },
     ],

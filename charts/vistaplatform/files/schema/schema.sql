@@ -5899,7 +5899,14 @@ CREATE TABLE IF NOT EXISTS public.tickets (
     -- Deliberately unconstrained: alerts are created by the alerting pipeline and
     -- a ticket outlives the alert it came from.
     alert_id uuid,
-    CONSTRAINT tickets_category_check CHECK (((category)::text = ANY ((ARRAY['compliance'::character varying, 'certificate'::character varying, 'remediation'::character varying, 'vulnerability'::character varying, 'operational'::character varying, 'general'::character varying])::text[]))),
+    -- Ticket categories partition tickets by SUBJECT, one per finding producer
+    --. 'remediation' is retired as a writable category — it is a verb,
+    -- not a subject, and nearly every ticket is remediation work, which is how
+    -- it became the dumping ground for five producers at once. It stays LEGAL
+    -- here so rows written before the split still read, and so the matching
+    -- ADD CONSTRAINT in POST-MIGRATIONS cannot fail against a database that
+    -- already holds one.
+    CONSTRAINT tickets_category_check CHECK (((category)::text = ANY ((ARRAY['compliance'::character varying, 'certificate'::character varying, 'crypto'::character varying, 'pqc'::character varying, 'vulnerability'::character varying, 'lifecycle'::character varying, 'inventory'::character varying, 'configuration'::character varying, 'drift'::character varying, 'operational'::character varying, 'general'::character varying, 'remediation'::character varying])::text[]))),
     CONSTRAINT tickets_external_sync_status_check CHECK (((external_sync_status)::text = ANY ((ARRAY['none'::character varying, 'linked'::character varying, 'syncing'::character varying, 'error'::character varying])::text[]))),
     CONSTRAINT tickets_priority_check CHECK (((priority)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
     CONSTRAINT tickets_severity_check CHECK (((severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
@@ -22030,3 +22037,47 @@ WHERE i.tenant_id = s.tenant_id
     WHERE existing.tenant_id = i.tenant_id AND existing.kind = 'sensor_id'
       AND existing.value = i.value AND coalesce(existing.scope, '') = coalesce(i.scope, '')
   );
+
+
+-- POST-MIGRATIONS: ticket categories, one per finding producer
+--
+-- Categories were fixed when findings had a single producer. There are now
+-- SEVEN (compliance, crypto, eol, vulnerability, configuration, hygiene,
+-- drift), and the UI collapsed five of them into 'remediation' — so weak
+-- crypto, quantum exposure, end-of-life software, config drift and CMDB
+-- hygiene all arrived in one undifferentiated bucket, which made a category
+-- filter on the work queue meaningless.
+--
+-- Eleven categories now, plus 'remediation' retained for rows written before
+-- the split. It is retired from every WRITER (the finding→ticket mapper maps
+-- each producer to its own category), not from the constraint: dropping it
+-- here would make this ADD CONSTRAINT fail on any database holding a single
+-- such row — the populated-upgrade class of failure a fresh double-apply is
+-- structurally blind to.
+--
+-- The CREATE TABLE above carries the same list for fresh installs. Both edits
+-- are required: CREATE TABLE IF NOT EXISTS silently no-ops on a database that
+-- already has the table, leaving the old constraint in place, and the failure
+-- would surface much later as a CHECK violation on the first insert of a new
+-- category rather than here.
+DO $$ BEGIN
+  IF to_regclass('public.tickets') IS NOT NULL THEN
+    ALTER TABLE public.tickets DROP CONSTRAINT IF EXISTS tickets_category_check;
+    ALTER TABLE public.tickets
+      ADD CONSTRAINT tickets_category_check
+      CHECK (((category)::text = ANY ((ARRAY[
+        'compliance'::character varying,    -- failed framework controls
+        'certificate'::character varying,   -- cert lifecycle: expiry, revocation, chain
+        'crypto'::character varying,        -- weak cipher / protocol / key size
+        'pqc'::character varying,           -- quantum-vulnerable crypto needing migration
+        'vulnerability'::character varying, -- known CVE on installed software
+        'lifecycle'::character varying,     -- OS/software EOL, hardware end-of-support
+        'inventory'::character varying,     -- CI hygiene: no owner/class/location, stale, duplicate
+        'configuration'::character varying, -- insecure exposure: plaintext mgmt, default creds
+        'drift'::character varying,         -- new issuer, unexpected protocol, port-profile change
+        'operational'::character varying,   -- platform ops: sensor/agent offline, service down
+        'general'::character varying,       -- manual, anything else
+        'remediation'::character varying    -- RETIRED writer; legal for pre-split rows only
+      ])::text[])));
+  END IF;
+END $$;

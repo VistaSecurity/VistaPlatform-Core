@@ -41,6 +41,7 @@ type stubTicketStore struct {
 	getErr         error
 	updateResult   *models.Ticket
 	updateErr      error
+	deleteResult   *models.Ticket
 	deleteErr      error
 	progressResult *models.TicketProgress
 	progressErr    error
@@ -64,7 +65,9 @@ func (s *stubTicketStore) GetByID(_, _ uuid.UUID) (*models.Ticket, error) {
 func (s *stubTicketStore) Update(_, _ uuid.UUID, _ models.UpdateTicketInput) (*models.Ticket, error) {
 	return s.updateResult, s.updateErr
 }
-func (s *stubTicketStore) Delete(_, _ uuid.UUID) error { return s.deleteErr }
+func (s *stubTicketStore) Delete(_, _ uuid.UUID) (*models.Ticket, error) {
+	return s.deleteResult, s.deleteErr
+}
 func (s *stubTicketStore) GetProgress(_ uuid.UUID, _ int, _ string) (*models.TicketProgress, error) {
 	return s.progressResult, s.progressErr
 }
@@ -227,7 +230,7 @@ func TestContract_CreateTicket_201(t *testing.T) {
 	sv := loadSpec(t)
 	tk := sampleTicket()
 	eng := newTicketEngine(&stubTicketStore{createResult: &tk})
-	body := strings.NewReader(`{"title":"Rotate weak cert","category":"remediation"}`)
+	body := strings.NewReader(`{"title":"Rotate weak cert","category":"crypto"}`)
 	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/tickets", body)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
@@ -254,6 +257,101 @@ func TestContract_CreateTicket_400_malformedJSON(t *testing.T) {
 	eng := newTicketEngine(&stubTicketStore{})
 	body := strings.NewReader(`{not-json`)
 	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/tickets", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// — a closed-vocabulary field the server does not recognise is a 400
+// that NAMES the field and echoes the value, not a 500.
+//
+// Before validation moved into the handler, these values travelled all the way
+// to the DB CHECK and came back as `500 "Failed to create ticket"` — a message
+// that tells the caller nothing about which of the four closed vocabularies on
+// the payload it disliked.
+func TestContract_CreateTicket_400_unknownCategory(t *testing.T) {
+	sv := loadSpec(t)
+	// A store that would SUCCEED, so a 201 here would mean validation never ran
+	// rather than that the stub happened to fail.
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{createResult: &tk})
+	body := strings.NewReader(`{"title":"x","category":"not_a_category"}`)
+	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/tickets", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not_a_category") {
+		t.Errorf("the 400 should echo the offending value, got: %s", w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// The retired category is still legal in the DB (pre-split rows satisfy the
+// CHECK) so nothing downstream would reject it — only this validation stops a
+// new one being written, which is what makes the retirement real rather than
+// a convention.
+func TestContract_CreateTicket_400_retiredCategory(t *testing.T) {
+	sv := loadSpec(t)
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{createResult: &tk})
+	body := strings.NewReader(`{"title":"x","category":"remediation"}`)
+	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/tickets", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "retired") {
+		t.Errorf("the 400 should say the category is retired, got: %s", w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+func TestContract_CreateTicket_400_unknownPriority(t *testing.T) {
+	sv := loadSpec(t)
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{createResult: &tk})
+	body := strings.NewReader(`{"title":"x","priority":"urgent"}`)
+	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/tickets", body)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// Omitting category/priority/source entirely must still work — defaults are
+// applied before validation, so absence is not the same as an invalid value.
+func TestContract_CreateTicket_201_defaultsApplied(t *testing.T) {
+	sv := loadSpec(t)
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{createResult: &tk})
+	body := strings.NewReader(`{"title":"Only a title"}`)
+	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/tickets", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "TicketCreatedResponse", w.Body.Bytes())
+}
+
+// An update carrying no closed-vocabulary field must not be rejected: a
+// tags-only or description-only PUT changes none of them.
+func TestContract_UpdateTicket_200_noVocabularyFields(t *testing.T) {
+	sv := loadSpec(t)
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{updateResult: &tk})
+	body := strings.NewReader(`{"tags":["urgent"]}`)
+	w := do(eng, http.MethodPut, "/api/v1/compliance-engine/tickets/"+tk.ID.String(), body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "TicketUpdatedResponse", w.Body.Bytes())
+}
+
+func TestContract_UpdateTicket_400_unknownStatus(t *testing.T) {
+	sv := loadSpec(t)
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{updateResult: &tk})
+	body := strings.NewReader(`{"status":"reopened"}`)
+	w := do(eng, http.MethodPut, "/api/v1/compliance-engine/tickets/"+tk.ID.String(), body)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -335,7 +433,8 @@ func TestContract_UpdateTicket_404(t *testing.T) {
 
 func TestContract_DeleteTicket_200(t *testing.T) {
 	sv := loadSpec(t)
-	eng := newTicketEngine(&stubTicketStore{})
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{deleteResult: &tk})
 	w := do(eng, http.MethodDelete,
 		"/api/v1/compliance-engine/tickets/"+aTicketUUID, nil)
 	if w.Code != http.StatusOK {
@@ -353,6 +452,35 @@ func TestContract_DeleteTicket_404(t *testing.T) {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// — a hard delete with no audit middleware in context must still
+// SUCCEED. The contract test router mounts the handlers without the
+// audit_middleware key, which is precisely the situation the handler has to
+// tolerate: the ticket is already gone and the transaction is committed, so
+// failing the response now would report a failure that did not happen.
+//
+// The wiring that makes the entry actually get written is asserted separately,
+// against cmd/main.go, by TestAuditMiddleware_IsReachableFromHandlers — a test
+// here could only prove the handler does not crash without it.
+func TestContract_DeleteTicket_200_withoutAuditMiddleware(t *testing.T) {
+	tk := sampleTicket()
+	eng := newTicketEngine(&stubTicketStore{deleteResult: &tk})
+	w := do(eng, http.MethodDelete, "/api/v1/compliance-engine/tickets/"+aTicketUUID, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — a missing audit sink must not fail the delete; body=%s",
+			w.Code, w.Body.String())
+	}
+}
+
+// A store that reports success but returns no ticket cannot be audited. The
+// handler must not panic dereferencing it — the delete still happened.
+func TestContract_DeleteTicket_200_storeReturnsNoTicket(t *testing.T) {
+	eng := newTicketEngine(&stubTicketStore{deleteResult: nil, deleteErr: nil})
+	w := do(eng, http.MethodDelete, "/api/v1/compliance-engine/tickets/"+aTicketUUID, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
 }
 
 func TestContract_GetTicketStats_200(t *testing.T) {

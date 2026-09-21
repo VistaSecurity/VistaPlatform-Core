@@ -1,5 +1,14 @@
 # Reviewed distinct policies and canonical owners. Fingerprints pin the reviewed syntax.
 # Do not regenerate blindly: a changed exception needs a semantic review.
+packages/primitives/src/tickets/sla.ts#DEFAULT_SLA_DAYS:
+  concept: ticket_sla_policy
+  reason: Days-from-creation to a ticket's default due date, keyed by priority.
+    An operational commitment about how quickly work should happen, not a
+    judgement about how bad something is - the values are days, and they get
+    larger as severity falls, which is the opposite direction to every rating
+    ladder. Mirrors the Go map; audit-ticket-categories.mjs pins the two
+    together and checks the shortest window stays outside the due-soon window.
+  fingerprint: ef58faf943b4af6401da587f6b97595807160fa0037a6cddd5737a906af084bf
 services/admin-service/internal/jobs/catalogfeeds/nvd.go#normalizeSeverity:
   concept: external_cvss
   reason: NVD source CVSS 0..10 severity with None distinct from findings Info.
@@ -19,6 +28,13 @@ services/cbom-service/internal/xbom/ocsf.go#ocsfSeverityLabel:
   reason: OCSF numeric severity IDs map to external labels required by that
     serialization format.
   fingerprint: f0faccf9300e0222429d53bebe665b6425c78ea11664d37978ad3ba382a74d50
+services/compliance-engine/internal/models/ticket_sla.go#DefaultSLADays:
+  concept: ticket_sla_policy
+  reason: Days-from-creation to a ticket's default due date, keyed by priority.
+    Days, not a risk index; the Go copy exists because CreateTicketFromAlert
+    files tickets server-side with no UI involved. audit-ticket-categories.mjs
+    pins it to the TypeScript mirror.
+  fingerprint: f982aa17cc27e093515b9d18b5406e9f61e0c234b6178b143f60d126c2d1f26b
 services/compliance-engine/internal/services/alert_subscriber.go#handleCertificateExpiring:
   concept: certificate_expiry_policy
   reason: Days-to-expiry chooses alert urgency; it is not a numeric risk or health
@@ -88,7 +104,7 @@ frontend-v2/src/sections/dashboard/dashboard-page.tsx#DashboardPage:
   concept: dashboard_counts
   reason: Displays per-grade counts and trends; unrelated count/length comparisons
     are not a ladder.
-  fingerprint: 5eaa27d2a58c1409d70af50293a71117ab25f34ac8d12a6f1e8dd7ac85592b3e
+  fingerprint: 6d67ec8bb2969f71d399887f46a67fac9051e3e9b9dff462aa440f06588fe873
 frontend-v2/src/sections/findings/findings-page.tsx#FindingsPage:
   concept: findings_loaded_view_counts
   reason: UI comparisons and conditional labels describe row counts, filters and

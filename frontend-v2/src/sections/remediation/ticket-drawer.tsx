@@ -1,10 +1,14 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '@vistasecurity/primitives/auth';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { ticketCategory } from '@vistasecurity/primitives/tickets';
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn, DrawerShell, Icon, MetaRow, Pill, SectionLabel } from '../../components/ui';
-import { CATEGORY_ICON, PRIORITY_COLOR, SLA_META, STATUS_COLOR, dueDays, slaState, type Ticket } from './meta';
+import { PRIORITY_COLOR, SLA_META, STATUS_COLOR, dueDays, slaState, type Ticket } from './meta';
+import { TicketEditForm } from './ticket-edit';
+import { useTenantUsers } from '../findings/queries';
 import { safeHttpUrl } from '../../lib/url';
 
 // Ticket detail drawer — fields, linked items, comments, and a status advance.
@@ -18,9 +22,27 @@ const NEXT_STATUS: Record<string, { to: string; label: string }> = {
 
 export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () => void }) {
   const qc = useQueryClient();
+  const { tenant } = useAuth();
+  const [editing, setEditing] = useState(false);
   const t = ticket;
   const sla = slaState(t);
   const d = dueDays(t);
+  const cat = ticketCategory(t.category);
+
+  // The assignee is a UUID on the row. Rendering it raw showed the user a
+  // 36-character identifier where a colleague's name belongs; the member list
+  // is already cached for the picker, so this costs nothing extra.
+  const members = useTenantUsers(tenant?.id);
+  const assignee = t.assigned_to
+    ? (() => {
+        const u = (members.data ?? []).find((m) => m.id === t.assigned_to);
+        if (u) return [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email;
+        // Not "unknown": the member list may still be loading, and a former
+        // member who has left the tenant is genuinely no longer in it. Both are
+        // better described than guessed at.
+        return members.isLoading ? 'loading…' : 'a former member';
+      })()
+    : null;
 
   const commentsQ = useQuery({
     queryKey: ['remediation', 'ticket-comments', t.id],
@@ -66,10 +88,10 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
       <div style={{ padding: '18px 22px 16px', borderBottom: '1px solid var(--app-border)' }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
           <span style={{ flex: 'none', width: 34, height: 34, borderRadius: 9, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${PRIORITY_COLOR[t.priority] || 'var(--neutral)'} 12%, transparent)`, color: PRIORITY_COLOR[t.priority] || 'var(--app-t2)' }}>
-            <Icon name={CATEGORY_ICON[t.category] || 'wrench'} size={16} />
+            <Icon name={cat?.icon ?? 'wrench'} size={16} />
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="eyebrow-app">{t.category} ticket</div>
+            <div className="eyebrow-app">{cat?.label ?? t.category} ticket</div>
             <h2 style={{ margin: '4px 0 6px', fontSize: 16.5, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', lineHeight: 1.25 }}>{t.title}</h2>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
               <Pill color={STATUS_COLOR[t.status] || 'var(--app-t2)'} style={{ fontSize: 10.5 }}>{t.status.replace('_', ' ')}</Pill>
@@ -84,18 +106,27 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
           </div>
           <DrawerCloseBtn onClose={onClose} />
         </div>
-        {next && (
-          <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
+        <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
+          <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+            {next && !editing && (
+              <button
+                onClick={() => advance.mutate(next.to)}
+                disabled={advance.isPending}
+                className="ui-btn accent"
+                style={{ flex: 1, justifyContent: 'center', height: 32, fontSize: 12.5, opacity: advance.isPending ? 0.6 : 1 }}
+              >
+                <Icon name="check" size={14} />{advance.isPending ? 'Updating…' : next.label}
+              </button>
+            )}
             <button
-              onClick={() => advance.mutate(next.to)}
-              disabled={advance.isPending}
-              className="ui-btn accent"
-              style={{ width: '100%', justifyContent: 'center', marginTop: 14, height: 32, fontSize: 12.5, opacity: advance.isPending ? 0.6 : 1 }}
+              onClick={() => setEditing((e) => !e)}
+              className="ui-btn"
+              style={{ flex: next && !editing ? 'none' : 1, justifyContent: 'center', height: 32, fontSize: 12.5 }}
             >
-              <Icon name="check" size={14} />{advance.isPending ? 'Updating…' : next.label}
+              <Icon name={editing ? 'x' : 'sliders-horizontal'} size={14} />{editing ? 'Cancel' : 'Edit'}
             </button>
-          </PermissionGate>
-        )}
+          </div>
+        </PermissionGate>
         {advance.isError && <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--danger-text)' }}>Couldn't update the ticket — try again.</div>}
       </div>
 
@@ -108,15 +139,27 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
         )}
 
         <SectionLabel icon="circle-alert">Details</SectionLabel>
-        <MetaRow k="Due" v={t.due_date ? t.due_date.slice(0, 10) : 'no due date'} mono />
-        <MetaRow k="Assigned to" v={t.assigned_to as string} />
-        <MetaRow k="Source" v={t.source} />
-        <MetaRow k="Created" v={t.created_at?.slice(0, 10)} mono />
-        <MetaRow k="Updated" v={t.updated_at?.slice(0, 10)} mono />
-        {(t.tags?.length ?? 0) > 0 && (
-          <div style={{ padding: '8px 0', borderBottom: '1px solid var(--app-border)', display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-            {t.tags!.map((tag) => <span key={tag} className="mono" style={{ fontSize: 11, color: 'var(--app-t2)', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', borderRadius: 6, padding: '2px 7px' }}>{tag}</span>)}
-          </div>
+        {editing ? (
+          <TicketEditForm ticket={t} onDone={() => setEditing(false)} onDeleted={onClose} commentCount={comments.length} />
+        ) : (
+          <>
+          <MetaRow k="Due" v={t.due_date ? t.due_date.slice(0, 10) : 'no due date'} mono />
+          <MetaRow k="Assigned to" v={assignee} />
+          <MetaRow k="Source" v={t.source} />
+          <MetaRow k="Created" v={t.created_at?.slice(0, 10)} mono />
+          <MetaRow k="Updated" v={t.updated_at?.slice(0, 10)} mono />
+          {(t.tags?.length ?? 0) > 0 && (
+            <div style={{ padding: '8px 0', borderBottom: '1px solid var(--app-border)', display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+              {t.tags!.map((tag) => <span key={tag} className="mono" style={{ fontSize: 11, color: 'var(--app-t2)', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', borderRadius: 6, padding: '2px 7px' }}>{tag}</span>)}
+            </div>
+          )}
+          {t.resolution_notes && (
+            <div style={{ padding: '8px 0', borderBottom: '1px solid var(--app-border)' }}>
+              <div style={{ fontSize: 12.5, color: 'var(--app-t3)', marginBottom: 3 }}>Resolution</div>
+              <div style={{ fontSize: 12.5, color: 'var(--app-t2)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{t.resolution_notes}</div>
+            </div>
+          )}
+          </>
         )}
 
         {(t.alert_id || t.asset_id || t.certificate_id || t.finding_id || t.crypto_implementation_id || t.external_ticket_url) && (

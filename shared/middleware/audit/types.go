@@ -94,6 +94,12 @@ const (
 	EventTypeTicketCreated                 = "ticket.created"
 	EventTypeTicketUpdated                 = "ticket.updated"
 	EventTypeTicketClosed                  = "ticket.closed"
+	// Deleting a ticket is a HARD delete: the row and its comments are gone.
+	// The audit entry is therefore not a pointer to the record, it IS the
+	// record — the only place the ticket's title, category, status, assignee
+	// and links survive. Handlers writing this event must capture the ticket's
+	// content in `oldValues`, not just its id.
+	EventTypeTicketDeleted = "ticket.deleted"
 
 	// Report events
 	EventTypeReportGenerated          = "report.generated"

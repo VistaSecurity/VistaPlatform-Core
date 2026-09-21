@@ -16,17 +16,30 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router';
 import { InventoryHealthHero } from './inventory-health-hero';
-import { HYGIENE_FRAMEWORK_CODE } from './inventory-health';
+import { HERO_PENDING_QUERY, HYGIENE_FRAMEWORK_CODE } from './inventory-health';
 
-/** The hero's two query keys, spelled as the hooks spell them. */
+/** The hero's three query keys, spelled as the hooks spell them. */
 const FACET_KEY = ['inventory', 'assets', 'facets', '', 'class,status,stale_status'];
+/**
+ * The pending count comes from a SECOND, differently-scoped facet fetch.
+ *
+ * It has to: an unqueried facet call runs the asset list's default
+ * `status:monitoring` scope, under which a `pending_approval` bucket cannot
+ * exist. See HERO_PENDING_QUERY. Seeding it separately here is what makes this
+ * harness able to tell the two populations apart — the fixture below used to
+ * put `pending_approval` in the BARE status facet, which is a payload the
+ * server never returns, so the test passed on data that cannot occur while the
+ * live hero read 0.
+ */
+const PENDING_KEY = ['inventory', 'assets', 'facets', HERO_PENDING_QUERY, 'status'];
 const HYGIENE_KEY = ['posture', 'available-frameworks'];
 
 type Facets = { buckets: Record<string, { value: string; count: number; label?: string }[]>; failed: string[] };
 
-function render(facets: Facets, frameworks: unknown[]): string {
+function render(facets: Facets, frameworks: unknown[], pending: Facets = pendingFacets): string {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData(FACET_KEY, facets);
+  qc.setQueryData(PENDING_KEY, pending);
   qc.setQueryData(HYGIENE_KEY, frameworks);
   return renderToStaticMarkup(
     <QueryClientProvider client={qc}>
@@ -50,9 +63,18 @@ const healthy: Facets = {
       { value: 'hardware.computer.server', count: 30, label: 'Server' },
       { value: 'service', count: 12, label: 'Service' },
     ],
-    status: [{ value: 'monitoring', count: 48 }, { value: 'pending_approval', count: 4 }],
+    // NO `pending_approval` bucket: the bare call runs `status:monitoring`, so
+    // the server cannot return one here. That is the whole reason for the
+    // scoped fetch below.
+    status: [{ value: 'monitoring', count: 48 }],
     stale_status: [{ value: 'active', count: 52 }],
   },
+  failed: [],
+};
+
+/** What the SCOPED (`status:pending_approval`) facet call returns. */
+const pendingFacets: Facets = {
+  buckets: { status: [{ value: 'pending_approval', count: 4 }] },
   failed: [],
 };
 
@@ -79,6 +101,33 @@ describe('a count whose facet level FAILED', () => {
     // One facet failing must not blank the rail, or the hero.
     const html = render({ ...healthy, failed: ['stale_status'] }, scored);
     expect(textOf(html, 'hero-count-pending')).toBe('4');
+  });
+
+  it('dashes the pending count when ITS OWN fetch failed', () => {
+    // The pending count has a separate query now, so it needs its own polarity:
+    // the main fan-out succeeding must not make a failed pending fetch read 0.
+    const html = render(healthy, scored, { buckets: { status: [] }, failed: ['status'] });
+    expect(textOf(html, 'hero-count-pending')).toBe('—');
+  });
+});
+
+describe('the pending-approval count', () => {
+  it('comes from the SCOPED fetch, not the bare fan-out', () => {
+    // Observed live: a tenant with ten assets in Approvals showed
+    // "0 Pending approval" here, because the bare `status` facet runs the list's
+    // default `status:monitoring` scope and can never contain a
+    // `pending_approval` bucket. Reading it from there is a lookup whose answer
+    // is 0 by construction.
+    //
+    // `healthy` deliberately has no such bucket, so if the component ever goes
+    // back to reading the bare facet this prints 0 and the test fails.
+    const html = render(healthy, scored, { buckets: { status: [{ value: 'pending_approval', count: 10 }] }, failed: [] });
+    expect(textOf(html, 'hero-count-pending')).toBe('10');
+  });
+
+  it('prints a real 0 when the queue is genuinely empty', () => {
+    const html = render(healthy, scored, { buckets: { status: [] }, failed: [] });
+    expect(textOf(html, 'hero-count-pending')).toBe('0');
   });
 });
 

@@ -21,8 +21,8 @@ import { clients } from '../../lib/clients';
 import { useAssetFacets, type FacetLevel } from '../inventory/asset-queries';
 import { CLASS_GROUP_STYLES, classGroupOf } from '../inventory/map-model';
 import {
-  HERO_PENDING_HREF, HERO_STALE_QUERY, bucketCount, classSlices, hygieneScore,
-  inventoryQueryHref, totalFromClasses, type ClassSlice, type HygieneScore,
+  HERO_PENDING_HREF, HERO_PENDING_QUERY, HERO_STALE_QUERY, bucketCount, classSlices, hygieneScore,
+  inventoryQueryHref, pendingCount, totalFromClasses, type ClassSlice, type HygieneScore,
 } from './inventory-health';
 
 /**
@@ -33,6 +33,19 @@ import {
  * runtime and a permanently empty tile.
  */
 const HERO_LEVELS: readonly FacetLevel[] = ['class', 'status', 'stale_status'];
+
+/**
+ * A SECOND facet fetch, for the pending count alone.
+ *
+ * It cannot ride along with HERO_LEVELS: the facets endpoint takes one query for
+ * the whole fan-out, and this one has to name `status:pending_approval` to
+ * escape the list's default `status:monitoring` scope — while the class and
+ * stale counts above must keep that scope, because they are the numbers the
+ * Inventory list shows. Two populations, two calls, each labelled.
+ *
+ * See HERO_PENDING_QUERY for why the bare fan-out reads 0 for ever.
+ */
+const PENDING_LEVELS: readonly FacetLevel[] = ['status'];
 
 /**
  * The Inventory Hygiene score, from the same `/frameworks/available` rollup the
@@ -56,12 +69,13 @@ function useHygiene() {
 
 export function InventoryHealthHero() {
   const facets = useAssetFacets('', HERO_LEVELS);
+  const pendingFacets = useAssetFacets(HERO_PENDING_QUERY, PENDING_LEVELS);
   const hygieneQ = useHygiene();
 
   const classes = classSlices(facets.data?.buckets.class);
   const total = totalFromClasses(facets.data?.buckets.class);
   const classFailed = facets.isError || (facets.data?.failed.includes('class') ?? false);
-  const pending = facets.isError ? null : bucketCount(facets.data, 'status', 'pending_approval');
+  const pending = pendingFacets.isError ? null : pendingCount(pendingFacets.data);
   const stale = facets.isError ? null : bucketCount(facets.data, 'stale_status', 'stale');
   const hygiene = hygieneQ.isError ? null : hygieneScore(hygieneQ.data);
 

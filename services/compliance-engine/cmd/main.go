@@ -199,6 +199,20 @@ func main() {
 	auditConfig.ClientKeyPath = cfg.ClientKeyPath
 	auditConfig.PlatformCACertPath = cfg.PlatformCACertPath
 	auditMiddleware := auditmiddleware.NewMiddleware(auditConfig)
+	// Hand the middleware to handlers that write their OWN audit entry.
+	//
+	// LogRequest below records the HTTP call — method, path, status, caller.
+	// That is enough for most routes and nowhere near enough for a destructive
+	// one: after a ticket is hard-deleted, "DELETE /tickets/<uuid> 200" says
+	// something was destroyed and nothing about what. audithelpers.
+	// ExtractAuditMiddleware reads THIS key, and without the Set it returns
+	// false and every explicit entry is silently skipped — the handler still
+	// compiles, its tests still pass, and nothing is ever written.
+	// TestAuditMiddleware_IsReachableFromHandlers pins the wiring.
+	router.Use(func(c *gin.Context) {
+		c.Set("audit_middleware", auditMiddleware)
+		c.Next()
+	})
 	router.Use(auditMiddleware.LogRequest())
 
 	// CORS is handled by Traefik API gateway - no need for duplicate headers
@@ -348,14 +362,24 @@ func main() {
 		compliance.GET("/findings/statistics", workspaceHandlers.GetFindingStatistics)
 		compliance.GET("/findings/by-control", workspaceHandlers.GetFindingsByControl)
 
-		// Unified ticket management. Tickets are a unified table (categories:
-		// compliance, certificate, remediation, vulnerability, operational,
-		// general) but the handlers live here, so we gate them with
-		// compliance.update. If finer-grained ticket scoping is needed
-		// later, introduce a tickets.* permission family — that's a
-		// seed.sql + RDS migration change, deferred.
+		// Unified ticket management. Tickets are a unified table (one category
+		// per finding producer, plus certificate / operational / general —
+		// see models.TicketCategoriesWritable) but the handlers live here, so
+		// TRIAGE is gated with compliance.update.
+		//
+		// CREATE is deliberately NOT gated (owner decision). Filing a
+		// ticket is reporting, not triage: a `viewer` holds read across every
+		// operational resource, so they are exactly the person most likely to
+		// notice a problem — and requiring compliance.update to file one meant
+		// the only people who could report an issue were the people who could
+		// already fix it. Editing, deleting and commenting stay gated, so an
+		// unprivileged reporter can raise a ticket and no more.
+		//
+		// If finer-grained ticket scoping is needed later, introduce a
+		// tickets.* permission family — that's a seed.sql + RDS migration
+		// change, deferred.
 		compliance.GET("/tickets", ticketHandlers.ListTickets)
-		compliance.POST("/tickets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), ticketHandlers.CreateTicket)
+		compliance.POST("/tickets", ticketHandlers.CreateTicket)
 		compliance.GET("/tickets/stats", ticketHandlers.GetTicketStats)
 		compliance.GET("/tickets/progress", ticketHandlers.GetTicketProgress)
 		compliance.GET("/tickets/:id", ticketHandlers.GetTicket)

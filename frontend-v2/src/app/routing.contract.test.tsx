@@ -111,6 +111,13 @@ describe('tenant console route table (react-router v8)', () => {
   it.each([
     ['/', '~layout > ~layout > index'],
     ['/dashboard', '~layout > ~layout > /dashboard'],
+    // The three focused dashboards. `dashboard-nav.test.ts` guards that the
+    // registry, the rail and the router all agree on WHICH paths exist; this
+    // guards that each one resolves through the auth gate and the shell, so a
+    // dashboard cannot ship unguarded or without the nav around it.
+    ['/dashboard/assets', '~layout > ~layout > /dashboard/assets'],
+    ['/dashboard/compliance', '~layout > ~layout > /dashboard/compliance'],
+    ['/dashboard/pqc', '~layout > ~layout > /dashboard/pqc'],
     ['/about', '~layout > ~layout > /about'],
     ['/inventory', '~layout > ~layout > /inventory'],
     ['/inventory/assets/a1b2c3', '~layout > ~layout > /inventory/assets/:id'],

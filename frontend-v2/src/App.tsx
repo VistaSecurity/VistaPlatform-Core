@@ -17,6 +17,7 @@ import { InventoryPage } from './sections/inventory/inventory-page';
 import { AssetPage } from './sections/inventory/asset-page';
 import { SensorsPage } from './sections/discovery/sensors-page';
 import { PlansPage } from './sections/remediation/plans-page';
+import { ProgressPage } from './sections/remediation/progress-page';
 import { QueuePage } from './sections/remediation/queue-page';
 import { AlertsPage } from './sections/remediation/alerts-page';
 import { JobsPage } from './sections/discovery/jobs-page';
@@ -31,6 +32,9 @@ import { ObservationsPage } from './sections/discovery/observations-page';
 import { PcapPage } from './sections/discovery/pcap-page';
 import { SbomPage } from './sections/discovery/sbom-page';
 import { DashboardPage } from './sections/dashboard/dashboard-page';
+import { AssetsDashboardPage } from './sections/dashboard/assets-dashboard';
+import { ComplianceDashboardPage } from './sections/dashboard/compliance-dashboard';
+import { PqcDashboardPage } from './sections/dashboard/pqc-dashboard';
 import { SettingsPage, ProfilePage } from './sections/settings/settings-page';
 import { FindingsPage } from './sections/findings/findings-page';
 import { PosturePage } from './sections/posture/posture-page';
@@ -98,7 +102,15 @@ export default function App() {
         />
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
+          {/* Four dashboards (DASHBOARDS in sections/dashboard/dashboards.ts).
+              Overview keeps the bare path — it is the index redirect target and
+              every existing bookmark. `dashboard-nav.test.ts` joins the registry
+              against these routes and the rail, so a dashboard cannot be added
+              in one place and forgotten in the others. */}
           <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/dashboard/assets" element={<AssetsDashboardPage />} />
+          <Route path="/dashboard/compliance" element={<ComplianceDashboardPage />} />
+          <Route path="/dashboard/pqc" element={<PqcDashboardPage />} />
           <Route path="/about" element={<AboutPage />} />
 
           {/* Discovery */}
@@ -146,6 +158,7 @@ export default function App() {
           <Route path="/remediation/triage" element={<Navigate to="/remediation/alerts" replace />} />
           <Route path="/remediation/queue" element={<QueuePage />} />
           <Route path="/remediation/plans" element={<PlansPage />} />
+          <Route path="/remediation/progress" element={<ProgressPage />} />
 
           {/* Profile-dropdown surfaces */}
           <Route path="/getting-started" element={<GettingStartedPage />} />

@@ -123,12 +123,20 @@ export const HYGIENE_FRAMEWORK_CODE = 'inventory-hygiene';
  * "Not assessed": the engine has not produced a rollup yet, and it has but no
  * control could be assessed. Neither is 100%, and neither is 0.
  */
+/**
+ * `code` defaults to Inventory Hygiene, which is what this function was written
+ * for. It is a parameter because the null-handling below — a null score means
+ * BOTH "no rollup yet" and "nothing could be assessed", and is never 0 and never
+ * 100 — is the same for every framework, and the PQC dashboard reads the
+ * `pqc-readiness` row the same way. One implementation of that rule, not two.
+ */
 export function hygieneScore(
   rows: { platform_framework: { code: string }; is_licensed: boolean; preview_score?: number | null;
           controls_passing?: number | null; controls_failing?: number | null;
           controls_not_assessed?: number | null }[] | undefined,
+  code: string = HYGIENE_FRAMEWORK_CODE,
 ): HygieneScore {
-  const row = (rows ?? []).find((r) => r.platform_framework.code === HYGIENE_FRAMEWORK_CODE);
+  const row = (rows ?? []).find((r) => r.platform_framework.code === code);
   if (!row) {
     return { score: null, passing: null, failing: null, notAssessed: null, activated: false, present: false };
   }
@@ -152,6 +160,47 @@ export function hygieneScore(
  * would land there as an opaque "extra".
  */
 export const HERO_STALE_QUERY = 'stale_status:stale';
+
+/**
+ * The query that COUNTS assets awaiting approval — and the reason a plain facet
+ * call cannot.
+ *
+ * `GET /infrastructure-assets/facets` with no `query` runs the asset list's
+ * DEFAULT SCOPE, which is the single term `status:monitoring`
+ * (`defaultStatusTerm`, services/inventory-service/internal/services/
+ * asset_query.go). The server's own comment explains why: "An asset that is
+ * still pending approval is not part of inventory: every lens excludes it, and
+ * counting it here made the dashboard disagree with the list."
+ *
+ * That default is right for the list. It is fatal for this count, because it
+ * means the `status` facet can NEVER contain a `pending_approval` bucket —
+ * reading one out of an unqueried facet is a lookup whose answer is 0 by
+ * construction, whatever the tenant's actual queue looks like. Verified live on
+ *: a tenant with **10** assets in Approvals rendered "0 Pending
+ * approval" on the Dashboard hero, beside a Pending link that opened a queue
+ * with ten rows in it.
+ *
+ * That is the exact failure this file's own header warns about — a reassuring
+ * zero is what a reader takes at face value — and a tile hard-wired to 0 is
+ * also a check that cannot fail.
+ *
+ * The scope is dropped "the moment the caller says something about status", so
+ * naming the status is what makes the bucket appear. `pendingCount` below reads
+ * it back out of a facet fetched with THIS query, never a bare one.
+ */
+export const HERO_PENDING_QUERY = 'status:pending_approval';
+
+/**
+ * The pending-approval count, from a facet fetched with `HERO_PENDING_QUERY`.
+ *
+ * Deliberately not a thin alias for `bucketCount`: the whole point is that the
+ * caller must pass the RIGHT facet payload, and a differently-named function is
+ * the thing that makes a reviewer ask which one they have. Still three-valued —
+ * a failed level is null, never 0.
+ */
+export function pendingCount(facets: FacetData | undefined): number | null {
+  return bucketCount(facets, 'status', 'pending_approval');
+}
 
 /**
  * Where the "Pending approval" count links.

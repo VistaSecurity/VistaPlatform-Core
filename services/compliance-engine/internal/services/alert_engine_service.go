@@ -619,12 +619,18 @@ func (s *AlertEngineService) CreateTicketFromAlert(ctx context.Context, tenantID
 	}
 	description += "--- Alert evidence timeline (alert " + alert.ID.String() + ") ---\n" + formatAlertTimeline(evts)
 
+	// A due date, so the ticket is visible to the queue's SLA cards and to the
+	// overdue / due-soon sweep. Without one it is filed straight into the blind
+	// spot that made all of that machinery inert.
+	dueDate := models.DefaultDueDateRFC3339(ticketSeverity, time.Now())
+
 	input := models.CreateTicketInput{
 		Category:      category,
 		Title:         alert.Title,
 		Description:   &description,
 		Priority:      ticketSeverity,
 		Severity:      &ticketSeverity,
+		DueDate:       &dueDate,
 		CertificateID: certificateID,
 	}
 	ticket, err := s.ticketSvc.Create(tenantID, userID, input)

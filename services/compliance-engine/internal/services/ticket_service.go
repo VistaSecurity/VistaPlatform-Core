@@ -235,10 +235,28 @@ func (s *TicketService) Update(tenantID, ticketID uuid.UUID, input models.Update
 
 	if input.Status != nil {
 		addClause("status", *input.Status)
-		if *input.Status == "resolved" || *input.Status == "closed" {
-			now := time.Now()
-			addClause("resolved_at", now)
+		switch *input.Status {
+		case "resolved", "closed":
+			// Stamp resolved_at on the FIRST arrival at a terminal status and
+			// never again. Stamping on both used to rewrite it: the drawer's
+			// ladder is open -> in_progress -> resolved -> closed, so every
+			// ticket that got closed had its resolution time replaced by the
+			// close time -- inflating avg_resolution_hours and shifting the
+			// resolved-per-day trend on /tickets/progress by however long the
+			// ticket sat resolved-but-not-closed.
+			if existing.ResolvedAt == nil {
+				now := time.Now()
+				addClause("resolved_at", now)
+			}
 			s.clearDueDateNotificationKeys(ticketID)
+		case "open", "in_progress":
+			// Reopening. Leaving a resolved_at behind would have the ticket
+			// counted as resolved by every aggregate while it sits open. Only
+			// reachable since the drawer gained the ability to move a ticket
+			// backwards -- before that, status only ever advanced.
+			if existing.ResolvedAt != nil {
+				addClause("resolved_at", nil)
+			}
 		}
 	}
 	if input.Priority != nil {
@@ -343,29 +361,77 @@ func (s *TicketService) Update(tenantID, ticketID uuid.UUID, input models.Update
 }
 
 // Delete deletes a ticket (comments cascade)
-func (s *TicketService) Delete(tenantID, ticketID uuid.UUID) error {
+// Delete removes a ticket and RETURNS what it removed.
+//
+// The return value is not a convenience. This is a hard delete — the row goes,
+// and ticket_comments cascades with it — so the audit entry the handler writes
+// is the only place the ticket's content survives. A Delete that returned just
+// an error would leave the caller able to record an id and nothing else, and
+// "ticket <uuid> was deleted" answers none of the questions anyone asks after
+// the fact.
+//
+// Three things reference a ticket, and they behave differently on delete:
+//
+//   - ticket_comments      ON DELETE CASCADE  — the thread goes with it
+//   - remediation_plan_items ON DELETE SET NULL — the plan item survives,
+//     unlinked, which is right: the finding is still real
+//   - alerts.ticket_id     NO FK AT ALL       — handled here, explicitly
+//
+// That last one is why this is a transaction rather than one statement. With
+// no foreign key, deleting a ticket left alerts.ticket_id pointing at a row
+// that no longer exists, and the Alerts page renders a "ticket" chip from the
+// presence of that column — so the alert would go on advertising a ticket
+// nobody could open.
+//
+// The alert's own evidence timeline is deliberately NOT rewritten. Its
+// `ticket_linked` event stays: a ticket WAS linked, on that date, by that
+// person, and that remains true after the ticket is destroyed. An append-only
+// trail that quietly retracts entries is worth less than one that does not.
+// What the timeline no longer does is imply the link is live.
+func (s *TicketService) Delete(tenantID, ticketID uuid.UUID) (*models.Ticket, error) {
+	// Read the ticket first, inside the same transaction, so what is audited is
+	// what was actually deleted rather than what it looked like a moment ago.
+	existing, err := s.GetByID(tenantID, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, fmt.Errorf("ticket not found")
+	}
+
 	tx, err := s.db.BeginTxx(context.Background(), nil)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := shareddatabase.SetTenantContext(context.Background(), tx.Tx, tenantID); err != nil {
-		return err
+		return nil, err
+	}
+
+	// Drop the dangling alert pointer BEFORE the delete: after the row is gone
+	// there is nothing left to match on.
+	if _, err := tx.Exec(
+		"UPDATE alerts SET ticket_id = NULL, updated_at = NOW() WHERE ticket_id = $1 AND tenant_id = $2",
+		ticketID, tenantID,
+	); err != nil {
+		return nil, fmt.Errorf("failed to unlink alerts from ticket: %w", err)
 	}
 
 	result, err := tx.Exec("DELETE FROM tickets WHERE id = $1 AND tenant_id = $2", ticketID, tenantID)
 	if err != nil {
-		return fmt.Errorf("failed to delete ticket: %w", err)
+		return nil, fmt.Errorf("failed to delete ticket: %w", err)
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("ticket not found")
+		// Lost a race with another deleter. Rolling back is right: the alert
+		// unlink above must not survive a delete that did not happen.
+		return nil, fmt.Errorf("ticket not found")
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx: %w", err)
+		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 	s.clearDueDateNotificationKeys(ticketID)
-	return nil
+	return existing, nil
 }
 
 // List retrieves tickets with filters and pagination
@@ -533,6 +599,23 @@ func (s *TicketService) GetStats(tenantID uuid.UUID) (*models.TicketStats, error
 			return nil, err
 		}
 		stats.ByCategory[cat] = count
+	}
+
+	// Due-soon count: open work inside the window and not yet overdue. The
+	// `>= NOW()` half matters — without it every overdue ticket would be
+	// counted twice, once in each card, and the queue's "keeping pace"
+	// percentage would go negative on a backlog.
+	err = tx.QueryRow(
+		fmt.Sprintf(
+			`SELECT COUNT(*) FROM tickets
+			  WHERE tenant_id = $1
+			    AND due_date >= NOW()
+			    AND due_date < NOW() + INTERVAL '%d days'
+			    AND status NOT IN ('resolved','closed')`, models.DueSoonDays),
+		tenantID,
+	).Scan(&stats.DueSoon)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get due-soon count: %w", err)
 	}
 
 	// Overdue count

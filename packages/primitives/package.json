@@ -20,7 +20,8 @@
     "./findings": "./src/findings/index.ts",
     "./shared": "./src/shared/index.ts",
     "./query": "./src/query/index.ts",
-    "./ratings": "./src/ratings/index.ts"
+    "./ratings": "./src/ratings/index.ts",
+    "./tickets": "./src/tickets/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

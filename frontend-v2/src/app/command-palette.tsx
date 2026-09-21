@@ -31,6 +31,7 @@ import { clients } from '../lib/clients';
 import { Icon } from '../components/ui';
 import { ServerQueryErrors } from '../sections/inventory/query-editor';
 import { INVENTORY_LENSES } from '../sections/inventory/lenses';
+import { DASHBOARDS } from '../sections/dashboard/dashboards';
 import {
   KIND_ICON, KIND_LABEL, assetItem, classesOfAssets, inventoryQueryLink, inventorySearchLink,
   matchingClasses, relationshipItem, sectionsOf,
@@ -51,6 +52,24 @@ export type { CommandItem, ResultKind };
  * Sub-lenses (TLS/SSH under Configuration) are left out: the palette lists
  * places, and those are filters of one.
  */
+/**
+ * The four dashboards, from the dashboard registry.
+ *
+ * Overview keeps the plain label "Dashboard" — it is the bare `/dashboard`
+ * route and what someone typing "dash" is looking for — while the three focused
+ * pages are prefixed, matching how the palette already prefixes Discovery and
+ * Risk & Compliance sub-pages. The sublabel carries the question each page
+ * answers, and the palette matches on label AND sublabel, so typing "quantum"
+ * finds the PQC dashboard even though that word is not in its name.
+ */
+export const DASHBOARD_NAV_ITEMS: CommandItem[] = DASHBOARDS.map((d) => ({
+  id: `nav-dash-${d.key}`,
+  kind: 'nav' as const,
+  label: d.key === 'overview' ? 'Dashboard' : `Dashboard · ${d.label}`,
+  sublabel: d.sublabel,
+  to: d.path,
+}));
+
 export const LENS_NAV_ITEMS: CommandItem[] = INVENTORY_LENSES
   .filter((l) => l.primary)
   .map((l) => ({
@@ -66,7 +85,11 @@ export const LENS_NAV_ITEMS: CommandItem[] = INVENTORY_LENSES
 // Static quick-jump targets — frontend-v2 5-section IA. Shown when the query is
 // empty, and also filtered by the typed query (so "post" finds Posture).
 export const NAV_ITEMS: CommandItem[] = [
-  { id: 'nav-dashboard', kind: 'nav', label: 'Dashboard', sublabel: 'Health overview', to: '/dashboard' },
+  // Derived from the dashboard registry, not restated: a hand-written map of
+  // the product goes stale the first time a room is added, silently, because
+  // nothing fails when it does. `command-palette.nav.test.ts` already guards
+  // the Inventory half of this join; `dashboard-nav.test.ts` guards this one.
+  ...DASHBOARD_NAV_ITEMS,
   { id: 'nav-inventory', kind: 'nav', label: 'Inventory', sublabel: 'Assets, certificates, keys, configurations', to: '/inventory' },
   ...LENS_NAV_ITEMS,
   { id: 'nav-posture', kind: 'nav', label: 'Risk & Compliance · Posture', sublabel: 'Compliance posture & frameworks', to: '/risk-compliance/posture' },

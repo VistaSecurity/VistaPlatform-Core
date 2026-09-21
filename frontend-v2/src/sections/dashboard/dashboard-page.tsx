@@ -179,7 +179,10 @@ export function DashboardPage() {
     { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: DASHBOARD_UNSCORED_ASSETS_ROUTE, error: false },
     { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration', error: pqc.isError },
     { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration', error: pqc.isError },
-    { id: 'tick', count: tkOverdue, label: 'Overdue tickets', sub: 'past SLA', icon: 'wrench', tone: ORANGE, route: '/remediation/plans', error: tickets.isError },
+    // The Queue, not Plans: this card counts overdue TICKETS, and Plans is a
+    // different object (grouped findings). Clicking an overdue-ticket count and
+    // landing on a plans grid gives you no way to reach what you clicked.
+    { id: 'tick', count: tkOverdue, label: 'Overdue tickets', sub: 'past SLA', icon: 'wrench', tone: ORANGE, route: '/remediation/queue', error: tickets.isError },
   ];
 
   return (

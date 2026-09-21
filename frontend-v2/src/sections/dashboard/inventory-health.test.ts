@@ -13,8 +13,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from '@vistasecurity/primitives/query';
 import {
-  HERO_CLASS_LIMIT, HERO_PENDING_HREF, HERO_STALE_QUERY, HYGIENE_FRAMEWORK_CODE,
-  bucketCount, classSlices, hygieneScore, inventoryQueryHref, totalFromClasses,
+  HERO_CLASS_LIMIT, HERO_PENDING_HREF, HERO_PENDING_QUERY, HERO_STALE_QUERY, HYGIENE_FRAMEWORK_CODE, bucketCount, classSlices, hygieneScore, inventoryQueryHref, pendingCount, totalFromClasses,
 } from './inventory-health';
 import type { FacetData } from '../inventory/asset-queries';
 
@@ -204,5 +203,54 @@ describe('where the hero links', () => {
     // "and everything beneath it in the taxonomy" for the same reason.
     const hero = readFileSync(new URL('./inventory-health-hero.tsx', import.meta.url), 'utf8');
     expect(hero).toContain('inventoryQueryHref(`class:${slice.path}`)');
+  });
+});
+
+// --------------------------------------------------------------------------
+// The pending-approval count, and why it cannot come from a bare facet call.
+//
+// Observed on a live deployment,: a tenant with TEN assets in
+// Approvals rendered "0 Pending approval" on the Dashboard hero, beside a
+// Pending link that opened a queue with ten rows in it.
+//
+// The cause is structural rather than arithmetic, which is why nothing here
+// caught it: `GET /infrastructure-assets/facets` with no `query` runs the asset
+// list's default scope, the single term `status:monitoring`. Under that scope a
+// `pending_approval` bucket cannot exist, so reading one out is a lookup whose
+// answer is 0 by construction — a tile hard-wired to reassure.
+describe('the pending-approval count', () => {
+  it('names the status, which is what drops the default scope', () => {
+    // The server drops `status:monitoring` "the moment the caller says
+    // something about status". If this query stops mentioning status, the
+    // default comes back and the count silently returns to 0 for ever.
+    expect(HERO_PENDING_QUERY).toContain('status:');
+    expect(HERO_PENDING_QUERY).toContain('pending_approval');
+  });
+
+  it('reads the count out of a facet fetched with that query', () => {
+    const scoped = {
+      buckets: { status: [{ value: 'pending_approval', count: 10 }] },
+      failed: [],
+    } as unknown as FacetData;
+    expect(pendingCount(scoped)).toBe(10);
+  });
+
+  it('would read ZERO from the bare fan-out — the bug, pinned', () => {
+    // This is what the endpoint actually returns with no query on a tenant
+    // whose queue holds ten assets: one bucket, monitoring, and no
+    // pending_approval bucket at all. Asserted so that anyone tempted to drop
+    // the second fetch and read `pending_approval` off the main facets again
+    // can see exactly what they would get.
+    const bare = {
+      buckets: { status: [{ value: 'monitoring', count: 25 }] },
+      failed: [],
+    } as unknown as FacetData;
+    expect(pendingCount(bare)).toBe(0);
+  });
+
+  it('stays three-valued: a failed level is null, not zero', () => {
+    const broken = { buckets: { status: [] }, failed: ['status'] } as unknown as FacetData;
+    expect(pendingCount(broken)).toBeNull();
+    expect(pendingCount(undefined)).toBeNull();
   });
 });
