@@ -291,14 +291,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # seed.sql is not committed under charts/ (see CLAUDE.md); the release is
-      # where it gets copied in. Without this the chart installs a schema and
-      # silently seeds nothing, and every lookup table comes up empty.
+      # seed.sql is not committed under charts/ (see CLAUDE.md). Stage both
+      # SQL files without whole-line comments so Helm's release Secret stays
+      # below Kubernetes' 1 MiB limit; the tracked schema mirror stays exact.
       - name: Stage schema and seed into the chart
-        run: |
-          mkdir -p charts/vistaplatform/files/schema
-          cp scripts/database/schema.sql charts/vistaplatform/files/schema/schema.sql
-          cp scripts/database/seed.sql   charts/vistaplatform/files/schema/seed.sql
+        run: scripts/stage-chart-sql.sh
 
       - name: Stamp the version from the tag
         run: |
