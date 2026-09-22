@@ -185,6 +185,7 @@ func (s *StorageEncryptionService) DiscoverS3BucketEncryption(ctx context.Contex
 // DiscoverRDSEncryption discovers encryption configuration for RDS instances
 func (s *StorageEncryptionService) DiscoverRDSEncryption(ctx context.Context, tenantID uuid.UUID, awsClient *awsclient.Client, regions []string) ([]models.Device, error) {
 	var devices []models.Device
+	var regionErrs []error
 
 	for _, region := range regions {
 		cfg := awsClient.GetConfig()
@@ -196,7 +197,13 @@ func (s *StorageEncryptionService) DiscoverRDSEncryption(ctx context.Context, te
 		for paginator.HasMorePages() {
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
+				// Recorded and returned, not only logged ( slice E).
+				// This `break` meant a region that denied rds:DescribeDBInstances
+				// returned no devices and no error, and the job reported
+				// "0 databases" with `success: true` — indistinguishable from
+				// an account with no RDS instances.
 				log.Printf("Warning: failed to list RDS instances in %s: %v", region, err)
+				regionErrs = append(regionErrs, fmt.Errorf("%s: %w", region, err))
 				break
 			}
 
@@ -273,7 +280,9 @@ func (s *StorageEncryptionService) DiscoverRDSEncryption(ctx context.Context, te
 		}
 	}
 
-	return devices, nil
+	// Devices AND error: the regions that answered are still returned, so one
+	// denied region does not discard the rest.
+	return devices, errors.Join(regionErrs...)
 }
 
 // resolveBucketRegion returns the bucket's home region.

@@ -27,8 +27,9 @@ import { useAssetImpact, useAssetNeighbourhood } from './relationship-queries';
 import { SOURCE_KIND_HELP, SOURCE_KIND_LABEL, TYPE_HELP } from './relationships';
 import {
   CLASS_GROUP_STYLES, IMPACT_DIMMED_OPACITY, STATUS_RING_COLOR, STATUS_RING_HELP,
-  buildImpactOverlay, buildMapGraph, canvasState, capGraph, classGroupOf, impactOverlayHeadline,
-  impactTint, legendFor, nodeAriaLabel, selectionAfterNodeChanges, statusRing, truncationNotice,
+  assetNodeCount, buildImpactOverlay, buildMapGraph, canvasState, capGraph, classGroupOf,
+  impactOverlayHeadline, impactTint, isAssetNode, legendFor, nodeAriaLabel,
+  selectionAfterNodeChanges, statusRing, truncationNotice, withCloudScopeRoots,
   type MapEdge, type MapGraph, type MapNode,
 } from './map-model';
 import {
@@ -92,15 +93,23 @@ const HANDLE_POSITION: Readonly<Record<HandleSide, Position>> = {
 const AssetNode = memo(function AssetNode({ data }: NodeProps<Node<AssetNodeData>>) {
   const { node, focused, selected, dimmed, tintStrength, impactDepth, handles } = data;
   const style = CLASS_GROUP_STYLES[node.group];
+  const isAsset = isAssetNode(node);
   const ring = statusRing(node.status);
   const tinted = impactDepth !== null && tintStrength > 0;
+  // A scope box has no lifecycle, so it gets no status ring and no status line
+  // in its tooltip. `statusRing('')` is `muted`, whose help text reads
+  // "Archived, denied, or otherwise not in service" — true of no region ever.
+  const ringColor = isAsset ? STATUS_RING_COLOR[ring] : 'transparent';
+  const boxTitle = isAsset
+    ? `${node.label}${node.classLabel ? ` · ${node.classLabel}` : ''}\n${STATUS_RING_HELP[ring]}`
+    : `${style.label} ${node.label}\n${node.classLabel}\nGroups the assets below it. Not an asset itself.`;
 
   return (
     <div
       data-testid="map-node"
       data-group={node.group}
       data-status-ring={ring}
-      title={`${node.label}${node.classLabel ? ` · ${node.classLabel}` : ''}\n${STATUS_RING_HELP[ring]}`}
+      title={boxTitle}
       style={{
         width: NODE_WIDTH,
         height: NODE_HEIGHT,
@@ -116,7 +125,9 @@ const AssetNode = memo(function AssetNode({ data }: NodeProps<Node<AssetNodeData
           : 'var(--app-panel2)',
         // Class is the fill/left bar, status is the ring. Two channels, because
         // a pending server has to still read as a server.
-        border: `${focused ? 2 : 1}px solid ${focused ? style.color : 'var(--app-border2)'}`,
+        // Dashed for a scope box: it is a frame the client drew, not a thing
+        // the inventory holds, and one glance should say so.
+        border: `${focused ? 2 : 1}px ${isAsset ? 'solid' : 'dashed'} ${focused ? style.color : 'var(--app-border2)'}`,
         outline: selected ? '2px solid var(--accent)' : 'none',
         outlineOffset: 2,
         boxShadow: focused ? `0 0 0 4px color-mix(in srgb, ${style.color} 18%, transparent)` : 'none',
@@ -131,7 +142,7 @@ const AssetNode = memo(function AssetNode({ data }: NodeProps<Node<AssetNodeData
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           background: `color-mix(in srgb, ${style.color} 16%, transparent)`,
           // The status ring: a coloured circle around the class icon.
-          boxShadow: `0 0 0 2px ${STATUS_RING_COLOR[ring]}`,
+          boxShadow: `0 0 0 2px ${ringColor}`,
         }}
       >
         <Icon name={style.icon} size={14} style={{ color: style.color }} />
@@ -432,6 +443,7 @@ function NodePanel({ node, edges, onClose, onFocus, fullScreen }: {
   fullScreen: boolean;
 }) {
   const style = CLASS_GROUP_STYLES[node.group];
+  const isAsset = isAssetNode(node);
   const ring = statusRing(node.status);
   const attached = edges.filter((e) => e.source === node.id || e.target === node.id);
 
@@ -449,7 +461,7 @@ function NodePanel({ node, edges, onClose, onFocus, fullScreen }: {
             width: 28, height: 28, borderRadius: 8, flexShrink: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: `color-mix(in srgb, ${style.color} 16%, transparent)`,
-            boxShadow: `0 0 0 2px ${STATUS_RING_COLOR[ring]}`,
+            boxShadow: `0 0 0 2px ${isAsset ? STATUS_RING_COLOR[ring] : 'transparent'}`,
           }}
         >
           <Icon name={style.icon} size={15} style={{ color: style.color }} />
@@ -457,15 +469,29 @@ function NodePanel({ node, edges, onClose, onFocus, fullScreen }: {
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', wordBreak: 'break-word' }}>{node.label}</div>
           <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
-            {node.classLabel || style.label} · {node.status || 'status unknown'}
+            {isAsset
+              ? `${node.classLabel || style.label} · ${node.status || 'status unknown'}`
+              : `${style.label} · ${node.classLabel}`}
           </div>
         </div>
         <button className="ui-btn sm ghost" onClick={onClose} title="Close"><Icon name="x" size={12} /></button>
       </div>
 
+      {!isAsset && (
+        // No actions, and a line saying why. A region is a scoping attribute
+        // ( D6), not an asset: there is no page to open and no
+        // neighbourhood to redraw around it. Saying so beats two greyed-out
+        // buttons that look like a permissions problem.
+        <div data-testid="map-scope-panel-note" style={{ fontSize: 11.5, color: 'var(--app-t3)', padding: '0 14px 11px', lineHeight: 1.55 }}>
+          A {style.label.toLowerCase()} is recorded on each asset, not inventoried on its own — there is
+          no asset page for it. It is drawn here so its resources have somewhere to sit.
+        </div>
+      )}
+
+      {isAsset && (
       <div style={{ display: 'flex', gap: 6, padding: '0 14px 11px', flexWrap: 'wrap' }}>
         <Link
-          to={`/inventory/assets/${node.id}`}
+          to={`/inventory/assets/${node.assetId ?? node.id}`}
           className="ui-btn sm"
           style={{ textDecoration: 'none', fontSize: 12 }}
           // The full-screen map has no rail to come back to, so the asset page
@@ -476,11 +502,12 @@ function NodePanel({ node, edges, onClose, onFocus, fullScreen }: {
           <Icon name="external-link" size={12} />Open asset
         </Link>
         {!node.isRoot && (
-          <button className="ui-btn sm" onClick={() => onFocus(node.id)} title="Redraw the neighbourhood around this asset" style={{ fontSize: 12 }}>
+          <button className="ui-btn sm" onClick={() => onFocus(node.assetId ?? node.id)} title="Redraw the neighbourhood around this asset" style={{ fontSize: 12 }}>
             <Icon name="crosshair" size={12} />Focus here
           </button>
         )}
       </div>
+      )}
 
       {node.riskScore !== undefined && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t3)', padding: '0 14px 10px' }}>
@@ -562,7 +589,11 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   const graph = useMemo(() => {
     const built = buildMapGraph(nbh.data);
     if (!nbh.data) return built;
-    return capGraph(built, nbh.data.node_cap, nbh.data.edge_cap);
+    // Capped FIRST, then rooted. The caps are about assets and the totals the
+    // truncation banner quotes come from the server, which has never heard of a
+    // grouping node — synthesising the account and region boxes before the cap
+    // would let scaffolding push real assets out of the graph.
+    return withCloudScopeRoots(capGraph(built, nbh.data.node_cap, nbh.data.edge_cap));
   }, [nbh.data]);
 
   // The expensive step, memoised on exactly what changes it. Hovering an edge,
@@ -588,16 +619,21 @@ function AssetMapViewInner(props: AssetMapViewProps) {
       draggable: false,
       // The class, the ring and the tint are all colour; none of them reach a
       // screen reader on their own, and the default announcement is "node".
-      ariaLabel: nodeAriaLabel(n, tint.depth),
+      ariaLabel: nodeAriaLabel(n, isAssetNode(n) ? tint.depth : null),
       // `button` rather than the default `group`: Enter and Space activate it.
-      ariaRole: 'button',
+      // A grouping node has no panel to open, so it announces as an image
+      // rather than promising an action that does nothing.
+      ariaRole: isAssetNode(n) ? 'button' : 'img',
       data: {
         node: n,
         focused: n.isRoot,
         selected: n.id === selectedId,
-        dimmed: !!overlay && !tint.inImpact,
-        tintStrength: tint.strength,
-        impactDepth: tint.depth,
+        // A grouping node is never dimmed by the impact overlay. It is not an
+        // asset, so it cannot be in or out of a blast radius, and dimming it as
+        // "not affected" would answer a question nobody asked about a region.
+        dimmed: !!overlay && isAssetNode(n) && !tint.inImpact,
+        tintStrength: isAssetNode(n) ? tint.strength : 0,
+        impactDepth: isAssetNode(n) ? tint.depth : null,
         handles,
       },
     };
@@ -651,9 +687,16 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   const edgeById = useMemo(() => new Map(graph.edges.map((e) => [e.id, e])), [graph.edges]);
   const selectedNode = useMemo(() => graph.nodes.find((n) => n.id === selectedId) ?? null, [graph.nodes, selectedId]);
   const legend = useMemo(() => legendFor(graph), [graph]);
+  // Assets and STORED edges only: the banner's "of N" comes from the server's
+  // own totals, so counting the derived scope boxes and their lines here would
+  // have a complete graph claim to be showing more than exists.
+  const shownCounts = useMemo(() => ({
+    nodes: assetNodeCount(graph),
+    edges: graph.edges.reduce((n, e) => (e.synthetic ? n : n + 1), 0),
+  }), [graph]);
   const truncation = useMemo(
-    () => truncationNotice(nbh.data, { nodes: graph.nodes.length, edges: graph.edges.length }),
-    [nbh.data, graph.nodes.length, graph.edges.length],
+    () => truncationNotice(nbh.data, shownCounts),
+    [nbh.data, shownCounts],
   );
 
   // Read off the graph rather than fetched separately: the neighbourhood
@@ -883,12 +926,21 @@ function AssetMapViewInner(props: AssetMapViewProps) {
             >
               <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--app-t1)' }}>{hoverEdge.edge.label}</div>
               <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 2, lineHeight: 1.5 }}>
-                {SOURCE_KIND_LABEL[hoverEdge.edge.sourceKind]} — {SOURCE_KIND_HELP[hoverEdge.edge.sourceKind]}
-                <br />
-                Confidence <span className="mono">{hoverEdge.edge.confidence.toFixed(2)}</span>
-                {' · '}seen <span className="mono">{hoverEdge.edge.observationCount}×</span>
-                <br />
-                First {shortDate(hoverEdge.edge.firstSeenAt)} · last {shortDate(hoverEdge.edge.lastSeenAt)}
+                {hoverEdge.edge.synthetic ? (
+                  // No provenance block: there is no stored relationship here,
+                  // so a confidence and an observation count would be numbers
+                  // about nothing.
+                  <>Drawn from the asset&rsquo;s recorded cloud account and region. Not a stored relationship — nothing observed it.</>
+                ) : (
+                  <>
+                    {SOURCE_KIND_LABEL[hoverEdge.edge.sourceKind]} — {SOURCE_KIND_HELP[hoverEdge.edge.sourceKind]}
+                    <br />
+                    Confidence <span className="mono">{hoverEdge.edge.confidence.toFixed(2)}</span>
+                    {' · '}seen <span className="mono">{hoverEdge.edge.observationCount}×</span>
+                    <br />
+                    First {shortDate(hoverEdge.edge.firstSeenAt)} · last {shortDate(hoverEdge.edge.lastSeenAt)}
+                  </>
+                )}
                 {hoverEdge.edge.pending && (
                   <>
                     <br />

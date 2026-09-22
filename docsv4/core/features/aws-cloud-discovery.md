@@ -237,7 +237,27 @@ Choose the resource types, and — if any regional type is selected — the regi
 
 The service creates a discovery job, enumerates and interrogates the resources, and writes discoveries to the `sensor_discoveries` table — the same pipeline sensor discoveries use. Each discovery carries its `cloud_provider` and `cloud_region`, so cloud resources are grouped into per-region cloud network segments.
 
-### 5. Review and approve
+### 5. Reading the result: "found nothing" vs "could not look"
+
+**UI:** Discovery → Discovery Jobs → click the job.
+
+The job's detail lists **every resource type the run asked for**, and says which of four things happened to it:
+
+| What you see | What it means |
+|---|---|
+| **Collected** — *n* found | The type was read successfully and there are *n* of them. |
+| **Collected** — none in this account | The type was read successfully and there are none. A real zero. |
+| **Partly collected** — *n* found in 1 of 3 regions | Some regions answered and some did not. The count is only what the working regions returned. |
+| **Could not collect** — not measured | Nothing is known about this type. It is **not** a zero. |
+| **Not collected** | You asked for a type this platform does not collect for this provider, so nothing looked. |
+
+A failed type shows the region it failed in, the provider's own error code (`AccessDeniedException`, `ThrottlingException`, …) and what to do about it — a denial needs an IAM change, a throttle needs a re-run. The provider's message is stored with secret-shaped values stripped out.
+
+The banner above the list gives the run's verdict: **complete** (everything requested was read), **partly collected**, or **nothing could be collected**. Only a *complete* run reports `success: true`, so a discovery whose KMS permission was revoked can no longer look like a clean run that found no keys.
+
+If the integration has account-wide compute enumeration switched off, or enumeration could not run, the job detail says so rather than leaving the instance and VPC counts silently at zero.
+
+### 6. Review and approve
 
 **UI:** Discovery → Approvals.
 
@@ -369,8 +389,8 @@ S3 and CloudFront are listed account-wide and are enumerated once regardless of 
 
 ## Error Handling
 
-- **API errors** — logged and non-fatal; discovery continues with the other resources.
-- **Permission errors** — reported in the job status and the device connection status for the TLS front-end types. For **KMS, S3 and RDS** they are not: see Limitations.
+- **API errors** — non-fatal. One resource type that fails never stops the others, and whatever the run did collect is kept.
+- **Permission errors** — recorded against the resource type and the region they happened in, and shown on **Discovery → Discovery Jobs → the job**. See [Reading the result](#reading-the-result-found-nothing-vs-could-not-look).
 - **Retries and throttling** — the platform does not configure its own retry or backoff policy. It uses the AWS SDK for Go v2 **standard retryer defaults**: up to 3 attempts per request, exponential backoff with jitter capped at 20 seconds, applied to throttling responses (`Throttling`, `TooManyRequestsException`, `SlowDown`, …), request timeouts and HTTP 500/502/503/504, governed by a retry-token quota that stops a storm of retries. Requests that exhaust their attempts surface as ordinary API errors. There is no platform-level pacing across a run.
 
 ## Security Considerations
@@ -442,9 +462,9 @@ Read this section before drawing conclusions from a run.
 
 **You can run KMS discovery, but you cannot yet browse the results as a key inventory in the tenant UI.** Discovered KMS keys are written to a separate `kms_keys` table that no page in the tenant UI reads. The keys do appear as devices on Discovery → Devices and as `service`-type Infrastructure Assets, but Inventory → Keys is a different inventory and does not show them; there is no view today that lists key spec, rotation status or rotation age for your KMS estate. Do not plan a KMS rotation review around this feature yet.
 
-### "No results" can mean "no permission"
+### Azure and GCP runs do not report per-type outcomes yet
 
-KMS, S3 and RDS discovery failures — including a missing IAM grant — are logged as warnings and the job **still reports success with zero results for that type**. If a type comes back empty, verify your IAM policy before concluding you have no resources of that type. The load-balancer, API Gateway and CloudFront paths do fail the job on a permission error, so this asymmetry applies only to the three at-rest types.
+The per-resource-type outcome described under [Reading the result](#reading-the-result-found-nothing-vs-could-not-look) is recorded for **AWS** discoveries. An Azure or GCP job's detail shows no Resource types section at all — which means "not reported", not "everything succeeded". Until it is extended, treat an empty Azure or GCP result the way you had to treat every cloud result before: verify permissions before concluding there is nothing there.
 
 ### S3 and RDS records are not reachable endpoints
 

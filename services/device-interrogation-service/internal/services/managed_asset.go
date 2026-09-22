@@ -104,6 +104,17 @@ const deviceTypeKey = "device_type"
 // "sensor" and lose its buttons.
 const deviceDiscoveryMethodKey = "device_discovery_method"
 
+// cloudIntegrationIDKey records WHICH cloud integration read a resource, inside
+// the device metadata map.
+//
+// It is provenance, not a credential reference. Cloud discovery used to leave
+// this fact in `asset_credentials.credential_id`, which was the only thing that
+// row ever held for a cloud resource — no username, no password. Cloud
+// discovery no longer writes a credentials row at all (nothing discovered
+// through a cloud API is a managed device), so the fact lives here instead of
+// being lost.
+const cloudIntegrationIDKey = "cloud_integration_id"
+
 // sourceManual is the producer reference for a value a person typed into the
 // Devices form. `user:<id>` would be better and is what ADR-0003 D3 names, but
 // the service layer is not handed the acting user; the handler is. Widening

@@ -4863,6 +4863,10 @@ export interface components {
             class_key?: string;
             asset_status?: string;
             risk_score?: number;
+            /** @description The cloud account, subscription or project the resource belongs to, from the `cloud.account_id` fact. A SCOPING ATTRIBUTE, not an asset class: there is no account asset, and the map renders it as a grouping node. ABSENT when nothing recorded one — never "", because an asset with no account must not be drawn under a fabricated one. */
+            cloud_account?: string;
+            /** @description The provider region as the provider names it, from the `cloud.region` fact. `global` is a legitimate value for a genuinely global resource such as a CDN distribution. ABSENT when nothing recorded one. */
+            cloud_region?: string;
             /** @description The SHORTEST hop count from the root, so a node reachable by several routes is placed once, at the distance a person would say it is. */
             depth: number;
             /** @description Present on the neighbourhood; the impact closure excludes its own root. */
@@ -5276,6 +5280,13 @@ export interface components {
             format?: string;
             algorithm_ref?: string;
             secured_by?: string;
+            /**
+             * @description Who holds the key. ABSENT means custody was not established — never read an absent value as either answer (the same three-valued honesty as the Data Protection lens's custody-unknown rung).
+             * @enum {string}
+             */
+            key_custody?: "customer" | "provider";
+            /** @description The provider's own fully-qualified name for a cloud-held key (a KMS ARN, a Key Vault key id, a Cloud KMS resource name). Absent on keys derived from a certificate. */
+            external_ref?: string;
             /** Format: date-time */
             activation_date?: string;
             /** Format: date-time */
@@ -5401,11 +5412,14 @@ export interface components {
             pqc_implementations: number;
             readiness_percent: number;
         };
-        /** @description Per-algorithm-family quantum readiness (models.PQCFamilyStats). */
+        /** @description Per-algorithm-family quantum readiness (models.PQCFamilyStats). One row per family: `family` identifies the row, and the flags answer for the family as a whole. An algorithm family can span several CycloneDX primitives (AES is ae, block-cipher and mac; SHA-2 is hash and mac) and the breakdown does not report the primitive, so a consumer may key by family name. */
         PQCFamilyStats: {
             family: string;
+            /** @description Distinct crypto configurations using this family. A configuration linked to two members of the same family counts once. */
             count: number;
+            /** @description True only if every algorithm used under this family is post-quantum. */
             is_pqc: boolean;
+            /** @description True only if EVERY algorithm used under this family is quantum-safe; one Shor-breakable member puts the whole family on the migration worklist. Same precedence as the per-configuration classification. */
             quantum_safe: boolean;
             /** @description Recommended PQC target; omitted when none. */
             migrate_to?: string;
@@ -5423,7 +5437,7 @@ export interface components {
             unclassified: number;
             /** @description (pqc_ready + symmetric_safe) / total_implementations, as a percentage. */
             pqc_percentage: number;
-            /** @description Per-family breakdown; null when the tenant has no crypto. */
+            /** @description Per-family breakdown, at most one row per family, largest first; null when the tenant has no crypto. Same population as total_implementations — configurations on a live, monitoring asset. */
             by_family: components["schemas"]["PQCFamilyStats"][] | null;
         };
         /** @description Envelope for GET /pqc/progress — `{ "progress": {...} }`. */

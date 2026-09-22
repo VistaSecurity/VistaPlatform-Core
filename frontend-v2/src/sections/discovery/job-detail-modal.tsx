@@ -12,6 +12,15 @@ import type { deviceInterrogationComponents } from '@vistasecurity/api-contract'
 import { Modal } from '../../components/ui';
 import { jobMeta, relTime, durationFmt, shortId, deviceTypeLabel } from './kit';
 import { useJobResults } from './queries';
+import {
+  failureLine,
+  hasResourceOutcomes,
+  outcomeView,
+  resourceTypeLabel,
+  runBanner,
+  type OutcomeTone,
+  type ResourceTypeOutcome,
+} from './cloud-outcomes';
 
 type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
 type ResultAsset = deviceInterrogationComponents['schemas']['JobResultAsset'];
@@ -77,6 +86,60 @@ function Counts({ total, withCrypto, materialized }: { total: number; withCrypto
           {t.hint && <div style={{ fontSize: 10.5, color: t.color ?? MUTED }}>{t.hint}</div>}
         </div>
       ))}
+    </div>
+  );
+}
+
+const TONE_COLOR: Record<OutcomeTone, string> = {
+  ok: OK,
+  warn: 'var(--warn)',
+  danger: DANGER,
+  muted: MUTED,
+};
+
+/**
+ * Per-resource-type outcome of a cloud discovery ( slice E).
+ *
+ * The one thing this section must never do is render "we looked and found
+ * nothing" the same way as "we could not look". Every row says which it is, and
+ * a type that failed carries the provider's own reason plus what to do about
+ * it — an AccessDenied is an IAM change, a throttle is a re-run.
+ */
+function ResourceTypes({ types }: { types: ResourceTypeOutcome[] }) {
+  return (
+    <div className="panel" style={{ padding: 0, borderRadius: 10, overflow: 'hidden' }} role="list" aria-label="Resource type outcomes">
+      {types.map((t, i) => {
+        const v = outcomeView(t);
+        const color = TONE_COLOR[v.tone];
+        return (
+          <div key={t.resource_type} role="listitem" style={{ padding: '9px 12px', borderTop: i ? '1px solid var(--app-border)' : 'none' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', minWidth: 170 }}>
+                {resourceTypeLabel(t.resource_type)}
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  padding: '1px 7px',
+                  borderRadius: 20,
+                  border: `1px solid ${color}`,
+                  color,
+                  flex: 'none',
+                }}
+              >
+                {v.label}
+              </span>
+              <span style={{ fontSize: 11.5, color: v.tone === 'ok' ? 'var(--app-t2)' : color }}>{v.detail}</span>
+            </div>
+            {(t.failures ?? []).map((f, j) => (
+              <div key={j} className="mono" style={{ fontSize: 10.5, color: 'var(--danger-text)', marginTop: 3, wordBreak: 'break-word' }}>
+                {failureLine(f)}
+              </div>
+            ))}
+            {v.action && <div style={{ fontSize: 11, color: MUTED, marginTop: 3 }}>{v.action}</div>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -159,6 +222,8 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
     errors?: Array<{ stage?: string; message?: string; count?: number }>;
   };
   const errors = processing?.errors ?? [];
+  const resourceTypes = res?.resource_types;
+  const banner = hasResourceOutcomes(resourceTypes) ? runBanner(res?.outcome, resourceTypes) : undefined;
 
   return (
     <Modal
@@ -206,6 +271,38 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
               </div>
             )}
           </Section>
+
+          {hasResourceOutcomes(resourceTypes) && (
+            <Section title="Resource types">
+              {banner && (
+                <div
+                  style={{
+                    marginBottom: 10,
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: `color-mix(in srgb, ${TONE_COLOR[banner.tone]} 10%, transparent)`,
+                    border: `1px solid ${TONE_COLOR[banner.tone]}`,
+                    fontSize: 11.5,
+                    color: 'var(--app-t1)',
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>{banner.title}</div>
+                  {banner.body}
+                </div>
+              )}
+              <ResourceTypes types={resourceTypes} />
+            </Section>
+          )}
+
+          {res.enumeration_skipped && (
+            <Section title="Account enumeration">
+              {/* Stored since enumeration shipped and never shown. "Switched
+                  off" and "found nothing" are different statements. */}
+              <div style={{ fontSize: 11.5, color: MUTED }}>
+                Account-wide compute and network enumeration did not run — {res.enumeration_skipped}.
+              </div>
+            </Section>
+          )}
 
           {errors.length > 0 && (
             <Section title="Processing errors">

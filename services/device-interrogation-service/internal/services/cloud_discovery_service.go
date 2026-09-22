@@ -89,52 +89,47 @@ func (s *CloudDiscoveryService) DiscoverAWSResources(ctx context.Context, tenant
 		regions = []string{awsClient.GetRegion()}
 	}
 
-	// Discover resources by type
-	for _, resourceType := range resourceTypes {
-		switch resourceType {
-		case "alb", "elb", "nlb":
-			devices, err := s.discoverLoadBalancers(ctx, tenantID, awsClient, resourceType, regions)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover load balancers: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "api_gateway":
-			devices, err := s.discoverAPIGateways(ctx, tenantID, awsClient, regions)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover API Gateways: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "cloudfront":
-			devices, err := s.discoverCloudFrontDistributions(ctx, tenantID, awsClient)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover CloudFront distributions: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "kms":
-			devices, err := s.discoverKMSKeys(ctx, tenantID, integrationID, awsClient, regions)
-			if err != nil {
-				log.Printf("Warning: KMS discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		case "s3":
-			storageService := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
-			devices, err := storageService.DiscoverS3BucketEncryption(ctx, tenantID, awsClient)
-			if err != nil {
-				log.Printf("Warning: S3 encryption discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		case "rds":
-			storageService := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
-			devices, err := storageService.DiscoverRDSEncryption(ctx, tenantID, awsClient, regions)
-			if err != nil {
-				log.Printf("Warning: RDS encryption discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		}
+	// Discover resources by type.
+	//
+	// Every requested type is collected independently, once per region, and
+	// its outcome is recorded ( slice E). The dispatch used to be a switch
+	// that was wrong in opposite directions in its two halves: alb/elb/nlb,
+	// api_gateway and cloudfront returned the error and abandoned the whole
+	// run, so one failing type lost the results of every type that worked;
+	// kms, s3 and rds logged a warning nobody reads while the job still
+	// reported `success: true`, so an IAM denial, a throttle and a genuinely
+	// empty account were indistinguishable. Neither aborts and neither is
+	// swallowed now — see runCloudCollectors.
+	//
+	// A resource type absent from this map is NOT silently ignored any more:
+	// it stays `not_attempted` on the job result, which says "you asked and
+	// nothing looked" instead of showing up as zero found.
+	storage := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
+	collectors := map[string]cloudCollector{
+		"api_gateway": {regional: true, collect: func(ctx context.Context, region string) ([]models.Device, error) {
+			return s.discoverAPIGateways(ctx, tenantID, awsClient, []string{region})
+		}},
+		"cloudfront": {collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+			return s.discoverCloudFrontDistributions(ctx, tenantID, awsClient)
+		}},
+		"kms": {regional: true, collect: func(ctx context.Context, region string) ([]models.Device, error) {
+			return s.discoverKMSKeys(ctx, tenantID, integrationID, awsClient, []string{region})
+		}},
+		"s3": {collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+			return storage.DiscoverS3BucketEncryption(ctx, tenantID, awsClient)
+		}},
+		"rds": {regional: true, collect: func(ctx context.Context, region string) ([]models.Device, error) {
+			return storage.DiscoverRDSEncryption(ctx, tenantID, awsClient, []string{region})
+		}},
 	}
+	for _, lbType := range []string{"alb", "elb", "nlb"} {
+		lbType := lbType
+		collectors[lbType] = cloudCollector{regional: true, collect: func(ctx context.Context, region string) ([]models.Device, error) {
+			return s.discoverLoadBalancers(ctx, tenantID, awsClient, lbType, []string{region})
+		}}
+	}
+
+	discoveredDevices = append(discoveredDevices, runCloudCollectors(ctx, resourceTypes, regions, collectors)...)
 
 	return discoveredDevices, nil
 }
@@ -304,7 +299,7 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 					Hostname:         stringPtr(hostname),
 					DiscoveryMethod:  "cloud_api",
 					CredentialID:     &integrationID,
-					ConnectionStatus: "connected",
+					ConnectionStatus: "discovered",
 					Metadata:         models.JSONB(metadata),
 					CreatedAt:        time.Now(),
 					UpdatedAt:        time.Now(),
@@ -458,7 +453,7 @@ func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantI
 					Hostname:         stringPtr(hostname),
 					DiscoveryMethod:  "cloud_api",
 					CredentialID:     &integrationID,
-					ConnectionStatus: "connected",
+					ConnectionStatus: "discovered",
 					Metadata:         models.JSONB(metadata),
 					CreatedAt:        time.Now(),
 					UpdatedAt:        time.Now(),
@@ -581,7 +576,7 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 				Hostname:         stringPtr(hostname),
 				DiscoveryMethod:  "cloud_api",
 				CredentialID:     &integrationID,
-				ConnectionStatus: "connected",
+				ConnectionStatus: "discovered",
 				Metadata:         models.JSONB(metadata),
 				CreatedAt:        time.Now(),
 				UpdatedAt:        time.Now(),
@@ -789,11 +784,28 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 					metadata["vpc_id"] = vpc
 				}
 
-				// Pass through ACM metadata from the crypto config's inner metadata
+				// Provider-API certificate records (ACM today) join the SAME
+				// canonical "certificates" array as the handshake chain, and
+				// every entry is labelled with where it came from.
+				//
+				// They used to be written under `acm_certificates`, which no
+				// materializer reads — CLAUDE.md's *Single certificate format*
+				// rule names exactly this as the thing not to do. The
+				// consequence was not cosmetic: a live ACM certificate reached
+				// `assets.metadata` and this row's metadata and nothing else,
+				// so it appeared in no certificate inventory and no expiry
+				// band, while the certificate that DID materialize was the
+				// distribution's default one captured in a handshake.
+				//
+				// mergeProviderCertificates dedupes by ARN, because
+				// EnrichCertificatesWithACM has already folded the ACM facts
+				// into an observed certificate wherever it could match one.
+				var providerCerts interface{}
 				if cfgMeta, ok := cfg["metadata"].(map[string]interface{}); ok {
-					if acmCerts, ok := cfgMeta["certificates"]; ok {
-						metadata["acm_certificates"] = acmCerts
-					}
+					providerCerts = cfgMeta["certificates"]
+				}
+				if certs := mergeProviderCertificates(metadata["certificates"], providerCerts); len(certs) > 0 {
+					metadata["certificates"] = certs
 				}
 
 				metadataJSON, err := json.Marshal(metadata)
@@ -1107,7 +1119,14 @@ func (s *CloudDiscoveryService) upsertDeviceAsset(ctx context.Context, device *m
 	// No cloud network ref: the crypto/at-rest collectors record buckets, key
 	// stores and load balancers, none of which the address-scoping question is
 	// asked about. Enumeration is the one path that has one.
-	return s.upsertDeviceAssetWith(ctx, device, resourceID, "", nil)
+	//
+	// The extra hook writes the resource's cloud ACCOUNT and REGION, which
+	// enumeration already writes for instances, VPCs and subnets and this path
+	// did not write at all — so a bucket or a distribution had nothing to be
+	// grouped under on the map ( slice D). Built in cloud_enumeration.go
+	// from the same two helpers enumeration uses, and nil when there is nothing
+	// honest to write.
+	return s.upsertDeviceAssetWith(ctx, device, resourceID, "", s.cloudScopeExtra(ctx, device))
 }
 
 // upsertDeviceAssetWith is upsertDeviceAsset with one more thing to do inside
@@ -1137,6 +1156,24 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 	if device.ID == uuid.Nil {
 		receipt = uuid.NewString()
 	}
+
+	// Which integration read this resource is PROVENANCE, and it used to be
+	// recorded only as `asset_credentials.credential_id`. No credentials row is
+	// written on this path any more (see the `Unmanaged` block below), so the
+	// fact moves to the asset's own metadata rather than being dropped: it is
+	// "this asset was read through integration X", not a credential reference,
+	// and metadata is where the rest of the device's pipeline provenance lives.
+	// Recorded BEFORE the observation is sealed so the contested path's replay
+	// carries it too.
+	if device.CredentialID != nil {
+		if device.Metadata == nil {
+			device.Metadata = models.JSONB{}
+		}
+		if _, ok := device.Metadata[cloudIntegrationIDKey]; !ok {
+			device.Metadata[cloudIntegrationIDKey] = device.CredentialID.String()
+		}
+	}
+
 	obs, err := s.devices.deviceObservation(ctx, device.TenantID, deviceObservationInput{
 		DeviceType:      device.DeviceType,
 		Hostname:        derefStr(device.Hostname),
@@ -1155,12 +1192,37 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		return err
 	}
 
-	// Every cloud resource reached through an integration IS managed: its posture
-	// is read over the provider API with that integration's credentials, which is
-	// exactly what asset_management records. So it gets a management row and stays
-	// on the Devices page, at-rest resources included. What an at-rest resource
-	// does NOT get is an ENDPOINT — the observation above carries none, and
-	// DATA_MODEL §2 says such an asset simply has no asset_endpoints row.
+	// NOTHING discovered through a cloud API is a managed device. Not a subnet,
+	// not a VPC, not an EC2 instance, not a bucket, not a key store, not a load
+	// balancer — nothing that reaches this funnel.
+	//
+	// This used to read "every cloud resource reached through an integration IS
+	// managed", on the reasoning that the integration's credentials are what
+	// asset_management records. That conflated two different questions, and the
+	// owner's criterion for the Devices page settles it: the page lists
+	// **API-accessible interfaces we pull inventory from**, not everything we
+	// could conceivably hold a credential for. By that test a subnet was never a
+	// device (there is no interface), and neither is an EC2 instance — an
+	// instance is onboarded through the DEVICE AGENT, not through cloud
+	// enumeration, so a management row minted here describes an onboarding that
+	// did not happen. The rows it did mint claimed `connection_status =
+	// 'connected'` for a connection nothing ever made, and the Devices page
+	// greyed out every action on them because it already knew a cloud-discovered
+	// row is not interrogable.
+	//
+	// What is suppressed is the management row and the credentials row. These
+	// resources remain first-class ASSETS: identity, facts, class, class
+	// attributes, endpoints and `contains` edges are all unchanged, and the
+	// Inventory lenses are where they belong.
+	//
+	// **This is scoped to the cloud path on purpose, and that scoping is a
+	// requirement rather than an implementation detail.** A cloud-hosted
+	// appliance — a Palo Alto or FortiGate running as an instance — must still
+	// be addable deliberately, with credentials, and interrogable. That happens
+	// through DeviceService.CreateDevice, which does not set this flag and is
+	// pinned by TestIntegration_ManualCloudApplianceKeepsManagement. Moving the
+	// suppression down into applyDeviceFields, or keying it on the
+	// client-settable `discovery_method` string, would take that away.
 	fields := deviceFieldUpdate{
 		DeviceType:       device.DeviceType,
 		Hostname:         device.Hostname,
@@ -1176,6 +1238,7 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		Tags:             device.Tags,
 		DiscoveryMethod:  device.DiscoveryMethod,
 		CreateManagement: true,
+		Unmanaged:        true,
 	}
 
 	pending := false
@@ -1322,18 +1385,7 @@ func (s *CloudDiscoveryService) discoverAzureKeyVaultKeys(ctx context.Context, t
 
 	var devices []models.Device
 	for _, f := range findings {
-		metadata := map[string]interface{}{
-			"key_id":           f.KeyID,
-			"resource_name":    f.KeyARN,
-			"key_state":        f.KeyState,
-			"key_usage":        f.KeyUsage,
-			"key_spec":         f.KeySpec,
-			"protection_level": f.Origin,
-			"rotation_enabled": f.RotationEnabled,
-			"location":         f.Region,
-			"subscription_id":  f.AccountID,
-			"creation_date":    f.CreationDate,
-		}
+		metadata := keyStoreDeviceMetadata(f, "subscription_id")
 		devices = append(devices, models.Device{
 			ID:               uuid.New(),
 			TenantID:         tenantID,
@@ -1341,7 +1393,7 @@ func (s *CloudDiscoveryService) discoverAzureKeyVaultKeys(ctx context.Context, t
 			Vendor:           stringPtr("Microsoft"),
 			Hostname:         stringPtr(resourceShortName(f.KeyID)),
 			DiscoveryMethod:  "cloud_api",
-			ConnectionStatus: "connected",
+			ConnectionStatus: "discovered",
 			Metadata:         models.JSONB(metadata),
 		})
 	}
@@ -1486,7 +1538,7 @@ func (s *CloudDiscoveryService) discoverApplicationGateways(ctx context.Context,
 				IPAddress:        stringPtrOrNil(ipAddress),
 				DiscoveryMethod:  "cloud_api",
 				CredentialID:     &integrationID,
-				ConnectionStatus: "connected",
+				ConnectionStatus: "discovered",
 				Metadata:         models.JSONB(metadata),
 				CreatedAt:        time.Now(),
 				UpdatedAt:        time.Now(),
@@ -1597,7 +1649,7 @@ func (s *CloudDiscoveryService) discoverAzureLoadBalancers(ctx context.Context, 
 				Hostname:         stringPtr(hostname),
 				DiscoveryMethod:  "cloud_api",
 				CredentialID:     &integrationID,
-				ConnectionStatus: "connected",
+				ConnectionStatus: "discovered",
 				Metadata:         models.JSONB(metadata),
 				CreatedAt:        time.Now(),
 				UpdatedAt:        time.Now(),
@@ -1709,18 +1761,7 @@ func (s *CloudDiscoveryService) discoverGCPKMSKeys(ctx context.Context, tenantID
 
 	var devices []models.Device
 	for _, f := range findings {
-		metadata := map[string]interface{}{
-			"key_id":           f.KeyID,
-			"resource_name":    f.KeyARN,
-			"key_state":        f.KeyState,
-			"key_usage":        f.KeyUsage,
-			"key_spec":         f.KeySpec,
-			"protection_level": f.Origin,
-			"rotation_enabled": f.RotationEnabled,
-			"location":         f.Region,
-			"project_id":       f.AccountID,
-			"creation_date":    f.CreationDate,
-		}
+		metadata := keyStoreDeviceMetadata(f, "project_id")
 		devices = append(devices, models.Device{
 			ID:               uuid.New(),
 			TenantID:         tenantID,
@@ -1728,11 +1769,50 @@ func (s *CloudDiscoveryService) discoverGCPKMSKeys(ctx context.Context, tenantID
 			Vendor:           stringPtr("Google Cloud"),
 			Hostname:         stringPtr(resourceShortName(f.KeyID)),
 			DiscoveryMethod:  "cloud_api",
-			ConnectionStatus: "connected",
+			ConnectionStatus: "discovered",
 			Metadata:         models.JSONB(metadata),
 		})
 	}
 	return devices, nil
+}
+
+// keyStoreDeviceMetadata is the device metadata for one managed key from a
+// cloud key store (Azure Key Vault, GCP KMS). accountKey is what the provider
+// calls the account the key lives in — `subscription_id` for Azure,
+// `project_id` for GCP — and is the only thing that differed between the two
+// hand-written copies this replaces.
+//
+// It exists to be TESTABLE. The identity line below is the whole point of the
+// function, and while it sat inline inside a method that needs a live provider
+// client, deleting it turned nothing red.
+//
+// AWS KMS does not use this: its collector writes a real `arn` (plus origin,
+// region and aliases), which identity.CloudResourceIDKeys already reads.
+func keyStoreDeviceMetadata(f KMSKeyFinding, accountKey string) map[string]interface{} {
+	return map[string]interface{}{
+		// The key's own identifier, under the canonical key.
+		//
+		// `key_id` carries the same value for these two providers, and it is
+		// deliberately NOT in identity.CloudResourceIDKeys: that list is
+		// consulted for every finding, cloud or not, and `key_id` is a generic
+		// crypto-posture field name (shared/redact lists it as exactly that).
+		// For AWS it is also a bare key UUID rather than a namespaced id.
+		//
+		// Without this the vault key was identified by its SHORT NAME alone —
+		// resourceShortName of the key URI — which collides between two vaults
+		// or two key rings holding a key of the same name.
+		"cloud_resource_id": f.KeyARN,
+		"key_id":            f.KeyID,
+		"resource_name":     f.KeyARN,
+		"key_state":         f.KeyState,
+		"key_usage":         f.KeyUsage,
+		"key_spec":          f.KeySpec,
+		"protection_level":  f.Origin,
+		"rotation_enabled":  f.RotationEnabled,
+		"location":          f.Region,
+		accountKey:          f.AccountID,
+		"creation_date":     f.CreationDate,
+	}
 }
 
 // resourceShortName returns the last path segment of a cloud resource name/ID.
@@ -1906,7 +1986,7 @@ func (s *CloudDiscoveryService) processGCPHTTPSProxy(
 		IPAddress:        stringPtrOrNil(ipAddress),
 		DiscoveryMethod:  "cloud_api",
 		CredentialID:     &integrationID,
-		ConnectionStatus: "connected",
+		ConnectionStatus: "discovered",
 		Metadata:         models.JSONB(metadata),
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
@@ -2005,7 +2085,7 @@ func (s *CloudDiscoveryService) processGCPSSLProxy(
 		IPAddress:        stringPtrOrNil(ipAddress),
 		DiscoveryMethod:  "cloud_api",
 		CredentialID:     &integrationID,
-		ConnectionStatus: "connected",
+		ConnectionStatus: "discovered",
 		Metadata:         models.JSONB(metadata),
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
@@ -2196,7 +2276,7 @@ func (s *CloudDiscoveryService) discoverKMSKeys(
 			Vendor:           stringPtr("AWS"),
 			Hostname:         stringPtr(keyName),
 			DiscoveryMethod:  "cloud_api",
-			ConnectionStatus: "connected",
+			ConnectionStatus: "discovered",
 			Metadata:         models.JSONB(metadata),
 		}
 		devices = append(devices, device)

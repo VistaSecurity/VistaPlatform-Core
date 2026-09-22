@@ -135,11 +135,17 @@ describe('the migration worklist', () => {
     expect(migrationWorklist(p).length + safeFamilies(p).length).toBe(families.length);
   });
 
-  // The endpoint really does return one family twice. Verified live:
+  // The endpoint used to return one family twice. Verified live:
   // `AES` at 18 AND at 5, `SHA-2` at 11 AND at 7, identical flags, nothing in
-  // the payload telling them apart. Two rows with one name read on screen as a
-  // rendering bug, and the reader cannot act on a difference that is not there.
-  describe('duplicate family rows from the server', () => {
+  // the payload telling them apart. The server was grouping by the algorithm's
+  // primitive and discarding it; `GetPQCProgress` now groups by family alone,
+  // and the Go guards named in mergeByFamily's comment hold it there.
+  //
+  // These stay because the fold stays: during a rolling upgrade this bundle can
+  // be served beside a backend from the previous release, so they pin what the
+  // page does with the payload that server sends. Against a current server the
+  // fold is a no-op — which the cases above, all with unique families, pin.
+  describe('duplicate family rows from an older server', () => {
     const dupes = [
       { family: 'AES', count: 18, is_pqc: false, quantum_safe: true },
       { family: 'AES', count: 5, is_pqc: false, quantum_safe: true },

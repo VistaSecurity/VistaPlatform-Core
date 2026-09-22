@@ -19,14 +19,14 @@ import {
 import type { MapEdge, MapGraph, MapNode } from './map-model';
 
 const node = (id: string, depth: number): MapNode => ({
-  id, label: id, classKey: '', classLabel: '', group: 'other',
+  id, kind: 'asset', assetId: id, label: id, classKey: '', classLabel: '', group: 'other',
   status: 'monitoring', depth, isRoot: id === 'a',
 });
 
 const edge = (id: string, source: string, target: string): MapEdge => ({
   id, source, target, type: 'runs_on', label: 'runs on', status: 'active',
   pending: false, sourceKind: 'measured', confidence: 1,
-  firstSeenAt: '', lastSeenAt: '', observationCount: 1,
+  firstSeenAt: '', lastSeenAt: '', observationCount: 1, synthetic: false,
 });
 
 /** a → b → c, plus a → d. A chain with one branch: enough to see both the

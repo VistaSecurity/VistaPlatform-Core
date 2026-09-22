@@ -220,8 +220,8 @@ func (w *PlatformAgentWorker) processNextJob() {
 			log.Printf("[PlatformAgentWorker] Warning: failed to log job completion for %s: %v", deviceJob.ID, logErr)
 		}
 
-		// Process results to create discovery findings
-		if result != nil && result.Success {
+		// Process results to create discovery findings.
+		if shouldProcessResults(result) {
 			err = w.resultProcessor.ProcessJobResults(updateCtx, deviceJob.ID, result)
 			if err != nil {
 				log.Printf("Warning: failed to process job results: %v", err)
@@ -289,6 +289,17 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		cloudProvider = detected
 	}
 
+	// Per-resource-type outcomes for this run ( slice E). The scheduled
+	// path built the same `Success: true` constant the interactive one did, so
+	// a recurring discovery whose KMS permission was revoked went on reporting
+	// success indefinitely. AWS only — see the same note in
+	// api/router.go's discoverCloudResourcesHandler.
+	var outcomes *CloudOutcomeRecorder
+	if cloudProvider == "aws" {
+		outcomes = NewCloudOutcomeRecorder(resourceTypes)
+		ctx = WithCloudOutcomes(ctx, outcomes)
+	}
+
 	var discovery *CloudDiscoveryResult
 	var err error
 	if sourceOnly, _ := job.Parameters["source_refresh_only"].(bool); sourceOnly {
@@ -348,16 +359,33 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 	if discovery.EnumerationSkipped != "" {
 		metadata["enumeration_skipped"] = discovery.EnumerationSkipped
 	}
+	// Per-type outcomes + the `success` they decide. Every attempted resource
+	// type collected without error — not the constant it used to be. See
+	// CloudOutcomeRecorder.ApplyToJobResult.
+	cloudSuccess := outcomes.ApplyToJobResult(metadata)
 
 	result := &models.JobResult{
 		JobID:       job.ID,
-		Success:     true,
+		Success:     cloudSuccess,
 		Assets:      assets,
 		CompletedAt: time.Now(),
 		Metadata:    metadata,
 	}
 
 	return result, nil
+}
+
+// shouldProcessResults says whether a finished job's results are worth
+// materializing.
+//
+// `|| len(result.Assets) > 0` is load-bearing since made a cloud job's
+// Success mean "every requested resource type was collected". A run where KMS
+// was denied but S3 and RDS answered is now Success=false, and gating on
+// Success alone would throw away the assets that DID arrive — turning an
+// honest partial result into silent data loss. A run that produced nothing
+// still skips processing.
+func shouldProcessResults(result *models.JobResult) bool {
+	return result != nil && (result.Success || len(result.Assets) > 0)
 }
 
 // executeDeviceInterrogation executes a device interrogation job

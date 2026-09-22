@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1-rc.1] - 2026-09-21
+
+A cloud account is now inventoried as completely as a network is. Adding an AWS
+integration already enumerated the right resources; this release fixes where
+they landed, what was read from them, and what the job told you about it.
+
+### Added
+
+- **Cloud KMS keys reach Inventory → Keys.** Keys discovered through an AWS,
+  Azure or GCP integration are now materialised into the first-class key
+  inventory, with their custody recorded: a customer-managed CMK and a
+  provider-held key (`aws/s3` and friends) are shown as the different postures
+  they are. `keys` gains `key_custody` and `external_ref`.
+
+- **Cloud-managed certificates reach Inventory → Certificates.** A certificate a
+  cloud provider issues and manages for you — an ACM certificate on a CloudFront
+  distribution, say — is now recorded with the rest of your certificates,
+  carrying a source badge that distinguishes it from one observed on the wire.
+  Its expiry is the date the provider states, so it participates in the
+  certificate-expiry frameworks like any other.
+
+- **The map roots on the cloud account and region.** Inventory → Map draws
+  account → region → VPC → subnet → instance, with the buckets and distributions
+  that live outside a VPC hung off their region instead of floating unconnected.
+  An asset whose region was never established draws no region box rather than a
+  guessed one.
+
+- **A cloud discovery job says what it could and could not look at.** Discovery →
+  Discovery Jobs → the job now lists every requested resource type with its own
+  outcome — collected (with a count), partly collected across regions, could not
+  collect (with the provider's error code, the region, and what to do about it),
+  or not collected at all. "Found nothing" and "could not look" are no longer the
+  same answer.
+
+### Changed
+
+- **A cloud integration no longer files structural resources as devices.**
+  Discovery → Devices lists the API-accessible interfaces the platform pulls
+  inventory from. Subnets, VPCs, buckets, distributions, key stores and cloud
+  compute instances are none of those, and no longer appear there — they remain
+  in Inventory and on the map, which is where they were always meant to live. A
+  cloud-hosted appliance you add deliberately, with credentials, is unaffected.
+  Existing installs have the stale management rows cleaned up on upgrade.
+
+### Fixed
+
+- **A cloud discovery no longer reports success when it could not look.** KMS, S3
+  and RDS failures — a revoked IAM grant, a throttle, an expired credential — were
+  logged as warnings and the job still stored `success: true` with zero results,
+  making a permission problem indistinguishable from an empty account. The
+  swallow existed at three depths and all three are closed; `success` now means
+  "every requested resource type was collected without error". Conversely, a
+  failing load balancer, API Gateway or CloudFront no longer aborts the whole run
+  and discards the types that worked.
+
+- **AWS-managed KMS keys are no longer discarded at discovery.** Cloud KMS
+  discovery skipped every key whose manager was AWS, so an account that had not
+  created its own CMK discovered nothing at all. Custody is an attribute now,
+  not a filter.
+
+- **A cloud resource you own is no longer filed as a third-party connection.**
+  Crypto discovered on a resource reached through your own cloud credentials now
+  lands on that asset. The decision was previously made on whether the address
+  was publicly routable, which put your own CDN among the external connections.
+
+- **One cloud resource no longer becomes two assets.** The collector and the
+  ingest path read different lists of provider identifier keys, so a CloudFront
+  distribution and its alias could be admitted as separate assets, and Azure
+  Application Gateways, Azure load balancers and GCP proxies resolved by their
+  provider id in one path and by hostname in the other. Both sides now read one
+  shared list. Assets already split this way are left alone and raised as a merge
+  proposal rather than merged automatically.
+
+- **Cloud discovery queue rows no longer sit pending forever.** A cloud finding
+  recorded against an asset that was already admitted, or routed as evidence
+  rather than inventory, kept a `pending` state no page listed and no action
+  could clear. Approving or denying an asset now settles the discovery rows
+  behind it, and existing stuck rows are settled on upgrade.
+
+- **PQC progress reports one row per algorithm family.** `/pqc/progress` returned
+  duplicate `by_family` rows, so the migration worklist double-counted families.
+
 ## [1.0.0] - 2026-09-21
 
 This is the first release of the **general asset inventory**: the product now

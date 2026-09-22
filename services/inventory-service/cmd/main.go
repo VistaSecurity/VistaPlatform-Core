@@ -122,6 +122,7 @@ func main() {
 	identityDiscoverySettingsHandler := handlers.NewIdentityDiscoverySettingsHandler(identitysettings.NewStore(db))
 	identityObservationHandler := handlers.NewIdentityObservationHandler(assetService)
 	cryptoAssetsHandler := handlers.NewCryptoAssetsHandler(assetService)
+	cloudKeyHandler := handlers.NewCloudKeyHandler(assetService)
 	cryptoApplicationsHandler := handlers.NewCryptoApplicationsHandler(assetService)
 	integrationsHandler := handlers.NewIntegrationsHandler(assetService)
 	networkSpaceHandler := handlers.NewNetworkSpaceHandler(networkSpaceService)
@@ -428,6 +429,13 @@ func main() {
 		// non-billing role that can see Inventory already holds it.
 		api.GET("/inventory-service/crypto-applications", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), cryptoApplicationsHandler.ListCryptoApplications)
 		api.GET("/inventory-service/keys", cryptoAssetsHandler.ListKeys)
+		// INTERNAL ONLY — device-interrogation-service lands the cloud KMS keys
+		// it discovered in the first-class key inventory, so they appear at
+		// Inventory → Keys. The handler rejects anything that is not an
+		// HMAC-verified internal call (same policy as the agent-host approval
+		// route above), so no tenant permission gates it. Registered before
+		// /keys/:id so "cloud" is not read as a key id.
+		api.POST("/inventory-service/keys/cloud", cloudKeyHandler.IngestCloudKeys)
 		api.GET("/inventory-service/keys/:id", cryptoAssetsHandler.GetKeyByID)
 		api.GET("/inventory-service/keys/:id/implementations", cryptoAssetsHandler.GetKeyImplementations)
 		api.GET("/inventory-service/libraries", cryptoAssetsHandler.ListLibraries)

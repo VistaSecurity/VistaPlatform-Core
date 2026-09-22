@@ -228,6 +228,13 @@ func (s *CloudDiscoveryService) DiscoverResourceEvidence(
 	out := &CloudDiscoveryResult{}
 	run := &cloudRunEvidence{}
 	ctx = context.WithValue(ctx, cloudRunKey{}, run)
+	// The run's scope, resolved once. Every resource the collectors below
+	// record reaches `upsertDeviceAsset`, which reads this to write the
+	// resource's `cloud.account_id` / `cloud.region`. Resolved here rather than
+	// per-resource because it is one row per run, and here rather than in
+	// `DiscoverResources` because the single-resource callers come through this
+	// function too.
+	ctx = context.WithValue(ctx, cloudScopeKey{}, s.resolveCloudScope(ctx, tenantID, integrationID, cloudProvider))
 	defer func() {
 		run.mu.Lock()
 		out.Identity = run.summary
@@ -439,15 +446,20 @@ func (s *CloudDiscoveryService) recordCloudResource(
 	metadata["cloud_resource_id"] = res.ResourceID
 
 	device := models.Device{
-		ID:               uuid.New(),
-		TenantID:         tenantID,
-		DeviceType:       res.DeviceType,
-		Vendor:           stringPtr(vendor),
-		Hostname:         stringPtr(res.Hostname),
-		IPAddress:        stringPtr(res.IPAddress),
-		DiscoveryMethod:  "cloud_api",
-		CredentialID:     &integrationID,
-		ConnectionStatus: "connected",
+		ID:              uuid.New(),
+		TenantID:        tenantID,
+		DeviceType:      res.DeviceType,
+		Vendor:          stringPtr(vendor),
+		Hostname:        stringPtr(res.Hostname),
+		IPAddress:       stringPtr(res.IPAddress),
+		DiscoveryMethod: "cloud_api",
+		CredentialID:    &integrationID,
+		// "discovered", never "connected". The provider's API was read; nothing
+		// connected to the resource, and nothing tested whether it could be.
+		// normalizeConnectionStatus maps this onto `unknown`, which is the one of
+		// the four permitted values that means "we have not measured this" — and
+		// which the Devices page renders in neutral grey rather than green.
+		ConnectionStatus: "discovered",
 		Metadata:         models.JSONB(metadata),
 		Tags:             models.JSONB(res.Tags),
 		CreatedAt:        time.Now(),
@@ -809,4 +821,165 @@ func firstAddress(addrs []string) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Cloud scope — account and region on every cloud-discovered asset
+// ---------------------------------------------------------------------------
+//
+// Account and region are SCOPING ATTRIBUTES, not asset classes ( decision
+// D6). They carry no crypto posture of their own, so they need no asset rows,
+// no findings, no risk scores and no lens presence — which is also why nothing
+// here touches `shared/assetclass` or the chart-parity audit that follows a
+// change to it. Recording them on the resource is what lets Inventory → Map
+// draw account → region → VPC → subnet → instance, and hang a bucket or a CDN
+// distribution off its region, without an account or a region ever becoming a
+// node in the inventory itself.
+//
+// Enumeration already writes them (`cloudPlacementFacts`,
+// `cloudResourceAttributes`). What follows is the SAME two helpers, on the same
+// transaction hook, for the resources the crypto and at-rest collectors record
+// instead — buckets, CDN distributions, key stores, load balancers, API
+// gateways. One write path, not two: a second producer of the same two values
+// is how one fact acquires two spellings, which is the mistake this file's
+// header already warns about for `member_of`.
+
+// cloudScopeKey carries one run's provider and owning account down to the
+// per-resource write.
+type cloudScopeKey struct{}
+
+// cloudScope is what a run knows about WHERE it is reading from.
+type cloudScope struct {
+	Provider string
+	// AccountID is the integration's own account, and is EMPTY when the
+	// integration does not state one. Empty travels as empty: no
+	// `cloud.account_id` fact is written, and the map roots the resource at its
+	// region rather than under an invented account.
+	AccountID string
+}
+
+// resolveCloudScope reads the integration's account id once per run.
+//
+// A read that fails is logged and returns the scope WITHOUT an account. Unknown
+// is not a default: the alternative — stamping every resource with the tenant's
+// first account, or with the integration uuid dressed up as one — produces a
+// map that looks complete and groups resources under an account nobody owns.
+func (s *CloudDiscoveryService) resolveCloudScope(ctx context.Context, tenantID, integrationID uuid.UUID, provider string) cloudScope {
+	scope := cloudScope{Provider: strings.TrimSpace(provider)}
+	if s.bypassDB == nil {
+		return scope
+	}
+	var accountID sql.NullString
+	err := s.bypassDB.QueryRowContext(ctx, `
+		SELECT account_id
+		  FROM platform_integrations
+		 WHERE id = $1
+		   AND (tenant_id = $2 OR (tenant_id IS NULL AND is_shared = true))
+		   AND is_active = true
+		   AND deleted_at IS NULL`, integrationID, tenantID).Scan(&accountID)
+	if err != nil {
+		log.Printf("[cloud scope] account id for integration %s unreadable; resources will carry no cloud.account_id: %v", integrationID, err)
+		return scope
+	}
+	scope.AccountID = strings.TrimSpace(accountID.String)
+	return scope
+}
+
+// accountIDFromARN reads the account field out of an AWS ARN.
+//
+// `arn:partition:service:region:account-id:resource`. The field is legitimately
+// EMPTY on an S3 bucket ARN, and present on CloudFront's
+// `arn:aws:cloudfront::<account>:distribution/<id>` where the REGION field is
+// the empty one instead. Preferred over the integration's account because the
+// resource's own statement of its owner is the better answer for a
+// cross-account resource — a shared VPC belongs to the account that created it,
+// not to the credential that happened to be able to read it.
+func accountIDFromARN(arn string) string {
+	parts := strings.Split(strings.TrimSpace(arn), ":")
+	if len(parts) < 6 || parts[0] != "arn" {
+		return ""
+	}
+	return strings.TrimSpace(parts[4])
+}
+
+// cloudScopeValues decides what a non-enumerated cloud resource's scope
+// actually is: the `cloud.*` fact values, and the `cloud_resource` class
+// attributes, both possibly empty.
+//
+// Pure, and separated from the transaction hook so the decisions — which of
+// the three values is present, where the account comes from, what a CloudFront
+// distribution's region is — are testable without a database.
+//
+// Only the three scoping values. VPC and subnet placement belong to the
+// enumeration path, which is the only one that has them.
+func cloudScopeValues(scope cloudScope, device models.Device) (map[string]any, map[string]any) {
+	provider := strings.TrimSpace(scope.Provider)
+	// `cloudRegionForDevice` answers the literal "global" for a CloudFront
+	// distribution, which is what the resource actually is rather than a region
+	// it does not have. Carried through unchanged.
+	region := strings.TrimSpace(cloudRegionForDevice(device))
+	account := strings.TrimSpace(firstNonEmpty(
+		accountIDFromARN(cloudResourceIDFromMetadata(device.Metadata)),
+		scope.AccountID,
+	))
+
+	values := map[string]any{}
+	if provider != "" {
+		values[facts.KeyCloudProvider] = provider
+	}
+	if account != "" {
+		values[facts.KeyCloudAccountID] = account
+	}
+	if region != "" {
+		values[facts.KeyCloudRegion] = region
+	}
+	if len(values) == 0 {
+		return nil, nil
+	}
+	attrs := filterClassAttributes(
+		DeviceTypeClassKey(device.DeviceType),
+		cloudResourceAttributes(provider, account, region),
+		device.DeviceType,
+	)
+	return values, attrs
+}
+
+// cloudScopeExtra builds the transaction hook that writes a non-enumerated
+// cloud resource's scope, or nil when there is nothing honest to write.
+//
+// Nil rather than a hook that writes empties: "we did not collect a region" and
+// "the region is blank" must not become the same row. `cloudRegionForDevice`
+// answers the literal "global" for a CloudFront distribution, which is what the
+// resource actually is rather than a region it does not have, and that answer
+// is carried through unchanged.
+func (s *CloudDiscoveryService) cloudScopeExtra(ctx context.Context, device *models.Device) func(*pgidentity.Repository, uuid.UUID) error {
+	if device == nil {
+		return nil
+	}
+	scope, _ := ctx.Value(cloudScopeKey{}).(cloudScope)
+	values, attrs := cloudScopeValues(scope, *device)
+	if len(values) == 0 && len(attrs) == 0 {
+		return nil
+	}
+
+	tenantID := device.TenantID
+	factRows := cloudFactRows(values, cloudSource(device.Vendor), time.Now().UTC())
+	if len(factRows) == 0 && len(attrs) == 0 {
+		return nil
+	}
+
+	return func(r *pgidentity.Repository, assetID uuid.UUID) error {
+		ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
+		if len(factRows) > 0 {
+			if err := r.UpsertFacts(ctx, ref, facts.ProducerCloudCollector, factRows); err != nil {
+				return fmt.Errorf("writing cloud scope facts: %w", err)
+			}
+		}
+		if len(attrs) > 0 {
+			if err := mergeAssetAttributes(ctx, r.Tx(), tenantID, assetID, attrs); err != nil {
+				return fmt.Errorf("writing cloud scope attributes: %w", err)
+			}
+		}
+		return nil
+	}
 }

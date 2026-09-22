@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
-	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/google/uuid"
 	awsclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/aws"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -25,6 +25,17 @@ type KMSDiscoveryService struct {
 	// kms_keys write runs under the known tenantID via WithTenantTx.
 	bypassDB  *sql.DB
 	masterKey string
+	// keyPublisher lands discovered keys in the first-class key inventory
+	// (Inventory → Keys). nil disables that hop — `kms_keys` is still written,
+	// which is what happens when the mTLS client cannot be built. Tests
+	// substitute a recorder via SetCloudKeyPublisher.
+	keyPublisher CloudKeyPublisher
+}
+
+// SetCloudKeyPublisher overrides where discovered keys are published. Tests
+// use it; production takes the env-derived publisher from the constructor.
+func (s *KMSDiscoveryService) SetCloudKeyPublisher(p CloudKeyPublisher) {
+	s.keyPublisher = p
 }
 
 // NewKMSDiscoveryService creates a new KMS discovery service. db is the
@@ -33,9 +44,10 @@ type KMSDiscoveryService struct {
 // same connection.
 func NewKMSDiscoveryService(db, bypassDB *sql.DB, masterKey string) *KMSDiscoveryService {
 	return &KMSDiscoveryService{
-		db:        db,
-		bypassDB:  bypassDB,
-		masterKey: masterKey,
+		db:           db,
+		bypassDB:     bypassDB,
+		masterKey:    masterKey,
+		keyPublisher: NewInventoryCloudKeyPublisherFromEnv(),
 	}
 }
 
@@ -90,11 +102,19 @@ func (s *KMSDiscoveryService) DiscoverAWSKMSKeys(
 	}
 
 	var allFindings []KMSKeyFinding
+	var regionErrs []error
 
 	for _, region := range regions {
 		findings, err := s.discoverKMSKeysInRegion(ctx, client, region)
 		if err != nil {
+			// Returned, not only logged ( slice E). This `continue` was
+			// the deepest of the three swallow sites: a region that denied
+			// kms:ListKeys produced no findings and no error, so the caller —
+			// and the stored job result — reported "0 keys" with
+			// `success: true`. "There are no keys" and "we were not allowed to
+			// look" are different answers.
 			log.Printf("Warning: KMS discovery failed in %s: %v", region, err)
+			regionErrs = append(regionErrs, fmt.Errorf("%s: %w", region, err))
 			continue
 		}
 		for i := range findings {
@@ -103,7 +123,9 @@ func (s *KMSDiscoveryService) DiscoverAWSKMSKeys(
 		allFindings = append(allFindings, findings...)
 	}
 
-	return allFindings, nil
+	// Findings AND error: whatever the working regions produced is still
+	// returned, so one bad region does not discard the rest.
+	return allFindings, errors.Join(regionErrs...)
 }
 
 // discoverKMSKeysInRegion discovers KMS keys in a specific region
@@ -158,10 +180,28 @@ func (s *KMSDiscoveryService) discoverKMSKeysInRegion(
 	return findings, nil
 }
 
-// describeKMSKey gets detailed information about a single KMS key
+// kmsKeyDescriber is the slice of the AWS KMS client describeKMSKey uses.
+// *kms.Client satisfies it; the tests pass a fake, which is what lets the
+// collection POLICY below be driven rather than eyeballed.
+type kmsKeyDescriber interface {
+	DescribeKey(ctx context.Context, in *kms.DescribeKeyInput, optFns ...func(*kms.Options)) (*kms.DescribeKeyOutput, error)
+	GetKeyRotationStatus(ctx context.Context, in *kms.GetKeyRotationStatusInput, optFns ...func(*kms.Options)) (*kms.GetKeyRotationStatusOutput, error)
+}
+
+// describeKMSKey gets detailed information about a single KMS key.
+//
+// EVERY key is collected, including AWS-managed ones (aws/s3, aws/ebs, …).
+// Custody is an ATTRIBUTE — recorded on the finding as KeyManager and carried
+// into inventory as `keys.key_custody` — not a filter to discard on. A bucket
+// encrypted under SSE-S3 is a materially different posture from one under a
+// customer-managed CMK, and the protection ladder in the Data Protection lens
+// exists to say so; dropping the AWS-managed keys threw away the only input
+// that could populate it and guaranteed "custody unknown" for everything AWS
+// holds. (It also meant an account whose keys are ALL AWS-managed discovered
+// exactly nothing, which is what happens on a default account.)
 func (s *KMSDiscoveryService) describeKMSKey(
 	ctx context.Context,
-	kmsClient *kms.Client,
+	kmsClient kmsKeyDescriber,
 	keyID string,
 	region string,
 ) (*KMSKeyFinding, error) {
@@ -173,10 +213,8 @@ func (s *KMSDiscoveryService) describeKMSKey(
 	}
 
 	key := describeOutput.KeyMetadata
-
-	// Skip AWS-managed keys (aws/s3, aws/ebs, etc.) — they're not customer-managed
-	if key.KeyManager == kmstypes.KeyManagerTypeAws {
-		return nil, fmt.Errorf("skipping AWS-managed key")
+	if key == nil {
+		return nil, fmt.Errorf("describe key %s: no key metadata in response", keyID)
 	}
 
 	finding := &KMSKeyFinding{
@@ -358,7 +396,38 @@ func (s *KMSDiscoveryService) StoreKMSKeyFindings(
 		}
 	}
 
+	// Then land the same keys in the FIRST-CLASS key inventory, which is the
+	// only one a person can see. `kms_keys` above is a parallel table whose one
+	// reader is an experimental endpoint no UI calls; without this hop a
+	// discovered key is invisible no matter how well it was discovered.
+	//
+	// Deliberately after the kms_keys write and non-fatal: publishing is how
+	// the key becomes VISIBLE, not how it is stored, so an inventory-service
+	// that is down must not lose the discovery.
+	s.publishToKeyInventory(ctx, tenantID, integrationID, provider, findings)
+
 	return nil
+}
+
+// publishToKeyInventory hands the findings to inventory-service's internal
+// cloud-key intake. Failures are logged, never returned: see StoreKMSKeyFindings.
+func (s *KMSDiscoveryService) publishToKeyInventory(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	integrationID uuid.UUID,
+	provider string,
+	findings []KMSKeyFinding,
+) {
+	if s.keyPublisher == nil || len(findings) == 0 {
+		return
+	}
+	records := cloudKeyRecordsFrom(provider, integrationID, findings)
+	written, err := s.keyPublisher.PublishCloudKeys(ctx, tenantID, records)
+	if err != nil {
+		log.Printf("Warning: %s KMS keys stored but not published to key inventory: %v", provider, err)
+		return
+	}
+	log.Printf("Published %d/%d %s KMS keys to the key inventory", written, len(records), provider)
 }
 
 // keySpecToSize maps AWS KMS key spec to key size in bits

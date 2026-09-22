@@ -30,6 +30,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
@@ -207,6 +208,18 @@ type NeighbourhoodNode struct {
 	ClassKey    string    `json:"class_key,omitempty"`
 	AssetStatus string    `json:"asset_status,omitempty"`
 	RiskScore   *int      `json:"risk_score,omitempty"`
+	// CloudAccount and CloudRegion are the resource's SCOPING ATTRIBUTES, read
+	// from the `cloud.account_id` and `cloud.region` facts ( D6). They are
+	// not asset classes and there is no account or region asset — the map turns
+	// them into grouping nodes so a cloud resource has something to hang off,
+	// which is the difference between "what is in this VPC" and "what is in
+	// this account".
+	//
+	// Both are OMITTED when the fact is absent. An asset with no region
+	// recorded must not be drawn under a fabricated one, and `omitempty` is
+	// what keeps "not collected" from arriving at the client as "".
+	CloudAccount string `json:"cloud_account,omitempty"`
+	CloudRegion  string `json:"cloud_region,omitempty"`
 	// Depth is the SHORTEST hop count from the root, so a node reachable by
 	// several routes is placed once, at the distance a person would say it is.
 	Depth  int  `json:"depth"`
@@ -543,10 +556,17 @@ func (s *RelationshipService) Neighbourhood(
 		if err != nil {
 			return err
 		}
+		scopes, err := loadCloudScopes(ctx, tx, tenantID, nodeIDs)
+		if err != nil {
+			return err
+		}
 		for _, id := range nodeIDs {
 			n := NeighbourhoodNode{AssetID: id, Depth: depths[id], IsRoot: id == assetID}
 			if p, ok := peers[id]; ok {
 				n.DisplayName, n.ClassKey, n.AssetStatus, n.RiskScore = p.DisplayName, p.ClassKey, p.AssetStatus, p.RiskScore
+			}
+			if sc, ok := scopes[id]; ok {
+				n.CloudAccount, n.CloudRegion = sc.AccountID, sc.Region
 			}
 			out.Nodes = append(out.Nodes, n)
 		}
@@ -1245,6 +1265,77 @@ func loadPeers(ctx context.Context, tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("scan relationship peers: %w", err)
+	}
+	return out, nil
+}
+
+// assetCloudScope is one asset's cloud account and region, either of which may
+// be empty because the fact is absent.
+type assetCloudScope struct {
+	AccountID string
+	Region    string
+}
+
+// loadCloudScopes reads `cloud.account_id` and `cloud.region` for the node set.
+//
+// The facts, not `assets.attributes`: the fact registry is where both cloud
+// write paths put these (the enumeration one and the collector one), and the
+// fact row carries the provenance and the observation time the attribute copy
+// does not. Reading both and picking would be two opinions about one value.
+//
+// One asset can hold the same key from several producers — the unique index is
+// on (tenant, asset, key, source_ref) — so the most confident and most recently
+// observed row wins, which is the same precedence `loadPeers` uses for an
+// asset's strongest identifier.
+//
+// An absent fact yields an absent entry, never "". The map must be able to tell
+// "this asset records no region" from "this asset records an empty region",
+// because only the first is true and the second would draw a grouping node
+// labelled with nothing.
+func loadCloudScopes(ctx context.Context, tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]assetCloudScope, error) {
+	out := map[uuid.UUID]assetCloudScope{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT ON (f.asset_id, f.key)
+		       f.asset_id, f.key, COALESCE(f.value #>> '{}', '')
+		  FROM asset_facts f
+		 WHERE f.tenant_id = $1
+		   AND f.asset_id = ANY($2)
+		   AND f.key = ANY($3)
+		   AND (f.expires_at IS NULL OR f.expires_at > now())
+		 ORDER BY f.asset_id, f.key, f.confidence DESC NULLS LAST, f.observed_at DESC`,
+		tenantID, pq.Array(ids), pq.Array([]string{facts.KeyCloudAccountID, facts.KeyCloudRegion}))
+	if err != nil {
+		return nil, fmt.Errorf("read cloud scope facts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			id       uuid.UUID
+			key      string
+			rawValue string
+		)
+		if err := rows.Scan(&id, &key, &rawValue); err != nil {
+			return nil, fmt.Errorf("scan cloud scope fact: %w", err)
+		}
+		value := strings.TrimSpace(rawValue)
+		if value == "" {
+			continue
+		}
+		scope := out[id]
+		switch key {
+		case facts.KeyCloudAccountID:
+			scope.AccountID = value
+		case facts.KeyCloudRegion:
+			scope.Region = value
+		}
+		out[id] = scope
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan cloud scope facts: %w", err)
 	}
 	return out, nil
 }

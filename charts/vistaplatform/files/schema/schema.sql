@@ -3301,6 +3301,9 @@ CREATE TABLE IF NOT EXISTS public.keys (
     fingerprint_value character varying(128),
     provenance text,
     metadata jsonb DEFAULT '{}'::jsonb,
+    key_custody character varying(20),
+    external_ref text,
+    CONSTRAINT valid_key_custody CHECK (((key_custody IS NULL) OR ((key_custody)::text = ANY ((ARRAY['customer'::character varying, 'provider'::character varying])::text[])))),
     CONSTRAINT valid_key_state CHECK (((state IS NULL) OR ((state)::text = ANY ((ARRAY['pre-activation'::character varying, 'active'::character varying, 'suspended'::character varying, 'deactivated'::character varying, 'compromised'::character varying, 'destroyed'::character varying])::text[])))),
     CONSTRAINT valid_material_type CHECK (((material_type)::text = ANY ((ARRAY['private-key'::character varying, 'public-key'::character varying, 'secret-key'::character varying, 'shared-secret'::character varying, 'key'::character varying, 'password'::character varying, 'credential'::character varying, 'token'::character varying, 'ciphertext'::character varying, 'signature'::character varying, 'digest'::character varying, 'initialization-vector'::character varying, 'nonce'::character varying, 'seed'::character varying, 'salt'::character varying, 'tag'::character varying, 'additional-data'::character varying, 'other'::character varying, 'unknown'::character varying])::text[])))
 );
@@ -17620,6 +17623,65 @@ CREATE UNIQUE INDEX IF NOT EXISTS keys_tenant_public_fingerprint_uniq
 
 
 -- =========================================================================
+-- Cloud KMS keys in the first-class key inventory — custody + provider identity.
+--
+-- A cloud KMS key (AWS KMS, Azure Key Vault, GCP Cloud KMS) has no exportable
+-- public material, so it cannot dedup on `public_fingerprint` the way a
+-- certificate's public key does, and it cannot be attributed to a holder from
+-- anything already on the row. Two columns close both gaps:
+--
+--   key_custody  WHO HOLDS THE KEY: 'customer' (a customer-managed CMK) or
+--                'provider' (an AWS-managed `aws/s3`-style key). NULL is
+--                "we did not establish custody" — the same three-valued honesty
+--                the Data Protection lens's `custody-unknown` rung is built on
+--                (frontend-v2/src/sections/inventory/data-protection.ts). There
+--                is deliberately no 'unknown' literal: an unasked question and a
+--                question answered "unknown" are the same absence, and one of
+--                them would have to be invented on every non-cloud key.
+--   external_ref THE PROVIDER'S OWN NAME for the key (an ARN, a Key Vault key
+--                id, a Cloud KMS resource name). It is the dedup identity for
+--                re-discovery, and the only stable handle a person can paste
+--                back into the provider's console.
+--
+-- Custody is an ATTRIBUTE, not a filter. AWS-managed keys used to be discarded
+-- at discovery, which guaranteed `custody-unknown` for everything AWS holds and
+-- threw away the input the protection ladder exists to read.
+--
+-- Both are ADD COLUMN IF NOT EXISTS (natively idempotent) and the CHECK is
+-- added only when absent, so this converges on a fresh install and on one
+-- upgraded from any prior release: every pre-existing row has key_custody NULL,
+-- which the CHECK admits, so the populated-upgrade path cannot fail here.
+-- =========================================================================
+ALTER TABLE IF EXISTS public.keys
+    ADD COLUMN IF NOT EXISTS key_custody character varying(20);
+ALTER TABLE IF EXISTS public.keys
+    ADD COLUMN IF NOT EXISTS external_ref text;
+
+DO $$ BEGIN
+  IF to_regclass('public.keys') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conname = 'valid_key_custody' AND conrelid = to_regclass('public.keys')
+     ) THEN
+    ALTER TABLE public.keys
+      ADD CONSTRAINT valid_key_custody
+      CHECK (((key_custody IS NULL) OR ((key_custody)::text = ANY ((ARRAY[
+        'customer'::character varying,
+        'provider'::character varying
+      ])::text[]))));
+  END IF;
+END $$;
+
+-- Dedup identity for a re-discovered cloud key: one row per (tenant, provider
+-- reference). Partial, so the certificate-derived keys (external_ref NULL) are
+-- untouched and many of them can coexist, exactly as the public_fingerprint
+-- index above does for its own population.
+CREATE UNIQUE INDEX IF NOT EXISTS keys_tenant_external_ref_uniq
+    ON public.keys USING btree (tenant_id, external_ref)
+    WHERE (external_ref IS NOT NULL);
+
+
+-- =========================================================================
 ALTER TABLE IF EXISTS public.service_accounts
     ADD COLUMN IF NOT EXISTS token_lookup text;
 
@@ -22079,5 +22141,224 @@ DO $$ BEGIN
         'general'::character varying,       -- manual, anything else
         'remediation'::character varying    -- RETIRED writer; legal for pre-split rows only
       ])::text[])));
+  END IF;
+END $$;
+
+
+-- POST-MIGRATIONS: nothing found through a cloud API was ever a managed device
+--
+-- Cloud discovery used to write an `asset_management` row for every resource it
+-- found — subnets, VPCs, EC2 instances, buckets, key stores, load balancers,
+-- CloudFront distributions, API gateways — stamped `connection_status =
+-- 'connected'`, plus an `asset_credentials` row holding nothing but the
+-- integration id. On the demo host that put seven subnets and two VPCs on
+-- Discovery → Devices claiming a connection nothing ever made, every per-row
+-- action greyed out because the page already knew a cloud-discovered row is not
+-- interrogable.
+--
+-- The Devices page lists API-ACCESSIBLE INTERFACES THE PLATFORM PULLS INVENTORY
+-- FROM, which is a narrower thing than "everything we could hold a credential
+-- for". A subnet has no interface at all; an EC2 instance is onboarded through
+-- the device agent, not through cloud enumeration. The writer is fixed
+-- (`Unmanaged` in device-interrogation-service); this removes what it wrote.
+--
+-- The predicate keys on `device_discovery_method`, the metadata key
+-- applyDeviceFields writes and the one the UI already reads to decide whether
+-- Interrogate and Test connection are offered. It is keyed on HOW the row came
+-- to be managed rather than on a list of cloud asset classes, because that is
+-- the actual criterion and a class list would need editing every time a
+-- collector learns a new resource kind.
+--
+-- This is a DATA DELETION, so four guard clauses keep it off anything an
+-- operator set up on purpose. **A cloud-hosted appliance someone added
+-- deliberately — a Palo Alto or FortiGate VM, with credentials, interrogated —
+-- must survive this, and does**: such a row is added through CreateDevice, so
+-- it carries `device_discovery_method = 'device_interrogation'` and fails the
+-- first clause outright, and it would independently fail all four others.
+--
+--   * a LOGIN credential — a username or a password — in asset_credentials.
+--   * a `management_url`: an address someone configured is a statement that the
+--     asset IS reachable, whatever its class, and is never guessed at.
+--   * `last_interrogated_at`: something has actually been pulled from it.
+--   * `interrogation_schedule_id`: it is on a schedule.
+--
+-- The credential clause says "no login secret" rather than "no asset_credentials
+-- row", and the distinction is load-bearing rather than pedantic. Cloud
+-- discovery also wrote `asset_credentials.credential_id = <the integration>` for
+-- every resource it recorded, so a `NOT EXISTS (SELECT 1 FROM asset_credentials
+-- ...)` test would match ZERO rows on exactly the installs this is meant to
+-- clean. It would have shipped as a check that cannot fire. (Verified against a
+-- real Postgres: a recorded subnet carried a credentials row whose credential_id
+-- was the integration and whose username and password_enc were both NULL.)
+--
+-- The asset itself, its facts, its class attributes, its endpoints and its
+-- containment edges all stay; this is not a delete of anything in the inventory.
+-- The orphaned credentials row goes with the management row it belonged to — it
+-- is reachable only through asset_management or an interrogation, so nothing can
+-- read it once the management row is gone, and the integration id it carried is
+-- preserved as provenance under `device_metadata.cloud_integration_id`.
+--
+-- Idempotent by construction: a re-run finds nothing left and reports DELETE 0.
+-- It re-runs on every helm upgrade, which is also what covers a management
+-- context sealed before the fix and replayed afterwards.
+DELETE FROM public.asset_credentials c
+USING public.assets a, public.asset_management m
+WHERE a.tenant_id = c.tenant_id
+  AND a.id = c.asset_id
+  AND m.tenant_id = c.tenant_id
+  AND m.asset_id = c.asset_id
+  AND a.metadata->>'device_discovery_method' = 'cloud_api'
+  AND c.username IS NULL
+  AND c.password_enc IS NULL
+  AND m.management_url IS NULL
+  AND m.last_interrogated_at IS NULL
+  AND m.interrogation_schedule_id IS NULL;
+
+DELETE FROM public.asset_management m
+USING public.assets a
+WHERE a.tenant_id = m.tenant_id
+  AND a.id = m.asset_id
+  AND a.metadata->>'device_discovery_method' = 'cloud_api'
+  AND m.management_url IS NULL
+  AND m.last_interrogated_at IS NULL
+  AND m.interrogation_schedule_id IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM public.asset_credentials c
+    WHERE c.tenant_id = m.tenant_id
+      AND c.asset_id = m.asset_id
+      AND (c.username IS NOT NULL OR c.password_enc IS NOT NULL)
+  );
+
+-- POST-MIGRATIONS: cloud discovery rows left `pending` with nothing that can
+-- ever clear them ( slice F, owner decision D7).
+--
+-- A cloud discovery writes `sensor_discoveries` rows like any other producer,
+-- but nothing cloud can match an auto-approval rule (a tenant's rules are
+-- scoped to sensors and to private network segments), so every row arrives
+-- `pending`. Two things then left them there for good, and BOTH are fixed going
+-- forward — this backfills the rows already written:
+--
+--   * a row routed to `external_connections` at ingest (a CloudFront
+--     distribution has a public address, so classifyAsset called it
+--     third-party) landed on NO asset, so `EffectiveStatus` was empty for it
+--     and discovery-processor left the rule's `pending` alone. It now stamps
+--     `observed` for a routed finding.
+--   * a row that DID land on an asset, but on one that was still
+--     `pending_approval`, was honestly `pending` — and then the human approved
+--     the asset and nothing told the queue row. ApproveAssets/DenyAssets now
+--     settle their rows (asset_service.go settleDiscoveryQueueRows).
+--
+-- Verified against the live demo database before merge: the three statements
+-- below match 4, 0 and 2 of that host's six cloud rows respectively, and zero
+-- of its eleven non-cloud `pending` rows.
+--
+-- Scoped three ways, deliberately:
+--   * `metadata->>'discovery_method' = 'cloud_api'` — this slice is about cloud
+--     rows. A sensor row sitting `pending` may be genuinely awaiting a human.
+--   * `processed_at IS NOT NULL` — an unprocessed row is one the poller is
+--     still working through; the retention sweep is careful about exactly this
+--     and so is this.
+--   * `approval_status = 'pending'` — which is what makes every statement
+--     idempotent: a row this has already moved matches none of them again.
+--
+-- The resource-id list is exactly what inventory-service's cloudResourceID()
+-- reads (arn / resource_id / cloud_resource_id / self_link / resource_uri), so
+-- "which asset did this row resolve to" is decided here the same way ingest
+-- decided it. `distribution_id` is deliberately NOT in the list: ingest does
+-- not read it either, so a distribution row did not resolve through it and
+-- claiming otherwise would credit the row with a materialization that never
+-- happened.
+--
+-- approval_status carries no CHECK constraint (a plain character varying(20),
+-- default 'pending'), and `observed` / `suppressed` are both already written by
+-- discovery-processor-service, so no ALTER is needed.
+DO $$
+DECLARE
+  approved_count   integer := 0;
+  suppressed_count integer := 0;
+  observed_count   integer := 0;
+BEGIN
+  IF to_regclass('public.sensor_discoveries_partitioned') IS NULL
+     OR to_regclass('public.asset_identifiers') IS NULL
+     OR to_regclass('public.assets') IS NULL THEN
+    RETURN;
+  END IF;
+
+  -- 1. The row landed on an asset the tenant has since approved. `pending` was
+  --    true when it was written and has not been true since. `auto_approved`
+  --    with auto_approval_rule_id left NULL is the same pair adoptEffectiveStatus
+  --    writes for a monitoring asset: nothing awaits a decision, and no rule
+  --    fired.
+  WITH settled AS (
+    UPDATE public.sensor_discoveries_partitioned d
+       SET approval_status = 'auto_approved'
+      FROM public.asset_identifiers i
+      JOIN public.assets a
+        ON a.tenant_id = i.tenant_id AND a.id = i.asset_id AND a.deleted_at IS NULL
+     WHERE d.processed_at IS NOT NULL
+       AND d.approval_status = 'pending'
+       AND d.metadata->>'discovery_method' = 'cloud_api'
+       AND i.tenant_id = d.tenant_id
+       AND i.kind = 'cloud_resource_id'
+       AND i.value = COALESCE(d.metadata->'raw_metadata'->>'arn',
+                              d.metadata->'raw_metadata'->>'resource_id',
+                              d.metadata->'raw_metadata'->>'cloud_resource_id',
+                              d.metadata->'raw_metadata'->>'self_link',
+                              d.metadata->'raw_metadata'->>'resource_uri')
+       AND a.asset_status = 'monitoring'
+    RETURNING 1
+  )
+  SELECT count(*) INTO approved_count FROM settled;
+
+  -- 2. The same join, for an asset the tenant took off the table. Nothing was
+  --    materialized and no approval decision will ever follow.
+  WITH settled AS (
+    UPDATE public.sensor_discoveries_partitioned d
+       SET approval_status = 'suppressed'
+      FROM public.asset_identifiers i
+      JOIN public.assets a
+        ON a.tenant_id = i.tenant_id AND a.id = i.asset_id AND a.deleted_at IS NULL
+     WHERE d.processed_at IS NOT NULL
+       AND d.approval_status = 'pending'
+       AND d.metadata->>'discovery_method' = 'cloud_api'
+       AND i.tenant_id = d.tenant_id
+       AND i.kind = 'cloud_resource_id'
+       AND i.value = COALESCE(d.metadata->'raw_metadata'->>'arn',
+                              d.metadata->'raw_metadata'->>'resource_id',
+                              d.metadata->'raw_metadata'->>'cloud_resource_id',
+                              d.metadata->'raw_metadata'->>'self_link',
+                              d.metadata->'raw_metadata'->>'resource_uri')
+       AND a.asset_status IN ('archived', 'denied')
+    RETURNING 1
+  )
+  SELECT count(*) INTO suppressed_count FROM settled;
+
+  -- 3. The row produced no asset: its evidence went to `external_connections`,
+  --    which is the row that proves it rather than the absence of a match
+  --    proving it. `observed` — the value this column already carries for
+  --    "recorded as evidence, no approval decision will ever follow" — rather
+  --    than `auto_approved`, which would claim an approval nobody made.
+  --
+  --    Runs AFTER 1 and 2, so a row that did resolve to an asset is already off
+  --    `pending` and cannot be caught here as well.
+  IF to_regclass('public.external_connections') IS NOT NULL THEN
+    WITH settled AS (
+      UPDATE public.sensor_discoveries_partitioned d
+         SET approval_status = 'observed'
+        FROM public.external_connections e
+       WHERE d.processed_at IS NOT NULL
+         AND d.approval_status = 'pending'
+         AND d.metadata->>'discovery_method' = 'cloud_api'
+         AND e.tenant_id = d.tenant_id
+         AND e.dest_ip = d.dest_ip
+         AND e.dest_port IS NOT DISTINCT FROM d.port
+      RETURNING 1
+    )
+    SELECT count(*) INTO observed_count FROM settled;
+  END IF;
+
+  IF approved_count > 0 OR suppressed_count > 0 OR observed_count > 0 THEN
+    RAISE NOTICE 'cloud sensor_discoveries backfill: % row(s) -> auto_approved, % row(s) -> suppressed, % row(s) -> observed',
+      approved_count, suppressed_count, observed_count;
   END IF;
 END $$;

@@ -5,7 +5,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore, riskColor } from '../../components/ui';
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
-import { serviceConfidence } from './lens-helpers';
+import { serviceConfidence, keyCustodyLabel } from './lens-helpers';
 import { assetIdentity, classDeclares, classLabel, operatingSystem, primaryAddressPort, primaryEndpoint } from './asset-shape';
 import {
   PROVENANCE_LABEL,
@@ -650,6 +650,11 @@ export function KeyDrawer({ keyId, onOpenAsset, onClose, active = true, depth = 
             <MetaRow k="Curve" v={k.curve as string} mono />
             <MetaRow k="Algorithm" v={k.algorithm_ref as string} mono />
             <MetaRow k="Secured by" v={k.secured_by as string} />
+            {/* Custody and the provider's own reference are present only on
+                cloud-held keys. An absent custody renders as "—", not as a
+                guess at who holds the key. */}
+            <MetaRow k="Custody" v={keyCustodyLabel(k.key_custody)} />
+            <MetaRow k="Cloud reference" v={k.external_ref as string} mono />
 
             <SectionLabel icon="clock">Lifecycle</SectionLabel>
             <MetaRow k="State" v={state} />

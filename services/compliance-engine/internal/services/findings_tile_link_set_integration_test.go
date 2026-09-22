@@ -50,14 +50,21 @@ import (
 // describe one set. A hand-typed "critical" would keep passing after someone
 // dropped `?severity=critical` from the route, which is precisely the drift
 // being guarded.
+//
+// Shares resolveDashboardCriticalFindingsRoute with
+// TestDashboardCriticalTile_RouteCarriesItsNarrowings in
+// findings_statistics_scope_test.go, and inherits that function's caching
+// trap: this reads dashboard-metrics.ts from frontend-v2/, a different module
+// tree that `go test`'s result cache cannot see into, so a frontend-only edit
+// can be served a stale `ok (cached)` unless the run passes `-count=1`.
+// `make test-integration-db` (scripts/run-integration-db-tests.sh) always
+// invokes this suite with `-count=1 -run Integration`, so the normal path is
+// safe — the trap is for anyone running `go test -run Integration ./...`
+// against this package by hand.
 func tileLinkSeverity(t *testing.T) string {
 	t.Helper()
 	metrics := readRepoFile(t, statsRepoRoot(t), dashboardMetricsRel)
-	m := reCritRoute.FindStringSubmatch(metrics)
-	if m == nil {
-		t.Fatalf("could not find DASHBOARD_CRITICAL_FINDINGS_ROUTE in %s", dashboardMetricsRel)
-	}
-	route := m[1]
+	route := resolveDashboardCriticalFindingsRoute(t, metrics)
 	i := strings.Index(route, "?")
 	if i < 0 {
 		t.Fatalf("the tile's route %q carries no query string, so it names no severity — "+

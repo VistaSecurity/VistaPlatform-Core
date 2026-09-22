@@ -24,12 +24,20 @@ type Key struct {
 	Metadata          map[string]interface{} `json:"metadata" db:"metadata"`
 
 	// CycloneDX relatedCryptoMaterialProperties fields
-	MaterialType     string     `json:"material_type" db:"material_type"`         // private-key, public-key, secret-key, etc.
-	State            string     `json:"state" db:"state"`                         // NIST SP 800-57: pre-activation, active, suspended, deactivated, compromised, destroyed
-	StateReason      *string    `json:"state_reason,omitempty" db:"state_reason"` // Reason for current state
-	Format           *string    `json:"format,omitempty" db:"format"`             // PEM, PKCS#8, JWK, DER
-	AlgorithmRef     *string    `json:"algorithm_ref,omitempty" db:"algorithm_ref"`
-	SecuredBy        *string    `json:"secured_by,omitempty" db:"secured_by"` // HSM, TPM, Software, None
+	MaterialType string  `json:"material_type" db:"material_type"`         // private-key, public-key, secret-key, etc.
+	State        string  `json:"state" db:"state"`                         // NIST SP 800-57: pre-activation, active, suspended, deactivated, compromised, destroyed
+	StateReason  *string `json:"state_reason,omitempty" db:"state_reason"` // Reason for current state
+	Format       *string `json:"format,omitempty" db:"format"`             // PEM, PKCS#8, JWK, DER
+	AlgorithmRef *string `json:"algorithm_ref,omitempty" db:"algorithm_ref"`
+	SecuredBy    *string `json:"secured_by,omitempty" db:"secured_by"` // HSM, TPM, Software, None
+	// KeyCustody is WHO HOLDS the key: "customer" or "provider". Absent means
+	// custody was not established — never assume either, the way the Data
+	// Protection lens's custody-unknown rung does not.
+	KeyCustody *string `json:"key_custody,omitempty" db:"key_custody"`
+	// ExternalRef is the provider's own fully-qualified name for the key (a KMS
+	// ARN, a Key Vault key id, a Cloud KMS resource name). Present only on keys
+	// that came from a cloud provider; it is their dedup identity.
+	ExternalRef      *string    `json:"external_ref,omitempty" db:"external_ref"`
 	ActivationDate   *time.Time `json:"activation_date,omitempty" db:"activation_date"`
 	DeactivationDate *time.Time `json:"deactivation_date,omitempty" db:"deactivation_date"`
 	DestructionDate  *time.Time `json:"destruction_date,omitempty" db:"destruction_date"`

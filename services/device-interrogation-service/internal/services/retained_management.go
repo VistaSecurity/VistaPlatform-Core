@@ -94,15 +94,33 @@ func (s *DeviceService) ReplayRetainedManagement(ctx context.Context, tenant uui
 			}
 			// Identity, observed addresses, names, tags and facts stay under the
 			// shared identity pipeline; replay configures management only.
-			if err := upsertManagement(ctx, bound.Tx(), tenant, asset, managementUpsert{
-				ManagementURL: fields.ManagementURL, TLSInsecureSkipVerify: fields.TLSInsecureSkipVerify,
-				ManagementProtocol: nonEmptyPtr(managementProtocol(derefStr(fields.ManagementURL), fields.DeviceType)),
-				ConnectionStatus:   nonEmptyPtr("unknown"),
-			}); err != nil {
-				return err
-			}
-			if err := s.upsertDeviceCredentials(ctx, bound.Tx(), tenant, asset, fields); err != nil {
-				return err
+			//
+			// And configures NOTHING for an unmanaged observation. This is the
+			// SECOND way a management row can be born — the contested path seals
+			// the same deviceFieldUpdate and materializes it here once the merge
+			// is approved — so a guard covering only the inline write would be
+			// quietly reopened by a replay weeks after the discovery run.
+			//
+			// The check is the sealed FLAG alone, deliberately. Re-deriving it
+			// here from `fields.DiscoveryMethod == "cloud_api"` would look more
+			// defensive and would be worse: discovery_method is settable by the
+			// client on CreateDeviceRequest, so an operator adding a cloud
+			// appliance and typing that value would silently lose the management
+			// row this whole path exists to configure. Contexts sealed before the
+			// flag existed replay as managed; the POST-MIGRATIONS cleanup in
+			// schema.sql removes what they write, and it re-runs on every helm
+			// upgrade rather than once.
+			if !fields.Unmanaged {
+				if err := upsertManagement(ctx, bound.Tx(), tenant, asset, managementUpsert{
+					ManagementURL: fields.ManagementURL, TLSInsecureSkipVerify: fields.TLSInsecureSkipVerify,
+					ManagementProtocol: nonEmptyPtr(managementProtocol(derefStr(fields.ManagementURL), fields.DeviceType)),
+					ConnectionStatus:   nonEmptyPtr("unknown"),
+				}); err != nil {
+					return err
+				}
+				if err := s.upsertDeviceCredentials(ctx, bound.Tx(), tenant, asset, fields); err != nil {
+					return err
+				}
 			}
 			if err := mergeAssetMetadata(ctx, bound.Tx(), tenant, asset, map[string]interface{}{deviceTypeKey: fields.DeviceType, deviceDiscoveryMethodKey: fields.DiscoveryMethod}); err != nil {
 				return err

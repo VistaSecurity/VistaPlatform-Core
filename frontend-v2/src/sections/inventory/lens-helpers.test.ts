@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   configurationRiskGroup, effectiveInventoryRiskFilter, groupConfigurationsByRisk,
-  keyAlgorithmLabel, serviceConfidence,
+  keyAlgorithmLabel, keyCustodyDetail, keyCustodyLabel, serviceConfidence,
   stripEmptyParens, stripInetMask,
 } from './lens-helpers';
 import type { CryptoConfig } from './drawers';
@@ -149,5 +149,37 @@ describe('serviceConfidence', () => {
     expect(serviceConfidence({
       service_confidence: 'LOW', service_identification_method: 'Port_Heuristic',
     }).qualifier).toBe('Best guess · from port');
+  });
+});
+
+// Cloud KMS keys reach the Keys lens carrying `key_custody`. The badge is the
+// one place a person sees the difference between a key THEY control and one the
+// provider holds — the same distinction the Data Protection lens's protection
+// ladder is built on — so the two states must read differently, and an ABSENT
+// custody must read as nothing at all rather than as either answer.
+describe('keyCustodyLabel', () => {
+  it('names both custody states, distinctly', () => {
+    expect(keyCustodyLabel('customer')).toBe('Customer-managed');
+    expect(keyCustodyLabel('provider')).toBe('Provider-managed');
+    expect(keyCustodyLabel('customer')).not.toBe(keyCustodyLabel('provider'));
+  });
+
+  it('claims nothing when custody was not established', () => {
+    // A certificate-derived key, or a cloud key whose manager the provider did
+    // not report. Absent is NOT "provider": rendering a guess there would be the
+    // same overclaim the not-assessed risk state exists to avoid.
+    expect(keyCustodyLabel(undefined)).toBeNull();
+    expect(keyCustodyLabel(null)).toBeNull();
+    expect(keyCustodyLabel('')).toBeNull();
+    expect(keyCustodyLabel('unknown')).toBeNull();
+    // The RAW provider wording is not a custody value — the backend normalises
+    // it, and the UI must not start accepting a second vocabulary.
+    expect(keyCustodyLabel('AWS')).toBeNull();
+  });
+
+  it('explains what each state means on hover, and explains nothing when there is no badge', () => {
+    expect(keyCustodyDetail('customer')).toMatch(/you control this key/i);
+    expect(keyCustodyDetail('provider')).toMatch(/you do not control the key/i);
+    expect(keyCustodyDetail(undefined)).toBeNull();
   });
 });

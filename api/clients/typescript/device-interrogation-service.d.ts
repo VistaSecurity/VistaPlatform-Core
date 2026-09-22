@@ -2059,6 +2059,70 @@ export interface components {
             processing?: {
                 [key: string]: unknown;
             };
+            /**
+             * @description A cloud discovery's per-resource-type outcome: what was asked for,
+             *     what answered, and what could not be looked at.
+             *
+             *     Absent for job kinds that do not collect by resource type, and for
+             *     cloud providers that do not record outcomes yet. **Absent means
+             *     "not reported", not "everything succeeded."**
+             */
+            resource_types?: components["schemas"]["JobResultResourceType"][];
+            /**
+             * @description The run verdict the per-type outcomes add up to. `complete` means
+             *     every resource type that was attempted was collected without error
+             *     — and it is the only verdict for which `success` is true.
+             * @enum {string}
+             */
+            outcome?: "complete" | "partial" | "failed";
+            /**
+             * @description Why account-wide compute/network enumeration did not run — switched
+             *     off for the integration, or the failure that stopped it.
+             */
+            enumeration_skipped?: string;
+        };
+        /**
+         * @description One requested cloud resource type's outcome. `succeeded` with `found: 0`
+         *     means the account genuinely has none; `failed` means nothing is known
+         *     about that type. Collapsing the two is the bug this exists to prevent.
+         */
+        JobResultResourceType: {
+            /** @description As requested, e.g. `kms`, `s3`, `rds`, `alb`. */
+            resource_type: string;
+            /**
+             * @description `succeeded` — every scope answered. `partial` — some scopes answered
+             *     and some failed. `failed` — every scope attempted failed.
+             *     `not_attempted` — requested, but this provider has no collector for
+             *     it, so nothing looked.
+             * @enum {string}
+             */
+            status: "succeeded" | "partial" | "failed" | "not_attempted";
+            /** @description Resources this type produced. Meaningful only for succeeded/partial. */
+            found: number;
+            /** @description Regions (or `global`) that answered. */
+            scopes_succeeded: number;
+            /** @description Regions (or `global`) attempted. Zero for not_attempted. */
+            scopes_attempted: number;
+            failures?: components["schemas"]["JobResultCollectorFailure"][];
+        };
+        /**
+         * @description One scope's collection failure, projected onto actionable fields. The
+         *     provider's own error code survives verbatim — an AccessDenied is a
+         *     different user action from a throttle — while the message is redacted
+         *     of secret-shaped runs and length-capped before it is stored or served.
+         */
+        JobResultCollectorFailure: {
+            /** @description The region this failed in, or `global` for a non-regional API. */
+            scope?: string;
+            /**
+             * @description Our classification of what the provider said.
+             * @enum {string}
+             */
+            reason?: "access_denied" | "credentials" | "throttled" | "region_unavailable" | "timeout" | "network" | "unknown";
+            /** @description The provider's own error code, e.g. `AccessDeniedException`. */
+            code?: string;
+            /** @description The provider's message, sanitized and bounded. */
+            message?: string;
         };
         JobResultsSummary: {
             total_assets: number;

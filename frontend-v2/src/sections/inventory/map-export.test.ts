@@ -16,6 +16,8 @@ import {
 import type { MapEdge, MapGraph, MapNode } from './map-model';
 
 const node = (over: Partial<MapNode> & Pick<MapNode, 'id'>): MapNode => ({
+  kind: 'asset',
+  assetId: over.id,
   label: over.id,
   classKey: 'server',
   classLabel: 'Server',
@@ -36,6 +38,7 @@ const edge = (over: Partial<MapEdge> & Pick<MapEdge, 'id' | 'source' | 'target'>
   firstSeenAt: '2026-01-01T00:00:00Z',
   lastSeenAt: '2026-09-01T00:00:00Z',
   observationCount: 4,
+  synthetic: false,
   ...over,
 });
 
@@ -77,6 +80,8 @@ describe('toGraphML', () => {
 `<?xml version="1.0" encoding="UTF-8"?>
 <graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
   <key id="n_label" for="node" attr.name="label" attr.type="string"/>
+  <key id="n_kind" for="node" attr.name="node_kind" attr.type="string"/>
+  <key id="n_asset_id" for="node" attr.name="asset_id" attr.type="string"/>
   <key id="n_class_key" for="node" attr.name="class_key" attr.type="string"/>
   <key id="n_class_group" for="node" attr.name="class_group" attr.type="string"/>
   <key id="n_status" for="node" attr.name="asset_status" attr.type="string"/>
@@ -87,6 +92,7 @@ describe('toGraphML', () => {
   <key id="e_type" for="edge" attr.name="type" attr.type="string"/>
   <key id="e_status" for="edge" attr.name="status" attr.type="string"/>
   <key id="e_source_kind" for="edge" attr.name="source_kind" attr.type="string"/>
+  <key id="e_synthetic" for="edge" attr.name="synthetic" attr.type="string"/>
   <key id="e_confidence" for="edge" attr.name="confidence" attr.type="double"/>
   <key id="e_first_seen" for="edge" attr.name="first_seen_at" attr.type="string"/>
   <key id="e_last_seen" for="edge" attr.name="last_seen_at" attr.type="string"/>
@@ -94,6 +100,8 @@ describe('toGraphML', () => {
   <graph id="neighbourhood" edgedefault="directed">
     <node id="root-1">
       <data key="n_label">app-01</data>
+      <data key="n_kind">asset</data>
+      <data key="n_asset_id">root-1</data>
       <data key="n_class_key">web_application</data>
       <data key="n_class_group">application</data>
       <data key="n_status">monitoring</data>
@@ -103,6 +111,8 @@ describe('toGraphML', () => {
     </node>
     <node id="host-1">
       <data key="n_label">host-01</data>
+      <data key="n_kind">asset</data>
+      <data key="n_asset_id">host-1</data>
       <data key="n_class_key">server</data>
       <data key="n_class_group">hardware</data>
       <data key="n_status">monitoring</data>
@@ -114,6 +124,7 @@ describe('toGraphML', () => {
       <data key="e_type">runs_on</data>
       <data key="e_status">active</data>
       <data key="e_source_kind">measured</data>
+      <data key="e_synthetic">false</data>
       <data key="e_confidence">0.9</data>
       <data key="e_first_seen">2026-01-01T00:00:00Z</data>
       <data key="e_last_seen">2026-09-01T00:00:00Z</data>
@@ -174,14 +185,16 @@ describe('toCytoscape', () => {
         nodes: [
           {
             data: {
-              id: 'root-1', label: 'app-01', class_key: 'web_application',
+              id: 'root-1', label: 'app-01', node_kind: 'asset', asset_id: 'root-1',
+              class_key: 'web_application',
               class_group: 'application', asset_status: 'monitoring', depth: 0,
               is_root: 'true', risk_score: 72,
             },
           },
           {
             data: {
-              id: 'host-1', label: 'host-01', class_key: 'server',
+              id: 'host-1', label: 'host-01', node_kind: 'asset', asset_id: 'host-1',
+              class_key: 'server',
               class_group: 'hardware', asset_status: 'monitoring', depth: 1,
               is_root: 'false',
             },
@@ -192,7 +205,7 @@ describe('toCytoscape', () => {
             data: {
               id: 'edge-1', source: 'root-1', target: 'host-1', label: 'runs on',
               type: 'runs_on', status: 'active', source_kind: 'measured',
-              confidence: 0.9, first_seen_at: '2026-01-01T00:00:00Z',
+              synthetic: 'false', confidence: 0.9, first_seen_at: '2026-01-01T00:00:00Z',
               last_seen_at: '2026-09-01T00:00:00Z', observation_count: 4,
             },
           },

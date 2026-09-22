@@ -20,23 +20,68 @@ import {
 
 // ------------------------------------------------------------- the model --
 
-/** One asset, as the map draws it. */
+/**
+ * What kind of box a node is.
+ *
+ * `asset` is an inventory asset. The two scope kinds are GROUPING NODES the
+ * client synthesises (`withCloudScopeRoots`) from the account and region each
+ * asset records — they are scoping attributes, not asset classes ( D6),
+ * so there is no asset behind them, nothing to open, no risk score and no
+ * lifecycle status. Anything that assumes a node has an asset id must check
+ * this first; `isAssetNode` is the guard.
+ */
+export type MapNodeKind = 'asset' | ScopeNodeKey;
+
+/** One node, as the map draws it: an asset, or a scope that groups them. */
 export interface MapNode {
+  /** The node id. An asset id for an asset; a `scope:…` key for a grouping
+   *  node, which cannot collide with a uuid. */
   id: string;
+  kind: MapNodeKind;
+  /** The asset behind this node. UNDEFINED on a grouping node — a region is
+   *  not an asset, and giving it a synthetic id would put a thing that does not
+   *  exist behind "Open asset". */
+  assetId?: string;
   /** What the node is labelled with — never a bare uuid (see `nodeLabel`). */
   label: string;
-  /** The raw `class_key` the server sent, or '' when it sent none. */
+  /** The raw `class_key` the server sent, or '' when it sent none (and always
+   *  '' on a grouping node). */
   classKey: string;
   /** The class's own label ('' when the key is unknown to this build). */
   classLabel: string;
-  /** Which top-level class group styles it (ADR-0002 taxonomy roots). */
-  group: ClassGroupKey;
-  /** Lifecycle status — drives the ring, not the fill. */
+  /** Which top-level class group styles it (ADR-0002 taxonomy roots), or the
+   *  scope key on a grouping node. */
+  group: NodeStyleKey;
+  /** Lifecycle status — drives the ring, not the fill. '' on a grouping node. */
   status: string;
   riskScore?: number;
-  /** Shortest hop count from the focus asset; 0 is the focus itself. */
+  /** Shortest hop count from the focus asset; 0 is the focus itself. A grouping
+   *  node takes the shallowest depth of what it groups. */
   depth: number;
   isRoot: boolean;
+  /** The cloud account this asset records, or undefined when it records none.
+   * A scoping attribute ( D6), carried here only so the grouping nodes
+   *  can be built from it. */
+  cloudAccount?: string;
+  /** The cloud region, likewise. `global` is a legitimate value for a CDN
+   *  distribution and is NOT a stand-in for "unknown". */
+  cloudRegion?: string;
+}
+
+/** Whether this node is a real asset — i.e. whether `assetId` is there. */
+export function isAssetNode(node: MapNode): boolean {
+  return node.kind === 'asset';
+}
+
+/** How many of the graph's nodes are assets.
+ *
+ *  Everything that COUNTS the graph has to use this rather than
+ *  `nodes.length`: the truncation banner says "showing N of M assets", and M
+ *  comes from the server, which has never heard of a grouping node. Counting
+ *  the scope boxes in N would make a complete graph claim to be showing more
+ *  assets than exist. */
+export function assetNodeCount(graph: MapGraph): number {
+  return graph.nodes.reduce((n, node) => (isAssetNode(node) ? n + 1 : n), 0);
 }
 
 /** One relationship, as the map draws it. */
@@ -55,6 +100,17 @@ export interface MapEdge {
   firstSeenAt: string;
   lastSeenAt: string;
   observationCount: number;
+  /**
+   * True when the client drew this line rather than the server storing it.
+   *
+   * Only the cloud scope edges (`withCloudScopeRoots`) are synthetic. They
+   * restate an asset's recorded account and region as containment so the map
+   * has something to root a VPC or a bucket on; there is no row in
+   * `asset_relationships` behind them, they have no observation history, and
+   * the tooltip and the exports say so. A stored edge and a derived one reading
+   * identically is how a picture starts asserting more than the data does.
+   */
+  synthetic: boolean;
 }
 
 export interface MapGraph {
@@ -82,6 +138,19 @@ export type ClassGroupKey =
   | 'hardware' | 'virtual' | 'cloud_resource' | 'application'
   | 'service' | 'external' | 'unknown_host' | 'other';
 
+/**
+ * The two grouping-node kinds.
+ *
+ * NOT members of `ClassGroupKey`: that union is the class taxonomy's roots, and
+ * a cloud account is not a class of asset — it is a scoping attribute rendered
+ * as a box ( D6). Keeping them in a separate union is what stops a scope
+ * box being counted as an asset anywhere the class groups are totalled.
+ */
+export type ScopeNodeKey = 'cloud_account' | 'cloud_region';
+
+/** Anything that can style a node: a class group, or a scope kind. */
+export type NodeStyleKey = ClassGroupKey | ScopeNodeKey;
+
 export interface ClassGroupStyle {
   label: string;
   /** A design token, never a literal — the map has to survive a brand retune
@@ -98,7 +167,7 @@ export interface ClassGroupStyle {
  * the map and a row in the facet rail are recognisably the same thing. The
  * colours come from the categorical + status token set rather than fresh hexes.
  */
-export const CLASS_GROUP_STYLES: Readonly<Record<ClassGroupKey, ClassGroupStyle>> = {
+export const CLASS_GROUP_STYLES: Readonly<Record<NodeStyleKey, ClassGroupStyle>> = {
   hardware: { label: 'Hardware', color: 'var(--chart-2)', icon: 'circuit-board' },
   virtual: { label: 'Virtual', color: 'var(--chart-1)', icon: 'layers' },
   cloud_resource: { label: 'Cloud resource', color: 'var(--chart-3)', icon: 'cloud' },
@@ -109,10 +178,28 @@ export const CLASS_GROUP_STYLES: Readonly<Record<ClassGroupKey, ClassGroupStyle>
   // inventory exists to close, and greying it would read as "nothing to see".
   unknown_host: { label: 'Unknown host', color: 'var(--warn)', icon: 'circle-help' },
   other: { label: 'Other', color: 'var(--neutral)', icon: 'circle-dashed' },
+  // The two scope kinds are deliberately styled from the muted TEXT tokens
+  // rather than from the categorical palette. They are the frame the assets
+  // hang in, not another series, and a scope box that competed for attention
+  // with a critical asset would be reading weight into scaffolding.
+  cloud_account: { label: 'Cloud account', color: 'var(--app-t2)', icon: 'cloud' },
+  cloud_region: { label: 'Cloud region', color: 'var(--app-t3)', icon: 'map-pin' },
 };
 
-/** Every group the styles cover, in the order the legend lists them. */
-export const CLASS_GROUP_KEYS = Object.keys(CLASS_GROUP_STYLES) as ClassGroupKey[];
+/**
+ * Every ASSET group the styles cover, in the order the legend lists them.
+ *
+ * Written out rather than taken from `Object.keys(CLASS_GROUP_STYLES)`, which
+ * is how the two scope kinds would silently join the class taxonomy the moment
+ * they were added to the style record.
+ */
+export const CLASS_GROUP_KEYS: readonly ClassGroupKey[] = [
+  'hardware', 'virtual', 'cloud_resource', 'application',
+  'service', 'external', 'unknown_host', 'other',
+];
+
+/** The grouping-node kinds, in the order they nest. */
+export const SCOPE_NODE_KEYS: readonly ScopeNodeKey[] = ['cloud_account', 'cloud_region'];
 
 /**
  * Which group a class key belongs to.
@@ -131,7 +218,7 @@ export function classGroupOf(classKey?: string | null): ClassGroupKey {
   return (root in CLASS_GROUP_STYLES ? root : 'other') as ClassGroupKey;
 }
 
-export const classGroupStyle = (group: ClassGroupKey): ClassGroupStyle =>
+export const classGroupStyle = (group: NodeStyleKey): ClassGroupStyle =>
   CLASS_GROUP_STYLES[group] ?? CLASS_GROUP_STYLES.other;
 
 // ------------------------------------------------------ the status ring ---
@@ -211,6 +298,8 @@ export function buildMapGraph(nbh: Neighbourhood | undefined): MapGraph {
     seenNodes.add(n.asset_id);
     nodes.push({
       id: n.asset_id,
+      kind: 'asset',
+      assetId: n.asset_id,
       label: nodeLabel(n),
       classKey: n.class_key ?? '',
       classLabel: ASSET_CLASSES[(n.class_key ?? '') as AssetClassKey]?.label ?? '',
@@ -219,6 +308,10 @@ export function buildMapGraph(nbh: Neighbourhood | undefined): MapGraph {
       riskScore: n.risk_score,
       depth: n.depth,
       isRoot: n.is_root === true || n.asset_id === nbh.root_asset_id,
+      // Trimmed, and absent stays absent. `cloud_account: ''` and "no account
+      // recorded" are different answers and only one of them may draw a box.
+      cloudAccount: (n.cloud_account ?? '').trim() || undefined,
+      cloudRegion: (n.cloud_region ?? '').trim() || undefined,
     });
   }
 
@@ -244,6 +337,7 @@ export function buildMapGraph(nbh: Neighbourhood | undefined): MapGraph {
       firstSeenAt: e.first_seen_at,
       lastSeenAt: e.last_seen_at,
       observationCount: e.observation_count,
+      synthetic: false,
     });
   }
 
@@ -266,6 +360,161 @@ export function capGraph(graph: MapGraph, nodeCap: number, edgeCap: number): Map
     .filter((e) => kept.has(e.source) && kept.has(e.target))
     .slice(0, Math.max(0, edgeCap));
   return { rootId: graph.rootId, nodes, edges };
+}
+
+// ------------------------------------------------- cloud scope grouping ---
+
+/** The id prefix every grouping node carries. Not a uuid, so it can never
+ *  collide with an asset id. */
+export const SCOPE_NODE_PREFIX = 'scope:';
+
+export const cloudAccountNodeId = (account: string): string => `${SCOPE_NODE_PREFIX}cloud_account:${account}`;
+
+/**
+ * A region node is keyed by ACCOUNT AND REGION, not by region alone.
+ *
+ * Two accounts with resources in `us-east-1` are two different places, and one
+ * box holding both would answer "what is in this account" with the other
+ * account's resources in it. The cost is that an asset recording a region but
+ * no account gets its own box — which is the honest rendering of what is
+ * known, and is labelled as such rather than quietly folded into a neighbour's
+ * account.
+ */
+export const cloudRegionNodeId = (account: string, region: string): string =>
+  `${SCOPE_NODE_PREFIX}cloud_region:${account}|${region}`;
+
+/** The label under a region box: whose account it is, or that nobody said. */
+export const cloudRegionSubLabel = (account: string): string =>
+  (account ? `Account ${account}` : 'Account not recorded');
+
+function scopeNode(id: string, kind: ScopeNodeKey, label: string, subLabel: string, depth: number): MapNode {
+  return {
+    id,
+    kind,
+    // No `assetId`: there is no asset. Everything that opens, focuses or
+    // exports a node has to cope with that, which is the point of the field
+    // being optional rather than a synthetic uuid nothing can resolve.
+    label,
+    classKey: '',
+    classLabel: subLabel,
+    group: kind,
+    // A scope has no lifecycle. '' rings as `muted`, which is right: the box is
+    // scaffolding, and giving it a green "monitoring" ring would claim the
+    // platform is watching a region.
+    status: '',
+    depth,
+    isRoot: false,
+  };
+}
+
+function scopeEdge(source: string, target: string): MapEdge {
+  return {
+    id: `${SCOPE_NODE_PREFIX}edge:${source}->${target}`,
+    source,
+    target,
+    type: 'contains',
+    label: TYPE_LABEL.contains,
+    status: 'active',
+    pending: false,
+    // `inferred` of the four provenances, because nothing observed this edge:
+    // it is the client restating the asset's own recorded account and region as
+    // a line. Calling it `measured` would put a relationship nobody stored on
+    // the same footing as one a collector saw.
+    sourceKind: 'inferred',
+    confidence: 1,
+    firstSeenAt: '',
+    lastSeenAt: '',
+    observationCount: 0,
+    synthetic: true,
+  };
+}
+
+/**
+ * Hang the graph's cloud assets off account and region grouping nodes.
+ *
+ * This is what turns "what is in this VPC" into "what is in this account". The
+ * two VPCs an AWS discovery produces float unrooted without it, and a bucket or
+ * a CDN distribution — regional or global rather than VPC-resident — has no
+ * edge at all and sits on the canvas as an isolated box.
+ *
+ * Three rules, and each one is a thing it would be easy to get wrong:
+ *
+ *  1. **Only the assets nothing else on the map contains get a scope parent.**
+ *     A subnet inside a drawn VPC is already placed; also hanging it off the
+ *     region would flatten account → region → VPC → subnet into a bush and draw
+ *     the same containment twice. An asset whose container fell outside the
+ *     depth window is NOT contained on this map, so it does attach — which is
+ *     the right answer, because on this map it really is a root.
+ *  2. **Absent is absent.** An asset recording no region gets no region box and
+ *     no edge; it stays on the map exactly where it was. Nothing invents a
+ *     placeholder region, because "unknown" is not a region and a box labelled
+ *     `—` would be read as one. An asset recording an account but no region
+ *     hangs directly off its account.
+ *  3. **Run this AFTER `capGraph`.** The caps are about assets, and the counts
+ *     the truncation banner quotes come from the server. Synthesising boxes
+ *     before the cap would let scaffolding push assets out of the graph.
+ */
+export function withCloudScopeRoots(graph: MapGraph): MapGraph {
+  const containedOnMap = new Set<string>();
+  for (const e of graph.edges) {
+    if (e.type === 'contains') containedOnMap.add(e.target);
+  }
+
+  const added = new Map<string, MapNode>();
+  const edges: MapEdge[] = [];
+  const edgeIds = new Set(graph.edges.map((e) => e.id));
+
+  const ensure = (node: MapNode) => {
+    const existing = added.get(node.id);
+    // Shallowest wins, the same rule the server's own `depth` follows: a box
+    // grouping something one hop out is one hop out.
+    if (existing) {
+      if (node.depth < existing.depth) added.set(node.id, { ...existing, depth: node.depth });
+      return;
+    }
+    added.set(node.id, node);
+  };
+
+  const link = (source: string, target: string) => {
+    const edge = scopeEdge(source, target);
+    if (edgeIds.has(edge.id)) return;
+    edgeIds.add(edge.id);
+    edges.push(edge);
+  };
+
+  for (const node of graph.nodes) {
+    if (!isAssetNode(node)) continue;
+    const account = (node.cloudAccount ?? '').trim();
+    const region = (node.cloudRegion ?? '').trim();
+    if (!account && !region) continue;
+    if (containedOnMap.has(node.id)) continue;
+
+    const accountId = account ? cloudAccountNodeId(account) : '';
+    if (accountId) {
+      ensure(scopeNode(accountId, 'cloud_account', account, 'Cloud account', node.depth));
+    }
+
+    if (!region) {
+      // Account but no region. Attached to the account directly rather than to
+      // a fabricated "unknown region" box.
+      if (accountId) link(accountId, node.id);
+      continue;
+    }
+
+    const regionId = cloudRegionNodeId(account, region);
+    ensure(scopeNode(regionId, 'cloud_region', region, cloudRegionSubLabel(account), node.depth));
+    if (accountId) link(accountId, regionId);
+    link(regionId, node.id);
+  }
+
+  if (added.size === 0) return graph;
+  return {
+    rootId: graph.rootId,
+    // Scope boxes first, so a layout that ties on rank puts the frame before
+    // the things in it.
+    nodes: [...added.values(), ...graph.nodes],
+    edges: [...graph.edges, ...edges],
+  };
 }
 
 // ---------------------------------------------------------- truncation ----
@@ -417,7 +666,13 @@ export function canvasState(
   if (query.isError) return 'error';
   // One node and no edges is the root by itself — the commonest neighbourhood
   // there is, and an ordinary answer rather than a failure.
-  if (graph.nodes.length <= 1 && graph.edges.length === 0) return 'empty';
+  //
+  // Counted over ASSETS and STORED edges only. A lone cloud resource picks up
+  // an account and a region box from `withCloudScopeRoots`, and letting that
+  // scaffolding decide would replace "no relationships yet — here is how to
+  // declare one" with a graph of three boxes and two lines that say nothing
+  // about what the asset is attached to.
+  if (assetNodeCount(graph) <= 1 && graph.edges.every((e) => e.synthetic)) return 'empty';
   return 'graph';
 }
 
@@ -433,6 +688,13 @@ export function canvasState(
  * side panel reads the same asset, so the two do not describe it differently.
  */
 export function nodeAriaLabel(node: MapNode, impactDepth: number | null): string {
+  // A grouping node has no lifecycle and no blast radius; announcing
+  // "Archived, denied, or otherwise not in service" for a region — which is
+  // what the `muted` ring's help text says — would be a flat lie in the one
+  // channel that has no picture to contradict it.
+  if (!isAssetNode(node)) {
+    return `${classGroupStyle(node.group).label} ${node.label}, ${node.classLabel}, groups the assets below it`;
+  }
   const parts = [node.label, node.classLabel || classGroupStyle(node.group).label];
   parts.push(STATUS_RING_HELP[statusRing(node.status)].replace(/\.$/, ''));
   if (node.isRoot) parts.push('the focus of this map');
@@ -484,12 +746,29 @@ export function selectionAfterNodeChanges(
 
 // ----------------------------------------------------------- the legend ---
 
-/** The groups actually present in this graph, so the legend describes the
- *  picture rather than the taxonomy. */
-export function legendFor(graph: MapGraph): { group: ClassGroupKey; style: ClassGroupStyle; count: number }[] {
-  const counts = new Map<ClassGroupKey, number>();
+export interface LegendEntry {
+  group: NodeStyleKey;
+  style: ClassGroupStyle;
+  count: number;
+}
+
+/**
+ * The groups actually present in this graph, so the legend describes the
+ * picture rather than the taxonomy.
+ *
+ * Class groups first, then the scope kinds — in that order because the legend
+ * is read as "what the boxes mean", and the scaffolding belongs after the
+ * inventory. The two are counted from the same pass but listed separately, so
+ * a reader can never mistake three region boxes for three cloud resources.
+ */
+export function legendFor(graph: MapGraph): LegendEntry[] {
+  const counts = new Map<NodeStyleKey, number>();
   for (const n of graph.nodes) counts.set(n.group, (counts.get(n.group) ?? 0) + 1);
-  return CLASS_GROUP_KEYS
-    .filter((g) => counts.has(g))
-    .map((group) => ({ group, style: CLASS_GROUP_STYLES[group], count: counts.get(group)! }));
+  const entries: LegendEntry[] = [];
+  for (const group of [...CLASS_GROUP_KEYS, ...SCOPE_NODE_KEYS]) {
+    const count = counts.get(group);
+    if (count === undefined) continue;
+    entries.push({ group, style: CLASS_GROUP_STYLES[group], count });
+  }
+  return entries;
 }

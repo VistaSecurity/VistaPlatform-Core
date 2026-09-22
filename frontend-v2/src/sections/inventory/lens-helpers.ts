@@ -63,6 +63,39 @@ export function keyAlgorithmLabel(algorithmRef: string | null | undefined, keyTy
   return [algorithmRef || keyType, sizeLabel].filter(Boolean).join(' · ') || '—';
 }
 
+// ---- Keys lens: key custody ------------------------------------------------
+// WHO HOLDS the key. A cloud KMS key discovered through a cloud integration
+// carries `key_custody`: 'customer' for a customer-managed CMK, 'provider' for
+// an AWS-managed `aws/s3`-style key. Everything else — every certificate-derived
+// key, and any cloud key whose manager the provider did not report — has it
+// absent, and absent is NOT a third answer meaning "provider": it means the
+// question was not answered, so the cell renders nothing at all rather than a
+// guess. Same three-valued honesty as the Data Protection lens's
+// `custody-unknown` rung, which is the other half of this signal.
+export type KeyCustody = 'customer' | 'provider';
+
+export const KEY_CUSTODY_LABEL: Record<KeyCustody, string> = {
+  customer: 'Customer-managed',
+  provider: 'Provider-managed',
+};
+
+export const KEY_CUSTODY_DETAIL: Record<KeyCustody, string> = {
+  customer: 'You control this key: its policy, its rotation, and whether it can be used at all.',
+  provider: 'The cloud provider holds this key. It is encrypted at rest, but you do not control the key or its policy.',
+};
+
+/** The custody badge for a key row, or null when custody was not established. */
+export function keyCustodyLabel(custody: string | null | undefined): string | null {
+  if (custody === 'customer' || custody === 'provider') return KEY_CUSTODY_LABEL[custody];
+  return null;
+}
+
+/** The hover text for the custody badge, or null when there is no badge. */
+export function keyCustodyDetail(custody: string | null | undefined): string | null {
+  if (custody === 'customer' || custody === 'provider') return KEY_CUSTODY_DETAIL[custody];
+  return null;
+}
+
 // ---- Endpoint service identification -------------------------------------
 // The asset-row derivations that used to live here (assetIdentity, assetLocation,
 // assetService, assetRisk, protocolBadges, the counts and the status badge) moved

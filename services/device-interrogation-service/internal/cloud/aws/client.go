@@ -395,6 +395,18 @@ func (c *Client) GetKMSClient() *kms.Client {
 	return kms.NewFromConfig(c.config)
 }
 
+// NewClientFromConfig builds a Client around an already-resolved aws.Config.
+//
+// NewClient is the production path: it reads the integration row, decrypts the
+// credentials and resolves the account id. This constructor exists for callers
+// that already hold a config — chiefly tests, which point BaseEndpoint at a
+// stub server to exercise what the collectors do when AWS answers with
+// AccessDenied or a throttle. Those paths have no other seam: the KMS and RDS
+// region loops build their service clients from GetConfig().
+func NewClientFromConfig(cfg aws.Config, accountID, region string) *Client {
+	return &Client{config: cfg, accountID: accountID, region: region}
+}
+
 // GetAccountID returns the AWS account ID
 func (c *Client) GetAccountID() string {
 	return c.accountID

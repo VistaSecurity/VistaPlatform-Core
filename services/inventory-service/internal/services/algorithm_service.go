@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -811,9 +812,30 @@ var pqcMigrationTargets = map[string]string{
 // per-implementation classification does NOT use an allowlist — see
 // quantumVulnerablePrimitives in pqc_readiness.go for why. Kept in sync with
 // that denylist by TestPQC_FamilyAndImplementationViewsAgree.
+//
+// An allowlist is the conservative choice HERE, and only here: a family whose
+// primitive the catalogue does not record falls OUT of the set and lands on the
+// migration worklist, which is the safe direction for a list whose job is to
+// say "look at these". The per-implementation classifier cannot use one,
+// because there "not on the list" would mean "counted as needing migration"
+// for eleven shipped algorithms including plain AES.
 var quantumSafeFamilyPrimitives = map[string]bool{
 	"ae": true, "hash": true, "mac": true,
 	"block-cipher": true, "stream-cipher": true, "xof": true,
+}
+
+// quantumSafeFamilyPrimitiveSlice is the same set, sorted, for binding into
+// the family query. The map above stays the only definition — the SQL decides
+// per-family safety from these values rather than from a second literal list,
+// because a family's answer now depends on ALL its components at once and that
+// is an aggregate.
+func quantumSafeFamilyPrimitiveSlice() []string {
+	out := make([]string, 0, len(quantumSafeFamilyPrimitives))
+	for p := range quantumSafeFamilyPrimitives {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // GetPQCProgress returns quantum-readiness across a tenant's crypto
@@ -851,23 +873,68 @@ func (s *AlgorithmService) GetPQCProgress(tenantID uuid.UUID) (*models.PQCProgre
 	// Per-family worklist. Restricted to real component roles for the same
 	// reason the classifier is: protocol-version and cipher-suite container rows
 	// are not algorithm families anyone migrates.
-	const familyQuery = `
-		SELECT COALESCE(NULLIF(a.algorithm_family, ''), 'Unknown') AS family,
-		       a.is_pqc,
-		       COALESCE(a.primitive, '') AS primitive,
-		       COUNT(DISTINCT cia.crypto_implementation_id) AS impl_count
-		  FROM crypto_implementation_algorithms cia
-		  JOIN algorithms a ON a.id = cia.algorithm_id
-		  JOIN crypto_implementations ci ON ci.id = cia.crypto_implementation_id
-		 WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL
-		   AND cia.algorithm_type = ANY($2)
-		 GROUP BY family, a.is_pqc, a.primitive
+	//
+	// ONE ROW PER FAMILY, and the grouping is the whole point.
+	//
+	// This used to `GROUP BY family, is_pqc, primitive` and then throw the
+	// primitive away — PQCFamilyStats has no field for it. A family with two
+	// primitives therefore emitted two rows that were identical in every
+	// exposed field: observed live on as `AES` at 18 and again at 5,
+	// `SHA-2` at 11 and again at 7. In the shipped catalogue AES spans
+	// {ae, block-cipher, mac}, SHA-2 {hash, mac}, SHA-3 {hash, xof} and RSA
+	// {pke, signature}, so this was reachable by four families the moment a
+	// tenant used two of one family's members.
+	//
+	// It was not only cosmetic. impl_count is COUNT(DISTINCT
+	// crypto_implementation_id) WITHIN a group, so a configuration using one
+	// family under two primitives was counted in both rows, and any consumer
+	// adding them up (the dashboard's mergeByFamily does) over-counted it. And
+	// because QuantumSafe was decided per primitive, a family holding one safe
+	// and one unsafe primitive would emit a safe row AND an unsafe row — the
+	// dashboard filters on quantum_safe before folding, so such a family would
+	// have appeared under "Replace these" and "Already quantum-safe" at the same
+	// time. No shipped family mixes the two today; the grouping is what kept it
+	// latent rather than anything about the catalogue.
+	//
+	// So: group by family alone, and answer both flags for the family as a
+	// whole, conservatively (bool_and). A family counts as quantum-safe only if
+	// EVERY component under it is — one Shor-breakable member is enough to put
+	// the family on the worklist, which is the same precedence the
+	// per-implementation classifier applies. COUNT(DISTINCT ...) over the whole
+	// family is then the true distinct configuration count.
+	//
+	// The population is MonitoredConfigurationsSQL, the same named definition
+	// the headline classifier uses. It did not used to be: this query took every
+	// non-deleted crypto_implementations row, with no assets join, so the
+	// worklist counted configurations on pending-approval and deleted assets
+	// that total_implementations on the same response excludes. That is the M-1
+	// divergence over again, one endpoint further in.
+	familyQuery := `
+		WITH monitored AS (
+			` + MonitoredConfigurationsSQL + `
+		),
+		family_component AS (
+			SELECT COALESCE(NULLIF(a.algorithm_family, ''), 'Unknown') AS family,
+			       cia.crypto_implementation_id                       AS impl_id,
+			       a.is_pqc                                           AS is_pqc,
+			       (a.is_pqc OR COALESCE(a.primitive, '') = ANY($3))  AS component_safe
+			  FROM crypto_implementation_algorithms cia
+			  JOIN monitored  m ON m.id = cia.crypto_implementation_id
+			  JOIN algorithms a ON a.id = cia.algorithm_id
+			 WHERE cia.algorithm_type = ANY($2)
+		)
+		SELECT family,
+		       bool_and(is_pqc)         AS is_pqc,
+		       bool_and(component_safe) AS quantum_safe,
+		       COUNT(DISTINCT impl_id)  AS impl_count
+		  FROM family_component
+		 GROUP BY family
 		 ORDER BY impl_count DESC, family
 	`
 
 	// RLS-scoped read; the tenant boundary is crypto_implementations.
 	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		rows, e := tx.Query(familyQuery, tenantID, pq.Array(pqcComponentRoles))
+		rows, e := tx.Query(familyQuery, tenantID, pq.Array(pqcComponentRoles), pq.Array(quantumSafeFamilyPrimitiveSlice()))
 		if e != nil {
 			return fmt.Errorf("failed to query PQC family breakdown: %w", e)
 		}
@@ -875,11 +942,9 @@ func (s *AlgorithmService) GetPQCProgress(tenantID uuid.UUID) (*models.PQCProgre
 
 		for rows.Next() {
 			var st models.PQCFamilyStats
-			var primitive string
-			if e := rows.Scan(&st.Family, &st.IsPQC, &primitive, &st.Count); e != nil {
+			if e := rows.Scan(&st.Family, &st.IsPQC, &st.QuantumSafe, &st.Count); e != nil {
 				return fmt.Errorf("failed to scan PQC family row: %w", e)
 			}
-			st.QuantumSafe = st.IsPQC || quantumSafeFamilyPrimitives[primitive]
 			if !st.QuantumSafe {
 				if target, ok := pqcMigrationTargets[st.Family]; ok {
 					st.MigrateTo = target

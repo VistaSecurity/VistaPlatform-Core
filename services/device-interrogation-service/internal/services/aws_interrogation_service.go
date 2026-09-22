@@ -619,6 +619,23 @@ func (s *AWSInterrogationService) getCertificateDetails(ctx context.Context, cer
 		details["domain_name"] = *cert.DomainName
 	}
 
+	// The certificate's own subject and serial, as ACM states them. Both are
+	// needed to project this response onto the canonical certificate shape
+	// (canonicalACMCertificate): subject_dn is a required field downstream, and
+	// serial + issuer is the only stable identity a PEM-less record has — ACM's
+	// DescribeCertificate returns metadata, never the certificate body, so
+	// there is no fingerprint to compute.
+	//
+	// "subject" in particular was already READ two call sites up
+	// (config.Metadata["certificate_subject"] in InterrogateLoadBalancer) and
+	// never written here, so that field has always been empty.
+	if cert.Subject != nil {
+		details["subject"] = *cert.Subject
+	}
+	if cert.Serial != nil {
+		details["serial"] = *cert.Serial
+	}
+
 	if len(cert.SubjectAlternativeNames) > 0 {
 		details["subject_alternative_names"] = cert.SubjectAlternativeNames
 	}
@@ -644,11 +661,16 @@ func (s *AWSInterrogationService) getCertificateDetails(ctx context.Context, cer
 		details["not_before"] = cert.NotBefore.Format("2006-01-02T15:04:05Z07:00")
 	}
 
+	// `not_after` is the fact. There is deliberately no `expires_in_days`
+	// beside it: the field that used to live here computed
+	// NotAfter.Sub(NotBefore) — the certificate's TOTAL VALIDITY, not the time
+	// remaining — and reported 197 days for a certificate with 88 left. Even
+	// spelled correctly it would be a derivation that goes stale in the row the
+	// moment it is stored, so it is deleted rather than fixed (decision D5 of
+	// the cloud-account-inventory spec). Every reader computes days remaining
+	// from not_after against its own clock.
 	if cert.NotAfter != nil {
 		details["not_after"] = cert.NotAfter.Format("2006-01-02T15:04:05Z07:00")
-		if cert.NotBefore != nil {
-			details["expires_in_days"] = int(cert.NotAfter.Sub(*cert.NotBefore).Hours() / 24)
-		}
 	}
 
 	// RenewalEligibility is an enum (value type, not pointer)

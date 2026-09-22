@@ -290,6 +290,31 @@ func TestContract_GetJobResults_200(t *testing.T) {
 	sv.assertConforms(t, "JobResultsResponse", w.Body.Bytes())
 }
 
+// A cloud discovery's results carry the per-resource-type outcome (
+// slice E). `additionalProperties: false` on JobResultsResponse means an
+// unspec'd field fails this outright, and a spec'd-but-undelivered one is
+// caught by the projection tests next door.
+func TestContract_GetJobResults_200_cloudResourceTypes(t *testing.T) {
+	sv := loadSpec(t)
+	stored := `{"success":false,"metadata":{"devices_count":17,"assets_count":17,` +
+		`"outcome":"partial","enumeration_skipped":"enumerate_compute is off for this integration",` +
+		`"resource_types":[` +
+		`{"resource_type":"s3","status":"succeeded","found":4,"scopes_succeeded":1,"scopes_attempted":1},` +
+		`{"resource_type":"kms","status":"failed","found":0,"scopes_succeeded":0,"scopes_attempted":1,` +
+		`"failures":[{"scope":"us-east-1","reason":"access_denied","code":"AccessDeniedException","message":"not authorized to perform: kms:ListKeys"}]},` +
+		`{"resource_type":"rds","status":"not_attempted","found":0,"scopes_succeeded":0,"scopes_attempted":0}` +
+		`]}}`
+	eng := newJobEngine(&stubJobStore{resultFound: true, resultsJSON: stored})
+	w := do(eng, http.MethodGet, base+"/jobs/"+aUUID+"/results", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "JobResultsResponse", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), `"resource_types"`) {
+		t.Fatalf("the outcome never reached the response: %s", w.Body.String())
+	}
+}
+
 func TestContract_RetryJob_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newJobEngine(&stubJobStore{mutStatus: "failed", mutFound: true})

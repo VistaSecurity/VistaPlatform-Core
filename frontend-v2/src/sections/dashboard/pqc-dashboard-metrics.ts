@@ -126,43 +126,36 @@ export interface WorklistRow {
 }
 
 /**
- * The migration worklist: algorithm families that are NOT quantum-safe, biggest
- * first.
- *
- * This is the part of `/pqc/progress` nothing in the product surfaced before.
- * The PQC Readiness feature shipped as a compliance framework and
- * deliberately added no page, so `by_family` — which is the only place the
- * catalogue's per-family `migrate_to` recommendation reaches the UI — has been
- * computed on every request and thrown away.
- *
- * Filtered on `quantum_safe`, not on `is_pqc`. They are different questions:
- * AES-256 is not a post-quantum algorithm and never will be, but it is
- * quantum-safe at its key size and belongs nowhere near a migration worklist.
- * Filtering on `!is_pqc` would put every symmetric cipher in the tenant on a
- * list of things to replace.
- */
-/**
  * Fold rows that share a family NAME.
  *
- * The endpoint really does return the same family twice — verified live on
- *a tenant whose `by_family` held `AES` at 18 and again at 5, and
- * `SHA-2` at 11 and again at 7, with identical `is_pqc`/`quantum_safe` flags and
- * no field distinguishing them. The server is grouping by something it does not
- * expose (most likely the component ROLE — the same cipher used for both a
- * symmetric and a hash slot).
+ * The server no longer sends duplicates. It did: verified live on, a
+ * tenant whose `by_family` held `AES` at 18 and again at 5, and `SHA-2` at 11
+ * and again at 7, with identical `is_pqc`/`quantum_safe` and no field telling
+ * them apart. The cause was not the component role guessed here — the query
+ * grouped by the algorithm's PRIMITIVE and then dropped it, and
+ * `PQCFamilyStats` has nowhere to put one. AES spans {ae, block-cipher, mac} in
+ * the catalogue, SHA-2 {hash, mac}. Fixed in `GetPQCProgress`
+ * (services/inventory-service/internal/services/algorithm_service.go), which
+ * now groups by family alone and answers both flags for the family as a whole;
+ * `TestIntegration_PQC_EveryFamilyAppearsAtMostOnce` is the guard.
  *
- * Whatever the cause, two rows with one name and nothing to tell them apart
- * read on screen as a rendering bug, and a reader cannot act on the difference
- * because the difference is not in the payload. So they are presented as one.
+ * This fold stays anyway, as version skew tolerance: during a rolling upgrade
+ * this bundle can be served beside a backend from the previous release, and two
+ * rows with one name and nothing to distinguish them read on screen as a
+ * rendering bug. Against a current server it is a no-op.
  *
- * Summing is the defensible choice: `by_family` is explicitly NOT additive
- * already — the endpoint's own description says one implementation appears under
- * several families and "those counts intentionally sum past the implementation
- * total" — so a merged count is no less additive than the list it came from, and
- * the page says so in as many words beside it.
+ * What it could never fix, and why the server fix was the necessary one: the
+ * page filters on `quantum_safe` BEFORE folding, so a family the old query
+ * reported safe under one primitive and unsafe under another would appear under
+ * "Replace these" and "Already quantum-safe" at the same time — two lists, one
+ * merge each, nothing in a position to notice. And its counts were
+ * COUNT(DISTINCT implementation) taken within a primitive group, so summing
+ * them over-counted any configuration that used one family twice. A fold cannot
+ * recover a distinct count from two overlapping ones; it can only stop the
+ * screen looking broken.
  *
- * `migrate_to` takes the first non-empty recommendation; duplicates observed so
- * far agree, and there is no basis for preferring one over the other.
+ * `migrate_to` takes the first non-empty recommendation; duplicates observed
+ * agreed, and there is no basis for preferring one over the other.
  */
 function mergeByFamily(rows: PqcFamily[]): WorklistRow[] {
   const out = new Map<string, WorklistRow>();

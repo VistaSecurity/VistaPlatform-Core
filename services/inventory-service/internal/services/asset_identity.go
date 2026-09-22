@@ -1037,8 +1037,17 @@ func cloudClassHint(resourceType string) string {
 // cloudResourceID digs the provider's resource identifier out of the finding.
 // ARN, Azure resource id and GCP self-link all land in the same identifier kind
 // — they are the same thing under three names.
+//
+// The key list is identity.CloudResourceIDKeys, shared with the collector side
+// (device-interrogation-service's cloudResourceIDFromMetadata). Both must read
+// the same keys: when they disagree, the collector identifies a resource by its
+// provider id and the finding for the same resource identifies it by hostname,
+// and one resource becomes two assets. That is how a CloudFront distribution
+// and its alias — one distribution, two hostnames, `distribution_id` and
+// nothing else naming it — became two assets once started routing owned
+// cloud findings onto assets at all.
 func cloudResourceID(f IngestFinding) string {
-	return rawDataString(f.RawData, "arn", "resource_id", "cloud_resource_id", "self_link", "resource_uri")
+	return identity.CloudResourceIDFromMetadata(f.RawData)
 }
 
 // findingEndpoint turns the finding's address and port into the endpoint

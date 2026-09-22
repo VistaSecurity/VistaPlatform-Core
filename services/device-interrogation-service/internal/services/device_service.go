@@ -455,6 +455,24 @@ type deviceFieldUpdate struct {
 	Tags                  map[string]interface{}
 	DiscoveryMethod       string
 	CreateManagement      bool
+	// Unmanaged says this observation configures NO management at all: no
+	// asset_management row and no asset_credentials row. It is what cloud
+	// discovery sets on everything it finds — see upsertDeviceAssetWith for why
+	// nothing reached through a cloud API is a managed device.
+	//
+	// It is not `CreateManagement: false`. That flag only withholds the default
+	// `unknown` status; upsertManagement would still insert a row, and an asset
+	// with an asset_management row is by definition on the Devices page
+	// (ListDevices is the inner join on it).
+	//
+	// Both rows go together deliberately. asset_credentials is reachable only
+	// through asset_management or an interrogation — agent_job_credentials.go,
+	// device_interrogation_service.go and managed_asset.go all join through one
+	// of those — so a credentials row on an unmanaged asset is unreachable by
+	// every consumer. What it held for a cloud resource was the integration id
+	// and nothing else, and that is kept as provenance under
+	// cloudIntegrationIDKey in the asset's metadata.
+	Unmanaged bool
 }
 
 // applyDeviceFields writes everything about a device that is not its identity:
@@ -489,24 +507,28 @@ func (s *DeviceService) applyDeviceFields(ctx context.Context, r *pgidentity.Rep
 		return fmt.Errorf("failed to record device tags: %w", err)
 	}
 
-	mgmt := managementUpsert{
-		ManagementURL:         in.ManagementURL,
-		TLSInsecureSkipVerify: in.TLSInsecureSkipVerify,
-		ConnectionStatus:      in.ConnectionStatus,
-	}
-	if proto := managementProtocol(derefStr(in.ManagementURL), in.DeviceType); proto != "" {
-		mgmt.ManagementProtocol = &proto
-	}
-	if in.CreateManagement && mgmt.ConnectionStatus == nil {
-		unknown := "unknown"
-		mgmt.ConnectionStatus = &unknown
-	}
-	if err := upsertManagement(ctx, tx, tenantID, assetID, mgmt); err != nil {
-		return err
-	}
-
-	if err := s.upsertDeviceCredentials(ctx, tx, tenantID, assetID, in); err != nil {
-		return err
+	// An unmanaged observation writes neither row — not an empty management row,
+	// not one defaulted to `unknown`. The row's EXISTENCE is the claim, because
+	// the Devices page is the inner join on it.
+	if !in.Unmanaged {
+		mgmt := managementUpsert{
+			ManagementURL:         in.ManagementURL,
+			TLSInsecureSkipVerify: in.TLSInsecureSkipVerify,
+			ConnectionStatus:      in.ConnectionStatus,
+		}
+		if proto := managementProtocol(derefStr(in.ManagementURL), in.DeviceType); proto != "" {
+			mgmt.ManagementProtocol = &proto
+		}
+		if in.CreateManagement && mgmt.ConnectionStatus == nil {
+			unknown := "unknown"
+			mgmt.ConnectionStatus = &unknown
+		}
+		if err := upsertManagement(ctx, tx, tenantID, assetID, mgmt); err != nil {
+			return err
+		}
+		if err := s.upsertDeviceCredentials(ctx, tx, tenantID, assetID, in); err != nil {
+			return err
+		}
 	}
 
 	// Declared hardware identity. The form's vendor/model/firmware are what a
@@ -863,11 +885,11 @@ func derefStr(p *string) string {
 // device's metadata. ARN, Azure resource id and GCP self-link are the same
 // thing under three names, and it is the strongest identifier a cloud resource
 // ever has.
+//
+// The key list lives in shared/identity so this and inventory-service's ingest
+// path read the SAME one. They used to keep private copies, the copies drifted,
+// and the two sides then disagreed about which resource a row named — see
+// identity.CloudResourceIDKeys.
 func cloudResourceIDFromMetadata(meta map[string]interface{}) string {
-	for _, key := range []string{"arn", "resource_id", "cloud_resource_id", "self_link", "gcp_resource_id", "azure_resource_id"} {
-		if v, ok := meta[key].(string); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
+	return identity.CloudResourceIDFromMetadata(meta)
 }

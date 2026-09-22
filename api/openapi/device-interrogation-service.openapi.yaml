@@ -3374,6 +3374,89 @@ components:
             outcomes (`steps`), de-duplicated `errors`, and counts for each
             pipeline stage. Absent on jobs that produced no assets or that ran
             before this was recorded.
+        resource_types:
+          type: array
+          description: |
+            A cloud discovery's per-resource-type outcome: what was asked for,
+            what answered, and what could not be looked at.
+
+            Absent for job kinds that do not collect by resource type, and for
+            cloud providers that do not record outcomes yet. **Absent means
+            "not reported", not "everything succeeded."**
+          items:
+            $ref: '#/components/schemas/JobResultResourceType'
+        outcome:
+          type: string
+          enum: [complete, partial, failed]
+          description: |
+            The run verdict the per-type outcomes add up to. `complete` means
+            every resource type that was attempted was collected without error
+            — and it is the only verdict for which `success` is true.
+        enumeration_skipped:
+          type: string
+          description: |
+            Why account-wide compute/network enumeration did not run — switched
+            off for the integration, or the failure that stopped it.
+    JobResultResourceType:
+      type: object
+      additionalProperties: false
+      description: |
+        One requested cloud resource type's outcome. `succeeded` with `found: 0`
+        means the account genuinely has none; `failed` means nothing is known
+        about that type. Collapsing the two is the bug this exists to prevent.
+      required:
+      - resource_type
+      - status
+      - found
+      - scopes_succeeded
+      - scopes_attempted
+      properties:
+        resource_type:
+          type: string
+          description: As requested, e.g. `kms`, `s3`, `rds`, `alb`.
+        status:
+          type: string
+          enum: [succeeded, partial, failed, not_attempted]
+          description: |
+            `succeeded` — every scope answered. `partial` — some scopes answered
+            and some failed. `failed` — every scope attempted failed.
+            `not_attempted` — requested, but this provider has no collector for
+            it, so nothing looked.
+        found:
+          type: integer
+          description: Resources this type produced. Meaningful only for succeeded/partial.
+        scopes_succeeded:
+          type: integer
+          description: Regions (or `global`) that answered.
+        scopes_attempted:
+          type: integer
+          description: Regions (or `global`) attempted. Zero for not_attempted.
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobResultCollectorFailure'
+    JobResultCollectorFailure:
+      type: object
+      additionalProperties: false
+      description: |
+        One scope's collection failure, projected onto actionable fields. The
+        provider's own error code survives verbatim — an AccessDenied is a
+        different user action from a throttle — while the message is redacted
+        of secret-shaped runs and length-capped before it is stored or served.
+      properties:
+        scope:
+          type: string
+          description: The region this failed in, or `global` for a non-regional API.
+        reason:
+          type: string
+          enum: [access_denied, credentials, throttled, region_unavailable, timeout, network, unknown]
+          description: Our classification of what the provider said.
+        code:
+          type: string
+          description: The provider's own error code, e.g. `AccessDeniedException`.
+        message:
+          type: string
+          description: The provider's message, sanitized and bounded.
     JobResultsSummary:
       type: object
       additionalProperties: false

@@ -37,6 +37,12 @@ export function xmlEscape(value: string | number | boolean | null | undefined): 
 function nodeFields(n: MapNode, rootId: string): Record<string, string | number> {
   return {
     label: n.label,
+    // `node_kind` is what tells the importing tool which boxes are assets. A
+    // grouping node carries NO `asset_id` — there is no asset — and a file that
+    // said otherwise would let a downstream tool join a region onto an
+    // inventory row that does not exist.
+    node_kind: n.kind,
+    ...(n.assetId === undefined ? {} : { asset_id: n.assetId }),
     class_key: n.classKey,
     class_group: n.group,
     asset_status: n.status,
@@ -52,6 +58,10 @@ function edgeFields(e: MapEdge): Record<string, string | number> {
     type: e.type,
     status: e.status,
     source_kind: e.sourceKind,
+    // Derived rather than stored. Exported explicitly so a graph opened in yEd
+    // six months from now still distinguishes a relationship a collector
+    // observed from a line this client drew out of an asset's recorded region.
+    synthetic: e.synthetic ? 'true' : 'false',
     confidence: e.confidence,
     first_seen_at: e.firstSeenAt,
     last_seen_at: e.lastSeenAt,
@@ -64,6 +74,8 @@ function edgeFields(e: MapEdge): Record<string, string | number> {
 // in yEd and Gephi instead of importing as a graph with no attributes.
 const NODE_KEYS: { id: string; name: string; type: 'string' | 'int' | 'double' }[] = [
   { id: 'n_label', name: 'label', type: 'string' },
+  { id: 'n_kind', name: 'node_kind', type: 'string' },
+  { id: 'n_asset_id', name: 'asset_id', type: 'string' },
   { id: 'n_class_key', name: 'class_key', type: 'string' },
   { id: 'n_class_group', name: 'class_group', type: 'string' },
   { id: 'n_status', name: 'asset_status', type: 'string' },
@@ -77,6 +89,7 @@ const EDGE_KEYS: { id: string; name: string; type: 'string' | 'int' | 'double' }
   { id: 'e_type', name: 'type', type: 'string' },
   { id: 'e_status', name: 'status', type: 'string' },
   { id: 'e_source_kind', name: 'source_kind', type: 'string' },
+  { id: 'e_synthetic', name: 'synthetic', type: 'string' },
   { id: 'e_confidence', name: 'confidence', type: 'double' },
   { id: 'e_first_seen', name: 'first_seen_at', type: 'string' },
   { id: 'e_last_seen', name: 'last_seen_at', type: 'string' },

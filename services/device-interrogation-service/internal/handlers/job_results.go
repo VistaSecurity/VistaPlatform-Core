@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
@@ -64,6 +65,30 @@ type JobResultAsset struct {
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// JobResultCollectorFailure is one scope's collection failure on a cloud
+// discovery job — the reason a resource type is not simply "zero found".
+type JobResultCollectorFailure struct {
+	Scope   string `json:"scope,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// JobResultResourceType is one requested cloud resource type's outcome.
+//
+// Mirrors services.CloudResourceTypeOutcome field for field; the pair is
+// pinned by TestBuildJobResults_ResourceTypesRoundTripFromWriter, because a
+// silent rename on the writing side would degrade every row to "not reported"
+// with nothing failing.
+type JobResultResourceType struct {
+	ResourceType    string                      `json:"resource_type"`
+	Status          string                      `json:"status"`
+	Found           int                         `json:"found"`
+	ScopesSucceeded int                         `json:"scopes_succeeded"`
+	ScopesAttempted int                         `json:"scopes_attempted"`
+	Failures        []JobResultCollectorFailure `json:"failures,omitempty"`
+}
+
 // JobResultsResponse is the results endpoint's payload.
 type JobResultsResponse struct {
 	JobID   string            `json:"job_id"`
@@ -75,6 +100,19 @@ type JobResultsResponse struct {
 	// per-asset outcomes and any errors. Absent for jobs that ran before it
 	// existed, or that produced no assets.
 	Processing map[string]interface{} `json:"processing,omitempty"`
+
+	// ResourceTypes is a cloud discovery's per-resource-type outcome: what was
+	// asked for, what answered, and what could not be looked at. Absent for
+	// job kinds that do not collect by resource type, and for cloud runs on a
+	// provider that does not record them yet — absent means "not reported",
+	// NOT "everything succeeded".
+	ResourceTypes []JobResultResourceType `json:"resource_types,omitempty"`
+	// Outcome is the run verdict those add up to: complete / partial / failed.
+	Outcome string `json:"outcome,omitempty"`
+	// EnumerationSkipped names why account-wide compute/network enumeration
+	// did not run — switched off for the integration, or a failure. Stored
+	// since the enumeration work landed and never surfaced until now.
+	EnumerationSkipped string `json:"enumeration_skipped,omitempty"`
 }
 
 // JobResultsSummary is the headline count set.
@@ -129,6 +167,15 @@ type rawJobResults struct {
 		Metadata map[string]interface{} `json:"metadata"`
 	} `json:"assets"`
 	Processing map[string]interface{} `json:"processing"`
+
+	// Metadata is the job's own run record. Typed rather than a map so the
+	// only fields that can reach a client are the ones named here — the same
+	// projection rule the asset list follows.
+	Metadata struct {
+		ResourceTypes      []JobResultResourceType `json:"resource_types"`
+		Outcome            string                  `json:"outcome"`
+		EnumerationSkipped string                  `json:"enumeration_skipped"`
+	} `json:"metadata"`
 }
 
 // buildJobResults projects the stored results JSON onto the response shape.
@@ -150,6 +197,19 @@ func buildJobResults(jobID, status, resultsJSON string) JobResultsResponse {
 
 	out.Success = raw.Success
 	out.Processing = deviceinterrogation.RedactMap(raw.Processing)
+	out.Outcome = raw.Metadata.Outcome
+	out.EnumerationSkipped = services.SanitizeCloudErrorMessage(raw.Metadata.EnumerationSkipped)
+	for _, t := range raw.Metadata.ResourceTypes {
+		// Re-sanitized on the way out as well as on the way in. The writer
+		// bounds and redacts the provider message already; doing it again here
+		// means a row written by any other path cannot leak through this
+		// endpoint either.
+		for i := range t.Failures {
+			t.Failures[i].Message = services.SanitizeCloudErrorMessage(t.Failures[i].Message)
+			t.Failures[i].Code = services.SanitizeCloudErrorMessage(t.Failures[i].Code)
+		}
+		out.ResourceTypes = append(out.ResourceTypes, t)
+	}
 
 	for _, a := range raw.Assets {
 		asset := JobResultAsset{

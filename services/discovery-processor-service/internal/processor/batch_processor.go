@@ -549,7 +549,9 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 
 		allDiscoveries := append(monitoringDiscoveries, pendingDiscoveries...)
 		for _, discovery := range allDiscoveries {
-			marks.add(discovery.ID, discovery.ApprovalStatus, discovery.AutoApprovalRuleID)
+			// discovery.AssetID is what adoptAssetID read off the import
+			// response — the asset this row actually landed on, or nil.
+			marks.addWithAsset(discovery.ID, discovery.ApprovalStatus, discovery.AutoApprovalRuleID, discovery.AssetID)
 		}
 
 		// "%d assets created/updated" is inventory-service's import counter: assets
@@ -672,13 +674,21 @@ type processedMark struct {
 type processedMarks struct {
 	order []processedMark
 	ids   map[processedMark][]string
+	// assets is the asset each settled discovery landed on, for the rows that
+	// landed on one. Per-row rather than per-mark, so it cannot ride on the
+	// grouped UPDATE and gets its own statement — see markProcessed.
+	assets map[string]string
 }
 
 func newProcessedMarks() *processedMarks {
-	return &processedMarks{ids: make(map[processedMark][]string)}
+	return &processedMarks{ids: make(map[processedMark][]string), assets: make(map[string]string)}
 }
 
 func (m *processedMarks) add(id uuid.UUID, approvalStatus string, ruleID *uuid.UUID) {
+	m.addWithAsset(id, approvalStatus, ruleID, nil)
+}
+
+func (m *processedMarks) addWithAsset(id uuid.UUID, approvalStatus string, ruleID *uuid.UUID, assetID *uuid.UUID) {
 	key := processedMark{approvalStatus: approvalStatus}
 	if ruleID != nil {
 		key.ruleID = ruleID.String()
@@ -687,6 +697,23 @@ func (m *processedMarks) add(id uuid.UUID, approvalStatus string, ruleID *uuid.U
 		m.order = append(m.order, key)
 	}
 	m.ids[key] = append(m.ids[key], id.String())
+	if assetID != nil && *assetID != uuid.Nil {
+		m.assets[id.String()] = assetID.String()
+	}
+}
+
+// assetPairs returns the (discovery id, asset id) pairs to write, in a stable
+// order so the two unnest arrays line up and a test can assert on them.
+func (m *processedMarks) assetPairs() (discoveryIDs, assetIDs []string) {
+	for _, key := range m.order {
+		for _, id := range m.ids[key] {
+			if assetID, ok := m.assets[id]; ok {
+				discoveryIDs = append(discoveryIDs, id)
+				assetIDs = append(assetIDs, assetID)
+			}
+		}
+	}
+	return discoveryIDs, assetIDs
 }
 
 func (m *processedMarks) empty() bool { return len(m.order) == 0 }
@@ -763,6 +790,7 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 			}
 			for i, result := range response.Results {
 				d := discoveries[start+i]
+				adoptAssetID(d, result.AssetID)
 				switch result.Outcome {
 				case "unresolved", "conflict":
 					// Evidence was committed, but identity admission made no
@@ -774,7 +802,31 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 						d.ApprovalStatus = "observed"
 						d.AutoApprovalRuleID = nil
 					}
-				case "created", "matched", "routed":
+				case "routed":
+					// The finding landed on NO asset: inventory-service
+					// classified it third-party and wrote it to
+					// external_connections instead. The evidence is recorded —
+					// somewhere else — and no approval decision about this row
+					// will ever be made, because Discovery → Approvals lists
+					// pending ASSETS and this finding produced none.
+					//
+					// `observed` rather than `auto_approved`: nothing approved
+					// anything here, and a row claiming an approval nobody made
+					// is the same dishonesty adoptEffectiveStatus's own comment
+					// argues against. `observed` is the value this column
+					// already carries for "recorded as evidence, no approval
+					// decision will ever follow" (host observations, and the
+					// unresolved branch above).
+					//
+					// This is what left the two CloudFront rows of's
+					// audit `pending` forever: EffectiveStatus is deliberately
+					// empty for a routed finding, so adoptEffectiveStatus left
+					// the rule's `pending` in place and nothing ever cleared it.
+					if d != nil && !isHostObservationDiscovery(d) {
+						d.ApprovalStatus = "observed"
+						d.AutoApprovalRuleID = nil
+					}
+				case "created", "matched":
 				case "rejected":
 					if d != nil {
 						d.ApprovalStatus = "suppressed"
@@ -787,6 +839,33 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 		}
 	}
 	return imported, nil
+}
+
+// adoptAssetID records which asset a discovery row actually landed on.
+//
+// `sensor_discoveries.asset_id` has existed all along, is SELECTed into every
+// row this service reads, and was never written by anything — so a processed
+// queue row and the asset it produced had no link between them at all. That is
+// what made "no user action clears them" literally true for the six cloud rows
+// in's audit: approving the asset in Discovery → Approvals cannot settle
+// a queue row it has no way to find.
+//
+// The id is already on the wire — inventory-service returns it per finding in
+// `results[].asset_id` (identity.IngestResult), which this loop was already
+// reading for its Outcome. Only rows that landed on an asset get one; a routed,
+// rejected or contested finding leaves the column NULL, which is the honest
+// answer for a row that produced no asset.
+func adoptAssetID(d *models.SensorDiscovery, assetID string) {
+	if d == nil {
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(assetID))
+	if err != nil || id == uuid.Nil {
+		// Not an answer: an older inventory-service omits the field, and a
+		// routed/rejected finding has no asset. Leave whatever the row had.
+		return
+	}
+	d.AssetID = &id
 }
 
 // adoptEffectiveStatus corrects the row state for findings inventory-service
@@ -872,6 +951,22 @@ func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, 
 				SET processed_at = $1, approval_status = $2, auto_approval_rule_id = $3::uuid
 				WHERE tenant_id = $4 AND id = ANY($5::uuid[])`,
 				now, key.approvalStatus, ruleID, tenantID, pq.Array(ids),
+			); e != nil {
+				return e
+			}
+		}
+		// Which asset each row landed on. Per-row, so it cannot share the
+		// grouped statement above; one unnest-joined UPDATE keeps it to a
+		// single round trip and to the same partition-pruning tenant_id
+		// predicate. Only rows that landed on an asset appear here — a routed,
+		// rejected or contested finding leaves the column NULL.
+		if discoveryIDs, assetIDs := marks.assetPairs(); len(discoveryIDs) > 0 {
+			if _, e := tx.ExecContext(ctx, `
+				UPDATE sensor_discoveries d
+				SET asset_id = v.asset_id
+				FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::uuid[]) AS asset_id) v
+				WHERE d.tenant_id = $3 AND d.id = v.id`,
+				pq.Array(discoveryIDs), pq.Array(assetIDs), tenantID,
 			); e != nil {
 				return e
 			}

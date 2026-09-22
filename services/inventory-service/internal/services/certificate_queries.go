@@ -142,7 +142,18 @@ func (s *AssetService) extractCertificatesFromFinding(f IngestFinding) []models.
 				if certMap, ok := certInterface.(map[string]interface{}); ok {
 					certData := s.extractCertificateData(map[string]interface{}{"certificate": certMap})
 					if certData != nil {
-						if dataSource != "" {
+						// Per-ENTRY provenance wins over the finding-level
+						// default. One cloud discovery carries both kinds: the
+						// provider's API states what is CONFIGURED, and a
+						// handshake against the same endpoint states what is
+						// SERVED. Labelling the whole finding "cloud_api" made
+						// a certificate captured off the wire — CloudFront's
+						// default *.cloudfront.net certificate, in the case
+						// that prompted this — read in the UI as
+						// provider-managed.
+						if entrySource, ok := certMap["data_source"].(string); ok && entrySource != "" {
+							certData.DataSource = entrySource
+						} else if dataSource != "" {
 							certData.DataSource = dataSource
 						}
 						if acm, ok := certMap["acm_metadata"].(map[string]interface{}); ok {

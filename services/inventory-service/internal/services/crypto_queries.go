@@ -150,7 +150,7 @@ func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []
 // algorithm_ref is the joined algorithm name and secured_by is the schema's
 // secured_by_mechanism — both aliased back to the field names the model/frontend
 // expect (the `keys` table has no algorithm_ref/secured_by columns).
-const keyColumns = `keys.id, keys.tenant_id, keys.key_type, keys.key_usage, keys.public_fingerprint, keys.jwk_thumbprint, keys.size_bits, keys.curve, keys.created_at, keys.rotated_at, keys.expires_at, keys.provenance, keys.metadata, keys.material_type, keys.state, keys.state_reason, keys.format, alg.name AS algorithm_ref, keys.secured_by_mechanism AS secured_by, keys.activation_date, keys.deactivation_date, keys.destruction_date`
+const keyColumns = `keys.id, keys.tenant_id, keys.key_type, keys.key_usage, keys.public_fingerprint, keys.jwk_thumbprint, keys.size_bits, keys.curve, keys.created_at, keys.rotated_at, keys.expires_at, keys.provenance, keys.metadata, keys.material_type, keys.state, keys.state_reason, keys.format, alg.name AS algorithm_ref, keys.secured_by_mechanism AS secured_by, keys.key_custody, keys.external_ref, keys.activation_date, keys.deactivation_date, keys.destruction_date`
 
 // keyJoin resolves the algorithm name for algorithm_ref. LEFT JOIN so keys with
 // a NULL algorithm_id (or none) still return.
@@ -227,6 +227,8 @@ type keyListRow struct {
 	Format            *string        `db:"format"`
 	AlgorithmRef      *string        `db:"algorithm_ref"`
 	SecuredBy         *string        `db:"secured_by"`
+	KeyCustody        *string        `db:"key_custody"`
+	ExternalRef       *string        `db:"external_ref"`
 	ActivationDate    *time.Time     `db:"activation_date"`
 	DeactivationDate  *time.Time     `db:"deactivation_date"`
 	DestructionDate   *time.Time     `db:"destruction_date"`
@@ -252,6 +254,8 @@ func (r keyListRow) toKey() models.Key {
 		Format:            r.Format,
 		AlgorithmRef:      r.AlgorithmRef,
 		SecuredBy:         r.SecuredBy,
+		KeyCustody:        r.KeyCustody,
+		ExternalRef:       r.ExternalRef,
 		ActivationDate:    r.ActivationDate,
 		DeactivationDate:  r.DeactivationDate,
 		DestructionDate:   r.DestructionDate,

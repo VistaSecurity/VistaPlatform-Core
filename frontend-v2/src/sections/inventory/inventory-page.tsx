@@ -9,6 +9,7 @@ import { Icon, Modal, RiskChip, levelFromScore, type RiskLevel } from '../../com
 import { findLens, resolveLensAlias, type InventoryLens } from './lenses';
 import { connectionStrengthFilter, connectionStrengthLabel, connectionStrengthTone, CONNECTION_STRENGTH_OPTIONS, type ConnectionStrengthFilter } from './connection-strength';
 import { STALE_DAYS } from './stale-threshold';
+import { certSourceBadge } from './certificate-source';
 import { AssetsLens } from './assets-lens';
 import { useMergeProposals } from './asset-queries';
 import { useRelationshipProposals } from './relationship-queries';
@@ -29,7 +30,7 @@ import { DP_GRID, DataProtectionDrawer, DataProtectionRow, useCryptoApplications
 import {
   type ConfigurationRiskGroup, CONFIGURATION_RISK_META, CONFIGURATION_RISK_OPTS,
   ENV_OPTS, RISK_OPTS, configurationRiskGroup, effectiveInventoryRiskFilter, groupConfigurationsByRisk,
-  stripInetMask, stripEmptyParens, keyAlgorithmLabel,
+  stripInetMask, stripEmptyParens, keyAlgorithmLabel, keyCustodyLabel, keyCustodyDetail,
 } from './lens-helpers';
 import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
 
@@ -395,7 +396,7 @@ export function InventoryPage() {
   let keys = (keysQ.data ?? []) as Key[];
   if (isKey && search.trim()) {
     const needle = search.trim().toLowerCase();
-    keys = keys.filter((k) => [k.key_type, k.material_type, k.curve, k.algorithm_ref, k.public_fingerprint, k.state]
+    keys = keys.filter((k) => [k.key_type, k.material_type, k.curve, k.algorithm_ref, k.public_fingerprint, k.state, k.external_ref, keyCustodyLabel(k.key_custody)]
       .some((v) => (v || '').toLowerCase().includes(needle)));
   }
 
@@ -436,8 +437,8 @@ export function InventoryPage() {
         }));
     } else if (isKey) {
       downloadCsv(`vista-inventory-keys-${stamp}.csv`,
-        ['key_type', 'material_type', 'size_bits', 'curve', 'algorithm', 'state', 'format', 'expires_at', 'fingerprint', 'deployment_count'],
-        keys.map((k) => [k.key_type, k.material_type, k.size_bits as number, k.curve, k.algorithm_ref, k.state, k.format, (k.expires_at as string | undefined)?.slice(0, 10), k.public_fingerprint, k.deployment_count ?? 0]));
+        ['key_type', 'material_type', 'size_bits', 'curve', 'algorithm', 'custody', 'external_ref', 'state', 'format', 'expires_at', 'fingerprint', 'deployment_count'],
+        keys.map((k) => [k.key_type, k.material_type, k.size_bits as number, k.curve, k.algorithm_ref, keyCustodyLabel(k.key_custody), k.external_ref, k.state, k.format, (k.expires_at as string | undefined)?.slice(0, 10), k.public_fingerprint, k.deployment_count ?? 0]));
     } else if (isConfig) {
       downloadCsv(`vista-inventory-${lens}-${stamp}.csv`,
         ['host', 'environment', 'protocol', 'version', 'cipher_suite', 'key_exchange', 'signature', 'symmetric', 'hash', 'key_size', 'risk_level', 'risk_score'],
@@ -884,7 +885,7 @@ function CertRow({ cert, onClick }: { cert: Certificate; onClick: () => void }) 
   const expDays = daysUntil(c.not_after as string | undefined);
   const expTone = expDays == null ? 'var(--app-t3)' : expDays < 0 ? 'var(--danger)' : expDays < 90 ? 'var(--warn-strong)' : 'var(--ok)';
   const deployCount = typeof c.deployment_count === 'number' ? c.deployment_count : null;
-  const isManual = c.data_source === 'manual';
+  const source = certSourceBadge(c.data_source as string | undefined);
   const issuerCN = (() => {
     const dn = c.issuer_dn as string | undefined;
     if (!dn) return null;
@@ -896,7 +897,7 @@ function CertRow({ cert, onClick }: { cert: Certificate; onClick: () => void }) 
       <span style={{ width: 10, height: 10, borderRadius: '50%', background: expTone, flex: 'none' }} />
       <div style={{ minWidth: 0 }}>
         <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(c.common_name as string) || c.subject_dn || '—'}</div>
-        {isManual && <div style={{ fontSize: 10.5, color: 'var(--warn)' }}>uploaded</div>}
+        {source && <div title={source.detail} style={{ fontSize: 10.5, color: source.tone }}>{source.label}</div>}
       </div>
       <Mono v={issuerCN} small />
       <Mono v={c.public_key_algorithm ? `${c.public_key_algorithm} ${c.public_key_size ?? ''}`.trim() : null} small />
@@ -931,12 +932,24 @@ function KeyRow({ keyItem, onClick }: { keyItem: Key; onClick: () => void }) {
   const sizeLabel = k.size_bits ? `${k.size_bits}-bit` : (k.curve as string) || '';
   const algo = keyAlgorithmLabel(k.algorithm_ref as string, k.key_type as string, sizeLabel);
   const title = [k.key_type as string, sizeLabel].filter(Boolean).join(' · ') || (k.material_type as string) || '—';
+  const custody = keyCustodyLabel(k.key_custody);
+  // Customer-managed is the top rung of the protection ladder; provider-managed
+  // is a real posture difference, not a failure — warn, not danger.
+  const custodyTone = k.key_custody === 'customer' ? 'var(--ok)' : 'var(--warn)';
   return (
     <div className="row-hover" onClick={onClick} style={{ display: 'grid', gridTemplateColumns: KEY_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
       <span style={{ width: 10, height: 10, borderRadius: '50%', background: stateTone, flex: 'none' }} />
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</div>
-        <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{(k.material_type as string) || ''}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{(k.material_type as string) || ''}</span>
+          {/* Custody, when the provider told us. Absent renders NOTHING — an
+              unanswered question must not read as "provider-managed". */}
+          {custody && (
+            <span title={keyCustodyDetail(k.key_custody) ?? undefined}
+              style={{ fontSize: 10, fontWeight: 600, color: custodyTone, background: `color-mix(in srgb, ${custodyTone} 11%, transparent)`, borderRadius: 40, padding: '1px 7px', whiteSpace: 'nowrap' }}>{custody}</span>
+          )}
+        </div>
       </div>
       <Mono v={algo} small />
       <span style={{ fontSize: 11, fontWeight: 600, color: stateTone, background: `color-mix(in srgb, ${stateTone} 11%, transparent)`, borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize' }}>{state || 'unknown'}</span>

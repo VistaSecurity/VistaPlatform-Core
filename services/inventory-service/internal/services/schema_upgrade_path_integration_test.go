@@ -45,6 +45,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -57,38 +59,54 @@ import (
 // newest first. Raise it with SCHEMA_UPGRADE_FROM_COUNT when auditing a risky
 // schema change; each extra tag costs a full schema+seed apply cycle.
 //
-// It is ZERO until core-v1.0.0, per ADR-0007 D2.5. This test asks "does the
-// current schema apply over the shape release X left behind?", and from phase 1
-// onwards the honest answer for every existing core-v* tag is "no, and
-// deliberately": `assets`, `devices` and the `asset_type`
-// enum are REPLACED, not migrated, because the owner established
-// that there are no installs of those releases to carry forward. Leaving the
-// count at 2 would fail the suite on a decision, which teaches the next person
-// to weaken the test rather than to read the ADR.
+// It was ZERO until core-v1.0.0 shipped, per ADR-0007 D2.5. That test asks
+// "does the current schema apply over the shape release X left behind?", and
+// from phase 1 onwards the honest answer for every PRE-1.0 core-v* tag is "no,
+// and deliberately": `assets`, `devices` and the `asset_type` enum are
+// REPLACED, not migrated, because the owner established that there
+// are no installs of those releases to carry forward.
 //
-// core-v1.0.0 is the first release of the new shape and the first one anything
-// can upgrade FROM. Re-arm this to 2 when it ships — the test is the only thing
-// that catches a statement which is fine against today's tables and fails
-// against a prior release's (a `SET NOT NULL` on a column old rows hold NULL in,
-// a `CHECK` old-format data violates); a populated double-apply is structurally
+// core-v1.0.0 was tagged on. It is the first release of the new
+// shape and therefore the first one anything can upgrade FROM, so the count is
+// re-armed to 2 exactly as D2.5 directs. The test is the only thing that
+// catches a statement which is fine against today's tables and fails against a
+// prior release's (a `SET NOT NULL` on a column old rows hold NULL in, a
+// `CHECK` old-format data violates); a populated double-apply is structurally
 // blind to that class.
-const upgradeFromTagCount = 0
+//
+// Two, not one: the second-newest release is the one an install that skipped a
+// patch upgrades from, and it costs one more schema+seed cycle to cover.
+// Only FINAL releases count — see releaseTag below.
+const upgradeFromTagCount = 2
 
 func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
+	// Unreachable while upgradeFromTagCount is 2 — kept so that setting the
+	// constant back to 0 disarms the test loudly rather than fataling on an
+	// empty tag list. The tripwire in schema_upgrade_tripwire_test.go fails the
+	// unit suite if anyone does set it back.
 	if n := upgradeFromTagCountFromEnv(); n == 0 {
-		t.Skip("upgrade-path verification is disarmed until core-v1.0.0 (ADR-0007 D2.5): " +
-			"phase 1 replaces the asset tables rather than migrating them, and there are no " +
-			"installs of any current core-v* release to upgrade. Set SCHEMA_UPGRADE_FROM_COUNT " +
-			"to run it against that many prior tags anyway.")
+		t.Skip("upgrade-path verification is disarmed: upgradeFromTagCount is 0. " +
+			"It was re-armed to 2 when core-v1.0.0 shipped (ADR-0007 D2.5); if you are " +
+			"reading this, something set it back. Set SCHEMA_UPGRADE_FROM_COUNT to run " +
+			"against that many prior release tags anyway.")
 	}
 	admin := testdb.Connect(t)
 	root := testdb.RepoRoot(t)
 
 	tags := priorReleaseTags(t, root, upgradeFromTagCountFromEnv())
 	if len(tags) == 0 {
-		t.Fatal("no core-v* release tags found — cannot verify the upgrade path. " +
-			"This usually means a shallow checkout: the test needs full history " +
-			"(actions/checkout with fetch-depth: 0), not just the tip commit.")
+		t.Fatal("no core-v1.0.0-or-later release tags found — cannot verify the upgrade " +
+			"path. This usually means a shallow checkout: the test needs full history " +
+			"(actions/checkout with fetch-depth: 0), not just the tip commit. " +
+			"Release CANDIDATES and pre-1.0 releases do not count; see " +
+			"firstSupportedUpgradeFrom.")
+	}
+	// Fewer tags than asked for is normal right after 1.0.0 — there is only one
+	// release at or above the floor — and says so rather than looking like the
+	// loop silently did less work than the constant advertises.
+	if want := upgradeFromTagCountFromEnv(); len(tags) < want {
+		t.Logf("only %d release(s) at or above %v exist; asked for %d",
+			len(tags), firstSupportedUpgradeFrom, want)
 	}
 	t.Logf("verifying upgrade path from prior releases: %s", strings.Join(tags, ", "))
 
@@ -141,9 +159,78 @@ func upgradeFromTagCountFromEnv() int {
 	return upgradeFromTagCount
 }
 
-// priorReleaseTags returns up to n core-v* tags, newest first. Core releases
+// releaseTag matches a FINAL core release tag and nothing else. Core releases
 // are tagged core-vX.Y.Z in this repository (a bare vX.Y.Z is the commercial
 // line and carries a different schema cadence), so only core-v* is considered.
+//
+// The anchored end is what excludes release candidates, and it is load-bearing
+// rather than tidiness. `git tag --sort=-v:refname` orders core-v1.0.0-rc.19
+// ABOVE core-v1.0.0 — git's version sort has no semver prerelease rule unless
+// versionsort.suffix is configured — and 1.0.0 went out after nineteen
+// candidates. Taking the "newest two" unfiltered therefore selects rc.19 and
+// rc.18 and never selects a shipped release at all: the guard would run, cost
+// two full schema+seed cycles, and answer a question nobody asked (and keep
+// answering it after 1.0.1, when the top two become 1.0.1 and rc.19).
+//
+// A candidate is also not a shape anything upgrades FROM. It exists so we can
+// install it, look at it and throw it away — the same reasoning the tripwire in
+// schema_upgrade_tripwire_test.go uses to refuse to ARM on one.
+var releaseTag = regexp.MustCompile(`^core-v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+
+// firstSupportedUpgradeFrom is the oldest shape this test will start from, and
+// it is a DECISION, not a convenience.
+//
+// ADR-0007 D2 is the no-migration path: phase 1 REPLACES `network_assets`,
+// `devices` and the `asset_type` enum rather than migrating them, drops the old
+// tables in POST-MIGRATIONS, and attempts no translation — because the owner
+// established that there are no installs of any pre-1.0 release to
+// carry forward. D2.5 therefore re-arms this test "against that release and
+// every one after it", core-v1.0.0 being the first release of the new shape.
+//
+// Without the floor, "newest two" reaches back to core-v0.12.5, which fails on
+// the replacement itself and would fail the suite on a decision — which teaches
+// the next person to weaken the test rather than to read the ADR, the exact
+// outcome the constant's comment above was written to prevent.
+//
+// The floor is NOT a place to hide a failure. It excludes only shapes the ADR
+// says nothing can be upgraded from; every release from 1.0.0 onward is tested,
+// and a real ordering bug against one of those still fails here. Raise it only
+// if a future ADR declares another replacement release.
+var firstSupportedUpgradeFrom = version{1, 0, 0}
+
+type version struct{ major, minor, patch int }
+
+func (v version) String() string {
+	return fmt.Sprintf("core-v%d.%d.%d", v.major, v.minor, v.patch)
+}
+
+func (v version) atLeast(o version) bool {
+	if v.major != o.major {
+		return v.major > o.major
+	}
+	if v.minor != o.minor {
+		return v.minor > o.minor
+	}
+	return v.patch >= o.patch
+}
+
+// parseReleaseTag returns the version of a FINAL core release tag, and false
+// for anything else — a candidate, a commercial tag, a blank line.
+func parseReleaseTag(tag string) (version, bool) {
+	m := releaseTag.FindStringSubmatch(strings.TrimSpace(tag))
+	if m == nil {
+		return version{}, false
+	}
+	// The regexp already proved all three groups are non-empty digit runs, so
+	// the only Atoi error reachable here is an overflow on an absurd tag.
+	var v version
+	v.major, _ = strconv.Atoi(m[1])
+	v.minor, _ = strconv.Atoi(m[2])
+	v.patch, _ = strconv.Atoi(m[3])
+	return v, true
+}
+
+// priorReleaseTags returns up to n final core-v* release tags, newest first.
 func priorReleaseTags(t *testing.T, root string, n int) []string {
 	t.Helper()
 	out, err := runGit(root, "tag", "-l", "core-v*", "--sort=-v:refname")
@@ -151,10 +238,17 @@ func priorReleaseTags(t *testing.T, root string, n int) []string {
 		t.Fatalf("listing release tags failed — the test cannot verify the upgrade "+
 			"path without git history (needs fetch-depth: 0): %v", err)
 	}
+	return firstNReleaseTags(strings.Split(strings.TrimSpace(out), "\n"), n)
+}
+
+// firstNReleaseTags is split out from the git call so the selection itself is
+// testable without a repository whose tags say what the case needs.
+func firstNReleaseTags(lines []string, n int) []string {
 	var tags []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		v, ok := parseReleaseTag(line)
+		if !ok || !v.atLeast(firstSupportedUpgradeFrom) {
 			continue
 		}
 		tags = append(tags, line)
@@ -163,6 +257,86 @@ func priorReleaseTags(t *testing.T, root string, n int) []string {
 		}
 	}
 	return tags
+}
+
+// Both polarities, because the selection's whole value is picking the tags a
+// customer actually upgrades FROM, and the two filters it applies (candidate,
+// floor) are separable: cases below fail if EITHER is removed.
+//
+// The shape being guarded is the real `git tag --sort=-v:refname` output of
+// this repository at core-v1.0.0: nineteen candidates sorted ABOVE the release
+// they are candidates for, because git's version sort has no semver prerelease
+// rule. An unfiltered "newest two" returns rc.19 and rc.18 and never a shipped
+// release at all.
+func TestPriorReleaseTagsSelectsFinalReleasesOnly(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		lines []string
+		n     int
+		want  []string
+	}{
+		{
+			// Candidate exclusion ONLY — both expected tags are above the
+			// floor, so this case fails if the rc filter goes and passes if
+			// only the floor does the work.
+			"candidates sorted above their release are skipped",
+			[]string{"core-v1.0.1-rc.2", "core-v1.0.1-rc.1", "core-v1.0.1", "core-v1.0.0"},
+			2,
+			[]string{"core-v1.0.1", "core-v1.0.0"},
+		},
+		{
+			"candidates only yields nothing rather than a candidate",
+			[]string{"core-v1.0.0-rc.2", "core-v1.0.0-rc.1"},
+			2,
+			nil,
+		},
+		{
+			"the commercial line is a different schema cadence",
+			[]string{"v1.0.0", "v3.6.0"},
+			2,
+			nil,
+		},
+		{
+			"n caps the result",
+			[]string{"core-v1.0.1", "core-v1.0.0", "core-v0.12.5"},
+			1,
+			[]string{"core-v1.0.1"},
+		},
+		{
+			"blank lines from an empty tag list do not match",
+			[]string{""},
+			2,
+			nil,
+		},
+		// The floor. ADR-0007 D2 replaces the asset tables rather than
+		// migrating them, so a pre-1.0 shape is not an upgrade path; asking
+		// for two when only one qualifying release exists returns the one.
+		{
+			"pre-1.0 releases are below the floor",
+			[]string{"core-v1.0.0", "core-v0.12.5", "core-v0.12.4"},
+			2,
+			[]string{"core-v1.0.0"},
+		},
+		{
+			"the floor is not a blanket exclusion of older patches",
+			[]string{"core-v1.2.0", "core-v1.1.9", "core-v1.0.0"},
+			3,
+			[]string{"core-v1.2.0", "core-v1.1.9", "core-v1.0.0"},
+		},
+		{
+			"a major above the floor qualifies",
+			[]string{"core-v2.0.0"},
+			1,
+			[]string{"core-v2.0.0"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := firstNReleaseTags(c.lines, c.n)
+			if strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("firstNReleaseTags(%v, %d) = %v, want %v", c.lines, c.n, got, c.want)
+			}
+		})
+	}
 }
 
 func mustGitShow(t *testing.T, root, tag, path string) string {

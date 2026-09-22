@@ -741,7 +741,21 @@ build-frontend: ## Build React frontend
 build-all: build-services build-sensor build-device-agent build-frontend build-ai-service ## Build all components
 
 # Test Commands
-test-unit: ## Run unit tests for all services
+#
+# This target already requires CGO + libpcap-dev, via `sensor` at the end of
+# the chain below — so it does NOT run on a machine without libpcap-dev,
+# unlike build-services (which deliberately excludes pcap-processor to keep
+# that property). Since that property is already given up, pcap-processor
+# costs nothing extra here and is included too.
+#
+# The list below is hand-maintained, not derived from go.work, to match the
+# existing chained-`cd` style of this target. That is the same drift hazard
+# build-services had (services added to go.work/the registry silently missing
+# here) until #1172's audit-build-targets.mjs started checking build-services
+# coverage against standards/service-registry.yaml — this target has no
+# equivalent guard yet, so re-check it by hand against `go.work`'s `use (...)`
+# block whenever a new service module is added.
+test-unit: ## Run unit tests for all services (needs CGO + libpcap-dev — see comment above)
 	@if [ "$(PARALLEL)" = "1" ]; then \
 		$(MAKE) test-parallel; \
 	else \
@@ -757,13 +771,21 @@ test-unit: ## Run unit tests for all services
 		cd ../resource-tracker-service && go test ./... && \
 		cd ../tenant-health-service && go test ./... && \
 		cd ../mcp-service && go test ./... && \
+		cd ../audit-service && go test ./... && \
+		cd ../notification-service && go test ./... && \
+		cd ../discovery-processor-service && go test ./... && \
+		cd ../device-interrogation-service && go test ./... && \
+		cd ../pcap-processor && go test ./... && \
 		cd ../../sensor && go test ./... && \
 		echo "Unit tests completed!"; \
 	fi
 
-test-parallel: ## Run tests in parallel across all services
+# See the test-unit comment above: this target needs CGO + libpcap-dev
+# regardless of pcap-processor (sensor already requires it), and the
+# hand-maintained-list hazard applies here too.
+test-parallel: ## Run tests in parallel across all services (needs CGO + libpcap-dev — see test-unit comment)
 	@echo "Running tests in parallel..."
-	@for service in auth-service inventory-service compliance-engine cbom-service sensor-manager admin-service monitoring-service cluster-sensor-service resource-tracker-service tenant-health-service mcp-service; do \
+	@for service in auth-service inventory-service compliance-engine cbom-service sensor-manager admin-service monitoring-service cluster-sensor-service resource-tracker-service tenant-health-service mcp-service audit-service notification-service discovery-processor-service device-interrogation-service pcap-processor; do \
 		(cd services/$$service && go test -v ./... &) \
 	done; \
 	(cd sensor && go test -v ./... &) \

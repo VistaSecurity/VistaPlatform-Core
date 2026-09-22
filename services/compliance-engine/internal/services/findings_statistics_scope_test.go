@@ -31,6 +31,7 @@ package services
 // guard for the half that was never the problem.
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -111,9 +112,46 @@ var (
 	reCritTileSub = regexp.MustCompile(`\{\s*id:\s*'crit',[^}]*?sub:\s*'([^']*)'`)
 	// Which rung of the severity ladder the tile reads off the rollup.
 	reCritTileRung = regexp.MustCompile(`const crit = findingsSeverity\.data\?\.(\w+)`)
-	// The destination the tile links at.
-	reCritRoute = regexp.MustCompile(`DASHBOARD_CRITICAL_FINDINGS_ROUTE = '([^']*)'`)
+	// findingsSeverityRoute's own template literal — DASHBOARD_CRITICAL_FINDINGS_ROUTE
+	// is no longer an inline string, it is `findingsSeverityRoute('critical')`, so the
+	// route has to be resolved from the helper's shape rather than read as a literal.
+	reFindingsSeverityRouteTemplate = regexp.MustCompile("(?s)function findingsSeverityRoute\\([^)]*\\)[^{]*\\{\\s*return `([^`]*)`;")
+	// The call that assigns the critical tile's destination: `findingsSeverityRoute('critical')`.
+	reCritRouteCall = regexp.MustCompile(`DASHBOARD_CRITICAL_FINDINGS_ROUTE\s*=\s*findingsSeverityRoute\('([^']*)'\)`)
 )
+
+// resolveDashboardCriticalFindingsRoute derives the route the Dashboard's
+// critical tile links at THE SAME WAY the runtime does.
+// DASHBOARD_CRITICAL_FINDINGS_ROUTE stopped being a string literal in favor of
+// `findingsSeverityRoute('critical')`, so a guard that still pattern-matches a
+// quoted literal finds nothing and passes vacuously (or, as happened, fails to
+// find its subject at all). Instead this reads findingsSeverityRoute's own
+// template literal and substitutes into it the argument the constant passes,
+// the same substitution the JS runtime performs when the module loads.
+func resolveDashboardCriticalFindingsRoute(t *testing.T, metrics string) string {
+	t.Helper()
+	tmplMatch := reFindingsSeverityRouteTemplate.FindStringSubmatch(metrics)
+	if tmplMatch == nil {
+		t.Fatalf("could not find findingsSeverityRoute's template literal in %s. If the route helper "+
+			"changed shape, re-point the guard — do not delete it.", dashboardMetricsRel)
+	}
+	template := tmplMatch[1]
+
+	callMatch := reCritRouteCall.FindStringSubmatch(metrics)
+	if callMatch == nil {
+		t.Fatalf("could not find `DASHBOARD_CRITICAL_FINDINGS_ROUTE = findingsSeverityRoute(...)` in %s. "+
+			"If the critical tile's route is built differently now, re-point the guard — do not delete it.",
+			dashboardMetricsRel)
+	}
+	severityArg := callMatch[1]
+
+	// The template interpolates `${encodeURIComponent(severity)}`; substitute the
+	// literal argument the same way the call resolves it at runtime. If the
+	// template no longer interpolates severity at all (e.g. the parameter was
+	// dropped), this substitution is simply a no-op and the resulting route
+	// carries no `severity=`, which is exactly the drift the caller must catch.
+	return strings.ReplaceAll(template, "${encodeURIComponent(severity)}", url.QueryEscape(severityArg))
+}
 
 // TestDashboardCriticalTile_RouteCarriesItsNarrowings is the other half of "a
 // tile that counts a subset must link to that subset" — the rule
@@ -132,6 +170,24 @@ var (
 // the two narrowings are enforced in different places — workflow in the SQL
 // above, severity in the URL — so a guard that saw only one side would pass
 // happily while the other drifted.
+//
+// One more way this test can go quiet, found while re-pointing it, and worth
+// naming because it looks nothing like a bug: it reads dashboard-metrics.ts
+// and dashboard-page.tsx off disk at runtime (readRepoFile), and those live in
+// frontend-v2/ — a different module tree that `go test`'s result cache has no
+// visibility into. The cache keys a package's result on the Go build inputs it
+// can see; a TypeScript file opened with os.ReadFile is invisible to that key.
+// Edit only the frontend file and re-run `go test ./internal/services/...`
+// from a shell that ran it before with no other change, and the cache serves
+// the PRIOR result — `ok (cached)` — without ever re-invoking this function,
+// let alone re-reading the file. That is exactly the failure this guard exists
+// to catch (a frontend-only change breaking the contract) arriving through a
+// door the guard itself cannot see. `-run TestDashboardCriticalTile` alone
+// does not help; only `-count=1` forces a real re-run. CI's `go test`
+// invocations run on a clean checkout with no prior cache to hit, so this
+// mostly bites a local re-check — but that is exactly the moment someone is
+// trying to confirm a fix, and a stale `ok` there is the worst possible time
+// for it.
 func TestDashboardCriticalTile_RouteCarriesItsNarrowings(t *testing.T) {
 	root := statsRepoRoot(t)
 	page := readRepoFile(t, root, dashboardPageRel)
@@ -145,11 +201,7 @@ func TestDashboardCriticalTile_RouteCarriesItsNarrowings(t *testing.T) {
 	}
 	rung := rungMatch[1]
 
-	routeMatch := reCritRoute.FindStringSubmatch(metrics)
-	if routeMatch == nil {
-		t.Fatalf("could not find DASHBOARD_CRITICAL_FINDINGS_ROUTE in %s", dashboardMetricsRel)
-	}
-	route := routeMatch[1]
+	route := resolveDashboardCriticalFindingsRoute(t, metrics)
 
 	// The rung the tile counts must appear as the route's `severity` parameter.
 	// Parsed rather than substring-matched: `severity=critical` inside some other

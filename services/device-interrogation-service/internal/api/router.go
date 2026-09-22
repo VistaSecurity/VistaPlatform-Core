@@ -768,6 +768,22 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 				cloudProvider = detectedProvider
 			}
 
+			// Per-resource-type outcomes for this run ( slice E). The
+			// recorder rides the context so a collector deep in the call tree
+			// records where the failure happened.
+			//
+			// AWS only for now: the Azure and GCP dispatch switches do not
+			// record yet, and seeding a recorder they never write to would
+			// report every requested type as "not collected" when it was in
+			// fact collected — a new lie in place of the old one. A provider
+			// with no recorder produces no outcomes and behaves exactly as
+			// before (nil recorder ⇒ Succeeded() true, Outcomes() empty).
+			var outcomes *services.CloudOutcomeRecorder
+			if cloudProvider == "aws" {
+				outcomes = services.NewCloudOutcomeRecorder(req.ResourceTypes)
+				ctx = services.WithCloudOutcomes(ctx, outcomes)
+			}
+
 			// One entry point for a cloud JOB: the crypto/at-rest collectors the
 			// request asked for, plus compute/network enumeration when the
 			// integration has it on (BUILD_PLAN 2.4).
@@ -858,9 +874,17 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 			statusUpdated = true
 
 			// Send completion notification to notification service (Slack, etc.)
+			//
+			// The verdict rides along: a Slack message reading "completed: 17
+			// resources found" for a run where KMS was denied is the same lie
+			// the stored result used to tell.
+			completionMsg := fmt.Sprintf("Cloud discovery completed: %d %s resources found", len(devices), cloudProvider)
+			if verdict := outcomes.Verdict(); verdict != services.CloudRunComplete {
+				completionMsg += fmt.Sprintf(" (%s — some resource types could not be collected)", verdict)
+			}
 			discoveryIntegration.SendDiscoveryNotification(ctx, tenantID,
 				"job_completed",
-				fmt.Sprintf("Cloud discovery completed: %d %s resources found", len(devices), cloudProvider),
+				completionMsg,
 				jobID, map[string]interface{}{
 					"cloud_provider": cloudProvider,
 					"devices_found":  len(devices),
@@ -895,6 +919,19 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 						"devices_count": len(devices),
 						"assets_count":  assetsCount,
 					}
+					// Per-resource-type outcomes, the run verdict they add up
+					// to, and the `success` flag they decide. Absent for a
+					// provider with no recorder, which is not the same as
+					// "everything succeeded" — the UI says "not reported"
+					// rather than inventing a verdict.
+					//
+					// `success` used to be the constant true, which is why a
+					// KMS AccessDenied and an account with no KMS keys produced
+					// byte-identical results. A type nobody collected
+					// (not_attempted) does not make the run unsuccessful —
+					// nothing failed — but it is reported per-type so it cannot
+					// read as "found zero".
+					cloudSuccess := outcomes.ApplyToJobResult(metadata)
 					if discovery != nil {
 						metadata["identity"] = discovery.Identity
 						// Only when enumeration actually ran: four zeros on a
@@ -909,7 +946,7 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 					}
 					result := &models.JobResult{
 						JobID:       deviceJob.ID,
-						Success:     true,
+						Success:     cloudSuccess,
 						CompletedAt: time.Now(),
 						Metadata:    metadata,
 					}

@@ -714,15 +714,59 @@ func isCloudManagedPlaceholder(f IngestFinding) bool {
 	if f.IPAddress != nil && *f.IPAddress != "" && !isUnspecifiedIP(*f.IPAddress) {
 		return false
 	}
-	if f.RawData != nil {
-		if src, _ := f.RawData["source"].(string); src == "cloud_discovery" {
-			return true
-		}
-		if dm, _ := f.RawData["discovery_method"].(string); dm == "cloud_api" {
-			return true
-		}
+	return isCloudAPIFinding(f)
+}
+
+// isCloudAPIFinding reports whether a finding came from a cloud provider's API
+// rather than from a sensor, a probe or an agent. Says nothing about the
+// finding's address — see isCloudManagedPlaceholder for that.
+func isCloudAPIFinding(f IngestFinding) bool {
+	if f.RawData == nil {
+		return false
+	}
+	if src, _ := f.RawData["source"].(string); src == "cloud_discovery" {
+		return true
+	}
+	if dm, _ := f.RawData["discovery_method"].(string); dm == "cloud_api" {
+		return true
 	}
 	return false
+}
+
+// isTenantOwnedCloudResource reports whether a finding describes a resource
+// inside an account the tenant gave us credentials for — a CloudFront
+// distribution, a load balancer, an API Gateway domain, a bucket, a key.
+//
+// This is the OWNERSHIP question, and it is a different question from
+// isCloudManagedPlaceholder's, which is about addressability. Keeping them
+// apart is the point:
+//
+//   - isCloudManagedPlaceholder stays exactly as it was. A finding with a real
+//     routable IP is still never a placeholder, so the shared 0.0.0.0/:: can
+//     still never become a match key and can still never collapse every bucket
+//     and key store onto one external_connections row. That collapse is the bug
+//     that helper was written to fix and nothing here reopens it: this
+//     predicate feeds ONLY the ownership decision, never the effective IP,
+//     never the identity lookup.
+//
+//   - Ownership is decided by provenance. A resource enumerated through the
+//     tenant's OWN cloud credentials belongs to the tenant whatever its
+//     address. Deciding it from the address instead is how a tenant's own CDN,
+//     which necessarily has a public routable IP, was filed as a third-party
+//     connection: classifyAsset saw a non-RFC-1918 address, said "third_party",
+//     and the distribution's certificate went to external_connections instead
+//     of onto the asset.
+//
+// The signal is on the finding already: the cloud collectors stamp
+// `discovery_method = cloud_api` and the id of the integration whose
+// credentials were used. Requiring the integration id as well as the method
+// keeps this to resources reached through a credential the tenant supplied.
+func isTenantOwnedCloudResource(f IngestFinding) bool {
+	if !isCloudAPIFinding(f) {
+		return false
+	}
+	integrationID, _ := f.RawData["integration_id"].(string)
+	return strings.TrimSpace(integrationID) != ""
 }
 
 // IngestReport is what one ingest batch DID, beyond the count of rows it
@@ -940,7 +984,16 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 		// are managed cloud resources, not external endpoints, and must stay on
 		// the managed-asset path rather than collapsing into a single shared
 		// external_connections row.
-		if cloudManaged && ownership == "third_party" {
+		//
+		// The same override applies for the opposite reason to a cloud resource
+		// that DOES have a routable address. classifyAsset works from the
+		// address, and a CloudFront distribution, a public ALB or an API
+		// Gateway domain is public by design — so every one of them classified
+		// as third_party and went to external_connections, filing the tenant's
+		// own CDN as somebody else's endpoint and taking its certificate with
+		// it. Ownership is not addressability: a resource enumerated through
+		// the tenant's own cloud credentials is the tenant's.
+		if (cloudManaged || isTenantOwnedCloudResource(f)) && ownership == "third_party" {
 			ownership = "unknown"
 		}
 
@@ -2028,8 +2081,18 @@ func (s *AssetService) processDiscoveryCryptoData(
 					primaryCertID = &cert.ID
 				}
 
-				// Link to previous certificate (issuer relationship)
-				if i > 0 && len(certIDs) > 1 {
+				// Link to previous certificate (issuer relationship).
+				//
+				// Adjacency in the array is NOT on its own evidence of an
+				// issuer relationship. The array is leaf-first for a chain
+				// captured in one handshake, but a cloud discovery's array can
+				// also carry a certificate the provider's API states is
+				// CONFIGURED alongside the chain that was actually served, and
+				// linking those by position asserts that a root certificate was
+				// issued by an unrelated leaf. The DNs settle it: X issued Y
+				// only if Y's issuer_dn is X's subject_dn, which holds for
+				// every real chain and for nothing else.
+				if i > 0 && len(certIDs) > 1 && certificates[i-1].IssuerDN != "" && certificates[i-1].IssuerDN == certData.SubjectDN {
 					if err := s.certificateService.LinkCertificateIssuer(tenantID, certIDs[i-1], cert.ID); err != nil {
 						log.Printf("Warning: failed to link certificate issuer: %v", err)
 						materializationErrs = append(materializationErrs, fmt.Errorf("link certificate issuer: %w", err))
@@ -2372,6 +2435,10 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 	s.publishLifecycle(tenantID, assetIDs, actorUserID,
 		events.EventTypeAssetApproved, identity.StatusMonitoring)
 
+	// The ingestion-queue rows that produced these assets are waiting on THIS
+	// decision. Settle them; see settleDiscoveryQueueRows.
+	s.settleDiscoveryQueueRows(tenantID, assetIDs, "auto_approved")
+
 	// Process deferred findings for each asset being approved.
 	// These were stored during IngestFindings when the asset was pending_approval.
 	var materializationErrs []error
@@ -2666,7 +2733,63 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 		return err
 	}
 	s.publishLifecycle(tenantID, assetIDs, userID, events.EventTypeAssetDenied, identity.StatusDenied)
+	s.settleDiscoveryQueueRows(tenantID, assetIDs, "suppressed")
 	return nil
+}
+
+// settleDiscoveryQueueRows closes out the ingestion-queue rows whose approval
+// decision has just been made.
+//
+// The missing half of the IngestReport/EffectiveStatus mechanism. That one
+// answers "what status does this asset have RIGHT NOW", at ingest — and when
+// the honest answer is `pending_approval`, discovery-processor correctly leaves
+// the queue row `pending`, because at that instant there really is a pending
+// asset awaiting a human. Nothing then told the queue row when that human
+// answered. The row stayed `pending` for the rest of its retention window with
+// its asset long since `monitoring`, and the only consumer of the value —
+// cluster-sensor-service's per-job materialization summary — went on reporting
+// it as "awaiting approval" (evidence item 7: four S3 rows in exactly
+// this state on the demo host, stranded by the bulk approval that promoted
+// their assets ninety seconds after they were written).
+//
+// Vocabulary, not new values: `auto_approved` with `auto_approval_rule_id`
+// still NULL is what adoptEffectiveStatus already stamps for a row whose asset
+// is `monitoring` — NULL saying truthfully that no rule fired — and
+// `suppressed` is what it stamps for `archived`/`denied`. This brings a row to
+// the state it would have been given had the approval preceded the ingest.
+//
+// Scoped by `asset_id`, which discovery-processor now records (adoptAssetID).
+// Rows written before that are not reachable from here and are settled by the
+// POST-MIGRATIONS backfill instead.
+//
+// AFTER the commit and best-effort, for the same reason publishLifecycle is:
+// the decision happened, and failing the caller's approval because a queue row
+// could not be tidied would be strictly worse than the stale row.
+func (s *AssetService) settleDiscoveryQueueRows(tenantID uuid.UUID, assetIDs []uuid.UUID, approvalStatus string) {
+	if len(assetIDs) == 0 || s.db == nil {
+		return
+	}
+	var settled int64
+	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		res, e := tx.Exec(`
+			UPDATE sensor_discoveries
+			   SET approval_status = $3
+			 WHERE tenant_id = $1
+			   AND asset_id = ANY($2)
+			   AND processed_at IS NOT NULL
+			   AND approval_status = 'pending'`, tenantID, pq.Array(assetIDs), approvalStatus)
+		if e != nil {
+			return e
+		}
+		settled, _ = res.RowsAffected()
+		return nil
+	}); err != nil {
+		log.Printf("[AssetService] settling discovery queue rows for %d asset(s) failed (the decision stands): %v", len(assetIDs), err)
+		return
+	}
+	if settled > 0 {
+		log.Printf("[AssetService] settled %d discovery queue row(s) to %s after the decision on %d asset(s)", settled, approvalStatus, len(assetIDs))
+	}
 }
 
 // publishLifecycle announces a decision a person made about assets already in
