@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/sbom"
 )
 
@@ -209,12 +210,12 @@ func writeSBOMError(c *gin.Context, err error) {
 // implement Unwrap. Matching on text alone is what this codebase keeps warning
 // about; matching on text only as a FALLBACK to the typed test is the part that
 // makes it safe.
+// It moved to shared/api so the caps added since (the certificate upload, the
+// PCAP upload, cluster-sensor-service's router ceiling) test for the ceiling
+// the same way rather than each growing a copy. This wrapper is kept because
+// the reasoning above is about THIS file's two ceilings.
 func isRequestBodyTooLarge(err error) bool {
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		return true
-	}
-	return err != nil && strings.Contains(err.Error(), "http: request body too large")
+	return sharedapi.RequestBodyTooLarge(err)
 }
 
 // writeSBOMTooLarge answers 413 with the cap named in the body.

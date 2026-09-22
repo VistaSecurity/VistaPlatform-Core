@@ -146,11 +146,13 @@ describe('flag-gated Enterprise integrations skip the request entirely', () => {
     expect(res.status).toBe('pending');
   });
 
-  it('fires NOTHING for SIEM export when siem_export is off', async () => {
-    const res = await observeDormant(integrations.siemIntegrationsQuery(false));
-    expect(fetchStub).not.toHaveBeenCalled();
-    expect(requestedUrls).toEqual([]);
-    expect(res.status).toBe('pending');
+  // SIEM export used to have a twin of the CMDB case above. It was removed with
+  // the H2 security fix: /siem/integrations is platform-global config and now
+  // requires a PLATFORM identity, so no tenant query factory may exist for it
+  // at all — not even a flag-gated one. This asserts the absence, because a
+  // deleted test proves nothing about what was deleted.
+  it('ships NO tenant query factory for SIEM export at all (SECURITY H2)', () => {
+    expect('siemIntegrationsQuery' in integrations).toBe(false);
   });
 });
 
@@ -255,14 +257,8 @@ describe('edition-probed backstop: CMDB / ITSM sync collection failures', () => 
     expect(fetchStub.mock.calls.length).toBeGreaterThan(1);
   });
 
-  it('applies the same probe to SIEM export', async () => {
-    nextResponse = () => json({ error: 'not found' }, 404);
-    const res = await run(integrations.siemIntegrationsQuery());
-
-    expect(fetchStub).toHaveBeenCalledTimes(1);
-    expect(requestedUrls[0]).toContain('/siem/integrations');
-    expect(isEditionUnavailable(res.error)).toBe(true);
-  });
+  // No SIEM counterpart: see the H2 note above — the tenant UI does not call
+  // /siem/integrations in any edition now, so there is nothing to probe.
 });
 
 describe('editionSectionState precedence', () => {

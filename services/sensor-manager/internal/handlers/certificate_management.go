@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"time"
 
@@ -122,6 +123,35 @@ func (h *Handler) RotateSensorCertificate(c *gin.Context) {
 
 	// Initialize certificate service
 	certService := certificates.NewCertificateService(h.sensorService.GetDB(), h.sensorService.GetBypassDB(), h.encryptionKey)
+
+	// Identity-change guard (H4). Rotation mints a new, legitimately CA-signed
+	// certificate for this sensor and supersedes the old one, so it must be at
+	// least as strong as the identity it rotates. SensorAuth alone is NOT
+	// sufficient: with AGENT_MTLS_REQUIRED off it accepts the path sensor_id as
+	// the entire authenticator, and a path UUID must never be enough to take
+	// over a sensor identity. This check is unconditional — it does not consult
+	// AGENT_MTLS_REQUIRED — so rotation is refused rather than granted when no
+	// proof can be presented.
+	if err := certService.VerifyPresentedIdentity(tenantID, sensorID, c.Request.TLS); err != nil {
+		if h.log != nil {
+			h.log.WithError(err).WithField("sensor_id", sensorIDStr).Warn("sensor certificate rotation refused: identity not proven")
+		}
+		if errors.Is(err, certificates.ErrClientCertificateRequired) {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Certificate rotation requires the sensor's current client certificate",
+				"detail": "This request presented no client certificate, so it cannot prove it already holds the identity it is asking to re-issue. " +
+					"The sensor must reach sensor-manager over the agent mTLS passthrough listener with its current certificate. " +
+					"On Kubernetes set agentMtls.enabled=true (with agentMtls.backends.sensor-manager.dnsName) in the Helm chart. " +
+					"A sensor that no longer holds a valid certificate must be re-enrolled with a registration key.",
+			})
+			return
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":  "Presented certificate is not this sensor's current certificate",
+			"detail": "Rotation is only granted to the holder of the sensor's active certificate. Re-enroll the sensor with a registration key if its certificate was revoked, superseded or lost.",
+		})
+		return
+	}
 
 	// Get the client-cert issuer CA before issuing. After IssueCertificate stores
 	// the replacement, the sensor's old cert is no longer the active serial.

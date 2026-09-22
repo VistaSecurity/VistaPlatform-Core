@@ -96,10 +96,10 @@ func TestDiscoverDeviceCannotReachRFC1918Appliance(t *testing.T) {
 	// 192.168.1.1 with credentials "admin"/"hunter2" and called them safe
 	// because "nothing is dialled" — which is only true for as long as the test
 	// passes. Removing the guard makes it dial for real, and the CI runners sit
-	// on 192.168.2.x / 192.168.99.x, so a regression would have sprayed
-	// plausible credentials at whatever answered on the lab LAN and hung the
-	// job for minutes per address. The test would have been most dangerous at
-	// exactly the moment it was most needed.
+	// on an ordinary RFC1918 LAN, so a regression would have sprayed plausible
+	// credentials at whatever answered on it and hung the job for minutes per
+	// address. The test would have been most dangerous at exactly the moment it
+	// was most needed.
 	//
 	// So: top-of-block host addresses that are valid RFC1918 (the guard must
 	// still match them) but are not the addresses anything is conventionally

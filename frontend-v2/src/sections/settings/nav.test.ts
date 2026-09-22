@@ -45,8 +45,8 @@ describe('visibleSettingsNav', () => {
 
   it('keeps every Core entry visible with all flags off', () => {
     const keys = keysOf(visibleSettingsNav(defaultFeatures));
-    // Integrations hosts Core notification channels alongside the gated CMDB and
-    // SIEM sections, so the PAGE stays — only those sections lock.
+    // Integrations hosts Core notification channels alongside the gated CMDB
+    // section, so the PAGE stays — only that section locks.
     expect(keys).toContain('integrations');
     // Branding keeps the palette (Core); only the white-label marks are gated,
     // in-page. Hiding the whole page would take colours away from Core.
@@ -182,10 +182,12 @@ describe('settingsPageMeta', () => {
     // one — never weaker than the routes the page calls (GET /activity-logs is
     // ungated; the by-user / by-resource drill-downs require audit.read).
     expect(settingsPageMeta('audit').permission).toBe('audit.read');
-    // Retention stays on settings.read: its only load call, GET
-    // /retention-policies, is ungated, so nobody reaches an error banner. The
-    // page's WRITE affordances are gated on audit.manage inline instead.
-    expect(settingsPageMeta('retention').permission).toBe('settings.read');
+    // No Retention entry at all (SECURITY C4): retention policies are
+    // platform-global config and audit-service now requires a platform
+    // identity for them, so every tenant role would get a 403. The nav entry
+    // was removed rather than re-gated — there is no tenant permission that
+    // could make it work.
+    expect(keysOf(visibleSettingsNav(defaultFeatures))).not.toContain('retention');
   });
 
   it('leaves ungated pages ungated', () => {

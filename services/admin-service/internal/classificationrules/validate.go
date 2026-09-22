@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/catalogs"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 )
 
@@ -34,6 +35,33 @@ func Validate(in Input) error {
 		Confidence: in.Confidence,
 		SourceURL:  deref(in.SourceURL),
 	}
+	// The citation rule, applied to the one field of a rule that becomes a live
+	// link in somebody else's browser.
+	//
+	// source_url is copied onto every class proposal the rule produces and
+	// rendered as a raw href in EVERY tenant's console (the Discovery class
+	// proposal row) as well as in the admin catalogue. A platform admin is
+	// trusted, but "trusted" is not the same as "their typo is everyone's
+	// problem": an https-only, no-private-address, no-internal-hostname,
+	// no-bare-IP link is the difference between a citation a reader can open and
+	// a link that probes a reader's own network when they click it.
+	//
+	// It is deliberately the SAME function the EOL catalogue uses
+	// (catalogs.ValidateCitationURL) rather than a second copy of the policy:
+	// that path enforces it at three doors and this one is the wider blast
+	// radius, so a fourth spelling of "what makes a URL a citation" would be the
+	// one that drifts.
+	//
+	// Applied only when a URL is actually given. classify.Rule documents an
+	// uncited admin rule as legitimate — an admin adding a rule for their own
+	// fleet may have nothing public to point at — and that stays true: this
+	// governs what a CITED rule may cite, not whether it must.
+	if u := strings.TrimSpace(deref(in.SourceURL)); u != "" {
+		if err := catalogs.ValidateCitationURL(u); err != nil {
+			return err
+		}
+	}
+
 	if err := r.Validate(); err != nil {
 		// The engine's messages name the rule and say what is wrong with it,
 		// which is exactly what the form needs to show. The "classify: " prefix

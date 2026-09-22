@@ -541,6 +541,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/devices/{id}/ssh-host-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Device UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Clear the pinned SSH host key for a device
+         * @description Unpins the device's SSH host key so the next interrogation records and
+         *     pins the key the device presents.
+         *
+         *     The deliberate re-pin path for a device that was legitimately replaced or
+         *     rekeyed. Interrogation fails closed against an unrecognised key and sends
+         *     no credential, so without this route an operator's only way forward would
+         *     be to turn host-key checking off — which is how a fail-closed control
+         *     becomes a fail-open one. It takes no fingerprint: the platform pins what
+         *     it actually observes on the next contact, so no value nobody measured can
+         *     be pinned.
+         */
+        delete: operations["resetDeviceSshHostKeyPin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/devices/bulk-interrogate": {
         parameters: {
             query?: never;
@@ -1556,6 +1588,22 @@ export interface components {
             updated_at: string;
             /** Format: date-time */
             deleted_at: string | null;
+            /**
+             * @description The SSH host key pinned to this device on first contact, as
+             *     `SHA256:...`. `omitempty` — absent means nothing is pinned yet, which
+             *     is the enrolment state. Once present, an interrogation that meets a
+             *     different key is refused during key exchange and no credential is
+             *     sent; clear the pin (DELETE /devices/{id}/ssh-host-key) to accept a
+             *     new one after a legitimate replacement or key rotation.
+             */
+            ssh_host_key_fingerprint?: string;
+            /** @description Algorithm of the pinned host key (e.g. ssh-ed25519). Absent when nothing is pinned. */
+            ssh_host_key_type?: string;
+            /**
+             * Format: date-time
+             * @description When the host key was pinned. Absent when nothing is pinned.
+             */
+            ssh_host_key_pinned_at?: string;
         };
         /**
          * @description A tenant's enrolled device interrogation agent (models.Agent). Telemetry
@@ -3111,6 +3159,32 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DeviceActionAccepted"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    resetDeviceSshHostKeyPin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Device UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pin was cleared; the next interrogation enrols the key the device presents. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];

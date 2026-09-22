@@ -38,6 +38,9 @@ type deviceStore interface {
 	UpdateDevice(ctx context.Context, tenantID, deviceID uuid.UUID, req models.UpdateDeviceRequest) (*models.Device, error)
 	DeleteDevice(ctx context.Context, tenantID, deviceID uuid.UUID) error
 	GetStoredDeviceCredentials(ctx context.Context, tenantID, deviceID uuid.UUID) (services.StoredDeviceCredentials, error)
+	// ResetSSHHostKeyPin clears the pinned SSH host key so the next
+	// interrogation enrols the key the device presents (H7).
+	ResetSSHHostKeyPin(ctx context.Context, tenantID, deviceID uuid.UUID) error
 }
 
 type jobCreator interface {
@@ -686,6 +689,13 @@ func buildJobParameters(device *models.Device, extra map[string]interface{}) map
 	if device.ManagementURL != nil && *device.ManagementURL != "" {
 		params["management_url"] = *device.ManagementURL
 	}
+	// The pinned SSH host key. An agent has no database, so a pin it never
+	// receives is a pin that cannot be enforced on the agent path — which would
+	// leave exactly half of the fix working. Not a secret: a host key
+	// fingerprint is public by construction.
+	if device.SSHHostKeyFingerprint != nil && *device.SSHHostKeyFingerprint != "" {
+		params["ssh_host_key_fingerprint"] = *device.SSHHostKeyFingerprint
+	}
 	// Vendor-specific addressing the agent would otherwise lose — the platform
 	// path reads this off device.Metadata directly.
 	if device.Metadata != nil {
@@ -980,5 +990,54 @@ func (h *DeviceHandlers) TestConnection(c *gin.Context) {
 		"tested_at":  time.Now().Format(time.RFC3339),
 		"message":    "Connection test completed",
 		"latency_ms": 42, // Simulated latency
+	})
+}
+
+// ResetDeviceHostKeyPin unpins a device's SSH host key so the next
+// interrogation enrols whatever key it is shown (H7).
+//
+// This is the deliberate re-pin path, and it exists because without one the
+// first device replacement or key rotation leaves an operator with no way
+// forward except turning host-key checking off entirely — which is how a
+// fail-closed control becomes fail-open in the field. It is a separate,
+// explicitly-named action rather than a field on the device edit form so that
+// "I accept a new identity for this device" is a decision somebody makes, not
+// a side effect of saving unrelated changes.
+//
+// It does not accept a fingerprint from the caller. The platform records what
+// the device actually presents on the next contact, so there is no way to pin a
+// value nobody observed.
+func (h *DeviceHandlers) ResetDeviceHostKeyPin(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid device ID"})
+		return
+	}
+
+	tenantIDVal, exists := c.Get("tenantID")
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Tenant ID not found"})
+		return
+	}
+	tenantID, ok := tenantIDVal.(uuid.UUID)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
+		return
+	}
+
+	device, err := h.deviceService.GetDevice(c.Request.Context(), tenantID, id)
+	if err != nil || device.TenantID != tenantID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+		return
+	}
+
+	if err := h.deviceService.ResetSSHHostKeyPin(c.Request.Context(), tenantID, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset the pinned SSH host key"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "The pinned SSH host key was cleared. The next interrogation will record the key this device presents and pin that. " +
+			"If you did not expect this device's key to change, change its credentials before re-running the interrogation.",
 	})
 }

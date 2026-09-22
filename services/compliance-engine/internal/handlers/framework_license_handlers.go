@@ -1,9 +1,7 @@
 package handlers
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -207,26 +205,23 @@ func (h *FrameworkLicenseHandlers) SelectFrameworks(c *gin.Context) {
 		return
 	}
 
-	// Read request body for debugging (before binding consumes it)
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err == nil {
-		// Restore body for binding
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	}
-
+	// The body is bound directly. It used to be io.ReadAll'd whole "for
+	// debugging", copied into a fresh buffer for binding, and then written to
+	// the pod log verbatim on any binding error — an unbounded read of
+	// tenant-chosen bytes held twice over, and tenant input in the log.
+	// Same defect as cluster-sensor-service's CreateJob (H10); the
+	// selection this endpoint takes is a short list of framework ids and the
+	// parsed summary below is what anyone debugging it reads.
 	var input models.FrameworkLicenseInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		log.Printf("ERROR: JSON binding failed: %v\n", err)
-		if len(bodyBytes) > 0 {
-			log.Printf("ERROR: Request body: %s\n", string(bodyBytes))
-		}
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Invalid request format",
 		})
 		return
 	}
 
-	log.Printf("DEBUG: Received SelectFrameworks request - FrameworkIDs: %v (len=%d), DefaultFrameworkID: %q\n", input.FrameworkIDs, len(input.FrameworkIDs), input.DefaultFrameworkID)
+	log.Printf("DEBUG: Received SelectFrameworks request - %d framework id(s), default set: %t\n", len(input.FrameworkIDs), input.DefaultFrameworkID != "")
 
 	if len(input.FrameworkIDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one framework must be selected"})

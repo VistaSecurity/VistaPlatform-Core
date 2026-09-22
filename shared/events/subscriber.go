@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -12,8 +13,37 @@ import (
 )
 
 // MessageHandler processes a single NATS message. Returning nil acknowledges
-// the message; returning an error triggers a nack (redelivery).
+// the message; returning an error triggers a nack (redelivery), unless the
+// error is marked Permanent — see ErrPermanent.
 type MessageHandler func(ctx context.Context, msg *nats.Msg) error
+
+// ErrPermanent marks a handler failure that redelivery cannot fix.
+//
+// The default on error is a nack, which is right for a transient fault: the
+// database was down, a peer timed out, try again. It is wrong for a message
+// whose CONTENT is the problem, because the second and third attempt do exactly
+// what the first did. When the work is expensive that is not merely wasted — it
+// is an amplifier. One oversized PCAP upload cost pcap-processor three full
+// processing passes and three OOM kills of a single-replica pod shared by every
+// tenant (H11); the redelivery turned one tenant's bad file into a cross-tenant
+// outage three times over.
+//
+// This is the same reasoning the panic path already uses (a panic is a code
+// defect, so the message is Term'd rather than crash-looped). Permanent extends
+// it to failures a handler can recognise for itself.
+var ErrPermanent = errors.New("permanent failure")
+
+// Permanent marks err so the subscriber terminates the message instead of
+// nacking it. Returns nil for a nil err, so it can wrap a call directly.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrPermanent, err)
+}
+
+// IsPermanent reports whether err was marked by Permanent.
+func IsPermanent(err error) bool { return errors.Is(err, ErrPermanent) }
 
 // SubscriptionConfig configures a JetStream pull or push subscription.
 type SubscriptionConfig struct {
@@ -64,8 +94,52 @@ func runHandlerSafely(ctx context.Context, msg *nats.Msg, subject string, handle
 	return
 }
 
+// messageSettler is the slice of *nats.Msg the ack decision uses. It exists so
+// the decision can be driven by a test: the thing worth pinning is which of
+// Ack / Nak / Term a given outcome reaches, and a unit test of IsPermanent
+// alone would stay green if this wiring were deleted.
+type messageSettler interface {
+	Ack(opts ...nats.AckOpt) error
+	Nak(opts ...nats.AckOpt) error
+	Term(opts ...nats.AckOpt) error
+}
+
+// settleMessage decides a message's fate after the handler has run.
+//
+//   - panicked → Term. A panic is a code defect; redelivering it would
+//     crash-loop through MaxDeliver re-triggering the same bug.
+//   - ErrPermanent → Term. The handler has said the content is the problem, so
+//     the second and third attempt do exactly what the first did, at the same
+//     cost. This is what stops one bad PCAP upload from OOM-killing the
+//     single-replica pcap-processor three times (H11).
+//   - any other error → Nak, the transient case: retry is the right answer.
+//   - nil → Ack.
+func settleMessage(msg messageSettler, subject string, handlerErr error, panicked bool) {
+	switch {
+	case panicked:
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[NATS] Failed to term panicked message on %s: %v", subject, termErr)
+		}
+	case IsPermanent(handlerErr):
+		log.Printf("[NATS] Permanent failure on %s, terminating message (no redelivery): %v", subject, handlerErr)
+		if termErr := msg.Term(); termErr != nil {
+			log.Printf("[NATS] Failed to term message on %s: %v", subject, termErr)
+		}
+	case handlerErr != nil:
+		log.Printf("[NATS] Error processing message on %s: %v", subject, handlerErr)
+		if nakErr := msg.Nak(); nakErr != nil {
+			log.Printf("[NATS] Failed to nack message on %s: %v", subject, nakErr)
+		}
+	default:
+		if err := msg.Ack(); err != nil {
+			log.Printf("[NATS] Failed to ack message on %s: %v", subject, err)
+		}
+	}
+}
+
 // Subscribe creates a durable JetStream subscription that processes messages
-// with the given handler. Messages are acked on success and nacked on error.
+// with the given handler. Messages are acked on success, nacked on a transient
+// error, and terminated on a panic or a Permanent error.
 func (s *Subscriber) Subscribe(cfg SubscriptionConfig, handler MessageHandler) error {
 	js := s.client.JetStream()
 	if js == nil {
@@ -103,28 +177,7 @@ func (s *Subscriber) Subscribe(cfg SubscriptionConfig, handler MessageHandler) e
 		// in any handler crashes the entire process — one malformed message or a
 		// nil-deref in one consumer takes down every subscription in the service.
 		handlerErr, panicked := runHandlerSafely(ctx, msg, cfg.Subject, handler)
-
-		if panicked {
-			// A panic is a code defect, not a transient fault. Terminate the
-			// message (no redelivery) so it can't crash-loop through MaxDeliver
-			// re-triggering the same bug; the logged stack is the signal to fix it.
-			if termErr := msg.Term(); termErr != nil {
-				log.Printf("[NATS] Failed to term panicked message on %s: %v", cfg.Subject, termErr)
-			}
-			return
-		}
-
-		if handlerErr != nil {
-			log.Printf("[NATS] Error processing message on %s: %v", cfg.Subject, handlerErr)
-			if nakErr := msg.Nak(); nakErr != nil {
-				log.Printf("[NATS] Failed to nack message on %s: %v", cfg.Subject, nakErr)
-			}
-			return
-		}
-
-		if err := msg.Ack(); err != nil {
-			log.Printf("[NATS] Failed to ack message on %s: %v", cfg.Subject, err)
-		}
+		settleMessage(msg, cfg.Subject, handlerErr, panicked)
 	}
 
 	var sub *nats.Subscription

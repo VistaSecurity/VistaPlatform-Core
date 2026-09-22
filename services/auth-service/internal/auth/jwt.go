@@ -145,14 +145,29 @@ func (j *JWTService) GenerateTokens(userID, tenantID uuid.UUID, email, role stri
 // GenerateTokensWithRefreshExpiry generates both access and refresh tokens,
 // using a caller-resolved refresh lifetime for policy-controlled sessions.
 func (j *JWTService) GenerateTokensWithRefreshExpiry(userID, tenantID uuid.UUID, email, role string, refreshExpiry time.Duration) (string, string, error) {
+	return j.GenerateTokensWithPasswordChange(userID, tenantID, email, role, refreshExpiry, false)
+}
+
+// GenerateTokensWithPasswordChange mints an access/refresh pair that carries the
+// pwd_change_required claim when passwordChangeRequired is set.
+//
+// This exists because auth-service had exactly ONE enforcement site for that
+// claim (middleware) and ZERO issuance sites: nothing in this service could
+// ever mint a limited session, so the gate was unreachable from here. The
+// platform-user branch of AuthService.Login is the issuance site — it
+// authenticates platform_users, including the published seeded super-admin
+// whose seed row carries force_password_change = true.
+func (j *JWTService) GenerateTokensWithPasswordChange(userID, tenantID uuid.UUID, email, role string, refreshExpiry time.Duration, passwordChangeRequired bool) (string, string, error) {
 	// Generate access token
-	accessToken, err := j.generateToken(userID, tenantID, email, role, "access", j.accessExpiry)
+	accessToken, err := j.generateToken(userID, tenantID, email, role, "access", j.accessExpiry, passwordChangeRequired)
 	if err != nil {
 		return "", "", err
 	}
 
-	// Generate refresh token
-	refreshToken, err := j.generateToken(userID, tenantID, email, role, "refresh", refreshExpiry)
+	// Generate refresh token. The claim rides the refresh token too, so a
+	// limited session cannot be laundered into an unrestricted one by calling
+	// /auth/refresh once — which would make the access-token claim inert.
+	refreshToken, err := j.generateToken(userID, tenantID, email, role, "refresh", refreshExpiry, passwordChangeRequired)
 	if err != nil {
 		return "", "", err
 	}
@@ -161,7 +176,7 @@ func (j *JWTService) GenerateTokensWithRefreshExpiry(userID, tenantID uuid.UUID,
 }
 
 // generateToken generates a JWT token with the given parameters
-func (j *JWTService) generateToken(userID, tenantID uuid.UUID, email, role, tokenType string, expiry time.Duration) (string, error) {
+func (j *JWTService) generateToken(userID, tenantID uuid.UUID, email, role, tokenType string, expiry time.Duration, passwordChangeRequired bool) (string, error) {
 	now := time.Now()
 	jti := uuid.NewString()
 	claims := JWTClaims{
@@ -172,7 +187,8 @@ func (j *JWTService) generateToken(userID, tenantID uuid.UUID, email, role, toke
 		Type:     tokenType,
 		// Only access tokens are ever presented from a browser, so only they
 		// need a double-submit value.
-		CSRF: csrfIfAccess(tokenType),
+		CSRF:                   csrfIfAccess(tokenType),
+		PasswordChangeRequired: passwordChangeRequired,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),

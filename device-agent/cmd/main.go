@@ -871,11 +871,30 @@ func saveConfigFile(configPath string, cfg *config.Config) error {
 	}
 
 	// Write to file
-	if err := os.WriteFile(configPath, []byte(configContent.String()), 0644); err != nil {
+	if err := writeSecretConfigFile(configPath, []byte(configContent.String())); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
+}
+
+// writeSecretConfigFile writes an agent configuration file owner-only.
+//
+// The file carries `registration_key:` in plaintext, and that key is the
+// agentSecret input to agentcreds.DeriveKey — the AES key that unwraps every
+// credential envelope the platform hands this agent (F5, Cisco, Fortinet,
+// Palo Alto and UniFi administrator passwords). At 0644 any unprivileged local
+// user on the agent host could read the key and decrypt them. The adjacent
+// client private key has always been written 0600; this matches it.
+//
+// os.WriteFile applies the mode only when it CREATES the file, so an upgrade
+// over a config an older build left world-readable would keep 0644. The
+// explicit Chmod is what actually tightens those.
+func writeSecretConfigFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
 
 // connectivityResult summarizes a platform reachability probe for display

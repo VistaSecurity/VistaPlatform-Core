@@ -145,12 +145,15 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     },
     { key: 'ratings', label: 'Severity Ratings', icon: 'gauge', job: 'The source-of-truth registry that rates every cryptographic value consistently over time.' },
     { key: 'asset-lifecycle', label: 'Asset Lifecycle', icon: 'recycle', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Set staleness thresholds, auto-archive behavior, and the drift baseline window assets are compared against.' },
-    // Stays settings.read: the page's only load call, GET /retention-policies,
-    // is ungated in audit-service, so the entry is not weaker than its route
-    // and nobody reaches an error banner. Its WRITE affordances are gated on
-    // audit.manage inside the page — the create/edit routes' real
-    // requirement.
-    { key: 'retention', label: 'Retention Policies', icon: 'archive', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Define data-retention schedules for audit and event logs.' },
+    // No 'retention' entry, deliberately (SECURITY C4, v1.0.0 audit).
+    // audit.retention_policies is platform-GLOBAL config — one row set governs
+    // every tenant's audit history, the table has no tenant_id column, and the
+    // sweep it drives deletes from audit.activity_logs with no tenant
+    // predicate. Its routes now require a platform identity, so a tenant-facing
+    // entry could only lead to a 403, and a dead button is a bug. The surface
+    // lives in admin-ui-v2 -> Security -> Retention. Do not re-add it here
+    // unless the table is first given a tenant_id and the feature genuinely
+    // re-scoped per tenant.
     { key: 'scopes', label: 'Scopes', icon: 'crop', built: true, job: 'Define named, versioned asset boundaries used by CBOM.' },
     // ADR-0006 D7. Both read the GENERATED class registry, not an endpoint —
     // the taxonomy is fixed and the client already ships it. `assets.read`

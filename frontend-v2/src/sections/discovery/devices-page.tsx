@@ -37,7 +37,7 @@ const COLS = [
   { label: 'Firmware', w: '1fr' },
   { label: 'Last interrogated', w: '130px' },
   { label: 'Connection', w: '110px', align: 'right' as const },
-  { label: '', w: '176px', align: 'right' as const },
+  { label: '', w: '206px', align: 'right' as const },
 ];
 
 function connColor(status?: string | null): string {
@@ -100,6 +100,31 @@ export function DevicesPage() {
     },
   });
 
+  // Clearing the pinned SSH host key. Interrogation fails closed against a key
+  // that differs from the pinned one and sends no credential, so a device that
+  // was legitimately replaced or rekeyed needs a way back — without one the
+  // realistic operator response is to disable host-key checking, which is the
+  // control failing open by other means.
+  const [repinningId, setRepinningId] = useState<string | null>(null);
+  const resetHostKey = useMutation({
+    mutationFn: async (id: string) => {
+      setRepinningId(id);
+      const { data, error } = await clients.devices.DELETE('/devices/{id}/ssh-host-key', { params: { path: { id } } });
+      if (error || !data) throw new Error('Failed to clear the pinned SSH host key');
+      return data;
+    },
+    onSuccess: () => {
+      toast.success('Pinned SSH host key cleared — the next interrogation will pin the key this device presents');
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof Error ? err.message : 'Failed to clear the pinned SSH host key');
+    },
+    onSettled: () => {
+      setRepinningId(null);
+      void qc.invalidateQueries({ queryKey: ['discovery', 'devices'] });
+    },
+  });
+
   const note = queryNote(q, devices.length === 0, {
     thing: 'managed assets',
     emptyTitle: 'Nothing is managed yet',
@@ -115,7 +140,8 @@ export function DevicesPage() {
           (device-interrogation-service/internal/api/router.go): POST /devices and
           /devices/discover-and-create are DiscoveryCreate; PUT /devices/:id is
           DiscoveryUpdate; POST /devices/:id/test-connection is DiscoveryRead;
-          /devices/:id/interrogate and DELETE /devices/:id are DiscoveryManage. */}
+          /devices/:id/interrogate, DELETE /devices/:id/ssh-host-key and
+          DELETE /devices/:id are DiscoveryManage. */}
       <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
         <div style={{ display: 'flex', gap: 9, marginBottom: 14 }}>
           <button className="ui-btn accent" onClick={() => { setEditing(null); setFormOpen(true); }}>
@@ -191,6 +217,21 @@ export function DevicesPage() {
                   </PermissionGate>
                   <PermissionGate permission={TENANT_PERMISSIONS.discovery.update}>
                     <RowBtn icon="wrench" title="Edit management settings" onClick={() => { setEditing(d); setFormOpen(true); }} />
+                  </PermissionGate>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
+                    {/* Only offered once a key is actually pinned: there is
+                        nothing to clear before first contact, and a button that
+                        does nothing is worse than no button. */}
+                    <RowBtn
+                      icon={repinningId === d.id ? 'loader' : 'key'}
+                      title={
+                        d.ssh_host_key_fingerprint
+                          ? `Clear the pinned SSH host key (${d.ssh_host_key_fingerprint}). Do this only after a deliberate device replacement or key rotation — if the key changed unexpectedly, change this device's credentials first.`
+                          : 'No SSH host key pinned yet — the next interrogation will pin the key this device presents'
+                      }
+                      onClick={() => resetHostKey.mutate(d.id)}
+                      disabled={repinningId === d.id || !d.ssh_host_key_fingerprint}
+                    />
                   </PermissionGate>
                   <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
                     {/* Unmanage, not delete. This removes the management

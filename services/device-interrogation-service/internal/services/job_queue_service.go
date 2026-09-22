@@ -257,6 +257,18 @@ func (s *JobQueueService) UpdateJobStatus(
 ) error {
 	now := time.Now()
 
+	// device_jobs.error_message is the one field the job-results projection
+	// (handlers/job_results.go) never touches: results are enumerated field by
+	// field and Asset.Metadata additionally walked by RedactMap, while the
+	// job-level error string is served verbatim by GET /jobs and GET /jobs/:id.
+	//
+	// The strings that reach here are built from runtime material — a vendor
+	// error, a Go *url.Error that prints the whole request URL — so they get the
+	// value-shaped half of the same redactor the results get. This is the
+	// BACKSTOP; the real fix for the PAN-OS case was taking the API key out of
+	// the URL. A backstop is here because the next vendor has not been checked.
+	errorMessage = redactedErrorMessage(errorMessage)
+
 	// Marshal results to JSON; use nil interface (not nil []byte) when no result
 	// so the pq driver sends SQL NULL rather than an invalid empty byte value for JSONB columns
 	var resultsJSON interface{}

@@ -40,6 +40,13 @@ type DeviceInfo struct {
 	// SiteID is vendor-specific (e.g. UniFi controller site).
 	SiteID   string
 	Metadata map[string]interface{}
+	// SSHHostKeyFingerprint is the host key pinned to this device record on a
+	// previous contact, in ssh.FingerprintSHA256 form. Empty means the device
+	// has never been contacted over SSH (or was deliberately re-pinned), which
+	// is the enrolment case: the interrogation captures the key it is shown and
+	// the wrapper stores it. Once set, a DIFFERENT key aborts the handshake
+	// before authentication — no credential is sent. See shared/sshtrust.
+	SSHHostKeyFingerprint string
 }
 
 // Credentials are decrypted, in-memory-only device credentials. Wrappers are

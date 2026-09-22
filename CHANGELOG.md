@@ -7,11 +7,198 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1-rc.1] - 2026-09-21
+## [1.1.0-rc.1] - 2026-09-22
+
+A security release. It is the remediation of a full ten-domain security audit of
+v1.0.0 — four Critical and ten High findings, every one verified against source
+before it was fixed. The audit report ships with the release at
+`docsv4/internal/security/SECURITY_AUDIT_2026-09.md`.
+
+**It also carries everything from 1.0.1**, which was tagged as a release
+candidate but never cut as a final release — the cloud-inventory work described
+in the section below this one.
+
+### BREAKING
+
+- **Agent and sensor authentication is now on by default**, and an install that
+  has neither set a passthrough hostname per backend nor explicitly opted out
+  will **fail** rather than come up unauthenticated. If you run sensors or
+  discovery agents, set `agentMtls.backends.<svc>.dnsName` for both
+  `sensor-manager` and `device-interrogation-service` before upgrading, and
+  re-point or re-enrol existing agents. If you run neither, set
+  `agentMtls.enabled: false` deliberately. See
+  `docsv4/core/operate/security/service-mesh-mtls.md`.
+- **Certificate rotation now requires the current certificate**, in every mode.
+  A lost agent certificate is a re-enrolment, not a renewal.
+- **Audit retention policies and SIEM forwarders moved to the platform admin.**
+  Tenant admins no longer see them in Settings; platform admins manage them in
+  admin-ui-v2 → Security → Retention / SIEM Export.
+- **Discovery now requires the matching permission.** Tenant viewers and
+  `api_user` can no longer create, cancel or retry discovery jobs, approve or
+  reject results, or change scan configuration. Reads are unaffected.
+- **Discovery targets are now authorized.** Jobs may no longer name loopback,
+  link-local (including cloud metadata), multicast, CGNAT, documentation or
+  reserved ranges, platform addresses, or public addresses outside a network
+  segment the tenant has registered.
+
+### Upgrading
+
+1. Back up your database. The chart ships no backup tooling and a wedged
+   migration leaves you mid-upgrade.
+2. Set the two `agentMtls` dnsNames, or set `agentMtls.enabled: false`. The
+   install fails with a message naming both paths if you set neither.
+3. Re-point or re-enrol existing sensors and discovery agents.
+4. **Rotate the credentials held by any agent enrolled before this release.**
+   The agent registration key was written world-readable and is the key that
+   unwraps device credential envelopes, so on a pre-upgrade host those
+   credentials should be treated as exposed to any local user. This release
+   stops new disclosure; it cannot undo old.
+5. If you bootstrapped with docker compose before this release, rotate
+   `INTERNAL_AUTH_SECRET` — it was left at a published placeholder value.
+
+<!-- release-notes-end -->
+
+### Security
+
+- **Platform-admin login through auth-service ignored `force_password_change`.**
+  `seed.sql` seeds the published platform-admin accounts with the flag set so
+  the shipped default password only buys a change-password-only session.
+  admin-service honoured it; auth-service never selected the column and never
+  issued the `pwd_change_required` claim, so `POST /auth/login` on the public
+  tenant host returned a full, unrestricted `super_admin` token on any fresh
+  install. Both the login and refresh paths now carry the claim — without the
+  refresh half, one `/auth/refresh` laundered a limited session into an
+  unrestricted one.
+- **A deleted platform administrator could still log in.** The soft delete
+  cleared neither `is_active` nor any session, and auth-service's lookup
+  filtered neither `deleted_at` nor `is_active` — unlike admin-service's own
+  login. Both lookups now filter, on login and on refresh.
+- **Agent and sensor authentication was disabled by the shipped chart.** The
+  services default `AGENT_MTLS_REQUIRED` to `true` and fail closed; the chart
+  explicitly set it to `false`, so a UUID in the URL was the entire credential
+  for discovery submission, command polling, job claim, result upload and
+  certificate rotation. Now on by default (see BREAKING).
+- **Certificate rotation was an identity takeover.** Rotation ran only under the
+  agent/sensor auth middleware, so with agent mTLS off an attacker holding a
+  UUID could obtain a legitimately CA-signed certificate for that identity and
+  supersede the genuine one — surviving any later enabling of mTLS. Rotation is
+  now bound to the presented client certificate (CN, validity, tenant-CA chain,
+  active-serial match) and refused when no such proof exists, independent of the
+  toggle.
+- **The agent registration key was written world-readable.** Both agents wrote
+  their config `0644` with the key in plaintext, and that key is the AES key
+  input for the envelopes carrying device administrator credentials — so any
+  local user on an agent host could decrypt the tenant's network-device
+  passwords. Now `0600`, re-applied on upgrade so a config an older build left
+  world-readable is corrected rather than left as it was.
+- **Any tenant admin could delete every tenant's audit trail.**
+  `audit.retention_policies` has no `tenant_id` column and the sweep it drives
+  deletes from `audit.activity_logs` with no tenant predicate on a `BYPASSRLS`
+  handle, yet its routes sat on the tenant API behind `audit.manage` — which
+  `tenant_admin` holds by default, and the two reads had no gate at all. A SIEM
+  integration likewise receives every tenant's events. Both now require a
+  platform identity.
+- **Discovery had no authorization of any kind.** The `cluster-sensor-service`
+  discovery routes carried authentication but no permission check, and the scan
+  guard short-circuited unless `options.origin == "auto_scan"` — an option the
+  caller set. So any authenticated tenant user could scan the cluster's own
+  service network, loopback, cloud metadata or arbitrary public hosts and read
+  the results back. Origin is now server-derived, and targets are authorized at
+  both job creation and after address expansion.
+- **Device interrogation was a full-read SSRF.** The tenant-supplied
+  `management_url` was dialled verbatim with an unguarded client and the remote
+  response body was returned in the job error. URLs are now canonicalized and
+  dialled through the same guard the on-prem connectors use — private networks
+  still reachable, because reaching an appliance on a private address is the
+  product; loopback, link-local and metadata refused at connect time.
+- **A live PAN-OS API key reached tenant API clients.** The key was in the query
+  string, so any transport error stringified the whole URL into
+  `device_jobs.error_message` — the one field results redaction never touched —
+  and that field is returned by the jobs endpoint. The key moved to a header,
+  and stored job errors are now redacted.
+- **SSH host keys were captured and never compared.** Trust-on-first-use
+  recorded a fingerprint as evidence and nothing ever read it back, so a device
+  administrator password was offered to whatever answered on port 22, every run.
+  The fingerprint is now pinned on the device record and compared during key
+  exchange, so a changed key aborts before any credential is sent and raises a
+  `host_key_changed` finding. Probes that exist to inventory key material are
+  deliberately unchanged — they send no credential.
+- **Two services could be OOM-killed by one request.** A 100 MiB body killed
+  `cluster-sensor-service`, and an uploaded capture could drive the shared,
+  single-replica `pcap-processor` to 1.29 GiB against a 512 MiB limit — then be
+  redelivered three times. Request bodies are now bounded at ingress, capture
+  accumulation reuses the cap the TLS path already had, multipart size checks
+  run before buffering rather than after, and a permanently-failed message is
+  terminated instead of retried.
+- **The compose bootstrap shipped a published `INTERNAL_AUTH_SECRET`.** The
+  rotation list covered eight secrets and missed this one, and the fallback that
+  would have generated it could never fire. Anyone could therefore sign an
+  internal service call with an attacker-chosen tenant. Rotation now covers it,
+  along with two more literals and a Grafana entry that was silently inert, and
+  the audit script now compares every bootstrap path against every other so the
+  lists cannot drift apart again.
+
+### Changed
+
+- All 23 Go modules updated within their current majors — `x/crypto` v0.57.0,
+  `x/net` v0.59.0, `x/text` v0.42.0, `quic-go` v0.62.0, `go-redis` v9.22.0,
+  `nats.go` v1.54.0 among them. Go 1.26 is retained deliberately: every stdlib
+  and toolchain advisory applying to that line is backported to 1.26.6, the
+  pinned version.
+- The `web-ui` and `admin-ui` images no longer ship a Caddy binary carrying
+  three HIGH-rated CVEs. The dependency floor list pinned `x/net`, `x/text` and
+  `grpc` but never `golang.org/x/crypto`, so it arrived at whatever Caddy
+  selected. Verified by scanning the rebuilt binary: six advisories before, two
+  after, both of which have no available fix.
+- Dependabot no longer ignores `golang.org/x/*`. The stated reason — that those
+  releases require Go 1.27 — was not true, and it had silenced security updates
+  on the most CVE-prone module family in the tree.
+
+## [1.0.1] - 2026-09-21
 
 A cloud account is now inventoried as completely as a network is. Adding an AWS
-integration already enumerated the right resources; this release fixes where
-they landed, what was read from them, and what the job told you about it.
+integration already enumerated the right resources — every VPC, subnet, instance,
+bucket and distribution arrived, and the counts matched the account exactly. What
+this release fixes is where they landed, what was read from them, and what the
+job told you afterwards.
+
+### Highlights
+
+- **Cloud resources stop pretending to be devices.** Discovery → Devices lists
+  the API-accessible interfaces the platform pulls inventory from. Subnets, VPCs,
+  buckets, distributions, key stores and cloud compute instances are none of
+  those, and no longer appear there — they live in Inventory and on the map,
+  which is where they always belonged. A cloud-hosted appliance you add
+  deliberately, with credentials, is unaffected.
+
+- **A cloud account's keys and certificates reach the inventory.** KMS keys land
+  in Inventory → Keys with their custody recorded, so a customer-managed CMK and
+  a provider-held key read as the different postures they are. Provider-managed
+  certificates land in Inventory → Certificates alongside the ones observed on
+  the wire.
+
+- **The map roots on the account.** Inventory → Map draws account → region → VPC
+  → subnet → instance, with the buckets and distributions that live outside a
+  VPC hung off their region instead of floating unconnected.
+
+- **A discovery job stops claiming success it cannot support.** Every requested
+  resource type now carries its own outcome, so "we looked and there was nothing
+  there" and "we could not look" are finally different answers.
+
+### Upgrading
+
+No action required. Existing installs have their stale cloud device rows cleaned
+up and their stuck discovery queue rows settled as part of the upgrade.
+
+### Verify
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v1.0.1 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+<!-- release-notes-end -->
 
 ### Added
 

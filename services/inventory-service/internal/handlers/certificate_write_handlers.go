@@ -128,6 +128,14 @@ func (h *CertificateHandler) CreateCertificate(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"certificate": certificate})
 }
 
+// maxCertPEMBytes caps a certificate upload. A PEM chain is a few kilobytes;
+// 1 MiB is roughly two hundred times the largest real one and leaves no doubt
+// about a legitimate upload being refused. One constant, used both as the
+// transport ceiling and as the parse cap, so the two cannot disagree.
+const maxCertPEMBytes = 1 << 20
+
+const certTooLargeMessage = "the certificate upload exceeds the 1 MiB limit"
+
 // UploadCertificate handles POST /api/v1/inventory-service/certificates/upload
 // Accepts a multipart PEM file (field "certificate_file"), extracts the
 // certificate fields, and stores it. The PEM is authoritative — any "metadata"
@@ -138,8 +146,24 @@ func (h *CertificateHandler) UploadCertificate(c *gin.Context) {
 		return
 	}
 
+	// Ceiling BEFORE gin buffers the body. The io.LimitReader below caps what
+	// is PARSED at 1 MiB, but it runs after the whole multipart body has
+	// already been received and buffered — so a 100 MiB "certificate" was
+	// resident in the pod before the 1 MiB cap had any say. Same number, moved
+	// to the point where it does something.
+	const maxCertUpload = int64(maxCertPEMBytes) + (1 << 16) // + multipart envelope
+	if c.Request.ContentLength > maxCertUpload {
+		sharedapi.PayloadTooLarge(c, certTooLargeMessage)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCertUpload)
+
 	fileHeader, err := c.FormFile("certificate_file")
 	if err != nil {
+		if sharedapi.RequestBodyTooLarge(err) {
+			sharedapi.PayloadTooLarge(c, certTooLargeMessage)
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "certificate_file is required"})
 		return
 	}
@@ -151,7 +175,7 @@ func (h *CertificateHandler) UploadCertificate(c *gin.Context) {
 	}
 	defer func() { _ = f.Close() }()
 
-	raw, err := io.ReadAll(io.LimitReader(f, 1<<20)) // 1 MiB cap — certs are small
+	raw, err := io.ReadAll(io.LimitReader(f, maxCertPEMBytes))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read uploaded file"})
 		return

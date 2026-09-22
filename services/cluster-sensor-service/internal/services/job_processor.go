@@ -500,6 +500,29 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 		expandedTargets = []string{target.Input}
 	}
 
+	// Authorize the addresses this dispatch will actually contact, on EVERY
+	// path — not only the automatic one AuthorizeAutomaticScan covers (#H5).
+	//
+	// This runs AFTER expansion deliberately. The stored target row can be a
+	// CIDR, a range or a hostname; only the expanded list names the hosts a
+	// packet is sent to, and a hostname is the one form whose addresses cannot
+	// be known at creation time. Re-checking here also means a segment the
+	// tenant withdrew, or an exclusion they added, between creation and
+	// dispatch is honoured.
+	if err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
+		return dispatchguard.AuthorizeTargets(tx, job.TenantID, expandedTargets)
+	}); err != nil {
+		// Settle the row rather than leaving it 'running' forever: a refused
+		// target is a terminal outcome with a reason a person can read.
+		if settleErr := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
+			_, e := tx.Exec(`UPDATE discovery_targets SET status='failed', error_message=$2, completed_at=NOW(), updated_at=NOW() WHERE id=$1`, target.ID, err.Error())
+			return e
+		}); settleErr != nil {
+			log.Printf("Failed to settle unauthorized target %s: %v", target.ID, settleErr)
+		}
+		return fmt.Errorf("target authorization failed for %s: %w", target.Input, err)
+	}
+
 	// Perform real port scanning for each expanded target
 	var allFindings []models.DiscoveryFinding
 	// Preserve original hostname for SNI and display (use original input if it's not an IP)

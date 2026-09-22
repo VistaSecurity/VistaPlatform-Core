@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -907,17 +908,32 @@ func (h *AuthHandlers) UploadAvatar(c *gin.Context) {
 		return
 	}
 
+	// Size ceiling BEFORE the body is buffered. The check below used to be the
+	// only one, and it read file.Size — which gin can only populate after it
+	// has received and buffered the entire upload. A 100 MiB "avatar" was
+	// resident in the pod before the 5 MiB limit was consulted.
+	if c.Request.ContentLength > MaxImageUploadRequestBytes {
+		sharedapi.PayloadTooLarge(c, ImageTooLargeMessage)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxImageUploadRequestBytes)
+
 	// Get uploaded file
 	file, err := c.FormFile("avatar")
 	if err != nil {
+		if sharedapi.RequestBodyTooLarge(err) {
+			sharedapi.PayloadTooLarge(c, ImageTooLargeMessage)
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "No avatar file provided",
 		})
 		return
 	}
 
-	// Validate file size (5MB limit)
-	if file.Size > 5*1024*1024 {
+	// The declared part size is still checked: the transport ceiling carries
+	// the envelope allowance, this one is the exact advertised number.
+	if file.Size > MaxImageUploadBytes {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "File too large. Maximum size is 5MB.",
 		})

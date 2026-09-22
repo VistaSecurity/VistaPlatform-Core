@@ -996,14 +996,44 @@ func findingObservedAt(f IngestFinding) time.Time {
 
 // findingClassHint maps the intake's asset-type opinion onto a class key.
 //
-// Cloud resource types are mapped directly where the collector named one;
-// otherwise the legacy four-value asset_type is translated by the one table in
-// shared/assetclass. Empty is a legitimate answer: the engine then falls back to
-// `unknown_host` or `external` from the network ownership, which is ADR-0002
+// Three readings, in descending order of how directly the producer said it:
+// the cloud `resource_type`, the producer's `device_type`, and last the legacy
+// four-value asset_type. All three go through the ONE table set in
+// shared/assetclass. Empty is a legitimate answer: the engine then falls back
+// to `unknown_host` or `external` from the network ownership, which is ADR-0002
 // D1's rule and more honest than guessing `server`.
+//
+// # Why `device_type` is read here
+//
+// The class hint is not cosmetic — it selects the class's IDENTIFIER
+// PRECEDENCE, which is what decides whether an identifier is allowed to vote.
+//
+// Half the cloud collectors write `resource_type` (buckets, RDS, the
+// enumerated VPCs/subnets/instances) and half write only `device_type`
+// (CloudFront, API Gateway, the three key stores, the managed load balancers).
+// For the second half the hint fell through to the legacy `asset_type`, which
+// the converter stamps `service` for all of them — so they were classed
+// `application`, whose precedence is `[cmdb_sys_id, name]` and contains no
+// `cloud_resource_id`.
+//
+// The consequence measured on demo: a CloudFront distribution's two discovery
+// rows both CARRIED the distribution id, and the identity engine logged
+// `carried cloud_resource_id=…, which belongs to another asset; it was not
+// attached` for each of them before creating a second and a third asset beside
+// the one the collector had just made. had made the identifier present;
+// the class made it mute. The certificate then never materialized, because the
+// duplicates were `pending_approval` and a pending asset's crypto is deferred.
+//
+// device-interrogation-service's own side has always read `device_type`
+// through this same table (`DeviceTypeClassKey`). Two sides of one question
+// reading two different keys is the drift ADR-0002 exists to end, and is
+// exactly the shape fixed for the identifier list.
 func findingClassHint(f IngestFinding) string {
 	if key := cloudClassHint(rawDataString(f.RawData, "resource_type", "cloud_resource_type")); key != "" {
 		return key
+	}
+	if key := assetclass.FromDeviceType(rawDataString(f.RawData, "device_type")); key != "" {
+		return string(key)
 	}
 	if key, ok := assetclass.FromLegacyAssetType(f.AssetType); ok {
 		return key

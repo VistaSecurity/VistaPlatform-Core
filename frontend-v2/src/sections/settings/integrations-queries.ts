@@ -1,16 +1,15 @@
-// Settings · Integrations — query factories for the two Enterprise-only halves
-// of the page, kept out of the component so the edition behaviour is unit
-// testable (see integrations-queries.test.ts).
+// Settings · Integrations — query factories for the Enterprise-only half of the
+// page, kept out of the component so the edition behaviour is unit testable
+// (see integrations-queries.test.ts).
 //
-// WHY THESE TWO ARE BOTH FLAG-GATED AND PROBED
+// WHY THIS IS BOTH FLAG-GATED AND PROBED
 //
-// CMDB/ITSM sync (`inventory-service/ee/cmdbsync`) and SIEM export
-// (`audit-service/ee/siemexport`) were both carved into the Enterprise tree, so
-// a Core build does not mount their routes and the calls 404.
+// CMDB/ITSM sync (`inventory-service/ee/cmdbsync`) was carved into the
+// Enterprise tree, so a Core build does not mount its routes and the call 404s.
 //
-// Both now HAVE registered entitlement keys (`cmdb_sync`, `siem_export` in
-// auth-service's `knownFeatures`, the OpenAPI `FeatureFlags` closed shape and
-// the `FeatureName` union), so the flag is authoritative and the request never
+// It HAS a registered entitlement key (`cmdb_sync` in auth-service's
+// `knownFeatures`, the OpenAPI `FeatureFlags` closed shape and the
+// `FeatureName` union), so the flag is authoritative and the request never
 // fires when it is off — that is the primary gate, and it is the one to reach
 // for whenever a key exists.
 //
@@ -21,13 +20,11 @@
 // instead of a red failure.
 import { assertEditionPresent, editionAwareRetry, isEditionUnavailable } from '@vistasecurity/primitives/features';
 import { clients } from '../../lib/clients';
-import type { inventoryComponents, auditServiceComponents } from '@vistasecurity/api-contract';
+import type { inventoryComponents } from '@vistasecurity/api-contract';
 
 export type CmdbProfileRow = inventoryComponents['schemas']['CMDBSyncProfile'];
-export type SiemIntegrationRow = auditServiceComponents['schemas']['SIEMIntegration'];
 
 export const CMDB_PROFILES_KEY = ['settings', 'cmdb-profiles'] as const;
-export const SIEM_INTEGRATIONS_KEY = ['settings', 'siem-integrations'] as const;
 
 /**
  * CMDB/ITSM sync profiles. Enterprise-only route; absent (404) on Core.
@@ -52,20 +49,12 @@ export function cmdbProfilesQuery(enabled = true) {
   };
 }
 
-/** Configured SIEM forwarders. Enterprise-only route; absent (404) on Core. */
-export function siemIntegrationsQuery(enabled = true) {
-  return {
-    queryKey: SIEM_INTEGRATIONS_KEY,
-    enabled,
-    retry: editionAwareRetry(),
-    queryFn: async (): Promise<SiemIntegrationRow[]> => {
-      const { data, response } = await clients.audit.GET('/siem/integrations', {});
-      assertEditionPresent('SIEM export', response);
-      if (!response.ok || !data) throw new Error('Failed to load SIEM integrations');
-      return data.integrations ?? [];
-    },
-  };
-}
+// siemIntegrationsQuery was removed with the H2 security fix (v1.0.0 audit):
+// GET /siem/integrations now requires a PLATFORM identity, because SIEM
+// integrations are platform-global config that fans every tenant's audit events
+// out to every enabled receiver. No tenant surface may call it, so the query
+// factory is gone rather than left to 403. admin-ui-v2 -> Security -> SIEM
+// Export owns that read.
 
 /**
  * What an edition-probed section should render.

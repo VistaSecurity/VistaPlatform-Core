@@ -3,15 +3,12 @@ package deviceinterrogation
 import (
 	"context"
 	"fmt"
-	"net"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/sshtrust"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // CiscoInterrogator interrogates Cisco devices (IOS routers/switches, ASA
@@ -20,9 +17,8 @@ import (
 // former device-agent and device-interrogation-service copies: it keeps the
 // agent copy's rich CLI parsing (crypto-map / IPSec SA / ISAKMP SA / IKEv2 SA,
 // parseSSLOutput, parseWebVPN, SSH-banner asset) AND adds the service copy's
-// known_hosts host-key verification with a safe, opt-in insecure fallback —
-// closing the security gap where the agent copy unconditionally used
-// ssh.InsecureIgnoreHostKey().
+// host-key verification (shared/sshtrust) — closing the security gap where the
+// agent copy unconditionally used ssh.InsecureIgnoreHostKey().
 type CiscoInterrogator struct{}
 
 // SupportedDeviceTypes implements DeviceInterrogator.
@@ -31,9 +27,9 @@ func (*CiscoInterrogator) SupportedDeviceTypes() []string {
 }
 
 // Interrogate implements DeviceInterrogator. It derives host/port from the
-// DeviceInfo, opens an SSH client (host-key verified against the user's
-// known_hosts unless creds.InsecureSkipVerify is set), runs the interrogation,
-// and returns the discovered crypto assets.
+// DeviceInfo, opens an SSH client under the shared/sshtrust host-key policy
+// (a fingerprint pinned on the device record is compared and fails closed),
+// runs the interrogation, and returns the discovered crypto assets.
 func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
 	host := device.IPAddress
 	if host == "" {
@@ -52,7 +48,8 @@ func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cr
 		return nil, fmt.Errorf("username and password required for Cisco device")
 	}
 
-	client, err := newCiscoSSHClient(host, port, creds.Username, creds.Password, creds.InsecureSkipVerify)
+	client, err := newCiscoSSHClient(host, port, creds.Username, creds.Password,
+		creds.InsecureSkipVerify, device.SSHHostKeyFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cisco client: %w", err)
 	}
@@ -77,9 +74,11 @@ type ciscoSSHClient struct {
 	session  *ssh.Session
 
 	// hostKeyFingerprint is the SHA-256 fingerprint of the host key we
-	// connected through, captured for evidence. hostKeyVerified records how it
-	// was trusted: "known_hosts", "first_use" (TOFU capture), or "skipped".
+	// connected through; hostKeyType is its algorithm. hostKeyVerified records
+	// how it was trusted — one of the sshtrust.Verification* values ("pinned",
+	// "known_hosts", "first_use", "skipped").
 	hostKeyFingerprint string
+	hostKeyType        string
 	hostKeyVerified    string
 
 	// chassisPID is the product id of the chassis entry of `show inventory`,
@@ -87,38 +86,27 @@ type ciscoSSHClient struct {
 	chassisPID string
 }
 
-// newCiscoSSHClient dials the device. Host-key handling is three-tier, closing
-// the agent copy's gap (it used ssh.InsecureIgnoreHostKey() unconditionally)
-// without regressing interrogation in environments that have no known_hosts:
+// newCiscoSSHClient dials the device. Host-key handling is delegated to
+// shared/sshtrust, which is the single policy for every SSH client in this
+// project that sends a credential — see that package for the precedence and for
+// why a prober that only inventories key material is deliberately not held to it.
 //
-//   - insecureSkipVerify == true → ssh.InsecureIgnoreHostKey() (operator opt-in).
-//   - a usable ~/.ssh/known_hosts exists → strict verification against it.
-//   - otherwise → capture-on-first-use: accept the connection but record the
-//     host-key fingerprint as evidence (surfaced in SSHInfo). This is the
-// "pin/surface on first contact" trust model from — we no longer
-//     silently ignore the key, but we also don't hard-fail on customer gear that
-//     was never in a known_hosts file.
-func newCiscoSSHClient(host string, port int, username, password string, insecureSkipVerify bool) (*ciscoSSHClient, error) {
+// pinnedFingerprint is what the device record stored on a previous contact.
+// When it is set, a different key aborts the handshake during key exchange and
+// the password never reaches the wire. When it is empty this is first contact:
+// the key is captured and the caller is expected to persist it, which is the
+// half that used to be missing and made the whole thing a check that could not
+// fail.
+func newCiscoSSHClient(host string, port int, username, password string, insecureSkipVerify bool, pinnedFingerprint string) (*ciscoSSHClient, error) {
 	c := &ciscoSSHClient{host: host, port: port, username: username, password: password}
 
-	var hostKeyCallback ssh.HostKeyCallback
-	switch {
-	case insecureSkipVerify:
-		hostKeyCallback = ssh.InsecureIgnoreHostKey() //nolint:gosec // operator opt-in via InsecureSkipVerify for first-contact interrogation
-		c.hostKeyVerified = "skipped"
-	default:
-		if cb, ok := ciscoKnownHostsCallback(); ok {
-			hostKeyCallback = cb
-			c.hostKeyVerified = "known_hosts"
-		} else {
-			// Capture-on-first-use: record the key, accept, surface as evidence.
-			hostKeyCallback = func(_ string, _ net.Addr, key ssh.PublicKey) error {
-				c.hostKeyFingerprint = ssh.FingerprintSHA256(key)
-				return nil
-			}
-			c.hostKeyVerified = "first_use"
-		}
+	address := fmt.Sprintf("%s:%d", host, port)
+	policy := &sshtrust.Policy{
+		Host:               address,
+		Pinned:             pinnedFingerprint,
+		InsecureSkipVerify: insecureSkipVerify,
 	}
+	hostKeyCallback := policy.Callback()
 
 	config := &ssh.ClientConfig{
 		User:            username,
@@ -127,32 +115,20 @@ func newCiscoSSHClient(host string, port int, username, password string, insecur
 		Timeout:         10 * time.Second,
 	}
 
-	address := fmt.Sprintf("%s:%d", host, port)
 	client, err := ssh.Dial("tcp", address, config)
+
+	// Read the observation back whether or not the dial succeeded: on a
+	// mismatch it is the key that actually turned up, which is what the finding
+	// needs to name.
+	c.hostKeyFingerprint = policy.Fingerprint
+	c.hostKeyType = policy.KeyType
+	c.hostKeyVerified = policy.Verification
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", address, err)
 	}
 	c.client = client
 	return c, nil
-}
-
-// ciscoKnownHostsCallback returns a strict known_hosts callback when a usable
-// ~/.ssh/known_hosts exists, else ok=false so the caller can fall back to
-// capture-on-first-use.
-func ciscoKnownHostsCallback() (ssh.HostKeyCallback, bool) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, false
-	}
-	knownHostsPath := filepath.Join(homeDir, ".ssh", "known_hosts")
-	if _, err := os.Stat(knownHostsPath); err != nil {
-		return nil, false
-	}
-	cb, err := knownhosts.New(knownHostsPath)
-	if err != nil {
-		return nil, false
-	}
-	return cb, true
 }
 
 // Close closes the SSH connection.
@@ -880,6 +856,9 @@ func (c *ciscoSSHClient) collectSSHInfo() CryptoAsset {
 	if c.hostKeyFingerprint != "" {
 		asset.SSHInfo.HostKeyFingerprint = c.hostKeyFingerprint
 		asset.Metadata["ssh_host_key_fingerprint"] = c.hostKeyFingerprint
+	}
+	if c.hostKeyType != "" {
+		asset.SSHInfo.HostKeyType = c.hostKeyType
 	}
 	if c.hostKeyVerified != "" {
 		asset.Metadata["ssh_host_key_verification"] = c.hostKeyVerified

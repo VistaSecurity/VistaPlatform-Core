@@ -32,14 +32,16 @@ var deviceTestTenant = uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 // --- stub deviceStore ------------------------------------------------------
 
 type stubDeviceStore struct {
-	list      []*models.Device
-	listErr   error
-	device    *models.Device
-	devErr    error
-	created   *models.Device
-	createErr error
-	updated   *models.Device
-	stored    services.StoredDeviceCredentials
+	hostKeyPinResets   int
+	hostKeyPinResetErr error
+	list               []*models.Device
+	listErr            error
+	device             *models.Device
+	devErr             error
+	created            *models.Device
+	createErr          error
+	updated            *models.Device
+	stored             services.StoredDeviceCredentials
 }
 
 func (s *stubDeviceStore) CreateDevice(context.Context, uuid.UUID, models.CreateDeviceRequest) (*models.Device, error) {
@@ -58,6 +60,11 @@ func (s *stubDeviceStore) DeleteDevice(context.Context, uuid.UUID, uuid.UUID) er
 
 func (s *stubDeviceStore) GetStoredDeviceCredentials(context.Context, uuid.UUID, uuid.UUID) (services.StoredDeviceCredentials, error) {
 	return s.stored, nil
+}
+
+func (s *stubDeviceStore) ResetSSHHostKeyPin(context.Context, uuid.UUID, uuid.UUID) error {
+	s.hostKeyPinResets++
+	return s.hostKeyPinResetErr
 }
 
 type recordingJobCreator struct {
@@ -89,6 +96,7 @@ func newDeviceEngineWithJobs(store *stubDeviceStore, jobs jobCreator) *gin.Engin
 	grp.DELETE("/devices/:id", h.DeleteDevice)
 	grp.POST("/devices/:id/interrogate", h.InterrogateDevice)
 	grp.POST("/devices/:id/test-connection", h.TestConnection)
+	grp.DELETE("/devices/:id/ssh-host-key", h.ResetDeviceHostKeyPin)
 	grp.POST("/devices/bulk-interrogate", h.BulkInterrogateDevices)
 	grp.POST("/devices/discover-and-create", h.DiscoverAndCreateDevice)
 	return r
@@ -324,6 +332,73 @@ func TestContract_DiscoverAndCreateDevice_400_badBody(t *testing.T) {
 	w := do(eng, http.MethodPost, base+"/devices/discover-and-create", strings.NewReader(`{`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// --- clearing the pinned SSH host key (H7) ---------------------------------
+//
+// These drive the REAL route, not the handler in isolation: the whole point of
+// the endpoint is that it is reachable and tenant-scoped, and a test that
+// called the method directly would stay green if the route were removed.
+
+func TestContract_ResetDeviceHostKeyPin_200(t *testing.T) {
+	sv := loadSpec(t)
+	store := &stubDeviceStore{device: sampleDevice()}
+	eng := newDeviceEngine(store)
+
+	w := do(eng, http.MethodDelete, base+"/devices/"+aUUID+"/ssh-host-key", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "MessageResponse", w.Body.Bytes())
+	if store.hostKeyPinResets != 1 {
+		t.Fatalf("ResetSSHHostKeyPin calls = %d, want 1 — the route must actually clear the pin", store.hostKeyPinResets)
+	}
+}
+
+// A device this tenant cannot see is a 404 AND must not have its pin cleared.
+// Answering 404 while still clearing would let one tenant unpin another's
+// device by guessing an id — the pin would silently vanish and the next
+// interrogation would trust whatever answered.
+func TestContract_ResetDeviceHostKeyPin_404_doesNotClear(t *testing.T) {
+	sv := loadSpec(t)
+	store := &stubDeviceStore{devErr: context.DeadlineExceeded}
+	eng := newDeviceEngine(store)
+
+	w := do(eng, http.MethodDelete, base+"/devices/"+aUUID+"/ssh-host-key", nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if store.hostKeyPinResets != 0 {
+		t.Fatalf("ResetSSHHostKeyPin was called %d time(s) for a device the tenant cannot see", store.hostKeyPinResets)
+	}
+}
+
+func TestContract_ResetDeviceHostKeyPin_400_badID(t *testing.T) {
+	sv := loadSpec(t)
+	store := &stubDeviceStore{device: sampleDevice()}
+	eng := newDeviceEngine(store)
+
+	w := do(eng, http.MethodDelete, base+"/devices/not-a-uuid/ssh-host-key", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if store.hostKeyPinResets != 0 {
+		t.Fatalf("ResetSSHHostKeyPin was called for an unparseable id")
+	}
+}
+
+func TestContract_ResetDeviceHostKeyPin_500(t *testing.T) {
+	sv := loadSpec(t)
+	store := &stubDeviceStore{device: sampleDevice(), hostKeyPinResetErr: context.DeadlineExceeded}
+	eng := newDeviceEngine(store)
+
+	w := do(eng, http.MethodDelete, base+"/devices/"+aUUID+"/ssh-host-key", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }

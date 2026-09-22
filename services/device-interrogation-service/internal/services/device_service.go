@@ -893,3 +893,13 @@ func derefStr(p *string) string {
 func cloudResourceIDFromMetadata(meta map[string]interface{}) string {
 	return identity.CloudResourceIDFromMetadata(meta)
 }
+
+// ResetSSHHostKeyPin clears the SSH host key pinned to a managed asset, so the
+// next interrogation enrols the key the device presents (H7).
+//
+// The operator-facing half of fail-closed host-key verification: a device that
+// was legitimately replaced or rekeyed has to be able to come back without
+// anybody disabling the check.
+func (s *DeviceService) ResetSSHHostKeyPin(ctx context.Context, tenantID, assetID uuid.UUID) error {
+	return clearSSHHostKeyPin(ctx, s.db, tenantID, assetID)
+}

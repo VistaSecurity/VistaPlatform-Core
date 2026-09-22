@@ -16,8 +16,22 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 	"github.com/vistasecurity/vistaplatform/shared/storage"
+)
+
+const (
+	// maxBrandingBytes is the advertised image ceiling — the same 5 MB the
+	// tenant-branding and avatar uploads use.
+	maxBrandingBytes = 5 * 1024 * 1024
+	// maxBrandingRequestBytes is the TRANSPORT ceiling: the image cap plus an
+	// allowance for the multipart envelope and the `type` text field this form
+	// carries alongside the file. Without it, an image of exactly the
+	// advertised maximum would be refused before the handler saw it.
+	maxBrandingRequestBytes = maxBrandingBytes + (1 << 16)
+
+	brandingTooLargeMessage = "File too large. Maximum size is 5MB"
 )
 
 var (
@@ -79,6 +93,16 @@ func UploadPlatformBrandingAsset(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
+		// Size ceiling FIRST — ahead of c.PostForm, which is what makes gin
+		// parse (and buffer) the whole multipart body. The file.Size check
+		// further down runs after that, so on its own it could never prevent
+		// the allocation it looks like it is preventing.
+		if c.Request.ContentLength > maxBrandingRequestBytes {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": brandingTooLargeMessage})
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBrandingRequestBytes)
+
 		// Get asset type (logo, login_logo, or favicon)
 		assetType := c.PostForm("type")
 		if assetType != "logo" && assetType != "login_logo" && assetType != "favicon" {
@@ -89,12 +113,17 @@ func UploadPlatformBrandingAsset(db *sql.DB) gin.HandlerFunc {
 		// Get uploaded file
 		file, err := c.FormFile("file")
 		if err != nil {
+			if sharedapi.RequestBodyTooLarge(err) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": brandingTooLargeMessage})
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
 			return
 		}
 
-		// Validate file size (5MB limit)
-		if file.Size > 5*1024*1024 {
+		// The declared part size is still checked: the transport ceiling
+		// carries the envelope allowance, this one is the advertised number.
+		if file.Size > maxBrandingBytes {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 5MB"})
 			return
 		}

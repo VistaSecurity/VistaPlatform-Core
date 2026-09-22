@@ -1,20 +1,19 @@
 // Settings · Integrations + Notifications & Alerts pages — ported from the
 // mock's settings/sectionF.jsx. Configured connections = tenant notification
-// channels (notification-service, full CRUD + test) + SIEM integrations
-// (audit-service, read-only this pass); routing rules = tenant notification
+// channels (notification-service, full CRUD + test); routing rules = tenant notification
 // rules (full CRUD + live enable toggle); alert rules = audit-service alert
 // rules (live enable toggle — creation needs the conditions/actions designer).
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { useFeature } from '@vistasecurity/primitives/features';
-import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
+import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, relTime, GREEN, AMBER, RED } from './kit';
 import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal, isDigest } from './notification-modals';
 import { CmdbProfileModal, CmdbDeleteModal, CmdbJobsModal, PLATFORM_LABEL, jobTone, type CMDBProfile } from './cmdb-modals';
-import { cmdbProfilesQuery, siemIntegrationsQuery, editionSectionState } from './integrations-queries';
+import { cmdbProfilesQuery, editionSectionState } from './integrations-queries';
 import { CONNECTOR_KIND_LABEL } from '@vistasecurity/primitives/connectors';
 import {
   connectorCatalogueQuery, connectorAction, connectorCaption, isSelectable,
@@ -224,40 +223,28 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const netboxQ = useQuery(netboxConnectionsQuery(netboxEntitled));
   const netboxState = netboxEntitled ? editionSectionState(netboxQ) : 'unavailable';
   const netboxConnections = netboxQ.data ?? [];
-  // CMDB sync and SIEM export are Enterprise-only routes with no entitlement
-  // key to gate on — see integrations-queries.ts. Both are edition-probed: an
-  // absent route resolves to `unavailable`, which renders an upgrade card (and
-  // drops the Add button) instead of a red failure. Notification channels are
-  // Core, so the page itself always renders.
+  // CMDB sync is an Enterprise-only route — see integrations-queries.ts. It is
+  // edition-probed: an absent route resolves to `unavailable`, which renders an
+  // upgrade card (and drops the Add button) instead of a red failure.
+  // Notification channels are Core, so the page itself always renders.
   const cmdbEntitled = useFeature('cmdb_sync');
   const cmdbQ = useQuery(cmdbProfilesQuery(cmdbEntitled));
   const cmdbState = cmdbEntitled ? editionSectionState(cmdbQ) : 'unavailable';
   const cmdbProfiles = cmdbQ.data ?? [];
   const closeCmdb = () => setCmdbModal({ kind: 'closed' });
   const channelsQ = useChannels();
+  // SIEM forwarders are no longer listed here (SECURITY H2, v1.0.0 audit).
+  // `audit.siem_integrations` is platform-GLOBAL config: SendEvent fans EVERY
+  // tenant's audit event out to every enabled integration, and the rows carry
+  // no usable tenant scope. GET /siem/integrations now requires a platform
+  // identity, so this read could only 403 — the surface belongs to
+  // admin-ui-v2 -> Security -> SIEM Export. The `siem_export` entitlement is
+  // still read below, purely to word the edition note.
   const siemEntitled = useFeature('siem_export');
-  // GET /siem/integrations requires audit.read ( — it required the WRITE
-  // permission audit.manage until then, which is why this panel showed "SIEM
-  // integrations failed to load" for every role but tenant_admin). Gate the
-  // fetch on the permission as well as the entitlement: a role that cannot read
-  // the audit surface should see the panel absent, not failing.
-  // Not destructured: `const { hasPermission } = usePermissions()` trips
-  // @typescript-eslint/unbound-method, and the lint job is a warning ratchet.
-  // Same call form as discovery/pcap-page.tsx.
-  const siemPermitted = usePermissions().hasPermission(TENANT_PERMISSIONS.audit.read);
-  const siemQ = useQuery(siemIntegrationsQuery(siemEntitled && siemPermitted));
-  const siemState = siemEntitled && siemPermitted ? editionSectionState(siemQ) : 'unavailable';
-  const siemForbidden = siemEntitled && !siemPermitted;
 
-  const siem = siemQ.data ?? [];
   const channels = channelsQ.data ?? [];
-  // A Core build has no SIEM route at all, so its absence must not count as a
-  // load failure of the (Core) connections list.
-  const siemUnavailable = siemState === 'unavailable';
-  const siemFailed = siemState === 'error';
-  const loading = channelsQ.isLoading || (!siemUnavailable && siemQ.isLoading);
-  const failed = channelsQ.isError && (siemFailed || siemUnavailable);
-  const partialFail = !failed && (channelsQ.isError || siemFailed);
+  const loading = channelsQ.isLoading;
+  const failed = channelsQ.isError;
   const close = () => setModal({ kind: 'closed' });
 
   const cardShell = (key: string, name: string, cat: string, tone: string, enabled: boolean, detail: string, actions?: React.ReactNode) => (
@@ -294,15 +281,11 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         {failed ? (
           <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load connections" message="The connection list failed to load." /></SCard>
         ) : loading ? (
-          <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading connections…" message="Fetching configured channels and SIEM integrations." /></SCard>
-        ) : siem.length + channels.length === 0 ? (
-          <SCard><StateNote icon="plug" tone="var(--app-t3)" title="No connections" message="No channels or SIEM integrations are configured yet — add one to start routing alerts." /></SCard>
+          <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading connections…" message="Fetching configured channels." /></SCard>
+        ) : channels.length === 0 ? (
+          <SCard><StateNote icon="plug" tone="var(--app-t3)" title="No connections" message="No channels are configured yet — add one to start routing alerts." /></SCard>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: 12 }}>
-            {siem.map((s) =>
-              cardShell(`siem-${s.id}`, s.name, `SIEM · ${s.type}`, s.enabled ? GREEN : AMBER, s.enabled,
-                `audit forwarding · ${relTime(s.updated_at)}`),
-            )}
             {channels.map((c) =>
               cardShell(`ch-${c.id}`, c.channel_name, CHANNEL_CAT[c.channel_type] ?? c.channel_type,
                 c.enabled ? testTone(c.test_status) : AMBER, c.enabled,
@@ -319,26 +302,11 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
           </div>
         )}
       </SSection>
-      {partialFail && (
-        <p style={{ fontSize: 12, color: 'var(--danger-text)', marginTop: 4 }}>
-          <Icon name="alert-triangle" size={13} style={{ verticalAlign: '-2px', marginRight: 5 }} />
-          {channelsQ.isError ? 'Notification channels failed to load' : 'SIEM integrations failed to load'} — the list above may be incomplete.
-        </p>
-      )}
       <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 4 }}>
-        {siemForbidden ? (
-          <>
-            <Icon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 5, color: 'var(--app-t3)' }} />
-            SIEM forwarders are not shown — viewing them needs the audit read permission. Ask a Tenant Administrator if you need access.
-          </>
-        ) : siemUnavailable ? (
-          <>
-            <Icon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 5, color: 'var(--accent)' }} />
-            Outbound SIEM forwarding (Splunk, Datadog, Elastic) is an Enterprise feature. Audit events are still recorded and searchable in every edition — only forwarding them to an external SIEM is gated.
-          </>
-        ) : (
-          'SIEM forwarder management (Splunk, Datadog, Elastic) is read-only here for now — connectors are configured via the audit pipeline.'
-        )}
+        <Icon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 5, color: siemEntitled ? 'var(--app-t3)' : 'var(--accent)' }} />
+        {siemEntitled
+          ? 'Outbound SIEM forwarding (Splunk, Datadog, Elastic) applies to the whole platform, so it is configured by your platform operator rather than per tenant. Audit events are recorded and searchable here either way.'
+          : 'Outbound SIEM forwarding (Splunk, Datadog, Elastic) is an Enterprise feature, configured platform-wide by your operator. Audit events are still recorded and searchable in every edition — only forwarding them to an external SIEM is gated.'}
       </p>
 
       <SSection

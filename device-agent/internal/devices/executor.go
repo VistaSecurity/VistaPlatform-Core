@@ -11,6 +11,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/models"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/security"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
 // resultSubmitter is the slice of the API client the executor uses: it posts a
@@ -138,11 +139,23 @@ func (e *JobExecutor) executeCloudDiscovery(job *models.Job) error {
 }
 
 // submitFailure builds and submits a failed JobResult.
+//
+// errMsg is redacted on the way out. It is assembled from whatever failed — a
+// vendor error, a Go *url.Error that prints the entire request URL — and the
+// platform stores it as device_jobs.error_message, which GET /jobs serves to the
+// tenant verbatim while the results beside it are projected field by field.
+// [redact.Text] is the value-shaped half of the same redactor: PEM private keys
+// by shape, credential query parameters by parameter name.
+//
+// The platform redacts this field again at its own write (see
+// redactedErrorMessage in device-interrogation-service). Both, deliberately:
+// this agent runs on the customer's host, so scrubbing here keeps the secret off
+// the wire, and scrubbing there covers every other producer of the field.
 func (e *JobExecutor) submitFailure(job *models.Job, errMsg string) error {
 	return e.submitter.SubmitResult(&models.JobResult{
 		JobID:       job.ID,
 		Success:     false,
-		Error:       errMsg,
+		Error:       redact.Text(errMsg),
 		CompletedAt: time.Now(),
 	})
 }
@@ -161,6 +174,13 @@ func buildDeviceInfo(deviceType string, params map[string]interface{}) di.Device
 	}
 	if v, ok := params["site_id"].(string); ok {
 		device.SiteID = v
+	}
+	// The host key the platform pinned for this device on a previous contact.
+	// Absent means first contact: the interrogation captures what it is shown
+	// and the platform pins it from the result. Present means a different key
+	// aborts the handshake before the password is offered (shared/sshtrust).
+	if v, ok := params["ssh_host_key_fingerprint"].(string); ok {
+		device.SSHHostKeyFingerprint = v
 	}
 	// SSH/management port — accept "ssh_port" or "port", encoded as a JSON number.
 	if p, ok := params["ssh_port"].(float64); ok {

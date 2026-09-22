@@ -1324,9 +1324,18 @@ serviceMtls:
 # Device-agents and sensors authenticate their outbound calls
 # (/agents/:id/{jobs,results,heartbeat}, /sensors/:sensor_id/{heartbeat,
 # commands/poll,...}) with the per-tenant mTLS client cert issued at
-# registration. When this is OFF (default), those routes tolerate a missing
-# client cert (the pre- fail-OPEN behavior) — any pod-network caller that
-# knows an agent/sensor UUID can poll jobs, submit results, or heartbeat.
+# registration. When this is OFF, those routes tolerate a missing client cert
+# (the pre- fail-OPEN behavior) — any pod-network caller that knows an
+# agent/sensor UUID can poll jobs, submit results, or heartbeat.
+#
+# ⚠️ BREAKING CHANGE: this now defaults to TRUE. It defaulted to false, which
+# made the chart explicitly set AGENT_MTLS_REQUIRED="false" on both backends and
+# so disabled agent/sensor authentication on every default install — a path
+# parameter was the entire authenticator. Enabling it requires the passthrough
+# prerequisites below, so a default install now FAILS AT `helm install` with a
+# message naming what to set, rather than coming up silently unauthenticated.
+# To keep the old behavior deliberately, set `agentMtls.enabled: false` — see
+# the migration notes in docsv4/core/operate/security/service-mesh-mtls.md.
 #
 # When ON, the backend FAILS CLOSED: device-interrogation-service and
 # sensor-manager require a verified client cert (cert CN -> identity ->
@@ -1358,7 +1367,10 @@ serviceMtls:
 #   keep calling the edge host and are 401'd fail-closed: re-register them (or
 #   point their configured URL at the passthrough host) after enabling.
 agentMtls:
-  enabled: false
+  # Secure by default (see the BREAKING CHANGE note above). Requires
+  # serviceMtls.enabled plus a dnsName per backend below; the chart fails the
+  # install with an actionable message when they are missing.
+  enabled: true
   # Dedicated agent/sensor mTLS listener port (container + Service + the
   # cluster-Traefik passthrough entrypoint). Both backends share this port;
   # they are disambiguated by HostSNI (per-backend dnsName below), so a single

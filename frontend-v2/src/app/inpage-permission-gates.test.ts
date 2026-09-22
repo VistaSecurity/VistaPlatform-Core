@@ -70,8 +70,8 @@ describe('Scopes (Settings → Policies → Scopes)', () => {
   it('gates scope writes on compliance.update, which is what cbom-service enforces', () => {
     routeRequires('services/cbom-service/cmd/main.go', 'scopeHandler.RegisterRoutes', 'PermissionComplianceUpdate');
     // Whole file: ScopesPage and FrameworksPage are both compliance-owned, and
-    // neither may fall back to settings.update. RetentionPage in the same file
-    // is audit.manage, so settings.update must not appear at all.
+    // neither may fall back to settings.update, so settings.update must not
+    // appear at all.
     gateUses(`${FE}sections/settings/pages-policies.tsx`, 'compliance.update', ['settings.update']);
   });
 });
@@ -96,10 +96,32 @@ describe('Custom policies (Enterprise policy authoring)', () => {
   });
 });
 
-describe('Retention policies (regression guard for #1375)', () => {
-  it('still gates writes on audit.manage', () => {
-    routeRequires('services/audit-service/cmd/main.go', '/audit-service/retention-policies"', 'PermissionAuditManage');
-    gateUses(`${FE}sections/settings/pages-policies.tsx`, 'audit.manage');
+describe('Retention policies are no longer a tenant surface (SECURITY C4)', () => {
+  // The guard used to assert the tenant page's audit.manage gate matched
+  // the route. The route's requirement changed: retention policies are
+  // platform-GLOBAL config (no tenant_id column, and the sweep they drive
+  // deletes every tenant's audit logs), so audit-service now requires a
+  // PLATFORM IDENTITY for them and no tenant permission can reach them. The
+  // correct in-page gate is therefore no page at all — a control that can only
+  // 403 is a dead button.
+  it('requires a platform identity in audit-service', () => {
+    const go = read('services/audit-service/cmd/main.go');
+    const line = go
+      .split('\n')
+      .find((l) => l.includes('platformConfig.Use(') && l.includes('RequirePlatformIdentity'));
+    expect(line, 'audit-service must mount its platform-global config group behind RequirePlatformIdentity').toBeTruthy();
+    for (const frag of [
+      'platformConfig.GET("/audit-service/retention-policies"',
+      'platformConfig.POST("/audit-service/retention-policies"',
+      'platformConfig.PUT("/audit-service/retention-policies/:id"',
+    ]) {
+      expect(go.includes(frag), `retention route must be mounted on the platform-gated group: ${frag}`).toBe(true);
+    }
+  });
+
+  it('ships no tenant UI that would call it', () => {
+    expect(read(`${FE}sections/settings/pages-policies.tsx`)).not.toContain('/retention-policies');
+    expect(read(`${FE}sections/settings/nav.ts`)).not.toContain("key: 'retention'");
   });
 });
 

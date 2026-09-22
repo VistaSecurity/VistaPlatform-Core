@@ -1,6 +1,11 @@
 // Settings · Policies pages — Scopes (cbom-service), Compliance Frameworks
-// (compliance-engine licenses + catalog), and Retention Policies (audit-service)
-// ported from the mock's settings/sectionF.jsx.
+// (compliance-engine licenses + catalog), ported from the mock's
+// settings/sectionF.jsx.
+//
+// Retention Policies used to live here too. It was removed with the C4 fix:
+// audit.retention_policies is platform-GLOBAL config with no tenant_id column,
+// and its routes now require a platform identity, so a tenant-facing page could
+// only 403. The surface lives in admin-ui-v2 -> Security -> Retention.
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router';
@@ -8,10 +13,9 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { QueryChip } from '../inventory/query-editor';
 import { clients } from '../../lib/clients';
 import { frameworkPercentageColor, Icon } from '../../components/ui';
-import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, GREEN, AMBER } from './kit';
+import { SPage, SSection, SCard, STag, StateNote } from './kit';
 import { coverageLine, formatScore, isUnscored } from '../findings/control-status';
 import { ScopeEditModal, ScopeDeleteModal } from './scope-modals';
-import { RetentionPolicyModal } from './policies-modals';
 import type { SettingsNavItem } from './nav';
 // cbom-service schemas are the root `components` export of the contract package.
 import type { components as CbomComponents } from '@vistasecurity/api-contract';
@@ -309,110 +313,6 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
         Preview scores show how each framework rates your current inventory before you commit. Once activated, live results appear in Risk &amp; Compliance → Posture.
         Best Practices is free and permanent for every tenant. Enterprise tenants can build their own at <Link to="/settings/policies/custom-policies" style={{ color: 'var(--app-t2)' }}>Custom Policies</Link>.
       </p>
-    </SPage>
-  );
-}
-
-function days(n?: number | null): string {
-  if (n == null) return '—';
-  if (n % 365 === 0 && n >= 365) return `${n / 365} year${n >= 730 ? 's' : ''}`;
-  return `${n} days`;
-}
-
-type RetentionPolicyRow = import('@vistasecurity/api-contract').auditServiceComponents['schemas']['RetentionPolicy'];
-
-function RetentionActiveToggle({ policy }: { policy: RetentionPolicyRow }) {
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: async (on: boolean) => {
-      const { error, response } = await clients.audit.PUT('/retention-policies/{id}', {
-        params: { path: { id: policy.id } },
-        body: {
-          policy_name: policy.policy_name, event_type: policy.event_type ?? null,
-          compliance_framework: policy.compliance_framework ?? null,
-          hot_storage_days: policy.hot_storage_days, cold_storage_days: policy.cold_storage_days ?? null,
-          total_retention_days: policy.total_retention_days, is_active: on,
-        },
-      });
-      if (error || !response.ok) throw new Error('Failed to update the policy');
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['settings', 'retention-policies'] }),
-  });
-  return <SToggle key={`${policy.id}-${policy.is_active}`} on={policy.is_active} onChange={(v) => mutation.mutate(v)} />;
-}
-
-type RetentionModalState = { kind: 'closed' } | { kind: 'create' } | { kind: 'edit'; policy: RetentionPolicyRow };
-
-export function RetentionPage({ meta }: { meta: SettingsNavItem }) {
-  const [modal, setModal] = useState<RetentionModalState>({ kind: 'closed' });
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['settings', 'retention-policies'],
-    queryFn: async () => {
-      const { data, error } = await clients.audit.GET('/retention-policies', {});
-      if (error || !data) throw new Error('Failed to load retention policies');
-      return data.policies ?? [];
-    },
-  });
-  const policies = data ?? [];
-  const close = () => setModal({ kind: 'closed' });
-  const cols = [
-    { label: 'Policy', w: '1.4fr' }, { label: 'Hot storage', w: '120px' }, { label: 'Total retention', w: '140px' },
-    { label: 'Active', w: '70px', align: 'right' as const }, { label: '', w: '50px', align: 'right' as const },
-  ];
-
-  // Every write gate below is audit.manage, not settings.update: audit-service
-  // gates POST/PUT /retention-policies on audit.manage. The list GET is
-  // ungated, so the page still loads read-only for anyone who can reach it —
-  // only the write affordances follow the route's real requirement.
-  return (
-    <SPage
-      eyebrow="Policies" title="Retention Policies" job={meta.job}
-      actions={
-        <PermissionGate permission={TENANT_PERMISSIONS.audit.manage}>
-          <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />Add policy</button>
-        </PermissionGate>
-      }
-    >
-      {isError ? (
-        <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load retention policies" message="The retention policy list failed to load." /></SCard>
-      ) : isLoading ? (
-        <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading retention policies…" message="Fetching data-retention schedules." /></SCard>
-      ) : policies.length === 0 ? (
-        <SCard><StateNote icon="archive" tone="var(--app-t3)" title="No retention policies" message="No data-retention schedules are defined yet — defaults apply until one is added." /></SCard>
-      ) : (
-        <STable cols={cols}>
-          {policies.map((p, i) => (
-            <STableRow
-              key={p.id}
-              first={i === 0}
-              cols={cols}
-              cells={[
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--app-t1)' }}>{p.policy_name}</div>
-                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>
-                    {[p.event_type, p.compliance_framework].filter(Boolean).join(' · ') || 'all events'}
-                  </div>
-                </div>,
-                <span style={{ fontSize: 12.5, color: 'var(--app-t2)' }}>{days(p.hot_storage_days)}</span>,
-                <span style={{ fontSize: 12.5, color: 'var(--app-t2)' }}>{days(p.total_retention_days)}</span>,
-                <PermissionGate permission={TENANT_PERMISSIONS.audit.manage} fallback={<span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><SDot color={p.is_active ? GREEN : AMBER} /></span>}>
-                  <span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><RetentionActiveToggle policy={p} /></span>
-                </PermissionGate>,
-                <PermissionGate permission={TENANT_PERMISSIONS.audit.manage}>
-                  <button className="ui-btn sm ghost" title="Edit policy" onClick={() => setModal({ kind: 'edit', policy: p })}><Icon name="settings" size={14} /></button>
-                </PermissionGate>,
-              ]}
-            />
-          ))}
-        </STable>
-      )}
-      <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 13 }}>
-        Pairs with the Audit log. Policies are deactivated rather than deleted; long-retention data is archived per the storage connection configured in Integrations.
-      </p>
-
-      {(modal.kind === 'create' || modal.kind === 'edit') && (
-        <RetentionPolicyModal key={modal.kind === 'edit' ? modal.policy.id : 'new'} policy={modal.kind === 'edit' ? modal.policy : null} open onClose={close} />
-      )}
     </SPage>
   );
 }

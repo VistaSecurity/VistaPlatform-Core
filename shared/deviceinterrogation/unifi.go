@@ -2,7 +2,6 @@ package deviceinterrogation
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // UnifiInterrogator interrogates Ubiquiti UniFi controllers (legacy software
@@ -113,12 +111,7 @@ func newUnifiClient(baseURL, username, password, siteID string, insecureSkipVeri
 		password:           password,
 		siteID:             siteID,
 		insecureSkipVerify: insecureSkipVerify,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec // per-device opt-in for self-signed appliance mgmt certs
-			},
-			Timeout: 30 * time.Second,
-		},
+		httpClient:         newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
 	}
 }
 
@@ -289,8 +282,7 @@ func (c *unifiClient) doLogin(req *http.Request) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return httpStatusError("login", resp.StatusCode)
 	}
 
 	c.cookies = resp.Cookies()
@@ -338,8 +330,7 @@ func (c *unifiClient) apiRequest(ctx context.Context, method, endpoint string, b
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, httpStatusError("API request", resp.StatusCode)
 	}
 
 	var apiResp unifiAPIResponse

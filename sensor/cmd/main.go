@@ -748,7 +748,7 @@ func (s *Sensor) saveConfigFile() error {
 
 	// Write the updated content back
 	updatedContent := strings.Join(lines, "\n")
-	if err := os.WriteFile(s.configPath, []byte(updatedContent), 0644); err != nil {
+	if err := writeSecretConfigFile(s.configPath, []byte(updatedContent)); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -1735,7 +1735,7 @@ func (s *Sensor) persistMonitoredInterfaces(interfaces []string) error {
 	out = append(out, block...)
 	out = append(out, lines[end:]...)
 
-	if err := os.WriteFile(s.configPath, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	if err := writeSecretConfigFile(s.configPath, []byte(strings.Join(out, "\n"))); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	log.Printf("✅ Persisted %d monitored interface(s) to config", len(interfaces))
@@ -2892,14 +2892,40 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 		fmt.Fprintf(&configContent, "  serverCACertPath: %q\n", serverCACertPath)
 	}
 
-	// Add footer comment
-	fmt.Fprintf(&configContent, "\n# Environment variables (for reference)\n# CONTROL_PLANE_URL=%s\n# REGISTRATION_KEY=%s\n# REPORTING_INTERVAL=%ds\n# DATA_PATH=%s\n# INTERFACES=%s\n",
-		controlPlaneURL, registrationKey, interval, dataPath, strings.Join(interfaces, ","))
+	// Add footer comment.
+	//
+	// REGISTRATION_KEY is deliberately absent. It used to be echoed here, which
+	// wrote the credential a second time in the same file for no operational
+	// benefit — the live value is `registrationKey:` above, and a copy in a
+	// comment only widens the blast radius of anything that reads a fragment of
+	// the file (a log tail, a support bundle, a pasted excerpt). Set
+	// REGISTRATION_KEY from the operator's own record, not from this file.
+	fmt.Fprintf(&configContent, "\n# Environment variables (for reference)\n# CONTROL_PLANE_URL=%s\n# REGISTRATION_KEY=<the registration key you entered above>\n# REPORTING_INTERVAL=%ds\n# DATA_PATH=%s\n# INTERFACES=%s\n",
+		controlPlaneURL, interval, dataPath, strings.Join(interfaces, ","))
 
 	// Write config file
-	if err := os.WriteFile(configPath, []byte(configContent.String()), 0644); err != nil {
+	if err := writeSecretConfigFile(configPath, []byte(configContent.String())); err != nil {
 		return fmt.Errorf("failed to write config file: %v", err)
 	}
 
 	return nil
+}
+
+// writeSecretConfigFile writes the sensor configuration file owner-only.
+//
+// The file carries `registrationKey:` in plaintext, and that key is the
+// agentSecret input to agentcreds.DeriveKey — the AES key that unwraps every
+// credential envelope the platform hands this sensor. At 0644 any unprivileged
+// local user on the sensor host could read the key and decrypt the tenant's
+// device administrator passwords. The adjacent client private key has always
+// been written 0600; this matches it.
+//
+// os.WriteFile applies the mode only when it CREATES the file, so an upgrade
+// over a config an older build left world-readable would keep 0644. The
+// explicit Chmod is what actually tightens those.
+func writeSecretConfigFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }

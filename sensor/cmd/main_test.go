@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -406,4 +407,80 @@ func mustLoadConfig(t *testing.T, path string) *config.Config {
 		t.Fatalf("LoadFromFile(%s): %v", path, err)
 	}
 	return cfg
+}
+
+// TestSensorConfigFilesAreOwnerOnly is the C3 regression guard.
+//
+// The sensor config carries `registrationKey:` in plaintext, and that key is the
+// agentSecret input to agentcreds.DeriveKey — the AES key that unwraps every
+// credential envelope carrying the tenant's device administrator passwords. It
+// was written 0644, so any unprivileged local user on the sensor host could read
+// it.
+//
+// This stats a file the real code path actually produced rather than reading the
+// mode constant back, and it covers all three writers: the interactive installer
+// that CREATES the file, and the two rewriters that run afterwards over a file an
+// older build may have left world-readable (os.WriteFile does not change the mode
+// of a file that already exists — only the explicit Chmod does).
+func TestSensorConfigFilesAreOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "sensor-config.yaml")
+
+	const key = "reg-key-super-secret-value"
+	if err := createConfigFile(configPath, "https://platform.example", key, 60, dir, []string{"eth0"}, ""); err != nil {
+		t.Fatalf("createConfigFile: %v", err)
+	}
+
+	assertOwnerOnly := func(stage string) {
+		t.Helper()
+		info, err := os.Stat(configPath)
+		if err != nil {
+			t.Fatalf("%s: stat: %v", stage, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Fatalf("%s: config mode = %#o, want 0600 — the registration key is the "+
+				"AES key for every device credential envelope", stage, perm)
+		}
+	}
+	assertOwnerOnly("createConfigFile")
+
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	// The live value belongs in `registrationKey:`. The footer used to repeat it
+	// in a comment, so the credential appeared twice in one file.
+	if n := strings.Count(string(body), key); n != 1 {
+		t.Fatalf("registration key appears %d time(s) in the generated config, want exactly 1 "+
+			"(the live `registrationKey:` value); the footer comment must not repeat it:\n%s", n, body)
+	}
+
+	// Simulate an upgrade over a config an older build left world-readable, then
+	// drive each rewriter and confirm it tightens the mode rather than preserving it.
+	s := &Sensor{
+		configPath: configPath,
+		config: &config.Config{
+			SensorID:          "sensor-123",
+			ReportingInterval: 45 * time.Second,
+		},
+	}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"saveConfigFile", s.saveConfigFile},
+		{"persistMonitoredInterfaces", func() error { return s.persistMonitoredInterfaces([]string{"eth1"}) }},
+	} {
+		if err := os.Chmod(configPath, 0644); err != nil {
+			t.Fatalf("%s: chmod to legacy mode: %v", tc.name, err)
+		}
+		if err := tc.run(); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		assertOwnerOnly(tc.name)
+	}
 }

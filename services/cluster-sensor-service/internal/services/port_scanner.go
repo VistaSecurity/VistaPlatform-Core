@@ -238,10 +238,19 @@ func validateNmapTarget(target string) error {
 //	                     (protocol, port) pairs regardless of what TCP said,
 //	                     because a TCP scan can say nothing about a UDP service.
 //
-// Neither dispatch changes WHICH HOST is contacted. `target` arrives already
-// authorised — it is one expanded address of a discovery_targets row created
-// from the job's approved target list — and both paths speak only to it, on
-// only the ports that row names.
+// Neither dispatch changes WHICH HOST is contacted. `target` is one expanded
+// address of a discovery_targets row, and both paths speak only to it, on only
+// the ports that row names.
+//
+// It arrives authorised — but note WHERE by: this comment used to say the
+// address "arrives already authorised" when nothing authorised it. Membership
+// of the job's target list was the only thing established, and that list came
+// from the caller. dispatchguard.AuthorizeTargets is what makes the claim true
+// now, and it is called in TWO places, neither of them here:
+// DiscoveryService.CreateJob (on the requested targets) and
+// JobProcessor.processTarget (on the EXPANDED addresses, immediately before
+// this function is reached). If either call is removed, this comment is a lie
+// again.
 func (ps *PortScanner) ScanTarget(target string, ports []int32, protocols []string, originalHostname *string, probeOpts map[string]interface{}) ([]models.DiscoveryFinding, error) {
 	// Validate target to prevent nmap argument injection
 	if err := validateNmapTarget(target); err != nil {

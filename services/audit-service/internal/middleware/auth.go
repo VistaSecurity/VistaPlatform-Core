@@ -296,6 +296,44 @@ func RequirePermission(db *sql.DB, permission string) gin.HandlerFunc {
 	}
 }
 
+// RequirePlatformIdentity restricts a route to a PLATFORM token.
+//
+// SECURITY (C4/H2, v1.0.0 audit): audit.retention_policies and
+// audit.siem_integrations are platform-GLOBAL configuration — neither carries a
+// usable tenant scope (retention_policies has no tenant_id column at all, and
+// siem_integrations' is nullable and never read), and both drive cross-tenant
+// effects: the retention sweep deletes from audit.activity_logs with no tenant
+// predicate on the BYPASSRLS handle, and the SIEM tee fans EVERY tenant's audit
+// event out to every enabled integration.
+//
+// Gating them on a tenant permission therefore gated nothing that mattered:
+// audit.manage is held by tenant_admin by default, so any tenant admin could
+// set total_retention_days=0 and destroy every tenant's audit history within a
+// day, or register a SIEM receiver for every tenant's events. Identity, not
+// permission, is the axis that separates those callers — so this runs BEFORE
+// the permission gate on every such route.
+//
+// Deliberately mirrors auth-service's middleware.RequirePlatformIdentity rather
+// than inventing a second rule: an internal (HMAC-signed S2S) call passes, a
+// platform token passes, anything else is refused with a message distinct from
+// the permission gate's so a test can tell WHICH gate answered.
+func RequirePlatformIdentity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if internal, _ := c.Get("isInternalCall"); internal == true {
+			c.Next()
+			return
+		}
+		if c.GetString(sharedmw.CtxKeyUserType) != sharedmw.UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Platform user required",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // GetUserType retrieves the user type from context
 func GetUserType(c *gin.Context) string {
 	if userType, exists := c.Get("userType"); exists {

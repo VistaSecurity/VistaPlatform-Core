@@ -100,7 +100,7 @@ rail with its own navigation, in this order:
 | **People & Access** | Members · Roles & Permissions · Security & SSO *(Enterprise)* |
 | **Integrations** | Integrations · AI assistant |
 | **Notifications & Alerts** | Routing Rules · Alert Rules · Delivery History |
-| **Policies** | Compliance Frameworks · Custom Policies *(Enterprise)* · Asset Lifecycle · Retention Policies · Scopes · Classes · Identification rules |
+| **Policies** | Compliance Frameworks · Custom Policies *(Enterprise)* · Asset Lifecycle · Scopes · Classes · Identification rules |
 | **Audit** | Audit |
 | **Infrastructure** | Locations · Network Segments |
 
@@ -309,8 +309,7 @@ Every connection you have authenticated, as a card. **Add connection** offers
 four channel types — **Email** (a recipient list), **Slack** (an incoming-webhook
 URL), **Generic webhook** (a POST endpoint that receives the alert JSON) and
 **PagerDuty** (an Events API v2 routing key) — and each card then offers
-**test**, **configure** and **remove**. Where your edition includes them, SIEM
-forwarders are listed here too.
+**test**, **configure** and **remove**.
 
 A connection is authenticated once here and then referenced wherever it is used,
 which is why the channels you add become the delivery targets in
@@ -318,9 +317,9 @@ which is why the channels you add become the delivery targets in
 **Tenant admin email** channels are listed here alongside anything you add.
 
 
-> **Outbound SIEM forwarding is an Enterprise capability.** Audit events are
-> recorded and searchable in every edition; only forwarding them to an external
-> SIEM is gated.
+> **Outbound SIEM forwarding is an Enterprise capability, configured
+> platform-wide.** Audit events are recorded and searchable here in every
+> edition; only forwarding them to an external SIEM is gated.
 
 ### CMDB / ITSM sync
 
@@ -476,7 +475,6 @@ compliance, identification, the asset lifecycle, data retention and BOM scoping.
 |------|--------------|
 | **Compliance Frameworks** | Which frameworks are active, and which is the default. |
 | **Asset Lifecycle** | Staleness thresholds, auto-archive behavior, and the drift baseline window. |
-| **Retention Policies** | How long audit and event data is kept. |
 | **Scopes** | Named, versioned asset boundaries used by Bills of Materials. |
 | **Classes** | Browse the asset class taxonomy and the attributes each class carries. |
 | **Identification rules** | How a sighting is matched to an existing asset, and whether a high enough match may be accepted without you. |
@@ -558,19 +556,14 @@ Both sections need the settings-update permission to change.
 
 ### Retention Policies
 
-**Policies → Retention Policies** defines how long audit and event data is kept.
-Each policy carries a **name**, an optional **event type** (empty applies to all
-events), **hot storage days** (kept immediately queryable) and **total retention
-days** (must be at least the hot-storage figure).
+**Audit-log retention is set by your platform operator, not per organization.**
+A retention policy governs the audit store as a whole — every organization on
+the deployment shares it — so it is configured in the platform administration
+console rather than in your settings. There is no Retention Policies page in
+your settings rail.
 
-**Anyone who can open the page can read the policies. Writing them needs the
-manage-audit permission** — not the settings permission. Without it, **Add
-policy**, the per-row active toggle and the edit control are simply absent, and
-the list stays readable.
-
-Policies are **deactivated, not deleted**. Long-retention data is archived to the
-storage connection you configure in [Integrations](#integrations). If no policy
-exists, platform defaults apply.
+If you need a different retention period, or need to know the one in force, ask
+your platform operator.
 
 ### Scopes
 
@@ -621,8 +614,8 @@ fourteen-column table. The
 filters.
 
 Event coverage spans authentication, asset changes, discovery jobs, compliance
-evaluations, and more. Retention follows the schedule set in
-[Policies → Retention Policies](#retention-policies). For the full event
+evaluations, and more. Retention follows the schedule your platform operator
+sets — see [Retention Policies](#retention-policies). For the full event
 taxonomy and the investigation workflows, see the
 [Audit Logging guide](./audit-logging.md).
 
@@ -904,10 +897,11 @@ under **Routing Rules**.
    measurement rule or nothing in scope is excluded from the score rather than
    counted against you.
 
-### A retention policy control is missing
+### The Retention Policies page is gone
 
-Writing retention policies needs the manage-audit permission, which is separate
-from the settings permission. See [Retention Policies](#retention-policies).
+Audit retention applies to the whole deployment, so it is set by your platform
+operator rather than per organization. See
+[Retention Policies](#retention-policies).
 
 ---
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -19,8 +20,11 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
+	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
 	trial_lock "github.com/vistasecurity/vistaplatform/shared/middleware/trial_lock"
+	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -88,6 +92,12 @@ func main() {
 	// Initialize router
 	router := gin.Default()
 
+	// Request-body ceiling, FIRST. It has to run ahead of every other
+	// middleware and handler, because a cap downstream of the code that reads
+	// the body is not a cap (H10). Mounted at the router so a route added later
+	// cannot forget it.
+	router.Use(sharedmw.MaxBody(handlers.MaxRequestBytes))
+
 	// Audit logging middleware
 	auditConfig := auditmiddleware.DefaultConfig()
 	auditConfig.ServiceName = "cluster-sensor-service"
@@ -118,41 +128,7 @@ func main() {
 	router.GET("/health", discoveryHandler.Health)
 
 	// API routes
-	api := router.Group("/api/v1")
-	discovery := api.Group("/discovery")
-
-	// Apply authentication middleware to all discovery routes
-	discovery.Use(middleware.RequireAuth(cfg.JWTSecret))
-	discovery.Use(middleware.RequireTenant())
-	// Trial-lock middleware gates writes when the calling tenant is in
-	// PhaseLocked. Discovery job dispatch in particular is a paid feature
-	// path locked tenants shouldn't reach.
-	discovery.Use(trial_lock.Middleware(db.DB, nil))
-	{
-		// Job management
-		discovery.POST("/jobs", discoveryHandler.CreateJob)
-		discovery.GET("/jobs", discoveryHandler.GetJobs)
-		discovery.GET("/jobs/:id", discoveryHandler.GetJob)
-		discovery.POST("/jobs/:id/cancel", discoveryHandler.CancelJob)
-		discovery.POST("/jobs/:id/retry", discoveryHandler.RetryJob)
-		discovery.GET("/jobs/:id/status", discoveryHandler.GetJobStatus)
-
-		// Results management
-		discovery.GET("/jobs/:id/results", discoveryHandler.GetJobResults)
-		discovery.POST("/jobs/:id/approve", discoveryHandler.ApproveResults)
-		discovery.POST("/jobs/:id/reject", discoveryHandler.RejectResults)
-
-		// Approval queue
-		discovery.GET("/approvals", discoveryHandler.GetApprovalQueue)
-		discovery.POST("/approvals/bulk-approve", discoveryHandler.BulkApprove)
-		discovery.POST("/approvals/bulk-reject", discoveryHandler.BulkReject)
-
-		// Configuration
-		discovery.GET("/config/rate-limits", discoveryHandler.GetRateLimits)
-		discovery.PUT("/config/rate-limits", discoveryHandler.UpdateRateLimits)
-		discovery.GET("/config/alerts", discoveryHandler.GetAlertConfigs)
-		discovery.PUT("/config/alerts", discoveryHandler.UpdateAlertConfigs)
-	}
+	registerDiscoveryRoutes(router, discoveryHandler, db.DB, cfg.JWTSecret)
 
 	// Health check server (HTTP, port 8080)
 	healthRouter := gin.New()
@@ -296,4 +272,84 @@ func main() {
 	}
 
 	log.Println("cluster-sensor-service stopped")
+}
+
+// registerDiscoveryRoutes wires the tenant-facing discovery surface.
+//
+// Extracted from main() so the RBAC wiring can be driven by a real router in a
+// test (discovery_route_gate_test.go). A test that exercised the middleware in
+// isolation would stay green through exactly the deletion that matters.
+//
+// PERMISSIONS (#H5). This group used to carry RequireAuth + RequireTenant +
+// trial_lock and no permission check of any kind, so any authenticated tenant
+// user — a read-only `viewer` included — could start scans, approve discovered
+// assets into inventory and raise their own scan rate limits.
+//
+// The vocabulary is the one the two peer services already use for the same
+// operations, so the surfaces cannot disagree:
+//
+//   - discovery.read   — every read, matching device-interrogation-service.
+//   - discovery.create — starting a job, matching inventory-service's
+//     POST /inventory-service/discovery/jobs.
+//   - discovery.update — cancel/retry, matching inventory-service's
+//     cancel/rerun.
+//   - assets.update    — approving or rejecting discovered results, because
+//     that is what admits a row to the inventory; inventory-service gates
+//     POST /assets/approve and /assets/deny on exactly this.
+//   - discovery.manage — the rate-limit and alert configuration. Raising your
+//     own scan rate limit is the high-privilege discovery action this service
+//     has, and discovery.manage is what device-interrogation-service gates its
+//     high-privilege actions on. Deliberately NOT settings.update: that would
+//     also strip security_admin, the role most likely to own scan
+//     configuration, of a capability this finding never asked to remove.
+//
+// HMAC-verified internal calls bypass the check inside RequireTenantPermission
+// itself — they carry the "system" sentinel, not a user — so the unattended
+// sweep's dispatch is unaffected.
+//
+// ONE DELIBERATE DIVERGENCE, stated rather than left to be discovered:
+// inventory-service gates its proxied jobs LIST on settings.read (its comment
+// explains why — it renders beside the Active Scanning settings summary),
+// while this service asks for discovery.read. The proxy forwards the caller's
+// JWT, so a role holding settings.read WITHOUT discovery.read now gets 403 on
+// the second hop. Of the seeded roles only billing_admin is in that position,
+// and a billing role reading the scan-job list was never the intent. Every
+// role with any read scope (viewer, api_user, security_admin, tenant_admin)
+// holds discovery.read.
+func registerDiscoveryRoutes(router *gin.Engine, discoveryHandler *handlers.DiscoveryHandler, rawDB *sql.DB, jwtSecret string) {
+	api := router.Group("/api/v1")
+	discovery := api.Group("/discovery")
+
+	// Apply authentication middleware to all discovery routes
+	discovery.Use(middleware.RequireAuth(jwtSecret))
+	discovery.Use(middleware.RequireTenant())
+	// Trial-lock middleware gates writes when the calling tenant is in
+	// PhaseLocked. Discovery job dispatch in particular is a paid feature
+	// path locked tenants shouldn't reach.
+	discovery.Use(trial_lock.Middleware(rawDB, nil))
+	{
+		// Job management
+		discovery.POST("/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
+		discovery.GET("/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetJobs)
+		discovery.GET("/jobs/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetJob)
+		discovery.POST("/jobs/:id/cancel", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.CancelJob)
+		discovery.POST("/jobs/:id/retry", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.RetryJob)
+		discovery.GET("/jobs/:id/status", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetJobStatus)
+
+		// Results management
+		discovery.GET("/jobs/:id/results", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetJobResults)
+		discovery.POST("/jobs/:id/approve", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), discoveryHandler.ApproveResults)
+		discovery.POST("/jobs/:id/reject", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), discoveryHandler.RejectResults)
+
+		// Approval queue
+		discovery.GET("/approvals", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetApprovalQueue)
+		discovery.POST("/approvals/bulk-approve", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), discoveryHandler.BulkApprove)
+		discovery.POST("/approvals/bulk-reject", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), discoveryHandler.BulkReject)
+
+		// Configuration
+		discovery.GET("/config/rate-limits", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetRateLimits)
+		discovery.PUT("/config/rate-limits", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryManage), discoveryHandler.UpdateRateLimits)
+		discovery.GET("/config/alerts", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetAlertConfigs)
+		discovery.PUT("/config/alerts", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryManage), discoveryHandler.UpdateAlertConfigs)
+	}
 }

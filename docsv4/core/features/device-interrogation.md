@@ -380,6 +380,35 @@ API from the platform.
 - Agent receives credentials sealed for that one agent and that one job, and
   decrypts in memory only
 
+### SSH host keys are pinned
+
+The first time the platform interrogates a device over SSH it records the
+device's host key fingerprint and pins it to that device. Every later
+interrogation compares the key the device presents against the pinned one, and a
+mismatch **fails the connection during the key exchange — before the device
+credentials are sent**.
+
+This matters because SSH offers the password only after the client has accepted
+the host's key. Without the comparison, anything that can answer on the device's
+address gets handed a device administrator password, every run.
+
+When a key changes you get a **`host_key_changed` finding** on the asset, at
+High severity, naming both fingerprints. Two things cause it:
+
+- **The device was legitimately replaced, rebuilt, or rekeyed.** Clear the pin
+  from **Discovery → Devices** (the key button on the device's row) and re-run
+  the interrogation; the platform pins the new key it observes.
+- **Something is intercepting the management session.** Nothing distinguishes
+  this from the case above at the protocol level, which is why the platform
+  fails closed rather than re-pinning itself. Change the device's credentials
+  before clearing the pin — the old ones may already have been offered
+  elsewhere.
+
+Clearing the pin requires the `discovery.manage` permission, and it takes no
+fingerprint from you: the platform pins only what it actually observes.
+
+First contact is unaffected — a device with no pin yet is enrolled normally.
+
 ### Network Security
 - Agent uses outbound-only communication (no inbound ports required)
 - All communication over HTTPS

@@ -2,7 +2,6 @@ package deviceinterrogation
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -14,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 )
@@ -82,16 +80,11 @@ type f5Client struct {
 
 func newF5Client(baseURL, username, password, token string, insecureSkipVerify bool) *f5Client {
 	return &f5Client{
-		baseURL:  baseURL,
-		username: username,
-		password: password,
-		token:    token,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec // per-device opt-in for self-signed appliance mgmt certs
-			},
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    baseURL,
+		username:   username,
+		password:   password,
+		token:      token,
+		httpClient: newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
 	}
 }
 
@@ -241,8 +234,7 @@ func (c *f5Client) authenticate(ctx context.Context) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return httpStatusError("authentication", resp.StatusCode)
 	}
 
 	var authResp map[string]interface{}

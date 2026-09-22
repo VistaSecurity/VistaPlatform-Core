@@ -644,22 +644,13 @@ func newHTTPXClient(cfg httpxConfig) *httpxClient {
 		timeout = 30 * time.Second
 	}
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: cfg.skipTLSVerify, //nolint:gosec // configurable per device
-		},
-	}
-
 	return &httpxClient{
 		baseURL:     cfg.baseURL,
 		username:    cfg.username,
 		password:    cfg.password,
 		apiKey:      cfg.apiKey,
 		bearerToken: cfg.bearerToken,
-		client: &http.Client{
-			Timeout:   timeout,
-			Transport: transport,
-		},
+		client:      newDeviceHTTPClient(cfg.skipTLSVerify, timeout),
 	}
 }
 

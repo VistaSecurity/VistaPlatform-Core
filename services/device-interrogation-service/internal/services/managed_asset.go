@@ -155,6 +155,7 @@ const managedAssetSelect = `
 	       GREATEST(a.updated_at, m.updated_at) AS updated_at, a.deleted_at,
 	       m.management_url, m.tls_insecure_skip_verify, m.connection_status,
 	       m.last_interrogated_at, m.interrogation_error,
+	       m.ssh_host_key_fingerprint, m.ssh_host_key_type, m.ssh_host_key_pinned_at,
 	       c.credential_id, c.username, c.password_enc
 	FROM public.assets a
 	JOIN public.asset_management m ON m.tenant_id = a.tenant_id AND m.asset_id = a.id
@@ -175,6 +176,9 @@ func scanManagedAsset(scan func(dest ...any) error) (managedAssetRow, error) {
 		managementURL      sql.NullString
 		interrogationError sql.NullString
 		lastInterrogated   sql.NullTime
+		hostKeyFingerprint sql.NullString
+		hostKeyType        sql.NullString
+		hostKeyPinnedAt    sql.NullTime
 		credentialID       sql.NullString
 		username           sql.NullString
 		passwordEnc        sql.NullString
@@ -187,6 +191,7 @@ func scanManagedAsset(scan func(dest ...any) error) (managedAssetRow, error) {
 		&row.device.UpdatedAt, &deletedAt,
 		&managementURL, &row.device.TLSInsecureSkipVerify, &row.device.ConnectionStatus,
 		&lastInterrogated, &interrogationError,
+		&hostKeyFingerprint, &hostKeyType, &hostKeyPinnedAt,
 		&credentialID, &username, &passwordEnc,
 	)
 	if err != nil {
@@ -206,6 +211,12 @@ func scanManagedAsset(scan func(dest ...any) error) (managedAssetRow, error) {
 	if lastInterrogated.Valid {
 		t := lastInterrogated.Time
 		d.LastInterrogatedAt = &t
+	}
+	d.SSHHostKeyFingerprint = nullStringPtr(hostKeyFingerprint)
+	d.SSHHostKeyType = nullStringPtr(hostKeyType)
+	if hostKeyPinnedAt.Valid {
+		t := hostKeyPinnedAt.Time
+		d.SSHHostKeyPinnedAt = &t
 	}
 	if deletedAt.Valid {
 		t := deletedAt.Time
@@ -699,6 +710,15 @@ type managementUpsert struct {
 	// ClearInterrogationError sets the column to NULL. Needed because
 	// InterrogationError is a pointer whose nil already means "leave it".
 	ClearInterrogationError bool
+	// SSHHostKeyFingerprint / SSHHostKeyType pin the key a device presented on
+	// first contact. Writing them also stamps ssh_host_key_pinned_at.
+	SSHHostKeyFingerprint *string
+	SSHHostKeyType        *string
+	// ClearSSHHostKey unpins the device — the deliberate re-pin path for a
+	// replaced device or a rotated key. Same reason ClearInterrogationError
+	// exists: a nil pointer already means "leave it alone", so "set it to NULL"
+	// needs a flag of its own.
+	ClearSSHHostKey bool
 }
 
 // upsertManagement writes the asset_management row for an asset, creating it if
@@ -716,11 +736,15 @@ func upsertManagement(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UU
 			INSERT INTO public.asset_management (
 				tenant_id, asset_id, management_url, management_protocol,
 				tls_insecure_skip_verify, connection_status,
-				last_interrogated_at, interrogation_error
+				last_interrogated_at, interrogation_error,
+				ssh_host_key_fingerprint, ssh_host_key_type, ssh_host_key_pinned_at
 			) VALUES (
 				$1, $2, $3, $4,
 				coalesce($5, false), coalesce($6, 'unknown'),
-				$7, $8
+				$7, $8,
+				CASE WHEN $10 THEN NULL ELSE $11 END,
+				CASE WHEN $10 THEN NULL ELSE $12 END,
+				CASE WHEN $10 OR $11 IS NULL THEN NULL ELSE now() END
 			)
 			ON CONFLICT (tenant_id, asset_id) DO UPDATE
 			SET management_url           = coalesce($3, public.asset_management.management_url),
@@ -730,10 +754,19 @@ func upsertManagement(ctx context.Context, tx *sql.Tx, tenantID, assetID uuid.UU
 			    last_interrogated_at     = coalesce($7, public.asset_management.last_interrogated_at),
 			    interrogation_error      = CASE WHEN $9 THEN NULL
 			                                    ELSE coalesce($8, public.asset_management.interrogation_error) END,
+			    ssh_host_key_fingerprint = CASE WHEN $10 THEN NULL
+			                                    ELSE coalesce($11, public.asset_management.ssh_host_key_fingerprint) END,
+			    ssh_host_key_type        = CASE WHEN $10 THEN NULL
+			                                    ELSE coalesce($12, public.asset_management.ssh_host_key_type) END,
+			    ssh_host_key_pinned_at   = CASE WHEN $10 THEN NULL
+			                                    WHEN $11 IS NOT NULL
+			                                     AND public.asset_management.ssh_host_key_fingerprint IS DISTINCT FROM $11 THEN now()
+			                                    ELSE public.asset_management.ssh_host_key_pinned_at END,
 			    updated_at               = now()`,
 		tenantID, assetID, in.ManagementURL, in.ManagementProtocol,
 		in.TLSInsecureSkipVerify, in.ConnectionStatus,
-		in.LastInterrogatedAt, in.InterrogationError, in.ClearInterrogationError)
+		in.LastInterrogatedAt, in.InterrogationError, in.ClearInterrogationError,
+		in.ClearSSHHostKey, in.SSHHostKeyFingerprint, in.SSHHostKeyType)
 	if err != nil {
 		return fmt.Errorf("upsert asset_management: %w", err)
 	}
@@ -924,4 +957,60 @@ func deviceFacts(vendor, model, firmware string, source identity.Source, at time
 	add(facts.KeyHWModel, model)
 	add(facts.KeyHWFirmwareVersion, firmware)
 	return out
+}
+
+// pinSSHHostKeyIfUnset records the SSH host key a device presented, but ONLY
+// when the device has none pinned yet (H7).
+//
+// The `IS NULL` predicate is the load-bearing part, and it is in SQL rather
+// than in a Go read-then-write for a reason: an automatic pin that can
+// overwrite an existing one is not a pin. Two concurrent interrogations, or a
+// Go check that raced the row it checked, would let the platform quietly re-pin
+// itself to whatever answered on port 22 — which is the original defect wearing
+// a different hat. Re-pinning is an operator decision and goes through
+// clearSSHHostKeyPin.
+//
+// Returns whether a row was pinned, so a caller can tell "enrolled this device"
+// from "it was already pinned".
+func pinSSHHostKeyIfUnset(
+	ctx context.Context,
+	db *sql.DB,
+	tenantID, assetID uuid.UUID,
+	fingerprint, keyType string,
+) (bool, error) {
+	if fingerprint == "" {
+		return false, nil
+	}
+	var pinned bool
+	err := shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
+		res, execErr := tx.ExecContext(ctx, `
+			UPDATE public.asset_management
+			   SET ssh_host_key_fingerprint = $3,
+			       ssh_host_key_type        = nullif($4, ''),
+			       ssh_host_key_pinned_at   = now(),
+			       updated_at               = now()
+			 WHERE tenant_id = $1
+			   AND asset_id  = $2
+			   AND ssh_host_key_fingerprint IS NULL`,
+			tenantID, assetID, fingerprint, keyType)
+		if execErr != nil {
+			return fmt.Errorf("pin ssh host key: %w", execErr)
+		}
+		n, raErr := res.RowsAffected()
+		if raErr != nil {
+			return fmt.Errorf("pin ssh host key: %w", raErr)
+		}
+		pinned = n > 0
+		return nil
+	})
+	return pinned, err
+}
+
+// clearSSHHostKeyPin unpins a device so the next interrogation enrols it again.
+//
+// The deliberate re-pin path. Without one, the first hardware swap makes an
+// operator's only way forward turning the check off entirely — which is how a
+// fail-closed control becomes a fail-open one in practice.
+func clearSSHHostKeyPin(ctx context.Context, db *sql.DB, tenantID, assetID uuid.UUID) error {
+	return upsertManagementOwnTx(ctx, db, tenantID, assetID, managementUpsert{ClearSSHHostKey: true})
 }

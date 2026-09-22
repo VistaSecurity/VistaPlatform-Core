@@ -2,14 +2,10 @@ package capture
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"crypto/md5"
-	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/pem"
 	"fmt"
 	"log"
 	"math"
@@ -28,6 +24,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/cache"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/crypto"
+	sensordisc "github.com/vistasecurity/vistaplatform/sensor/internal/discovery"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 )
@@ -1190,35 +1187,23 @@ func (pc *PacketCapture) analyzeCertificate(payload []byte, discovery *models.Cr
 		return
 	}
 
-	// Fingerprint
-	fp := sha256.Sum256(der)
-	discovery.RawMetadata["cert_fingerprint_sha256"] = hex.EncodeToString(fp[:])
-	discovery.RawMetadata["cert_subject"] = cert.Subject.String()
-	discovery.RawMetadata["cert_issuer"] = cert.Issuer.String()
-	discovery.RawMetadata["cert_not_after"] = cert.NotAfter.UTC().Format(time.RFC3339)
-	discovery.RawMetadata["cert_not_before"] = cert.NotBefore.UTC().Format(time.RFC3339)
-	discovery.RawMetadata["cert_key_algorithm"] = cert.PublicKeyAlgorithm.String()
-	discovery.RawMetadata["cert_signature_algorithm"] = cert.SignatureAlgorithm.String()
-	discovery.RawMetadata["certificate_pem"] = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-
-	// Public key size
-	switch key := cert.PublicKey.(type) {
-	case *rsa.PublicKey:
-		discovery.RawMetadata["cert_public_key_size"] = key.Size() * 8
-	case *ecdsa.PublicKey:
-		discovery.RawMetadata["cert_public_key_size"] = key.Curve.Params().BitSize
+	// Emit the leaf in the canonical `certificates` array — the single shape
+	// every discovery path produces (CLAUDE.md, *Single certificate format*),
+	// built by the same shared extractor the reassembling parser next door
+	// uses, so the two passive paths cannot describe a certificate differently.
+	//
+	// This used to flatten the leaf into loose cert_* keys. Nothing read them:
+	// discovery-processor's extractCryptoDetails and inventory-service's
+	// extractCertificatesFromFinding both look for "certificates", so a
+	// certificate captured on this path reached sensor_discoveries and then no
+	// certificate inventory at all. Sensors already in the field keep sending
+	// the flat form; upgradeLegacyFlatCertificate in discovery-processor reads
+	// it for them.
+	certs := sensordisc.ExtractCertificatesFromX509([]*x509.Certificate{cert})
+	if len(certs) == 0 {
+		return
 	}
-
-	// Subject Alternative Names
-	sans := make([]string, 0, len(cert.DNSNames)+len(cert.IPAddresses)+len(cert.EmailAddresses))
-	sans = append(sans, cert.DNSNames...)
-	for _, ip := range cert.IPAddresses {
-		sans = append(sans, ip.String())
-	}
-	sans = append(sans, cert.EmailAddresses...)
-	if len(sans) > 0 {
-		discovery.RawMetadata["cert_san"] = sans
-	}
+	discovery.RawMetadata["certificates"] = sensordisc.CertificateInfoMaps(certs)
 }
 
 // parseSupportedVersionsExt scans TLS extensions in payload[start:end] for the

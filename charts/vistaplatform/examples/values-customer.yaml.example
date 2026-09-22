@@ -52,6 +52,31 @@ tls:
   # HTTP only. Refuses to render unless tls.allowNone: true.
   # mode: none
   # allowNone: true
+# -----------------------------------------------------------------------------
+# REQUIRED: agent/sensor mTLS hostnames.
+#
+# Agent and sensor authentication is fail-closed and ON by default. Without a
+# TLS-passthrough host, agents and sensors cannot present their client
+# certificate, so the chart refuses to render rather than come up silently
+# unauthenticated.
+#
+# Both names must resolve to a cluster-Traefik TLS-PASSTHROUGH entrypoint on
+# port 8444. THE CHART DOES NOT CREATE THAT ENTRYPOINT - it is cluster
+# infrastructure you provide, like cert-manager and the ingress controller.
+#
+# If you run no sensors or discovery agents, set enabled: false instead. That
+# restores the previous behaviour, in which an agent authenticates by its UUID
+# alone - read the security note in values.yaml before choosing it.
+# -----------------------------------------------------------------------------
+agentMtls:
+  enabled: true
+  backends:
+    sensor-manager:
+      dnsName: sensors.vistaplatform.example.com   # FIXME: sensor mTLS passthrough host
+    device-interrogation-service:
+      dnsName: agents.vistaplatform.example.com    # FIXME: agent mTLS passthrough host
+
+
 
 # -----------------------------------------------------------------------------
 # OPTIONAL: ingress controller selection.

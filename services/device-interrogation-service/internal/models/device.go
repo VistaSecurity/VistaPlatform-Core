@@ -43,8 +43,16 @@ type Device struct {
 	// verification when calling the device's management API. Defaults to
 	// false; operators flip it to true only for devices whose management
 	// endpoints present self-signed certs.
-	TLSInsecureSkipVerify bool       `json:"tls_insecure_skip_verify" db:"tls_insecure_skip_verify"`
-	ConnectionStatus      string     `json:"connection_status" db:"connection_status"`
+	TLSInsecureSkipVerify bool   `json:"tls_insecure_skip_verify" db:"tls_insecure_skip_verify"`
+	ConnectionStatus      string `json:"connection_status" db:"connection_status"`
+	// SSHHostKeyFingerprint is the host key pinned for this device, in
+	// ssh.FingerprintSHA256 form. nil means "never pinned" — the enrolment
+	// case. Once set, an interrogation that meets a different key aborts before
+	// sending a credential. SSHHostKeyType is its algorithm, carried so the UI
+	// can show what was pinned rather than an opaque hash.
+	SSHHostKeyFingerprint *string    `json:"ssh_host_key_fingerprint,omitempty" db:"ssh_host_key_fingerprint"`
+	SSHHostKeyType        *string    `json:"ssh_host_key_type,omitempty" db:"ssh_host_key_type"`
+	SSHHostKeyPinnedAt    *time.Time `json:"ssh_host_key_pinned_at,omitempty" db:"ssh_host_key_pinned_at"`
 	LastInterrogatedAt    *time.Time `json:"last_interrogated_at" db:"last_interrogated_at"`
 	InterrogationError    *string    `json:"interrogation_error" db:"interrogation_error"`
 	Metadata              JSONB      `json:"metadata" db:"metadata"`

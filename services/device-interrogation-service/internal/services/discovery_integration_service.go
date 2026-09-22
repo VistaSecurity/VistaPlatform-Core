@@ -196,9 +196,10 @@ func (s *DiscoveryIntegrationService) UpdateJobStatus(
 	status string,
 	errorMessage *string,
 ) error {
+	// Same rule as device_jobs.error_message — see redactedErrorMessage.
 	var errMsg interface{}
 	if errorMessage != nil {
-		errMsg = *errorMessage
+		errMsg = redactErrorMessage(*errorMessage)
 	}
 
 	var query string

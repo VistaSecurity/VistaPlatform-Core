@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -191,4 +192,62 @@ func TestSaveConfigFileOmitsUnsetVerbose(t *testing.T) {
 	if !strings.Contains(string(body), "verbose: false") {
 		t.Errorf("explicit verbose: false was not persisted:\n%s", body)
 	}
+}
+
+// TestAgentConfigFileIsOwnerOnly is the C3 regression guard.
+//
+// The generated agent config carries `registration_key:` in plaintext, and that
+// key is the agentSecret input to agentcreds.DeriveKey — the AES key that unwraps
+// every credential envelope carrying the tenant's F5, Cisco, Fortinet, Palo Alto
+// and UniFi administrator passwords. It was written 0644, so any unprivileged
+// local user on the agent host could read it and decrypt them.
+//
+// This stats a file saveConfigFile actually produced rather than reading the mode
+// constant back, and it re-runs the save over a file left world-readable by an
+// older build: os.WriteFile does not change the mode of a file that already
+// exists, so only the explicit Chmod tightens an upgraded install.
+func TestAgentConfigFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+
+	path := filepath.Join(t.TempDir(), "agent-config.yaml")
+	cfg := &config.Config{
+		PlatformURL:     "https://platform.example",
+		RegistrationKey: "reg-key-super-secret-value",
+		DataPath:        t.TempDir(),
+	}
+
+	assertOwnerOnly := func(stage string) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("%s: stat: %v", stage, err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Fatalf("%s: config mode = %#o, want 0600 — the registration key is the "+
+				"AES key for every device credential envelope", stage, perm)
+		}
+	}
+
+	if err := saveConfigFile(path, cfg); err != nil {
+		t.Fatalf("saveConfigFile: %v", err)
+	}
+	assertOwnerOnly("fresh write")
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(body), cfg.RegistrationKey) {
+		t.Fatalf("test is vacuous: the config does not contain the registration key:\n%s", body)
+	}
+
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatalf("chmod to legacy mode: %v", err)
+	}
+	if err := saveConfigFile(path, cfg); err != nil {
+		t.Fatalf("saveConfigFile (rewrite): %v", err)
+	}
+	assertOwnerOnly("rewrite over a legacy 0644 config")
 }

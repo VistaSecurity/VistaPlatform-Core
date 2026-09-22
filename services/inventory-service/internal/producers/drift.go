@@ -1258,18 +1258,38 @@ func (p *DriftProducer) readOpenRows(ctx context.Context, tx *sql.Tx, tenantID u
 	return out, rows.Err()
 }
 
-// driftKinds is every kind this producer emits, which is also every kind it
-// sweeps. Derived from the registry rather than listed, so a kind added to the
-// `drift` producer without a sweep here is impossible.
+// driftKinds is every kind THIS PASS asserts, which is also every kind it may
+// sweep. Derived from the registry rather than listed, so a kind added to the
+// `drift` producer without a sweep here is impossible — except for the kinds
+// listed in driftKindsNotFromBaseline, which this pass does not evaluate.
+//
+// A Sweep is a full statement: "everything of this kind I do not re-assert has
+// gone away." Sweeping a kind this pass cannot evaluate therefore inactivates
+// every open row of it on the next run, silently. The exclusion list is the
+// only thing standing between a correctly-raised finding and its quiet
+// disappearance, which is why TestDriftSweepCoversEveryKindItCanAssert pins it.
 var driftKinds = func() []string {
 	var out []string
 	for _, k := range findings.All {
-		if k.Producer == findings.ProducerDrift {
+		if k.Producer == findings.ProducerDrift && !driftKindsNotFromBaseline[k.Key] {
 			out = append(out, k.Key)
 		}
 	}
 	return out
 }()
+
+// driftKindsNotFromBaseline are `drift` kinds raised somewhere OTHER than this
+// baseline pass, and therefore outside what it may sweep.
+//
+//   - host_key_changed: raised by device-interrogation-service when a managed
+//     device presents an SSH host key that differs from the one pinned to it.
+//     It is genuine drift — the device's identity changed — but this pass has
+//     no baseline of host keys to compare and would resolve every open row on
+//     its first run. It is resolved by the interrogation that next succeeds
+//     against the device.
+var driftKindsNotFromBaseline = map[string]bool{
+	findings.KindHostKeyChanged: true,
+}
 
 // ---------------------------------------------------------------------------
 // helpers

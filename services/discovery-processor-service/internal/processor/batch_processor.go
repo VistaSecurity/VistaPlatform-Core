@@ -764,6 +764,15 @@ const importChunkSize = 50
 // converted from, and it is what adoptEffectiveStatus stamps.
 func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, discoveries []*models.SensorDiscovery, assetStatus string) (int, error) {
 	imported := 0
+	unknownOutcomes := map[string]int{}
+	defer func() {
+		// Loud, once per import, naming the value and how many rows carried it
+		// — the thing the batch-rejecting version never managed to be.
+		for outcome, n := range unknownOutcomes {
+			fmt.Printf("Warning: inventory-service reported outcome %q for %d finding(s) this build has no arm for; their discovery rows were left as the rules set them. Teach applyIngestOutcome about it.\n",
+				outcome, n)
+		}
+	}()
 	for start := 0; start < len(findings); start += importChunkSize {
 		end := start + importChunkSize
 		if end > len(findings) {
@@ -791,54 +800,135 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 			for i, result := range response.Results {
 				d := discoveries[start+i]
 				adoptAssetID(d, result.AssetID)
-				switch result.Outcome {
-				case "unresolved", "conflict":
-					// Evidence was committed, but identity admission made no
-					// monitoring approval. Do not retry retained evidence.
-					if result.Outcome == "unresolved" && result.ObservationID == "" {
-						return imported, fmt.Errorf("unresolved ingestion omitted durable observation ID")
+				if err := applyIngestOutcome(d, result); err != nil {
+					if errors.Is(err, errUnknownIngestOutcome) {
+						// One row this build has no arm for must not cost the
+						// other forty-nine. See errUnknownIngestOutcome.
+						unknownOutcomes[result.Outcome]++
+						continue
 					}
-					if result.AssetID == "" && d != nil {
-						d.ApprovalStatus = "observed"
-						d.AutoApprovalRuleID = nil
-					}
-				case "routed":
-					// The finding landed on NO asset: inventory-service
-					// classified it third-party and wrote it to
-					// external_connections instead. The evidence is recorded —
-					// somewhere else — and no approval decision about this row
-					// will ever be made, because Discovery → Approvals lists
-					// pending ASSETS and this finding produced none.
-					//
-					// `observed` rather than `auto_approved`: nothing approved
-					// anything here, and a row claiming an approval nobody made
-					// is the same dishonesty adoptEffectiveStatus's own comment
-					// argues against. `observed` is the value this column
-					// already carries for "recorded as evidence, no approval
-					// decision will ever follow" (host observations, and the
-					// unresolved branch above).
-					//
-					// This is what left the two CloudFront rows of's
-					// audit `pending` forever: EffectiveStatus is deliberately
-					// empty for a routed finding, so adoptEffectiveStatus left
-					// the rule's `pending` in place and nothing ever cleared it.
-					if d != nil && !isHostObservationDiscovery(d) {
-						d.ApprovalStatus = "observed"
-						d.AutoApprovalRuleID = nil
-					}
-				case "created", "matched":
-				case "rejected":
-					if d != nil {
-						d.ApprovalStatus = "suppressed"
-						d.AutoApprovalRuleID = nil
-					}
-				default:
-					return imported, fmt.Errorf("inventory returned unrecognized outcome %q", result.Outcome)
+					return imported, err
 				}
 			}
 		}
 	}
 	return imported, nil
+}
+
+// errUnknownIngestOutcome is what [applyIngestOutcome] reports for an outcome
+// this build has no arm for.
+//
+// It is a sentinel, and importInChunks does NOT fail the batch on it, because
+// the alternative was measured: `supporting` — an identity outcome that has
+// existed since and shipped in core-v1.0.0 — was never added to the
+// switch below, so every batch containing one supporting row errored, was
+// retried three times as if the error were transient, and then had ALL of its
+// rows stamped `processed_at` + `approval_status = 'rejected'` by
+// markBatchAsFailed. 5,006 rows on the dev cluster, ~500/hour, for as long as
+// the rule had been on. Nobody noticed, because a rejected row reads as a
+// decision somebody made rather than as evidence thrown away.
+//
+// So: an outcome we cannot interpret is a fact about THIS BUILD, not about the
+// forty-nine other findings in the chunk. The row keeps the state the
+// auto-approval rules gave it — `pending` at worst, which is visible, joined to
+// its asset by adoptAssetID and settleable by inventory-service's
+// settleDiscoveryQueueRows once a human decides — and every other row in the
+// batch lands. Rejecting them all converts "we added a new outcome" into silent
+// bulk data loss; leaving one row on the rules' answer converts it into a log
+// line and, at worst, a stale queue row.
+//
+// The rows still get `processed_at` (markProcessed runs), so nothing loops.
+var errUnknownIngestOutcome = errors.New("inventory returned an unrecognized outcome")
+
+// applyIngestOutcome settles one discovery row from the identity outcome
+// inventory-service reported for the finding that row produced.
+//
+// This switch is the ONLY definition of which outcomes this service
+// understands; ingest_outcome_coverage_test.go drives it with every
+// [identity.Outcome] constant declared in shared/identity and fails if any of
+// them lands in the default arm. That guard is the real fix here — the switch
+// and the Outcome set drifting apart with nothing noticing is what produced the
+// data loss described on errUnknownIngestOutcome.
+func applyIngestOutcome(d *models.SensorDiscovery, result identity.IngestResult) error {
+	switch result.Outcome {
+	case string(identity.OutcomeUnresolved), string(identity.OutcomeConflict):
+		// Evidence was committed, but identity admission made no
+		// monitoring approval. Do not retry retained evidence.
+		if result.Outcome == string(identity.OutcomeUnresolved) && result.ObservationID == "" {
+			return fmt.Errorf("unresolved ingestion omitted durable observation ID")
+		}
+		if result.AssetID == "" && d != nil {
+			d.ApprovalStatus = "observed"
+			d.AutoApprovalRuleID = nil
+		}
+	case "routed":
+		// Not an identity.Outcome: asset_service stamps it itself for a
+		// finding it classified third-party, so there is no constant to
+		// name here.
+		//
+		// The finding landed on NO asset: inventory-service
+		// classified it third-party and wrote it to
+		// external_connections instead. The evidence is recorded —
+		// somewhere else — and no approval decision about this row
+		// will ever be made, because Discovery → Approvals lists
+		// pending ASSETS and this finding produced none.
+		//
+		// `observed` rather than `auto_approved`: nothing approved
+		// anything here, and a row claiming an approval nobody made
+		// is the same dishonesty adoptEffectiveStatus's own comment
+		// argues against. `observed` is the value this column
+		// already carries for "recorded as evidence, no approval
+		// decision will ever follow" (host observations, and the
+		// unresolved branch above).
+		//
+		// This is what left the two CloudFront rows of's
+		// audit `pending` forever: EffectiveStatus is deliberately
+		// empty for a routed finding, so adoptEffectiveStatus left
+		// the rule's `pending` in place and nothing ever cleared it.
+		if d != nil && !isHostObservationDiscovery(d) {
+			d.ApprovalStatus = "observed"
+			d.AutoApprovalRuleID = nil
+		}
+	case string(identity.OutcomeCreated), string(identity.OutcomeMatched),
+		string(identity.OutcomeProvisional), string(identity.OutcomeSupporting):
+		// Nothing to correct here. All four landed the finding ON an asset,
+		// so the row's fate is that asset's fate, and two mechanisms already
+		// govern it honestly: adoptEffectiveStatus has just stamped the row
+		// from the status the asset ACTUALLY has (`auto_approved` when it is
+		// monitoring, `suppressed` when archived/denied), and adoptAssetID has
+		// linked the row to the asset so inventory-service's
+		// settleDiscoveryQueueRows closes it out when a human decides on a
+		// still-pending one.
+		//
+		// The two arms are here rather than on `observed` for exactly
+		// that reason. `observed` means "recorded as evidence, no approval
+		// decision will EVER follow" — true for `routed` and for an
+		// asset-less `unresolved`, and false for both of these:
+		//
+		//   provisional — the engine CREATED an asset (pending_approval,
+		//     identity_status provisional). It is in Discovery → Approvals
+		//     waiting for a person, exactly like `created`.
+		//   supporting  — another sighting of an asset we already hold, which
+		//     may itself be a provisional asset still awaiting that decision.
+		//     Stamping `observed` would both deny a decision that is still
+		//     coming and overwrite the accurate `auto_approved`
+		//     adoptEffectiveStatus just wrote for an already-monitoring one,
+		//     replacing a true statement with a vaguer one.
+		//
+		// Neither outcome is an approval, and neither arm claims one: no arm
+		// here ever writes `auto_approved`.
+	case "rejected":
+		// Also not an identity.Outcome: like "routed", asset_service stamps
+		// it for a finding it declined to materialize (the asset is archived
+		// or denied), so there is no constant to name.
+		if d != nil {
+			d.ApprovalStatus = "suppressed"
+			d.AutoApprovalRuleID = nil
+		}
+	default:
+		return fmt.Errorf("%w: %q", errUnknownIngestOutcome, result.Outcome)
+	}
+	return nil
 }
 
 // adoptAssetID records which asset a discovery row actually landed on.

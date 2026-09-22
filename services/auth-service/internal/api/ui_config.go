@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 	"github.com/vistasecurity/vistaplatform/shared/storage"
 )
@@ -1047,6 +1048,16 @@ func UploadBrandingAssetWithChecker(db *sql.DB, limitSvc limitChecker) gin.Handl
 			return
 		}
 
+		// Size ceiling FIRST — ahead of c.PostForm, which is itself what makes
+		// gin parse (and therefore buffer) the whole multipart body. The
+		// file.Size check further down runs after that has already happened,
+		// so on its own it could never prevent the allocation.
+		if c.Request.ContentLength > MaxImageUploadRequestBytes {
+			sharedapi.PayloadTooLarge(c, ImageTooLargeMessage)
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxImageUploadRequestBytes)
+
 		// Get asset type (logo or favicon)
 		assetType := c.PostForm("type")
 		if assetType != "logo" && assetType != "favicon" {
@@ -1057,12 +1068,17 @@ func UploadBrandingAssetWithChecker(db *sql.DB, limitSvc limitChecker) gin.Handl
 		// Get uploaded file
 		file, err := c.FormFile("file")
 		if err != nil {
+			if sharedapi.RequestBodyTooLarge(err) {
+				sharedapi.PayloadTooLarge(c, ImageTooLargeMessage)
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
 			return
 		}
 
-		// Validate file size (5MB limit)
-		if file.Size > 5*1024*1024 {
+		// The declared part size is still checked: the transport ceiling
+		// carries the envelope allowance, this one is the advertised number.
+		if file.Size > MaxImageUploadBytes {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "File too large. Maximum size is 5MB"})
 			return
 		}

@@ -2,7 +2,6 @@ package deviceinterrogation
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -10,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 )
@@ -47,15 +45,10 @@ type fortinetClient struct {
 
 func newFortinetClient(baseURL, username, password string, insecureSkipVerify bool) *fortinetClient {
 	return &fortinetClient{
-		baseURL:  baseURL,
-		username: username,
-		password: password,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec // per-device opt-in for self-signed appliance mgmt certs
-			},
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    baseURL,
+		username:   username,
+		password:   password,
+		httpClient: newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
 	}
 }
 

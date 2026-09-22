@@ -771,6 +771,15 @@ func (s *ResultProcessor) recordInterrogationObservations(
 			OSVersion:       asset.DeviceInfo.OSVersion,
 		}
 	}
+	// Pin the SSH host key the AGENT was shown, when this device has none
+	// pinned. The in-cluster path does the same thing at its own call site; both
+	// runtimes have to enrol, or a device only ever interrogated by an agent
+	// would never acquire a pin and the comparison would have nothing to read.
+	if fp, keyType := hostKeyFromJobResult(result); fp != "" {
+		if _, err := pinSSHHostKeyIfUnset(ctx, s.db, tenantID, assetID, fp, keyType); err != nil {
+			fmt.Printf("Warning: failed to pin ssh host key for asset %s: %v\n", assetID, err)
+		}
+	}
 	if !obs.Empty() {
 		if err := s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs); err != nil {
 			// The crypto assets have already landed. Losing the ops
@@ -873,4 +882,20 @@ func hostInventoryObservationsFromResult(result *models.JobResult) *di.Interroga
 		out.Assets = append(out.Assets, asset)
 	}
 	return out
+}
+
+// hostKeyFromJobResult returns the SSH host key an agent-run interrogation
+// observed. Mirrors hostKeyFingerprintFromResult on the in-cluster path; the
+// two differ only because each runtime carries its own asset struct.
+func hostKeyFromJobResult(result *models.JobResult) (fingerprint, keyType string) {
+	if result == nil {
+		return "", ""
+	}
+	for i := range result.Assets {
+		info := result.Assets[i].SSHInfo
+		if info != nil && info.HostKeyFingerprint != "" {
+			return info.HostKeyFingerprint, info.HostKeyType
+		}
+	}
+	return "", ""
 }

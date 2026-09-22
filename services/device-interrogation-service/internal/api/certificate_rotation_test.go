@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"database/sql"
@@ -17,6 +18,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/certificates"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -78,6 +80,20 @@ func TestRotateAgentCertificate_UnknownAgent(t *testing.T) {
 	}
 }
 
+// parseCertPEM decodes a PEM certificate the API returned.
+func parseCertPEM(t *testing.T, certPEM string) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		t.Fatal("certificate is not valid PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	return cert
+}
+
 // generateAgentCSR builds an RSA keypair + CSR with CN == agentID, as the
 // device-agent does during renewal.
 func generateAgentCSR(t *testing.T, agentID uuid.UUID) string {
@@ -121,12 +137,35 @@ func TestIntegration_RotateAgentCertificate_IssuesAndSupersedes(t *testing.T) {
 	g.Use(middleware.AgentAuth(db, db, false)) // fail-open: resolves tenant from the agent row
 	g.POST("/:id/certificates/rotate", rotateAgentCertificateHandler(db, db))
 
-	rotate := func() rotateAgentCertificateResponse {
+	post := func(peer *x509.Certificate) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(rotateAgentCertificateRequest{CSR: generateAgentCSR(t, agentID)})
 		req := httptest.NewRequest(http.MethodPost, "/agents/"+agentID.String()+"/certificates/rotate", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		if peer != nil {
+			req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{peer}}
+		}
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
+		return w
+	}
+
+	// H4: rotation without proof of the CURRENT identity must be refused, even
+	// in fail-open mode where the path id alone authenticates everything else.
+	if w := post(nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("certless rotate: expected 401, got %d (body=%s)", w.Code, w.Body.String())
+	}
+
+	// Enroll: issue the agent's first certificate the way registration does, so
+	// it has a current identity to rotate FROM.
+	certService := certificates.NewCertificateService(db, db, "test-encryption-master-key-32byte")
+	enrolledPEM, err := certService.IssueCertificate(tenantID, agentID, generateAgentCSR(t, agentID))
+	if err != nil {
+		t.Fatalf("enroll agent certificate: %v", err)
+	}
+	enrolled := parseCertPEM(t, enrolledPEM)
+
+	rotate := func(peer *x509.Certificate) rotateAgentCertificateResponse {
+		w := post(peer)
 		if w.Code != http.StatusOK {
 			t.Fatalf("rotate: expected 200, got %d (body=%s)", w.Code, w.Body.String())
 		}
@@ -137,7 +176,7 @@ func TestIntegration_RotateAgentCertificate_IssuesAndSupersedes(t *testing.T) {
 		return resp
 	}
 
-	first := rotate()
+	first := rotate(enrolled)
 	if first.ClientCert == "" {
 		t.Fatal("first rotation returned empty client_cert")
 	}
@@ -157,8 +196,13 @@ func TestIntegration_RotateAgentCertificate_IssuesAndSupersedes(t *testing.T) {
 		t.Errorf("certificate_expires_at %v is not in the future", first.CertificateExpiresAt)
 	}
 
-	// Second rotation must supersede the first: exactly one unrevoked row.
-	_ = rotate()
+	// Second rotation must supersede the first: exactly one unrevoked row. It is
+	// driven with the certificate the FIRST rotation returned — the superseded
+	// enrollment cert would now be refused, which is the point of the guard.
+	if w := post(enrolled); w.Code != http.StatusUnauthorized {
+		t.Fatalf("rotate with superseded cert: expected 401, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	_ = rotate(parseCertPEM(t, first.ClientCert))
 	var active int
 	if err := db.QueryRow(
 		`SELECT COUNT(*) FROM agent_certificates WHERE agent_id = $1 AND revoked_at IS NULL`,

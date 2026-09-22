@@ -983,7 +983,7 @@ your permissions and your edition; the detail for each is in the
 | **People & Access** | Members, Roles & Permissions, Security & SSO | Who is in the organization, what each role grants, and how people sign in |
 | **Integrations** | Integrations, AI assistant | Connected systems — CMDB/ITSM, messaging, storage, SIEM — and which AI capabilities are on |
 | **Notifications & Alerts** | Routing Rules, Alert Rules, Delivery History | Which events reach which channel, what raises an alert, and what was actually sent |
-| **Policies** | Compliance Frameworks, Custom Policies, Asset Lifecycle, Retention Policies, Scopes, Classes, Identification rules | The rules the platform applies to your data |
+| **Policies** | Compliance Frameworks, Custom Policies, Asset Lifecycle, Scopes, Classes, Identification rules | The rules the platform applies to your data |
 | **Audit** | Audit | Search and export the full trail of who did what, when |
 | **Infrastructure** | Locations, Network Segments | The physical/cloud location registry and the network boundaries discovery scopes against |
 

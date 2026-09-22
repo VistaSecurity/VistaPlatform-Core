@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 
 	"github.com/google/uuid"
@@ -215,6 +217,15 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 		return nil, fmt.Errorf("too many targets; limit is 1000 per job")
 	}
 
+	// Resolve hostname targets to the addresses they name, so target
+	// authorization inside the transaction below has addresses to judge. A
+	// name that cannot be resolved is refused rather than accepted unchecked —
+	// an unauthorizable target is not an authorized one.
+	authTargets, err := targetsForAuthorization(req.Targets)
+	if err != nil {
+		return nil, err
+	}
+
 	// OT active probes are an independent per-target cross-product:
 	// each requested OT protocol probes its standard port. Tier flag
 	// `ot_active_probing` gates the capability — when off, requested OT
@@ -341,6 +352,19 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 			if err := authorizeEnrichmentDispatch(tx, sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}, selectedSensor); err != nil {
 				return err
 			}
+		}
+		// TARGET AUTHORIZATION — every path, every origin (#H5).
+		//
+		// AuthorizeAutomaticScan below short-circuits on an option the CALLER
+		// supplies, so before this line a manually-created job was authorized
+		// by nothing: loopback, the cluster's own Service CIDR,
+		// 169.254.169.254 and arbitrary public hosts were all reachable from
+		// the Discover wizard. This check does not look at the origin at all.
+		// It runs inside the job-creation transaction so a segment withdrawn a
+		// moment ago wins the race, and it is repeated at dispatch time in
+		// job_processor.processTarget against the EXPANDED addresses.
+		if err := dispatchguard.AuthorizeTargets(tx, tenantID, authTargets); err != nil {
+			return err
 		}
 		if dispatchguard.IsAutomaticScan(req.Options) {
 			if len(req.OTProbeProtocols) > 0 {
@@ -846,4 +870,34 @@ func (s *DiscoveryService) withTenantTxx(ctx context.Context, tenantID uuid.UUID
 		return err
 	}
 	return tx.Commit()
+}
+
+// targetsForAuthorization reduces a job's requested targets to literal address
+// forms (address, CIDR, a-b range) that dispatchguard.TargetScope can judge.
+//
+// Hostnames are resolved HERE, outside the transaction, because a DNS lookup
+// must not be held inside one — and because the guard deliberately refuses to
+// guess what a name means. The addresses a name resolves to are re-checked at
+// dispatch time after expansion, so a rebind between creation and scan is
+// caught there rather than trusted here.
+func targetsForAuthorization(targets []string) ([]string, error) {
+	out := make([]string, 0, len(targets))
+	for _, raw := range targets {
+		target := strings.TrimSpace(raw)
+		if target == "" {
+			return nil, fmt.Errorf("empty scan target")
+		}
+		if strings.Contains(target, "/") || net.ParseIP(target) != nil || shareddisc.IsNetworkRange(target) {
+			out = append(out, target)
+			continue
+		}
+		ips, err := net.LookupIP(target)
+		if err != nil || len(ips) == 0 {
+			return nil, fmt.Errorf("scan target %q could not be resolved for authorization", target)
+		}
+		for _, ip := range ips {
+			out = append(out, ip.String())
+		}
+	}
+	return out, nil
 }

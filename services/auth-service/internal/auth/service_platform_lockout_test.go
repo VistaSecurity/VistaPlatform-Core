@@ -50,8 +50,9 @@ func expectFallThroughToPlatform(mock sqlmock.Sqlmock, email string, id uuid.UUI
 		WithArgs(email).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"id", "email", "password_hash", "first_name", "last_name",
-			"is_active", "email_verified", "last_login_at", "created_at", "role_name",
-		}).AddRow(id, email, hash, "Plat", "Admin", true, true, now, now, "platform_admin"))
+			"is_active", "email_verified", "force_password_change",
+			"last_login_at", "created_at", "role_name",
+		}).AddRow(id, email, hash, "Plat", "Admin", true, true, false, now, now, "platform_admin"))
 }
 
 // expectLockoutPolicyLookup mocks the two platform_settings reads that

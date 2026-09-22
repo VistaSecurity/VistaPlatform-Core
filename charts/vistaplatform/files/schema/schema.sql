@@ -18431,6 +18431,21 @@ CREATE TABLE IF NOT EXISTS public.asset_management (
     last_interrogated_at timestamp with time zone,
     interrogation_error text,
     interrogation_schedule_id uuid,
+    -- The SSH host key this device presented on first contact, pinned.
+    --
+    -- Trust-on-first-use only means anything if the capture is COMPARED later.
+    -- It was not: the interrogator recorded a fingerprint as "evidence", nothing
+    -- ever read it back, and a device administrator password went to whatever
+    -- answered on port 22 every single run. This column is the read-back side.
+    -- shared/sshtrust compares it during key exchange, so a mismatch aborts the
+    -- handshake BEFORE any credential is sent.
+    --
+    -- NULL means "not pinned yet" — first contact, the enrolment case, which
+    -- must keep working. Clearing it back to NULL is the deliberate re-pin path
+    -- for a replaced device or a rotated key.
+    ssh_host_key_fingerprint text,
+    ssh_host_key_type text,
+    ssh_host_key_pinned_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT asset_management_pkey PRIMARY KEY (tenant_id, asset_id),
@@ -22362,3 +22377,19 @@ BEGIN
       approved_count, suppressed_count, observed_count;
   END IF;
 END $$;
+
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: pin the SSH host key on the device record (H7)
+-- ----------------------------------------------------------------------------
+-- The CREATE TABLE above carries these columns for a fresh install; this is the
+-- half that reaches a database that already has the table. Nullable with no
+-- default, so it is a metadata-only add and existing rows read "not pinned" —
+-- which is correct: nothing has been pinned yet, and the next successful
+-- interrogation enrols each device.
+ALTER TABLE IF EXISTS public.asset_management
+    ADD COLUMN IF NOT EXISTS ssh_host_key_fingerprint text;
+ALTER TABLE IF EXISTS public.asset_management
+    ADD COLUMN IF NOT EXISTS ssh_host_key_type text;
+ALTER TABLE IF EXISTS public.asset_management
+    ADD COLUMN IF NOT EXISTS ssh_host_key_pinned_at timestamp with time zone;

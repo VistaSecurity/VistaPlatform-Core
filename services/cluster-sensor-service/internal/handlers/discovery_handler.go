@@ -1,10 +1,8 @@
 package handlers
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -19,6 +17,41 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+// MaxRequestBytes caps every request body cluster-sensor-service accepts.
+//
+// Derived from the largest request the service will actually process, not
+// picked round. DiscoveryService.CreateJob refuses more than 1000 targets
+// (matching the `max_targets_per_job` rate-limit default), and the longest
+// plausible target token is an IPv6 CIDR — 43 characters, ~46 bytes once
+// JSON-quoted and comma-separated — so a maximal target list is ~46 KiB. The
+// only other list that can grow is `ports`: every TCP port, all 65,535 of them,
+// is ~400 KiB. 1 MiB is therefore more than twice the largest legitimate
+// request, and three orders of magnitude below the pod's 256 MiB limit.
+//
+// Raising it is a decision about what the service accepts, not a tuning knob:
+// anything near the pod limit puts a handful of concurrent requests back within
+// reach of the OOM killer, which is the bug this closes (H10).
+const MaxRequestBytes = 1 << 20
+
+// maxRequestBytesMessage is what a refused caller reads. It names the number,
+// because "too large" is not actionable.
+const maxRequestBytesMessage = "the request body exceeds the 1 MiB limit"
+
+// serverAuthorityJobOptions are the job options whose value selects which
+// authorization path a discovery job is judged by. They are the server's to
+// state, not the caller's to claim, so CreateJob strips them from any request
+// that is not an HMAC-verified internal service call.
+//
+//   - origin: dispatchguard.IsAutomaticScan keys on "auto_scan".
+//   - identity_*: select the identity-enrichment dispatch path, whose replay
+//     token and observation/scope ids are minted by the coordinator.
+var serverAuthorityJobOptions = []string{
+	"origin",
+	"identity_enrichment_request_id",
+	"identity_observation_id",
+	"identity_network_scope",
+}
 
 type DiscoveryHandler struct {
 	discoveryService *services.DiscoveryService
@@ -78,6 +111,27 @@ func (h *DiscoveryHandler) authorizeJob(c *gin.Context) (*models.DiscoveryJob, b
 	return job, true
 }
 
+// bindJSON binds the request body, answering 413 when the router's MaxBody
+// ceiling was reached and 400 for anything else.
+//
+// The 413 branch is not cosmetic. MaxBytesReader surfaces as a read error, so
+// without it every over-cap request — the exact thing the cap exists to refuse
+// — would be reported to the caller as a malformed document, which is both
+// wrong and unactionable. The Content-Length path is refused by the middleware
+// before a handler runs; this covers a chunked body, which declares no length.
+func bindJSON(c *gin.Context, req interface{}) bool {
+	if err := c.ShouldBindJSON(req); err != nil {
+		if sharedapi.RequestBodyTooLarge(err) {
+			sharedapi.PayloadTooLarge(c, maxRequestBytesMessage)
+			return false
+		}
+		log.Printf("[DiscoveryHandler] JSON binding error: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return false
+	}
+	return true
+}
+
 // Helper function to extract user ID from context
 func extractUserID(c *gin.Context) (string, error) {
 	userIDVal, exists := c.Get("userID")
@@ -108,21 +162,41 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 		return
 	}
 
-	// Read raw body for logging
-	bodyBytes, _ := c.GetRawData()
-	log.Printf("[DiscoveryHandler] Received request body: %s", string(bodyBytes))
-
-	// Create a new reader from the bytes for binding
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-
+	// The body is bound straight from the request. It used to be read whole
+	// with c.GetRawData(), string()ed into a log line, and then copied into a
+	// fresh bytes.Buffer for binding — three live copies of a body the caller
+	// chose the size of, in a pod limited to 256 MiB (H10). The router's
+	// MaxBody middleware now caps it, and nothing here holds a second copy.
+	//
+	// The log line is gone rather than truncated: a discovery job request is
+	// tenant input, it reaches pod logs verbatim, and the parsed summary below
+	// is what anyone debugging this actually reads.
 	var req models.CreateDiscoveryJobRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		log.Printf("[DiscoveryHandler] JSON binding error: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+	if !bindJSON(c, &req) {
 		return
 	}
 
-	log.Printf("[DiscoveryHandler] Successfully parsed request: targets=%v, protocols=%v, ports=%v", req.Targets, req.Protocols, req.Ports)
+	// ORIGIN IS SERVER-DERIVED (#H5).
+	//
+	// `options.origin` decides which policy engine a job is judged by:
+	// dispatchguard.IsAutomaticScan keys on it, and the enrichment keys below
+	// select the identity-enrichment dispatch path. Both were read straight out
+	// of caller-supplied JSON, which let a browser choose its own guard.
+	//
+	// Only an HMAC-verified internal service call — inventory-service's
+	// unattended sweep, which has no browser behind it — may DECLARE an
+	// origin. Anything carrying a person's JWT is "manual" by construction,
+	// whatever it asked for.
+	if !sharedmw.IsInternalCall(c) {
+		for _, reserved := range serverAuthorityJobOptions {
+			delete(req.Options, reserved)
+		}
+		if req.Options == nil {
+			req.Options = map[string]interface{}{}
+		}
+		req.Options["origin"] = "manual"
+	}
+	log.Printf("[DiscoveryHandler] Parsed request: %d target(s), %d protocol(s), %d port(s)", len(req.Targets), len(req.Protocols), len(req.Ports))
 
 	// Check rate limits
 	err = h.rateLimiter.CheckRateLimit(tenantID)
@@ -377,8 +451,7 @@ func (h *DiscoveryHandler) UpdateRateLimits(c *gin.Context) {
 	}
 
 	var req models.RateLimitConfigRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+	if !bindJSON(c, &req) {
 		return
 	}
 
@@ -417,8 +490,7 @@ func (h *DiscoveryHandler) UpdateAlertConfigs(c *gin.Context) {
 	}
 
 	var req models.AlertConfigRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+	if !bindJSON(c, &req) {
 		return
 	}
 

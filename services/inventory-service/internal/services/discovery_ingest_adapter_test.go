@@ -28,7 +28,7 @@ func TestToIngestFinding_ClusterSensorWireShape(t *testing.T) {
 			"key_exchange_algorithm": "ECDHE",
 			"key_size": 256,
 			"hash_algorithm": "SHA256",
-			"cert_subject": "CN=example.com"
+			"cert_validation_status": "valid"
 		}
 	}`
 
@@ -41,7 +41,7 @@ func TestToIngestFinding_ClusterSensorWireShape(t *testing.T) {
 	if out.IPAddress == nil || *out.IPAddress != "142.250.80.3" {
 		t.Errorf("resolved_ip should map to ip_address; got %v", out.IPAddress)
 	}
-	if out.RawData == nil || out.RawData["cert_subject"] != "CN=example.com" {
+	if out.RawData == nil || out.RawData["cert_validation_status"] != "valid" {
 		t.Errorf(`"data" should be promoted to raw_data with cert details; got %v`, out.RawData)
 	}
 	if out.CipherSuite == nil || *out.CipherSuite != "TLS_AES_128_GCM_SHA256" {

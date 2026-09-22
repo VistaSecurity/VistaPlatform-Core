@@ -65,6 +65,17 @@ RUN npm run build -w frontend-v2
 # floors, never downgrades. When a future Caddy release ships these versions or
 # newer, the corresponding line becomes a no-op and can be dropped.
 #
+# A module ABSENT from this list is not pinned by it. golang.org/x/crypto was
+# missing until 2026-09, so the published web-ui/admin-ui images shipped it at
+# whatever Caddy selected (v0.53.0) carrying GO-2026-6354/GO-2026-6355 — the
+# ratchet looked maintained and simply never reached the module. Add new floors
+# here as advisories land rather than assuming the existing lines cover them.
+#
+# NOT raised, deliberately: github.com/google/cel-go carries GO-2026-6094, fixed
+# in v0.30.0, but v0.30.0 changes the interpreter API and Caddy v2.11.4 does not
+# compile against it (celmatcher.go: []Interpretable vs []InterpretableV2).
+# cel-go is imported-but-not-called here; raise it when Caddy supports it.
+#
 # GOTOOLCHAIN names the EXACT patch, for the same reason the service Dockerfiles
 # do — but note the reason is NOT go.work compatibility. This stage compiles an
 # unrelated module, so go.work's floor never applies and the build cannot fail
@@ -98,9 +109,12 @@ RUN printf '%s\n' \
 # go.sum entries for Caddy's own optional-module imports unresolved after a
 # bare `go get`, and the build fails on ~10 "missing go.sum entry" errors.
 RUN go get github.com/caddyserver/caddy/v2@v2.11.4 \
- && go get golang.org/x/net@v0.56.0 \
-           golang.org/x/text@v0.39.0 \
-           google.golang.org/grpc@v1.82.1 \
+ && go get golang.org/x/net@v0.59.0 \
+           golang.org/x/text@v0.42.0 \
+           golang.org/x/crypto@v0.57.0 \
+           google.golang.org/grpc@v1.83.2 \
+           github.com/klauspost/compress@v1.18.7 \
+           github.com/go-chi/chi/v5@v5.3.0 \
  && go mod tidy
 RUN go build -o /go/bin/caddy .
 
@@ -118,7 +132,7 @@ RUN go build -o /go/bin/caddy .
 # not been rebuilt since 2026-06-24, so the tag still resolves to exactly this
 # digest and there is no newer one to bump to. The Alpine package CVEs it now
 # carries are cleared in the layer below instead.
-FROM caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+FROM caddy:2-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
 
 # Alpine package currency + surface removal.
 #

@@ -1120,3 +1120,99 @@ func TestIntegration_DriftProducer_AFailedWritePhaseClaimsNoCoverage(t *testing.
 			"and must roll back with it")
 	}
 }
+
+// A `host_key_changed` finding must SURVIVE a baseline drift pass (H7).
+//
+// The kind belongs to the `drift` producer because a device presenting a new
+// SSH host key IS drift, but it is raised by device-interrogation-service, not
+// by this pass. A Sweep is a full statement — "everything of this kind I did
+// not re-assert has gone away" — so sweeping a kind this pass cannot evaluate
+// would inactivate every open row of it on the next run, silently, and the
+// operator would lose the only signal that a managed device's identity changed.
+//
+// Mutation-proven: delete the driftKindsNotFromBaseline entry (so the kind
+// falls back into driftKinds) and this goes red with the row INACTIVE.
+func TestIntegration_DriftProducer_DoesNotSweepHostKeyChanged(t *testing.T) {
+	f := newDriftFixture(t)
+	ctx := context.Background()
+
+	// Something for the pass to actually do, so the write phase — and its
+	// sweep — runs rather than short-circuiting.
+	f.addEndpoint(t, f.assetID, 3389, "tcp", "SMB", f.daysAgo(3), f.now, "active", nil)
+
+	hostKeyFinding := uuid.New()
+	exec(t, f.owner, `
+		INSERT INTO findings (id, tenant_id, producer, kind, subject_type, subject_id,
+		                      severity, score, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'drift', 'host_key_changed', 'asset', $3,
+		        'high', 70, 'device presented a different SSH host key', 'ACTIVE', 'NEW')`,
+		hostKeyFinding, f.tenant, f.baselineAsset)
+
+	// A kind this pass DOES own, left stale, so the assertion below distinguishes
+	// "the sweep did not run" from "the sweep ran and correctly skipped ours".
+	sweepable := uuid.New()
+	exec(t, f.owner, `
+		INSERT INTO findings (id, tenant_id, producer, kind, subject_type, subject_id,
+		                      severity, score, summary, detection_state, workflow_status)
+		VALUES ($1, $2, 'drift', 'new_issuer', 'asset', $3,
+		        'medium', 30, 'stale, to be swept', 'ACTIVE', 'NEW')`,
+		sweepable, f.tenant, f.baselineAsset)
+
+	f.run(t, ctx)
+
+	var hostKeyState, sweepableState string
+	if err := f.owner.QueryRow(`SELECT detection_state FROM findings WHERE id = $1`, hostKeyFinding).
+		Scan(&hostKeyState); err != nil {
+		t.Fatalf("read host_key_changed finding: %v", err)
+	}
+	if err := f.owner.QueryRow(`SELECT detection_state FROM findings WHERE id = $1`, sweepable).
+		Scan(&sweepableState); err != nil {
+		t.Fatalf("read new_issuer finding: %v", err)
+	}
+
+	if sweepableState != producer.StateInactive {
+		t.Fatalf("new_issuer detection_state = %q, want %q — the sweep did not run, so this test proves nothing",
+			sweepableState, producer.StateInactive)
+	}
+	if hostKeyState != producer.StateActive {
+		t.Errorf("host_key_changed detection_state = %q, want %q — the baseline pass swept a finding it cannot evaluate",
+			hostKeyState, producer.StateActive)
+	}
+}
+
+// Every `drift` kind is either swept by this pass or explicitly excluded, and
+// every exclusion names a kind that still exists.
+//
+// Two polarities, because an exclusion list is exactly the kind of guard that
+// rots into a no-op: a kind renamed in the registry leaves a stale entry here
+// that matches nothing and quietly stops protecting anything.
+func TestDriftSweepKindPartitionIsComplete(t *testing.T) {
+	registered := map[string]bool{}
+	for _, k := range findings.All {
+		if k.Producer == findings.ProducerDrift {
+			registered[k.Key] = true
+		}
+	}
+	if len(registered) == 0 {
+		t.Fatal("no drift kinds in the registry")
+	}
+
+	for excluded := range driftKindsNotFromBaseline {
+		if !registered[excluded] {
+			t.Errorf("driftKindsNotFromBaseline names %q, which is not a registered `drift` kind — "+
+				"a stale exclusion protects nothing", excluded)
+		}
+		if slices.Contains(driftKinds, excluded) {
+			t.Errorf("kind %q is both excluded and swept", excluded)
+		}
+	}
+
+	for kind := range registered {
+		if driftKindsNotFromBaseline[kind] {
+			continue
+		}
+		if !slices.Contains(driftKinds, kind) {
+			t.Errorf("registered drift kind %q is neither swept nor explicitly excluded", kind)
+		}
+	}
+}

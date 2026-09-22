@@ -24,11 +24,22 @@ func TestImportRetainedEvidenceAcknowledgement(t *testing.T) {
 		name    string
 		results []identity.IngestResult
 		wantErr bool
+		// wantStatus is the row's approval_status afterwards; empty means
+		// `observed`, the retained-evidence answer most of these expect.
+		wantStatus string
 	}{
-		{"retained", []identity.IngestResult{{Outcome: "unresolved", ObservationID: uuid.NewString()}}, false},
-		{"missing durable receipt", []identity.IngestResult{{Outcome: "unresolved"}}, true},
-		{"unknown outcome", []identity.IngestResult{{Outcome: "unknown"}}, true},
-		{"misaligned results", []identity.IngestResult{{Outcome: "rejected"}, {Outcome: "rejected"}}, true},
+		{name: "retained", results: []identity.IngestResult{{Outcome: "unresolved", ObservationID: uuid.NewString()}}},
+		{name: "missing durable receipt", results: []identity.IngestResult{{Outcome: "unresolved"}}, wantErr: true},
+		{
+			// An outcome this build has no arm for is a fact about the build,
+			// not about the row: the import succeeds, the row keeps the state
+			// the auto-approval rules gave it, and the batch is NOT failed —
+			// failing it is what rejected 5,006 rows over `supporting`.
+			name:       "unknown outcome",
+			results:    []identity.IngestResult{{Outcome: "unknown"}},
+			wantStatus: "auto_approved",
+		},
+		{name: "misaligned results", results: []identity.IngestResult{{Outcome: "rejected"}, {Outcome: "rejected"}}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,8 +58,21 @@ func TestImportRetainedEvidenceAcknowledgement(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("import error=%v, wantErr=%v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (imported != 0 || row.ApprovalStatus != "observed" || row.AutoApprovalRuleID != nil || row.AssetID != nil) {
-				t.Fatalf("retained evidence acquired an asset/approval: imported=%d row=%+v", imported, row)
+			if tc.wantErr {
+				return
+			}
+			wantStatus := tc.wantStatus
+			if wantStatus == "" {
+				wantStatus = "observed"
+			}
+			if imported != 0 || row.ApprovalStatus != wantStatus || row.AssetID != nil {
+				t.Fatalf("row settled as %q (wanted %q): imported=%d row=%+v", row.ApprovalStatus, wantStatus, imported, row)
+			}
+			if wantStatus == "observed" && row.AutoApprovalRuleID != nil {
+				t.Fatalf("retained evidence acquired an approval rule: %+v", row)
+			}
+			if wantStatus == "auto_approved" && row.AutoApprovalRuleID == nil {
+				t.Fatalf("an uninterpretable outcome cleared the rule that stamped the row: %+v", row)
 			}
 		})
 	}

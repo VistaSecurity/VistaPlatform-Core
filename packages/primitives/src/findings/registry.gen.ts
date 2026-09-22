@@ -75,6 +75,7 @@ export type FindingKindKey =
   | 'new_class_in_segment'
   | 'unexpected_protocol'
   | 'port_profile_changed'
+  | 'host_key_changed'
   | 'new_issuer';
 
 /** What a finding (or a ticket, or an alert) can be about. */
@@ -459,6 +460,19 @@ export const FINDING_KINDS: readonly FindingKind[] = [
   },
   {
     producer: 'drift',
+    key: 'host_key_changed',
+    severityModel: 'fixed',
+    defaultSeverity: 'high',
+    score: 70,
+    scoreSource: 'fixed',
+    subjectTypes: ['asset'],
+    feedsRisk: true,
+    titleTemplate: '{subject} presented a different SSH host key ({detail})',
+    guidance: 'Confirm the device\'s SSH host key changed for a reason you know about — it was replaced, rebuilt, or its key was rotated. If it was, re-pin the key from the device\'s page so interrogation can resume; the platform will not authenticate against an unrecognised key until you do. If nothing explains it, treat it as an interception of the management session and change the device\'s credentials before re-pinning, because the previous ones may have been offered to whatever answered.',
+    description: 'The SSH host key a managed device presented differs from the one pinned when the platform first contacted it. Interrogation was refused before any credential was sent. A replaced device and an on-path attacker look identical from here, which is why this fails closed rather than re-pinning itself.',
+  },
+  {
+    producer: 'drift',
     key: 'new_issuer',
     severityModel: 'fixed',
     defaultSeverity: 'medium',
@@ -524,6 +538,7 @@ export const FINDING_KIND_KEYS: readonly FindingKindKey[] = [
   'new_class_in_segment',
   'unexpected_protocol',
   'port_profile_changed',
+  'host_key_changed',
   'new_issuer',
 ];
 
@@ -560,6 +575,7 @@ export const FINDING_KIND = {
   NewClassInSegment: 'new_class_in_segment',
   UnexpectedProtocol: 'unexpected_protocol',
   PortProfileChanged: 'port_profile_changed',
+  HostKeyChanged: 'host_key_changed',
   NewIssuer: 'new_issuer',
 } as const satisfies Record<string, FindingKindKey>;
 

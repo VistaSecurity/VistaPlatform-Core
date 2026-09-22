@@ -416,17 +416,51 @@ func newRouter(
 		api.GET("/audit-service/compliance-reports/templates", h.compliance.GetComplianceReportTemplates)
 		api.POST("/audit-service/compliance-reports/generate", h.compliance.GenerateComplianceReport)
 
-		// Retention policy endpoints.
-		// SECURITY: writes gated on audit.manage (blocks tenant viewers).
-		// retention_policies + siem/integrations are platform-GLOBAL config (no
-		// tenant_id column) — the durable fix is a platform-admin-only gate (or
-		// tenant-scoping the tables), pending the product decision.
-		// Since audit.manage is a real, seeded tenant permission resolved
-		// from tenant_role_permissions, not a role name this service made up.
-		api.GET("/audit-service/retention-policies", h.retention.GetRetentionPolicies)
-		api.GET("/audit-service/retention-policies/:id", h.retention.GetRetentionPolicyByID)
-		api.POST("/audit-service/retention-policies", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.CreateRetentionPolicy)
-		api.PUT("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.UpdateRetentionPolicy)
+		// Platform-GLOBAL configuration. Everything mounted on this group is
+		// config that applies to EVERY tenant at once, so it is gated on
+		// platform IDENTITY first and permission second.
+		//
+		// SECURITY (C4/H2, v1.0.0 audit) — this is the durable fix the previous
+		// comment here deferred. retention_policies has no tenant_id column, so
+		// no RLS policy is possible and the retention sweep
+		// (services/retention_service.go GetLogsForDeletion / DeleteLogs) runs
+		// with NO tenant predicate on the BYPASSRLS handle; with S3 archival
+		// unconfigured the job deletes outright. These routes previously sat on
+		// the plain tenant group behind audit.manage, which tenant_admin holds
+		// by default and the two GETs carried no gate at all — so any tenant
+		// admin could POST total_retention_days=0 and destroy every tenant's
+		// audit history on the next sweep.
+		//
+		// Gating, not tenant-scoping: adding tenant_id to these tables and
+		// re-scoping the feature per tenant remains an open product option, and
+		// a larger change than a security fix should make.
+		//
+		// The consumer is admin-ui-v2 → Security → Retention / SIEM Export,
+		// which already exists and already authenticates with a platform token.
+		platformConfig := api.Group("")
+		platformConfig.Use(middleware.RequirePlatformIdentity())
+		{
+			// Reads gated too: the two GETs used to be completely ungated.
+			platformConfig.GET("/audit-service/retention-policies", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.retention.GetRetentionPolicies)
+			platformConfig.GET("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.retention.GetRetentionPolicyByID)
+			platformConfig.POST("/audit-service/retention-policies", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.CreateRetentionPolicy)
+			platformConfig.PUT("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.UpdateRetentionPolicy)
+
+			// SIEM integration endpoints (Enterprise). Absent in a Core build.
+			// The exporter owns its own permission gating and secret redaction
+			// and repeats the platform-identity gate on each route; mounting it
+			// HERE is what makes that gate unskippable in the running service.
+			//
+			// SECURITY (H2): the SIEM tee at
+			// internal/handlers/activity_log_handlers.go fans every tenant's
+			// audit event to every enabled integration, so a tenant admin who
+			// could register one received the whole platform's audit stream.
+			// "The build boundary IS the gate" decided the EDITION, not the
+			// identity.
+			if h.siemExport != nil {
+				h.siemExport.RegisterRoutes(platformConfig)
+			}
+		}
 
 		// Built-in audit alert rules (read-only view of the in-memory engine).
 		//
@@ -470,13 +504,8 @@ func newRouter(
 			h.scheduledReports.RegisterRoutes(api)
 		}
 
-		// SIEM integration endpoints (Enterprise). Absent in a Core build. The
-		// exporter owns its own routes and permission gating, including the
-		// audit.manage gate on the read (SIEM integrations are
-		// platform-global config, not per-tenant data) and secret redaction.
-		if h.siemExport != nil {
-			h.siemExport.RegisterRoutes(api)
-		}
+		// SIEM integration endpoints moved to the platformConfig group above
+		// (C4/H2) — they are platform-global config, not per-tenant data.
 
 		// Analytics endpoints
 		api.GET("/audit-service/analytics/user-activity", h.analytics.GetUserActivity)

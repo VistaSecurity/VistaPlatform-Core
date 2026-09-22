@@ -55,6 +55,72 @@ type CryptoDiscovery struct {
 	HostObservation *hostobs.HostObservation `json:"host_observation,omitempty"`
 }
 
+// MaxDiscoveriesPerCapture bounds how many distinct crypto observations one
+// capture file may contribute, across every protocol.
+//
+// It is tlsparse.MaxSessions and not a number of its own. The TLS path was
+// already bounded at that many distinct flows; the SSH and QUIC paths were not,
+// and neither were their dedup maps — a capture full of unique source/destination
+// pairs grew `result.Discoveries` and `seen` without limit until the pod died
+// (H11, measured at 1.29 GiB against a 512 Mi limit, redelivered three times).
+//
+// Re-using the TLS number means one policy rather than two: "one capture is
+// worth at most this many distinct crypto flows", applied wherever a discovery
+// is produced. A second constant here would be a second opinion about the same
+// question, and the two would drift.
+//
+// It is a truncation, not a rejection. A capture that hits the ceiling still
+// yields its first MaxDiscoveriesPerCapture findings and completes; the count
+// shed is logged and carried on PcapResult.DiscoveriesDropped so an operator
+// can see that the file was bigger than the cap rather than quiet.
+const MaxDiscoveriesPerCapture = tlsparse.MaxSessions
+
+// discoverySink accumulates discoveries under MaxDiscoveriesPerCapture.
+//
+// The dedup map is inside the sink deliberately. Capping the slice alone would
+// still let `seen` grow one key per unique flow forever, which is most of the
+// heap in the capture that motivated this — the keys are longer than the
+// structs they guard against. At the cap the sink stops recording keys too, so
+// nothing about it grows.
+type discoverySink struct {
+	discoveries []CryptoDiscovery
+	seen        map[string]bool
+	dropped     int
+}
+
+func newDiscoverySink() *discoverySink {
+	return &discoverySink{
+		discoveries: make([]CryptoDiscovery, 0, 64),
+		seen:        make(map[string]bool),
+	}
+}
+
+// add records d under dedup key, and reports whether it was kept.
+func (s *discoverySink) add(key string, d CryptoDiscovery) bool {
+	if len(s.discoveries) >= MaxDiscoveriesPerCapture {
+		// At the cap nothing is recorded — not the discovery, and not the key.
+		// A dropped duplicate is counted once per packet rather than once per
+		// flow, which overstates the shed; the alternative is the unbounded map
+		// this cap exists to stop.
+		s.dropped++
+		return false
+	}
+	if s.seen[key] {
+		return false
+	}
+	s.seen[key] = true
+	s.discoveries = append(s.discoveries, d)
+	return true
+}
+
+// There is deliberately no `full()` short-circuit around the per-packet
+// analysis. Skipping analyzeSSH/analyzeQUIC once the sink is full would save a
+// little CPU on an attack input and would also stop `dropped` from ever being
+// incremented — the shed count would read zero on exactly the capture that shed
+// the most, and the log line announcing the truncation would never fire. A
+// counter that cannot rise is the inert-check failure this codebase keeps
+// re-learning, so every candidate discovery is still offered to add().
+
 // PcapResult holds the aggregated results of processing a pcap file.
 type PcapResult struct {
 	Discoveries      []CryptoDiscovery `json:"discoveries"`
@@ -64,6 +130,11 @@ type PcapResult struct {
 	CaptureEndTime   *time.Time        `json:"capture_end_time,omitempty"`
 	PacketsProcessed int               `json:"packets_processed"`
 	ErrorCount       int               `json:"error_count"`
+	// DiscoveriesDropped counts observations shed at
+	// MaxDiscoveriesPerCapture. Non-zero means the capture carried more
+	// distinct crypto flows than one file is allowed to contribute, and the
+	// result is a truncation rather than the whole picture.
+	DiscoveriesDropped int `json:"discoveries_dropped,omitempty"`
 }
 
 // AuditSink records one unit of consumer work on the shared audit path.
@@ -146,7 +217,8 @@ func (p *Processor) logJobAudit(ctx context.Context, job *events.PcapJobEvent, r
 func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 	var job events.PcapJobEvent
 	if err := events.UnmarshalMsg(msg, &job); err != nil {
-		return fmt.Errorf("unmarshal pcap job event: %w", err)
+		// Permanent: the bytes will not parse differently on the second read.
+		return events.Permanent(fmt.Errorf("unmarshal pcap job event: %w", err))
 	}
 
 	log.Printf("[PCAP] Processing job %s for tenant %s (file: %s, size: %d bytes)",
@@ -176,7 +248,18 @@ func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 		}
 		p.cleanupFile(job.FilePath)
 		p.logJobAudit(ctx, &job, nil, started, "process_failed")
-		return fmt.Errorf("process pcap file: %w", err)
+
+		// The temp file has just been deleted, and the job row is already
+		// marked failed, so there is nothing left for a redelivery to succeed
+		// at — every retry would re-open a path that no longer exists and fail
+		// identically, three times, on a single-replica pod every tenant
+		// shares. The one exception is a cancelled context: that is the
+		// service shutting down or the processing timeout expiring, which says
+		// nothing about the file, so it stays nack-able.
+		if ctx.Err() != nil {
+			return fmt.Errorf("process pcap file: %w", err)
+		}
+		return events.Permanent(fmt.Errorf("process pcap file: %w", err))
 	}
 
 	// Insert individual crypto discoveries into the sensor_discoveries pipeline
@@ -223,30 +306,28 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 	}
 	protocolSet := make(map[string]bool)
 
-	// Track seen connections to avoid duplicate discoveries (SSH banners and
-	// QUIC Initials are single-packet observations, so they dedup per packet).
-	seen := make(map[string]bool)
+	// One sink for every producer — TLS sessions, SSH banners, QUIC Initials
+	// and host observations all go through it, so MaxDiscoveriesPerCapture is
+	// a single ceiling on the file rather than a per-protocol one each path
+	// would have to remember to apply. SSH banners and QUIC Initials are
+	// single-packet observations, so they dedup per packet; TLS handshakes are
+	// reassembled per flow and emitted once per session, so a Certificate
+	// message that spans several segments is actually parseable, and dedup
+	// keeps repeated clients from producing identical rows while preserving
+	// distinct SNI/certificate/negotiated-crypto evidence behind the same
+	// IP:port.
+	sink := newDiscoverySink()
 
-	// TLS handshakes are reassembled per flow across TCP segments and emitted
-	// once per session, so a Certificate message that spans several segments is
-	// actually parseable. Dedup keeps repeated clients from producing identical
-	// rows while preserving distinct SNI/certificate/negotiated-crypto evidence
-	// behind the same IP:port.
 	// Passive host observation over the same packets (asset-inventory ADR-0004
 	// D2). A capture file is often the only view we get of a segment nobody
 	// will let us put a sensor on.
 	hostObs := newHostObsCollector()
 
-	tlsSeen := make(map[string]bool)
 	tracker := tlsparse.NewTracker(func(s *tlsparse.Session) {
-		key := tlsSessionDedupeKey(s)
-		if tlsSeen[key] {
-			return
-		}
-		tlsSeen[key] = true
 		d := discoveryFromTLSSession(s)
-		result.Discoveries = append(result.Discoveries, d)
-		protocolSet[d.Protocol] = true
+		if sink.add("tls|"+tlsSessionDedupeKey(s), d) {
+			protocolSet[d.Protocol] = true
+		}
 	})
 
 	for packet := range packetSource.Packets() {
@@ -312,10 +393,8 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 
 			// Check for SSH banners
 			if d := p.analyzeSSH(payload, srcIP, srcPort, dstIP, dstPort, ts); d != nil {
-				key := fmt.Sprintf("%s:%d-%s:%d-ssh", d.SourceIP, d.SourcePort, d.DestIP, d.DestPort)
-				if !seen[key] {
-					seen[key] = true
-					result.Discoveries = append(result.Discoveries, *d)
+				key := fmt.Sprintf("ssh|%s:%d-%s:%d", d.SourceIP, d.SourcePort, d.DestIP, d.DestPort)
+				if sink.add(key, *d) {
 					protocolSet["SSH"] = true
 				}
 			}
@@ -329,10 +408,8 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 			payload := udp.Payload
 
 			if d := p.analyzeQUIC(payload, srcIP, srcPort, dstIP, dstPort, ts); d != nil {
-				key := fmt.Sprintf("%s:%d-%s:%d-quic", d.SourceIP, d.SourcePort, d.DestIP, d.DestPort)
-				if !seen[key] {
-					seen[key] = true
-					result.Discoveries = append(result.Discoveries, *d)
+				key := fmt.Sprintf("quic|%s:%d-%s:%d", d.SourceIP, d.SourcePort, d.DestIP, d.DestPort)
+				if sink.add(key, *d) {
 					protocolSet["QUIC"] = true
 				}
 			}
@@ -345,8 +422,17 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 	// One row per host for the whole file. The coalescing window is longer
 	// than any plausible capture, so this drain is the only thing that emits.
 	for _, d := range hostObs.Discoveries() {
-		result.Discoveries = append(result.Discoveries, d)
-		protocolSet[d.Protocol] = true
+		key := fmt.Sprintf("host|%s|%s", d.SourceIP, d.Protocol)
+		if sink.add(key, d) {
+			protocolSet[d.Protocol] = true
+		}
+	}
+
+	result.Discoveries = sink.discoveries
+	result.DiscoveriesDropped = sink.dropped
+	if sink.dropped > 0 {
+		log.Printf("[PCAP] Discovery cap reached: kept %d observation(s), shed %d at the per-capture limit of %d",
+			len(sink.discoveries), sink.dropped, MaxDiscoveriesPerCapture)
 	}
 	// Logged whenever the decoders saw anything, not only when something was
 	// malformed — and the coalescer's drop count is in it.

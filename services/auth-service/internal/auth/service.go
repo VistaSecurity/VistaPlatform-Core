@@ -650,7 +650,7 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 	if err != nil {
 		if err == ErrUserNotFound {
 			// Check if this is a platform user
-			platformUser, passwordHash, platformRoleName, platformErr := a.getPlatformUserByEmail(req.Email)
+			platformUser, passwordHash, platformRoleName, forcePasswordChange, platformErr := a.getPlatformUserByEmail(req.Email)
 			if platformErr != nil {
 				return nil, ErrInvalidCredentials
 			}
@@ -685,9 +685,18 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 
 			sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
 
-			// Generate tokens for platform user (no tenant_id for platform users)
-			accessToken, refreshToken, err := a.jwt.GenerateTokensWithRefreshExpiry(
-				platformUser.ID, uuid.Nil, platformUser.Email, platformRoleName, sessionTTL)
+			// Generate tokens for platform user (no tenant_id for platform users).
+			//
+			// When the account carries force_password_change this must be a
+			// LIMITED session: the holder proved knowledge of a password
+			// that has to be rotated — on a fresh install that is the PUBLISHED
+			// seeded super-admin password — so the token carries
+			// pwd_change_required and reaches nothing but the change-password
+			// flow. admin-service has always done this; auth-service did not,
+			// which meant the mitigation was bypassable simply by logging in at
+			// the tenant host instead.
+			accessToken, refreshToken, err := a.jwt.GenerateTokensWithPasswordChange(
+				platformUser.ID, uuid.Nil, platformUser.Email, platformRoleName, sessionTTL, forcePasswordChange)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate tokens: %w", err)
 			}
@@ -826,7 +835,7 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 			return nil, err
 		}
 		// Platform user token on tenant endpoint: look up in platform_users
-		platformUser, roleName, platformErr := a.getPlatformUserByID(claims.UserID)
+		platformUser, roleName, forcePasswordChange, platformErr := a.getPlatformUserByID(claims.UserID)
 		if platformErr != nil {
 			return nil, ErrUserNotFound
 		}
@@ -834,8 +843,8 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 			return nil, ErrUserInactive
 		}
 		sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
-		accessToken, newRefreshToken, err := a.jwt.GenerateTokensWithRefreshExpiry(
-			platformUser.ID, uuid.Nil, platformUser.Email, roleName, sessionTTL)
+		accessToken, newRefreshToken, err := a.jwt.GenerateTokensWithPasswordChange(
+			platformUser.ID, uuid.Nil, platformUser.Email, roleName, sessionTTL, forcePasswordChange)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate tokens: %w", err)
 		}
@@ -918,61 +927,85 @@ func (a *AuthService) Logout(userID uuid.UUID) error {
 	return a.refreshTokenService.RevokeAllUserTokens(userID)
 }
 
-// getPlatformUserByID retrieves a platform user by UUID
-func (a *AuthService) getPlatformUserByID(userID uuid.UUID) (*models.PlatformUser, string, error) {
+// getPlatformUserByID retrieves a platform user by UUID.
+//
+// Same two rules as getPlatformUserByEmail, for the same reason: this is the
+// refresh path, which re-mints tokens. Refusing a soft-deleted operator at login
+// but re-issuing their session on refresh would leave the front door locked and
+// a window open, and dropping force_password_change here would let one
+// /auth/refresh call upgrade a limited session into an unrestricted one.
+func (a *AuthService) getPlatformUserByID(userID uuid.UUID) (*models.PlatformUser, string, bool, error) {
 	query := `
 		SELECT pu.id, pu.email, pu.first_name, pu.last_name,
-		       pu.is_active, pu.email_verified, pu.last_login_at, pu.created_at,
+		       pu.is_active, pu.email_verified, pu.force_password_change,
+		       pu.last_login_at, pu.created_at,
 		       pr.name as role_name
 		FROM platform_users pu
 		JOIN platform_roles pr ON pu.role_id = pr.id
-		WHERE pu.id = $1`
+		WHERE pu.id = $1 AND pu.deleted_at IS NULL`
 
 	user := &models.PlatformUser{}
 	var roleName string
+	var forcePasswordChange bool
 	err := a.db.QueryRow(query, userID).Scan(
 		&user.ID, &user.Email,
 		&user.FirstName, &user.LastName, &user.IsActive,
-		&user.EmailVerified, &user.LastLoginAt, &user.CreatedAt,
+		&user.EmailVerified, &forcePasswordChange,
+		&user.LastLoginAt, &user.CreatedAt,
 		&roleName,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, "", ErrUserNotFound
+			return nil, "", false, ErrUserNotFound
 		}
-		return nil, "", err
+		return nil, "", false, err
 	}
-	return user, roleName, nil
+	return user, roleName, forcePasswordChange, nil
 }
 
-// getPlatformUserByEmail retrieves a platform user by email with password hash and role name
-func (a *AuthService) getPlatformUserByEmail(email string) (*models.PlatformUser, string, string, error) {
+// getPlatformUserByEmail retrieves a platform user by email with password hash,
+// role name and the force_password_change flag.
+//
+// The WHERE clause mirrors admin-service's own platform login
+// (services/admin-service/internal/handlers/auth.go): soft-deleted and
+// deactivated operators must not authenticate here either. Without the
+// deleted_at filter a platform administrator removed in admin-ui kept a working
+// login on the tenant host, because DeletePlatformUser only stamps deleted_at —
+// it does not clear is_active.
+//
+// force_password_change is selected because this is a token-issuing path: the
+// seeded super-admin rows ship with the flag set and the caller must mint
+// a LIMITED session for them rather than an unrestricted one.
+func (a *AuthService) getPlatformUserByEmail(email string) (*models.PlatformUser, string, string, bool, error) {
 	query := `
 		SELECT pu.id, pu.email, pu.password_hash, pu.first_name, pu.last_name,
-		       pu.is_active, pu.email_verified, pu.last_login_at, pu.created_at,
+		       pu.is_active, pu.email_verified, pu.force_password_change,
+		       pu.last_login_at, pu.created_at,
 		       pr.name as role_name
 		FROM platform_users pu
 		JOIN platform_roles pr ON pu.role_id = pr.id
-		WHERE pu.email = $1`
+		WHERE pu.email = $1 AND pu.deleted_at IS NULL AND pu.is_active = true`
 
 	user := &models.PlatformUser{}
 	var passwordHash sql.NullString // NULL for SSO-only platform users (#891)
 	var roleName string
+	var forcePasswordChange bool
 	err := a.db.QueryRow(query, strings.ToLower(email)).Scan(
 		&user.ID, &user.Email, &passwordHash,
 		&user.FirstName, &user.LastName, &user.IsActive,
-		&user.EmailVerified, &user.LastLoginAt, &user.CreatedAt,
+		&user.EmailVerified, &forcePasswordChange,
+		&user.LastLoginAt, &user.CreatedAt,
 		&roleName,
 	)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, "", "", ErrUserNotFound
+			return nil, "", "", false, ErrUserNotFound
 		}
-		return nil, "", "", err
+		return nil, "", "", false, err
 	}
 
-	return user, passwordHash.String, roleName, nil
+	return user, passwordHash.String, roleName, forcePasswordChange, nil
 }
 
 // GetUserByEmail retrieves a user by email

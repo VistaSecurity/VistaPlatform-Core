@@ -20,7 +20,12 @@ import (
 // Recheck automatic work when it leaves the durable queue. Hold the policy
 // row until command insertion commits so a committed pause wins the race.
 var ErrPaused = errors.New("identity enrichment is paused")
-var ErrDenied = errors.New("identity enrichment is not authorized")
+
+// ErrDenied is the package-wide refusal. Its wording is deliberately not
+// enrichment-specific any more: since #H5 the same sentinel also carries target
+// authorization refusals for MANUAL jobs, which have nothing to do with
+// identity enrichment.
+var ErrDenied = errors.New("scan dispatch is not authorized")
 
 func denied(message string) error { return fmt.Errorf("%w: %s", ErrDenied, message) }
 

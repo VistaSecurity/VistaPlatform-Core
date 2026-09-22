@@ -26,15 +26,103 @@ var ErrNoTarget = fmt.Errorf("device has no management URL, hostname, or IP addr
 // device records carry operator-entered display names like "home gw", which
 // would build an invalid URL. An unusable hostname falls through to the IP
 // rather than failing, since the IP reaches the same device.
+//
+// An explicit management URL is TENANT INPUT and is canonicalized by
+// [canonicalManagementURL] before it is returned. It used to be returned
+// verbatim, which handed the tenant the whole request: every collector builds
+// its calls as `baseURL + "/api/…"`, so a base URL ending in `#` swallowed the
+// appended path into a fragment and the request went wherever the tenant
+// pointed it. That is the half of the SSRF that the dial guard cannot see,
+// because the address it inspects is perfectly legitimate.
 func managementURL(device DeviceInfo) (string, error) {
-	if device.ManagementURL != "" {
-		return device.ManagementURL, nil
+	if strings.TrimSpace(device.ManagementURL) != "" {
+		return canonicalManagementURL(device.ManagementURL)
 	}
 	host, err := deviceHost(device)
 	if err != nil {
 		return "", err
 	}
 	return "https://" + host, nil
+}
+
+// maxManagementURL bounds the stored management URL. Past this it is not an
+// appliance address.
+const maxManagementURL = 2000
+
+// canonicalManagementURL turns an operator-supplied management URL into the
+// only shape a collector may concatenate onto: scheme, host, and an optional
+// path prefix. It returns an error rather than a repaired value when the input
+// is not that shape.
+//
+// It is a canonicalizer and not merely a checker on purpose. Rejecting a
+// fragment and then returning the original string would leave the next reader
+// to notice that `u.Fragment` and `strings.Contains(raw, "#")` disagree about
+// percent-encoded input; rebuilding the string from the parsed parts means the
+// query and fragment are structurally gone whatever spelling they arrived in.
+//
+// What it does NOT do is judge the ADDRESS. Interrogating an appliance at
+// 10.0.0.5 is the product; the address policy belongs at dial time, where the
+// concrete IP is known and DNS rebinding cannot walk past it — see
+// [newDeviceHTTPClient].
+func canonicalManagementURL(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", ErrNoTarget
+	}
+	if len(s) > maxManagementURL {
+		return "", fmt.Errorf("management URL is %d bytes, which is not an appliance address", len(s))
+	}
+	if strings.Contains(s, "#") {
+		// Checked on the RAW string, before parsing, because a BARE trailing `#`
+		// parses to an empty u.Fragment and would pass a check that only asked
+		// url.Parse. It is the exact shape the audit reproduced with: the
+		// fragment is empty, the URL looks ordinary, and every collector's
+		// `baseURL + "/api/…"` concatenation lands the whole appended path
+		// inside a fragment that is never sent — so the request goes to `/`,
+		// or to whatever the tenant wrote after the `#`.
+		//
+		// Refused rather than stripped: a `#` in a management URL is never
+		// something an operator meant, and silently rewriting someone's input
+		// is how a wrong device gets interrogated with no one the wiser. A
+		// percent-encoded %23 is an ordinary path character and is unaffected.
+		return "", fmt.Errorf("management URL %q must not contain a fragment marker", s)
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", fmt.Errorf("management URL %q does not parse: %w", s, err)
+	}
+	if u.Opaque != "" {
+		// `https:10.0.0.5/api` — a scheme with no authority. It parses, and it
+		// is not an address.
+		return "", fmt.Errorf("management URL %q names no host", s)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		// file://, gopher://, and the scheme-relative `//host/path` that parses
+		// with an empty scheme. An appliance management interface speaks HTTP.
+		return "", fmt.Errorf("management URL %q must be http or https", s)
+	}
+	if u.User != nil {
+		// `https://user:pass@host` puts a credential somewhere nothing redacts,
+		// and `https://real.host@evil.example/` is the oldest way to make a URL
+		// read as one host and resolve as another.
+		return "", fmt.Errorf("management URL %q must not carry userinfo", s)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("management URL %q names no host", s)
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("management URL %q must not carry a query string", s)
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("management URL %q must not carry a fragment", s)
+	}
+	path := strings.TrimRight(u.EscapedPath(), "/")
+	if strings.Contains(path, "..") {
+		// A path prefix is a prefix, not a traversal.
+		return "", fmt.Errorf("management URL %q must not contain a relative path segment", s)
+	}
+	return scheme + "://" + u.Host + path, nil
 }
 
 // deviceHost resolves the bare host (no scheme, no port) for a device, applying

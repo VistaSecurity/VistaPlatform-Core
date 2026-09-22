@@ -191,6 +191,10 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			devices.DELETE("/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.DeleteDevice)
 			devices.POST("/:id/interrogate", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.InterrogateDevice)
 			devices.POST("/:id/test-connection", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), deviceHandlers.TestConnection)
+			// Clearing the pinned SSH host key accepts a NEW identity for a
+			// device, so it sits with the destructive routes at
+			// discovery.manage rather than with the reads (H7).
+			devices.DELETE("/:id/ssh-host-key", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.ResetDeviceHostKeyPin)
 			devices.GET("/:id/health", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), healthHandlers.GetDeviceHealth)
 			devices.GET("/:id/health/timeline", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), healthHandlers.GetDeviceHealthTimeline)
 		}

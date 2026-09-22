@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 )
 
@@ -64,20 +65,52 @@ func (h *Handler) UploadPcap(c *gin.Context) {
 		return
 	}
 
+	// The size ceiling is applied BEFORE the body is read, not after.
+	//
+	// It used to sit below c.FormFile, comparing fileHeader.Size to the limit
+	// — by which point gin had already received the entire upload, buffered
+	// the first 32 MiB of it in heap and spilled the rest to the pcap-uploads
+	// volume. A check downstream of the buffering it is meant to prevent
+	// cannot prevent anything; it only decides whether to delete what was
+	// already accepted.
+	//
+	// The limit is the operator's `pcap_max_upload_size_mb` platform setting
+	// (default 500), unchanged — this is about WHEN it is enforced, not what
+	// it is. Two mechanisms, for the same reason as the shared MaxBody
+	// middleware: a declared Content-Length over the cap is refused before a
+	// byte is read, and MaxBytesReader stops the read at the ceiling for a
+	// chunked body or a lying header. The multipart envelope (boundaries, part
+	// headers) is a few hundred bytes on top of the file, so the transport
+	// ceiling carries a small allowance to keep a file of exactly the
+	// documented maximum acceptable.
+	maxSizeMB, _ := h.pcapService.GetMaxUploadSize()
+	maxSizeBytes := int64(maxSizeMB) * 1024 * 1024
+	tooLarge := fmt.Sprintf("File size exceeds maximum allowed size of %d MB", maxSizeMB)
+	const multipartEnvelopeAllowance = 1 << 16
+	if c.Request.ContentLength > maxSizeBytes+multipartEnvelopeAllowance {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": tooLarge})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSizeBytes+multipartEnvelopeAllowance)
+
 	// Get the uploaded file
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		// An over-cap upload fails HERE, while FormFile is still reading the
+		// envelope, so it must not be reported as "no file provided" — the
+		// caller's form was well-formed, it was just too big.
+		if sharedapi.RequestBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": tooLarge})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided in 'file' field"})
 		return
 	}
 
-	// Check file size against platform setting
-	maxSizeMB, _ := h.pcapService.GetMaxUploadSize()
-	maxSizeBytes := int64(maxSizeMB) * 1024 * 1024
+	// The declared part size is still checked, because the transport ceiling
+	// carries the envelope allowance and this one is the exact number.
 	if fileHeader.Size > maxSizeBytes {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-			"error": fmt.Sprintf("File size exceeds maximum allowed size of %d MB", maxSizeMB),
-		})
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": tooLarge})
 		return
 	}
 

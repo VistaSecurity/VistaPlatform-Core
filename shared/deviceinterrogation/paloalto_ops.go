@@ -127,7 +127,10 @@ type panLLDPInterface struct {
 // was not: an op command is XML, and `<show><arp><entry name='all'/></arp>` in
 // a bare query string is neither valid nor parseable by the device.
 func (c *panClient) panOpCommand(ctx context.Context, cmd string) (string, error) {
-	apiURL := fmt.Sprintf("%s/api/?type=op&cmd=%s&key=%s", c.baseURL, url.QueryEscape(cmd), c.apiKey)
+	// No `&key=`: the API key travels in the X-PAN-KEY header that apiRequest
+	// sets. See the note there — this URL is what a *url.Error prints, and that
+	// string is persisted and served.
+	apiURL := fmt.Sprintf("%s/api/?type=op&cmd=%s", c.baseURL, url.QueryEscape(cmd))
 	body, err := c.apiRequest(ctx, "GET", apiURL)
 	if err != nil {
 		return "", err

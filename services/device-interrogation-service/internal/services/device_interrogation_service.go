@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -12,7 +13,10 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/findings/producer"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
+	"github.com/vistasecurity/vistaplatform/shared/sshtrust"
 )
 
 // DeviceInterrogationService handles device interrogation logic. The vendor and
@@ -163,10 +167,27 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 
 	result, err := interrogator.Interrogate(ctx, coreDevice, coreCreds)
 	if err != nil {
+		// A changed SSH host key is not a transport failure, it is security
+		// signal: the credential was NOT sent, and something either replaced
+		// the device or is sitting in front of it. Raise a finding an operator
+		// can act on before reporting the job failed.
+		var mismatch *sshtrust.MismatchError
+		if errors.As(err, &mismatch) {
+			s.recordHostKeyMismatch(ctx, tenantID, deviceID, device, mismatch)
+		}
 		s.updateDeviceError(ctx, tenantID, deviceID, err.Error())
 		markJobFailed(ctx, s.discoveryIntegration, jobID, err.Error())
 		return uuid.Nil, 0, fmt.Errorf("device interrogation failed: %w", err)
 	}
+
+	// First contact: store the key we were shown so the NEXT interrogation has
+	// something to compare against. Without this write the comparison above has
+	// nothing to read and trust-on-first-use is a check that cannot fail — which
+	// is exactly what it was.
+	s.pinObservedHostKey(ctx, tenantID, deviceID, device, result)
+	// ...and close any host-key-changed finding this device was carrying: the
+	// handshake completing is proof the condition is gone.
+	s.resolveHostKeyMismatch(ctx, tenantID, deviceID)
 
 	// The sensor_discoveries batch is keyed by this run's discovery job, exactly
 	// as ProcessJobResults keys its own — so a job's rows are identifiable and
@@ -303,6 +324,12 @@ func buildCoreDeviceInfo(device *models.Device, baseURL string) di.DeviceInfo {
 	}
 	if device.IPAddress != nil {
 		d.IPAddress = *device.IPAddress
+	}
+	// The pinned host key. Empty means first contact; a set value is compared
+	// during key exchange and fails the connection closed before the password
+	// is offered (shared/sshtrust).
+	if device.SSHHostKeyFingerprint != nil {
+		d.SSHHostKeyFingerprint = *device.SSHHostKeyFingerprint
 	}
 	if device.Metadata != nil {
 		if siteID, ok := device.Metadata["site_id"].(string); ok {
@@ -441,7 +468,8 @@ func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, as
 		       a.hostname, host(a.primary_address),
 		       m.management_url, m.tls_insecure_skip_verify, m.connection_status,
 		       a.metadata, a.tags, a.created_at, a.updated_at,
-		       c.credential_id, c.username, c.password_enc
+		       c.credential_id, c.username, c.password_enc,
+		       m.ssh_host_key_fingerprint, m.ssh_host_key_type, m.ssh_host_key_pinned_at
 		FROM public.assets a
 		JOIN public.asset_management m ON m.tenant_id = a.tenant_id AND m.asset_id = a.id
 		LEFT JOIN public.asset_credentials c ON c.tenant_id = a.tenant_id AND c.asset_id = a.id
@@ -452,6 +480,8 @@ func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, as
 	var metadataJSON, tagsJSON []byte
 	var deviceType, hostname, ipAddress, managementURL sql.NullString
 	var credentialID, username, password sql.NullString
+	var sshHostKeyFingerprint, sshHostKeyType sql.NullString
+	var sshHostKeyPinnedAt sql.NullTime
 
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, query, assetID, tenantID).Scan(
@@ -460,6 +490,7 @@ func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, as
 			&managementURL, &device.TLSInsecureSkipVerify, &device.ConnectionStatus,
 			&metadataJSON, &tagsJSON, &device.CreatedAt, &device.UpdatedAt,
 			&credentialID, &username, &password,
+			&sshHostKeyFingerprint, &sshHostKeyType, &sshHostKeyPinnedAt,
 		)
 	})
 	if err != nil {
@@ -486,6 +517,15 @@ func (s *DeviceInterrogationService) getDevice(ctx context.Context, tenantID, as
 	}
 	if password.Valid {
 		device.Password = &password.String
+	}
+	if sshHostKeyFingerprint.Valid && sshHostKeyFingerprint.String != "" {
+		device.SSHHostKeyFingerprint = &sshHostKeyFingerprint.String
+	}
+	if sshHostKeyType.Valid && sshHostKeyType.String != "" {
+		device.SSHHostKeyType = &sshHostKeyType.String
+	}
+	if sshHostKeyPinnedAt.Valid {
+		device.SSHHostKeyPinnedAt = &sshHostKeyPinnedAt.Time
 	}
 
 	var meta map[string]interface{}
@@ -647,6 +687,10 @@ func (s *DeviceInterrogationService) persistObservations(ctx context.Context, te
 // asset_management row.
 func (s *DeviceInterrogationService) updateDeviceError(ctx context.Context, tenantID, assetID uuid.UUID, errorMsg string) {
 	status := "error"
+	// asset_management.interrogation_error is served on the device detail, and
+	// like device_jobs.error_message it is free text built from whatever failed.
+	// See redactErrorMessage.
+	errorMsg = redactErrorMessage(errorMsg)
 	if err := upsertManagementOwnTx(ctx, s.db, tenantID, assetID, managementUpsert{
 		ConnectionStatus:   &status,
 		InterrogationError: &errorMsg,
@@ -726,4 +770,143 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 	}
 	// One database finding per interrogation.
 	return jobID, 1, nil
+}
+
+// ---------------------------------------------------------------------------
+// SSH host-key pinning (H7)
+// ---------------------------------------------------------------------------
+
+// hostKeyFingerprintFromResult returns the SSH host key an interrogation
+// observed, and its algorithm.
+//
+// It reads the SSH asset every SSH-borne interrogator appends
+// (ciscoSSHClient.collectSSHInfo). A vendor client that reached the device over
+// HTTPS has no SSH asset and therefore nothing to pin — which is correct, not a
+// gap: there is no SSH session to protect.
+func hostKeyFingerprintFromResult(result *di.InterrogateResult) (fingerprint, keyType string) {
+	if result == nil {
+		return "", ""
+	}
+	for i := range result.Assets {
+		info := result.Assets[i].SSHInfo
+		if info != nil && info.HostKeyFingerprint != "" {
+			return info.HostKeyFingerprint, info.HostKeyType
+		}
+	}
+	return "", ""
+}
+
+// pinObservedHostKey stores the host key a successful interrogation was shown,
+// when the device has none pinned yet.
+//
+// It deliberately does NOT overwrite an existing pin. A successful
+// interrogation against a pinned device already proves the key matched — the
+// handshake would have failed otherwise — and a blind overwrite here is how a
+// pin quietly re-pins itself to whatever answered, which is the failure mode
+// this whole change exists to remove. Re-pinning is an operator action.
+func (s *DeviceInterrogationService) pinObservedHostKey(
+	ctx context.Context,
+	tenantID, assetID uuid.UUID,
+	device *models.Device,
+	result *di.InterrogateResult,
+) {
+	if device.SSHHostKeyFingerprint != nil && *device.SSHHostKeyFingerprint != "" {
+		return
+	}
+	fingerprint, keyType := hostKeyFingerprintFromResult(result)
+	if fingerprint == "" {
+		return
+	}
+	if _, err := pinSSHHostKeyIfUnset(ctx, s.db, tenantID, assetID, fingerprint, keyType); err != nil {
+		// Logged rather than fatal: the interrogation itself succeeded and its
+		// results are worth keeping. The cost of a failed pin is that the next
+		// run enrols again, not a wrong answer.
+		log.Printf("device-interrogation: failed to pin ssh host key for asset %s: %v", assetID, err)
+	}
+}
+
+// recordHostKeyMismatch raises the finding for a device whose SSH host key
+// changed.
+//
+// Best-effort by design: the caller is already on its way out with the error
+// that says the same thing, and failing to write the finding must not turn a
+// refused connection into a crash.
+func (s *DeviceInterrogationService) recordHostKeyMismatch(
+	ctx context.Context,
+	tenantID, assetID uuid.UUID,
+	device *models.Device,
+	mismatch *sshtrust.MismatchError,
+) {
+	w, err := producer.New("drift")
+	if err != nil {
+		log.Printf("device-interrogation: host-key finding writer: %v", err)
+		return
+	}
+
+	kind, ok := findings.Get("drift", "host_key_changed")
+	if !ok {
+		log.Printf("device-interrogation: finding kind drift/host_key_changed is not registered")
+		return
+	}
+
+	label := device.DeviceType
+	switch {
+	case device.Hostname != nil && *device.Hostname != "":
+		label = *device.Hostname
+	case device.IPAddress != nil && *device.IPAddress != "":
+		label = *device.IPAddress
+	}
+
+	f := producer.Finding{
+		Kind:         "host_key_changed",
+		Subject:      producer.Subject{Type: "asset", ID: assetID},
+		SubjectLabel: label,
+		Severity:     kind.DefaultSeverity,
+		Score:        kind.Score,
+		Summary: fmt.Sprintf("%s presented a different SSH host key (%s)",
+			label, mismatch.Observed),
+		Evidence: map[string]any{
+			// Fingerprints are public key material, not secrets — they are the
+			// citation. The credential is not here, and did not reach the wire.
+			"pinned_fingerprint":    mismatch.Expected,
+			"presented_fingerprint": mismatch.Observed,
+			"host_key_type":         mismatch.KeyType,
+			"device_address":        mismatch.Host,
+			"credential_sent":       false,
+		},
+	}
+
+	if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		_, upsertErr := w.Upsert(ctx, tx, tenantID, f)
+		return upsertErr
+	}); err != nil {
+		log.Printf("device-interrogation: failed to record host-key-changed finding for asset %s: %v", assetID, err)
+	}
+}
+
+// resolveHostKeyMismatch closes an open host-key-changed finding after an
+// interrogation that succeeded.
+//
+// A successful interrogation is proof the condition is gone: the handshake only
+// completes when the presented key matches the pin, or when there is no pin
+// because an operator deliberately cleared it and this contact enrolled the new
+// one. Either way the device's identity is settled again.
+//
+// This is the kind's ONLY resolver. The baseline drift pass in
+// inventory-service deliberately does not sweep it (driftKindsNotFromBaseline)
+// because it has no host-key baseline to evaluate against, so without this call
+// the finding would stay open forever after a legitimate device replacement.
+func (s *DeviceInterrogationService) resolveHostKeyMismatch(ctx context.Context, tenantID, assetID uuid.UUID) {
+	w, err := producer.New("drift")
+	if err != nil {
+		log.Printf("device-interrogation: host-key finding writer: %v", err)
+		return
+	}
+	if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		_, resolveErr := w.Resolve(ctx, tx, tenantID, "host_key_changed",
+			producer.Subject{Type: "asset", ID: assetID})
+		return resolveErr
+	}); err != nil {
+		log.Printf("device-interrogation: failed to resolve host-key-changed finding for asset %s: %v", assetID, err)
+	}
 }

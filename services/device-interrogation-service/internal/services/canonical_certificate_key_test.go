@@ -72,22 +72,12 @@ var certKeyAllowlist = map[string]string{
 	"total_certificates":                 "a COUNT field in the certificate statistics response",
 	"crypto_implementation_certificates": "a database TABLE name, in the merge-preview table list",
 
-	// Known debt, deliberately not fixed here — see the notes on each.
-	//
-	// The sensor's passive TLS parser flattens the leaf certificate into
-	// cert_* keys instead of emitting a canonical "certificates" array. It
-	// predates this guard, the ingest path reads the flat spelling, and
-	// changing it is a sensor-protocol change with its own blast radius. It is
-	// listed so that it is a KNOWN exception rather than an unnoticed one.
-	"cert_fingerprint_sha256":  "sensor passive TLS parser, pre-existing flat form (packet_capture.go)",
-	"cert_subject":             "sensor passive TLS parser + external_connections column name",
-	"cert_issuer":              "sensor passive TLS parser, pre-existing flat form",
-	"cert_not_before":          "sensor passive TLS parser, pre-existing flat form",
-	"cert_not_after":           "sensor passive TLS parser, pre-existing flat form",
-	"cert_key_algorithm":       "sensor passive TLS parser, pre-existing flat form",
-	"cert_signature_algorithm": "sensor passive TLS parser, pre-existing flat form",
-	"cert_public_key_size":     "sensor passive TLS parser, pre-existing flat form",
-	"cert_san":                 "sensor passive TLS parser, pre-existing flat form",
+	// The sensor's passive TLS parser used to flatten the leaf certificate
+	// into cert_* keys here. It now emits the canonical array, and the nine
+	// exceptions that excused it are gone — so the flat spelling is a
+	// violation everywhere again. Sensors already in the field still SEND it;
+	// processor.upgradeLegacyFlatCertificate reads it for them, and assembles
+	// the keys from parts so that a reader is not mistaken for a producer.
 }
 
 func TestCanonicalCertificateMetadataKey(t *testing.T) {

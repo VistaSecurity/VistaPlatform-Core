@@ -32,6 +32,31 @@ type detectedImage struct {
 // raster types (PNG / JPEG / GIF / ICO / WEBP); notably SVG, HTML and scripts
 // have no image magic and are rejected. Callers must additionally check the
 // returned MIME against the per-endpoint allowlist.
+// MaxImageUploadBytes is the ceiling for every image upload in the platform —
+// a user avatar, a tenant logo, a tenant favicon, a platform-branding asset.
+//
+// 5 MiB is the number the handlers already advertised; what changes is that it
+// is now enforced before the body is buffered rather than after. All four
+// handlers advertised the same figure and each hard-coded its own `5*1024*1024`,
+// so raising one and forgetting another was one edit away. One constant.
+//
+// It is a generous ceiling for the job: a 512×512 PNG logo is tens of
+// kilobytes, and nothing in the product renders an image larger than a few
+// hundred. Cutting it would be safe; leaving room is what keeps a designer's
+// unoptimised export working.
+const MaxImageUploadBytes = 5 * 1024 * 1024
+
+// MaxImageUploadRequestBytes is the TRANSPORT ceiling for those uploads: the
+// image cap plus an allowance for the multipart envelope (boundaries, part
+// headers, and the small text fields these forms carry alongside the file, such
+// as `type`). Without the allowance an image of exactly MaxImageUploadBytes
+// would be refused by the transport before the handler could accept it —
+// the same off-by-an-envelope the SBOM upload documents.
+const MaxImageUploadRequestBytes = MaxImageUploadBytes + (1 << 16)
+
+// ImageTooLargeMessage is what a refused uploader reads.
+const ImageTooLargeMessage = "the upload exceeds the 5 MB limit"
+
 func sniffImageType(fh *multipart.FileHeader) (detectedImage, bool) {
 	f, err := fh.Open()
 	if err != nil {

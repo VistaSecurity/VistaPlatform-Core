@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -100,6 +101,33 @@ func rotateAgentCertificateHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 		var req rotateAgentCertificateRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+
+		// Identity-change guard (H4). Rotation mints a new, legitimately
+		// CA-signed certificate for this agent and supersedes the old one, so it
+		// must be at least as strong as the identity it rotates. AgentAuth alone
+		// is NOT sufficient: with AGENT_MTLS_REQUIRED off it accepts the path id
+		// (or X-Agent-ID header) as the entire authenticator, and neither is a
+		// secret. This check is unconditional — it does not consult
+		// AGENT_MTLS_REQUIRED — so rotation is refused rather than granted when
+		// no proof can be presented. Mirrors sensor-manager's sensor-side guard.
+		if err := certService.VerifyPresentedIdentity(tenantID, agentID, c.Request.TLS); err != nil {
+			log.Printf("rotateAgentCertificate: refused for agent %s, identity not proven: %v", agentID, err)
+			if errors.Is(err, certificates.ErrClientCertificateRequired) {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"error": "Certificate rotation requires the agent's current client certificate",
+					"detail": "This request presented no client certificate, so it cannot prove it already holds the identity it is asking to re-issue. " +
+						"The agent must reach device-interrogation-service over the agent mTLS passthrough listener with its current certificate. " +
+						"On Kubernetes set agentMtls.enabled=true (with agentMtls.backends.device-interrogation-service.dnsName) in the Helm chart. " +
+						"An agent that no longer holds a valid certificate must be re-enrolled with a registration key.",
+				})
+				return
+			}
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":  "Presented certificate is not this agent's current certificate",
+				"detail": "Rotation is only granted to the holder of the agent's active certificate. Re-enroll the agent with a registration key if its certificate was revoked, superseded or lost.",
+			})
 			return
 		}
 

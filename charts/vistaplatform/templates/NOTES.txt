@@ -101,6 +101,58 @@ ENCRYPTED INTERNAL TRANSPORT IS ON (serviceMtls.enabled=true — default since #
     datastores.nats.tls.enabled=false
 {{- end }}
 
+{{/*
+  Read through `default dict` for the same reason as `verification` below: on a
+  release installed before this key existed, `helm upgrade --reuse-values`
+  carries the old values forward and .Values.agentMtls is nil — a nil-pointer
+  here would fail the whole upgrade, not just the message.
+*/}}
+{{- $agentMtls := .Values.agentMtls | default dict }}
+{{- $agentPort := $agentMtls.port | default 8444 }}
+{{- if $agentMtls.enabled }}
+
+AGENT + SENSOR AUTHENTICATION IS ON (agentMtls.enabled=true — now the DEFAULT)
+
+  device-interrogation-service and sensor-manager FAIL CLOSED: every outbound
+  agent/sensor call (jobs, results, heartbeat, discovery submission, command
+  poll, certificate rotation) must present the client certificate issued at
+  registration. Before this became the default the chart set
+  AGENT_MTLS_REQUIRED="false" and a UUID in the URL was the only credential.
+
+  ⚠️ EXISTING AGENTS AND SENSORS MUST BE MIGRATED. Anything still calling the
+  edge host, or holding no certificate, is rejected with 401 after this upgrade:
+
+    - Re-point each agent/sensor at the passthrough host below (they persist it
+      automatically after a re-registration), or re-enroll it with a
+      registration key.
+    - Certificate rotation additionally requires the CURRENT certificate in
+      every mode — a lost certificate cannot be rotated, only re-enrolled.
+
+  Passthrough hosts advertised to agents/sensors (each must resolve to a
+  cluster-Traefik TLS-PASSTHROUGH entrypoint on port {{ $agentPort }}, which this chart
+  does NOT create):
+{{- range $svc, $cfg := ($agentMtls.backends | default dict) }}
+{{- if and $cfg $cfg.dnsName }}
+    - {{ $svc }}: https://{{ $cfg.dnsName }}:{{ $agentPort }}
+{{- end }}
+{{- end }}
+
+  To deliberately keep the previous, UNAUTHENTICATED behavior:
+    agentMtls.enabled=false
+{{- else }}
+
+⚠️  AGENT + SENSOR AUTHENTICATION IS OFF (agentMtls.enabled=false)
+
+  You have opted out of the secure default. device-interrogation-service and
+  sensor-manager accept any caller that knows an agent/sensor UUID: job polling,
+  result submission, heartbeats and discovery submission are UNAUTHENTICATED on
+  the pod network. Certificate rotation is refused in this mode, because it
+  requires the caller's current client certificate.
+
+  Re-enable with agentMtls.enabled=true plus a dnsName per backend — see
+  docsv4/core/operate/security/service-mesh-mtls.md.
+{{- end }}
+
 Verify chart authenticity (run on a machine with cosign installed):
 {{/*
   Read through `default dict`, not directly. `helm upgrade --reuse-values`
@@ -125,7 +177,7 @@ Verify chart authenticity (run on a machine with cosign installed):
   the release workflow named in the regexp above.
 
 For day-2 operations (upgrade, backup, support bundle), see the customer
-deployment guide at docsv4/core/operate/deployment/rke2-v1/deployment-guide.md.
+deployment guide at docsv4/core/operate/security/service-mesh-mtls.md.
 
 {{- if .Release.IsUpgrade }}
 
@@ -170,7 +222,7 @@ UPGRADE NOTES
 
   - For other edge-case upgrade scenarios (env-shape migrations, RWO PVC
     deadlocks), see "Upgrade" in the deployment guide:
-    docsv4/core/operate/deployment/rke2-v1/deployment-guide.md
+    docsv4/core/operate/security/service-mesh-mtls.md
 {{- if .Values.serviceMtls.enabled }}
 
   - ENCRYPTED INTERNAL TRANSPORT is now ON by default (#965). If you are

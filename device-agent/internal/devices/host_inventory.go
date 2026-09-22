@@ -172,6 +172,10 @@ func buildRemoteRunner(transport hostinventory.Transport, params, creds map[stri
 		PrivateKeyPEM: credString(creds, "private_key"),
 		Passphrase:    credString(creds, "passphrase"),
 	}
+	// The pinned host key, same parameter name the interrogation path reads.
+	if v, ok := params["ssh_host_key_fingerprint"].(string); ok {
+		cfg.PinnedHostKeyFingerprint = v
+	}
 	// Per-target opt-out of host-key verification, spelled the same way every
 	// other interrogator spells it so an operator learns it once.
 	if v, ok := params["insecure_skip_verify"].(bool); ok {

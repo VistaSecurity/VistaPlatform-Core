@@ -43,6 +43,7 @@ const (
 	KindNewClassInSegment         = "new_class_in_segment"
 	KindUnexpectedProtocol        = "unexpected_protocol"
 	KindPortProfileChanged        = "port_profile_changed"
+	KindHostKeyChanged            = "host_key_changed"
 	KindNewIssuer                 = "new_issuer"
 )
 
@@ -433,6 +434,20 @@ var All = []Kind{
 		TitleTemplate:   "{subject}'s listening ports changed ({detail})",
 		Guidance:        "Compare the current listening ports against what this asset is supposed to run, and confirm the change was planned. Ports opening is the signal to chase first, but a port closing unexpectedly can mean a service has failed rather than been removed.",
 		Description:     "The set of listening sockets on an asset differs from its baseline. Ports opening is the signal; ports closing is recorded but scored the same because either direction can mean an unplanned change.",
+	},
+	{
+		Producer:        "drift",
+		Key:             "host_key_changed",
+		SeverityModel:   "fixed",
+		DefaultSeverity: "high",
+		Score:           70,
+		ScoreSource:     "fixed",
+		Rungs:           nil,
+		SubjectTypes:    []string{"asset"},
+		FeedsRisk:       true,
+		TitleTemplate:   "{subject} presented a different SSH host key ({detail})",
+		Guidance:        "Confirm the device's SSH host key changed for a reason you know about — it was replaced, rebuilt, or its key was rotated. If it was, re-pin the key from the device's page so interrogation can resume; the platform will not authenticate against an unrecognised key until you do. If nothing explains it, treat it as an interception of the management session and change the device's credentials before re-pinning, because the previous ones may have been offered to whatever answered.",
+		Description:     "The SSH host key a managed device presented differs from the one pinned when the platform first contacted it. Interrogation was refused before any credential was sent. A replaced device and an on-path attacker look identical from here, which is why this fails closed rather than re-pinning itself.",
 	},
 	{
 		Producer:        "drift",

@@ -134,7 +134,11 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     'ENV=development',
     'GIN_MODE=release',
     'DATABASE_URL=postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=disable',
-    'JWT_SECRET=dev-secret-key-change-in-production',
+    // Indirection, not a literal: .env holds the rotated value, and a literal
+    // here would silently override it with the published placeholder for every
+    // service in the generated compose file. `:?` matches docker-compose.yml's
+    // convention and fails loudly rather than starting on a weak secret.
+    'JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}',
     'LOG_LEVEL=debug',
     `CORS_ORIGINS=\${DEV_CORS_ORIGINS:-http://localhost:\${WEB_UI_HOST_PORT:-${webUIPort}},http://localhost:\${ADMIN_UI_HOST_PORT:-${adminUIPort}}}`,
     // Version envs surfaced on /health. In dev the image isn't tagged with
@@ -152,7 +156,7 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
   // meant HMAC clients like compliance-engine silently sent unsigned calls and
   // got 401s in dev compose, matching the K8s bug.)
   if ((service.required_secrets || []).includes('INTERNAL_AUTH_SECRET')) {
-    baseEnv.push('INTERNAL_AUTH_SECRET=dev-internal-auth-secret-change-in-production');
+    baseEnv.push('INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}');
   }
   
   // Add service-specific environment variables
@@ -207,7 +211,7 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
   if (['inventory-service', 'sensor-manager', 'cbom-service'].includes(service.name)) {
     baseEnv.push(
       'INFLUXDB_URL=http://influxdb:8086',
-      'INFLUXDB_TOKEN=dev-token-1234567890',
+      'INFLUXDB_TOKEN=${INFLUXDB_TOKEN:?Set INFLUXDB_TOKEN in .env}',
       'INFLUXDB_ORG=crypto-inventory',
       'INFLUXDB_BUCKET=metrics'
     );

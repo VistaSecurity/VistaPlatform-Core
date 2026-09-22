@@ -268,7 +268,7 @@ database layer directly. */}}
 {{- end -}}
 {{- end -}}
 {{- if eq $withDNS 0 -}}
-{{- fail (printf "agentMtls.enabled=true but no agentMtls.backends entry has a dnsName (found: %s). Set agentMtls.backends.<service>.dnsName so registration can advertise a TLS-passthrough control-plane URL." (keys $agentBackends | sortAlpha | join ", ")) -}}
+{{- fail (printf "agentMtls.enabled is true (the DEFAULT since agent/sensor authentication became secure-by-default) but no agentMtls.backends entry has a dnsName (found: %s).\n\nAgent and sensor authentication is fail-closed: without a TLS-passthrough host, agents and sensors cannot present their client certificate and every outbound call would 401.\n\nChoose one:\n  1. RECOMMENDED — set a passthrough hostname per backend, e.g.\n       --set agentMtls.backends.sensor-manager.dnsName=sensors.example.com \\\n       --set agentMtls.backends.device-interrogation-service.dnsName=agents.example.com\n     Each must resolve to a cluster-Traefik TLS-PASSTHROUGH entrypoint on port %v (the chart does not create that entrypoint), and existing agents/sensors must be re-enrolled or re-pointed at it.\n  2. EXPLICIT OPT-OUT — keep the previous, UNAUTHENTICATED behavior with\n       --set agentMtls.enabled=false\n     Agents and sensors then authenticate by their UUID alone; certificate rotation stays refused because it requires a client certificate in every mode.\n\nMigration steps: docsv4/core/operate/security/service-mesh-mtls.md (Agent and sensor mTLS)." (keys $agentBackends | sortAlpha | join ", ") .Values.agentMtls.port) -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.serviceMtls.enabled -}}

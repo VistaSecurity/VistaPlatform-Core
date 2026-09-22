@@ -2,7 +2,6 @@ package deviceinterrogation
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 )
 
 // PaloAltoInterrogator interrogates Palo Alto Networks PAN-OS appliances over
@@ -85,15 +83,10 @@ type panClient struct {
 
 func newPanClient(baseURL, username, password string, insecureSkipVerify bool) *panClient {
 	return &panClient{
-		baseURL:  baseURL,
-		username: username,
-		password: password,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec // per-device opt-in for self-signed appliance mgmt certs
-			},
-			Timeout: 30 * time.Second,
-		},
+		baseURL:    baseURL,
+		username:   username,
+		password:   password,
+		httpClient: newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
 	}
 }
 
@@ -312,8 +305,7 @@ func (c *panClient) getAPIKey(ctx context.Context) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API key request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return httpStatusError("API key request", resp.StatusCode)
 	}
 
 	var panosResp panResponse
@@ -386,7 +378,7 @@ func (c *panClient) getLLDPNeighbors(ctx context.Context) (string, error) {
 // getSSLDecryptProfiles retrieves SSL-decrypt profiles.
 func (c *panClient) getSSLDecryptProfiles(ctx context.Context) ([]panSSLDecryptEntry, error) {
 	xpath := "/config/devices/entry/network/profiles/ssl-decrypt"
-	apiURL := fmt.Sprintf("%s/api/?type=config&action=get&xpath=%s&key=%s", c.baseURL, url.QueryEscape(xpath), c.apiKey)
+	apiURL := fmt.Sprintf("%s/api/?type=config&action=get&xpath=%s", c.baseURL, url.QueryEscape(xpath))
 
 	resp, err := c.apiRequest(ctx, "GET", apiURL)
 	if err != nil {
@@ -418,7 +410,7 @@ func (c *panClient) getSSLDecryptProfiles(ctx context.Context) ([]panSSLDecryptE
 // getSecurityRules retrieves security rules with SSL settings.
 func (c *panClient) getSecurityRules(ctx context.Context) ([]panRuleEntry, error) {
 	xpath := "/config/devices/entry/vsys/entry/rulebase/security/rules"
-	apiURL := fmt.Sprintf("%s/api/?type=config&action=get&xpath=%s&key=%s", c.baseURL, url.QueryEscape(xpath), c.apiKey)
+	apiURL := fmt.Sprintf("%s/api/?type=config&action=get&xpath=%s", c.baseURL, url.QueryEscape(xpath))
 
 	resp, err := c.apiRequest(ctx, "GET", apiURL)
 	if err != nil {
@@ -449,12 +441,29 @@ func (c *panClient) getSecurityRules(ctx context.Context) ([]panRuleEntry, error
 	return rules, nil
 }
 
+// panAPIKeyHeader is the PAN-OS XML API's header form of the API key, accepted
+// since PAN-OS 9.0 and equivalent to the `key=` query parameter.
+const panAPIKeyHeader = "X-PAN-KEY"
+
 // apiRequest makes an authenticated API request to the device and returns the
 // raw XML body.
+//
+// The API key travels in [panAPIKeyHeader], never in the query string. PAN-OS
+// accepts both, and the difference is not cosmetic: Go stringifies a transport
+// failure as a *url.Error carrying the WHOLE request URL, and that string is
+// persisted as device_jobs.error_message and as the device's
+// interrogation_error — both served to tenant API clients, and error_message is
+// the one field the job-results projection never redacts. A firewall that
+// stopped answering mid-interrogation therefore published a LIVE PAN-OS API
+// key. It is now not in the URL to begin with; redact.Text at the persist sites
+// is the backstop for the next vendor nobody has checked.
 func (c *panClient) apiRequest(ctx context.Context, method, apiURL string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, method, apiURL, nil)
 	if err != nil {
 		return "", err
+	}
+	if c.apiKey != "" {
+		req.Header.Set(panAPIKeyHeader, c.apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -464,8 +473,7 @@ func (c *panClient) apiRequest(ctx context.Context, method, apiURL string) (stri
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", httpStatusError("API request", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)

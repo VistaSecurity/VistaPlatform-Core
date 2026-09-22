@@ -10,7 +10,7 @@ import { SpecPendingPage, AccessNotice } from './spec-pending';
 import { SPage, SCard, StateNote } from './kit';
 import { OrgOverviewPage, OrgBrandingPage } from './pages-org';
 import { MembersPage, RolesPage, SecuritySsoPage } from './pages-people';
-import { ScopesPage, FrameworksPage, RetentionPage } from './pages-policies';
+import { ScopesPage, FrameworksPage } from './pages-policies';
 import { CustomPoliciesPage } from './pages-custom-policies';
 import { ClassesPage, IdentificationRulesPage } from './pages-classes';
 import { BillingPage, UsagePage } from './pages-account';
@@ -83,7 +83,6 @@ export function SettingsPage() {
     case 'notification-history': return <NotificationHistoryPage meta={meta} />;
     case 'frameworks': return <FrameworksPage meta={meta} />;
     case 'custom-policies': return <CustomPoliciesPage meta={meta} />;
-    case 'retention': return <RetentionPage meta={meta} />;
     case 'scopes': return <ScopesPage meta={meta} />;
     case 'classes': return <ClassesPage meta={meta} />;
     case 'identification-rules': return <IdentificationRulesPage meta={meta} />;

@@ -8,13 +8,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/sshtrust"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // Runner is how the collector reaches a host. It is the ONLY thing that
@@ -147,20 +146,22 @@ type SSHConfig struct {
 	// KnownHostsPath overrides the default ~/.ssh/known_hosts lookup. Tests set
 	// it; operators do not need to.
 	KnownHostsPath string
-	Timeout        time.Duration
+	// PinnedHostKeyFingerprint is the host key recorded for this target on a
+	// previous run (ssh.FingerprintSHA256 form). When set, a different key
+	// aborts the handshake during key exchange and the credential in Password /
+	// PrivateKeyPEM never reaches the wire. Empty is first contact — the key is
+	// captured into HostKeyFingerprint for the caller to persist.
+	PinnedHostKeyFingerprint string
+	Timeout                  time.Duration
 }
 
 // SSHRunner executes on a remote host over SSH.
 //
-// Host-key handling is the same three tiers the Cisco interrogator uses
-// (shared/deviceinterrogation/cisco.go), for the same reason: a single policy
-// across every SSH client this project ships, and no runtime that silently
-// ignores a host key.
-//
-//   - InsecureSkipHostKeyVerify → ignore (operator opt-in, recorded).
-//   - a usable known_hosts       → strict verification against it.
-//   - otherwise                  → capture-on-first-use: accept, and record the
-//     key fingerprint as evidence.
+// Host-key handling is shared/sshtrust — the same single policy the Cisco
+// interrogator uses, for the same reason: this runner AUTHENTICATES, so a
+// host-key capture that is never compared is a check that cannot fail. A
+// fingerprint pinned on the target record is compared and fails closed; first
+// contact captures one.
 //
 // It is deliberately NOT the transport for Windows. See winrm.go.
 type SSHRunner struct {
@@ -170,9 +171,11 @@ type SSHRunner struct {
 	client *ssh.Client
 
 	// HostKeyFingerprint is the SHA-256 fingerprint of the key we connected
-	// through; HostKeyVerified records how it was trusted ("known_hosts",
-	// "first_use", "skipped").
+	// through; HostKeyType is its algorithm. HostKeyVerified records how it was
+	// trusted — one of the sshtrust.Verification* values ("pinned",
+	// "known_hosts", "first_use", "skipped").
 	HostKeyFingerprint string
+	HostKeyType        string
 	HostKeyVerified    string
 }
 
@@ -191,35 +194,33 @@ func NewSSHRunner(cfg SSHConfig) (*SSHRunner, error) {
 
 	r := &SSHRunner{cfg: cfg}
 
-	var hostKeyCallback ssh.HostKeyCallback
-	switch {
-	case cfg.InsecureSkipHostKeyVerify:
-		hostKeyCallback = ssh.InsecureIgnoreHostKey() //nolint:gosec // operator opt-in, recorded as HostKeyVerified="skipped"
-		r.HostKeyVerified = "skipped"
-	default:
-		if cb, ok := knownHostsCallback(cfg.KnownHostsPath); ok {
-			hostKeyCallback = cb
-			r.HostKeyVerified = "known_hosts"
-		} else {
-			hostKeyCallback = func(_ string, _ net.Addr, key ssh.PublicKey) error {
-				r.HostKeyFingerprint = ssh.FingerprintSHA256(key)
-				return nil
-			}
-			r.HostKeyVerified = "first_use"
-		}
+	address := net.JoinHostPort(cfg.Host, fmt.Sprint(cfg.Port))
+	policy := &sshtrust.Policy{
+		Host:               address,
+		Pinned:             cfg.PinnedHostKeyFingerprint,
+		InsecureSkipVerify: cfg.InsecureSkipHostKeyVerify,
+		KnownHostsPath:     cfg.KnownHostsPath,
 	}
+	hostKeyCallback := policy.Callback()
 
 	auth, err := sshAuthMethods(cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(cfg.Host, fmt.Sprint(cfg.Port)), &ssh.ClientConfig{
+	client, err := ssh.Dial("tcp", address, &ssh.ClientConfig{
 		User:            cfg.User,
 		Auth:            auth,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         cfg.Timeout,
 	})
+
+	// Read the observation back on both paths: a mismatch still has to be able
+	// to say which key turned up.
+	r.HostKeyFingerprint = policy.Fingerprint
+	r.HostKeyType = policy.KeyType
+	r.HostKeyVerified = policy.Verification
+
 	if err != nil {
 		return nil, fmt.Errorf("hostinventory: ssh dial %s: %w", cfg.Host, err)
 	}
@@ -254,27 +255,6 @@ func sshAuthMethods(cfg SSHConfig) ([]ssh.AuthMethod, error) {
 		return nil, errors.New("hostinventory: ssh: no credential supplied")
 	}
 	return methods, nil
-}
-
-// knownHostsCallback returns a strict callback when a usable known_hosts
-// exists, else ok=false so the caller falls back to capture-on-first-use.
-func knownHostsCallback(override string) (ssh.HostKeyCallback, bool) {
-	path := override
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, false
-		}
-		path = filepath.Join(home, ".ssh", "known_hosts")
-	}
-	if _, err := os.Stat(path); err != nil {
-		return nil, false
-	}
-	cb, err := knownhosts.New(path)
-	if err != nil {
-		return nil, false
-	}
-	return cb, true
 }
 
 // Run executes argv on the remote host.

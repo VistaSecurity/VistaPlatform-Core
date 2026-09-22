@@ -129,6 +129,23 @@ func SafeHTTPClientAllowingPrivate(timeout time.Duration) *http.Client {
 	return clientWithGuard(timeout, onPremDialGuard)
 }
 
+// OnPremDialContext is [SafeHTTPClientAllowingPrivate]'s guard as a bare
+// DialContext function, for a caller that must build its own http.Transport
+// rather than take the one above.
+//
+// Device interrogation is that caller: every appliance client sets a per-device
+// TLSClientConfig (InsecureSkipVerify is a per-device opt-in for self-signed
+// management certs), so it cannot use a prebuilt client — but it needs exactly
+// the same address policy. Handing out the guard rather than a second copy of
+// it means widening or narrowing [IsNeverReachable] moves both.
+//
+// The rule it carries is the one that makes an on-premises product possible at
+// all: reaching 10.0.0.5 IS the job, reaching 127.0.0.1 or 169.254.169.254
+// never is.
+func OnPremDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return (&net.Dialer{Timeout: timeout, Control: onPremDialGuard}).DialContext
+}
+
 func clientWithGuard(timeout time.Duration, guard func(string, string, syscall.RawConn) error) *http.Client {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	// NOTE: the transport keeps proxy-from-env, which is the behaviour every

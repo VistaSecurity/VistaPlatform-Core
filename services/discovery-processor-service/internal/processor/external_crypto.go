@@ -63,7 +63,18 @@ type ExternalCryptoDetails struct {
 // An empty value carries no information, so it must not win over one that does.
 // This applies to every envelope key, not just version: cipher_suite and
 // key_size are shadowed by "" and 0 the same way.
+//
+// Flattening is also where the legacy flat certificate shape is folded back
+// into the canonical "certificates" array — this is the one seam BOTH ingest
+// paths pass through (extractCryptoDetails for external connections,
+// batch_processor for asset/certificate ingest), so putting the upgrade here
+// means an un-upgraded sensor is handled identically by both.
 func flattenSensorDiscoveryMetadata(raw map[string]interface{}) map[string]interface{} {
+	return upgradeLegacyFlatCertificate(flattenSensorDiscoveryEnvelope(raw))
+}
+
+// flattenSensorDiscoveryEnvelope performs the envelope merge described above.
+func flattenSensorDiscoveryEnvelope(raw map[string]interface{}) map[string]interface{} {
 	nested, ok := raw["raw_metadata"].(map[string]interface{})
 	if !ok || len(nested) == 0 {
 		return raw
