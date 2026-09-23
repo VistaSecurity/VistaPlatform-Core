@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.1] - 2026-09-22
+## [1.1.0-rc.2] - 2026-09-22
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -22,11 +22,15 @@ in the section below this one.
 
 - **Agent and sensor authentication is now on by default**, and an install that
   has neither set a passthrough hostname per backend nor explicitly opted out
-  will **fail** rather than come up unauthenticated. If you run sensors or
-  discovery agents, set `agentMtls.backends.<svc>.dnsName` for both
-  `sensor-manager` and `device-interrogation-service` before upgrading, and
-  re-point or re-enrol existing agents. If you run neither, set
-  `agentMtls.enabled: false` deliberately. See
+  will **fail** rather than come up unauthenticated. Set
+  `agentMtls.backends.<svc>.dnsName` for **both** `sensor-manager` and
+  `device-interrogation-service` before upgrading, and re-point or re-enrol
+  existing agents. Each hostname must be distinct from the other and from
+  `tls.dnsName`, and must resolve to a cluster-Traefik TLS-passthrough
+  entrypoint on port 8444 that you provision — the chart does not create it.
+  Deleting a backend entry does **not** opt that service out; to opt out, set
+  `agentMtls.enabled: false`. **Development installs need none of this** —
+  docker compose disables agent mTLS explicitly. See
   `docsv4/core/operate/security/service-mesh-mtls.md`.
 - **Certificate rotation now requires the current certificate**, in every mode.
   A lost agent certificate is a re-enrolment, not a renewal.
@@ -153,6 +157,41 @@ in the section below this one.
 - Dependabot no longer ignores `golang.org/x/*`. The stated reason — that those
   releases require Go 1.27 — was not true, and it had silenced security updates
   on the most CVE-prone module family in the tree.
+
+### Fixed
+
+- **Enterprise compose sessions now use the development runtime overlay and
+  build every Enterprise-capable service.** The licensed session previously
+  omitted the development port/TLS overrides and left `mcp-service` on its
+  Core Dockerfile; the HTTP verifier also probed Traefik metrics on the retired
+  host port. Enterprise startup now uses the complete overlay stack, builds
+  MCP with the Enterprise tag, and verifies the generated metrics port.
+
+- **A discovery batch no longer fails wholesale on an unrecognised ingest
+  outcome.** A finding that resolved as supporting evidence for a provisional
+  asset returned an outcome the discovery processor had never handled, which
+  failed the import, exhausted its retries and marked **every row in the batch**
+  rejected. One dev cluster had discarded 5,006 rows this way at roughly 500 an
+  hour. Both affected outcomes are handled, an unknown one is now recorded
+  per-row instead of failing the batch, and a guard fails if the identity
+  engine ever declares an outcome the processor does not handle.
+
+- **A cloud resource no longer arrives as a second, differently-classed asset.**
+  A finding for a CloudFront distribution, an API Gateway, a key store or a
+  managed load balancer was classed from a metadata key those collectors do not
+  write, so it fell through to a class whose identity rules exclude the cloud
+  provider's own resource id. The resource's identifier was present and ignored,
+  and the finding created a new pending asset per hostname beside the real one —
+  which is also why a provider-managed certificate never reached the certificate
+  inventory. Cloud KMS keys are now classed as key stores rather than
+  applications.
+
+- **Certificates seen in passive capture reach the certificate inventory.** The
+  sensor's single-packet TLS path emitted certificates in a flattened shape that
+  no consumer read, so those observations reached the discovery queue and then
+  nothing. It now emits the same canonical shape as every other producer, and
+  the platform folds the old shape for sensors still in the field, recovering
+  data that was previously dropped.
 
 ## [1.0.1] - 2026-09-21
 

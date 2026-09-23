@@ -1381,10 +1381,27 @@ agentMtls:
   entryPoint: agent-mtls
   # Backends that expose the passthrough listener, keyed by service name, each
   # with its own dnsName (the HostSNI the agent/sensor connects to and the
-  # IngressRouteTCP match). Required when enabled. Keep these distinct from
-  # tls.dnsName — that host's TLS is terminated at the edge; these must be
-  # passed through. Only these backends terminate agent/sensor mTLS; no other
-  # backend is affected.
+  # IngressRouteTCP match).
+  #
+  # EVERY entry needs its OWN dnsName when enabled — one hostname cannot serve
+  # both. They share a single passthrough entrypoint and are told apart by
+  # HostSNI, so a backend left blank renders no IngressRouteTCP and no advertised
+  # URL while its deployment still sets AGENT_MTLS_REQUIRED=true and opens the
+  # port: a green install and a total lockout for that service's agents. The
+  # chart refuses to render instead.
+  #
+  # DO NOT delete an entry to opt one service out. The deployment template keys
+  # AGENT_MTLS_REQUIRED off the presence of that entry, so a missing key emits no
+  # value at all and the service falls back to its built-in default of true —
+  # the same lockout, reached by the tidier-looking route. Opt out with
+  # agentMtls.enabled=false, which opts out the whole platform.
+  #
+  # Keep these distinct from tls.dnsName — that host's TLS is terminated at the
+  # edge; these must be passed through. Only these backends terminate
+  # agent/sensor mTLS; no other backend is affected.
+  #
+  # Dev installs need none of this: docker compose sets AGENT_MTLS_REQUIRED=false
+  # for both services explicitly (scripts/generate-docker-compose.mjs).
   backends:
     device-interrogation-service:
       dnsName: ""   # e.g. agents.example.com

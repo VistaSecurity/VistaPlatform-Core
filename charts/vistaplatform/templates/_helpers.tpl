@@ -258,17 +258,42 @@ database layer directly. */}}
   what does the real work in practice.
 */}}
 {{- $agentBackends := .Values.agentMtls.backends | default dict -}}
-{{- if not $agentBackends -}}
-{{- fail "agentMtls.enabled=true requires at least one entry under agentMtls.backends with a dnsName (e.g. sensor-manager), so registration can advertise a TLS-passthrough control-plane URL." -}}
+{{/*
+  The services that terminate agent/sensor mTLS. A hard-coded pair rather than a
+  derived list on purpose: these are the only two backends with agent-facing
+  endpoints, and _deployment.tpl gates BOTH of its env branches on
+  `hasKey agentMtls.backends <name>`. So deleting a key here does not opt that
+  service out — it emits no AGENT_MTLS_REQUIRED at all, the service falls back
+  to its built-in default of true, and it then demands a client certificate with
+  no IngressRouteTCP to carry one. Absence is the worst case, not the safe one,
+  which is why it is checked rather than tolerated.
+*/}}
+{{- $agentFacing := list "device-interrogation-service" "sensor-manager" -}}
+{{- $absent := list -}}
+{{- range $svc := $agentFacing -}}
+{{- if not (hasKey $agentBackends $svc) -}}
+{{- $absent = append $absent $svc -}}
 {{- end -}}
-{{- $withDNS := 0 -}}
+{{- end -}}
+{{- if $absent -}}
+{{- fail (printf "agentMtls.enabled=true but agentMtls.backends has no entry for: %s.\n\nRemoving a backend key does NOT opt it out of agent mTLS. The deployment template keys its AGENT_MTLS_REQUIRED env off the presence of that entry, so with the key gone the service emits no value, falls back to its built-in default of true, and demands a client certificate that no IngressRouteTCP exists to deliver — a silent, total lockout for that service's agents.\n\nKeep the entry and give it a dnsName, or set agentMtls.enabled=false to opt the whole platform out." (join ", " (sortAlpha $absent))) -}}
+{{- end -}}
+{{/*
+  Every backend needs its OWN dnsName, not merely one between them. The two
+  services share a passthrough entrypoint and are disambiguated by HostSNI, so a
+  backend with no dnsName renders no IngressRouteTCP and no advertised URL while
+  _deployment.tpl still sets AGENT_MTLS_REQUIRED=true and opens the port. The
+  half-configured install is the dangerous one: it renders green and locks that
+  service's agents out with no error to read.
+*/}}
+{{- $missing := list -}}
 {{- range $svc, $cfg := $agentBackends -}}
-{{- if and $cfg $cfg.dnsName -}}
-{{- $withDNS = add1 $withDNS -}}
+{{- if not (and $cfg $cfg.dnsName) -}}
+{{- $missing = append $missing $svc -}}
 {{- end -}}
 {{- end -}}
-{{- if eq $withDNS 0 -}}
-{{- fail (printf "agentMtls.enabled is true (the DEFAULT since agent/sensor authentication became secure-by-default) but no agentMtls.backends entry has a dnsName (found: %s).\n\nAgent and sensor authentication is fail-closed: without a TLS-passthrough host, agents and sensors cannot present their client certificate and every outbound call would 401.\n\nChoose one:\n  1. RECOMMENDED — set a passthrough hostname per backend, e.g.\n       --set agentMtls.backends.sensor-manager.dnsName=sensors.example.com \\\n       --set agentMtls.backends.device-interrogation-service.dnsName=agents.example.com\n     Each must resolve to a cluster-Traefik TLS-PASSTHROUGH entrypoint on port %v (the chart does not create that entrypoint), and existing agents/sensors must be re-enrolled or re-pointed at it.\n  2. EXPLICIT OPT-OUT — keep the previous, UNAUTHENTICATED behavior with\n       --set agentMtls.enabled=false\n     Agents and sensors then authenticate by their UUID alone; certificate rotation stays refused because it requires a client certificate in every mode.\n\nMigration steps: docsv4/core/operate/security/service-mesh-mtls.md (Agent and sensor mTLS)." (keys $agentBackends | sortAlpha | join ", ") .Values.agentMtls.port) -}}
+{{- if $missing -}}
+{{- fail (printf "agentMtls.enabled is true (the DEFAULT since agent/sensor authentication became secure-by-default) but these agentMtls.backends entries have no dnsName: %s.\n\nAgent and sensor authentication is fail-closed: without a TLS-passthrough host, agents and sensors of that service cannot present their client certificate and every outbound call would 401. EVERY listed backend needs its own hostname — they share one passthrough entrypoint and are told apart by HostSNI, so one hostname cannot serve both.\n\nChoose one:\n  1. RECOMMENDED — set a passthrough hostname per backend:\n       --set agentMtls.backends.sensor-manager.dnsName=sensors.example.com \\\n       --set agentMtls.backends.device-interrogation-service.dnsName=agents.example.com\n     Each must be distinct, must differ from tls.dnsName (that host is terminated at the edge), and must resolve to a cluster-Traefik TLS-PASSTHROUGH entrypoint on port %v (the chart does not create that entrypoint). Existing agents/sensors must be re-enrolled or re-pointed at it.\n  2. EXPLICIT OPT-OUT — keep the previous, UNAUTHENTICATED behavior with\n       --set agentMtls.enabled=false\n     Agents and sensors then authenticate by their UUID alone; certificate rotation stays refused because it requires a client certificate in every mode.\n\nDev installs need none of this: docker compose sets AGENT_MTLS_REQUIRED=false for both services explicitly.\n\nMigration steps: docsv4/core/operate/security/service-mesh-mtls.md (Agent and sensor mTLS)." (join ", " (sortAlpha $missing)) .Values.agentMtls.port) -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.serviceMtls.enabled -}}

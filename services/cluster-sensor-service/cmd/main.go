@@ -307,15 +307,19 @@ func main() {
 // itself — they carry the "system" sentinel, not a user — so the unattended
 // sweep's dispatch is unaffected.
 //
-// ONE DELIBERATE DIVERGENCE, stated rather than left to be discovered:
-// inventory-service gates its proxied jobs LIST on settings.read (its comment
-// explains why — it renders beside the Active Scanning settings summary),
-// while this service asks for discovery.read. The proxy forwards the caller's
-// JWT, so a role holding settings.read WITHOUT discovery.read now gets 403 on
-// the second hop. Of the seeded roles only billing_admin is in that position,
-// and a billing role reading the scan-job list was never the intent. Every
-// role with any read scope (viewer, api_user, security_admin, tenant_admin)
-// holds discovery.read.
+// The jobs LIST is gated on settings.read, NOT discovery.read, to match
+// inventory-service's proxied list exactly. That service's comment explains
+// the reasoning — the unified Jobs page is reached the way the Active Scanning
+// settings summary is, a tenant admin's view onto scan activity rather than a
+// general discovery-data read — and the proxy forwards the caller's JWT, so
+// the two hops must agree or the second one 403s.
+//
+// This service asked for discovery.read for one release, which put
+// billing_admin (settings.read, no discovery.read) on the wrong side of that
+// second hop. The owner's call,: a billing role seeing the scan-job
+// list is fine — usage visibility without access to what the scans found.
+// Job DETAIL and RESULTS stay on discovery.read in both services, so the split
+// is summary-vs-data rather than a permission that means two things.
 func registerDiscoveryRoutes(router *gin.Engine, discoveryHandler *handlers.DiscoveryHandler, rawDB *sql.DB, jwtSecret string) {
 	api := router.Group("/api/v1")
 	discovery := api.Group("/discovery")
@@ -330,7 +334,7 @@ func registerDiscoveryRoutes(router *gin.Engine, discoveryHandler *handlers.Disc
 	{
 		// Job management
 		discovery.POST("/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryCreate), discoveryHandler.CreateJob)
-		discovery.GET("/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetJobs)
+		discovery.GET("/jobs", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), discoveryHandler.GetJobs)
 		discovery.GET("/jobs/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryRead), discoveryHandler.GetJob)
 		discovery.POST("/jobs/:id/cancel", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.CancelJob)
 		discovery.POST("/jobs/:id/retry", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionDiscoveryUpdate), discoveryHandler.RetryJob)

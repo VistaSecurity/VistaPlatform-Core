@@ -129,7 +129,11 @@ var discoveryRouteGates = []struct {
 	permission string
 }{
 	{http.MethodPost, "/api/v1/discovery/jobs", `{"targets":["10.0.0.1"],"protocols":["tls"],"ports":[443]}`, "discovery.create"},
-	{http.MethodGet, "/api/v1/discovery/jobs", "", "discovery.read"},
+	// The LIST is settings.read, matching inventory-service's proxied list —
+	// the second hop must agree with the first or a settings.read-only role
+	// (billing_admin) 403s there. Job DETAIL below stays discovery.read:
+	// summary visibility and discovery data are deliberately different keys.
+	{http.MethodGet, "/api/v1/discovery/jobs", "", "settings.read"},
 	{http.MethodGet, "/api/v1/discovery/jobs/" + uuid.Nil.String(), "", "discovery.read"},
 	{http.MethodPost, "/api/v1/discovery/jobs/" + uuid.Nil.String() + "/cancel", "{}", "discovery.update"},
 	{http.MethodPost, "/api/v1/discovery/jobs/" + uuid.Nil.String() + "/retry", "{}", "discovery.update"},

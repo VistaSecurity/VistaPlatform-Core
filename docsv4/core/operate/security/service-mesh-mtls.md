@@ -165,9 +165,22 @@ identity's *current* certificate.
          dnsName: agents.example.com
    ```
 
-   Keep these **distinct** from `tls.dnsName` — that host is terminated at the
-   edge. With no `dnsName` set, the chart **fails the install** with a message
-   naming both options, rather than opening a listener nothing can reach.
+   **Both backends need their own hostname.** They share one passthrough
+   entrypoint and are told apart by `HostSNI`, so a single name cannot serve
+   both. Keep them **distinct from each other** and **distinct from
+   `tls.dnsName`** — that host is terminated at the edge.
+
+   The chart **fails the install** rather than open a listener nothing can
+   reach. It fails if either hostname is missing, and also if a backend entry
+   is **deleted** — removing a key does not opt a service out. The deployment
+   template keys `AGENT_MTLS_REQUIRED` off the presence of that entry, so a
+   missing key emits no value and the service falls back to its built-in
+   default of `true`, demanding a client certificate that no route can
+   deliver. To opt out, set `agentMtls.enabled: false`.
+
+   **Dev installs need no DNS entries at all.** The docker-compose path sets
+   `AGENT_MTLS_REQUIRED=false` for both services explicitly, so a compose
+   developer never provisions a passthrough host or a certificate.
 
 ### Migrating an existing install (do this before upgrading)
 
