@@ -16,24 +16,35 @@ import {
 const SEG = '2f1b9e7c-0000-4000-8000-000000000001';
 
 describe('the view switch', () => {
-  it('defaults to the neighbourhood, which is what ?lens=map has always meant', () => {
-    // The other polarity of the feature: adding a second view must not change
-    // where an existing bookmark lands.
-    expect(readMapView(null)).toBe('neighbourhood');
-    expect(DEFAULT_MAP_VIEW).toBe('neighbourhood');
+  it('opens on the whole estate when nothing is focused (#1978)', () => {
+    expect(readMapView(null)).toBe('network');
+    expect(DEFAULT_MAP_VIEW).toBe('network');
   });
 
-  it('reads the topology out of the URL, so the view is a link', () => {
+  it('still lands an old focus= link on the neighbourhood', () => {
+    // Every map link written before the Network view existed carries a focus
+    // and no view. Changing the default must not move where those land.
+    expect(readMapView(null, true)).toBe('neighbourhood');
+    expect(readMapView('bogus', true)).toBe('neighbourhood');
+  });
+
+  it('lets an explicit view win over the focus', () => {
+    expect(readMapView('network', true)).toBe('network');
+    expect(readMapView('topology', true)).toBe('topology');
+  });
+
+  it('reads the view out of the URL, so the view is a link', () => {
     expect(readMapView('topology')).toBe('topology');
+    expect(readMapView('neighbourhood')).toBe('neighbourhood');
   });
 
   it('falls back rather than rendering nothing for a typo', () => {
-    expect(readMapView('topolgy')).toBe('neighbourhood');
-    expect(readMapView('')).toBe('neighbourhood');
+    expect(readMapView('topolgy')).toBe('network');
+    expect(readMapView('')).toBe('network');
   });
 
-  it('offers exactly the two views ADR-0006 D4 names', () => {
-    expect([...MAP_VIEWS]).toEqual(['neighbourhood', 'topology']);
+  it('offers the network view first, then the two ADR-0006 D4 names', () => {
+    expect([...MAP_VIEWS]).toEqual(['network', 'neighbourhood', 'topology']);
   });
 });
 

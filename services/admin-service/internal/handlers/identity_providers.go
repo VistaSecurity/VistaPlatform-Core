@@ -2,13 +2,27 @@ package handlers
 
 // Platform Identity Providers — CRUD over `platform_sso_providers`, the
 // global config for VISTA'S OWN OAuth app used by social signup ("Sign up with
-// Google/Microsoft"). This is NOT a tenant's IdP (that's auth-service's
-// /tenant/sso/providers) — it's one row per provider type for the whole platform.
-// Gated by platform.settings; the client secret is encrypted at rest with
-// ENCRYPTION_MASTER_KEY and never returned to the UI.
+// Google/Microsoft") and by staff sign-in to the admin console. This is
+// NOT a tenant's IdP (that's auth-service's /tenant/sso/providers) — it's one
+// row per (provider type, purpose) for the whole platform.
+//
+// Authorization: reads are gated by platform.settings; EVERY write (create,
+// update — which is also how a provider is enabled or disabled — and delete) is
+// gated by platform.security.manage in server.go. An admin_login row decides
+// who can sign in as staff: its token/userinfo endpoints are trusted to name
+// the platform user, so whoever can write one can sign in as any staff member.
+// A signup row decides who can found a tenant. Neither is a "setting".
+//
+// The client secret is encrypted at rest with ENCRYPTION_MASTER_KEY and never
+// returned (has_secret flags whether one is stored). Every write records
+// updated_by — the staff SSO callback trusts an admin_login provider to sign in
+// a super administrator only when a super administrator made the last change
+// (see staffSSOProviderTrustedForSuperAdmin) — and emits a platform audit event
+// naming the changed fields, never the secret.
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -63,6 +77,70 @@ type platformIdPResponse struct {
 	IsEnabled    bool   `json:"is_enabled"`
 }
 
+// platformIdPFields is the non-secret, mutable part of a provider row — what an
+// update can change and what its audit event may carry.
+type platformIdPFields struct {
+	ProviderName string
+	ClientID     string
+	AuthURL      string
+	TokenURL     string
+	UserinfoURL  string
+	Scopes       string
+	IsEnabled    bool
+}
+
+// platformIdPFieldOrder fixes the order changed fields are reported in.
+var platformIdPFieldOrder = []string{"provider_name", "client_id", "auth_url", "token_url", "userinfo_url", "scopes", "is_enabled"}
+
+func (f platformIdPFields) values() map[string]interface{} {
+	return map[string]interface{}{
+		"provider_name": f.ProviderName,
+		"client_id":     f.ClientID,
+		"auth_url":      f.AuthURL,
+		"token_url":     f.TokenURL,
+		"userinfo_url":  f.UserinfoURL,
+		"scopes":        f.Scopes,
+		"is_enabled":    f.IsEnabled,
+	}
+}
+
+// diff names the fields whose value differs between f and next.
+func (f platformIdPFields) diff(next platformIdPFields) []string {
+	a, b := f.values(), next.values()
+	changed := []string{}
+	for _, k := range platformIdPFieldOrder {
+		if a[k] != b[k] {
+			changed = append(changed, k)
+		}
+	}
+	return changed
+}
+
+// auditValues is the secret-free record of the named fields' new values. The
+// client secret is represented only by whether this write set it.
+func (f platformIdPFields) auditValues(fields []string, secretWritten bool) map[string]interface{} {
+	all := f.values()
+	out := map[string]interface{}{"client_secret_rotated": secretWritten}
+	for _, k := range fields {
+		if v, ok := all[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// platformIdPCaller returns the authenticated platform user making a write, or
+// writes a 401 and reports false. Every write records its author (updated_by),
+// so an unattributed write is refused rather than stored.
+func platformIdPCaller(c *gin.Context) (uuid.UUID, bool) {
+	id, err := uuid.Parse(c.GetString("userID"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found"})
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
 // platformSecretEncrypt encrypts a client secret for storage. Mirrors smtpEncrypt:
 // a missing master key (dev) falls back to plaintext rather than failing the save.
 func platformSecretEncrypt(plaintext string) string {
@@ -112,9 +190,13 @@ func ListPlatformIdentityProviders(db *sql.DB) gin.HandlerFunc {
 }
 
 // CreatePlatformIdentityProvider handles POST /admin/identity-providers. One row
-// per provider type (unique constraint) — a duplicate type returns 409.
+// per (provider type, purpose) — a duplicate returns 409.
 func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		callerID, ok := platformIdPCaller(c)
+		if !ok {
+			return
+		}
 		var req platformIdPRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
@@ -153,11 +235,11 @@ func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 		var id string
 		err := db.QueryRow(`
 			INSERT INTO platform_sso_providers
-			    (provider_type, provider_name, purpose, client_id, client_secret_encrypted, auth_url, token_url, userinfo_url, scopes, is_enabled)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			    (provider_type, provider_name, purpose, client_id, client_secret_encrypted, auth_url, token_url, userinfo_url, scopes, is_enabled, updated_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			RETURNING id`,
 			req.ProviderType, name, purpose, req.ClientID, platformSecretEncrypt(req.ClientSecret),
-			req.AuthURL, req.TokenURL, req.UserinfoURL, scopes, enabled).Scan(&id)
+			req.AuthURL, req.TokenURL, req.UserinfoURL, scopes, enabled, callerID).Scan(&id)
 		if err != nil {
 			if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 				c.JSON(http.StatusConflict, gin.H{"error": "An identity provider of this type and purpose already exists. Edit it instead."})
@@ -166,14 +248,41 @@ func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create identity provider"})
 			return
 		}
+
+		created := platformIdPFields{
+			ProviderName: name, ClientID: req.ClientID, AuthURL: req.AuthURL, TokenURL: req.TokenURL,
+			UserinfoURL: req.UserinfoURL, Scopes: scopes, IsEnabled: enabled,
+		}
+		recordPlatformAudit(c, PlatformAuditEntry{
+			EventType:     "platform_identity_provider.created",
+			Action:        "create",
+			EventCategory: "config",
+			ResourceType:  "platform_identity_provider",
+			ResourceID:    id,
+			ChangedFields: append(append([]string(nil), platformIdPFieldOrder...), "client_secret"),
+			NewValues:     created.auditValues(platformIdPFieldOrder, true),
+			Metadata:      map[string]interface{}{"provider_type": req.ProviderType, "purpose": purpose},
+		})
 		c.JSON(http.StatusCreated, gin.H{"id": id, "message": "Identity provider created"})
 	}
 }
 
 // UpdatePlatformIdentityProvider handles PUT /admin/identity-providers/:id.
-// A blank client_secret keeps the stored one. provider_type is immutable.
+// A blank client_secret keeps the stored one; a blank provider_name, client_id,
+// auth_url, token_url or scopes keeps the stored value. userinfo_url and
+// is_enabled are always taken from the request (is_enabled defaults to true).
+// provider_type and purpose are immutable.
+//
+// The stored row is read under FOR UPDATE so the audit event names the fields
+// that actually changed. Any update — even one that changes nothing — records
+// the caller as updated_by: re-saving a provider is how a super administrator
+// vouches for it again.
 func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		callerID, ok := platformIdPCaller(c)
+		if !ok {
+			return
+		}
 		id, err := uuid.Parse(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid provider ID"})
@@ -184,39 +293,93 @@ func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
-		enabled := true
-		if req.IsEnabled != nil {
-			enabled = *req.IsEnabled
-		}
-		// COALESCE keeps the stored secret when the caller sends a blank one.
-		var newSecret interface{}
-		if strings.TrimSpace(req.ClientSecret) != "" {
-			newSecret = platformSecretEncrypt(req.ClientSecret)
-		} else {
-			newSecret = nil
-		}
-		res, err := db.Exec(`
-			UPDATE platform_sso_providers SET
-			    provider_name = COALESCE(NULLIF($2,''), provider_name),
-			    client_id     = COALESCE(NULLIF($3,''), client_id),
-			    client_secret_encrypted = COALESCE($4, client_secret_encrypted),
-			    auth_url      = COALESCE(NULLIF($5,''), auth_url),
-			    token_url     = COALESCE(NULLIF($6,''), token_url),
-			    userinfo_url  = $7,
-			    scopes        = COALESCE(NULLIF($8,''), scopes),
-			    is_enabled    = $9,
-			    updated_at    = now()
-			WHERE id = $1`,
-			id, req.ProviderName, req.ClientID, newSecret,
-			req.AuthURL, req.TokenURL, req.UserinfoURL, req.Scopes, enabled)
+
+		ctx := c.Request.Context()
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update identity provider"})
 			return
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
+		defer func() { _ = tx.Rollback() }()
+
+		var before platformIdPFields
+		var providerType, purpose string
+		err = tx.QueryRowContext(ctx, `
+			SELECT provider_type, purpose, provider_name, client_id, auth_url, token_url, userinfo_url, scopes, is_enabled
+			FROM platform_sso_providers WHERE id = $1 FOR UPDATE`, id).
+			Scan(&providerType, &purpose, &before.ProviderName, &before.ClientID, &before.AuthURL,
+				&before.TokenURL, &before.UserinfoURL, &before.Scopes, &before.IsEnabled)
+		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Identity provider not found"})
 			return
 		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update identity provider"})
+			return
+		}
+
+		after := before
+		for dst, v := range map[*string]string{
+			&after.ProviderName: req.ProviderName,
+			&after.ClientID:     req.ClientID,
+			&after.AuthURL:      req.AuthURL,
+			&after.TokenURL:     req.TokenURL,
+			&after.Scopes:       req.Scopes,
+		} {
+			if v != "" {
+				*dst = v
+			}
+		}
+		after.UserinfoURL = req.UserinfoURL
+		after.IsEnabled = true
+		if req.IsEnabled != nil {
+			after.IsEnabled = *req.IsEnabled
+		}
+		// COALESCE keeps the stored secret when the caller sends a blank one.
+		var newSecret interface{}
+		secretRotated := strings.TrimSpace(req.ClientSecret) != ""
+		if secretRotated {
+			newSecret = platformSecretEncrypt(req.ClientSecret)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE platform_sso_providers SET
+			    provider_name = $2,
+			    client_id     = $3,
+			    client_secret_encrypted = COALESCE($4, client_secret_encrypted),
+			    auth_url      = $5,
+			    token_url     = $6,
+			    userinfo_url  = $7,
+			    scopes        = $8,
+			    is_enabled    = $9,
+			    updated_by    = $10,
+			    updated_at    = now()
+			WHERE id = $1`,
+			id, after.ProviderName, after.ClientID, newSecret,
+			after.AuthURL, after.TokenURL, after.UserinfoURL, after.Scopes, after.IsEnabled, callerID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update identity provider"})
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update identity provider"})
+			return
+		}
+
+		changed := before.diff(after)
+		values := after.auditValues(changed, secretRotated)
+		if secretRotated {
+			changed = append(changed, "client_secret")
+		}
+		recordPlatformAudit(c, PlatformAuditEntry{
+			EventType:     "platform_identity_provider.updated",
+			Action:        "update",
+			EventCategory: "config",
+			ResourceType:  "platform_identity_provider",
+			ResourceID:    id.String(),
+			ChangedFields: changed,
+			NewValues:     values,
+			Metadata:      map[string]interface{}{"provider_type": providerType, "purpose": purpose},
+		})
 		c.JSON(http.StatusOK, gin.H{"message": "Identity provider updated"})
 	}
 }
@@ -224,20 +387,33 @@ func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 // DeletePlatformIdentityProvider handles DELETE /admin/identity-providers/:id.
 func DeletePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if _, ok := platformIdPCaller(c); !ok {
+			return
+		}
 		id, err := uuid.Parse(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid provider ID"})
 			return
 		}
-		res, err := db.Exec(`DELETE FROM platform_sso_providers WHERE id = $1`, id)
+		var providerType, purpose string
+		err = db.QueryRow(`DELETE FROM platform_sso_providers WHERE id = $1 RETURNING provider_type, purpose`, id).
+			Scan(&providerType, &purpose)
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Identity provider not found"})
+			return
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete identity provider"})
 			return
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Identity provider not found"})
-			return
-		}
+		recordPlatformAudit(c, PlatformAuditEntry{
+			EventType:     "platform_identity_provider.deleted",
+			Action:        "delete",
+			EventCategory: "config",
+			ResourceType:  "platform_identity_provider",
+			ResourceID:    id.String(),
+			Metadata:      map[string]interface{}{"provider_type": providerType, "purpose": purpose},
+		})
 		c.JSON(http.StatusOK, gin.H{"message": "Identity provider deleted"})
 	}
 }

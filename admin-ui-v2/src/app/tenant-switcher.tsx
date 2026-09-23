@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Building2, ChevronDown, Search, Filter, LogIn, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { Avatar, initialsFromName } from '../components/ui/primitives';
-import { useTenants } from '../sections/tenants/queries';
+import { useTenants, planLabel } from '../sections/tenants/queries';
 import { usePlatformEdition } from '../lib/edition';
 import { useScope } from './scope';
 
@@ -50,7 +50,7 @@ export function TenantSwitcher() {
               </button>
               {hits.map((t) => (
                 <button key={t.id} onClick={() => { setScope(t.id, t.name); setOpen(false); }} className="row-hover" style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '8px 10px', border: 'none', background: scopeId === t.id ? 'var(--op-hover)' : 'transparent', borderRadius: 'var(--r-sm)', cursor: 'pointer', textAlign: 'left' }}>
-                  <Avatar initials={initialsFromName(t.name)} size={22} brand={t.subscription_tier === 'Sovereign'} square />
+                  <Avatar initials={initialsFromName(t.name)} size={22} brand={planLabel(t) === 'Sovereign'} square />
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div style={{ fontSize: 13, color: 'var(--op-t1)', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</div>
                     <div className="mono" style={{ fontSize: 10, color: 'var(--op-t3)' }}>{t.slug}</div>

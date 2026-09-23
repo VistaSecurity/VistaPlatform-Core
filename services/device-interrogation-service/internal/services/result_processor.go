@@ -143,12 +143,13 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 	// puts the DEVICE's own identity; the facts and edges are per-result and
 	// arrive whether or not any crypto asset did, which is why this is no
 	// longer gated on a non-empty asset list.
+	var observationsErr error
 	if deviceJob.AssetID != nil {
 		var first models.DiscoveredAsset
 		if len(result.Assets) > 0 {
 			first = result.Assets[0]
 		}
-		s.recordInterrogationObservations(ctx, deviceJob.TenantID, *deviceJob.AssetID, jobID, first, result)
+		observationsErr = s.recordInterrogationObservations(ctx, deviceJob.TenantID, *deviceJob.AssetID, jobID, first, result)
 	}
 
 	// Record what actually happens to each asset so the outcome is visible in
@@ -167,6 +168,13 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 			fmt.Printf("Warning: %v\n", err)
 		}
 	}()
+	// Dropped facts and edges do not fail the job (the crypto assets landed),
+	// but they must not leave it reading as a clean success either. Recorded
+	// before anything below can return, so the deferred persist carries them.
+	if deviceJob.AssetID != nil {
+		steps.observationsFailed(deviceJob.AssetID.String(), result.ObservationsErr)
+		steps.observationsFailed(deviceJob.AssetID.String(), observationsErr)
+	}
 
 	// Look up the tenant's platform system sensor once. Assets handed to this
 	// processor are additionally published into sensor_discoveries under it so
@@ -751,12 +759,14 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 // The management row is advanced separately (markInterrogated), because
 // "we reached it" is true whether or not the device told us anything about
 // itself.
+//
+// It returns what the sink could not persist, for the job's processing block.
 func (s *ResultProcessor) recordInterrogationObservations(
 	ctx context.Context,
 	tenantID, assetID, jobID uuid.UUID,
 	asset models.DiscoveredAsset,
 	result *models.JobResult,
-) {
+) error {
 	obs := InterrogationObservations{
 		ObservedAt:    result.CompletedAt,
 		Facts:         result.Facts,
@@ -780,15 +790,18 @@ func (s *ResultProcessor) recordInterrogationObservations(
 			fmt.Printf("Warning: failed to pin ssh host key for asset %s: %v\n", assetID, err)
 		}
 	}
+	var persistErr error
 	if !obs.Empty() {
-		if err := s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs); err != nil {
+		if persistErr = s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs); persistErr != nil {
 			// The crypto assets have already landed. Losing the ops
-			// observations is worth a warning, not a failed job that tells the
-			// operator the interrogation did not happen.
-			fmt.Printf("Warning: failed to persist interrogation observations for asset %s: %v\n", assetID, err)
+			// observations is not a failed job that tells the operator the
+			// interrogation did not happen — but it is returned so the job's
+			// processing block says what was lost.
+			fmt.Printf("Warning: failed to persist interrogation observations for asset %s: %v\n", assetID, persistErr)
 		}
 	}
 	s.markInterrogated(ctx, tenantID, assetID)
+	return persistErr
 }
 
 // markInterrogated advances the asset's management row after a successful run:

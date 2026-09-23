@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Package } from 'lucide-react';
 import { usePlatformEdition, type EditionCapability } from '../lib/edition';
+import { licenseAllows, type LicenseGate } from './nav';
 
 // Route-level EDITION guard, the deep-link backstop for the nav filter in
 // nav.ts (`visibleSections`).
@@ -83,6 +84,50 @@ export function EditionNotice({
   const { title, body } = COPY[capability];
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: compact ? 'flex-start' : 'center', justifyContent: 'center', padding: compact ? 0 : 40 }}>
+      <div style={{ maxWidth: 520, display: 'flex', gap: 14, padding: '22px 24px', borderRadius: 'var(--r-lg)', background: 'var(--op-panel2)', border: '1px solid var(--op-border)' }}>
+        <Package size={20} style={{ color: 'var(--op-t3)', flex: 'none', marginTop: 2 }} />
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--op-t1)' }}>{title}</div>
+          <div style={{ fontSize: 12.5, color: 'var(--op-t3)', marginTop: 4, lineHeight: 1.55 }}>{body}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const LICENSE_COPY: Record<LicenseGate, { title: string; body: string }> = {
+  msp: {
+    title: 'Part of Vista Platform MSP',
+    body:
+      'Billing, invoices, coupons, trials and revenue analytics exist for a service provider billing its own ' +
+      'customers. This install is not licensed as MSP, so there is nobody to bill and nothing here to manage.',
+  },
+  'not-enterprise': {
+    title: 'Vista Platform Enterprise has no plans',
+    body:
+      'On an Enterprise install every tenant gets every feature the licence covers — there are no plans or tiers ' +
+      'to compose. To switch a feature off for one tenant, open Tenants, select the tenant, then Entitlements.',
+  },
+};
+
+/**
+ * Route-level LICENCE guard: the deep-link backstop for `licenseAllows` in the
+ * nav filter, exactly as RequirePlatformEdition backs up `editionAllows`.
+ */
+export function RequireLicenseEdition({ gate, children }: { gate?: LicenseGate; children: ReactNode }) {
+  const { license } = usePlatformEdition();
+  if (!gate) return <>{children}</>;
+  if (license === 'pending') {
+    return (
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-t3)', fontSize: 13 }}>
+        Checking licence…
+      </div>
+    );
+  }
+  if (licenseAllows({ license: gate }, license)) return <>{children}</>;
+  const { title, body } = LICENSE_COPY[gate];
+  return (
+    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
       <div style={{ maxWidth: 520, display: 'flex', gap: 14, padding: '22px 24px', borderRadius: 'var(--r-lg)', background: 'var(--op-panel2)', border: '1px solid var(--op-border)' }}>
         <Package size={20} style={{ color: 'var(--op-t3)', flex: 'none', marginTop: 2 }} />
         <div>

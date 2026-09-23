@@ -451,7 +451,9 @@ type deviceObservationInput struct {
 func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUID, in deviceObservationInput) (identity.Observation, error) {
 	host := strings.TrimSpace(in.Hostname)
 	ip := strings.TrimSpace(in.IPAddress)
-	segmentID, dynamicScope := s.segmentScope(ctx, tenantID, ip, host, in.CloudNetworkRef)
+	managementAddress := managementHost(in.ManagementURL)
+	scopeIP, scopeHost := deviceScopeInputs(ip, host, managementAddress)
+	segmentID, dynamicScope := s.segmentScope(ctx, tenantID, scopeIP, scopeHost, in.CloudNetworkRef)
 
 	obs := identity.Observation{
 		TenantID:    tenantID.String(),
@@ -494,7 +496,7 @@ func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUI
 	if rid := strings.TrimSpace(in.CloudResourceID); rid != "" {
 		add(identity.KindCloudResourceID, rid, "")
 	}
-	for _, name := range dedupeStrings(host, managementHost(in.ManagementURL)) {
+	for _, name := range dedupeStrings(host, managementAddress) {
 		if parsed := net.ParseIP(name); parsed != nil {
 			add(identity.KindIPAddress, name, segmentID)
 			if obs.DisplayName == "" {
@@ -529,6 +531,20 @@ func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUI
 		return identity.Observation{}, errDeviceHasNoIdentifier
 	}
 	return clean, nil
+}
+
+// deviceScopeInputs makes the management target participate in the same
+// segment lookup as an explicitly entered IP/hostname. Operators commonly
+// provide only a URL; treating its address as tenant-default made it unable to
+// match the same appliance observed by a sensor in a configured segment.
+func deviceScopeInputs(ip, hostname, managementAddress string) (string, string) {
+	if strings.TrimSpace(ip) == "" && net.ParseIP(strings.TrimSpace(managementAddress)) != nil {
+		ip = managementAddress
+	}
+	if strings.TrimSpace(hostname) == "" && net.ParseIP(strings.TrimSpace(managementAddress)) == nil {
+		hostname = managementAddress
+	}
+	return strings.TrimSpace(ip), strings.TrimSpace(hostname)
 }
 
 // managementHost returns the host part of a management URL, or "".

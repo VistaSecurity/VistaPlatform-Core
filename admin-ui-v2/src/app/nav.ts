@@ -37,7 +37,7 @@
 // via packages/primitives/src/features/edition.ts) and renders an edition
 // notice rather than an error.
 import { PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
-import type { EditionCapabilities, EditionCapability } from '../lib/edition';
+import type { EditionCapabilities, EditionCapability, LicenseState } from '../lib/edition';
 
 /**
  * A sub-section. Sub-navigation in the v2 UI lives in the LEFT rail, indented
@@ -95,6 +95,14 @@ export interface NavItem {
   /** Any-of variant of `permission`: visible if the operator holds at least one. */
   anyOf?: string[];
   /**
+   * Licence-edition gate, independent of `edition` (which is about the BUILD):
+   *   'msp'            — shown only when the licence is MSP (Billing & Revenue:
+   *                      billing is MSP-only, edition-licensing spec §1);
+   *   'not-enterprise' — hidden on an Enterprise licence (Plans & Pricing:
+   *                      Enterprise has no plans; Core keeps tier authoring).
+   */
+  license?: LicenseGate;
+  /**
    * Admin-service capability this section's backend needs ('msp' | 'billing').
    * Absent in the running build ⇒ the section is hidden from the rail and its
    * route renders an edition notice. RBAC is NOT a substitute: a Core operator
@@ -104,7 +112,22 @@ export interface NavItem {
   edition?: EditionCapability;
 }
 
+export type LicenseGate = 'msp' | 'not-enterprise';
+
 const P = PLATFORM_PERMISSIONS;
+
+/**
+ * True if the install's licence allows this entry. `pending` hides gated
+ * entries (the nav grows, never shrinks, as the answer lands); `unknown` fails
+ * open, like CAPABILITIES_UNKNOWN, so a read failure never blanks a paying MSP
+ * console. Ungated entries always pass.
+ */
+export function licenseAllows(entry: { license?: LicenseGate }, license: LicenseState): boolean {
+  if (!entry.license || license === 'unknown') return true;
+  if (license === 'pending') return false;
+  if (entry.license === 'msp') return license === 'msp';
+  return license !== 'enterprise';
+}
 
 /** True if the operator may see this section, given a permission predicate. */
 export function sectionVisible(s: NavItem, has: (p: string) => boolean): boolean {
@@ -140,9 +163,10 @@ export function visibleSections(
   has: (p: string) => boolean,
   capabilities: EditionCapabilities,
   sections: NavItem[] = SECTIONS,
+  license: LicenseState = 'unknown',
 ): NavItem[] {
   return sections
-    .filter((s) => sectionVisible(s, has) && editionAllows(s, capabilities))
+    .filter((s) => sectionVisible(s, has) && editionAllows(s, capabilities) && licenseAllows(s, license))
     .map((s) => {
       if (!s.children?.length) return s;
       const children = s.children
@@ -191,6 +215,9 @@ export const SECTIONS: NavItem[] = [
     // Whole section is ee/billingapi (Stripe, invoices, coupons, trials,
     // dunning, revenue analytics). Core ships no monetization code at all.
     edition: 'billing',
+    // And billing is MSP-only by LICENCE: an Enterprise company has nobody
+    // to bill, so the section is hidden unless the licence is MSP.
+    license: 'msp',
     children: [
       { id: 'overview', label: 'Overview', title: 'Billing Overview', subtitle: 'MRR, ARR, revenue by plan, and invoices' },
       { id: 'coupons', label: 'Coupons', title: 'Coupons', subtitle: 'Discount codes and redemptions' },
@@ -206,6 +233,10 @@ export const SECTIONS: NavItem[] = [
   { id: 'plans', label: 'Plans & Pricing', icon: 'Layers', group: null,
     title: 'Plans & Pricing', subtitle: 'Entitlements, tiers, and add-ons — what we sell and how it’s composed',
     source: 'feature-flags registry + billing-analytics/billable-items + subscription-tiers', permission: P.platform.billing,
+    // Enterprise has no plans (every tenant gets the licence, minus per-tenant
+    // switches in the tenant drawer), so the whole area is hidden there. Core
+    // keeps tier authoring; MSP designs its own plans here.
+    license: 'not-enterprise',
     children: [
       { id: 'entitlements', label: 'Entitlements', title: 'Entitlements', subtitle: 'The lever catalog: capability gates, capacity caps, metered meters, support' },
       { id: 'tiers', label: 'Tiers', title: 'Tiers', subtitle: 'Compose entitlements into plans, price, and publish' },
@@ -269,6 +300,9 @@ export const SECTIONS: NavItem[] = [
       { id: 'legal', label: 'Legal', title: 'Legal Documents', subtitle: 'Terms of Service and Privacy Policy — authoring, versioning, and acceptance audit' },
       { id: 'identity-providers', label: 'Identity Providers', title: 'Identity Providers', subtitle: "Vista's Google / Microsoft OAuth apps for social sign-up" },
       { id: 'notifications', label: 'Notification Delivery', title: 'Notification Delivery', subtitle: 'Channels, routing rules, and delivery history' },
+      // Core: a Core build answers "no licence installed", which is this
+      // page's Core state (GET /admin/license is Core code).
+      { id: 'license', label: 'License & Usage', title: 'License & Usage', subtitle: 'The licence this install runs under, and the data-retention cap' },
     ] },
 
   { id: 'staff', label: 'Staff & Access', icon: 'UsersRound', group: 'Governance',

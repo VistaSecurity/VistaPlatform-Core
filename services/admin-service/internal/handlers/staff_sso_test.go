@@ -88,7 +88,7 @@ func TestStaffSsoCallback_UsesConfiguredSessionTTLForRefreshSession(t *testing.T
 				t.Fatalf("Authorization = %q, want Bearer idp-access-token", got)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"email":"Admin@Example.COM"}`))
+			_, _ = w.Write([]byte(`{"email":"Admin@Example.COM","email_verified":true}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -107,15 +107,21 @@ func TestStaffSsoCallback_UsesConfiguredSessionTTLForRefreshSession(t *testing.T
 	userID := uuid.New()
 	start := time.Now()
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT client_id, client_secret_encrypted, token_url, userinfo_url FROM platform_sso_providers")).
+	providerAuthor := uuid.New()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, client_id, client_secret_encrypted, token_url, userinfo_url, updated_by FROM platform_sso_providers")).
 		WithArgs("google").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"client_id", "client_secret_encrypted", "token_url", "userinfo_url",
-		}).AddRow("client-id", "client-secret", idp.URL+"/token", idp.URL+"/userinfo"))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pr.name, pu.force_password_change FROM platform_users pu")).
+			"id", "client_id", "client_secret_encrypted", "token_url", "userinfo_url", "updated_by",
+		}).AddRow(uuid.NewString(), "client-id", "client-secret", idp.URL+"/token", idp.URL+"/userinfo", providerAuthor.String()))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pr.id, pr.name, pu.force_password_change FROM platform_users pu")).
 		WithArgs("admin@example.com").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "force_password_change"}).
-			AddRow(userID, "super_admin", false))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "role_id", "name", "force_password_change"}).
+			AddRow(userID, uuid.New(), "super_admin", false))
+	// The provider's last writer is an active super administrator, so the
+	// super-admin gate lets this sign-in through.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS (")).
+		WithArgs(providerAuthor, "super_admin").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT setting_value FROM platform_settings WHERE setting_key = $1")).
 		WithArgs("session_timeout_minutes").
 		WillReturnRows(sqlmock.NewRows([]string{"setting_value"}).AddRow([]byte("20160")))
@@ -184,6 +190,7 @@ func TestStaffSsoCallback_UsesConfiguredSessionTTLForRefreshSession(t *testing.T
 func TestCreatePlatformIdentityProvider_invalidPurpose_400(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set("userID", uuid.NewString()); c.Next() })
 	r.POST("/p", CreatePlatformIdentityProvider(nil))
 
 	w := httptest.NewRecorder()
@@ -195,4 +202,136 @@ func TestCreatePlatformIdentityProvider_invalidPurpose_400(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid purpose, got %d", w.Code)
 	}
+}
+
+// Every provider write records its author, so a write with no authenticated
+// caller is refused before the DB is touched.
+func TestPlatformIdentityProviderWrites_401WithoutCaller(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.POST("/p", CreatePlatformIdentityProvider(nil))
+	r.PUT("/p/:id", UpdatePlatformIdentityProvider(nil))
+	r.DELETE("/p/:id", DeletePlatformIdentityProvider(nil))
+	body := `{"provider_type":"google","purpose":"admin_login","client_id":"x","client_secret":"y","auth_url":"a","token_url":"t"}`
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/p"},
+		{http.MethodPut, "/p/" + uuid.NewString()},
+		{http.MethodDelete, "/p/" + uuid.NewString()},
+	} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s: status = %d, want 401", tc.method, tc.path, w.Code)
+		}
+	}
+}
+
+// staffCallbackHarness drives StaffSsoCallback against a fake IdP whose
+// userinfo endpoint returns userinfoJSON. It returns the redirect Location.
+func staffCallbackHarness(t *testing.T, userinfoJSON string, expect func(mock sqlmock.Sqlmock, tokenURL, userinfoURL string)) (string, sqlmock.Sqlmock) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/token":
+			_, _ = w.Write([]byte(`{"access_token":"idp-access-token"}`))
+		case "/userinfo":
+			_, _ = w.Write([]byte(userinfoJSON))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(idp.Close)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	expect(mock, idp.URL+"/token", idp.URL+"/userinfo")
+
+	r := gin.New()
+	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, "staff-sso-gate-test-secret", adminauth.NewPlatformRefreshTokenService(db)))
+	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state=s&code=c", nil)
+	req.AddCookie(&http.Cookie{Name: "admin_sso_state", Value: "s"})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302", w.Code)
+	}
+	return w.Header().Get("Location"), mock
+}
+
+func expectStaffProviderRow(mock sqlmock.Sqlmock, tokenURL, userinfoURL string, updatedBy interface{}) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, client_id, client_secret_encrypted, token_url, userinfo_url, updated_by FROM platform_sso_providers")).
+		WithArgs("google").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "client_id", "client_secret_encrypted", "token_url", "userinfo_url", "updated_by",
+		}).AddRow(uuid.NewString(), "client-id", "client-secret", tokenURL, userinfoURL, updatedBy))
+}
+
+// Gate 1: without an explicit email_verified=true the callback refuses before
+// it looks up any platform user — for every shape an IdP could send.
+func TestStaffSsoCallback_RefusesUnverifiedEmail(t *testing.T) {
+	for name, ui := range map[string]string{
+		"missing":      `{"email":"admin@example.com"}`,
+		"false":        `{"email":"admin@example.com","email_verified":false}`,
+		"string false": `{"email":"admin@example.com","email_verified":"false"}`,
+		"number 1":     `{"email":"admin@example.com","email_verified":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			loc, mock := staffCallbackHarness(t, ui, func(mock sqlmock.Sqlmock, tokenURL, userinfoURL string) {
+				expectStaffProviderRow(mock, tokenURL, userinfoURL, uuid.NewString())
+			})
+			if loc != "/login?error=sso_email_unverified" {
+				t.Fatalf("Location = %q, want /login?error=sso_email_unverified", loc)
+			}
+			// No platform_users lookup was attempted (sqlmock fails an
+			// unexpected query, and every expectation was consumed).
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// Gate 2: a super administrator is refused when the provider's last writer is
+// not (or no longer) an active super administrator, or is unknown.
+func TestStaffSsoCallback_SuperAdminNeedsSuperAdminAuthoredProvider(t *testing.T) {
+	userID := uuid.New()
+	author := uuid.New()
+	t.Run("author not a super admin", func(t *testing.T) {
+		loc, mock := staffCallbackHarness(t, `{"email":"root@example.com","email_verified":true}`, func(mock sqlmock.Sqlmock, tokenURL, userinfoURL string) {
+			expectStaffProviderRow(mock, tokenURL, userinfoURL, author.String())
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pr.id, pr.name, pu.force_password_change FROM platform_users pu")).
+				WithArgs("root@example.com").
+				WillReturnRows(sqlmock.NewRows([]string{"id", "role_id", "name", "force_password_change"}).AddRow(userID, uuid.New(), "super_admin", false))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS (")).
+				WithArgs(author, "super_admin").
+				WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+		})
+		if loc != "/login?error=sso_super_admin_untrusted_provider" {
+			t.Fatalf("Location = %q, want /login?error=sso_super_admin_untrusted_provider", loc)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("no recorded author", func(t *testing.T) {
+		loc, mock := staffCallbackHarness(t, `{"email":"root@example.com","email_verified":true}`, func(mock sqlmock.Sqlmock, tokenURL, userinfoURL string) {
+			expectStaffProviderRow(mock, tokenURL, userinfoURL, nil)
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pr.id, pr.name, pu.force_password_change FROM platform_users pu")).
+				WithArgs("root@example.com").
+				WillReturnRows(sqlmock.NewRows([]string{"id", "role_id", "name", "force_password_change"}).AddRow(userID, uuid.New(), "super_admin", false))
+		})
+		if loc != "/login?error=sso_super_admin_untrusted_provider" {
+			t.Fatalf("Location = %q, want /login?error=sso_super_admin_untrusted_provider", loc)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

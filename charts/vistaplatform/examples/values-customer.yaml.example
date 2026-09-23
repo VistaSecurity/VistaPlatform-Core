@@ -147,6 +147,30 @@ ingress:
 license:
   existingSecretName: vistaplatform-license
 
+# Install identity (an MSP licence is bound to it). Leave commented out for
+# `helm install` / `helm upgrade`, which generate and preserve it. If you deploy
+# with ArgoCD, Flux or `helm template`, pin it — those cannot preserve a
+# generated id. Use the id admin-service logs at boot ("this install's id").
+# install:
+#   id: 00000000-0000-4000-8000-000000000000
+#   # The install signing key (MSP usage reports are signed with it). Same
+#   # rule: pin it only for GitOps renders, from an ENCRYPTED values file.
+#   signingKeyPEM: |
+#     -----BEGIN EC PRIVATE KEY-----
+#     ...
+#     -----END EC PRIVATE KEY-----
+
+# Licence usage reports (MSP licence only; inert otherwise). A copy of each
+# signed monthly report is written to a PVC; the database is the record.
+# ReadWriteOnce (the default) keeps admin-service to one replica.
+# licensing:
+#   reports:
+#     persistence:
+#       enabled: true
+#       size: 1Gi
+#       accessMode: ReadWriteOnce
+#       storageClassName: ""
+
 # -----------------------------------------------------------------------------
 # REQUIRED: platform secrets. Apply this Secret separately:
 #

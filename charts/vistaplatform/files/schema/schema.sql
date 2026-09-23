@@ -895,12 +895,21 @@ $$;
 
 
 -- FUNCTION: set_trial_end_date()
+--
+-- Stamps a 30-day trial end ONLY on a tenant created on a trial tier
+-- (subscription_tiers.is_trial). It used to stamp every new tenant, and the
+-- column carried the same 30-day default, so every tenant on every install —
+-- Enterprise ones included — read "Trial · ends <date>" in both UIs for a plan
+-- that was never a trial (edition-licensing spec, background item 5). Trials
+-- are an MSP choice now: a tier the MSP marks is_trial.
 CREATE OR REPLACE FUNCTION public.set_trial_end_date() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-    -- Set trial end date to 30 days from now if not specified
-    IF NEW.trial_ends_at IS NULL THEN
+    IF NEW.trial_ends_at IS NULL
+       AND NEW.subscription_tier_id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM public.subscription_tiers st
+                   WHERE st.id = NEW.subscription_tier_id AND st.is_trial) THEN
         NEW.trial_ends_at = NOW() + INTERVAL '30 days';
     END IF;
     RETURN NEW;
@@ -1390,9 +1399,9 @@ CREATE TABLE IF NOT EXISTS public.tenants (
     slug character varying(100) NOT NULL,
     domain character varying(255),
     subscription_tier_id uuid,
-    trial_ends_at timestamp with time zone DEFAULT (now() + '30 days'::interval),
+    trial_ends_at timestamp with time zone,
     billing_email character varying(255),
-    payment_status character varying(50) DEFAULT 'trial'::character varying,
+    payment_status character varying(50) DEFAULT 'active'::character varying,
     stripe_customer_id character varying(255),
     stripe_subscription_id character varying(255),
     sso_enabled boolean DEFAULT false,
@@ -4626,6 +4635,13 @@ CREATE TABLE IF NOT EXISTS public.platform_sso_providers (
     purpose character varying(20) DEFAULT 'signup' NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    -- The platform user who last created or changed this row. Staff SSO signs a
+    -- super administrator in only through an admin_login provider whose
+    -- updated_by is, at sign-in time, an active super administrator, and any
+    -- other staff member only if updated_by currently holds every permission
+    -- of their role. No FK: a deleted author must leave the row untrusted,
+    -- not rewrite it.
+    updated_by uuid,
     CONSTRAINT valid_platform_provider_type CHECK (((provider_type)::text = ANY ((ARRAY['google'::character varying, 'microsoft'::character varying])::text[]))),
     CONSTRAINT valid_platform_provider_purpose CHECK (((purpose)::text = ANY ((ARRAY['signup'::character varying, 'admin_login'::character varying])::text[])))
 );
@@ -21868,6 +21884,251 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_discovery_jobs_identity_enrichment_request
  ON public.discovery_jobs(tenant_id,(metadata->'options'->>'identity_enrichment_request_id'))
  WHERE metadata->'options'->>'identity_enrichment_request_id' IS NOT NULL;
 
+-- ============================================================================
+-- LICENSING: install identity and the verified licence
+-- (docsv4/internal/developer/standards/features/edition-licensing-and-msp-metering.md §2)
+-- ============================================================================
+-- Both tables are global — no tenant_id, no RLS — like subscription_tiers: they
+-- describe the install, not a tenant, and every service's resolver reads
+-- platform_license through whichever pool it holds.
+
+-- platform_install: this install's identity. One row, ever.
+--
+-- The id is generated ONCE and must survive upgrades, because an MSP licence
+-- is bound to it (vc_install_id) and every usage report will carry it. On a
+-- Helm install the chart generates it into a Secret with `lookup` (kept across
+-- upgrades) and admin-service mirrors it here at boot; on a compose/dev install
+-- with no INSTALL_ID set, admin-service generates it here and the database
+-- volume is what keeps it. See services/admin-service/ee/edition/install.go.
+--
+-- The single-row rule is an index rather than a convention: two rows would
+-- make "this install's id" ambiguous, which is the one thing it must not be.
+CREATE TABLE IF NOT EXISTS public.platform_install (
+    install_id uuid NOT NULL PRIMARY KEY,
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS platform_install_single_row ON public.platform_install ((true));
+
+-- platform_license: the licence this install runs under. At most one row.
+--
+-- The product writes it from ONE place: admin-service's licence reconciler
+-- (ee/edition), on its bypass pool, after it has verified the signed token —
+-- upserted at boot and on every reconcile, and DELETED when the token is
+-- missing, invalid, expired or bound to another install. No row = Core.
+-- That is a code convention, not a database guarantee: crypto_app is limited to
+-- SELECT here and on platform_install (see ROLE GRANTS at the end of the file),
+-- but crypto_bypass keeps full DML, and every backend holds a
+-- BYPASS_DATABASE_URL for it. The REVOKE narrows the RLS app pool only.
+-- shared/entitlements reads it (edition, expires_at) to decide every
+-- edition-gated capability; it re-checks expires_at itself, so an expired row
+-- that admin-service has not yet removed grants nothing.
+--
+-- token_sha256 identifies which token produced the row without storing the
+-- token. max_tenants / grace_days are the MSP soft cap (NULL = not set by the
+-- licence); install_id is the binding the token carried, if any.
+CREATE TABLE IF NOT EXISTS public.platform_license (
+    singleton boolean NOT NULL DEFAULT true PRIMARY KEY CHECK (singleton),
+    subject text NOT NULL,
+    edition text NOT NULL CHECK (edition IN ('enterprise', 'msp')),
+    licensee text NOT NULL DEFAULT '',
+    issued_at timestamp with time zone,
+    expires_at timestamp with time zone NOT NULL,
+    max_tenants integer CHECK (max_tenants IS NULL OR max_tenants >= 0),
+    grace_days integer CHECK (grace_days IS NULL OR grace_days >= 0),
+    install_id uuid,
+    token_sha256 text NOT NULL,
+    verified_at timestamp with time zone NOT NULL DEFAULT now(),
+    updated_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
+-- LICENSING: MSP usage metering (edition-licensing spec PR 4)
+-- (docsv4/internal/developer/architecture/licensing/LICENSE_USAGE_REPORT_V1.md)
+-- ============================================================================
+-- An MSP-licensed install reports, once a month, which customer tenants
+-- existed and how large they were. The tables below are the facts those
+-- reports are built from. All are global (no tenant_id RLS policy): they
+-- describe the install's customers as a whole, and only admin-service's usage
+-- collector (ee/licensing, bypass pool) writes them. crypto_app may read the
+-- ledger tables but not write them, and may not touch the dev signing key at
+-- all — see ROLE GRANTS at the end of the file.
+--
+-- No foreign key to tenants anywhere here, deliberately: purging a tenant
+-- (DELETE FROM tenants, which cascades) must not erase the fact that it was a
+-- customer during a month that has not been reported yet.
+
+-- The public half of the install signing key, which signs every usage report.
+-- The private half lives in the chart-managed Secret (never the database) on a
+-- Helm install; see license_signing_dev_key for compose/dev.
+-- signing_public_key is the base64 SPKI DER; signing_key_id is the lowercase
+-- hex SHA-256 of that DER (the report's key_id).
+ALTER TABLE public.platform_install ADD COLUMN IF NOT EXISTS signing_public_key text;
+ALTER TABLE public.platform_install ADD COLUMN IF NOT EXISTS signing_key_id text;
+ALTER TABLE public.platform_install ADD COLUMN IF NOT EXISTS signing_key_recorded_at timestamp with time zone;
+
+-- license_signing_dev_key: the install signing key's PRIVATE half, ONLY on an
+-- install with no key mounted (docker-compose / dev). admin-service generates
+-- it on first boot and logs loudly that it is not for production. A Helm
+-- install mounts the chart's Secret instead and never writes this table.
+-- crypto_app has no privilege on it whatsoever.
+CREATE TABLE IF NOT EXISTS public.license_signing_dev_key (
+    singleton boolean NOT NULL DEFAULT true PRIMARY KEY CHECK (singleton),
+    private_key_pem text NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+-- license_usage_events: tenant lifecycle facts, append-only. Written at the
+-- lifecycle call sites (signup, suspend, reactivate, soft delete) — NOT
+-- derived from the audit log, whose tenant attribution is not reliable enough
+-- to bill from. actor is an opaque id ("signup", "platform_user:<uuid>"),
+-- never a name or an email.
+CREATE TABLE IF NOT EXISTS public.license_usage_events (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id uuid NOT NULL,
+    type text NOT NULL CHECK (type IN ('created', 'suspended', 'reactivated', 'deleted', 'restored')),
+    occurred_at timestamp with time zone NOT NULL DEFAULT now(),
+    actor text NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_license_usage_events_occurred_at ON public.license_usage_events (occurred_at);
+CREATE INDEX IF NOT EXISTS idx_license_usage_events_tenant ON public.license_usage_events (tenant_id, occurred_at);
+
+-- license_usage_snapshot_runs: one row per UTC date the daily snapshot ran.
+-- It is what tells "taken, zero tenants" apart from "not taken" (a gap), which
+-- the per-tenant rows below cannot do on a day with no tenants. backfilled is
+-- true for a missed day taken late, at admin-service start.
+CREATE TABLE IF NOT EXISTS public.license_usage_snapshot_runs (
+    snapshot_date date NOT NULL PRIMARY KEY,
+    taken_at timestamp with time zone NOT NULL DEFAULT now(),
+    tenant_count integer NOT NULL DEFAULT 0,
+    backfilled boolean NOT NULL DEFAULT false
+);
+
+-- license_usage_daily: each live tenant's state and size at the daily
+-- snapshot (00:15 UTC). state is the tenant's billing state folded to
+-- active | trial | suspended (shared/licenseusage.StateOf). The size signals
+-- use the platform-excluding counts: customer sensors leave out the
+-- platform-managed sensors (platform = 'platform' or tagged 'system').
+CREATE TABLE IF NOT EXISTS public.license_usage_daily (
+    snapshot_date date NOT NULL,
+    tenant_id uuid NOT NULL,
+    state text NOT NULL CHECK (state IN ('active', 'trial', 'suspended')),
+    is_operator boolean NOT NULL DEFAULT false,
+    customer_sensors integer NOT NULL DEFAULT 0,
+    device_agents integer NOT NULL DEFAULT 0,
+    assets integer NOT NULL DEFAULT 0,
+    users integer NOT NULL DEFAULT 0,
+    PRIMARY KEY (snapshot_date, tenant_id)
+);
+
+-- license_usage_reports: every signed monthly report, the system of record
+-- (a copy on the licensing.reports.dir volume is an export). body is the
+-- RFC 8785 canonical JSON that was signed and envelope the exact bytes a
+-- download serves — text, not jsonb, because jsonb would re-serialise them and
+-- the signature is over the bytes. At most one COMPLETE report per period: a
+-- second would be billed twice. Month-to-date previews (complete = false) are
+-- never billed and may repeat. The delivery_* columns belong to the
+-- transmitter (spec PR 5); 'pending' is what it will pick up.
+CREATE TABLE IF NOT EXISTS public.license_usage_reports (
+    report_id uuid NOT NULL PRIMARY KEY,
+    period_start timestamp with time zone NOT NULL,
+    period_end timestamp with time zone NOT NULL,
+    complete boolean NOT NULL,
+    generated_at timestamp with time zone NOT NULL,
+    tenant_count integer NOT NULL DEFAULT 0,
+    signing_key_id text NOT NULL,
+    body text NOT NULL,
+    signature text NOT NULL,
+    envelope text NOT NULL,
+    generated_by text NOT NULL DEFAULT 'scheduler',
+    delivery_status text NOT NULL DEFAULT 'pending' CHECK (delivery_status IN ('pending', 'delivered', 'failed')),
+    delivery_attempts integer NOT NULL DEFAULT 0,
+    last_error text,
+    delivered_at timestamp with time zone,
+    CHECK (period_end > period_start)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS license_usage_reports_one_complete_per_period
+    ON public.license_usage_reports (period_start) WHERE complete;
+CREATE INDEX IF NOT EXISTS idx_license_usage_reports_generated_at ON public.license_usage_reports (generated_at DESC);
+-- tenants.is_operator: marks the MSP's own tenant(s) — the organisation running
+-- the install, as opposed to its customers. The MSP soft cap (below) never
+-- counts them, and usage reports flag them. A platform admin sets it from
+-- admin-ui → Tenants → tenant drawer.
+ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS is_operator boolean NOT NULL DEFAULT false;
+
+-- Only the bypass role or the table owner may set is_operator. Marking a
+-- tenant as the operator's own takes it out of the MSP soft cap's count, so an
+-- app-pool write (crypto_app: request-driven SQL, an injection in a
+-- tenant-facing handler) that set it could make room past the licence. The one
+-- legitimate writer is admin-service's PUT /admin/tenants/:id/operator, on the
+-- bypass pool. "Bypass" is the BYPASSRLS attribute (crypto_bypass) rather than
+-- a role name; "owner" is anyone with the privileges of the table's owner,
+-- which covers superusers and installs without the RLS roles, whose services
+-- connect as the owner. Covers INSERT too: a new tenant inserted already
+-- marked would never be counted. SECURITY INVOKER (the default), so
+-- current_user is the caller.
+--
+-- This guards the one column, not the cap in general: crypto_app keeps INSERT
+-- and UPDATE on tenants, so an app-pool write could still insert a tenant
+-- without AdmitTenantCreation or clear deleted_at. The cap is a guardrail;
+-- usage reports are what an MSP is billed from.
+CREATE OR REPLACE FUNCTION public.guard_tenant_is_operator() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'INSERT' AND NOT NEW.is_operator THEN
+        RETURN NEW;
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.is_operator IS NOT DISTINCT FROM OLD.is_operator THEN
+        RETURN NEW;
+    END IF;
+    IF (SELECT rolbypassrls FROM pg_catalog.pg_roles WHERE rolname = current_user)
+       OR pg_catalog.pg_has_role(current_user,
+              (SELECT relowner FROM pg_catalog.pg_class WHERE oid = TG_RELID), 'USAGE') THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'tenants.is_operator can only be changed by a platform administrator'
+        USING ERRCODE = 'insufficient_privilege';
+END;
+$$;
+CREATE OR REPLACE TRIGGER guard_tenant_is_operator BEFORE INSERT OR UPDATE OF is_operator ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.guard_tenant_is_operator();
+
+-- platform_license.license_id: the licence's canonical identity, the SHA-256
+-- of the token's JWS signing input (header.payload as signed). Written by the
+-- licence reconciler; NULL only on a row an older admin-service wrote.
+-- token_sha256 (the raw token's hash, shown to operators) cannot identify a
+-- licence: one issued token verifies in several byte forms (spare bits in the
+-- signature's last base64url character; ECDSA's (r, n-s)), each with its own
+-- token_sha256. The signing input cannot vary without breaking the signature.
+ALTER TABLE public.platform_license ADD COLUMN IF NOT EXISTS license_id text;
+
+-- license_cap_grace: the MSP soft cap's grace clock, ONE ROW PER LICENCE.
+--
+-- A row is written the first time the live, non-operator tenant count goes
+-- over platform_license.max_tenants under a licence (keyed by its license_id),
+-- and is never updated or deleted after that: the grace period is granted once
+-- per licence. Dropping back to or under the licence (tenants deleted, tenants
+-- marked as the operator's own) does not clear it, and installing another
+-- licence and then this one again (A -> B -> A, as happens in a renewal
+-- overlap) finds A's row where it was. Only a licence with a new license_id —
+-- one Vista Security minted — has no row and so gets a grace period.
+-- Written by shared/entitlements (AdmitTenantCreation / EvaluateTenantCap)
+-- with INSERT ... ON CONFLICT DO NOTHING on a bypass pool; read-only for
+-- crypto_app, like platform_license (ROLE GRANTS below) — an app-pool write
+-- that removed a row would reopen tenant creation past the licence. It is a
+-- table of its own, not columns on platform_license, because the licence
+-- reconciler rewrites (and on Core, deletes) that row.
+CREATE TABLE IF NOT EXISTS public.license_cap_grace (
+    license_id text NOT NULL PRIMARY KEY,
+    grace_started_at timestamp with time zone NOT NULL,
+    recorded_at timestamp with time zone NOT NULL DEFAULT now()
+);
+
+-- POST-MIGRATIONS: license_cap_state ('s single-row grace clock, never in
+-- a release) is replaced by license_cap_grace. A single row could hold only one
+-- licence's clock, so installing another licence overwrote it and re-installing
+-- the first got a fresh grace period.
+DROP TABLE IF EXISTS public.license_cap_state;
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -21921,6 +22182,51 @@ REVOKE ALL ON public.mv_location_finding_summary_tenant FROM crypto_app, crypto_
 REVOKE ALL ON public.mv_remediation_queue_tenant        FROM crypto_app, crypto_bypass;
 GRANT SELECT ON public.mv_location_finding_summary_tenant TO crypto_app, crypto_bypass;
 GRANT SELECT ON public.mv_remediation_queue_tenant        TO crypto_app, crypto_bypass;
+
+-- The install's licence and identity are READ-ONLY for crypto_app. Every
+-- service's entitlement resolver reads platform_license through its app pool,
+-- so SELECT stays. Left with the blanket grant above, any query on the app pool
+-- — an injection in a tenant-facing request handler, say — could INSERT an
+-- 'enterprise' row and switch every paid capability on for every tenant, or
+-- rewrite the install id a licence is bound to.
+--
+-- What this does NOT do: make admin-service the only possible writer. The
+-- reconciler writes on the bypass pool (crypto_bypass), and crypto_bypass keeps
+-- full DML on both tables — but every backend is handed a BYPASS_DATABASE_URL
+-- for that same role (and the owner's password), so any backend process could
+-- write them. The REVOKE narrows the RLS app pool, where request-driven SQL
+-- runs; it is not a boundary against a compromised backend.
+--
+-- REVOKE ALL then GRANT SELECT, so a re-apply (whose blanket GRANT re-adds the
+-- write privileges) always ends read-only. shared/database's
+-- TestIntegration_Schema_SingleApplyGrantsEveryRelation checks both after one
+-- apply and after two (its readOnlyForApp list).
+REVOKE ALL ON public.platform_license FROM crypto_app;
+REVOKE ALL ON public.platform_install FROM crypto_app;
+GRANT SELECT ON public.platform_license TO crypto_app;
+GRANT SELECT ON public.platform_install TO crypto_app;
+
+-- The usage-metering ledger (edition-licensing spec PR 4) follows the same
+-- rule: read-only for crypto_app, written only by admin-service's usage
+-- collector on the bypass pool. A crypto_app write could delete a customer
+-- from a month's report or forge its lifecycle. The dev signing key is the
+-- private half of the report signing key on an install with none mounted, so
+-- crypto_app gets NOTHING on it — not even SELECT.
+REVOKE ALL ON public.license_usage_events        FROM crypto_app;
+REVOKE ALL ON public.license_usage_snapshot_runs FROM crypto_app;
+REVOKE ALL ON public.license_usage_daily         FROM crypto_app;
+REVOKE ALL ON public.license_usage_reports       FROM crypto_app;
+REVOKE ALL ON public.license_signing_dev_key     FROM crypto_app;
+GRANT SELECT ON public.license_usage_events        TO crypto_app;
+GRANT SELECT ON public.license_usage_snapshot_runs TO crypto_app;
+GRANT SELECT ON public.license_usage_daily         TO crypto_app;
+GRANT SELECT ON public.license_usage_reports       TO crypto_app;
+
+-- The MSP soft cap's grace clocks: same rule, same reason. Every tenant-creation
+-- path reads them inside its own (app-pool) transaction and writes through the
+-- bypass pool.
+REVOKE ALL ON public.license_cap_grace FROM crypto_app;
+GRANT SELECT ON public.license_cap_grace TO crypto_app;
 -- ADR-0016: compliance severity vocabulary. Preserve judgments and weights;
 -- only spellings change. Run before new writers/seeds; rollback requires the
 -- matching old vocabulary migration, not just restarting old application code.
@@ -22393,3 +22699,44 @@ ALTER TABLE IF EXISTS public.asset_management
     ADD COLUMN IF NOT EXISTS ssh_host_key_type text;
 ALTER TABLE IF EXISTS public.asset_management
     ADD COLUMN IF NOT EXISTS ssh_host_key_pinned_at timestamp with time zone;
+
+-- ============================================================================
+-- POST-MIGRATIONS: edition licence model v2 (edition-licensing spec PR 1)
+-- ============================================================================
+-- The licence now lives in ONE platform_license row that the resolver reads,
+-- instead of per-tenant tenant_entitlements rows the old token seeder wrote for
+-- every tenant, every day (its upsert key included date_trunc('day', now()), so
+-- it added a fresh set per tenant per day, each outranking the platform
+-- admin's own exceptions). Those rows are now dead weight that would also be
+-- mistaken for operator exceptions, so they go. Only the seeder ever wrote this
+-- reason prefix; rows a platform admin created carry their own reason and are
+-- untouched. Idempotent: a second run matches nothing.
+DELETE FROM public.tenant_entitlements WHERE reason LIKE 'edition token:%';
+
+-- No blanket 30-day trial on new tenants. The trigger above now stamps
+-- trial_ends_at only for a trial tier; the column default did the same thing
+-- unconditionally and would have defeated it. DROP DEFAULT is idempotent.
+-- Existing trial_ends_at values are left alone here: whether they are real
+-- depends on the edition, which the schema Job cannot know — on an Enterprise
+-- licence admin-service clears them at runtime (ee/edition).
+ALTER TABLE public.tenants ALTER COLUMN trial_ends_at DROP DEFAULT;
+
+-- Likewise payment_status: its 'trial' default labelled every tenant created
+-- without an explicit status (any path other than signup, which now writes
+-- 'active') as on a trial — on every edition, including Enterprise, which has
+-- no trials. 'active' is the honest default; an MSP that runs trials sets
+-- 'trial' explicitly (ee/billing's trial manager does). Existing rows are left
+-- alone for the same reason as trial_ends_at above. SET DEFAULT is idempotent.
+ALTER TABLE public.tenants ALTER COLUMN payment_status SET DEFAULT 'active';
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: record who last wrote each platform identity provider
+-- ----------------------------------------------------------------------------
+-- The CREATE TABLE above carries the column for a fresh install; this reaches a
+-- database that already has the table. Nullable with no default (metadata-only
+-- add). Existing rows read NULL = "author unknown", which staff SSO treats as
+-- not trusted to sign in a super administrator until a super administrator
+-- saves the provider again; other staff keep signing in through it until its
+-- next save records an author.
+ALTER TABLE IF EXISTS public.platform_sso_providers
+    ADD COLUMN IF NOT EXISTS updated_by uuid;

@@ -1945,6 +1945,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/infrastructure-assets/network-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every live asset, placed by site and network, with a crypto summary
+         * @description The data behind Inventory → Map → Network: one row per asset with the site and network segment it is placed in, and a SUMMARY of the crypto its services carry — enough to colour a device and to group devices by a shared crypto trait, and no more. The per-service detail a device's exploded view shows is read on demand from the asset's endpoints, crypto configurations and certificates.
+         *
+         *     ## What is included
+         *
+         *     Assets whose status is `monitoring` or `pending_approval`. Archived, denied and deleted assets are not on the map. `segments` lists every ACTIVE network segment, including those no returned asset sits in, so an empty network is drawn as empty rather than missing.
+         *
+         *     ## Sites
+         *
+         *     `site` uses the same expression as the topology tree and the `site` facet, so the three can never name a site differently. An asset with no site is `Unassigned`.
+         *
+         *     ## Unknown is not zero
+         *
+         *     `risk_score` is only meaningful when `risk_assessed` is true. A score of 0 with `risk_assessed: false` means nothing has assessed the asset yet, not that it is safe.
+         *
+         *     ## Caps
+         *
+         *     Bounded at `asset_cap` assets, ordered by risk then name. Past the cap the response sets `truncated` and still reports the real `total_assets`. It is never silently shortened. An empty estate is 200 with empty arrays.
+         */
+        get: operations["getAssetNetworkMap"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/infrastructure-assets/stats": {
         parameters: {
             query?: never;
@@ -4991,6 +5027,84 @@ export interface components {
         /** @description Envelope for GET /infrastructure-assets/topology — `{ topology }`. */
         AssetTopologyResponse: {
             topology: components["schemas"]["AssetTopology"];
+        };
+        /** @description One active network segment. */
+        NetworkMapSegment: {
+            /** Format: uuid */
+            segment_id: string;
+            name: string;
+            /** @description The segment definition: a CIDR, a range, or a cloud network reference. */
+            value: string;
+            segment_type: string;
+        };
+        /** @description One DISTINCT algorithm-catalogue component linked to any of the asset's live crypto configurations (`crypto_implementation_algorithms` joined to `algorithms`). The assessment is the catalogue's, so the map never holds a second opinion about an algorithm. */
+        NetworkMapComponent: {
+            /** @enum {string} */
+            algorithm_type: "protocol_version" | "cipher_suite" | "key_exchange" | "signature" | "symmetric" | "hash";
+            /** @description The catalogue name. */
+            name: string;
+            /** @description Catalogue strength (weak / acceptable / strong / recommended). Empty string when the catalogue row records none. */
+            strength: string;
+            is_pqc: boolean;
+            /** @description True when at least one configuration uses it (a junction link with is_inferred false). False when it is only offered or derived. */
+            observed: boolean;
+        };
+        /** @description The asset's live crypto configurations classified by the platform's one PQC classifier (the same one behind /pqc/progress and /pqc/summary). The four counts partition the configurations: any classical asymmetric component makes a configuration need migration, whatever else it uses. */
+        NetworkMapPQC: {
+            needs_migration: number;
+            pqc_ready: number;
+            symmetric_safe: number;
+            unclassified: number;
+        };
+        /** @description A summary of the crypto the asset's live configurations carry. */
+        NetworkMapCrypto: {
+            /** @description Sorted by algorithm_type then name. Empty means nothing resolved against the catalogue (not assessed), not "clean". */
+            components: components["schemas"]["NetworkMapComponent"][];
+            pqc: components["schemas"]["NetworkMapPQC"];
+            /** @description Distinct leaf certificates presented by the asset's live configurations whose not_after is within 90 days of now (expired included). Chain intermediates and roots are not counted. */
+            certs_expiring_90d: number;
+        };
+        NetworkMapAsset: {
+            /** Format: uuid */
+            asset_id: string;
+            /** @description Display name, else hostname, else the primary address, else "". */
+            display_name: string;
+            class_key: string;
+            /** @description The primary address */
+            address?: string;
+            /**
+             * Format: uuid
+             * @description The network segment the asset is placed in. Null for an unsegmented asset.
+             */
+            segment_id?: string | null;
+            site: string;
+            /** @enum {string} */
+            asset_status: "monitoring" | "pending_approval";
+            risk_score: number;
+            /** @description True when something has assessed the asset's risk (risk_assessed_by is non-empty). A 0 score with this false is "not assessed". */
+            risk_assessed: boolean;
+            /** @description The cloud account the resource records. Omitted when absent. */
+            cloud_account?: string;
+            /** @description The cloud region the resource records. Omitted when absent. */
+            cloud_region?: string;
+            /** @description Live endpoints (network services) on the asset. */
+            service_count: number;
+            /** @description Live endpoints carrying at least one live crypto configuration, plus ONE when the asset also carries live configurations no live endpoint accounts for (none recorded, or since closed), which the exploded view shows as a single "not tied to a service" group. May exceed service_count for that reason. */
+            crypto_service_count: number;
+            crypto: components["schemas"]["NetworkMapCrypto"];
+        };
+        NetworkMap: {
+            segments: components["schemas"]["NetworkMapSegment"][] | null;
+            assets: components["schemas"]["NetworkMapAsset"][] | null;
+            /** @description Assets on the map before the cap. */
+            total_assets: number;
+            /** @description True when total_assets exceeded asset_cap. */
+            truncated: boolean;
+            asset_cap: number;
+        };
+        /** @description Envelope for GET /infrastructure-assets/network-map — `{ network_map }`. */
+        NetworkMapResponse: {
+            network_map: components["schemas"]["NetworkMap"];
         };
         /** @description Asset count + trend over a period (models.AssetStats). Returned bare by GET /infrastructure-assets/stats. */
         AssetStats: {
@@ -9699,6 +9813,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssetTopologyResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getAssetNetworkMap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The network map. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkMapResponse"];
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];

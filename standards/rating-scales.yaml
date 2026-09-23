@@ -1312,6 +1312,15 @@ bindings:
       minimum/maximum constraints; preserve current wire compatibility. The risk
       concept declares the intended scale; this audit does not prove runtime
       validation.
+  inventory-service.openapi.yaml#/components/schemas/NetworkMapAsset/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
   inventory-service.openapi.yaml#/components/schemas/Asset/properties/risk_level:
     concept: risk_band
     delivery: implement
@@ -1593,6 +1602,17 @@ bindings:
       constraints; preserve current wire compatibility. The algorithm_strength
       concept declares the intended scale; this audit does not prove runtime
       validation.
+  inventory-service.openapi.yaml#/components/schemas/NetworkMapComponent/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Mirrors CryptoComponentAssessment.strength, which carries
+      an empty string when the catalogue row records no strength, so an enum
+      would reject a real value. The algorithm_strength concept declares the
+      intended scale; this audit does not prove runtime validation.
   inventory-service.openapi.yaml#/components/schemas/CryptoComponentAssessment/properties/risk_score:
     concept: risk
     delivery: implement

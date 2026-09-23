@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // Placeholder handlers for routes not yet implemented
@@ -205,9 +207,23 @@ func getTenantUsageHandler(db *sql.DB) gin.HandlerFunc {
 // SSO provider CRUD handlers are Enterprise (ee/sso/tenant_sso.go)
 // CreateSSOProvider, UpdateSSOProvider, DeleteSSOProvider, TestSSOProvider are implemented there
 
-// getSubscriptionTiersHandler returns subscription tiers (requires auth)
+// getSubscriptionTiersHandler returns subscription tiers (requires auth).
+//
+// On an Enterprise install it answers an empty catalogue: Enterprise has no
+// plans (edition-licensing spec §1), and every tier value this lists —
+// retention_days included — would describe a plan no tenant is on. What a
+// tenant actually gets is the resolver's answer (GET /tenant/features,
+// /billing/usage/current), which on Enterprise is the licence plus the
+// platform retention cap.
 func getSubscriptionTiersHandler(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if lic, err := entitlements.LoadLicense(c.Request.Context(), db); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch subscription tiers"})
+			return
+		} else if lic.EffectiveEdition(time.Now()) == entitlements.EditionEnterprise {
+			c.JSON(http.StatusOK, gin.H{"tiers": []gin.H{}})
+			return
+		}
 		rows, err := db.Query(`
 			SELECT id, name, display_name, max_sensors, max_assets, max_users,
 			       retention_days, price_cents, COALESCE(annual_price_cents, 0), billing_interval, features,
@@ -292,6 +308,19 @@ func getPublicTiersHandler(db *sql.DB) gin.HandlerFunc {
 // directly by the contract test.
 func getPublicTiersHandlerWithStore(store tierStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Enterprise has no plans to offer; see getSubscriptionTiersHandler.
+		edition, err := store.LicenseEdition(c.Request.Context())
+		if err != nil {
+			log.Printf("Tiers licence read error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to fetch subscription tiers",
+			})
+			return
+		}
+		if edition == entitlements.EditionEnterprise {
+			c.JSON(http.StatusOK, gin.H{"tiers": []gin.H{}})
+			return
+		}
 		rows, err := store.ListActiveTiers(c.Request.Context())
 		if err != nil {
 			log.Printf("Tiers query error: %v", err)

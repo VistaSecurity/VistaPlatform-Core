@@ -1,15 +1,62 @@
 # The Map
 
-The map answers two different questions, and it has a view for each.
+The map answers three different questions, and it has a view for each.
 
 | View | The question | What you get |
 |---|---|---|
+| **Network** | *Where is everything, and where is the crypto risk?* | Every device laid out by site and network, each marked by the crypto it serves. Click any device to see its services and their crypto. |
 | **Neighbourhood** | *What is this one thing attached to?* | A graph around one asset, out to three hops, with the impact overlay. |
 | **Topology** | *Where is everything?* | A tree of your whole estate by site, segment and class, with counts and the connections between segments. |
 
 The switch between them sits at the top of the page, and the view you are in is in the address bar — so either one is a link you can paste into a ticket.
 
-Most of this page is about the neighbourhood view, which is the one people open most. [Topology](#the-topology-view) is at the bottom.
+The map opens on the [network view](#the-network-view). A link that names an asset (from an asset's Relationships tab, or one somebody pasted) still opens the neighbourhood around it. [Topology](#the-topology-view) is at the bottom.
+
+## The network view
+
+The **network view** draws your whole estate at once: each site, the networks at that site, and the devices on each network. Every device carries a small badge showing how many of its services carry crypto, coloured by what the platform found there.
+
+### Four layouts
+
+Choose with **View**. They all draw the same devices; pick whichever reads best for the shape of your estate.
+
+| Layout | Best for |
+|---|---|
+| **Funnel** | A small or medium estate. Networks funnel up to their site, and sites up to the internet. |
+| **Circuit** | Wide networks. Each site is a trunk line and each network a bus with devices hanging off it, so a big network grows sideways rather than into a tall block. |
+| **Radial** | A large estate at a glance. Sites on the inner ring, networks in the middle, one wedge per device on the outside. Tall coloured wedges carry crypto; short grey ones do not. |
+| **By crypto** | Deciding what to fix. Devices are grouped by an algorithm or certificate problem they share, worst first, so each row is one change that fixes every device in it. Strong algorithms nobody needs to act on are hidden until you ask for them. |
+
+### Zoom
+
+**Sites** shows one summary card per site: devices, networks, how many carry crypto, and the risk breakdown. **Networks** shows each network's device types and risk breakdown without drawing every device. **Devices** draws every device. A small estate opens at Devices; a large one at Sites.
+
+Click a site — its name, its card, or its ring in the radial layout — to focus on it. **All sites** takes you back.
+
+### Colour
+
+**Colour by** switches between:
+
+- **Crypto risk** — the device's risk rating on the platform's standard scale. A device nothing has assessed yet is drawn hollow and labelled *Not assessed*: that is not the same as low risk.
+- **Quantum readiness** — whether the device's crypto needs migrating before quantum computers can break it, using the same classification as the PQC dashboard. One configuration that relies on classical public-key crypto is enough to mark the device as needing migration.
+
+A hollow grey badge means the device has open services but no crypto has been observed on them yet. A device with no badge has no services observed at all.
+
+**Only devices with crypto** hides everything with nothing to show — usually phones, TVs and laptops seen on the network but never measured.
+
+### A device, exploded
+
+Click any device in any layout. Below the map, the device appears on the left with a line out to each of its services. Each service lists the crypto measured on it — protocol, key exchange, cipher, signature, key size, and its certificate with the expiry date — coloured by the platform's algorithm assessment. Algorithms the server **offers** but did not use are shown only when they are weak, marked *also offers*, because a reachable weak option is still a weakness. Services with no crypto observed are grouped into one card.
+
+From there, **Open asset** goes to the asset's page and **Show neighbourhood** draws the graph around it.
+
+### What the network view does not guess
+
+- **Networks come from your data.** A device is drawn in the network it is assigned to, even if its address suggests another. If a device looks misplaced, the assignment is what needs fixing.
+- **Gateways are not inferred.** Until a device is recorded as a network's gateway, the network says *gateway not recorded*, rather than assuming the first address is the router.
+- Very large estates are capped. When that happens a banner says how many devices are shown out of how many, highest risk first.
+
+The site you focus on and the device you open are in the address bar, so a view is a link you can paste into a ticket. Your layout, zoom and colour choices are remembered in your browser.
 
 ## The neighbourhood view
 
@@ -21,7 +68,9 @@ A list is better for deciding about one relationship. A picture is better for se
 
 **Inventory → Map.**
 
-The map opens on the neighbourhood view with a search box rather than a graph, because a map has to be a map *of* something. Find the asset you want at the centre and click it. The search box speaks the same [query language](./query.md) as the inventory list, so `class:server and environment:production` works here exactly as it does there.
+Choose **Neighbourhood** at the top of the map. The list of assets runs down the left-hand side and the map opens on the first one, so there is always a map to look at; pick any other asset from the list to redraw it. The search box above the list speaks the same [query language](./query.md) as the inventory list, so `class:server and environment:production` works here exactly as it does there.
+
+An asset with no relationships is still drawn, on its own, with a note saying nothing has been observed or declared about what it is attached to.
 
 Two other ways in:
 

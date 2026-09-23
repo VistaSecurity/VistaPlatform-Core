@@ -41,11 +41,17 @@ type billingUsageStore interface {
 // billing-portal call is currently a no-op in the handler).
 type tenantBillingStore interface {
 	GetTenantBillingRow(ctx context.Context, tenantID uuid.UUID) (*tenantBillingRow, error)
+	// TenantPlan is the tenant's plan block: on Enterprise the tier is a
+	// capacity placeholder, so its name must not reach the tenant.
+	TenantPlan(ctx context.Context, tenantID uuid.UUID) (entitlements.Plan, error)
 }
 
 // tierStore is the seam for the public subscription-tiers list.
 type tierStore interface {
 	ListActiveTiers(ctx context.Context) ([]tierRow, error)
+	// LicenseEdition is the edition the install runs as now (core when no
+	// active licence). An Enterprise install has no plans to list.
+	LicenseEdition(ctx context.Context) (entitlements.Edition, error)
 }
 
 // tenantBillingRow holds the nullable columns the GetTenantBilling join returns.
@@ -317,4 +323,18 @@ func (r *billingRepository) GetTenantTierName(ctx context.Context, tenantID uuid
 		WHERE t.id = $1
 	`, tenantID).Scan(&name)
 	return name, err
+}
+
+// LicenseEdition reads platform_license through the shared (cached) reader.
+func (r *billingRepository) LicenseEdition(ctx context.Context) (entitlements.Edition, error) {
+	lic, err := entitlements.LoadLicense(ctx, r.db)
+	if err != nil {
+		return "", err
+	}
+	return lic.EffectiveEdition(time.Now()), nil
+}
+
+// TenantPlan resolves the tenant's plan block.
+func (r *billingRepository) TenantPlan(ctx context.Context, tenantID uuid.UUID) (entitlements.Plan, error) {
+	return entitlements.ResolvePlan(ctx, r.db, tenantID)
 }

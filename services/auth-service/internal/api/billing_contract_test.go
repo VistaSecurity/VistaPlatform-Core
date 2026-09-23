@@ -14,11 +14,13 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 type stubBillingUsageStore struct {
@@ -146,12 +148,24 @@ func TestContract_GetCurrentUsage_500_limits(t *testing.T) {
 // --- GET /tenant/billing ----------------------------------------------------
 
 type stubTenantBillingStore struct {
-	row *tenantBillingRow
-	err error
+	row     *tenantBillingRow
+	err     error
+	plan    *entitlements.Plan // nil = Core
+	planErr error
 }
 
 func (s *stubTenantBillingStore) GetTenantBillingRow(_ context.Context, _ uuid.UUID) (*tenantBillingRow, error) {
 	return s.row, s.err
+}
+
+func (s *stubTenantBillingStore) TenantPlan(context.Context, uuid.UUID) (entitlements.Plan, error) {
+	if s.planErr != nil {
+		return entitlements.Plan{}, s.planErr
+	}
+	if s.plan != nil {
+		return *s.plan, nil
+	}
+	return entitlements.PlanFor(nil, time.Now(), entitlements.TenantPlanFacts{}), nil
 }
 
 func newTenantBillingEngine(store tenantBillingStore, authenticated bool, tenantID string) *gin.Engine {
@@ -208,6 +222,47 @@ func TestContract_GetTenantBilling_200_noTier(t *testing.T) {
 	sv.assertConforms(t, "TenantBillingResponse", w.Body.Bytes())
 }
 
+// On Enterprise the tenant-facing billing read-out carries neither the
+// placeholder tier's name nor a trial: the copy guard, for /tenant/billing.
+func TestContract_GetTenantBilling_EnterpriseHidesTierAndTrial(t *testing.T) {
+	sv := loadSpec(t)
+	row := sampleBillingRow()
+	row.TierName = sql.NullString{String: "community", Valid: true}
+	row.DisplayName = sql.NullString{String: "Community", Valid: true}
+	row.SubscriptionStatus = sql.NullString{String: "trialing", Valid: true}
+	lic := &entitlements.License{Edition: entitlements.EditionEnterprise, Licensee: "Acme Corp", ExpiresAt: time.Now().Add(90 * 24 * time.Hour)}
+	plan := entitlements.PlanFor(lic, time.Now(), entitlements.TenantPlanFacts{})
+	eng := newTenantBillingEngine(&stubTenantBillingStore{row: row, plan: &plan}, true, aTenantID)
+	w := do(eng, http.MethodGet, "/api/v1/auth-service/tenant/billing", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "TenantBillingResponse", w.Body.Bytes())
+	lower := strings.ToLower(w.Body.String())
+	for _, word := range []string{"community", "trial"} {
+		if strings.Contains(lower, word) {
+			t.Errorf("Enterprise /tenant/billing contains %q: %s", word, w.Body.String())
+		}
+	}
+	if !strings.Contains(w.Body.String(), entitlements.PlanDisplayNameEnterprise) {
+		t.Errorf("Enterprise /tenant/billing lacks the plan display name: %s", w.Body.String())
+	}
+
+	// MSP (and Core) keep the tier: it IS the plan there.
+	mspLic := &entitlements.License{Edition: entitlements.EditionMSP, ExpiresAt: time.Now().Add(90 * 24 * time.Hour)}
+	mspPlan := entitlements.PlanFor(mspLic, time.Now(), entitlements.TenantPlanFacts{TierDisplayName: "Pro"})
+	w = do(newTenantBillingEngine(&stubTenantBillingStore{row: sampleBillingRow(), plan: &mspPlan}, true, aTenantID), http.MethodGet, "/api/v1/auth-service/tenant/billing", nil)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"tier_name":"pro"`) {
+		t.Errorf("MSP /tenant/billing = %d %s, want the tier name", w.Code, w.Body.String())
+	}
+
+	// An unreadable plan fails closed rather than falling back to the row.
+	w = do(newTenantBillingEngine(&stubTenantBillingStore{row: row, planErr: context.DeadlineExceeded}, true, aTenantID), http.MethodGet, "/api/v1/auth-service/tenant/billing", nil)
+	if w.Code != http.StatusInternalServerError || strings.Contains(strings.ToLower(w.Body.String()), "community") {
+		t.Errorf("plan error: %d %s, want 500 without the row", w.Code, w.Body.String())
+	}
+}
+
 func TestContract_GetTenantBilling_401(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newTenantBillingEngine(&stubTenantBillingStore{}, false, aTenantID)
@@ -241,12 +296,20 @@ func TestContract_GetTenantBilling_500(t *testing.T) {
 // --- GET /tiers (public) ----------------------------------------------------
 
 type stubTierStore struct {
-	tiers []tierRow
-	err   error
+	tiers   []tierRow
+	err     error
+	edition entitlements.Edition // "" = core
 }
 
 func (s *stubTierStore) ListActiveTiers(_ context.Context) ([]tierRow, error) {
 	return s.tiers, s.err
+}
+
+func (s *stubTierStore) LicenseEdition(context.Context) (entitlements.Edition, error) {
+	if s.edition == "" {
+		return entitlements.EditionCore, nil
+	}
+	return s.edition, nil
 }
 
 func newTiersEngine(store tierStore) *gin.Engine {

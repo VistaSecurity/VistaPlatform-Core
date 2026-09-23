@@ -39,7 +39,7 @@ func TestAssignTierToTenant_NeedsNoPricer(t *testing.T) {
 	// with SetPricer never called.
 	svc := NewTierService(db, db)
 
-	_, err = svc.AssignTierToTenant(uuid.New(), uuid.New())
+	_, err = svc.AssignTierToTenant(uuid.New(), uuid.New(), "platform_user:test")
 	if err == nil {
 		t.Fatal("expected a database error against an unreachable pool, got nil")
 	}

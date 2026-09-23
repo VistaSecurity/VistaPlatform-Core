@@ -1,6 +1,9 @@
 package services
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // TestProcessingLog_ZeroAssetPayloadIsNotACleanSuccess pins the honesty rule the
 // first live fleet data broke: an interrogation that genuinely found 12 devices
@@ -105,6 +108,66 @@ func TestProcessingLog_FatalIsVisibleAndSinksTheFlag(t *testing.T) {
 	clean.ok("a.example.net", StageDiscoveryFinding)
 	if _, ok := clean.Summary()["fatal"]; ok {
 		t.Error("fatal key present on a clean run")
+	}
+}
+
+// TestProcessingLog_DroppedObservationsAreVisible pins the surface for what
+// ObservationSink.Persist could not write. A UniFi interrogation that dropped
+// 139 of 143 facts and every edge persisted `errors: [], fully_materialized:
+// true`, because the persist error only reached stdout.
+//
+// Persist joins one error per dropped write, so the count is per observation
+// and identical messages collapse into one entry with a count.
+//
+// MUTATION: delete the p.fail call in observationsFailed and this fails.
+func TestProcessingLog_DroppedObservationsAreVisible(t *testing.T) {
+	p := &ProcessingLog{DiscoveryJobID: "job-1", ExistingFindings: 1, AssetsReceived: 1}
+	p.ok("a.example.net", StageDiscoveryFinding)
+	p.observationsFailed("asset-1", errors.Join(
+		errors.New("fact hw.model: resolving subject: boom"),
+		errors.New("fact hw.model: resolving subject: boom"),
+		errors.New("edge connects_to: resolving peer: boom"),
+	))
+
+	s := p.Summary()
+	if s["observations_failed"] != 3 {
+		t.Errorf("observations_failed = %v, want 3", s["observations_failed"])
+	}
+	if s["fully_materialized"] != false {
+		t.Errorf("fully_materialized = %v, want false when observations were dropped", s["fully_materialized"])
+	}
+	errs, _ := s["errors"].([]map[string]interface{})
+	counts := map[string]int{}
+	for _, e := range errs {
+		if e["stage"] == StageObservations {
+			counts[e["message"].(string)] = e["count"].(int)
+		}
+	}
+	if counts["fact hw.model: resolving subject: boom"] != 2 || counts["edge connects_to: resolving peer: boom"] != 1 {
+		t.Errorf("observation errors = %+v, want the fact twice and the edge once", errs)
+	}
+
+	// The same holds for a host-inventory run, whose headline is overridden.
+	h := &ProcessingLog{HostInventory: &HostInventoryCounts{AssetID: "asset-1"}}
+	if h.Summary()["fully_materialized"] != true {
+		t.Fatal("fixture: a clean host-inventory run must read fully materialized, or the check below is vacuous")
+	}
+	h.observationsFailed("asset-1", errors.New("writing identity: boom"))
+	if h.Summary()["fully_materialized"] != false {
+		t.Error("host-inventory summary hid a dropped observation")
+	}
+}
+
+// TestProcessingLog_NoObservationErrorStaysClean is the other polarity: a nil
+// persist error records nothing, and the field is present as zero.
+func TestProcessingLog_NoObservationErrorStaysClean(t *testing.T) {
+	p := &ProcessingLog{AssetsReceived: 1, DiscoveryJobID: "job-1"}
+	p.ok("a.example.net", StageDiscoveryFinding)
+	p.observationsFailed("asset-1", nil)
+
+	s := p.Summary()
+	if s["observations_failed"] != 0 || s["fully_materialized"] != true {
+		t.Errorf("clean run: observations_failed = %v, fully_materialized = %v", s["observations_failed"], s["fully_materialized"])
 	}
 }
 

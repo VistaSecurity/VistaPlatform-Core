@@ -89,6 +89,7 @@ export interface paths {
         /**
          * Get the resolved feature flags + usage limits for the current tenant
          * @description Returns the union of (tier features) and (active per-tenant overrides), plus any usage-bound limits the frontend needs to make UI gating decisions (e.g. disabling Subscribe at cap). The response always includes every entry in the platform's canonical feature list (`knownFeatures` in `features.go`) so the frontend can rely on a stable shape.
+         *     `plan` is the tenant's plan as a person should read it: "Vista Platform Core"; "Vista Platform Enterprise" with the licensee (never a tier name, never a trial); or on MSP the MSP's own plan and, for a trial plan, `plan.trial`. Omitted when the plan could not be resolved — the UI then hides the block rather than falling back to a tier name.
          */
         get: operations["getTenantFeatures"];
         put?: never;
@@ -1380,7 +1381,7 @@ export interface paths {
         };
         /**
          * List active subscription tiers (public)
-         * @description Public list of active subscription tiers for pricing/registration. No auth required.
+         * @description Public list of active subscription tiers for pricing/registration. No auth required. Empty on an Enterprise install, which has no plans (edition-licensing spec).
          */
         get: operations["getPublicTiers"];
         put?: never;
@@ -1848,6 +1849,24 @@ export interface components {
         FeaturesResponse: {
             features: components["schemas"]["FeatureFlags"];
             limits: components["schemas"]["UsageLimits"];
+            plan?: components["schemas"]["TenantPlan"];
+        };
+        /** @description The resolved plan block (shared/entitlements.PlanFor). No trial is the ABSENT `trial` key, not null. */
+        TenantPlan: {
+            /** @enum {string} */
+            edition: "core" | "enterprise" | "msp";
+            display_name: string;
+            /** @description Who the licence was issued to; null on Core. */
+            licensee: string | null;
+            /**
+             * Format: date-time
+             * @description The licence expiry; null on Core.
+             */
+            expires_at: string | null;
+            trial?: {
+                /** Format: date-time */
+                ends_at: string;
+            };
         };
         /** @description The deployment's AI status plus the calling tenant's own controls. Response body of both `GET` and `PUT /tenant/ai`. */
         TenantAIStatus: {
@@ -2971,7 +2990,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            /** @description A user with this email already exists. */
+            /** @description A user with this email already exists, OR (MSP installs only) the install is past its licensed tenant limit and grace period — `error` then reads "This platform is not accepting new organisations right now. Please contact the platform operator." and is meant to be shown as-is. The refusal deliberately carries no tenant counts and no licensing detail (the caller is unauthenticated); those are recorded in the audit trail as `tenant.create_refused_license_limit`. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3006,7 +3025,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            /** @description A user with this email already exists. */
+            /** @description A user with this email already exists, OR (MSP installs only) the install is past its licensed tenant limit and grace period — `error` then reads "This platform is not accepting new organisations right now. Please contact the platform operator." and is meant to be shown as-is. The refusal deliberately carries no tenant counts and no licensing detail (the caller is unauthenticated); those are recorded in the audit trail as `tenant.create_refused_license_limit`. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4398,7 +4417,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            /** @description An account with this email already exists. */
+            /** @description An account with this email already exists, or (MSP installs only) the install is past its licensed tenant limit and grace period — see /auth/register. */
             409: {
                 headers: {
                     [name: string]: unknown;

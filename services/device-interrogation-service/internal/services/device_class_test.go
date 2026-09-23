@@ -160,3 +160,21 @@ func TestManagementHost(t *testing.T) {
 		}
 	}
 }
+
+func TestDeviceScopeInputsUseManagementAddressWhenExplicitIdentityIsAbsent(t *testing.T) {
+	tests := []struct {
+		name, ip, hostname, managementAddress, wantIP, wantHostname string
+	}{
+		{name: "url IP", managementAddress: "192.168.10.1", wantIP: "192.168.10.1"},
+		{name: "url hostname", managementAddress: "router.lab.example", wantHostname: "router.lab.example"},
+		{name: "explicit values win", ip: "10.0.0.2", hostname: "edge-1", managementAddress: "192.168.10.1", wantIP: "10.0.0.2", wantHostname: "edge-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotIP, gotHostname := deviceScopeInputs(tt.ip, tt.hostname, tt.managementAddress)
+			if gotIP != tt.wantIP || gotHostname != tt.wantHostname {
+				t.Fatalf("deviceScopeInputs() = (%q, %q), want (%q, %q)", gotIP, gotHostname, tt.wantIP, tt.wantHostname)
+			}
+		})
+	}
+}

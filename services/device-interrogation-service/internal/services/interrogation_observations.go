@@ -462,7 +462,7 @@ func (s *ObservationSink) resolvePeer(
 		return identity.AssetRef{}, err
 	}
 	if state, ok := ctx.Value(peerContextKey{}).(*retainedPeerContext); ok {
-		if original, found := state.Peers[identifierKey(peer)]; found {
+		if original, found := state.retainedPeer(peer); found {
 			obs = original
 		}
 	}

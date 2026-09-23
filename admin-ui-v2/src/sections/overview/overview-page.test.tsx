@@ -8,17 +8,22 @@ import type { Tenant, TenantHealthSummary } from '../tenants/queries';
 const state = vi.hoisted(() => ({
   tenants: [] as Tenant[],
   health: new Map<string, TenantHealthSummary>(),
+  // The ee build mounts both msp and billing on every paid install; what
+  // differs is the licence.
+  license: 'enterprise',
 }));
 
 vi.mock('@tanstack/react-query', () => ({
-  useQuery: () => ({ data: { services: [] } }),
+  useQuery: () => ({ data: { services: [], mrr: 12000, active_tenants: 4, series: [] } }),
 }));
 
 vi.mock('../../lib/edition', () => ({
   usePlatformEdition: () => ({
-    has: (capability: string) => capability === 'msp',
+    has: () => true,
     resolved: true,
     edition: 'enterprise',
+    license: state.license,
+    isMsp: state.license === 'msp',
   }),
 }));
 
@@ -47,6 +52,7 @@ function tenant(id: string, name: string, overrides: Partial<Tenant> = {}): Tena
     stripe_customer_id: null,
     sso_enabled: false,
     is_active: true,
+    is_operator: false,
     custom_branding: null,
     ui_config: null,
     settings: null,
@@ -78,6 +84,7 @@ describe('OverviewPage tenant attention policy', () => {
   beforeEach(() => {
     state.tenants = [];
     state.health = new Map();
+    state.license = 'msp';
   });
 
   it('excludes unknown score zero while retaining a measured zero', () => {
@@ -127,5 +134,46 @@ describe('OverviewPage tenant attention policy', () => {
 
     expect(html).toContain('Score Fifty Four');
     expect(html).not.toContain('Score Fifty Five');
+  });
+});
+
+// Billing is MSP-only by licence, and the Enterprise ee binary mounts the
+// billing routes too — so Mission Control must gate its billing surfaces on
+// the licence, not on the build capability.
+describe('OverviewPage billing surfaces by licence', () => {
+  beforeEach(() => {
+    state.tenants = [
+      tenant('past-due', 'Past Due Tenant', { payment_status: 'past_due' }),
+      tenant('fine', 'Fine Tenant'),
+    ];
+    state.health = new Map();
+  });
+
+  it('Enterprise: no revenue hero, no past-due tile, no past-due attention row', () => {
+    state.license = 'enterprise';
+    const html = renderOverview();
+    expect(html).not.toContain('Recurring revenue');
+    expect(html).not.toContain('MRR');
+    expect(html).not.toContain('Past-due tenants');
+    expect(html).not.toContain('Past Due Tenant');
+    // The Core and MSP-directory tiles stay.
+    expect(html).toContain('Suspended');
+    expect(html).toContain('Total tenants');
+    expect(html).toContain('Services needing attention');
+  });
+
+  it('Core licence on the ee build: same as Enterprise', () => {
+    state.license = 'core';
+    const html = renderOverview();
+    expect(html).not.toContain('Recurring revenue');
+    expect(html).not.toContain('Past-due tenants');
+  });
+
+  it('MSP: revenue hero and past-due tile shown', () => {
+    state.license = 'msp';
+    const html = renderOverview();
+    expect(html).toContain('Recurring revenue');
+    expect(html).toContain('Past-due tenants');
+    expect(html).toContain('Past Due Tenant');
   });
 });

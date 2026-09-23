@@ -108,6 +108,9 @@ func main() {
 	// map's "where is everything" view, as a site -> segment -> class tree of
 	// counts rather than the force graph D4 rejects.
 	topologyHandler := handlers.NewTopologyHandler(assetService)
+	// Inventory → Map → Network: every live asset placed by site and
+	// segment, with a catalogue-assessed crypto summary.
+	networkMapHandler := handlers.NewNetworkMapHandler(assetService)
 	classProposalHandler := handlers.NewClassProposalHandler(services.NewClassProposalService(db))
 	// SBOM ingestion (workstream 2.6b): the upload endpoints plus the two
 	// software reads they feed — an asset's Software tab and the tenant
@@ -613,6 +616,7 @@ func main() {
 		// static children ahead of the `:id` parameter, so this does not shadow
 		// the per-asset paths and they do not swallow it.
 		apiv2.GET("/inventory-service/infrastructure-assets/topology", topologyHandler.GetTopology)
+		apiv2.GET("/inventory-service/infrastructure-assets/network-map", networkMapHandler.GetNetworkMap)
 		apiv2.GET("/inventory-service/infrastructure-assets/stats", assetHandler.GetAssetStats)
 		apiv2.GET("/inventory-service/infrastructure-assets/recent-count", assetHandler.GetRecentAssetsCount)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id/endpoints", assetPhase1Handler.GetAssetEndpoints)

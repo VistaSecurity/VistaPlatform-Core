@@ -40,6 +40,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
 	authrbac "github.com/vistasecurity/vistaplatform/auth-service/internal/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"gopkg.in/yaml.v3"
 )
 
@@ -325,7 +326,7 @@ func newEngine(
 
 	grp.GET("/auth/me", authHandlers.GetMe)
 	grp.GET("/user/permissions", rbacHandlers.GetCurrentUserPermissions)
-	grp.GET("/tenant/features", newTenantFeaturesHandler(limits))
+	grp.GET("/tenant/features", newTenantFeaturesHandler(limits, stubPlan(entitlements.Plan{Edition: entitlements.EditionCore, DisplayName: entitlements.PlanDisplayNameCore})))
 	grp.GET("/tenant/:tenantId/roles", rbacHandlers.GetTenantRoles)
 	grp.POST("/tenant/:tenantId/roles", rbacHandlers.CreateTenantRole)
 	grp.DELETE("/tenant/:tenantId/roles/:roleId", rbacHandlers.DeleteTenantRole)

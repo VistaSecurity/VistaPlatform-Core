@@ -1,10 +1,14 @@
 package services
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // DB-backed tests for TierService.GetEffectiveLimits. They assert the
@@ -34,8 +38,8 @@ func TestGetEffectiveLimits_TierValues(t *testing.T) {
 	if limits.MaxAssets == nil || *limits.MaxAssets != 10000 {
 		t.Errorf("MaxAssets = %v, want 10000 (pro tier)", limits.MaxAssets)
 	}
-	if limits.RetentionDays != 365 {
-		t.Errorf("RetentionDays = %d, want 365 (pro tier)", limits.RetentionDays)
+	if limits.RetentionDays == nil || *limits.RetentionDays != 365 {
+		t.Errorf("RetentionDays = %v, want 365 (pro tier)", limits.RetentionDays)
 	}
 	if limits.ComplianceFrameworks == nil || *limits.ComplianceFrameworks != 1 {
 		t.Errorf("ComplianceFrameworks = %v, want 1 (pro tier)", limits.ComplianceFrameworks)
@@ -210,5 +214,31 @@ func TestGetTierCaps_ComposedTierAndCatalogueDefault(t *testing.T) {
 	}
 	if q, ok := caps["max_users"]; !ok || q != nil {
 		t.Errorf("uncomposed max_users = %v (present=%v), want present and nil = unlimited (catalogue default)", q, ok)
+	}
+}
+
+// A plan that cannot be resolved must not fall back to the tier-derived
+// read-out: on Enterprise that would name the capacity-placeholder tier
+// ("community") as the tenant's plan. Same rule as the tenant list/detail
+// presenter, which answers 500 rather than the raw rows.
+func TestGetEffectiveLimits_PlanErrorFailsClosed(t *testing.T) {
+	_, db := setup(t)
+	tenant := uuid.New()
+	if _, err := db.Exec(`
+		INSERT INTO tenants (id, name, slug, subscription_tier_id, created_at, updated_at)
+		VALUES ($1, $2, $3, (SELECT id FROM subscription_tiers WHERE name='community'), NOW(), NOW())
+	`, tenant, "lim-"+tenant.String()[:8], "lim-"+tenant.String()[:8]); err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	svc := NewTierService(db, db)
+	svc.resolvePlan = func(context.Context, *sql.DB, uuid.UUID) (entitlements.Plan, error) {
+		return entitlements.Plan{}, errors.New("licence unreadable")
+	}
+	limits, err := svc.GetEffectiveLimits(tenant)
+	if err == nil {
+		t.Fatalf("GetEffectiveLimits with an unresolvable plan = %+v, want an error (fail closed)", limits)
+	}
+	if limits != nil {
+		t.Fatalf("returned a read-out alongside the error: %+v", limits)
 	}
 }

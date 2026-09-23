@@ -229,6 +229,48 @@
         }
       }
     },
+    "install": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Pinned install id (UUID). Empty = generate once and preserve with lookup. Required for GitOps renders (ArgoCD, helm template), which cannot lookup.",
+          "pattern": "^$|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "signingKeyPEM": {
+          "type": "string",
+          "description": "Pinned install signing key (ECDSA P-256 private key, PEM). Empty = generate once and preserve with lookup. Required for GitOps renders, from an encrypted values file."
+        }
+      }
+    },
+    "licensing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reports": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dir": {
+              "type": "string",
+              "pattern": "^/",
+              "description": "Absolute path admin-service writes <report_id>.json to when persistence is enabled."
+            },
+            "persistence": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "size": { "type": "string" },
+                "accessMode": { "type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadWriteOncePod"] },
+                "storageClassName": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
     "platform": {
       "type": "object",
       "additionalProperties": false,

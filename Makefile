@@ -1013,6 +1013,8 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (admin-service MSP: tenants + tenant-lifecycle + costs + announcements + maintenance-windows + support-tickets + tenant-stats + dashboard)..."
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/msp ]; then go test ./ee/msp/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
+	@echo "==> API contract: running Go contract tests (admin-service EE licence usage: license/usage + license/reports)..."
+	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/licensing ]; then go test ./ee/licensing/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (admin-service EE billing: my-billing + coupons + billing-analytics + billing-invoices)..."
 	@cd services/admin-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/billingapi ]; then go test ./ee/billingapi/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (monitoring-service/status + alerting + trends + gateway + admin-status)..."

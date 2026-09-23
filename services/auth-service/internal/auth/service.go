@@ -30,6 +30,8 @@ import (
 	"github.com/sirupsen/logrus"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/email"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
+	"github.com/vistasecurity/vistaplatform/shared/licenseusage"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 )
@@ -1184,8 +1186,10 @@ func (a *AuthService) createUser(user *models.User) error {
 // Overridable with DEFAULT_SIGNUP_TIER for the one deployment shape where a
 // different floor is correct: a commercial multi-tenant SaaS, which wants new
 // signups on the "free" trial tier instead. Self-hosted installs — Core or
-// commercial — want the community floor, since their entitlements come from an
-// edition token's tenant_entitlements overrides, not from the tier.
+// commercial — want the community floor: on Core it is the whole product, and
+// on an Enterprise licence the tier plays no part at all (the resolver's
+// licence step grants every covered capability and unlimited capacity; see
+// shared/entitlements/license.go).
 const DefaultSignupTierName = "community"
 
 // defaultSignupTierName returns the configured default tier name for new
@@ -1299,13 +1303,20 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 		Slug:               slug,
 		SubscriptionTierID: modelTierID, // uuid.Nil when the tier row is missing (DB stores NULL)
 		BillingEmail:       "",          // Will be set during registration
-		PaymentStatus:      "trial",
-		Settings:           make(map[string]interface{}),
-		CreatedAt:          time.Now(),
-		UpdatedAt:          time.Now(),
+		// 'active', not 'trial': a self-signup tenant has not started a trial
+		// of anything. The old 'trial' made both UIs label every tenant on
+		// every install — Enterprise ones included — "Trial". Whether a tenant
+		// is on a trial is its tier's business (subscription_tiers.is_trial,
+		// an MSP's choice): the set_tenant_trial_end trigger stamps
+		// trial_ends_at for a trial tier and leaves it NULL otherwise.
+		PaymentStatus: "active",
+		Settings:      make(map[string]interface{}),
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
-	// Note: trial_ends_at is handled by the database trigger.
+	// trial_ends_at is left to the set_tenant_trial_end trigger, which sets it
+	// only when the tier is a trial tier.
 	// onboarding_status is left at its 'pending' default: the tier here is a
 	// system-assigned floor, not a choice the user made, and the MSP onboarding
 	// funnel reads that column as "has this tenant been through onboarding".
@@ -1320,8 +1331,36 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 	// requires app.tenant_id = tenant_id. Without this, those triggers fail.
 	// tenants itself has no RLS policy so the context does not constrain the
 	// INSERT itself.
+	//
+	// The MSP soft cap is decided inside the same transaction, before the
+	// INSERT: AdmitTenantCreation takes a transaction-scoped advisory lock, so
+	// two signups at the cap cannot both be admitted, and returns a
+	// *entitlements.TenantCapExceededError (HTTP 409 at every caller) once an
+	// MSP install is past its grace period. It is a no-op on Core and
+	// Enterprise. The grace clock is written through the bypass pool, because
+	// crypto_app can only read license_cap_grace.
 	if err := shareddatabase.WithTenantTx(context.Background(), a.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(context.Background(), query,
+		var capWriter entitlements.Execer // nil → written through tx
+		if a.bypassDB != nil {
+			capWriter = a.bypassDB
+		}
+		capStatus, e := entitlements.AdmitTenantCreation(context.Background(), tx, capWriter, time.Now())
+		if e != nil {
+			if capErr, ok := entitlements.IsTenantCapExceeded(e); ok {
+				logrus.WithFields(logrus.Fields{
+					"licensed": capErr.Licensed, "current": capErr.Current,
+				}).Warn("Tenant creation refused: MSP licensed tenant limit reached and the grace period has ended")
+			}
+			return e
+		}
+		// State describes the NEXT creation; this one landed over the licence
+		// only if the count now exceeds it.
+		if capStatus.State == entitlements.TenantCapGrace && capStatus.Licensed != nil && capStatus.Current > *capStatus.Licensed {
+			logrus.WithFields(logrus.Fields{
+				"licensed": capStatus.Licensed, "current": capStatus.Current, "grace_ends_at": capStatus.GraceEndsAt,
+			}).Warn("Tenant created over the MSP licensed tenant limit, within the grace period")
+		}
+		_, e = tx.ExecContext(context.Background(), query,
 			tenant.ID, tenant.Name, tenant.Slug, subscriptionTierID,
 			tenant.BillingEmail, tenant.PaymentStatus, "{}", tenant.CreatedAt, tenant.UpdatedAt,
 		)
@@ -1336,6 +1375,12 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 	}); err != nil {
 		return nil, err
 	}
+
+	// Licence usage ledger: the tenant exists from now (shared/licenseusage).
+	// Recorded on the bypass pool — the ledger is read-only for the app role —
+	// after the tenant has committed, so best-effort: a ledger failure must not
+	// fail a signup that has already happened.
+	licenseusage.RecordBestEffort(context.Background(), a.bypassDB, tenantID, licenseusage.Created, licenseusage.ActorSignup)
 
 	// Seed the default notification pack. Best-effort: a pack failure must
 	// not fail tenant creation, so this runs in its own transaction and only

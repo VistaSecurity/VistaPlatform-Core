@@ -199,6 +199,57 @@ func TestIntegration_SeedBackfillsTierLessTenants(t *testing.T) {
 	}
 }
 
+// trialStateOf reads the two columns both UIs render as "Trial · ends <date>".
+func trialStateOf(t *testing.T, db *sql.DB, tenantID uuid.UUID) (paymentStatus string, trialEndsAt sql.NullTime) {
+	t.Helper()
+	if err := db.QueryRow(`SELECT payment_status, trial_ends_at FROM tenants WHERE id = $1`, tenantID).
+		Scan(&paymentStatus, &trialEndsAt); err != nil {
+		t.Fatalf("read trial state: %v", err)
+	}
+	return paymentStatus, trialEndsAt
+}
+
+// A self-signup tenant on the default (non-trial) tier is not on a trial. It
+// used to be written payment_status 'trial', and the column default plus the
+// set_tenant_trial_end trigger stamped trial_ends_at = now()+30d on every
+// tenant, so an Enterprise install's only tenant read "Trial · ends <date>"
+// (edition-licensing spec, background item 5).
+func TestIntegration_SelfSignupTenant_IsNotOnATrial(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+
+	tenantID := newSignupTenant(t, db)
+	status, ends := trialStateOf(t, db, tenantID)
+	if status != "active" {
+		t.Errorf("payment_status = %q, want \"active\"", status)
+	}
+	if ends.Valid {
+		t.Errorf("trial_ends_at = %s on a non-trial tier, want NULL", ends.Time)
+	}
+}
+
+// The other polarity: a tier the operator marks is_trial still gets its trial
+// end stamped. Without this the test above would pass if the trigger were
+// simply deleted, and an MSP's trial plans would silently never end.
+func TestIntegration_SelfSignupTenant_OnATrialTierGetsATrialEnd(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+
+	var isTrial bool
+	if err := db.QueryRow(`SELECT is_trial FROM subscription_tiers WHERE name = 'free'`).Scan(&isTrial); err != nil {
+		t.Fatalf("read free tier: %v", err)
+	}
+	if !isTrial {
+		t.Fatal("premise failed: the seeded free tier is no longer is_trial — pick another trial tier")
+	}
+
+	t.Setenv("DEFAULT_SIGNUP_TIER", "free")
+	tenantID := newSignupTenant(t, db)
+	if _, ends := trialStateOf(t, db, tenantID); !ends.Valid {
+		t.Error("tenant created on the is_trial 'free' tier has no trial_ends_at — the trigger no longer stamps trial tiers")
+	}
+}
+
 // Guard against the env var leaking between packages in a shared test process.
 func TestMain(m *testing.M) {
 	if err := os.Unsetenv("DEFAULT_SIGNUP_TIER"); err != nil {

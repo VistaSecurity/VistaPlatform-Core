@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // SubscriptionTier represents a subscription tier with limits and pricing
@@ -101,15 +102,22 @@ type TierUpdateRequest struct {
 	Entitlements []TierEntitlementInput `json:"entitlements"`
 }
 
-// EffectiveLimits represents the effective limits for a tenant (tier + overrides)
+// EffectiveLimits represents the effective limits for a tenant: every value is
+// what the entitlement resolver answers (override > tier > default, then the
+// licence step), so this read-out agrees with enforcement on every edition.
+//
+// TierName is omitted on an Enterprise install — Enterprise has no plans, and
+// the tier a tenant row points at is a capacity placeholder, not something to
+// show anyone (edition-licensing spec §3). Plan is the name to display.
 type EffectiveLimits struct {
 	TenantID             uuid.UUID              `json:"tenant_id"`
 	TierID               uuid.UUID              `json:"tier_id"`
-	TierName             string                 `json:"tier_name"`
+	TierName             string                 `json:"tier_name,omitempty"`
+	Plan                 *entitlements.Plan     `json:"plan,omitempty"`
 	MaxSensors           *int                   `json:"max_sensors"`
 	MaxAssets            *int                   `json:"max_assets"`
 	MaxUsers             *int                   `json:"max_users"`
-	RetentionDays        int                    `json:"retention_days"`
+	RetentionDays        *int                   `json:"retention_days"` // nil = unlimited
 	ComplianceFrameworks *int                   `json:"compliance_frameworks"`
 	MaxIntegrations      *int                   `json:"max_integrations"`
 	Features             map[string]interface{} `json:"features"`

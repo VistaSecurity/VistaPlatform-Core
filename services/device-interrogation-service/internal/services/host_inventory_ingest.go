@@ -1148,6 +1148,9 @@ func hostInventoryFacts(obs *di.InterrogateResult, subject di.PeerRef) (out []di
 // identifierKey renders a peer's identifiers as one comparable string, so two
 // references to the same host compare equal regardless of field order in the
 // JSON they arrived as.
+//
+// In-memory only: the NUL separator cannot be stored in jsonb or text. A key
+// that is persisted uses retainedPeerKey.
 func identifierKey(peer di.PeerRef) string {
 	parts := make([]string, 0, len(peer.Identifiers))
 	for _, id := range peer.Identifiers {

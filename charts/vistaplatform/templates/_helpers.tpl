@@ -82,6 +82,16 @@ podAntiAffinity:
 {{- printf "%s-generated" (include "vistaplatform.fullname" .) -}}
 {{- end -}}
 
+{{/* Name of the chart-managed Secret holding this install's identity (secrets-install.yaml). */}}
+{{- define "vistaplatform.installSecretName" -}}
+{{- printf "%s-install" (include "vistaplatform.fullname" .) -}}
+{{- end -}}
+
+{{/* Name of the PVC admin-service writes licence usage reports to (license-reports-pvc.yaml). */}}
+{{- define "vistaplatform.licenseReportsClaimName" -}}
+{{- printf "%s-license-reports" (include "vistaplatform.fullname" .) -}}
+{{- end -}}
+
 {{/* Name of the customer-supplied platform Secret. */}}
 {{- define "vistaplatform.platformSecretName" -}}
 {{- if .Values.platform.existingSecretName -}}

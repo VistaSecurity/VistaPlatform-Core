@@ -104,7 +104,7 @@ func TestEditionInfo_ReportsHookPresence(t *testing.T) {
 func TestPlatformEditionHandler_WireShape(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.GET("/edition", PlatformEdition(EditionHooks{}.Info()))
+	r.GET("/edition", PlatformEdition(EditionHooks{}.Info(), nil))
 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/edition", nil))

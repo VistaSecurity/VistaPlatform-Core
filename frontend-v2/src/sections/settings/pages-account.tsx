@@ -5,7 +5,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
-import { useFeature } from '@vistasecurity/primitives/features';
+import { useFeature, usePlan, type TenantPlan } from '@vistasecurity/primitives/features';
 import { clients } from '../../lib/clients';
 import { mySubscriptionQuery, myInvoicesQuery } from './billing-queries';
 import { safeHttpUrl } from '../../lib/url';
@@ -22,14 +22,62 @@ function dateStr(iso?: string | null): string {
 }
 const INVOICE_TONE: Record<string, string> = { paid: GREEN, open: AMBER, draft: 'var(--app-t3)', void: 'var(--app-t3)', uncollectible: RED };
 
+/**
+ * The plan block (edition-licensing spec §1, "Tenant plan block"): what the
+ * organization is on, rendered from the resolved `plan` on /tenant/features —
+ * never from a tier name. Enterprise: "Vista Platform Enterprise, provided by
+ * <licensee>", no tier, no trial, no upgrade. MSP: the MSP's own plan and, for
+ * a trial plan, its end date. Core: "Vista Platform Core". Hidden when the plan
+ * could not be read.
+ */
+export function PlanBlock({ plan, isLoading }: { plan: TenantPlan | undefined; isLoading: boolean }) {
+  if (isLoading) {
+    return <SCard><div data-testid="plan-loading" style={{ height: 46, borderRadius: 10, background: 'var(--app-panel2, transparent)' }} /></SCard>;
+  }
+  if (!plan) return null;
+  const provider = plan.edition === 'enterprise' && plan.licensee ? `, provided by ${plan.licensee}` : '';
+  return (
+    <SCard style={{ display: 'flex', alignItems: 'center', gap: 18, background: 'linear-gradient(120deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%)' }}>
+      <span style={{ width: 46, height: 46, borderRadius: 12, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-gradient)', color: 'var(--accent-fg)' }}>
+        <Icon name="gem" size={22} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div data-testid="plan-name" style={{ fontSize: 16, fontWeight: 700, color: 'var(--app-t1)' }}>{plan.display_name}{provider}</div>
+        {plan.edition === 'msp' && plan.trial && (
+          <div style={{ fontSize: 12.5, color: 'var(--app-t3)', marginTop: 2 }}>Trial ends {dateStr(plan.trial.ends_at)}</div>
+        )}
+        {plan.edition === 'core' && (
+          <div style={{ fontSize: 12.5, color: 'var(--app-t3)', marginTop: 2 }}>
+            Free to run for any purpose — no plan, no invoices and no payment provider.
+          </div>
+        )}
+      </div>
+    </SCard>
+  );
+}
+
 export function BillingPage({ meta }: { meta: SettingsNavItem }) {
-  // `/my-billing/**` is admin-service/ee/billingapi — absent from a Core build.
-  // SettingsPage already renders the upgrade card instead of this component when
-  // the flag is off, so reaching here means it is on; the guard is repeated on
-  // the queries so a stale flag map still cannot fire a doomed request.
+  const { plan, isLoading: planLoading } = usePlan();
+  // Billing CONTROLS need `billing_portal`, which resolves on only on an MSP
+  // install whose plan includes it — never on Enterprise or Core. `/my-billing`
+  // is admin-service/ee/billingapi, so without the flag the queries are not
+  // even enabled: no doomed request.
   const billingEntitled = useFeature('billing_portal');
-  const subQ = useQuery(mySubscriptionQuery(billingEntitled));
-  const invQ = useQuery(myInvoicesQuery(billingEntitled));
+  return (
+    <SPage eyebrow="Account" title="Billing account" job={meta.job}>
+      <SSection>
+        <PlanBlock plan={plan} isLoading={planLoading} />
+      </SSection>
+      {billingEntitled && <BillingControls />}
+    </SPage>
+  );
+}
+
+// Rendered only when billing_portal resolves on (see BillingPage), so the
+// queries are enabled unconditionally here.
+function BillingControls() {
+  const subQ = useQuery(mySubscriptionQuery(true));
+  const invQ = useQuery(myInvoicesQuery(true));
 
   const portal = usePortalSession();
   const reactivate = useReactivate();
@@ -59,8 +107,8 @@ export function BillingPage({ meta }: { meta: SettingsNavItem }) {
   ];
 
   return (
-    <SPage eyebrow="Account" title="Billing" job={meta.job}>
-      <SSection>
+    <>
+      <SSection title="Subscription">
         {subQ.isError ? (
           <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load the subscription" message="The billing subscription failed to load." /></SCard>
         ) : subQ.isLoading ? (
@@ -206,7 +254,7 @@ export function BillingPage({ meta }: { meta: SettingsNavItem }) {
           onClose={() => setCancelOpen(false)}
         />
       )}
-    </SPage>
+    </>
   );
 }
 
@@ -217,7 +265,18 @@ function fmtCount(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
+/**
+ * The Usage & Limits footer. "Upgrade" only makes sense where there are plans
+ * to move between — an MSP install. On Enterprise capacity is unlimited and
+ * there is nothing to buy; on Core there is no plan.
+ */
+export function usageFooter(periodEnd: string, plan: TenantPlan | undefined): string {
+  const reset = `Limits reset ${dateStr(periodEnd)}.`;
+  return plan?.edition === 'msp' ? `${reset} Approaching a limit? Upgrade for headroom or contact your account team.` : reset;
+}
+
 export function UsagePage({ meta }: { meta: SettingsNavItem }) {
+  const { plan } = usePlan();
   const { data, isLoading, isError } = useQuery({
     queryKey: ['settings', 'usage'],
     queryFn: async () => {
@@ -276,7 +335,7 @@ export function UsagePage({ meta }: { meta: SettingsNavItem }) {
       )}
       {data?.period?.end && (
         <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 14 }}>
-          Limits reset {dateStr(data.period.end)}. Approaching a limit? Upgrade for headroom or contact your account team.
+          {usageFooter(data.period.end, plan)}
         </p>
       )}
     </SPage>

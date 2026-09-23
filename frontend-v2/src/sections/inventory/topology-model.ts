@@ -24,18 +24,25 @@ export type TopologySegment = inventoryComponents['schemas']['AssetTopologySegme
 export type TopologyClass = inventoryComponents['schemas']['AssetTopologyClass'];
 export type TopologyEdge = inventoryComponents['schemas']['AssetTopologyEdge'];
 
-/** The two map views, as they appear in the URL (`?view=`). */
-export const MAP_VIEWS = ['neighbourhood', 'topology'] as const;
+/** The map views, as they appear in the URL (`?view=`). */
+export const MAP_VIEWS = ['network', 'neighbourhood', 'topology'] as const;
 export type MapView = (typeof MAP_VIEWS)[number];
 
-/** The default. The neighbourhood is what `?lens=map` has always meant, and a
- *  bookmark to it must keep landing there. */
-export const DEFAULT_MAP_VIEW: MapView = 'neighbourhood';
+/** The default when nothing is focused: the whole estate. The lens
+ *  opens on a picture of everything rather than on a picker. */
+export const DEFAULT_MAP_VIEW: MapView = 'network';
 
-/** Read the view out of a URL parameter. An unknown value falls back rather
- *  than rendering nothing — a typo in a pasted link should still show a map. */
-export function readMapView(raw: string | null): MapView {
-  return (MAP_VIEWS as readonly string[]).includes(raw ?? '') ? (raw as MapView) : DEFAULT_MAP_VIEW;
+/**
+ * Read the view out of a URL parameter.
+ *
+ * With no (or an unknown) `view`, a URL that carries `focus=` is a
+ * neighbourhood link — every map link written before the Network view existed
+ * has that shape — so it still lands on the neighbourhood. Without a focus it
+ * is the estate. A typo in a pasted link still shows a map.
+ */
+export function readMapView(raw: string | null, hasFocus = false): MapView {
+  if ((MAP_VIEWS as readonly string[]).includes(raw ?? '')) return raw as MapView;
+  return hasFocus ? 'neighbourhood' : DEFAULT_MAP_VIEW;
 }
 
 /**

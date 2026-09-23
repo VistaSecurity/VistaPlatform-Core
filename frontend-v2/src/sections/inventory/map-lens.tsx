@@ -377,20 +377,52 @@ function ExportMenu({ graph, rootLabel, disabled }: { graph: MapGraph; rootLabel
 
 // ------------------------------------------------------------- the picker --
 
-/** Find the asset to centre the map on.
+/** The height of an element, tracked as it resizes — so the picker's windowed
+ *  list can fill whatever the sidebar leaves it rather than a fixed guess. */
+function useElementHeight<T extends HTMLElement>(): [(el: T | null) => void, number] {
+  const [height, setHeight] = useState(0);
+  const observer = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((el: T | null) => {
+    observer.current?.disconnect();
+    observer.current = null;
+    if (!el) return;
+    setHeight(el.clientHeight);
+    if (typeof ResizeObserver === 'undefined') return;
+    observer.current = new ResizeObserver(([entry]) => setHeight(entry.contentRect.height));
+    observer.current.observe(el);
+  }, []);
+  return [ref, height];
+}
+
+/** Find the asset to centre the map on — the map lens's left-hand sidebar.
  *
  *  The same query language and the same editor as the Inventory list, because
  *  "which asset" is the question the list already answers and a second search
- *  box with its own syntax would be a second thing to learn. */
-function AssetPicker({ onPick }: { onPick: (id: string) => void }) {
-  const [query, setQuery] = useState('');
-  const q = useAssetsQuery(query, 1, true);
+ *  box with its own syntax would be a second thing to learn. The query itself
+ *  lives with the lens, which needs the first result to auto-focus the map. */
+function AssetPicker({ query, onQueryChange, q, selectedId, onPick }: {
+  query: string;
+  onQueryChange: (query: string) => void;
+  q: ReturnType<typeof useAssetsQuery>;
+  selectedId: string;
+  onPick: (id: string) => void;
+}) {
   const rows = q.data?.assets ?? [];
+  const [listRef, listHeight] = useElementHeight<HTMLDivElement>();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <QueryEditor value={query} onChange={setQuery} placeholder="Find the asset to map — e.g. class:server and environment:production" />
+    <aside
+      data-testid="map-picker"
+      style={{
+        width: 340, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0,
+        padding: '4px 12px 12px', borderRight: '1px solid var(--app-border)',
+      }}
+    >
+      {/* A row of its own: the editor's root is `flex: 1` for the toolbars it
+          normally sits in, which in this column would split the sidebar's
+          height with the list. */}
+      <div style={{ display: 'flex', flex: 'none' }}>
+        <QueryEditor value={query} onChange={onQueryChange} placeholder="e.g. class:server" />
       </div>
 
       {q.isError && (
@@ -402,10 +434,11 @@ function AssetPicker({ onPick }: { onPick: (id: string) => void }) {
       )}
 
       {!q.isError && (
+        <div ref={listRef} style={{ flex: 1, minHeight: 0 }}>
         <VirtualList
           items={rows}
           rowHeight={46}
-          height={Math.min(330, Math.max(92, rows.length * 46))}
+          height={listHeight}
           empty={
             <div data-testid="map-picker-empty" style={{ fontSize: 12.5, color: 'var(--app-t3)', padding: '18px 2px' }}>
               {q.isLoading ? 'Searching…' : 'No assets match that query.'}
@@ -414,7 +447,8 @@ function AssetPicker({ onPick }: { onPick: (id: string) => void }) {
           render={(a) => (
             <button
               onClick={() => onPick(a.id)}
-              className="ui-btn ghost"
+              className={'ui-btn ghost' + (a.id === selectedId ? ' accent' : '')}
+              aria-current={a.id === selectedId ? 'true' : undefined}
               style={{
                 width: '100%', height: 42, justifyContent: 'flex-start', gap: 10,
                 textAlign: 'left', fontSize: 12.5,
@@ -428,8 +462,9 @@ function AssetPicker({ onPick }: { onPick: (id: string) => void }) {
             </button>
           )}
         />
+        </div>
       )}
-    </div>
+    </aside>
   );
 }
 
@@ -567,8 +602,6 @@ export interface AssetMapViewProps {
   /** Full screen: no app rail, an Exit button instead of a "Full screen" one. */
   fullScreen: boolean;
   onToggleFullScreen: () => void;
-  /** Shown above the graph in lens mode so the focus can be changed. */
-  picker?: ReactNode;
 }
 
 function AssetMapViewInner(props: AssetMapViewProps) {
@@ -799,10 +832,6 @@ function AssetMapViewInner(props: AssetMapViewProps) {
         </button>
       </div>
 
-      {props.picker && (
-        <div style={{ padding: '0 26px 12px' }}>{props.picker}</div>
-      )}
-
       {impactOn && impact.data && (
         <div data-testid="map-impact-headline" style={{ margin: fullScreen ? '10px 18px 0' : '0 26px 10px', fontSize: 12.5, color: 'var(--app-t1)' }}>
           <Icon name="zap" size={12} style={{ color: 'var(--accent)', verticalAlign: -1 }} />{' '}
@@ -847,25 +876,7 @@ function AssetMapViewInner(props: AssetMapViewProps) {
             />
           )}
 
-          {state === 'empty' && (
-            <Centered
-              testId="map-empty" icon="waypoints"
-              title="No relationships yet"
-              message="Nothing has been observed or declared about what this asset is attached to, so there is nothing to draw. Most of an inventory is a leaf, so this is a normal answer — but it also means impact analysis has nothing to go on here."
-              extra={
-                <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', justifyContent: 'center' }}>
-                  <Link to="/discovery/sensors" className="ui-btn sm" style={{ textDecoration: 'none', fontSize: 12 }}>
-                    <Icon name="radar" size={12} />How relationships are discovered
-                  </Link>
-                  <Link to={`/inventory/assets/${assetId}/relationships`} className="ui-btn sm ghost" style={{ textDecoration: 'none', fontSize: 12 }}>
-                    <Icon name="plus" size={12} />Declare one
-                  </Link>
-                </div>
-              }
-            />
-          )}
-
-          {state === 'graph' && (
+          {(state === 'graph' || state === 'empty') && (
             <ReactFlow
               nodes={rfNodes}
               edges={rfEdges}
@@ -873,6 +884,9 @@ function AssetMapViewInner(props: AssetMapViewProps) {
               nodeTypes={NODE_TYPES}
               edgeTypes={EDGE_TYPES}
               fitView
+              // A lone focus node would otherwise be zoomed to maxZoom and fill
+              // the canvas; cap the initial fit at actual size.
+              fitViewOptions={{ maxZoom: 1 }}
               // The layout owns positions; dragging a node would desync it from
               // the exports and from what a second viewer sees.
               nodesDraggable={false}
@@ -911,6 +925,36 @@ function AssetMapViewInner(props: AssetMapViewProps) {
                   ))}
                 </div>
               </Panel>
+              {state === 'empty' && (
+                // Drawn OVER the canvas rather than instead of it: the focus asset
+                // is still on the map, so the user can see there is a map here
+                // and that this asset simply has nothing attached yet.
+                <Panel position="bottom-center">
+                  <div
+                    data-testid="map-empty"
+                    style={{
+                      maxWidth: 460, padding: '11px 14px', borderRadius: 11, textAlign: 'center',
+                      border: '1px solid var(--app-border2)', background: 'var(--app-panel)',
+                      display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'center',
+                    }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--app-t1)' }}>No relationships yet</div>
+                    <div style={{ fontSize: 12, color: 'var(--app-t3)', lineHeight: 1.55 }}>
+                      Nothing has been observed or declared about what this asset is attached to.
+                      Most of an inventory is a leaf, so this is a normal answer — but impact
+                      analysis has nothing to go on here.
+                    </div>
+                    <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', justifyContent: 'center' }}>
+                      <Link to="/discovery/sensors" className="ui-btn sm" style={{ textDecoration: 'none', fontSize: 12 }}>
+                        <Icon name="radar" size={12} />How relationships are discovered
+                      </Link>
+                      <Link to={`/inventory/assets/${assetId}/relationships`} className="ui-btn sm ghost" style={{ textDecoration: 'none', fontSize: 12 }}>
+                        <Icon name="plus" size={12} />Declare one
+                      </Link>
+                    </div>
+                  </div>
+                </Panel>
+              )}
             </ReactFlow>
           )}
 
@@ -972,10 +1016,9 @@ function shortDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 10);
 }
 
-function Centered({ testId, icon, tone, title, message, action, extra }: {
+function Centered({ testId, icon, tone, title, message, action }: {
   testId: string; icon: string; tone?: string; title: string; message: string;
   action?: { label: string; onClick: () => void };
-  extra?: ReactNode;
 }) {
   return (
     <div
@@ -988,7 +1031,6 @@ function Centered({ testId, icon, tone, title, message, action, extra }: {
       <Icon name={icon} size={26} style={{ color: tone ?? 'var(--app-t3)' }} />
       <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--app-t1)' }}>{title}</div>
       <div style={{ fontSize: 12.5, color: 'var(--app-t3)', maxWidth: 480, lineHeight: 1.6 }}>{message}</div>
-      {extra}
       {action && <button className="ui-btn sm" onClick={action.onClick}>{action.label}</button>}
     </div>
   );
@@ -1017,6 +1059,9 @@ export function AssetMapLens() {
   const focus = params.get('focus') ?? '';
   const depth = clampDepth(Number(params.get('depth') ?? 2));
   const includePending = params.get('pending') === '1';
+  const [query, setQuery] = useState('');
+  const q = useAssetsQuery(query, 1, true);
+  const firstId = q.data?.assets?.[0]?.id;
 
   const setParam = useCallback((key: string, value: string | null) => {
     const next = new URLSearchParams(params);
@@ -1024,41 +1069,52 @@ export function AssetMapLens() {
     setParams(next, { replace: true });
   }, [params, setParams]);
 
-  const picker = <AssetPicker onPick={(id) => setParam('focus', id)} />;
-
-  if (!focus) {
-    return (
-      <div style={{ padding: '18px 26px', display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 760 }}>
-        <div>
-          <h2 style={{ margin: '0 0 6px', fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 16, color: 'var(--app-t1)', display: 'flex', alignItems: 'center', gap: 9 }}>
-            <Icon name="waypoints" size={17} style={{ color: 'var(--accent)' }} />Map
-          </h2>
-          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--app-t3)', lineHeight: 1.6 }}>
-            The map draws what one asset is attached to — up to three hops out, with each
-            relationship labelled by type and coloured by where it came from. Pick the asset to
-            centre it on. Relationships nobody has confirmed are drawn dashed, and rejected ones
-            are never drawn at all.
-          </p>
-        </div>
-        {picker}
-      </div>
-    );
-  }
+  // Start on the first asset in the list, so the lens opens on a map rather
+  // than on a list with an empty space beside it. Only when nothing is focused:
+  // a focus from the URL (a pasted link) or a click always wins.
+  useEffect(() => {
+    if (!focus && firstId) setParam('focus', firstId);
+  }, [focus, firstId, setParam]);
 
   return (
-    <AssetMapView
-      assetId={focus}
-      depth={depth}
-      includePending={includePending}
-      onDepthChange={(d) => setParam('depth', String(d))}
-      onIncludePendingChange={(v) => setParam('pending', v ? '1' : null)}
-      onFocus={(id) => setParam('focus', id)}
-      fullScreen={false}
-      onToggleFullScreen={() => {
-        void navigate(`/inventory/map/${focus}?depth=${depth}${includePending ? '&pending=1' : ''}`);
-      }}
-      picker={picker}
-    />
+    <div data-testid="map-lens" style={{ display: 'flex', flex: 1, minHeight: 0, height: '100%' }}>
+      <AssetPicker
+        query={query}
+        onQueryChange={setQuery}
+        q={q}
+        selectedId={focus}
+        onPick={(id) => setParam('focus', id)}
+      />
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        {focus ? (
+          <AssetMapView
+            assetId={focus}
+            depth={depth}
+            includePending={includePending}
+            onDepthChange={(d) => setParam('depth', String(d))}
+            onIncludePendingChange={(v) => setParam('pending', v ? '1' : null)}
+            onFocus={(id) => setParam('focus', id)}
+            fullScreen={false}
+            onToggleFullScreen={() => {
+              void navigate(`/inventory/map/${focus}?depth=${depth}${includePending ? '&pending=1' : ''}`);
+            }}
+          />
+        ) : (
+          <div style={{ flex: 1, position: 'relative', margin: '0 26px 18px', borderRadius: 14, border: '1px solid var(--app-border)', background: 'var(--app-bg2)' }}>
+            {q.isLoading ? (
+              <Centered testId="map-loading" icon="loader" title="Loading assets…" message="The map opens on the first asset in the list." />
+            ) : (
+              <Centered
+                testId="map-no-assets" icon="waypoints" title="Nothing to map yet"
+                message={query
+                  ? 'No assets match that query. Change or clear it to pick an asset to map.'
+                  : 'The map draws what an asset is attached to. Once assets are in the inventory, the first one opens here.'}
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

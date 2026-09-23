@@ -29,10 +29,26 @@ export type EditionCapability = 'msp' | 'billing';
 
 export type EditionCapabilities = Record<EditionCapability, boolean>;
 
+/** What the install is LICENSED as (platform_license; an expired licence is core). */
+export type LicenseEdition = 'core' | 'enterprise' | 'msp';
+
+/**
+ * The licence edition as the console knows it: the reported value, `pending`
+ * until the read-out lands, or `unknown` when it could not be read (the
+ * request failed, or admin-service reported null).
+ */
+export type LicenseState = LicenseEdition | 'pending' | 'unknown';
+
 export interface PlatformEdition {
   /** Coarse build edition. Informational — gate on `capabilities`. */
   edition: 'core' | 'enterprise';
   capabilities: EditionCapabilities;
+  /**
+   * The licence half. The build cannot tell Enterprise from MSP (one ee binary
+   * serves both); the licence can. Null when admin-service could not read it.
+   * Absent from an admin-service that predates the licence model.
+   */
+  license_edition?: LicenseEdition | null;
 }
 
 /**
@@ -63,8 +79,10 @@ export const platformEditionKey = ['platform', 'edition'] as const;
  * Query options for the edition read-out. Exported separately from the hook so
  * tests can drive it through a real QueryClient.
  *
- * Cached forever: hooks are wired at process start, so the answer cannot change
- * while the console is open. One request per session.
+ * The capability half cannot change while the console is open (hooks are wired
+ * at process start); the licence half can — a licence is installed, renewed or
+ * lapses while the process runs — so the answer goes stale after five minutes
+ * and is re-read on the next navigation. Still one request per mount otherwise.
  */
 export function platformEditionQuery() {
   return {
@@ -74,7 +92,7 @@ export function platformEditionQuery() {
       if (error || !data) throw new Error('Failed to resolve platform edition');
       return data as PlatformEdition;
     },
-    staleTime: Infinity,
+    staleTime: 5 * 60 * 1000,
     gcTime: Infinity,
     // An absent route is a settled fact; one retry covers a transient blip
     // without multiplying 404s in the console.
@@ -91,6 +109,15 @@ export interface PlatformEditionState {
   edition: PlatformEdition['edition'] | null;
   /** Convenience predicate for nav filters and route guards. */
   has: (capability: EditionCapability) => boolean;
+  /** The licence edition, or pending/unknown. See LicenseState. */
+  license: LicenseState;
+  /**
+   * True only when the licence is known to be MSP: plans, trials and billing
+   * are MSP-only (edition-licensing spec §1). Unknown fails OPEN here, like the
+   * capability map, so a transient read failure never blanks a paying MSP's
+   * billing surfaces; pending hides them until the answer lands.
+   */
+  isMsp: boolean;
 }
 
 /**
@@ -113,11 +140,14 @@ export function resolveEditionState(
   isError: boolean,
 ): PlatformEditionState {
   const capabilities = data?.capabilities ?? (isError ? CAPABILITIES_UNKNOWN : CAPABILITIES_PENDING);
+  const license: LicenseState = data ? (data.license_edition ?? 'unknown') : isError ? 'unknown' : 'pending';
   return {
     capabilities,
     resolved: Boolean(data) || isError,
     edition: data?.edition ?? null,
     has: (capability) => capabilities[capability] !== false,
+    license,
+    isMsp: license === 'msp' || license === 'unknown',
   };
 }
 

@@ -54,7 +54,7 @@ func (s *ObservationSink) preparePeerContext(ctx context.Context, tenant, asset 
 		}
 	}
 	for _, peer := range peers {
-		key := identifierKey(peer)
+		key := retainedPeerKey(peer)
 		if _, ok := state.Peers[key]; ok {
 			continue
 		}
@@ -71,6 +71,50 @@ func (s *ObservationSink) preparePeerContext(ctx context.Context, tenant, asset 
 	digest := sha256.Sum256(body)
 	state.ContextID = hex.EncodeToString(digest[:])
 	return context.WithValue(ctx, peerContextKey{}, state), state, nil
+}
+
+// retainedPeerKey is the key a peer's receipt envelope is stored under in
+// retainedPeerContext.Peers, which is marshalled into
+// identity_observation_peer_contexts.payload — a jsonb column.
+//
+// It is deliberately NOT identifierKey. That joins its parts with NUL, which is
+// harmless for an in-memory comparison and fatal here: encoding/json writes the
+// NUL as \u0000, jsonb refuses that escape (22P05), and so every retained peer
+// with two or more identifiers failed its resolution transaction and the fact
+// or edge it carried was dropped.
+//
+// A hex SHA-256 over a length-prefixed encoding of the (kind, value) pairs,
+// because:
+//   - it is printable and jsonb-safe whatever bytes a collector reported. A
+//     NUL, control character or invalid UTF-8 in a value is hashed away rather
+//     than rejected, or rewritten to U+FFFD by encoding/json so the key no
+//     longer round-trips;
+//   - length prefixes, not a separator, delimit the parts, so the encoding is
+//     injective: no value can forge a two-identifier peer's key by containing
+//     the separator and so inherit that peer's envelope;
+//   - it keeps identifierKey's order and exactness, so the peers that share a
+//     key are the peers that shared one before.
+func retainedPeerKey(peer di.PeerRef) string {
+	h := sha256.New()
+	for _, id := range peer.Identifiers {
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(id.Kind), id.Kind, len(id.Value), id.Value)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// retainedPeer returns the receipt envelope retained for peer.
+//
+// A context written before retainedPeerKey existed is keyed by identifierKey.
+// Only NUL-free keys — peers with a single identifier — could have been stored,
+// since any NUL failed the insert. A hex digest never contains '=' and every
+// such legacy key does, so the fallback can never match an entry in a
+// new-format context, and an old context still reads exactly as it was written.
+func (c *retainedPeerContext) retainedPeer(peer di.PeerRef) (identity.Observation, bool) {
+	if obs, ok := c.Peers[retainedPeerKey(peer)]; ok {
+		return obs, true
+	}
+	obs, ok := c.Peers[identifierKey(peer)]
+	return obs, ok
 }
 
 func retainPeerContext(ctx context.Context, repo *pgidentity.Repository, tenant uuid.UUID, res identity.Resolution) error {

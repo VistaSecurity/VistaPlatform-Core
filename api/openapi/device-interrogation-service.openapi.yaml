@@ -1035,7 +1035,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
+              $ref: '#/components/schemas/DiscoverAndCreateDeviceRequest'
       responses:
         '201':
           description: The created device.
@@ -1051,6 +1051,18 @@ paths:
                 $ref: '#/components/schemas/RetainedDeviceObservation'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
+        '422':
+          description: The target was disallowed, rejected authentication, or did not expose a supported discovery API.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDiscoveryError'
+        '502':
+          description: The management endpoint could not be reached securely.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDiscoveryError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /jobs:
@@ -1933,6 +1945,37 @@ components:
         proposal_id:
           type: string
           format: uuid
+        message:
+          type: string
+          description: Operator-facing next step for completing identity resolution.
+    DiscoverAndCreateDeviceRequest:
+      type: object
+      additionalProperties: false
+      required: [device_type, management_url, username, password]
+      properties:
+        device_type:
+          type: string
+          enum: [f5, palo_alto, cisco, fortinet, unifi]
+        management_url:
+          type: string
+          format: uri
+        username:
+          type: string
+        password:
+          type: string
+        tls_insecure_skip_verify:
+          type: boolean
+          description: Explicit opt-in for appliances with a self-signed management certificate. Defaults to false.
+    DeviceDiscoveryError:
+      type: object
+      additionalProperties: false
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum: [target_disallowed, authentication_failed, connection_failed, unsupported_response, discovery_failed]
+        message:
+          type: string
     CreateDeviceRequest:
       type: object
       additionalProperties: false
@@ -1948,6 +1991,9 @@ components:
           type: string
         hostname:
           type: string
+          maxLength: 253
+          pattern: '^\S+$'
+          description: DNS hostname or IP literal; display names with spaces are not hostnames.
         ip_address:
           type: string
         management_url:
@@ -1984,6 +2030,9 @@ components:
           type: string
         hostname:
           type: string
+          maxLength: 253
+          pattern: '^\S+$'
+          description: DNS hostname or IP literal; display names with spaces are not hostnames.
         ip_address:
           type: string
         management_url:

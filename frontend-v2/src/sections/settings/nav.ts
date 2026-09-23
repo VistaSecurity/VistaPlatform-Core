@@ -50,19 +50,19 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     { key: 'org-branding', label: 'Branding', icon: 'palette', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Upload your logo and favicon and set the display name to white-label the console.' },
   ] },
   { section: 'Account', items: [
+    // NOT feature-gated (edition-licensing spec §6): every tenant sees what it
+    // is on — "Vista Platform Core", "Vista Platform Enterprise, provided by
+    // <licensee>", or its MSP plan. Only the billing CONTROLS inside the page
+    // (subscription, invoices, payment portal) follow `billing_portal`, which
+    // resolves on only on an MSP install whose plan includes it.
     {
-      key: 'billing', label: 'Billing', icon: 'credit-card', built: true,
+      key: 'billing', label: 'Billing account', icon: 'credit-card', built: true,
       permission: TENANT_PERMISSIONS.billing.read,
-      job: 'Manage the subscription — plan, invoices, and payment methods.',
-      feature: 'billing_portal',
-      lock: {
-        title: 'Not part of this edition',
-        message: 'Self-service billing — subscription, invoices, plan changes and the payment portal — belongs to the commercial editions, which are sold and provisioned by our team. A Core deployment has no subscription to manage; it is free to run for any purpose, with no plan, no invoices and no payment provider. Usage & Limits still shows your consumption against the tier you are on.',
-      },
+      job: 'See what your organization is on and, where your provider bills you here, manage the subscription, invoices and payment methods.',
     },
     // NOT gated: Usage & Limits reads auth-service /billing/usage/current, which
     // is Core. Consumption-against-limits is meaningful on a free install too.
-    { key: 'usage', label: 'Usage & Limits', icon: 'chart-column', built: true, permission: TENANT_PERMISSIONS.billing.read, job: 'Monitor consumption against plan limits and see when to upgrade.' },
+    { key: 'usage', label: 'Usage & Limits', icon: 'chart-column', built: true, permission: TENANT_PERMISSIONS.billing.read, job: 'Monitor consumption against your limits.' },
   ] },
   { section: 'People & Access', items: [
     { key: 'members', label: 'Members', icon: 'users', built: true, permission: TENANT_PERMISSIONS.users.read, job: 'Invite users, assign roles, and manage the organization roster.' },

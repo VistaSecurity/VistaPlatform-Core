@@ -14,15 +14,26 @@ import {
 import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, money, relTime } from '../../components/ui/primitives';
 import {
   type Tenant, type TenantHealthSummary, tenantStatus, useTenantStatusMutation,
-  useTenantReevaluateMutation, useTenantStats, useTenantCost, useTenantCoupons, useTierEntitlements,
-  useDeleteTenant, useAdminTiers, useAdminChangePlan,
+  useTenantReevaluateMutation, useTenantStats, useTenantCost, useTenantCoupons,
+  useDeleteTenant, useAdminTiers, useAdminChangePlan, planLabel,
 } from './queries';
 import { TenantFormModal } from './tenant-form-modal';
-import { PlanExceptionsPanel } from './plan-exceptions';
+import { TenantEntitlementsTab } from './tenant-entitlements-tab';
 import { TenantSettingsPanel } from './tenant-settings-tab';
+import { usePlatformEdition } from '../../lib/edition';
+import { OperatorTenantControl } from './operator-tenant-control';
 
 const TABS = ['Overview', 'Billing', 'Entitlements', 'Settings', 'SSO', 'Activity'] as const;
 type DrawerTab = (typeof TABS)[number];
+
+/**
+ * The drawer's tabs for this install. Billing is MSP-only by licence (and needs
+ * the billing build): Enterprise has nobody to bill, so the tab, like the
+ * Billing & Revenue section, is not offered there.
+ */
+export function drawerTabs(showBilling: boolean): DrawerTab[] {
+  return TABS.filter((tb) => tb !== 'Billing' || showBilling);
+}
 
 function DrawerSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -64,7 +75,10 @@ function StatCell({ icon: Icon, label, value }: { icon: typeof Users; label: str
 
 function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthSummary; onClose: () => void }) {
   const status = tenantStatus(t);
-  const plan = t.subscription_tier ?? 'Trial';
+  const plan = planLabel(t);
+  // Billing status, billing email and the trial date are MSP concepts: an
+  // Enterprise install has no billing and no trials (edition-licensing §1).
+  const { isMsp } = usePlatformEdition();
   const healthIndex = healthIndexPresentation(health?.overall_score, health?.health_status !== 'unknown');
   const stats = useTenantStats(t.id);
   const statusMut = useTenantStatusMutation();
@@ -138,10 +152,10 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
       <DrawerSection title="Account">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
           <Row label="Plan" value={plan} />
-          <Row label="Billing status" value={statusOfLabel(status)} />
-          <Row label="Billing email" value={t.billing_email || '—'} />
+          {isMsp && <Row label="Billing status" value={statusOfLabel(status)} />}
+          {isMsp && <Row label="Billing email" value={t.billing_email || '—'} />}
           <Row label="SSO" value={t.sso_enabled ? 'Enabled' : 'Disabled'} />
-          <Row label="Trial ends" value={t.trial_ends_at ? new Date(t.trial_ends_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'} />
+          {isMsp && t.plan?.trial && <Row label="Trial ends" value={new Date(t.plan.trial.ends_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} />}
           <Row label="Customer since" value={relTime(t.created_at)} />
           <Row label="Last updated" value={relTime(t.updated_at)} />
         </div>
@@ -157,6 +171,7 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
         <button onClick={reevaluate} disabled={reevalMut.isPending} className="op-btn sm" style={{ width: '100%', justifyContent: 'center', marginTop: 8 }}>
           <RefreshCw size={14} />{reevalMut.isPending ? 'Enqueuing…' : 'Re-evaluate compliance'}
         </button>
+        <OperatorTenantControl tenant={t} />
       </DrawerSection>
     </>
   );
@@ -192,7 +207,7 @@ function PlanChangePanel({ t }: { t: Tenant }) {
     <DrawerSection title="Change plan (support)">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>
-          Current plan: <strong style={{ color: 'var(--op-t1)' }}>{t.subscription_tier ?? 'Trial'}</strong>.
+          Current plan: <strong style={{ color: 'var(--op-t1)' }}>{planLabel(t)}</strong>.
           Applied with no proration — nothing is refunded; the next invoice bills the new plan's rate.
           Downgrades mid-agreement are granted here only (tenants can only upgrade themselves).
         </div>
@@ -302,28 +317,6 @@ function BillingTab({ t }: { t: Tenant }) {
   );
 }
 
-function EntitlementsTab({ t }: { t: Tenant }) {
-  const ents = useTierEntitlements(t.subscription_tier_id || null);
-  return (
-    <>
-      <DrawerSection title={`Tier entitlements — ${t.subscription_tier ?? 'Trial'}`}>
-        {ents.isLoading ? (
-          <Pending>Loading entitlements…</Pending>
-        ) : ents.data && ents.data.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-            {ents.data.map((e) => <Row key={e.item_id} label={e.item_display_name} value={fmtEntitlement(e.included_value, e.item_unit)} />)}
-          </div>
-        ) : (
-          <Pending>No entitlements resolved for this tier.</Pending>
-        )}
-      </DrawerSection>
-      <DrawerSection title="Plan Exceptions">
-        <PlanExceptionsPanel tenantId={t.id} />
-      </DrawerSection>
-    </>
-  );
-}
-
 function SSOTab({ t }: { t: Tenant }) {
   return (
     <DrawerSection title="Single sign-on">
@@ -364,7 +357,9 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
   const [tab, setTab] = useState<DrawerTab>('Overview');
   const [editing, setEditing] = useState(false);
   const status = tenantStatus(t);
-  const plan = t.subscription_tier ?? 'Trial';
+  const plan = planLabel(t);
+  const { isMsp, has } = usePlatformEdition();
+  const tabs = drawerTabs(isMsp && has('billing'));
   const notWired = (what: string) => () => toast(`${what} — wired with the impersonation flow`, { icon: '🔒' });
 
   return (
@@ -392,7 +387,7 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
           </div>
           {/* tab strip */}
           <div style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap' }}>
-            {TABS.map((tb) => (
+            {tabs.map((tb) => (
               <button key={tb} className={'op-chip' + (tab === tb ? ' active' : '')} onClick={() => setTab(tb)}>{tb}</button>
             ))}
           </div>
@@ -400,8 +395,8 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {tab === 'Overview' && <OverviewTab t={t} health={health} onClose={onClose} />}
-          {tab === 'Billing' && <BillingTab t={t} />}
-          {tab === 'Entitlements' && <EntitlementsTab t={t} />}
+          {tab === 'Billing' && tabs.includes('Billing') && <BillingTab t={t} />}
+          {tab === 'Entitlements' && <TenantEntitlementsTab tenant={t} />}
           {tab === 'Settings' && <TenantSettingsPanel tenantId={t.id} />}
           {tab === 'SSO' && <SSOTab t={t} />}
           {tab === 'Activity' && <ActivityTab />}
@@ -416,12 +411,4 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
 
 function statusOfLabel(s: string): string {
   return ({ active: 'Active', trial: 'Trial', past_due: 'Past due', suspended: 'Suspended', canceled: 'Canceled', onboarding: 'Onboarding' } as Record<string, string>)[s] ?? s;
-}
-
-/** Entitlement `included_value` is an untyped JSON value (number / "unlimited" / bool). */
-function fmtEntitlement(v: unknown, unit?: string): string {
-  if (v === null || v === undefined) return '—';
-  if (typeof v === 'boolean') return v ? 'Included' : 'Not included';
-  if (typeof v === 'number') return unit ? `${v.toLocaleString()} ${unit}` : v.toLocaleString();
-  return String(v);
 }

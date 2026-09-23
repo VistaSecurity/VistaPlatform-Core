@@ -15,9 +15,6 @@
 //                                     in its group comments.
 //   scripts/database/seed.sql         billable_items rows — display name and
 //                                     description per capability.
-//                                     Edition-gate corrective UPDATE — the list
-//                                     that stops a tier self-granting paid
-//                                     capability.
 //   standards/editions.yaml           Documentation links, edition blurbs, the
 //                                     AI surface and the MSP surface (both
 //                                     carved by build/service split, so absent
@@ -27,8 +24,13 @@
 //
 //   1. editions.yaml `docs:` key set === editionByItem key set, both
 //      directions. Adding a gated capability forces a documentation decision.
-//   2. seed.sql's edition-gate corrective UPDATE list === editionByItem. Both
-//      files carry a "keep this in sync" comment; this is what enforces it.
+//   2. seed.sql does NOT carry the old edition-gate corrective UPDATE (every
+//      tier_entitlements row for a gated key forced to disabled, on every seed
+//      run). The licence step in shared/entitlements/license.go is the
+//      boundary now, and on an MSP install that UPDATE would strip every
+//      customer's plan of its paid capabilities on each helm upgrade.
+//      And, since that UPDATE no longer tidies up after them, the seeded
+//      tier_entitlements rows must themselves grant no gated capability.
 //   3. resolver_test.go's `gated := []string{...}` === editionByItem. Same
 //      reason — the test pins the open-core invariant and is worthless if it
 //      silently omits a key.
@@ -202,17 +204,51 @@ function parseBillableItems(src) {
   return items;
 }
 
-/** The corrective UPDATE that stops any tier self-granting paid capability. */
-function parseSeedGatedList(src) {
-  const anchor = src.indexOf('Edition-gate correction');
-  must(anchor !== -1, "seed.sql's 'Edition-gate correction' block not found");
-  const inStart = src.indexOf('bi.key IN (', anchor);
-  must(inStart !== -1, 'no `bi.key IN (` list in the edition-gate correction block');
-  const inEnd = src.indexOf(')', inStart);
-  must(inEnd !== -1, 'unterminated `bi.key IN (` list');
-  const keys = [...src.slice(inStart, inEnd).matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]);
-  must(keys.length > 0, 'parsed zero keys from the edition-gate corrective UPDATE');
-  return new Set(keys);
+/**
+ * (tier, key) pairs the seed's tier_entitlements VALUES list grants as
+ * `{"enabled": true}`. Asserts it found the VALUES list at all, so a reshaped
+ * seed cannot make the check pass by matching nothing.
+ */
+function findSeededGatedGrants(src) {
+  // Comments stripped first: the VALUES list carries `-- Free (trial; …)`
+  // banners, and a `;` inside one ended the statement early — the check then
+  // read only the first tier's rows and passed with every other tier unread.
+  const code = src
+    .split('\n')
+    .map((line) => line.replace(/--.*$/, ''))
+    .join('\n');
+  const start = code.indexOf('INSERT INTO tier_entitlements');
+  must(start !== -1, 'INSERT INTO tier_entitlements not found in seed.sql');
+  const end = code.indexOf(';', start);
+  must(end !== -1, 'unterminated INSERT INTO tier_entitlements in seed.sql');
+  const block = code.slice(start, end);
+  // Every seeded tier must have been read, or a truncated parse passes quietly.
+  for (const tier of ['community', 'free', 'starter', 'pro', 'enterprise']) {
+    must(block.includes(`('${tier}',`), `tier_entitlements seed parse did not reach tier '${tier}'`);
+  }
+  const rows = [...block.matchAll(/\(\s*'([a-z0-9_-]+)'\s*,\s*'([a-z0-9_]+)'\s*,\s*'(\{[^']*\})'\s*\)/g)];
+  must(rows.length > 0, "parsed zero (tier, key, value) rows from seed.sql's tier_entitlements seed");
+  return rows
+    .filter(([, , , value]) => /"enabled"\s*:\s*true/.test(value))
+    .map(([, tier, key]) => ({ tier, key }));
+}
+
+/**
+ * Statements in seed.sql that rewrite tier_entitlements to `{"enabled": false}`
+ * — the shape of the retired edition-gate corrective UPDATE. Matched on the SQL
+ * itself (comments stripped), not on a banner, so renaming the block cannot
+ * hide it.
+ */
+function findTierGrantRewrites(src) {
+  const code = src
+    .split('\n')
+    .map((line) => line.replace(/--.*$/, ''))
+    .join('\n');
+  const hits = [];
+  for (const m of code.matchAll(/UPDATE\s+tier_entitlements\b[\s\S]*?;/gi)) {
+    if (/"enabled"\s*:\s*false/i.test(m[0])) hits.push(m[0].split('\n')[0].trim());
+  }
+  return hits;
 }
 
 /** The Go test that pins "no tier may grant an edition-gated capability". */
@@ -231,7 +267,8 @@ const setDiff = (a, b) => [...a].filter((x) => !b.has(x)).sort();
 // ── Load everything ────────────────────────────────────────────────────────
 const { byKey, groups } = parseEditionsGo(read(EDITIONS_GO, 'editions.go'));
 const items = parseBillableItems(read(SEED_SQL, 'seed.sql'));
-const seedGated = parseSeedGatedList(read(SEED_SQL, 'seed.sql'));
+const tierGrantRewrites = findTierGrantRewrites(read(SEED_SQL, 'seed.sql'));
+const seededTierGrants = findSeededGatedGrants(read(SEED_SQL, 'seed.sql'));
 const testGated = parseResolverTestGated(read(RESOLVER_TEST, 'resolver_test.go'));
 const meta = yaml.parse(read(EDITIONS_YAML, 'editions.yaml'));
 
@@ -259,7 +296,26 @@ const compare = (label, other, otherLabel) => {
 };
 
 compare('standards/editions.yaml `docs:`', new Set(Object.keys(meta.docs)), 'editionByItem');
-compare("seed.sql edition-gate corrective UPDATE", seedGated, 'editionByItem');
+// 2b. With the corrective UPDATE gone, the seeded rows themselves must ship every
+// gated capability disabled — a fresh MSP install's sample plans would
+// otherwise grant paid capability out of the box, and a fresh Core install's
+// tier editor would show paid boxes ticked that the licence step then ignores.
+for (const { tier, key } of seededTierGrants) {
+  if (byKey.has(key)) {
+    problems.push(
+      `seed.sql's tier_entitlements seed grants edition-gated ${key} on tier '${tier}' — ` +
+        'every seeded tier must ship gated capabilities disabled ({"enabled": false})',
+    );
+  }
+}
+
+for (const stmt of tierGrantRewrites) {
+  problems.push(
+    `seed.sql rewrites tier grants to disabled (${stmt} ...) — the retired edition-gate corrective ` +
+      'UPDATE. The licence step (shared/entitlements/license.go) is the edition boundary now; on an MSP ' +
+      "install this would strip every customer's plan of its paid capabilities on each helm upgrade",
+  );
+}
 compare('shared/entitlements/resolver_test.go `gated`', testGated, 'editionByItem');
 
 for (const key of gatedKeys) {

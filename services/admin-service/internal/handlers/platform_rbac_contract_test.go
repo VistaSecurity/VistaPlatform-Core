@@ -50,6 +50,36 @@ type stubPlatformRBACStore struct {
 	permsErr     error
 	perm         models.PlatformPermission
 	permErr      error
+
+	// Escalation seams (authorizeRolePermissionEdit). Zero values PERMIT.
+	callerRoleID   string   // the caller's own role id ("" = none)
+	callerRoleName string   // the caller's own role name
+	missingCurrent []string // what the edited role holds today that the caller lacks
+	missingNew     []string // what the requested set holds that the caller lacks
+	// setPermsCalled / createCalls record writes, so a denial can be shown to
+	// have written nothing.
+	setPermsCalled bool
+	setPermsIDs    []string
+	checkedIDs     []string // the ids PermissionsNotHeldBy was asked about
+	createCalls    int
+	updateCalled   bool
+	deleteCalled   bool
+}
+
+func (s *stubPlatformRBACStore) PlatformUserRole(string) (platformUserRoleRef, error) {
+	ref := platformUserRoleRef{RoleName: s.callerRoleName}
+	if s.callerRoleID != "" {
+		id := uuid.MustParse(s.callerRoleID)
+		ref.RoleID = &id
+	}
+	return ref, nil
+}
+func (s *stubPlatformRBACStore) RolePermissionsNotHeldBy(string, string) ([]string, error) {
+	return s.missingCurrent, nil
+}
+func (s *stubPlatformRBACStore) PermissionsNotHeldBy(_ string, ids []string) ([]string, error) {
+	s.checkedIDs = ids
+	return s.missingNew, nil
 }
 
 func (s *stubPlatformRBACStore) ListRoles() ([]platformRoleRow, error) { return s.roles, s.rolesErr }
@@ -60,13 +90,22 @@ func (s *stubPlatformRBACStore) RolePermissionNames(string) ([]string, error) {
 	return s.permNames, s.permNamesErr
 }
 func (s *stubPlatformRBACStore) CreateRole(string, string, string) (string, time.Time, time.Time, error) {
+	s.createCalls++
 	now := time.Now().UTC()
 	return s.createID, now, now, s.createErr
 }
-func (s *stubPlatformRBACStore) UpdateRoleFields(string, *string, *string) error { return s.updateErr }
-func (s *stubPlatformRBACStore) RoleIsSystem(string) (bool, error)               { return s.isSystem, s.isSystemErr }
-func (s *stubPlatformRBACStore) DeleteRole(string) error                         { return s.deleteErr }
-func (s *stubPlatformRBACStore) SetRolePermissions(string, []string) error {
+func (s *stubPlatformRBACStore) UpdateRoleFields(string, *string, *string) error {
+	s.updateCalled = true
+	return s.updateErr
+}
+func (s *stubPlatformRBACStore) RoleIsSystem(string) (bool, error) { return s.isSystem, s.isSystemErr }
+func (s *stubPlatformRBACStore) DeleteRole(string) error {
+	s.deleteCalled = true
+	return s.deleteErr
+}
+func (s *stubPlatformRBACStore) SetRolePermissions(_ string, ids []string) error {
+	s.setPermsCalled = true
+	s.setPermsIDs = ids
 	return s.setPermsErr
 }
 func (s *stubPlatformRBACStore) ListPermissions() ([]models.PlatformPermission, error) {
@@ -110,6 +149,10 @@ func rbacEngine(store platformRBACStore, prov userPermissionProvider, withUser b
 }
 
 // --- sample data ------------------------------------------------------------
+
+// sampleRoleID is the :id of the role-mutation contract tests; the handlers
+// parse it as a uuid (400 otherwise).
+const sampleRoleID = "6b000000-0000-4000-8000-00000000a0a0"
 
 func samplePlatformRole() platformRoleRow {
 	now := time.Now().UTC()
@@ -171,7 +214,7 @@ func TestContract_GetPlatformRole_200(t *testing.T) {
 		role:      samplePlatformRole(),
 		permNames: []string{"platform_users.read"},
 	}, nil, false)
-	w := doRequest(eng, http.MethodGet, apiBase+"/admin/roles/role_1", nil)
+	w := doRequest(eng, http.MethodGet, apiBase+"/admin/roles/"+sampleRoleID, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -181,7 +224,7 @@ func TestContract_GetPlatformRole_200(t *testing.T) {
 func TestContract_GetPlatformRole_404(t *testing.T) {
 	sv := loadSpec(t)
 	eng := rbacEngine(&stubPlatformRBACStore{roleErr: sql.ErrNoRows}, nil, false)
-	w := doRequest(eng, http.MethodGet, apiBase+"/admin/roles/missing", nil)
+	w := doRequest(eng, http.MethodGet, apiBase+"/admin/roles/"+uuid.NewString(), nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
@@ -212,8 +255,8 @@ func TestContract_CreatePlatformRole_400(t *testing.T) {
 
 func TestContract_UpdatePlatformRole_200(t *testing.T) {
 	sv := loadSpec(t)
-	eng := rbacEngine(&stubPlatformRBACStore{}, nil, false)
-	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/role_1",
+	eng := rbacEngine(&stubPlatformRBACStore{}, nil, true)
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/"+sampleRoleID,
 		strings.NewReader(`{"display_name":"Renamed"}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
@@ -225,7 +268,7 @@ func TestContract_UpdatePlatformRole_200(t *testing.T) {
 func TestContract_UpdatePlatformRole_400(t *testing.T) {
 	sv := loadSpec(t)
 	eng := rbacEngine(&stubPlatformRBACStore{}, nil, false)
-	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/role_1", strings.NewReader(`{}`))
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/"+sampleRoleID, strings.NewReader(`{}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -234,8 +277,8 @@ func TestContract_UpdatePlatformRole_400(t *testing.T) {
 
 func TestContract_DeletePlatformRole_200(t *testing.T) {
 	sv := loadSpec(t)
-	eng := rbacEngine(&stubPlatformRBACStore{isSystem: false}, nil, false)
-	w := doRequest(eng, http.MethodDelete, apiBase+"/admin/roles/role_1", nil)
+	eng := rbacEngine(&stubPlatformRBACStore{isSystem: false}, nil, true)
+	w := doRequest(eng, http.MethodDelete, apiBase+"/admin/roles/"+sampleRoleID, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -246,7 +289,7 @@ func TestContract_DeletePlatformRole_200(t *testing.T) {
 func TestContract_DeletePlatformRole_400_system(t *testing.T) {
 	sv := loadSpec(t)
 	eng := rbacEngine(&stubPlatformRBACStore{isSystem: true}, nil, false)
-	w := doRequest(eng, http.MethodDelete, apiBase+"/admin/roles/role_1", nil)
+	w := doRequest(eng, http.MethodDelete, apiBase+"/admin/roles/"+sampleRoleID, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -257,7 +300,7 @@ func TestContract_DeletePlatformRole_400_system(t *testing.T) {
 func TestContract_DeletePlatformRole_404(t *testing.T) {
 	sv := loadSpec(t)
 	eng := rbacEngine(&stubPlatformRBACStore{isSystemErr: sql.ErrNoRows}, nil, false)
-	w := doRequest(eng, http.MethodDelete, apiBase+"/admin/roles/missing", nil)
+	w := doRequest(eng, http.MethodDelete, apiBase+"/admin/roles/"+uuid.NewString(), nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
@@ -268,8 +311,8 @@ func TestContract_DeletePlatformRole_404(t *testing.T) {
 
 func TestContract_SetPlatformRolePermissions_200(t *testing.T) {
 	sv := loadSpec(t)
-	eng := rbacEngine(&stubPlatformRBACStore{isSystem: false}, nil, false)
-	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/role_1/permissions",
+	eng := rbacEngine(&stubPlatformRBACStore{isSystem: false}, nil, true)
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/"+sampleRoleID+"/permissions",
 		strings.NewReader(`{"permission_ids":["`+uuid.New().String()+`","`+uuid.New().String()+`"]}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
@@ -280,8 +323,8 @@ func TestContract_SetPlatformRolePermissions_200(t *testing.T) {
 // Empty array clears all permissions → still 200.
 func TestContract_SetPlatformRolePermissions_200_empty(t *testing.T) {
 	sv := loadSpec(t)
-	eng := rbacEngine(&stubPlatformRBACStore{isSystem: false}, nil, false)
-	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/role_1/permissions",
+	eng := rbacEngine(&stubPlatformRBACStore{isSystem: false}, nil, true)
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/"+sampleRoleID+"/permissions",
 		strings.NewReader(`{"permission_ids":[]}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
@@ -293,7 +336,7 @@ func TestContract_SetPlatformRolePermissions_200_empty(t *testing.T) {
 func TestContract_SetPlatformRolePermissions_403_system(t *testing.T) {
 	sv := loadSpec(t)
 	eng := rbacEngine(&stubPlatformRBACStore{isSystem: true}, nil, false)
-	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/role_1/permissions",
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/"+sampleRoleID+"/permissions",
 		strings.NewReader(`{"permission_ids":["`+uuid.New().String()+`"]}`))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
@@ -305,7 +348,7 @@ func TestContract_SetPlatformRolePermissions_403_system(t *testing.T) {
 func TestContract_SetPlatformRolePermissions_404(t *testing.T) {
 	sv := loadSpec(t)
 	eng := rbacEngine(&stubPlatformRBACStore{isSystemErr: sql.ErrNoRows}, nil, false)
-	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/missing/permissions",
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/roles/"+uuid.NewString()+"/permissions",
 		strings.NewReader(`{"permission_ids":[]}`))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())

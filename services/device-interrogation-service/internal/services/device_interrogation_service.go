@@ -79,6 +79,18 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	ctx context.Context,
 	tenantID, userID, deviceID uuid.UUID,
 ) (uuid.UUID, int, error) {
+	return s.interrogateDevice(ctx, tenantID, userID, deviceID, nil)
+}
+
+// interrogateDevice is InterrogateDevice that also reports, through
+// observationsErr when it is non-nil, what the observation sink could not
+// persist. The platform worker hands that to the result processor so it lands
+// in the job's processing block rather than only in this process's log.
+func (s *DeviceInterrogationService) interrogateDevice(
+	ctx context.Context,
+	tenantID, userID, deviceID uuid.UUID,
+	observationsErr *error,
+) (uuid.UUID, int, error) {
 	device, err := s.getDevice(ctx, tenantID, deviceID)
 	if err != nil {
 		return uuid.Nil, 0, fmt.Errorf("failed to get device: %w", err)
@@ -212,7 +224,9 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	// half the finding carries it (see "device_identity" above) but the Devices
 	// page keeps showing "—" for firmware forever, even after a successful
 	// interrogation that plainly reported one (L-7).
-	s.persistObservations(ctx, tenantID, deviceID, jobID, result)
+	if err := s.persistObservations(ctx, tenantID, deviceID, jobID, result); err != nil && observationsErr != nil {
+		*observationsErr = err
+	}
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, deviceID)
 	if err := s.discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
@@ -669,18 +683,20 @@ func (s *DeviceInterrogationService) updateDeviceInterrogationTime(ctx context.C
 // (ResultProcessor.recordInterrogationObservations) because they share the
 // sink — the two runtimes writing the same observation two ways is the drift
 // that made the sensor and its in-cluster twin diverge.
-func (s *DeviceInterrogationService) persistObservations(ctx context.Context, tenantID, assetID, jobID uuid.UUID, result *di.InterrogateResult) {
+func (s *DeviceInterrogationService) persistObservations(ctx context.Context, tenantID, assetID, jobID uuid.UUID, result *di.InterrogateResult) error {
 	obs := InterrogationObservations{
 		DeviceIdentity: result.DeviceIdentity,
 		Facts:          result.Facts,
 		Relationships:  result.Relationships,
 	}
 	if obs.Empty() {
-		return
+		return nil
 	}
-	if err := s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs); err != nil {
+	err := s.observations.Persist(ctx, tenantID, assetID, interrogationSource(jobID), obs)
+	if err != nil {
 		log.Printf("device-interrogation: failed to persist observations for asset %s: %v", assetID, err)
 	}
+	return err
 }
 
 // updateDeviceError records why the device could not be reached, on its

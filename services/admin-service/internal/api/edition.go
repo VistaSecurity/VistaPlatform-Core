@@ -2,7 +2,9 @@ package api
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/catalogs"
@@ -11,6 +13,7 @@ import (
 	adminservices "github.com/vistasecurity/vistaplatform/admin-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/ai"
 	"github.com/vistasecurity/vistaplatform/shared/cache"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 // This file is the Core/Enterprise seam for admin-service. There are two
@@ -279,6 +282,15 @@ type EditionCapabilities struct {
 type EditionInfo struct {
 	Edition      string              `json:"edition"`
 	Capabilities EditionCapabilities `json:"capabilities"`
+	// LicenseEdition is what the install is LICENSED as right now — "core",
+	// "enterprise" or "msp" — from platform_license, the row admin-service's
+	// reconciler writes after verifying the token. It is the half of the
+	// answer the build cannot give: one ee binary serves both paid editions,
+	// and only the licence says which one. The console hides Plans & Pricing
+	// on Enterprise and Billing unless MSP on this field (edition-licensing
+	// spec §6). Null when the licence could not be read, which the console
+	// treats like an unreadable capability map: fail open.
+	LicenseEdition *entitlements.Edition `json:"license_edition"`
 }
 
 // enrichStateLabel renders the enricher's availability as the three-valued
@@ -326,8 +338,22 @@ func (h EditionHooks) Info() EditionInfo {
 //
 // `info` is resolved once at mount time rather than per request because hooks
 // are wired at process start and cannot change while the process runs.
-func PlatformEdition(info EditionInfo) gin.HandlerFunc {
+//
+// The licence half (LicenseEdition) is read per request, through the shared
+// licence cache, because a licence can be installed, renewed or expire while
+// the process runs. db may be nil (unit tests), which reports it as unknown.
+func PlatformEdition(info EditionInfo, db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, info)
+		out := info
+		out.LicenseEdition = nil
+		if db != nil {
+			if lic, err := entitlements.LoadLicense(c.Request.Context(), db); err == nil {
+				ed := lic.EffectiveEdition(time.Now())
+				out.LicenseEdition = &ed
+			} else {
+				log.Printf("[admin-service] platform/edition: licence read failed, reporting it as unknown: %v", err)
+			}
+		}
+		c.JSON(http.StatusOK, out)
 	}
 }

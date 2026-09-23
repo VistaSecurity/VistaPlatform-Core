@@ -3,7 +3,7 @@ import { AppShell } from './app/app-shell';
 import { PlatformBrandingEffects } from './app/platform-branding';
 import { RequireAuth } from './app/require-auth';
 import { RequirePlatformPermission } from './app/require-permission';
-import { RequirePlatformEdition } from './app/require-edition';
+import { RequireLicenseEdition, RequirePlatformEdition } from './app/require-edition';
 import { SectionPlaceholder } from './app/section-placeholder';
 import { LoginPage } from './pages/login-page';
 import { ResetPasswordPage } from './pages/reset-password-page';
@@ -77,7 +77,16 @@ export default function App() {
             // backend? A Core operator holds `tenants.read`, so the permission
             // guard above happily lets them into a section whose routes 404.
             // Pass-through when `s.edition` is undefined (Core sections).
-            return <Route key={s.id} path={path} element={<RequirePlatformEdition capability={s.edition}>{guarded}</RequirePlatformEdition>} />;
+            // Third gate: the install's LICENCE edition (Plans & Pricing on
+            // Enterprise, Billing unless MSP). Pass-through when `s.license`
+            // is undefined.
+            return (
+              <Route key={s.id} path={path} element={
+                <RequirePlatformEdition capability={s.edition}>
+                  <RequireLicenseEdition gate={s.license}>{guarded}</RequireLicenseEdition>
+                </RequirePlatformEdition>
+              } />
+            );
           })}
           <Route path="*" element={<SectionPlaceholder title="Not found" />} />
         </Route>

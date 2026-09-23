@@ -275,12 +275,12 @@ func TestGetTierEntitlements_SeededTier(t *testing.T) {
 	} else {
 		t.Error("pro tier missing max_sensors entitlement")
 	}
-	// ot_active_probing is edition-gated, so the seed's corrective UPDATE
-	// forces it false on EVERY tier — a tier must never grant paid capability
-	// (seed.sql "Edition-gate correction"; editionByItem in
-	// shared/entitlements/editions.go). It arrives as a tenant_entitlements
-	// override from the entitlement-token seeder instead. The row must still
-	// exist so the tier editor can display it.
+	// ot_active_probing is edition-gated, and every seeded tier ships every
+	// gated capability disabled (scripts/generate-edition-matrix.mjs fails on a
+	// seeded grant). Whether a tenant actually gets it is the licence's call
+	// (shared/entitlements/license.go): Enterprise grants it to everyone, MSP
+	// lets the MSP's own plans grant it. The row must still exist so the tier
+	// editor can display it.
 	if ot, ok := byKey["ot_active_probing"]; ok {
 		var v struct{ Enabled bool }
 		_ = json.Unmarshal(ot.IncludedValue, &v)

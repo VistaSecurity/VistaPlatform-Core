@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 
@@ -283,6 +284,13 @@ func (h *AuthHandlers) Register(c *gin.Context) {
 
 	user, err := h.authService.Register(&req.RegisterRequest)
 	if err != nil {
+		// MSP soft cap: the install is past its licensed tenant count and
+		// grace period. The visitor gets a generic 409; the counts go to
+		// audit (RespondTenantCapRefused).
+		if capErr, ok := entitlements.IsTenantCapExceeded(err); ok {
+			RespondTenantCapRefused(c, capErr)
+			return
+		}
 		switch {
 		case errors.Is(err, auth.ErrEmailExists):
 			c.JSON(http.StatusConflict, gin.H{
@@ -1339,6 +1347,13 @@ func (h *AuthHandlers) CompleteRegistration(c *gin.Context) {
 	// Register user (this creates tenant and user)
 	user, err := h.authService.Register(&req.RegisterRequest)
 	if err != nil {
+		// MSP soft cap: the install is past its licensed tenant count and
+		// grace period. The visitor gets a generic 409; the counts go to
+		// audit (RespondTenantCapRefused).
+		if capErr, ok := entitlements.IsTenantCapExceeded(err); ok {
+			RespondTenantCapRefused(c, capErr)
+			return
+		}
 		switch {
 		case errors.Is(err, auth.ErrEmailExists):
 			c.JSON(http.StatusConflict, gin.H{

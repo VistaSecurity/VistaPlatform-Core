@@ -27,7 +27,9 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +42,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/devicetest"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -131,6 +134,18 @@ func newUniFiControllerForTest(t *testing.T, controllerName string) *httptest.Se
 					"uplink_remote_port":24,"port_idx":1,"type":"wire",
 					"x_uplink_key":"`+unifiPoison+`"
 				}
+			},{
+				"name":"Office AP","ip":"192.0.2.12","mac":"78:8a:20:4b:ee:52",
+				"model":"U6LR","type":"uap","version":"6.6.55.15189",
+				"serial":"788A204BEE52","adopted":true,"state":1,"uptime":7654321,
+				"x_authkey":"`+unifiPoison+`","x_vwirekey":"`+unifiPoison+`",
+				"ethernet_table":[{"name":"eth0","mac":"78:8a:20:4b:ee:52","num_port":1}],
+				"uplink":{
+					"uplink_mac":"78:8a:20:4b:ee:41",
+					"uplink_device_name":"Office Switch",
+					"uplink_remote_port":2,"port_idx":1,"type":"wire",
+					"x_uplink_key":"`+unifiPoison+`"
+				}
 			}]`)
 		default:
 			ok(w, `[]`)
@@ -138,22 +153,45 @@ func newUniFiControllerForTest(t *testing.T, controllerName string) *httptest.Se
 	}))
 }
 
-// TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine drives the whole
-// path a real UniFi integration drives: the REAL registry (so the result has
-// been through Sanitize as it would be in production), then the service's own
-// persistObservations adapter, then the rows.
+// The fixture's managed devices. The switch is what the controller's LLDP and
+// client tables hang off; the AP uplinks through the switch, so its uplink edge
+// has to land on the switch asset rather than on a second, MAC-only one.
+const (
+	unifiSwitchMAC = "78:8a:20:4b:ee:41"
+	unifiAPMAC     = "78:8a:20:4b:ee:52"
+	lldpNeighbour  = "00:1b:17:00:00:01"
+	unifiClientMAC = "4c:6e:0a:87:d4:80"
+)
+
+// unifiRun is one interrogation of the fixture controller, persisted through
+// the service's own adapter.
+type unifiRun struct {
+	tenant     uuid.UUID
+	controller uuid.UUID
+	jobID      uuid.UUID
+	hexLocalID uuid.UUID
+	result     *di.InterrogateResult
+	persistErr error
+}
+
+// interrogateUniFiFixture drives the whole path a real UniFi integration
+// drives: the REAL registry (so the result has been through Sanitize as it
+// would be in production), then the service's own persistObservations adapter.
 //
-// It asserts the wiring, not the helper: delete the persistObservations call in
-// InterrogateDevice and the collector still emits edges and the sink still
-// writes them, and only a test that goes through the adapter notices.
-func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
-	db := testdb.Connect(t)
+// configure runs after the fixture's pre-existing inventory is in place and
+// before the interrogation, to set the tenant up the way the case needs.
+func interrogateUniFiFixture(t *testing.T, db *sql.DB, configure func(tenant uuid.UUID)) unifiRun {
+	t.Helper()
 	tenant := testdb.NewTenant(t, db)
 	ctx := context.Background()
 
 	hostname := "unifi-" + uuid.New().String()[:8] + ".corp.example.test"
 	srv := newUniFiControllerForTest(t, hostname)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	// httptest binds loopback, which the device SSRF guard refuses. Open THIS
+	// listener and nothing else: every other address the collector could be
+	// talked into dialling still goes through the production guard.
+	devicetest.AllowListener(t, srv.Listener.Addr().String())
 
 	// The controller is the device being interrogated: an asset with
 	// management, exactly as Discovery → Devices creates it.
@@ -166,10 +204,12 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	hexLocalID := seedHexLocalHost(t, db, tenant, "4c:6e:0a:87:d4:80", "4c6e0a87d480.local")
+	hexLocalID := seedHexLocalHost(t, db, tenant, unifiClientMAC, "4c6e0a87d480.local")
+	if configure != nil {
+		configure(tenant)
+	}
 
-	registry := di.NewRegistry()
-	interrogator, err := registry.Get("unifi")
+	interrogator, err := di.NewRegistry().Get("unifi")
 	if err != nil {
 		t.Fatalf("registry.Get(unifi): %v", err)
 	}
@@ -186,126 +226,304 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 
 	jobID := uuid.New()
 	sink := &DeviceInterrogationService{db: db, observations: NewObservationSink(db)}
-	sink.persistObservations(ctx, tenant, dev.ID, jobID, result)
+	return unifiRun{
+		tenant:     tenant,
+		controller: dev.ID,
+		jobID:      jobID,
+		hexLocalID: hexLocalID,
+		result:     result,
+		persistErr: sink.persistObservations(ctx, tenant, dev.ID, jobID, result),
+	}
+}
 
-	// --- the switch became an asset ---------------------------------------
-	switchID := assetByIdentifier(t, db, tenant, "mac_address", "78:8a:20:4b:ee:41")
-	neighbourID := assetByIdentifier(t, db, tenant, "mac_address", "00:1b:17:00:00:01")
+// TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine joins the two
+// halves: a UniFi `stat/device` response goes in, and assets, facts and edges
+// come out.
+//
+// It asserts the wiring, not the helper: delete the persistObservations call in
+// InterrogateDevice and the collector still emits edges and the sink still
+// writes them, and only a test that goes through the adapter notices.
+func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
+	db := testdb.Connect(t)
 
-	// --- member_of: the adopted switch belongs to the controller ----------
-	assertCollectorEdge(t, db, tenant, collectorEdge{
-		from: switchID, to: dev.ID, typ: "member_of",
-		sourceRef: "interrogation:" + jobID.String(),
-		label:     "adoption",
+	// A tenant that has not turned identity admission on — the default, since
+	// the mode reads as disabled when no setting exists. Every subject the
+	// controller names resolves at once, so this is where the full map is
+	// asserted.
+	t.Run("admission off", func(t *testing.T) {
+		run := interrogateUniFiFixture(t, db, nil)
+		tenant := run.tenant
+		if run.persistErr != nil {
+			t.Errorf("persistObservations dropped observations: %v", run.persistErr)
+		}
+		ref := "interrogation:" + run.jobID.String()
+
+		// --- the switch and the AP became assets, and their facts are on them
+		switchID := assetByIdentifier(t, db, tenant, "mac_address", unifiSwitchMAC)
+		apID := assetByIdentifier(t, db, tenant, "mac_address", unifiAPMAC)
+		neighbourID := assetByIdentifier(t, db, tenant, "mac_address", lldpNeighbour)
+		if switchID == apID {
+			t.Fatalf("the switch and the AP resolved to one asset %s", switchID)
+		}
+		assertDeviceFacts(t, db, tenant, switchID, ref, "US8P150", "788A204BEE41")
+		assertDeviceFacts(t, db, tenant, apID, ref, "U6LR", "788A204BEE52")
+
+		// --- member_of: both adopted devices belong to the controller ------
+		for _, dev := range []struct {
+			id    uuid.UUID
+			label string
+		}{{switchID, "switch adoption"}, {apID, "AP adoption"}} {
+			assertCollectorEdge(t, db, tenant, collectorEdge{
+				from: dev.id, to: run.controller, typ: "member_of", sourceRef: ref, label: dev.label,
+			})
+		}
+
+		// --- member_of: the AP uplinks through the switch ------------------
+		assertCollectorEdge(t, db, tenant, collectorEdge{
+			from: apID, to: switchID, typ: "member_of", sourceRef: ref, label: "AP uplink",
+		})
+
+		// --- connects_to: the LLDP neighbour -------------------------------
+		//
+		// UniFi reports both an LLDP neighbour and an uplink for the same
+		// physical link, so the uplink's member_of and the LLDP connects_to
+		// land between the same pair. The connects_to is the one asserted: it
+		// is what draws the neighbour on the map as a link, not a container.
+		assertCollectorEdge(t, db, tenant, collectorEdge{
+			from: switchID, to: neighbourID, typ: "connects_to", sourceRef: ref, label: "LLDP neighbour",
+		})
+
+		// --- provenance, on every edge this run wrote -----------------------
+		//
+		// An edge with no provenance cannot be audited or swept, and "measured"
+		// versus "inferred" is the field a reviewer uses to decide whether to
+		// believe it (ADR-0008 D4.2).
+		rows, err := db.Query(`
+			SELECT type, source_kind, coalesce(source_ref, ''), status
+			FROM asset_relationships WHERE tenant_id = $1`, tenant)
+		if err != nil {
+			t.Fatalf("edge scan: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		seen := 0
+		for rows.Next() {
+			var typ, kind, gotRef, status string
+			if err := rows.Scan(&typ, &kind, &gotRef, &status); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			seen++
+			if kind != string(identity.SourceMeasured) {
+				t.Errorf("%s edge source_kind = %q, want measured — a controller STATES its adoption and its neighbours", typ, kind)
+			}
+			if gotRef != ref {
+				t.Errorf("%s edge source_ref = %q, want %s", typ, gotRef, ref)
+			}
+			if status != "pending" {
+				t.Errorf("%s edge status = %q, want pending — neither end was approved by anyone", typ, status)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows: %v", err)
+		}
+		if seen < 5 {
+			t.Errorf("%d edges written, want at least the two adoptions, the AP uplink, the LLDP link and the client link", seen)
+		}
+
+		// --- UniFi client joined the hex .local CI by MAC and promoted linux-2
+		clientID := assetByIdentifier(t, db, tenant, "mac_address", unifiClientMAC)
+		if clientID != run.hexLocalID {
+			t.Errorf("client MAC minted a new asset %s; want join onto hex .local CI %s", clientID, run.hexLocalID)
+		}
+		var hostName, display string
+		if err := db.QueryRow(`SELECT coalesce(hostname,''), coalesce(display_name,'') FROM assets WHERE tenant_id=$1 AND id=$2`,
+			tenant, run.hexLocalID).Scan(&hostName, &display); err != nil {
+			t.Fatalf("read hex-local CI names: %v", err)
+		}
+		if hostName != "linux-2" || display != "linux-2" {
+			t.Errorf("CI names hostname=%q display=%q, want linux-2 after STA ingest", hostName, display)
+		}
+		assertCollectorEdge(t, db, tenant, collectorEdge{
+			from: clientID, to: switchID, typ: "connects_to", sourceRef: ref, label: "client-to-switch",
+		})
+
+		var dyn sql.NullBool
+		var src sql.NullString
+		if err := db.QueryRow(`
+			SELECT (metadata->>'dynamic')::boolean, metadata->>'source'
+			FROM network_segments
+			WHERE tenant_id = $1 AND value = '192.0.2.0/24' AND segment_type = 'cidr'`,
+			tenant).Scan(&dyn, &src); err != nil {
+			t.Fatalf("DHCP LAN segment: %v", err)
+		}
+		if !dyn.Valid || !dyn.Bool {
+			t.Errorf("DHCP LAN metadata.dynamic = %v, want true so lease IPs cannot vote", dyn)
+		}
+		if src.String != "unifi" {
+			t.Errorf("DHCP LAN metadata.source = %q, want unifi", src.String)
+		}
+
+		var iotDyn sql.NullBool
+		if err := db.QueryRow(`
+			SELECT (metadata->>'dynamic')::boolean
+			FROM network_segments
+			WHERE tenant_id = $1 AND value = '198.51.100.0/24' AND segment_type = 'cidr'`,
+			tenant).Scan(&iotDyn); err != nil {
+			t.Fatalf("static VLAN segment: %v", err)
+		}
+		if !iotDyn.Valid || iotDyn.Bool {
+			t.Errorf("static VLAN metadata.dynamic = %v, want false", iotDyn)
+		}
+
+		// --- and nothing the controller volunteered came with them ----------
+		//
+		// The mesh PSK, the SMTP relay password, the per-device auth key and
+		// the operator's email are all in the fixture above; none of them may
+		// be in a row. This is the assertion the original leak would have
+		// failed.
+		assertNoPoisonInTenantRows(t, db, tenant)
 	})
 
-	// --- connects_to: the LLDP neighbour ----------------------------------
+	// A tenant with identity admission ENFORCED and an asset allowance — the
+	// configuration of the live tenant where this went wrong. Admission admits
+	// the devices the controller inventories and RETAINS the weakly-evidenced
+	// peers (the LLDP neighbour, the controller as its devices name it) until
+	// they can be resolved. The retained peers' receipt envelopes are
+	// persisted to a jsonb column keyed per peer.
 	//
-	// UniFi reports both an LLDP neighbour and an uplink for the same physical
-	// link, so the two edges land between the same pair. What matters for the
-	// map is that the neighbour became an asset and at least one edge joins it
-	// to the switch.
-	var joined int
-	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_relationships
-		WHERE tenant_id = $1
-		  AND ((from_asset_id = $2 AND to_asset_id = $3) OR (from_asset_id = $3 AND to_asset_id = $2))`,
-		tenant, switchID, neighbourID).Scan(&joined); err != nil {
-		t.Fatalf("neighbour edge lookup: %v", err)
-	}
-	if joined == 0 {
-		t.Error("the LLDP neighbour became an asset but no edge joins it to the switch; the map would show two unconnected nodes")
-	}
-
-	// --- provenance, on every edge this run wrote -------------------------
+	// That key used to join a peer's identifiers with NUL. jsonb refuses
+	// \u0000 (22P05), so every peer with two or more identifiers failed its
+	// resolution transaction and the fact or edge it carried was dropped: on a
+	// live interrogation 139 of 143 facts and all 74 relationships. With
+	// admission off nothing is retained and the key is never written, which is
+	// why the case above could not see it.
 	//
-	// An edge with no provenance cannot be audited or swept, and "measured"
-	// versus "inferred" is the field a reviewer uses to decide whether to
-	// believe it (ADR-0008 D4.2).
-	rows, err := db.Query(`
-		SELECT type, source_kind, coalesce(source_ref, ''), status
-		FROM asset_relationships WHERE tenant_id = $1`, tenant)
-	if err != nil {
-		t.Fatalf("edge scan: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	seen := 0
-	for rows.Next() {
-		var typ, kind, ref, status string
-		if err := rows.Scan(&typ, &kind, &ref, &status); err != nil {
-			t.Fatalf("scan: %v", err)
+	// MUTATION: make retainedPeerKey return identifierKey(peer) and this fails
+	// with every fact and edge dropped on `pq: unsupported Unicode escape
+	// sequence (22P05)`.
+	t.Run("admission enforced", func(t *testing.T) {
+		run := interrogateUniFiFixture(t, db, func(tenant uuid.UUID) {
+			if _, err := db.Exec(`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason)
+				SELECT $1,id,'{"quantity":100}'::jsonb,'unifi collector edges' FROM billable_items WHERE key='max_assets'`, tenant); err != nil {
+				t.Fatalf("asset allowance: %v", err)
+			}
+			if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')
+				ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
+				t.Fatalf("enforce admission: %v", err)
+			}
+		})
+		tenant := run.tenant
+		if run.persistErr != nil {
+			t.Fatalf("persistObservations dropped observations under enforced admission: %v", run.persistErr)
 		}
-		seen++
-		if kind != string(identity.SourceMeasured) {
-			t.Errorf("%s edge source_kind = %q, want measured — a controller STATES its adoption and its neighbours", typ, kind)
-		}
-		if ref != "interrogation:"+jobID.String() {
-			t.Errorf("%s edge source_ref = %q, want interrogation:%s", typ, ref, jobID)
-		}
-		if status != "pending" {
-			t.Errorf("%s edge status = %q, want pending — neither end was approved by anyone", typ, status)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows: %v", err)
-	}
-	if seen < 2 {
-		t.Errorf("%d edges written, want at least the adoption and the neighbour link", seen)
-	}
+		ref := "interrogation:" + run.jobID.String()
 
-	// --- UniFi client joined the hex .local CI by MAC and promoted linux-2 --
-	clientID := assetByIdentifier(t, db, tenant, "mac_address", "4c:6e:0a:87:d4:80")
-	if clientID != hexLocalID {
-		t.Errorf("client MAC minted a new asset %s; want join onto hex .local CI %s", clientID, hexLocalID)
-	}
-	var hostName, display string
-	if err := db.QueryRow(`SELECT coalesce(hostname,''), coalesce(display_name,'') FROM assets WHERE tenant_id=$1 AND id=$2`,
-		tenant, hexLocalID).Scan(&hostName, &display); err != nil {
-		t.Fatalf("read hex-local CI names: %v", err)
-	}
-	if hostName != "linux-2" || display != "linux-2" {
-		t.Errorf("CI names hostname=%q display=%q, want linux-2 after STA ingest", hostName, display)
-	}
-	assertCollectorEdge(t, db, tenant, collectorEdge{
-		from: clientID, to: switchID, typ: "connects_to",
-		sourceRef: "interrogation:" + jobID.String(),
-		label:     "client-to-switch",
+		// The devices the controller inventories are admitted, with their facts.
+		switchID := assetByIdentifier(t, db, tenant, "mac_address", unifiSwitchMAC)
+		apID := assetByIdentifier(t, db, tenant, "mac_address", unifiAPMAC)
+		assertDeviceFacts(t, db, tenant, switchID, ref, "US8P150", "788A204BEE41")
+		assertDeviceFacts(t, db, tenant, apID, ref, "U6LR", "788A204BEE52")
+
+		// Edges are not asserted here. Under enforced admission a peer named
+		// only by a MAC (the AP's uplink, a client's switch) is retained with
+		// network_scope_unresolved rather than matched to the admitted asset,
+		// so those edges wait for replay. That is admission policy, and the
+		// case above asserts the edges themselves.
+
+		// The retained context reached Postgres, and every peer the collector
+		// named reads back by the key it was stored under — which is what
+		// replay does once an operator resolves the retained peers.
+		var body []byte
+		if err := db.QueryRow(`SELECT payload FROM identity_observation_peer_contexts WHERE tenant_id=$1`, tenant).Scan(&body); err != nil {
+			t.Fatalf("no retained peer context: %v — admission retained nothing, so the retained path was not exercised", err)
+		}
+		var state retainedPeerContext
+		if err := json.Unmarshal(body, &state); err != nil {
+			t.Fatalf("decode retained payload: %v", err)
+		}
+		multi := 0
+		for _, peer := range unifiRunPeers(run.result) {
+			if len(peer.Identifiers) > 1 {
+				multi++
+			}
+			if _, ok := state.retainedPeer(peer); !ok {
+				t.Errorf("retained context has no envelope for peer %q (%d identifiers)", peer.DisplayName, len(peer.Identifiers))
+			}
+		}
+		// Without a multi-identifier peer the key never had a separator in it,
+		// and this case would pass against the bug it exists for.
+		if multi == 0 {
+			t.Fatal("the fixture names no peer with two or more identifiers, so the NUL-key shape is not exercised")
+		}
+		for key := range state.Peers {
+			if raw, err := hex.DecodeString(key); err != nil || len(raw) != sha256.Size {
+				t.Errorf("retained peer key %q is not a hex SHA-256", key)
+			}
+		}
+
+		// Under admission the vendor projection is persisted a second time, in
+		// the retained payload, and that copy has to be as clean as the rows.
+		if strings.Contains(string(body), unifiPoison) {
+			t.Errorf("the retained peer context carries material the controller volunteered and nothing reads")
+		}
 	})
+}
 
-	var dyn sql.NullBool
-	var src sql.NullString
+// unifiRunPeers is every distinct peer the persisted observations name: the
+// set preparePeerContext retains an envelope for.
+func unifiRunPeers(result *di.InterrogateResult) []di.PeerRef {
+	var peers []di.PeerRef
+	seen := map[string]bool{}
+	add := func(p di.PeerRef) {
+		if p.IsZero() {
+			return
+		}
+		if key := retainedPeerKey(p); !seen[key] {
+			seen[key] = true
+			peers = append(peers, p)
+		}
+	}
+	for _, f := range result.Facts {
+		add(f.Subject)
+	}
+	for _, r := range result.Relationships {
+		add(r.Subject)
+		add(r.Peer)
+	}
+	return peers
+}
+
+// assertDeviceFacts asserts that a managed device's identity facts landed on
+// ITS asset, from this interrogation — not on the controller, and not on a
+// second asset for the same device.
+func assertDeviceFacts(t *testing.T, db *sql.DB, tenant, asset uuid.UUID, sourceRef, model, serial string) {
+	t.Helper()
+	for key, want := range map[string]string{
+		"hw.vendor": "Ubiquiti Networks",
+		"hw.model":  model,
+		"hw.serial": serial,
+	} {
+		var got string
+		if err := db.QueryRow(`
+			SELECT value #>> '{}' FROM asset_facts
+			WHERE tenant_id = $1 AND asset_id = $2 AND key = $3 AND source_ref = $4`,
+			tenant, asset, key, sourceRef).Scan(&got); err != nil {
+			t.Errorf("asset %s has no %s fact from %s: %v", asset, key, sourceRef, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("asset %s %s = %q, want %q", asset, key, got, want)
+		}
+	}
+	var interfaces int
 	if err := db.QueryRow(`
-		SELECT (metadata->>'dynamic')::boolean, metadata->>'source'
-		FROM network_segments
-		WHERE tenant_id = $1 AND value = '192.0.2.0/24' AND segment_type = 'cidr'`,
-		tenant).Scan(&dyn, &src); err != nil {
-		t.Fatalf("DHCP LAN segment: %v", err)
+		SELECT count(*) FROM asset_facts
+		WHERE tenant_id = $1 AND asset_id = $2 AND key = 'net.interfaces' AND source_ref = $3`,
+		tenant, asset, sourceRef).Scan(&interfaces); err != nil {
+		t.Fatalf("net.interfaces lookup: %v", err)
 	}
-	if !dyn.Valid || !dyn.Bool {
-		t.Errorf("DHCP LAN metadata.dynamic = %v, want true so lease IPs cannot vote", dyn)
+	if interfaces != 1 {
+		t.Errorf("asset %s has %d net.interfaces facts from %s, want 1", asset, interfaces, sourceRef)
 	}
-	if src.String != "unifi" {
-		t.Errorf("DHCP LAN metadata.source = %q, want unifi", src.String)
-	}
-
-	var iotDyn sql.NullBool
-	if err := db.QueryRow(`
-		SELECT (metadata->>'dynamic')::boolean
-		FROM network_segments
-		WHERE tenant_id = $1 AND value = '198.51.100.0/24' AND segment_type = 'cidr'`,
-		tenant).Scan(&iotDyn); err != nil {
-		t.Fatalf("static VLAN segment: %v", err)
-	}
-	if !iotDyn.Valid || iotDyn.Bool {
-		t.Errorf("static VLAN metadata.dynamic = %v, want false", iotDyn)
-	}
-
-	// --- and nothing the controller volunteered came with them ------------
-	//
-	// The mesh PSK, the SMTP relay password, the per-device auth key and the
-	// operator's email are all in the fixture above; none of them may be in a
-	// row. This is the assertion the original leak would have failed.
-	assertNoPoisonInTenantRows(t, db, tenant)
 }
 
 // --- helpers ---------------------------------------------------------------

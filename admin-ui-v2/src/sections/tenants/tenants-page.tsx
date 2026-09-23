@@ -6,13 +6,24 @@
 import { useMemo, useState } from 'react';
 import { Search, ChevronRight } from 'lucide-react';
 import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, relTime } from '../../components/ui/primitives';
-import { useTenants, useTenantHealthMap, tenantStatus, type Tenant, type TenantDisplayStatus } from './queries';
+import { useTenants, useTenantHealthMap, tenantStatus, planLabel, type Tenant, type TenantDisplayStatus } from './queries';
 import { TenantDrawer } from './tenant-drawer';
 import { useScope } from '../../app/scope';
+import { usePlatformEdition } from '../../lib/edition';
 
 const STATUS_FILTERS: [TenantDisplayStatus | 'all', string][] = [
   ['all', 'All'], ['active', 'Active'], ['trial', 'Trial'], ['past_due', 'Past due'], ['suspended', 'Suspended'], ['canceled', 'Canceled'],
 ];
+
+/**
+ * The status chips this install offers. Trial and the billing states are MSP
+ * concepts (edition-licensing spec §1): on Enterprise and Core a tenant is
+ * active or suspended, and a "Trial" chip would only ever count zero — or,
+ * worse, count rows the backend has not normalised yet.
+ */
+export function statusFilters(isMsp: boolean): [TenantDisplayStatus | 'all', string][] {
+  return isMsp ? STATUS_FILTERS : STATUS_FILTERS.filter(([k]) => k === 'all' || k === 'active' || k === 'suspended');
+}
 
 type Sort = 'name' | 'active' | 'created';
 
@@ -20,21 +31,30 @@ export function TenantsPage() {
   const { scopeId } = useScope();
   const { data: tenants, isLoading, isError, refetch } = useTenants(scopeId);
   const { data: healthMap } = useTenantHealthMap();
+  const { isMsp } = usePlatformEdition();
+  const filters = statusFilters(isMsp);
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<TenantDisplayStatus | 'all'>('all');
   const [plan, setPlan] = useState('all');
   const [sort, setSort] = useState<Sort>('name');
-  const [open, setOpen] = useState<Tenant | null>(null);
+  // The drawer holds the tenant's ID, not a copy of the row: the tenant it
+  // shows is re-read from the directory query on every render, so a change
+  // saved from inside the drawer (the "Your own tenant" toggle, an edit) shows
+  // up there as soon as the query cache has it. A snapshot taken at row click
+  // would keep showing the pre-change value — and a controlled checkbox bound
+  // to it would re-send the same change on the next click.
+  const [openId, setOpenId] = useState<string | null>(null);
 
   // Memoised so the fallback `[]` keeps a stable identity — otherwise every
   // render produces a fresh array and the useMemo blocks below never hit.
   const all = useMemo(() => tenants ?? [], [tenants]);
-  const plans = useMemo(() => Array.from(new Set(all.map((t) => t.subscription_tier).filter(Boolean))) as string[], [all]);
+  const open: Tenant | null = openId ? all.find((t) => t.id === openId) ?? null : null;
+  const plans = useMemo(() => Array.from(new Set(all.map((t) => planLabel(t)))), [all]);
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: all.length };
-    for (const [k] of STATUS_FILTERS.slice(1)) c[k] = all.filter((t) => tenantStatus(t) === k).length;
+    for (const [k] of filters.slice(1)) c[k] = all.filter((t) => tenantStatus(t) === k).length;
     return c;
-  }, [all]);
+  }, [all, filters]);
 
   const rows = useMemo(() => {
     const ql = q.trim().toLowerCase();
@@ -42,7 +62,7 @@ export function TenantsPage() {
     // facets (status/plan/text) filter client-side here.
     const filtered = all.filter((t) =>
       (status === 'all' || tenantStatus(t) === status) &&
-      (plan === 'all' || t.subscription_tier === plan) &&
+      (plan === 'all' || planLabel(t) === plan) &&
       (!ql || t.name.toLowerCase().includes(ql) || t.slug.toLowerCase().includes(ql) || (t.domain ?? '').toLowerCase().includes(ql)),
     );
     return [...filtered].sort((a, b) =>
@@ -61,7 +81,7 @@ export function TenantsPage() {
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search tenants, slug, domain…" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: 'var(--op-t1)', fontSize: 12.5, fontFamily: 'var(--font-body)' }} />
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {STATUS_FILTERS.map(([k, l]) => (
+          {filters.map(([k, l]) => (
             <button key={k} onClick={() => setStatus(k)} className={'op-chip' + (status === k ? ' active' : '')}>
               {l}<span style={{ opacity: 0.6 }}>{counts[k] ?? 0}</span>
             </button>
@@ -83,15 +103,15 @@ export function TenantsPage() {
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         <table className="op-table">
           <thead><tr>
-            <th>Tenant</th><th>Plan</th><th>Status</th><th>Health</th><th className="num">Assets</th><th>Sensors</th><th className="num">MRR</th><th>CSM</th><th>Active</th><th />
+            <th>Tenant</th><th>Plan</th><th>Status</th><th>Health</th><th className="num">Assets</th><th>Sensors</th>{isMsp && <th className="num">MRR</th>}<th>CSM</th><th>Active</th><th />
           </tr></thead>
           <tbody>
             {rows.map((t) => {
-              const plan = t.subscription_tier ?? 'Trial';
+              const plan = planLabel(t);
               const h = healthMap?.get(t.id);
               const healthIndex = healthIndexPresentation(h?.overall_score, h?.health_status !== 'unknown');
               return (
-                <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => setOpen(t)}>
+                <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => setOpenId(t.id)}>
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <Avatar initials={initialsFromName(t.name)} size={26} brand={plan === 'Sovereign'} square />
@@ -113,7 +133,7 @@ export function TenantsPage() {
                   </td>
                   <td className="num t-muted">—</td>
                   <td className="t-muted">—</td>
-                  <td className="num t-muted">—</td>
+                  {isMsp && <td className="num t-muted">—</td>}
                   <td className="t-muted">—</td>
                   <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(t.updated_at)}</td>
                   <td><ChevronRight size={15} style={{ color: 'var(--op-t3)' }} /></td>
@@ -136,10 +156,10 @@ export function TenantsPage() {
       <div style={{ flex: 'none', padding: '9px 24px', borderTop: '1px solid var(--op-border)', display: 'flex', alignItems: 'center', gap: 14, fontSize: 12, color: 'var(--op-t3)' }}>
         <span>{rows.length} of {all.length} tenants</span>
         <span>·</span>
-        <span>Assets · Sensors · MRR enrich from inventory / fleet / billing — wiring next</span>
+        <span>{isMsp ? 'Assets · Sensors · MRR enrich from inventory / fleet / billing — wiring next' : 'Assets · Sensors enrich from inventory / fleet — wiring next'}</span>
       </div>
 
-      {open && <TenantDrawer tenant={open} health={healthMap?.get(open.id)} onClose={() => setOpen(null)} />}
+      {open && <TenantDrawer tenant={open} health={healthMap?.get(open.id)} onClose={() => setOpenId(null)} />}
     </div>
   );
 }

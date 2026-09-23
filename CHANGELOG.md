@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.3] - 2026-09-22
+## [1.1.0-rc.4] - 2026-09-23
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -17,6 +17,12 @@ before it was fixed. The audit report ships with the release at
 **It also carries everything from 1.0.1**, which was tagged as a release
 candidate but never cut as a final release — the cloud-inventory work described
 in the section below this one.
+
+**It also introduces licence model v2** — licences now name their edition.
+On an Enterprise licence every tenant gets every Enterprise capability, with
+unlimited capacity and no tier or trial labels; on an MSP licence the MSP's own
+plans decide, with an optional licensed-tenant soft cap and signed monthly usage
+reports. See **Upgrading** for what an existing install needs to do.
 
 ### BREAKING
 
@@ -60,9 +66,146 @@ in the section below this one.
 5. If you bootstrapped with docker compose before this release, rotate
    `INTERNAL_AUTH_SECRET` — it was left at a published placeholder value.
 
+- **Re-save each staff admin-login identity provider as a Super
+  Administrator** if Super Administrators sign in with it. Existing providers
+  have no recorded author, so Super Administrator SSO through them is refused
+  (password sign-in still works) until a Super Administrator saves the provider
+  once in Settings → Identity Providers. Other staff are unaffected by the
+  upgrade itself; after the next save, a provider signs in only staff whose
+  role's permissions its last editor also holds, so have an administrator who
+  outranks everyone using it make that save.
+- **Staff sign-in with Microsoft Entra now fails closed.** Entra does not send
+  `email_verified`, and platform identity providers have no allowed-domain list
+  to stand in for it the way tenant SSO does, so Microsoft staff sign-in is
+  refused. Sign in with a password, or use a provider that asserts verified
+  email.
+- Platform Administrators who managed the email relay or the security policy
+  need a role holding `platform.security.manage`; those pages are read-only
+  without it.
+
 <!-- release-notes-end -->
 
+### Added
+
+- **Enterprise presentation of the licence.** On an Enterprise install no tier
+  name, trial or "community" label appears anywhere: tenants, the Tenants list
+  and drawer, and the tenant's **Settings → Billing account** page all read
+  *Vista Platform Enterprise* (the billing page adds "provided by
+  \<licensee\>"), from a new resolved `plan` block on `GET /tenant/features` and
+  the admin tenant responses. The admin console hides **Plans & Pricing** on
+  Enterprise and **Billing & Revenue** unless the install is MSP. New
+  **Settings → License & Usage** page shows the licence (edition, licensee,
+  expiry, days left, warnings at 30/14/7 days, the install ID; "Vista Platform
+  Core — no licence installed" without one) and, on Enterprise, a platform
+  **data-retention cap** (unlimited by default) that every tenant's retention
+  resolves to. **Tenants → drawer → Entitlements** now lists each licensed
+  feature with a per-tenant on/off switch on Enterprise (reason required, up
+  to 500 characters in any script, audited); on MSP it shows the plan's composition — from the tenant's real
+  plan, where it used to query a non-existent one — plus Plan Exceptions, whose
+  changes are now audited too. The seeded support level `community` is renamed
+  `standard`. Off MSP, Mission Control shows no revenue or past-due tiles. The
+  tenant **Edit** form asks for name and domain only, and the API refuses a
+  payment status change with 409. On Enterprise, `GET /tenant/billing` names
+  the plan instead of the tier. (Spec: `edition-licensing-and-msp-metering`,
+  PR 2.)
+- **MSP licensed tenant limit with a grace period.** An MSP licence that
+  carries a tenant limit now caps the install's live customer tenants. The
+  first tenant over the limit starts a grace period (the licence's
+  `grace_days`, 30 by default) during which new tenants are still created. After
+  it, every tenant-creation path (password signup, signup completion and
+  social signup) answers **409** with a neutral "This platform is not
+  accepting new organisations right now. Please contact the platform
+  operator." The person signing up never sees the install's tenant counts;
+  the refusal is audited (`tenant.create_refused_license_limit`) with them for
+  the operator. Existing tenants are never affected. The grace period is
+  granted once per licence: deleting tenants or marking them as your own does
+  not restart it, and after it ends a new tenant is refused whenever it would
+  take the count over the limit, including from exactly at the limit. Only a
+  new licence starts a new grace period; re-installing an earlier licence, or
+  another copy of the same licence, does not. Only a platform admin (through the
+  control below) can mark a tenant as your own; the database refuses it from
+  the application's regular connection. Two signups
+  at the last slot cannot both get in. The admin console shows a banner on
+  every page while the install is over its limit. Platform admins can mark
+  the MSP's own tenant(s) as not counted (Tenants → a tenant → Overview →
+  Tenant controls → **Your own tenant**, audited). New API:
+  `GET /admin/license/cap` (read-only) and `PUT /admin/tenants/{id}/operator`. Core and
+  Enterprise installs are never capped. (Spec:
+  `edition-licensing-and-msp-metering`, PR 3.)
+
+- **MSP usage reporting.** On an MSP licence admin-service now records each
+  customer tenant's lifecycle (created, suspended, reactivated, deleted — at
+  the signup, platform-admin, dunning and trial call sites, not from the audit
+  log), takes a daily usage snapshot at 00:15 UTC (state plus customer-sensor,
+  device-agent, asset and user counts, platform-managed sensors excluded; a
+  missed day is backfilled with the tenants that existed at the end of that
+  day), and on the 1st of each month produces a **signed usage report** for the
+  previous UTC month (a month whose report was due while admin-service was down
+  is generated when it comes back):
+  every tenant present in the month exactly once, days by state, lifecycle
+  events, peak size, the month's peak tenant count and any snapshot gaps —
+  counts and tenant ids only, no names or inventory. Reports are signed with an
+  install key (ES256 over RFC 8785 canonical JSON), stored in the database and
+  written to a new reports volume, and can be generated on demand (including a
+  never-billed month-to-date preview; a complete report for a month with no
+  snapshot at all is refused with `409`), listed and downloaded through
+  `/admin/license/usage` and `/admin/license/reports` (`platform.settings`,
+  audited). Delivery to Vista Security is not configured yet. New chart values:
+  `install.signingKeyPEM` (pin the signing key for GitOps renders — the chart
+  otherwise generates it once into `<fullname>-install` and keeps it) and
+  `licensing.reports.{dir,persistence.*}`.
+  - **Upgrade notes:** the reports volume is on by default. With its default
+    ReadWriteOnce access mode admin-service is updated with the `Recreate`
+    strategy and the chart refuses to render more than one admin-service
+    replica — use a ReadWriteMany class, or set
+    `licensing.reports.persistence.enabled=false`. The chart cannot know the
+    licence edition at render time, so **Enterprise and Core installs get the
+    1Gi PVC and the `Recreate` strategy too**, although only an MSP licence
+    ever writes a report there — set
+    `licensing.reports.persistence.enabled=false` on those installs (and on
+    any that scale admin-service above one replica, whose `helm upgrade`
+    otherwise fails to render). Every edition records tenant lifecycle events
+    (ids and times only); only an MSP licence takes snapshots or builds
+    reports. (Spec: `edition-licensing-and-msp-metering`, PR 4.)
+
 ### Security
+
+- **Configuring how staff sign in now requires Security management.** Writing a
+  platform identity provider (Settings → Identity Providers: add, edit,
+  enable/disable, delete — for staff admin login and for social sign-up) was
+  gated by `platform.settings`, which the stock Platform Administrator role
+  holds, and the staff single sign-on callback trusted any email the configured
+  provider returned. Together that let a Platform Administrator obtain a session
+  as any other staff member, including a Super Administrator. Provider writes
+  now require `platform.security.manage` (seeded to Super Administrator only);
+  viewing stays on `platform.settings` and never returns the client secret.
+- The same permission now gates the settings that decide how staff
+  authenticate or where their password-reset and invitation email goes: the
+  admin-console link base (`admin_ui_base_url`), the email relay
+  (`email_config`), and the password, session, lockout and staff
+  email-verification policy. A request that includes any of them without the
+  permission is refused whole with `403`, naming the fields. Tenant-facing
+  sign-up settings and branding are unchanged.
+- Staff single sign-on now requires the identity provider to assert that the
+  email address is verified, using the same policy as tenant SSO.
+- Staff single sign-on signs in a Super Administrator only through a provider
+  whose most recent change was made by an active Super Administrator, and any
+  other staff member only through a provider whose most recent editor currently
+  holds every permission of that staff member's role.
+- Tenant social sign-up and sign-in use only the platform's sign-up identity
+  providers. They used to select platform providers by type alone, so once a
+  staff admin-login provider existed for the same type, the public sign-up
+  provider list advertised it and a tenant sign-up could start on the staff
+  console's OAuth app. Seeding platform sign-up providers from
+  `PLATFORM_GOOGLE_*` / `PLATFORM_MICROSOFT_*` environment variables also
+  failed on every start (its conflict target matched no unique index) and now
+  works.
+- Identity-provider changes, writes of the settings above, and staff single
+  sign-on attempts (successful and refused) are recorded in the platform
+  activity trail with the actor and the changed fields; secrets are never
+  recorded.
+
+- **Platform role assignment is now authorized (security-staff-1, Critical).** Any platform administrator could make any account — including their own — Super Administrator, because creating, inviting and editing platform users wrote the role behind `platform_users.manage` alone and the seeded `platform_roles.assign` permission was never checked. Every role write now requires `platform_roles.assign`, the granted role (and, on a change, the user's current role) must be within the caller's own permissions, and nobody may change their own role. Role changes are audited as `platform_user.role_changed` with the old and new role. The same class of escalation was closed on the other staff-management paths: setting a colleague's password, sending them a reset link, editing, activating/deactivating, and deleting them now all require that the caller hold every permission of the target's current role (so a Platform Administrator can no longer take over or lock out a Super Administrator through staff management — the separate takeover path through the staff admin-login identity-provider settings is closed by the Security-management gating and staff SSO checks described above); nobody may deactivate or delete their own account; editing a role's permissions (`platform_roles.manage`) may not add permissions the caller lacks, touch the caller's own role, or strip a role that outranks the caller; and the last active Super Administrator can be neither deactivated, deleted, nor re-roled — enforced atomically under a row lock, so two concurrent step-downs cannot both succeed. Renaming, re-describing, or deleting a role now needs the same rank over it, and only a Super Administrator may rename a system role. Role-permission edits parse and canonicalize every permission id before checking it (an upper-case or braced id of a permission the caller lacked used to skip the check and still be written), and non-UUID ids are rejected with `400`. Every write to an existing platform user is conditional on the role the authorization check saw, so a user re-roled in between is not written (`409`, reload and retry). **Behaviour change:** the seeded Platform Administrator role now holds `platform_roles.assign`, `support.tenants` and `support.users` (existing installs gain them on upgrade), so stock Platform Administrators can create, invite, re-role and manage staff in every role except Super Administrator — including Support Agents. The platform-user API now returns `role_id: null` for a user with no role instead of the zero UUID. Updating a user with only their unchanged `role_id` is now a no-op, and an unknown user id on edit/set-password/reset/delete answers `404`. The admin console disables the Role field and the Invite/Create buttons for operators without `platform_roles.assign` and shows the server's reason on refusal.
 
 - **Platform-admin login through auth-service ignored `force_password_change`.**
   `seed.sql` seeds the published platform-admin accounts with the flag set so
@@ -144,6 +287,32 @@ in the section below this one.
 
 ### Changed
 
+- **Licence model v2.** A licence now names its edition (`vc_edition`:
+  `enterprise` or `msp`) and is recorded as one `platform_license` row that
+  every service reads, instead of per-tenant entitlement rows written every day.
+  On an **Enterprise** licence every tenant gets every Enterprise capability
+  (unless a platform admin switches it off for that tenant) with unlimited
+  capacity, whatever tier it is on; trial labels are cleared. On an **MSP**
+  licence the MSP's own plans decide, and a plan can now grant a paid
+  capability. The self-service billing portal is MSP-only. MSP licences are
+  bound to the install's id (a new chart-managed Secret, `<fullname>-install`;
+  admin-service records it in the database on first boot, after which the
+  database copy is authoritative and logged at every start). **ArgoCD, Flux and
+  `helm template` users must set the new `install.id` value** — those renders
+  cannot preserve a generated id.
+  New tenants are no longer marked as on a 30-day trial: signup writes
+  `payment_status = 'active'`, the column now defaults to `'active'` rather than
+  `'trial'`, and a trial end is stamped only for a tier marked as a trial.
+  - **Upgrade notes:** tokens minted before this release (no `vc_edition`) keep
+    working **as Enterprise for this release only** and log a warning — an MSP
+    customer on such a token runs as Enterprise until it is re-issued. On an
+    install with no licence, a per-tenant override no longer switches on a paid
+    capability. A renewed licence Secret now takes effect within ten minutes
+    without a restart. An MSP token that is not bound to an install
+    (`vc_install_id`) is rejected, and MSP tokens no longer carry the v1
+    `vc_features` list, so a release older than this one reads a new MSP token
+    as granting nothing. (Spec: `edition-licensing-and-msp-metering`, PR 1.)
+
 - All 23 Go modules updated within their current majors — `x/crypto` v0.57.0,
   `x/net` v0.59.0, `x/text` v0.42.0, `quic-go` v0.62.0, `go-redis` v9.22.0,
   `nats.go` v1.54.0 among them. Go 1.26 is retained deliberately: every stdlib
@@ -159,6 +328,12 @@ in the section below this one.
   on the most CVE-prone module family in the tree.
 
 ### Fixed
+
+- The admin tenant directory no longer fails to load when a tenant has no
+  billing email, and a malformed `INSTALL_ID` no longer stops a licence bound to
+  the install's recorded id from being re-verified.
+- Device bootstrap discovery now reaches RFC1918 appliance management interfaces through the same guarded client as recurring interrogation, while continuing to block loopback, link-local/metadata, DNS-rebinding, and cross-host redirect targets. TLS verification remains the default and the UI exposes an explicit self-signed-certificate override.
+- Adding a managed device now derives identity scope from a URL-only management address, explains retained identity observations before opening them, rejects display names entered as hostnames, and surfaces safe connection/authentication diagnostics without exposing appliance response bodies.
 
 - **Enterprise compose sessions now use the development runtime overlay and
   build every Enterprise-capable service.** The licensed session previously
@@ -450,7 +625,6 @@ the product documentation so this file stays readable.
 - Inventory facet clicks match NULL and empty context values, use segment UUIDs,
   preserve tenant-defined class paths, and reset pagination when filters change.
   Sensor and agent settings saves tolerate empty response arrays.
-
 
 ## [0.12.5] - 2026-09-08
 
@@ -2444,7 +2618,6 @@ guard it.
   rendered with SQL `host()` rather than a text cast, which would append the
   prefix and never match a bare-IP comparison downstream.
 
-
 ## [0.5.6] - 2026-08-12
 
 ### Security
@@ -2665,7 +2838,6 @@ RLS-protected tables no longer execute as their owner (closing a cross-tenant
 read bypass for the app role), materialized-view refresh works again under the
 role split, and agent versions now track reality on every heartbeat instead of
 freezing at registration.
-
 
 ### Security
 
@@ -2979,7 +3151,6 @@ fixes.
   it) are removed with it. Database tables `artifacts`, `artifact_audit_log` and
   `tenant_artifact_config` are dropped by the schema-migration Job on the next
   `helm upgrade`.
-
 
 ## [0.3.1] - 2026-08-10
 
@@ -3611,7 +3782,6 @@ shipped confident wrong answers. This release repairs that layer.
   assert on the **raw column bytes**, not merely the round trip: an "encrypt"
   that returns its input passes a round-trip test perfectly.
 
-
 - **The cross-tenant platform-admin API is no longer served on the public tenant
   host, and the admin plane can be restricted to named source networks**.
 
@@ -3677,7 +3847,6 @@ shipped confident wrong answers. This release repairs that layer.
   verified from an address *outside* `sourceRange` — with a wrong
   `ipStrategy.depth` the list matches the load balancer's own address and admits
   everyone while looking like it works.
-
 
 - **`tools/qa-platform/ui` moved to `react-router-dom@^7.18.2`** (from
   `^6.28.0`, lockfile was at 6.30.3), clearing the three open-redirect
@@ -3822,7 +3991,6 @@ shipped confident wrong answers. This release repairs that layer.
   `npm ls` reports TS 6 as `invalid`. Generation works and `npm ci` succeeds;
   it resolves when upstream supports 6.
 
-
 - **Stripe browser SDKs upgraded to current majors** in `frontend-v2`:
   `@stripe/stripe-js` `^2.4.0` → `^9.13.0` (7 majors) and
   `@stripe/react-stripe-js` `^2.4.0` → `^6.8.0` (4 majors). Server-side Stripe
@@ -3898,7 +4066,6 @@ shipped confident wrong answers. This release repairs that layer.
   own merits and removes the resolution dependency the failure is consistent
   with, but CI is the thing that gets to confirm it.
 
-
 - **Platform-admin refresh rejected every ES256 session minted after.**
   `admin-service` signed refresh tokens with the new `platformSigner` (ES256)
   but `RefreshToken` still verified with an HMAC-only keyfunc, so login
@@ -3925,7 +4092,6 @@ shipped confident wrong answers. This release repairs that layer.
   Fixed with a shared `database.JSONMap` (a `sql.Scanner`/`driver.Valuer` map
   that JSON-encodes identically, so no API response shape changes) plus
   `COALESCE` on the two nullable text columns.
-
 
 - **Four compliance-evaluation correctness defects, each of which looked like
   working code while doing nothing**. All four were reproduced with a
@@ -4124,7 +4290,6 @@ shipped confident wrong answers. This release repairs that layer.
   lockfile now fails the gate rather than skipping it. The nightly's frontend
   job also gained the lint and typecheck steps its own header already claimed
   it ran.
-
 
 - **React was installed twice.** The lockfile hoisted `react@18.3.1` to the root
   while nesting `react@19.2.8` under each UI, because `packages/primitives`

@@ -9,7 +9,7 @@ import { useNavigate } from 'react-router';
 import { CircleDollarSign, Building2, Activity, AlertTriangle, ChevronRight } from 'lucide-react';
 import { clients } from '../../lib/clients';
 import { Avatar, AreaChart, MiniBar, PlanTag, StatTile, StatusTag, healthIndexPresentation, initialsFromName, moneyK, num } from '../../components/ui/primitives';
-import { useTenants, useTenantHealthMap, tenantStatus } from '../tenants/queries';
+import { useTenants, useTenantHealthMap, tenantStatus, planLabel } from '../tenants/queries';
 import { usePlatformEdition } from '../../lib/edition';
 
 // Revenue analytics live in admin-service/ee/billingapi. On a Core build the
@@ -55,9 +55,14 @@ export function OverviewPage() {
   const navigate = useNavigate();
   const { data: tenants } = useTenants();
   const { data: healthMap } = useTenantHealthMap();
-  const { has } = usePlatformEdition();
-  const showRevenue = has('billing');
+  const { has, isMsp } = usePlatformEdition();
+  // Revenue and past-due are billing surfaces, and billing is MSP-only by
+  // LICENCE (edition-licensing spec §1: "Billing admin — Enterprise: No").
+  // The build capability alone is not enough: one ee binary serves both paid
+  // editions, so an Enterprise install mounts the billing routes too.
+  const showRevenue = has('billing') && isMsp;
   const showTenants = has('msp');
+  const showPastDue = showTenants && showRevenue;
   const { data: dash } = useBillingDashboard(showRevenue);
   const { data: series } = useMrrSeries(showRevenue);
   const { data: status } = useSystemStatus();
@@ -65,7 +70,7 @@ export function OverviewPage() {
   // Memoised so the fallback `[]` keeps a stable identity — otherwise every
   // render produces a fresh array and the useMemo blocks below never hit.
   const all = useMemo(() => tenants ?? [], [tenants]);
-  const pastDue = all.filter((t) => tenantStatus(t) === 'past_due').length;
+  const pastDue = showPastDue ? all.filter((t) => tenantStatus(t) === 'past_due').length : 0;
   const suspended = all.filter((t) => tenantStatus(t) === 'suspended').length;
   const services = status?.services ?? [];
   // "disabled" means an operator intentionally opted the service out of
@@ -80,7 +85,7 @@ export function OverviewPage() {
       const st = tenantStatus(t);
       const h = healthMap?.get(t.id);
       if (st === 'suspended') return 100;
-      if (st === 'past_due') return 80;
+      if (st === 'past_due' && showPastDue) return 80;
       // `unknown` is stored as score 0 for compatibility, but it means no
       // health factor could be measured. Use the same availability/range
       // adapter as the rendered Health cell so the sentinel cannot become a
@@ -91,11 +96,11 @@ export function OverviewPage() {
       return 0;
     };
     return [...all].map((t) => ({ t, s: sev(t) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 6).map((x) => x.t);
-  }, [all, healthMap]);
+  }, [all, healthMap, showPastDue]);
 
   return (
     <div className="op-fade" style={{ padding: '20px 24px 40px', display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {/* revenue hero — Enterprise billing only. Mission Control has no
+      {/* revenue hero — MSP billing only. Mission Control has no
           `edition` marker in nav.ts because most of it (service health) is Core;
           the paid pieces are gated here instead of hiding the whole page. */}
       {showRevenue && (
@@ -121,8 +126,8 @@ export function OverviewPage() {
       </div>
       {/* Tenant-derived tiles read /admin/tenants (MSP) and link to sections a
           Core build does not have; only "Degraded services" is Core. */}
-      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${showTenants ? 4 : 1},1fr)`, gap: 12 }}>
-        {showTenants && <StatTile label="Past-due tenants" value={pastDue} icon={CircleDollarSign} accent={pastDue ? 'var(--danger)' : undefined} onClick={() => navigate('/billing')} />}
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${showTenants ? (showPastDue ? 4 : 3) : 1},1fr)`, gap: 12 }}>
+        {showPastDue && <StatTile label="Past-due tenants" value={pastDue} icon={CircleDollarSign} accent={pastDue ? 'var(--danger)' : undefined} onClick={() => navigate('/billing')} />}
         {showTenants && <StatTile label="Suspended" value={suspended} icon={Building2} accent={suspended ? 'var(--warn)' : undefined} onClick={() => navigate('/tenants')} />}
         <StatTile label="Services needing attention" value={needsAttention} icon={Activity} accent={needsAttention ? 'var(--warn)' : undefined} onClick={() => navigate('/system')} />
         {showTenants && <StatTile label="Total tenants" value={num(all.length)} icon={Building2} onClick={() => navigate('/tenants')} />}
@@ -138,7 +143,7 @@ export function OverviewPage() {
             {attention.map((t) => {
               const h = healthMap?.get(t.id);
               const healthIndex = healthIndexPresentation(h?.overall_score, h?.health_status !== 'unknown');
-              const plan = t.subscription_tier ?? 'Trial';
+              const plan = planLabel(t);
               return (
                 <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => navigate('/tenants')}>
                   <td><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><Avatar initials={initialsFromName(t.name)} size={26} brand={plan === 'Sovereign'} square /><span style={{ fontWeight: 600, color: 'var(--op-t1)' }}>{t.name}</span></div></td>

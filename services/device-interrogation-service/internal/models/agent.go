@@ -174,6 +174,12 @@ type JobResult struct {
 	// simply sends none, which is not the same as sending an empty one.
 	Facts         []di.FactObservation         `json:"facts,omitempty"`
 	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
+
+	// ObservationsErr is what the in-cluster executor could not persist of the
+	// Facts/Relationships it wrote itself, handed to the result processor so it
+	// lands in the job's processing block. Never serialised: an agent cannot
+	// set it, and it is not part of the stored result.
+	ObservationsErr error `json:"-"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

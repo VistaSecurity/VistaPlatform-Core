@@ -73,13 +73,23 @@ SELECT r.id, p.id FROM platform_roles r, platform_permissions p
 WHERE r.name = 'super_admin'
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
+-- platform_roles.assign lets a stock Platform Admin create, invite and re-role
+-- staff. It is safe to hand out because admin-service only lets a caller grant
+-- a role whose permissions are a subset of their own, act on a user whose role
+-- they outrank, and never change their own role. Owner decision: a Platform
+-- Admin may assign every platform role except super_admin — so platform_admin
+-- is kept a SUPERSET of support_agent (it also holds support.tenants and
+-- support.users), and stays strictly narrower than super_admin (which holds
+-- every permission). Existing installs pick new rows up on the next seed run
+-- (ON CONFLICT DO NOTHING).
 INSERT INTO platform_role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM platform_roles r, platform_permissions p
 WHERE r.name = 'platform_admin'
   AND p.name IN (
     'tenants.read','tenants.update','tenants.manage','tenants.activate','tenants.suspend',
     'platform_users.read','platform_users.create','platform_users.update','platform_users.manage',
-    'platform_roles.read','platform_permissions.read','tenant_roles.assign',
+    'platform_roles.read','platform_roles.assign','platform_permissions.read','tenant_roles.assign',
+    'support.tenants','support.users',
     'algorithms.manage','catalogs.manage',
     'platform.settings','platform.billing','platform.analytics',
     'platform.health','platform.logs','platform.logs.read','platform.security','platform.audit',
@@ -216,7 +226,7 @@ INSERT INTO billable_items (key, display_name, description, category, kind, unit
 ('billing_portal',            'Self-Service Billing',       'Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional.', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  69),
 
 -- Support tier (enum)
-('support_sla_tier',          'Support SLA',                'Response-time tier for support requests', 'support', 'enum_choice', NULL, '{"value": "community"}'::jsonb, false, NULL, 300)
+('support_sla_tier',          'Support SLA',                'Response-time tier for support requests', 'support', 'enum_choice', NULL, '{"value": "standard"}'::jsonb, false, NULL, 300)
 ON CONFLICT (key) DO NOTHING;
 
 -- =================================================================
@@ -254,7 +264,7 @@ FROM (VALUES
     ('community',     'connector_netbox',            '{"enabled": false}'),
     ('community',     'siem_export',                 '{"enabled": false}'),
     ('community',     'billing_portal',              '{"enabled": false}'),
-    ('community',     'support_sla_tier',            '{"value": "community"}'),
+    ('community',     'support_sla_tier',            '{"value": "standard"}'),
 
     -- Free (trial; minimal caps; nothing enabled)
     ('free',          'max_sensors',                 '{"quantity": 1}'),
@@ -276,7 +286,7 @@ FROM (VALUES
     ('free',          'connector_netbox',            '{"enabled": false}'),
     ('free',          'siem_export',                 '{"enabled": false}'),
     ('free',          'billing_portal',              '{"enabled": false}'),
-    ('free',          'support_sla_tier',            '{"value": "community"}'),
+    ('free',          'support_sla_tier',            '{"value": "standard"}'),
 
     -- Starter (small shop; no compliance framework beyond auto-licensed Best Practices)
     ('starter',       'max_sensors',                 '{"quantity": 5}'),
@@ -300,7 +310,11 @@ FROM (VALUES
     ('starter',       'billing_portal',              '{"enabled": false}'),
     ('starter',       'support_sla_tier',            '{"value": "business"}'),
 
-    -- Pro (Starter + 1 platform compliance framework + OT + CBOM signing + threshold overrides)
+    -- Pro (Starter + 1 platform compliance framework). Every edition-gated
+    -- capability ships disabled here, as on every seeded tier: these rows used
+    -- to say true for four of them and relied on the corrective UPDATE at the
+    -- bottom of this file to flip them, which is gone (see there).
+    -- generate-edition-matrix.mjs fails if a seeded tier grants one.
     ('pro',           'max_sensors',                 '{"quantity": 25}'),
     ('pro',           'max_assets',                  '{"quantity": 10000}'),
     ('pro',           'max_users',                   '{"quantity": 25}'),
@@ -310,10 +324,10 @@ FROM (VALUES
     ('pro',           'storage_gb',                  '{"quantity": 250}'),
     ('pro',           'pcap_gb_per_month',           '{"quantity": 100}'),
     ('pro',           'custom_policies',             '{"enabled": false}'),
-    ('pro',           'threshold_overrides',         '{"enabled": true}'),
-    ('pro',           'ot_active_probing',           '{"enabled": true}'),
-    ('pro',           'ot_primary_lens',             '{"enabled": true}'),
-    ('pro',           'cbom_signing',                '{"enabled": true}'),
+    ('pro',           'threshold_overrides',         '{"enabled": false}'),
+    ('pro',           'ot_active_probing',           '{"enabled": false}'),
+    ('pro',           'ot_primary_lens',             '{"enabled": false}'),
+    ('pro',           'cbom_signing',                '{"enabled": false}'),
     ('pro',           'sso_saml',                    '{"enabled": false}'),
     ('pro',           'custom_branding',             '{"enabled": false}'),
     ('pro',           'cmdb_sync',                   '{"enabled": false}'),
@@ -365,6 +379,24 @@ FROM (VALUES
 JOIN subscription_tiers t ON t.name = v.tier_name
 JOIN billable_items i ON i.key = v.item_key
 ON CONFLICT (tier_id, item_id) DO NOTHING;
+
+-- support_sla_tier: the lowest level used to be the value "community", which
+-- surfaced as a support level in the plan composer and the tenant drawer — and
+-- "community" must never appear on an Enterprise install (edition-licensing
+-- spec §1). Renamed to "standard". The INSERTs above are ON CONFLICT DO
+-- NOTHING, so existing installs are converged here; only rows still holding
+-- the exact old value are touched, so an MSP's own choice is left alone.
+-- Idempotent: a second run matches nothing.
+UPDATE billable_items SET default_value = '{"value": "standard"}'::jsonb
+WHERE key = 'support_sla_tier' AND default_value = '{"value": "community"}'::jsonb;
+UPDATE tier_entitlements te SET included_value = '{"value": "standard"}'::jsonb
+FROM billable_items bi
+WHERE bi.id = te.item_id AND bi.key = 'support_sla_tier'
+  AND te.included_value = '{"value": "community"}'::jsonb;
+UPDATE tenant_entitlements te SET override_value = '{"value": "standard"}'::jsonb
+FROM billable_items bi
+WHERE bi.id = te.item_id AND bi.key = 'support_sla_tier'
+  AND te.override_value = '{"value": "community"}'::jsonb;
 
 -- =================================================================
 -- Backfill: tier-less tenants land on the default floor
@@ -4395,38 +4427,26 @@ BEGIN
 END $$;
 
 -- =================================================================
--- Edition-gate correction (idempotent, must run on every seed)
+-- Tier grants of edition-gated capabilities are NOT rewritten here
 -- =================================================================
 --
--- Invariant: NO subscription tier may grant an edition-gated capability.
+-- This seed used to end with a corrective UPDATE that forced every
+-- tier_entitlements row for an edition-gated capability back to
+-- {"enabled": false}, on every seed run (i.e. every helm upgrade). It existed
+-- because a tier row was then the only thing standing between a Core install
+-- and a paid capability.
 --
--- The tier_entitlements insert above uses ON CONFLICT DO NOTHING, so flipping
--- the seeded values alone would only fix FRESH databases. Every deployment
--- seeded before this change keeps its old rows forever — including any that
--- granted paid capability from the enterprise tier, which is exactly the hole
--- this closes. Hence a corrective UPDATE rather than a value change alone.
+-- It is gone on purpose (edition-licensing spec, PR 1). The boundary is now
+-- the resolver's licence step (shared/entitlements/license.go): no valid
+-- licence covering a capability means it resolves disabled whatever a tier
+-- says, so a Core install is safe with any tier data. And on an MSP install a
+-- plan that grants a paid capability is the product working — the MSP sells
+-- its own plans — so rewriting those rows on every upgrade would silently
+-- strip every MSP customer's plan. scripts/generate-edition-matrix.mjs fails
+-- if the corrective UPDATE comes back.
 --
--- Why it is safe to run every time: edition-gated capability is granted by an
--- entitlement TOKEN, which writes tenant_entitlements overrides
--- (admin-service/ee/edition/seeder.go). Overrides outrank tiers in the
--- resolver, so a licensed deployment is unaffected by what the tier says. The
--- only thing this can take away is capability nobody was entitled to.
---
--- Keep this list in sync with editionByItem in shared/entitlements/editions.go.
--- `make audit` enforces the partition; a key added there and missed here would
--- leave a tier able to self-grant it.
-UPDATE tier_entitlements te
-SET    included_value = '{"enabled": false}'::jsonb,
-       updated_at     = now()
-FROM   billable_items bi
-WHERE  bi.id = te.item_id
-  AND  bi.key IN (
-         'custom_policies', 'threshold_overrides',
-         'ot_active_probing', 'ot_primary_lens',
-         'cbom_signing', 'sso_saml', 'custom_branding',
-         'cmdb_sync', 'connector_netbox', 'siem_export', 'billing_portal'
-       )
-  AND  te.included_value IS DISTINCT FROM '{"enabled": false}'::jsonb;
+-- The seeded tiers above still ship every gated capability as disabled; that
+-- is their starting state, applied once with ON CONFLICT DO NOTHING.
 
 
 -- =================================================================

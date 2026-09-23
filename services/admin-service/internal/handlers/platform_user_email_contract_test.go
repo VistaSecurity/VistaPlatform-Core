@@ -79,12 +79,13 @@ func platformUserEmailEngine(store platformUserStore, hasher passwordHasher, ema
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	grp := r.Group(apiBase + "/admin/users")
-	grp.POST("/invite", func(c *gin.Context) {
+	grp.Use(func(c *gin.Context) {
 		if currentUserID != "" {
 			c.Set("userID", currentUserID)
 		}
 		c.Next()
-	}, invitePlatformUserWithDeps(store, hasher, email, branding))
+	})
+	grp.POST("/invite", invitePlatformUserWithDeps(store, hasher, email, branding))
 	grp.POST("/:id/send-password-reset", adminSendPasswordResetWithDeps(store, email, branding))
 	return r
 }
@@ -131,7 +132,7 @@ func TestContract_InvitePlatformUser_201_emailNotConfigured(t *testing.T) {
 	sv := loadSpec(t)
 	eng := platformUserEmailEngine(
 		&stubPlatformUserStore{roleExists: true, createID: uuid.New().String()},
-		stubPasswordHasher{}, emailNotConfigured(), stubBrandingProvider{}, "",
+		stubPasswordHasher{}, emailNotConfigured(), stubBrandingProvider{}, stubCallerID,
 	)
 	w := doRequest(eng, http.MethodPost, inviteBase, strings.NewReader(validInviteBody()))
 	if w.Code != http.StatusCreated {
@@ -147,7 +148,7 @@ func TestContract_InvitePlatformUser_201_emailSendFailed(t *testing.T) {
 	sv := loadSpec(t)
 	eng := platformUserEmailEngine(
 		&stubPlatformUserStore{roleExists: true, createID: uuid.New().String()},
-		stubPasswordHasher{}, emailSendFails(), stubBrandingProvider{}, "",
+		stubPasswordHasher{}, emailSendFails(), stubBrandingProvider{}, stubCallerID,
 	)
 	w := doRequest(eng, http.MethodPost, inviteBase, strings.NewReader(validInviteBody()))
 	if w.Code != http.StatusCreated {
@@ -163,7 +164,7 @@ func TestContract_InvitePlatformUser_201_emailSendFailed(t *testing.T) {
 
 func TestContract_InvitePlatformUser_400_missingFields(t *testing.T) {
 	sv := loadSpec(t)
-	eng := platformUserEmailEngine(&stubPlatformUserStore{}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, "")
+	eng := platformUserEmailEngine(&stubPlatformUserStore{}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, stubCallerID)
 	w := doRequest(eng, http.MethodPost, inviteBase, strings.NewReader(`{"email":"x@y.com"}`))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
@@ -173,7 +174,7 @@ func TestContract_InvitePlatformUser_400_missingFields(t *testing.T) {
 
 func TestContract_InvitePlatformUser_400_invalidRole(t *testing.T) {
 	sv := loadSpec(t)
-	eng := platformUserEmailEngine(&stubPlatformUserStore{roleExists: false}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, "")
+	eng := platformUserEmailEngine(&stubPlatformUserStore{roleExists: false}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, stubCallerID)
 	w := doRequest(eng, http.MethodPost, inviteBase, strings.NewReader(validInviteBody()))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
@@ -185,7 +186,7 @@ func TestContract_InvitePlatformUser_409_duplicate(t *testing.T) {
 	sv := loadSpec(t)
 	eng := platformUserEmailEngine(
 		&stubPlatformUserStore{roleExists: true, createErr: errPlatformUserExists},
-		stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, "",
+		stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, stubCallerID,
 	)
 	w := doRequest(eng, http.MethodPost, inviteBase, strings.NewReader(validInviteBody()))
 	if w.Code != http.StatusConflict {
@@ -200,7 +201,7 @@ func TestContract_AdminSendPasswordReset_200_emailSent(t *testing.T) {
 	sv := loadSpec(t)
 	eng := platformUserEmailEngine(
 		&stubPlatformUserStore{user: samplePlatformUser(), userFound: true},
-		stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, "",
+		stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, stubCallerID,
 	)
 	w := doRequest(eng, http.MethodPost, sendResetPath(uuid.New().String()), nil)
 	if w.Code != http.StatusOK {
@@ -216,7 +217,7 @@ func TestContract_AdminSendPasswordReset_200_emailNotConfigured(t *testing.T) {
 	sv := loadSpec(t)
 	eng := platformUserEmailEngine(
 		&stubPlatformUserStore{user: samplePlatformUser(), userFound: true},
-		stubPasswordHasher{}, emailNotConfigured(), stubBrandingProvider{}, "",
+		stubPasswordHasher{}, emailNotConfigured(), stubBrandingProvider{}, stubCallerID,
 	)
 	w := doRequest(eng, http.MethodPost, sendResetPath(uuid.New().String()), nil)
 	if w.Code != http.StatusOK {
@@ -232,7 +233,7 @@ func TestContract_AdminSendPasswordReset_200_emailSendFailed(t *testing.T) {
 	sv := loadSpec(t)
 	eng := platformUserEmailEngine(
 		&stubPlatformUserStore{user: samplePlatformUser(), userFound: true},
-		stubPasswordHasher{}, emailSendFails(), stubBrandingProvider{}, "",
+		stubPasswordHasher{}, emailSendFails(), stubBrandingProvider{}, stubCallerID,
 	)
 	w := doRequest(eng, http.MethodPost, sendResetPath(uuid.New().String()), nil)
 	if w.Code != http.StatusOK {
@@ -248,7 +249,7 @@ func TestContract_AdminSendPasswordReset_200_emailSendFailed(t *testing.T) {
 
 func TestContract_AdminSendPasswordReset_400_invalidID(t *testing.T) {
 	sv := loadSpec(t)
-	eng := platformUserEmailEngine(&stubPlatformUserStore{}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, "")
+	eng := platformUserEmailEngine(&stubPlatformUserStore{}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, stubCallerID)
 	w := doRequest(eng, http.MethodPost, sendResetPath("not-a-uuid"), nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
@@ -258,7 +259,7 @@ func TestContract_AdminSendPasswordReset_400_invalidID(t *testing.T) {
 
 func TestContract_AdminSendPasswordReset_404_notFound(t *testing.T) {
 	sv := loadSpec(t)
-	eng := platformUserEmailEngine(&stubPlatformUserStore{userFound: false}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, "")
+	eng := platformUserEmailEngine(&stubPlatformUserStore{userFound: false}, stubPasswordHasher{}, emailSends(), stubBrandingProvider{}, stubCallerID)
 	w := doRequest(eng, http.MethodPost, sendResetPath(uuid.New().String()), nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())

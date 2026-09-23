@@ -182,6 +182,9 @@ func createPlatformUserWithStore(store platformUserStore, hasher passwordHasher)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role_id"})
 			return
 		}
+		if !authorizeRoleAssignment(c, store, roleAssignment{NewRoleID: req.RoleID}) {
+			return
+		}
 
 		if err := passwordsvc.ValidatePasswordStrengthWithMinLength(req.Password, store.PasswordMinLength(ctx)); err != nil {
 			api.BadRequest(c, err.Error())
@@ -267,6 +270,9 @@ func invitePlatformUserWithDeps(store platformUserStore, hasher passwordHasher, 
 		}
 		if !roleExists {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role_id"})
+			return
+		}
+		if !authorizeRoleAssignment(c, store, roleAssignment{NewRoleID: req.RoleID}) {
 			return
 		}
 
@@ -396,6 +402,28 @@ func updatePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 
 		ctx := c.Request.Context()
 
+		// Every edit of another user — name, status, flags, role — is an act on
+		// that user, so it needs rank over them (platform_role_assignment.go,
+		// rule 5). It also resolves the target's current role, used below.
+		callerID, current, ok := authorizeActOnPlatformUser(c, store, userID)
+		if !ok {
+			return
+		}
+		if userID == callerID && req.IsActive != nil && !*req.IsActive {
+			c.JSON(http.StatusForbidden, gin.H{"error": "You cannot deactivate your own account. Ask another administrator."})
+			return
+		}
+
+		// roleChangedFrom is set only when this request actually changes the
+		// user's role; it carries the old role into the audit record.
+		var roleChangedFrom *platformUserRoleRef
+		// roleToWrite is what reaches UpdatePlatformUser: the requested role
+		// only when it is a change that passed authorizeRoleAssignment, nil
+		// otherwise. Re-writing an "unchanged" role is a time-of-check /
+		// time-of-use hole: if another operator changed this user's role
+		// between our read and our write, re-sending the stale role would
+		// silently revert their change with no role authority at all.
+		var roleToWrite *uuid.UUID
 		if req.RoleID != nil {
 			roleExists, err := store.RoleExists(ctx, req.RoleID.String())
 			if err != nil {
@@ -406,22 +434,51 @@ func updatePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role_id"})
 				return
 			}
+
+			// Re-sending the user's existing role (the Edit form always sends
+			// role_id) is not a role change and needs no role authority.
+			if current.RoleID == nil || *current.RoleID != *req.RoleID {
+				if !authorizeRoleAssignment(c, store, roleAssignment{
+					TargetUserID:  userID,
+					CurrentRoleID: current.RoleID,
+					NewRoleID:     *req.RoleID,
+				}) {
+					return
+				}
+				roleChangedFrom = &current
+				roleToWrite = req.RoleID
+			}
 		}
 
 		fields := platformUserUpdateFields{
 			FirstName:           req.FirstName,
 			LastName:            req.LastName,
-			RoleID:              req.RoleID,
+			RoleID:              roleToWrite,
 			IsActive:            req.IsActive,
 			ForcePasswordChange: req.ForcePasswordChange,
 		}
 
 		if !fields.HasUpdates() {
+			if req.RoleID != nil {
+				// The body carried only the user's current role: a valid
+				// request with nothing to change.
+				c.JSON(http.StatusOK, gin.H{"message": "Platform user updated successfully"})
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
 			return
 		}
 
-		if err := store.UpdatePlatformUser(ctx, userID.String(), fields); err != nil {
+		// Conditional on the user still holding the role the rank check saw.
+		if err := store.UpdatePlatformUser(ctx, userID.String(), current.RoleID, fields); err != nil {
+			if errors.Is(err, errLastActiveSuperAdmin) {
+				respondLastActiveSuperAdmin(c)
+				return
+			}
+			if errors.Is(err, errPlatformUserChanged) {
+				respondPlatformUserChanged(c)
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update platform user"})
 			return
 		}
@@ -433,6 +490,32 @@ func updatePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 			ResourceType:  "platform_user",
 			ResourceID:    userID.String(),
 		})
+
+		if roleChangedFrom != nil {
+			// A role change is a privilege grant: record it as its own event,
+			// with both sides, so it can be found without diffing profiles.
+			meta := map[string]interface{}{
+				"old_role_id":   nil,
+				"old_role_name": roleChangedFrom.RoleName,
+				"new_role_id":   req.RoleID.String(),
+			}
+			if roleChangedFrom.RoleID != nil {
+				meta["old_role_id"] = roleChangedFrom.RoleID.String()
+			}
+			// Read the role back rather than trusting the request, so the
+			// record names what is actually stored.
+			if now, found, err := store.PlatformUserRole(ctx, userID.String()); err == nil && found {
+				meta["new_role_name"] = now.RoleName
+			}
+			recordPlatformAudit(c, PlatformAuditEntry{
+				EventType:     "platform_user.role_changed",
+				Action:        "change_role",
+				EventCategory: "user",
+				ResourceType:  "platform_user",
+				ResourceID:    userID.String(),
+				Metadata:      meta,
+			})
+		}
 
 		c.JSON(http.StatusOK, gin.H{"message": "Platform user updated successfully"})
 	}
@@ -448,7 +531,8 @@ func AdminSetPassword(db *sql.DB) gin.HandlerFunc {
 func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userIDStr := c.Param("id")
-		if _, err := uuid.Parse(userIDStr); err != nil {
+		targetID, err := uuid.Parse(userIDStr)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 			return
 		}
@@ -462,6 +546,13 @@ func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) g
 			return
 		}
 
+		// Setting someone's password is taking over their account: it needs
+		// rank over them (platform_role_assignment.go, rule 5).
+		_, current, ok := authorizeActOnPlatformUser(c, store, targetID)
+		if !ok {
+			return
+		}
+
 		if err := passwordsvc.ValidatePasswordStrengthWithMinLength(req.NewPassword, store.PasswordMinLength(c.Request.Context())); err != nil {
 			api.BadRequest(c, err.Error())
 			return
@@ -472,13 +563,13 @@ func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) g
 			return
 		}
 
-		affected, err := store.UpdatePlatformUserPassword(c.Request.Context(), userIDStr, newHash, req.ForcePasswordChange)
-		if err != nil {
+		// Conditional on the user still holding the role the rank check saw.
+		if err := store.UpdatePlatformUserPassword(c.Request.Context(), targetID.String(), current.RoleID, newHash, req.ForcePasswordChange); err != nil {
+			if errors.Is(err, errPlatformUserChanged) {
+				respondPlatformUserChanged(c)
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to set password"})
-			return
-		}
-		if affected == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
 
@@ -487,7 +578,7 @@ func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) g
 			Action:        "set_password",
 			EventCategory: "user",
 			ResourceType:  "platform_user",
-			ResourceID:    userIDStr,
+			ResourceID:    targetID.String(),
 			Metadata: map[string]interface{}{
 				"force_password_change": req.ForcePasswordChange,
 			},
@@ -507,15 +598,24 @@ func AdminSendPasswordReset(db *sql.DB) gin.HandlerFunc {
 func adminSendPasswordResetWithDeps(store platformUserStore, email emailProvider, branding brandingProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userIDStr := c.Param("id")
-		if _, err := uuid.Parse(userIDStr); err != nil {
+		targetID, err := uuid.Parse(userIDStr)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 			return
 		}
 
 		ctx := c.Request.Context()
 
+		// A reset link is a way into the account (whoever can read the
+		// response's reset_link when email is unconfigured holds it), so it
+		// needs rank over the target like set-password (rule 5).
+		_, current, ok := authorizeActOnPlatformUser(c, store, targetID)
+		if !ok {
+			return
+		}
+
 		// Fetch user email
-		userEmail, found, err := store.ActiveUserEmail(ctx, userIDStr)
+		userEmail, found, err := store.ActiveUserEmail(ctx, targetID.String())
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 			return
@@ -533,7 +633,12 @@ func adminSendPasswordResetWithDeps(store platformUserStore, email emailProvider
 		expires := time.Now().Add(1 * time.Hour)
 		tokenHash := hashPasswordResetToken(token)
 
-		if err := store.StorePasswordResetToken(ctx, userIDStr, tokenHash, expires); err != nil {
+		// Conditional on the user still holding the role the rank check saw.
+		if err := store.StorePasswordResetToken(ctx, targetID.String(), current.RoleID, tokenHash, expires); err != nil {
+			if errors.Is(err, errPlatformUserChanged) {
+				respondPlatformUserChanged(c)
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store reset token"})
 			return
 		}
@@ -578,7 +683,25 @@ func deletePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 			return
 		}
 
-		if err := store.DeletePlatformUser(c.Request.Context(), userID.String()); err != nil {
+		callerID, current, ok := authorizeActOnPlatformUser(c, store, userID)
+		if !ok {
+			return
+		}
+		if userID == callerID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "You cannot delete your own account. Ask another administrator."})
+			return
+		}
+
+		// Conditional on the user still holding the role the rank check saw.
+		if err := store.DeletePlatformUser(c.Request.Context(), userID.String(), current.RoleID); err != nil {
+			if errors.Is(err, errLastActiveSuperAdmin) {
+				respondLastActiveSuperAdmin(c)
+				return
+			}
+			if errors.Is(err, errPlatformUserChanged) {
+				respondPlatformUserChanged(c)
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete platform user"})
 			return
 		}

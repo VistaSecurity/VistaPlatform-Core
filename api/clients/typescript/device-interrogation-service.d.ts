@@ -1216,12 +1216,30 @@ export interface components {
             observation_id: string;
             /** Format: uuid */
             proposal_id?: string;
+            /** @description Operator-facing next step for completing identity resolution. */
+            message?: string;
+        };
+        DiscoverAndCreateDeviceRequest: {
+            /** @enum {string} */
+            device_type: "f5" | "palo_alto" | "cisco" | "fortinet" | "unifi";
+            /** Format: uri */
+            management_url: string;
+            username: string;
+            password: string;
+            /** @description Explicit opt-in for appliances with a self-signed management certificate. Defaults to false. */
+            tls_insecure_skip_verify?: boolean;
+        };
+        DeviceDiscoveryError: {
+            /** @enum {string} */
+            error: "target_disallowed" | "authentication_failed" | "connection_failed" | "unsupported_response" | "discovery_failed";
+            message: string;
         };
         /** @description Request body for POST /devices. `password` is encrypted at rest. */
         CreateDeviceRequest: {
             device_type: string;
             vendor?: string;
             model?: string;
+            /** @description DNS hostname or IP literal; display names with spaces are not hostnames. */
             hostname?: string;
             ip_address?: string;
             management_url?: string;
@@ -1244,6 +1262,7 @@ export interface components {
         UpdateDeviceRequest: {
             vendor?: string;
             model?: string;
+            /** @description DNS hostname or IP literal; display names with spaces are not hostnames. */
             hostname?: string;
             ip_address?: string;
             management_url?: string;
@@ -3227,7 +3246,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": Record<string, never>;
+                "application/json": components["schemas"]["DiscoverAndCreateDeviceRequest"];
             };
         };
         responses: {
@@ -3250,7 +3269,25 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            /** @description The target was disallowed, rejected authentication, or did not expose a supported discovery API. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
+            /** @description The management endpoint could not be reached securely. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
         };
     };
     listInterrogationJobs: {

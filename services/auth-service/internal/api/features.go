@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
 
@@ -59,14 +61,26 @@ type complianceFrameworkUsage struct {
 // auth_stores.go) so the contract test can substitute an in-memory stub
 // without touching a database.
 func getTenantFeaturesHandler(db *sql.DB) gin.HandlerFunc {
-	return newTenantFeaturesHandler(sharedservices.NewLimitEnforcementService(db))
+	return newTenantFeaturesHandler(sharedservices.NewLimitEnforcementService(db), func(ctx context.Context, tenantID uuid.UUID) (entitlements.Plan, error) {
+		return entitlements.ResolvePlan(ctx, db, tenantID)
+	})
 }
+
+// tenantPlanResolver resolves the tenant's plan block (shared/entitlements
+// ResolvePlan in production).
+type tenantPlanResolver func(ctx context.Context, tenantID uuid.UUID) (entitlements.Plan, error)
 
 // newTenantFeaturesHandler is the testable factory behind
 // getTenantFeaturesHandler. Production callers go through the db-typed
 // wrapper above; the contract test calls this directly with a stub
 // limitChecker.
-func newTenantFeaturesHandler(limitSvc limitChecker) gin.HandlerFunc {
+//
+// The response also carries `plan`, the tenant's plan as a person should read
+// it (edition-licensing spec §3): "Vista Platform Core", "Vista Platform
+// Enterprise" with the licensee, or on MSP the MSP's own plan and trial. On a
+// plan lookup failure the key is omitted — the UI hides the plan block rather
+// than falling back to a tier name.
+func newTenantFeaturesHandler(limitSvc limitChecker, plans tenantPlanResolver) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantIDStr := c.GetString("tenantID")
 		if tenantIDStr == "" {
@@ -103,9 +117,17 @@ func newTenantFeaturesHandler(limitSvc limitChecker) gin.HandlerFunc {
 			log.Printf("getTenantFeaturesHandler: GetComplianceFrameworkUsage for tenant %s failed: %v", tenantID, err)
 		}
 
-		c.JSON(http.StatusOK, gin.H{
+		resp := gin.H{
 			"features": features,
 			"limits":   limits,
-		})
+		}
+		if plans != nil {
+			if plan, err := plans(c.Request.Context(), tenantID); err == nil {
+				resp["plan"] = plan
+			} else {
+				log.Printf("getTenantFeaturesHandler: plan for tenant %s failed: %v", tenantID, err)
+			}
+		}
+		c.JSON(http.StatusOK, resp)
 	}
 }

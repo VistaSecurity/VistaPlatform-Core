@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -62,6 +63,14 @@ func GetQuantityInTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, itemKe
 	if err != nil {
 		return nil, err
 	}
+	// Same licence step as Resolve, read on the caller's transaction for the
+	// same reason as everything else here, and uncached because there is no
+	// pool to key a cache on. One read of a one-row table.
+	lic, err := readLicenseInTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	applyLicense(ent, lic, time.Now())
 	return quantityFor(ent, itemKey)
 }
 

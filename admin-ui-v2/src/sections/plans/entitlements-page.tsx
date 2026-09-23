@@ -303,7 +303,7 @@ function BillableItemModal({ item, onClose }: { item: BillableItem | null; onClo
               </label>
             </div>
           ) : (
-            <input value={dvEnum} onChange={(e) => setDvEnum(e.target.value)} placeholder="community" style={modalInputStyle} />
+            <input value={dvEnum} onChange={(e) => setDvEnum(e.target.value)} placeholder="standard" style={modalInputStyle} />
           )}
         </ModalField>
         <ModalField label="Unit (optional)">

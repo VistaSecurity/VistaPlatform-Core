@@ -14,6 +14,9 @@ const SSO_ERRORS: Record<string, string> = {
   sso_no_email: 'The identity provider did not return an email address.',
   sso_unavailable: 'That single sign-on option is not available right now.',
   sso_exchange: 'Single sign-on failed during the provider handshake. Please try again.',
+  sso_email_unverified: 'The identity provider did not confirm that email address is verified, so it cannot be used to sign in.',
+  sso_super_admin_untrusted_provider: 'Super Administrators can sign in with this provider only after a Super Administrator has saved its configuration. Sign in with your password, or ask a Super Administrator to review the provider.',
+  sso_untrusted_provider: 'This provider was last configured by someone without all of your permissions, so it cannot sign you in. Sign in with your password, or ask an administrator who holds at least your permissions to review and save the provider.',
 };
 
 // VISTA Operations sign-in — the design kit's SSO-first / passkey two-pane

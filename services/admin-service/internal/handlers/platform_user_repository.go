@@ -97,16 +97,39 @@ type platformUserStore interface {
 	// never below passwordsvc.MinPasswordLength.
 	PasswordMinLength(ctx context.Context) int
 	CreatePlatformUser(ctx context.Context, in platformUserInsert) (id string, createdAt, updatedAt time.Time, err error)
-	UpdatePlatformUser(ctx context.Context, id string, f platformUserUpdateFields) error
-	UpdatePlatformUserPassword(ctx context.Context, id, hash string, forceChange bool) (affected int64, err error)
-	DeletePlatformUser(ctx context.Context, id string) error
+
+	// The writes below act on an EXISTING user whose rank the handler has just
+	// checked (authorizeActOnPlatformUser). Each is conditional on the user
+	// still holding expectedRole — the role that check saw (nil = no role) —
+	// and returns errPlatformUserChanged, writing nothing, when they no longer
+	// do (or no longer exist). Without that, a user promoted between the check
+	// and the write would be acted on by someone who no longer outranks them.
+	UpdatePlatformUser(ctx context.Context, id string, expectedRole *uuid.UUID, f platformUserUpdateFields) error
+	UpdatePlatformUserPassword(ctx context.Context, id string, expectedRole *uuid.UUID, hash string, forceChange bool) error
+	DeletePlatformUser(ctx context.Context, id string, expectedRole *uuid.UUID) error
 
 	// Invite/reset-flow seams (InvitePlatformUser, AdminSendPasswordReset).
 	CreateInvitedPlatformUser(ctx context.Context, in platformUserInviteInsert) (id string, createdAt time.Time, err error)
 	InviterDisplayName(ctx context.Context, inviterID string) string
 	EnabledAdminSsoProviderLabels(ctx context.Context) []string
 	ActiveUserEmail(ctx context.Context, id string) (email string, found bool, err error)
-	StorePasswordResetToken(ctx context.Context, id, tokenHash string, expires time.Time) error
+	StorePasswordResetToken(ctx context.Context, id string, expectedRole *uuid.UUID, tokenHash string, expires time.Time) error
+
+	// Role-assignment authorization seams (platform_roles.assign enforcement —
+	// see platform_role_assignment.go). Every path that writes
+	// platform_users.role_id consults these before writing.
+	HasPlatformPermission(ctx context.Context, userID, permission string) (bool, error)
+	RolePermissionsNotHeldBy(ctx context.Context, callerID, roleID string) (missing []string, err error)
+	PlatformUserRole(ctx context.Context, userID string) (current platformUserRoleRef, found bool, err error)
+}
+
+// platformUserRoleRef is a platform user's current role: nil RoleID when the
+// row has none. The schema declares platform_users.role_id NOT NULL, so that
+// only happens for a row written outside the constraint; it is handled rather
+// than assumed away because a nil here must mean "holds nothing".
+type platformUserRoleRef struct {
+	RoleID   *uuid.UUID
+	RoleName string
 }
 
 type platformUserRepository struct{ db *sql.DB }
@@ -189,7 +212,7 @@ func (r *platformUserRepository) ListPlatformUsers(ctx context.Context, f platfo
 	var users []models.PlatformUser
 	for rows.Next() {
 		var user models.PlatformUser
-		var roleID uuid.UUID
+		var roleID uuid.NullUUID
 		var roleName, roleDisplayName sql.NullString
 		var roleTableID sql.NullString
 		var invitedBy sql.NullString
@@ -212,7 +235,7 @@ func (r *platformUserRepository) ListPlatformUsers(ctx context.Context, f platfo
 			}
 		}
 
-		user.RoleID = roleID
+		user.RoleID = nullableUUID(roleID)
 		if roleTableID.Valid && roleName.Valid {
 			if rID, err := uuid.Parse(roleTableID.String); err == nil {
 				user.Role = &models.PlatformRole{
@@ -236,7 +259,7 @@ func (r *platformUserRepository) ListPlatformUsers(ctx context.Context, f platfo
 
 func (r *platformUserRepository) GetPlatformUser(ctx context.Context, id string) (models.PlatformUser, bool, error) {
 	var user models.PlatformUser
-	var roleID uuid.UUID
+	var roleID uuid.NullUUID
 	var roleName, roleDisplayName sql.NullString
 	var roleTableID sql.NullString
 
@@ -261,7 +284,7 @@ func (r *platformUserRepository) GetPlatformUser(ctx context.Context, id string)
 		return user, false, err
 	}
 
-	user.RoleID = roleID
+	user.RoleID = nullableUUID(roleID)
 	if roleTableID.Valid && roleName.Valid {
 		if rID, err := uuid.Parse(roleTableID.String); err == nil {
 			user.Role = &models.PlatformRole{
@@ -275,10 +298,196 @@ func (r *platformUserRepository) GetPlatformUser(ctx context.Context, id string)
 	return user, true, nil
 }
 
+// nullableUUID maps a uuid column read as NULL to a nil pointer. Should a
+// platform_users row lack a role (the schema says NOT NULL, but see
+// platformUserRoleRef), it must reach the API as "role_id": null — not
+// as the zero UUID, which a client cannot tell from a real id.
+func nullableUUID(v uuid.NullUUID) *uuid.UUID {
+	if !v.Valid {
+		return nil
+	}
+	id := v.UUID
+	return &id
+}
+
+// expectedRoleArg is the query argument for "role_id IS NOT DISTINCT FROM $n":
+// SQL NULL for a user the check saw with no role.
+func expectedRoleArg(expectedRole *uuid.UUID) uuid.NullUUID {
+	if expectedRole == nil {
+		return uuid.NullUUID{}
+	}
+	return uuid.NullUUID{UUID: *expectedRole, Valid: true}
+}
+
+// execExpectingOneRow runs a conditional write and maps "matched nothing" to
+// errPlatformUserChanged.
+func execExpectingOneRow(ctx context.Context, ex interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}, query string, args ...interface{}) error {
+	res, err := ex.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errPlatformUserChanged
+	}
+	return nil
+}
+
 func (r *platformUserRepository) RoleExists(ctx context.Context, roleID string) (bool, error) {
 	var exists bool
 	err := r.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM platform_roles WHERE id = $1)", roleID).Scan(&exists)
 	return exists, err
+}
+
+// HasPlatformPermission asks the same SECURITY DEFINER function the route
+// middleware uses (RBACService.CheckPlatformPermission), so the handler-level
+// check and the route gate can never disagree about what a user holds.
+func (r *platformUserRepository) HasPlatformPermission(ctx context.Context, userID, permission string) (bool, error) {
+	var ok bool
+	err := r.db.QueryRowContext(ctx, "SELECT platform_user_has_permission($1, $2)", userID, permission).Scan(&ok)
+	return ok, err
+}
+
+// RolePermissionsNotHeldBy returns the permissions roleID grants that callerID
+// does not currently hold — empty means the role is a subset of the caller's
+// effective permissions. Evaluated through platform_user_has_permission so an
+// inactive or deleted caller holds nothing.
+func (r *platformUserRepository) RolePermissionsNotHeldBy(ctx context.Context, callerID, roleID string) ([]string, error) {
+	return rolePermissionsNotHeldBy(ctx, r.db, callerID, roleID)
+}
+
+// rolePermissionsNotHeldBy is shared by the platform-user and platform-RBAC
+// repositories, so "does this role outrank the caller?" has one definition.
+func rolePermissionsNotHeldBy(ctx context.Context, db *sql.DB, callerID, roleID string) ([]string, error) {
+	return permissionNames(ctx, db, `
+		SELECT pp.name
+		FROM platform_role_permissions prp
+		JOIN platform_permissions pp ON pp.id = prp.permission_id
+		WHERE prp.role_id = $2
+		  AND NOT platform_user_has_permission($1, pp.name)
+		ORDER BY pp.name
+	`, callerID, roleID)
+}
+
+// permissionNames runs a query returning one permission name per row.
+func permissionNames(ctx context.Context, db *sql.DB, query string, args ...interface{}) ([]string, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+// PlatformUserRole reads a (non-deleted) platform user's current role.
+func (r *platformUserRepository) PlatformUserRole(ctx context.Context, userID string) (platformUserRoleRef, bool, error) {
+	var roleID uuid.NullUUID
+	var roleName sql.NullString
+	err := r.db.QueryRowContext(ctx, `
+		SELECT pu.role_id, pr.name
+		FROM platform_users pu
+		LEFT JOIN platform_roles pr ON pr.id = pu.role_id
+		WHERE pu.id = $1 AND pu.deleted_at IS NULL
+	`, userID).Scan(&roleID, &roleName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return platformUserRoleRef{}, false, nil
+	}
+	if err != nil {
+		return platformUserRoleRef{}, false, err
+	}
+	ref := platformUserRoleRef{RoleName: roleName.String}
+	if roleID.Valid {
+		id := roleID.UUID
+		ref.RoleID = &id
+	}
+	return ref, true, nil
+}
+
+// withLastSuperAdminGuard runs write in a transaction that first locks every
+// active super_admin row, and refuses with errLastActiveSuperAdmin when userID
+// is the only one left and removes(tx) says the write takes them out of that
+// set (deactivation, deletion, or a role change away from super_admin).
+//
+// Why a lock and not a count: under READ COMMITTED two concurrent removals of
+// DIFFERENT super_admins (A stepping down while B is deactivated) each count
+// the other as still active and both commit, leaving none. SELECT ... FOR
+// UPDATE OF pu makes the second transaction wait on the first's row; when it
+// resumes, Postgres re-checks the WHERE clause against the committed row, so a
+// super_admin the first transaction removed is no longer returned. ORDER BY
+// fixes the lock order so two guarded writers cannot deadlock each other.
+func (r *platformUserRepository) withLastSuperAdminGuard(
+	ctx context.Context,
+	userID string,
+	removes func(tx *sql.Tx) (bool, error),
+	write func(tx *sql.Tx) error,
+) error {
+	target, err := uuid.Parse(userID)
+	if err != nil {
+		return err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT pu.id
+		FROM platform_users pu
+		JOIN platform_roles pr ON pr.id = pu.role_id
+		WHERE pr.name = $1
+		  AND pu.is_active = true
+		  AND pu.deleted_at IS NULL
+		ORDER BY pu.id
+		FOR UPDATE OF pu
+	`, superAdminRoleName)
+	if err != nil {
+		return err
+	}
+	// Keyed by uuid value, not text, so no spelling of userID can miss.
+	active := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		active[id] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if active[target] && len(active) == 1 {
+		rm, err := removes(tx)
+		if err != nil {
+			return err
+		}
+		if rm {
+			return errLastActiveSuperAdmin
+		}
+	}
+
+	if err := write(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *platformUserRepository) AdminEmailVerificationRequired(ctx context.Context) bool {
@@ -342,7 +551,7 @@ func (r *platformUserRepository) CreatePlatformUser(ctx context.Context, in plat
 	return userID, createdAt, updatedAt, nil
 }
 
-func (r *platformUserRepository) UpdatePlatformUser(ctx context.Context, id string, f platformUserUpdateFields) error {
+func (r *platformUserRepository) UpdatePlatformUser(ctx context.Context, id string, expectedRole *uuid.UUID, f platformUserUpdateFields) error {
 	updates := []string{}
 	args := []interface{}{}
 	i := 1
@@ -374,17 +583,36 @@ func (r *platformUserRepository) UpdatePlatformUser(ctx context.Context, id stri
 	}
 
 	updates = append(updates, "updated_at = NOW()")
-	args = append(args, id)
+	args = append(args, id, expectedRoleArg(expectedRole))
 
 	query := "UPDATE platform_users SET " + strings.Join(updates, ", ") +
-		" WHERE id = $" + strconv.Itoa(i) + " AND deleted_at IS NULL" //nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
+		" WHERE id = $" + strconv.Itoa(i) + " AND deleted_at IS NULL" +
+		" AND role_id IS NOT DISTINCT FROM $" + strconv.Itoa(i+1) //nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
 
-	_, err := r.db.ExecContext(ctx, query, args...)
-	return err
+	deactivates := f.IsActive != nil && !*f.IsActive
+	if !deactivates && f.RoleID == nil {
+		// Cannot take anyone out of the active super_admin set.
+		return execExpectingOneRow(ctx, r.db, query, args...)
+	}
+	return r.withLastSuperAdminGuard(ctx, id,
+		func(tx *sql.Tx) (bool, error) {
+			if deactivates {
+				return true, nil
+			}
+			var newRole string
+			err := tx.QueryRowContext(ctx, `SELECT name FROM platform_roles WHERE id = $1`, *f.RoleID).Scan(&newRole)
+			if errors.Is(err, sql.ErrNoRows) {
+				return true, nil
+			}
+			return newRole != superAdminRoleName, err
+		},
+		func(tx *sql.Tx) error {
+			return execExpectingOneRow(ctx, tx, query, args...)
+		})
 }
 
-func (r *platformUserRepository) UpdatePlatformUserPassword(ctx context.Context, id, hash string, forceChange bool) (int64, error) {
-	res, err := r.db.ExecContext(ctx, `
+func (r *platformUserRepository) UpdatePlatformUserPassword(ctx context.Context, id string, expectedRole *uuid.UUID, hash string, forceChange bool) error {
+	return execExpectingOneRow(ctx, r.db, `
 		UPDATE platform_users
 		SET password_hash = $1,
 		    force_password_change = $2,
@@ -393,19 +621,23 @@ func (r *platformUserRepository) UpdatePlatformUserPassword(ctx context.Context,
 		    password_reset_expires = NULL,
 		    updated_at = NOW()
 		WHERE id = $3 AND deleted_at IS NULL
-	`, hash, forceChange, id)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+		  AND role_id IS NOT DISTINCT FROM $4
+	`, hash, forceChange, id, expectedRoleArg(expectedRole))
 }
 
-func (r *platformUserRepository) DeletePlatformUser(ctx context.Context, id string) error {
-	_, err := r.db.ExecContext(ctx,
-		"UPDATE platform_users SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
-		id,
-	)
-	return err
+// DeletePlatformUser soft-deletes a user, refusing (errLastActiveSuperAdmin)
+// when they are the last active super_admin.
+func (r *platformUserRepository) DeletePlatformUser(ctx context.Context, id string, expectedRole *uuid.UUID) error {
+	return r.withLastSuperAdminGuard(ctx, id,
+		func(*sql.Tx) (bool, error) { return true, nil },
+		func(tx *sql.Tx) error {
+			return execExpectingOneRow(ctx, tx, `
+				UPDATE platform_users SET deleted_at = NOW(), updated_at = NOW()
+				WHERE id = $1 AND deleted_at IS NULL
+				  AND role_id IS NOT DISTINCT FROM $2`,
+				id, expectedRoleArg(expectedRole),
+			)
+		})
 }
 
 func (r *platformUserRepository) CreateInvitedPlatformUser(ctx context.Context, in platformUserInviteInsert) (string, time.Time, error) {
@@ -494,11 +726,11 @@ func (r *platformUserRepository) ActiveUserEmail(ctx context.Context, id string)
 	return email, true, nil
 }
 
-func (r *platformUserRepository) StorePasswordResetToken(ctx context.Context, id, tokenHash string, expires time.Time) error {
-	_, err := r.db.ExecContext(ctx, `
+func (r *platformUserRepository) StorePasswordResetToken(ctx context.Context, id string, expectedRole *uuid.UUID, tokenHash string, expires time.Time) error {
+	return execExpectingOneRow(ctx, r.db, `
 		UPDATE platform_users
 		SET password_reset_token = $1, password_reset_expires = $2, updated_at = NOW()
-		WHERE id = $3
-	`, tokenHash, expires, id)
-	return err
+		WHERE id = $3 AND deleted_at IS NULL
+		  AND role_id IS NOT DISTINCT FROM $4
+	`, tokenHash, expires, id, expectedRoleArg(expectedRole))
 }

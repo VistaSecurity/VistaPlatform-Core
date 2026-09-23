@@ -11,7 +11,7 @@ This guide is for **platform administrators** — the staff who operate Vista Pl
 
 It documents the administration console (admin-ui v2). The console has a single, persistent **left-rail navigation**: top-level sections, with sub-pages indented underneath the active section (there are no in-page tabs). The sections are grouped into three blocks — an ungrouped operations block at the top, then **Platform**, then **Governance**.
 
-**Core vs. paid editions.** A handful of sections belong to a specific edition and simply don't exist in a Core build — their rail entries are hidden and their routes render an edition notice rather than a page whose calls 404. **Tenants** and **Comms** are part of the MSP tenant-lifecycle surface; **Billing & Revenue** is part of the Enterprise+ billing surface. Everything else on this page — Mission Control, Support, Fleet, Jobs & Queues, Plans & Pricing, System Health, Catalog, Settings, Staff & Access, and Security & Trust — ships in every edition, including Core.
+**Core vs. paid editions.** A handful of sections belong to a specific edition and simply don't exist in a Core build — their rail entries are hidden and their routes render an edition notice rather than a page whose calls 404. **Tenants** and **Comms** are part of the MSP tenant-lifecycle surface; **Billing & Revenue** is part of the MSP billing surface (the tenant-facing billing portal is MSP-only; see the [edition matrix](../editions.md)). Everything else on this page — Mission Control, Support, Fleet, Jobs & Queues, Plans & Pricing, System Health, Catalog, Settings, Staff & Access, and Security & Trust — ships in every edition, including Core.
 
 ---
 
@@ -61,10 +61,26 @@ Signing in with a seeded (or admin-issued temporary) password gives you a limite
 Access is role-based. Roles and the permissions they carry are managed in **Staff & Access → Roles**; the typical shape is:
 
 - **Super Administrator** — full access, including billing, packaging, and security policy.
-- **Platform Administrator** — day-to-day platform and tenant management, excluding the most sensitive billing/settings actions.
+- **Platform Administrator** — day-to-day platform and tenant management, excluding the most sensitive billing/settings actions. It holds **Manage platform settings** (`platform.settings`) but not **Manage security settings** (`platform.security.manage`) — see [Settings that need Security management](#settings-that-need-security-management).
 - **Support Administrator** — read-oriented access for assisting tenants.
 
 Permissions are enforced by the services, not just hidden in the UI — a missing permission yields a `403` even on a direct request. The console only shows you the sections and actions your role permits, and an edition your build doesn't ship is hidden regardless of role.
+
+#### Who can assign a role
+
+Giving someone a role is a grant of every permission that role carries, so it has its own permission, **`platform_roles.assign`**, separate from the `platform_users.manage` that lets you edit staff profiles. Out of the box **Super Administrator** and **Platform Administrator** both hold it, so either can create, invite, and re-role staff. **Platform Administrators can assign all roles except Super Administrator.** What stops that from being a path to more access is a single rule the services apply everywhere: **you can only act within what you hold yourself.**
+
+- **Granting a role** (create, invite, role change) needs `platform_roles.assign`, and the role must not carry any permission you don't have. The seeded *Platform Administrator* role holds everything *Support Agent* does, so a Platform Administrator can give out *Platform Administrator*, *Support Agent*, or a narrower custom role — but never *Super Administrator*, which holds permissions no other role has.
+- **Acting on a colleague** — editing their details, activating or deactivating them, setting their password, sending them a reset link, changing their role, or deleting them — needs you to *outrank* them: every permission in their current role must be one you hold. A Platform Administrator can manage Support Agents and other Platform Administrators, but cannot reset a Super Administrator's password, deactivate them, or change their role.
+- **You can't change your own role, deactivate yourself, or delete yourself.** Ask another administrator. The one exception is a Super Administrator stepping down from the role.
+- **The last active Super Administrator stays.** Nobody — including themselves — can deactivate, delete, or re-role the only remaining active Super Administrator; promote someone else first. This is checked atomically, so two administrators stepping down at the same moment cannot both succeed.
+- **Editing a role's permissions** (in **Roles**, which needs `platform_roles.manage`) follows the same rule: you can't edit your own role, can't edit a role that holds permissions you lack, and can only give a role permissions you hold. System roles' permissions cannot be edited at all.
+- **Renaming or deleting a role** follows it too: you can only rename, re-describe, or delete a role whose permissions you all hold, and only a Super Administrator can change a system role's display name. System roles cannot be deleted.
+- **If someone else changes a colleague while you are acting on them** — say they are promoted between your click and the save — nothing is written and you get a `409` asking you to reload and try again, so the check you passed always applies to the account you change.
+
+To stop Platform Administrators from managing staff roles, remove `platform_roles.assign` from a custom role you give them instead — the seeded system roles cannot be edited. Without it an administrator can still edit a colleague's details, deactivate them, and reset their password (within their rank), but cannot create, invite, or change anyone's role.
+
+Refusals come back as a `403` (or `409` for the last-Super-Administrator and changed-meanwhile cases) with the reason — and, where it applies, the list of permissions you are missing — and the console shows that reason. Every role change is recorded in the platform activity trail as `platform_user.role_changed` with the previous and new role.
 
 ### Navigation structure
 
@@ -196,16 +212,37 @@ All three are gated on the platform permission `catalogs.manage`, separate from 
 
 ## Settings
 
-**What it's for:** platform-wide configuration — email delivery, self-service sign-up, white-labeling, legal documents, identity providers, and outbound notification delivery. Six sub-pages:
+**What it's for:** platform-wide configuration — email delivery, self-service sign-up, white-labeling, legal documents, identity providers, outbound notification delivery, and the licence. Seven sub-pages:
 
-- **Email** — SMTP configuration for invitations, password resets, and onboarding mail.
+- **Email** — SMTP configuration for invitations, password resets, and onboarding mail. Saving it needs Security management (see below); anyone with Settings access can view it and send a test email.
 - **Access & Sign-up** — self-service sign-up and email-verification gates for new organizations.
 - **Branding** — white-label the platform: product name, logos, and favicon.
 - **Legal** — author and version your Terms of Service and Privacy Policy.
-- **Identity Providers** — the platform's own Google / Microsoft OAuth apps, used for social sign-up.
+- **Identity Providers** — the platform's own Google / Microsoft OAuth apps, used for social sign-up and for staff sign-in to this console. Adding, editing, enabling, disabling or deleting a provider needs Security management (see below); anyone with Settings access can view them.
 - **Notification Delivery** — the platform-level notification channels (chat webhook, email, generic webhook, paging), the routing rules that send alerts of a given source/severity to them, and delivery history. These are platform-level notifications — from monitoring and security — distinct from any tenant's own channels.
+- **License & Usage** — the licence this install runs under and this install's ID. A Core install reads **Vista Platform Core — no licence installed**. Needs `platform.settings`.
 
 **Key tasks:** wire up email delivery, configure self-service sign-up policy, white-label the console, keep your legal documents current, connect an identity provider for social sign-up, and configure where platform alerts go.
+
+### Settings that need Security management
+
+Most of Settings needs only **Manage platform settings** (`platform.settings`). A few settings decide *who can sign in as staff* or *where a staff member's password-reset and invitation links go*; whoever can change them can take over any staff account, Super Administrators included. Those need **Manage security settings** (`platform.security.manage`), which only the Super Administrator role holds by default:
+
+| Setting | Where | Why it is gated |
+|---|---|---|
+| Identity providers (both "Sign-up" and "Admin login") | Settings → Identity Providers | An admin-login provider decides which staff account a sign-in becomes. |
+| Email relay (SMTP) | Settings → Email | The relay carries every staff password-reset link and invitation. |
+| Admin console link base (`admin_ui_base_url`, API only) | — | The host staff reset and invitation links point at. |
+| Password, session, lockout and staff email-verification policy | Security & Trust → Policy | They govern how staff accounts authenticate. |
+
+Without the permission those pages are read-only and say which permission is missing; the services refuse the write with `403` even on a direct request, and a request that mixes a gated setting with ordinary ones saves nothing. Every change to these settings, and every identity-provider change, is recorded in **Security & Trust → Activity Log** with who made it and which fields changed — never a secret.
+
+Staff sign-in through an identity provider has two more rules:
+
+- The provider must assert that the email address is **verified**. A provider that does not (Microsoft Entra, for example) cannot be used for staff sign-in; use a password.
+- A provider signs in only staff its most recent editor outranks. A **Super Administrator** is signed in only through a provider that a Super Administrator saved most recently; anyone else only if the provider's most recent editor currently holds every permission of their role. If the provider is changed by someone with fewer permissions — or its last editor is deactivated or loses permissions — the affected staff must use their password until someone who outranks them reviews and saves the provider again. A provider saved before this rule existed has no recorded editor: it keeps signing in everyone except Super Administrators.
+
+Staff SSO sign-ins appear in the Activity Log as `auth.sso_login` events; refusals are marked failed with the reason.
 
 If no platform notification channels are configured yet, the Notification Delivery page shows a prominent warning — platform-level alerts (from monitoring and security) are still recorded but reach nobody until at least one channel and a matching routing rule exist. The **bell icon** in the admin console header gives platform staff a live in-app feed of these alerts independent of that external-channel setup.
 
@@ -217,7 +254,7 @@ If no platform notification channels are configured yet, the Notification Delive
 
 ### Staff
 
-The list of platform (internal) admin users. From here you **invite/create** a platform admin, assign them a **role**, **update** their details and role, and **deactivate/remove** access when someone leaves. Invited staff receive an email to set up their account. Treat this list as a privileged-access inventory — review it periodically and remove stale accounts.
+The list of platform (internal) admin users. From here you **invite/create** a platform admin, assign them a **role**, **update** their details and role, and **deactivate/remove** access when someone leaves. Creating, inviting, and changing a role all need `platform_roles.assign` — without it the Role field and the Invite/Create buttons are disabled (see [Who can assign a role](#who-can-assign-a-role)). Invited staff receive an email to set up their account. Treat this list as a privileged-access inventory — review it periodically and remove stale accounts.
 
 ### Roles
 
@@ -235,7 +272,7 @@ The platform **roles and their permissions**. Create, edit, and delete roles, an
 - **Activity Log** — the full platform-wide activity trail: user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Scope-to-tenant sessions and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
 - **Retention** — log **retention and archival** policies: how long activity is kept hot vs. archived. Set these to match the compliance regimes you operate under; longer retention typically means tiered/archived storage rather than indefinite hot storage.
 - **SIEM Export** — outbound **SIEM forwarding**: stream the activity trail to your external security tooling (Splunk, Datadog, Elasticsearch, etc.) for correlation and long-term analysis. Configure and verify the forwarding integration here.
-- **Policy** — platform security and authentication settings (the policy that governs how the platform itself is secured): registration toggles, email-verification requirement, password policy, and session/lockout controls.
+- **Policy** — platform security and authentication settings (the policy that governs how the platform itself is secured): registration toggles, email-verification requirement, password policy, and session/lockout controls. Editing it needs Security management; see [Settings that need Security management](#settings-that-need-security-management).
 
 **Key tasks:** monitor security events and investigate anomalies, search and export the activity trail, set retention to satisfy your compliance obligations, forward the trail to your SIEM, and set platform-level security/authentication policy.
 

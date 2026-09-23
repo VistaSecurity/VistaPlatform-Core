@@ -35,6 +35,7 @@ import { DashboardPage } from './sections/dashboard/dashboard-page';
 import { AssetsDashboardPage } from './sections/dashboard/assets-dashboard';
 import { ComplianceDashboardPage } from './sections/dashboard/compliance-dashboard';
 import { PqcDashboardPage } from './sections/dashboard/pqc-dashboard';
+import { OverviewNextDashboardPage } from './sections/dashboard/overview-next-dashboard';
 import { SettingsPage, ProfilePage } from './sections/settings/settings-page';
 import { FindingsPage } from './sections/findings/findings-page';
 import { PosturePage } from './sections/posture/posture-page';
@@ -111,6 +112,7 @@ export default function App() {
           <Route path="/dashboard/assets" element={<AssetsDashboardPage />} />
           <Route path="/dashboard/compliance" element={<ComplianceDashboardPage />} />
           <Route path="/dashboard/pqc" element={<PqcDashboardPage />} />
+          <Route path="/dashboard/overview-next" element={<OverviewNextDashboardPage />} />
           <Route path="/about" element={<AboutPage />} />
 
           {/* Discovery */}

@@ -15,7 +15,13 @@ const (
 	PermissionPlatformUsersManage = "platform_users.manage"
 	PermissionPlatformUsersDelete = "platform_users.delete"
 
-	PermissionPlatformRolesRead   = "platform_roles.read"
+	PermissionPlatformRolesRead = "platform_roles.read"
+	// PermissionPlatformRolesAssign gates every write of platform_users.role_id
+	// (create, invite, and role change on update). Granting a role is a
+	// privilege grant, so it is deliberately separate from
+	// platform_users.manage; the handler also requires the granted role to be a
+	// subset of the caller's own permissions.
+	PermissionPlatformRolesAssign = "platform_roles.assign"
 	PermissionPlatformRolesManage = "platform_roles.manage"
 
 	PermissionPlatformPermissionsRead = "platform_permissions.read"
@@ -33,6 +39,13 @@ const (
 	// a vulnerability source are different trust decisions.
 	PermissionCatalogsManage = "catalogs.manage"
 )
+
+// PermissionPlatformSecurityManage gates every write that decides how staff
+// authenticate or where their credential-bearing email goes: identity providers
+// (staff SSO and social signup), the SMTP relay, the admin-console link base,
+// and the password/session/lockout policy. Seeded to super_admin only;
+// platform.settings (held by platform_admin) keeps read access to all of it.
+const PermissionPlatformSecurityManage = "platform.security.manage"
 
 // Tenant-level permission constants primarily enforced by admin-service RBAC middleware.
 const (

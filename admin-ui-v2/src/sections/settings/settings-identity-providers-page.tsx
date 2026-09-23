@@ -1,12 +1,20 @@
-// Platform Settings — Identity Providers. Configures VISTA'S OWN OAuth
-// apps (Google / Microsoft) that power social signup ("Sign up with Google").
-// This is platform-wide (one row per provider type), distinct from a tenant's
-// own SSO (that's the tenant web-ui). CRUD over admin-service
-// /admin/identity-providers; the client secret is write-only and never returned.
+// Platform Settings — Identity Providers. Configures VISTA'S OWN
+// OAuth apps (Google / Microsoft) that power social signup ("Sign up with
+// Google") and staff sign-in to this console ("Admin login"). Platform-wide
+// (one row per provider type and purpose), distinct from a tenant's own SSO
+// (that's the tenant web-ui). CRUD over admin-service /admin/identity-providers;
+// the client secret is write-only and never returned.
+//
+// Viewing needs platform.settings (the nav gate). Every WRITE — add, edit,
+// enable/disable, delete — needs platform.security.manage, which the server
+// enforces: an admin-login provider decides which staff account signs in, so
+// configuring one is a way to become any staff member. Without it the page is
+// read-only and says why.
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { KeyRound, Plus, Pencil, Trash2 } from 'lucide-react';
+import { KeyRound, Plus, Pencil, Trash2, Lock } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import type { adminServiceComponents as AdminC } from '@vistasecurity/api-contract';
@@ -64,6 +72,8 @@ export function SettingsIdentityProvidersPage() {
   });
   const providers = data ?? [];
   const [editing, setEditing] = useState<Provider | 'new' | null>(null);
+  const perms = usePlatformPermissions();
+  const canManage = perms.hasPermission(PLATFORM_PERMISSIONS.platform.securityManage);
 
   return (
     <div className="op-fade" style={{ padding: 24, maxWidth: 820 }}>
@@ -74,13 +84,19 @@ export function SettingsIdentityProvidersPage() {
               <KeyRound size={18} /> Identity Providers
             </div>
             <div style={{ fontSize: 12.5, color: 'var(--op-t3)', marginTop: 4 }}>
-              Vista's own Google / Microsoft OAuth apps that power "Sign up with Google/Microsoft" on the public sign-up page.
+              Vista's own Google / Microsoft OAuth apps: "Sign up with Google/Microsoft" on the public sign-up page, and staff sign-in to this console.
             </div>
           </div>
-          <button className="op-btn" onClick={() => setEditing('new')} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flex: 'none' }}>
-            <Plus size={15} /> Add provider
-          </button>
+          {canManage ? (
+            <button className="op-btn" onClick={() => setEditing('new')} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flex: 'none' }}>
+              <Plus size={15} /> Add provider
+            </button>
+          ) : (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--op-t3)', flex: 'none' }}><Lock size={12} />Read-only</span>
+          )}
         </div>
+
+        {!canManage && <SecurityManageNotice />}
 
         {isError ? (
           <div style={{ fontSize: 13, color: 'var(--danger)' }}>Couldn't load identity providers.</div>
@@ -105,14 +121,27 @@ export function SettingsIdentityProvidersPage() {
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: p.is_enabled ? 'var(--ok)' : 'var(--op-t3)', flex: 'none' }}>
                   {p.is_enabled ? 'Enabled' : 'Disabled'}
                 </span>
-                <button className="op-btn ghost sm" title="Edit" onClick={() => setEditing(p)}><Pencil size={14} /></button>
+                {canManage && <button className="op-btn ghost sm" title="Edit" onClick={() => setEditing(p)}><Pencil size={14} /></button>}
               </div>
             ))}
           </div>
         )}
       </div>
 
-      {editing && <IdpModal provider={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
+      {canManage && editing && <IdpModal provider={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
+    </div>
+  );
+}
+
+// Why the page is read-only. Names the permission, because "ask an
+// administrator" is only actionable when the operator can say what to ask for.
+export function SecurityManageNotice({ what = 'Adding, editing, enabling or deleting an identity provider' }: { what?: string }) {
+  return (
+    <div role="note" style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '10px 12px', borderRadius: 10, border: '1px solid var(--op-border)', background: 'var(--op-panel2)', fontSize: 12.5, color: 'var(--op-t2)', lineHeight: 1.5 }}>
+      <Lock size={14} style={{ flex: 'none', marginTop: 2, color: 'var(--op-t3)' }} />
+      <span>
+        {what} requires Security management (<span className="mono">platform.security.manage</span>). These settings decide how staff sign in, so only a Super Administrator holds it by default.
+      </span>
     </div>
   );
 }
@@ -186,7 +215,7 @@ function IdpModal({ provider, onClose }: { provider: Provider | null; onClose: (
       open
       onClose={onClose}
       title={isEdit ? `Edit ${providerLabel(type)} provider` : 'Add identity provider'}
-      description="Vista's own OAuth app. Sign-up = tenant founders (web host); Admin login = staff into this console (admin host). Register the redirect URI below in the provider's console."
+      description="Vista's own OAuth app. Sign-up = tenant founders (web host); Admin login = staff into this console (admin host). Register the redirect URI below in the provider's console. Admin login accepts only addresses the provider marks verified, and signs in only staff whose permissions the last person to save the provider also holds (a Super Administrator: only if a Super Administrator saved it last)."
       size="md"
       primaryLabel={isEdit ? 'Save changes' : 'Add provider'}
       onPrimary={() => mutation.mutate()}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 )
@@ -29,6 +30,10 @@ type platformSettingKV struct {
 type platformSettingsStore interface {
 	ListSettings(ctx context.Context) ([]platformSettingKV, error)
 	UpsertSetting(ctx context.Context, key string, value []byte, updatedBy uuid.UUID) error
+	// HasPlatformPermission reports whether the platform user holds permission.
+	// The PUT needs it per FIELD (see securityGatedSettingKeys), which a route
+	// middleware cannot express.
+	HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
 }
 
 type platformSettingsRepository struct{ db *sql.DB }
@@ -68,6 +73,106 @@ func (r *platformSettingsRepository) UpsertSetting(ctx context.Context, key stri
 			updated_at = NOW()
 	`, key, value, updatedBy)
 	return err
+}
+
+func (r *platformSettingsRepository) HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error) {
+	var has bool
+	err := r.db.QueryRowContext(ctx, `SELECT platform_user_has_permission($1, $2)`, userID, permission).Scan(&has)
+	return has, err
+}
+
+// securityGatedSettingKeys lists the platform_settings a caller may write only
+// with platform.security.manage — the same permission that gates identity
+// providers. platform.settings (held by a stock platform_admin) is enough for
+// everything else. Each entry decides how STAFF authenticate or where their
+// credential-bearing email goes, so holding it is equivalent to being able to
+// take over any staff account, super administrators included:
+//
+//   - admin_ui_base_url — the host staff password-reset and invitation links
+//     point at (email_helpers.getPlatformBrandConfig). Re-pointed, a super
+//     administrator's reset token is delivered to someone else's site.
+//   - email_config — the SMTP relay (and its stored credential) that carries
+//     those reset tokens and invitations. Whoever controls the relay reads them.
+//   - password_min_length, max_login_attempts, lockout_duration_minutes,
+//     session_timeout_minutes — the authentication policy enforced for platform
+//     users as well as tenant users (shared/security/authpolicy). Loosening the
+//     lockout is what makes guessing a staff password practical.
+//   - admin_email_verification_required — whether a new staff account must
+//     prove its address before signing in.
+//
+// Deliberately NOT gated (tenant-facing only; a platform_admin already holds
+// tenants.manage and platform.impersonate, so they grant nothing new):
+// registration_enabled, email_verification_required,
+// block_personal_email_domains, platform_domain (tenant web links, used by
+// auth-service), and branding/name/support/limits/ui/log-storage keys.
+//
+// The Security ▸ Policy page in admin-ui-v2 has always rendered read-only
+// without platform.security.manage; this is the server half of that claim.
+var securityGatedSettingKeys = []string{
+	"admin_ui_base_url",
+	"email_config",
+	"password_min_length",
+	"session_timeout_minutes",
+	"max_login_attempts",
+	"lockout_duration_minutes",
+	"admin_email_verification_required",
+}
+
+// securityGatedFieldsIn returns the security-gated keys this request would
+// write, in securityGatedSettingKeys order. "Would write" mirrors the persist
+// logic below exactly: an empty admin_ui_base_url and an absent (nil) pointer
+// are both no-ops there, so they are not writes here either.
+func securityGatedFieldsIn(s PlatformSettings) []string {
+	present := map[string]bool{
+		"admin_ui_base_url":                 s.AdminUIBaseURL != "",
+		"email_config":                      s.EmailConfig != nil,
+		"password_min_length":               s.PasswordMinLength != nil,
+		"session_timeout_minutes":           s.SessionTimeoutMinutes != nil,
+		"max_login_attempts":                s.MaxLoginAttempts != nil,
+		"lockout_duration_minutes":          s.LockoutDurationMinutes != nil,
+		"admin_email_verification_required": s.AdminEmailVerificationRequired != nil,
+	}
+	var out []string
+	for _, k := range securityGatedSettingKeys {
+		if present[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// securitySettingsAuditValues is the non-secret record of a security-gated
+// settings write: the new value of each scalar, and for email_config every
+// field except the SMTP password, whose rotation is recorded as a boolean.
+func securitySettingsAuditValues(s PlatformSettings, fields []string) map[string]interface{} {
+	out := map[string]interface{}{}
+	for _, f := range fields {
+		switch f {
+		case "admin_ui_base_url":
+			out[f] = s.AdminUIBaseURL
+		case "password_min_length":
+			out[f] = *s.PasswordMinLength
+		case "session_timeout_minutes":
+			out[f] = *s.SessionTimeoutMinutes
+		case "max_login_attempts":
+			out[f] = *s.MaxLoginAttempts
+		case "lockout_duration_minutes":
+			out[f] = *s.LockoutDurationMinutes
+		case "admin_email_verification_required":
+			out[f] = *s.AdminEmailVerificationRequired
+		case "email_config":
+			ec := s.EmailConfig
+			out[f] = map[string]interface{}{
+				"smtp_host":             ec.SMTPHost,
+				"smtp_port":             ec.SMTPPort,
+				"smtp_username":         ec.SMTPUsername,
+				"from_email":            ec.FromEmail,
+				"from_name":             ec.FromName,
+				"smtp_password_changed": ec.SMTPPassword != "",
+			}
+		}
+	}
+	return out
 }
 
 // EmailConfig holds SMTP delivery settings for outbound platform email.
@@ -331,6 +436,26 @@ func updatePlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFun
 			return
 		}
 
+		// Authorize the security-gated keys BEFORE validating or writing
+		// anything: a request that mixes gated and ungated keys is refused whole,
+		// so a denied caller never gets a partial save.
+		gatedFields := securityGatedFieldsIn(settings)
+		if len(gatedFields) > 0 {
+			ok, err := store.HasPlatformPermission(c.Request.Context(), userID, rbac.PermissionPlatformSecurityManage)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permission"})
+				return
+			}
+			if !ok {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":               "Insufficient permissions: these settings require Security management",
+					"required_permission": rbac.PermissionPlatformSecurityManage,
+					"fields":              gatedFields,
+				})
+				return
+			}
+		}
+
 		// Validate settings.
 		//
 		// These bounds mirror what the enforcement layers actually accept
@@ -530,6 +655,17 @@ func updatePlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFun
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update email_config"})
 				return
 			}
+		}
+
+		if len(gatedFields) > 0 {
+			recordPlatformAudit(c, PlatformAuditEntry{
+				EventType:     "platform_settings.security_updated",
+				Action:        "update",
+				EventCategory: "config",
+				ResourceType:  "platform_settings",
+				ChangedFields: gatedFields,
+				NewValues:     securitySettingsAuditValues(settings, gatedFields),
+			})
 		}
 
 		c.JSON(http.StatusOK, gin.H{

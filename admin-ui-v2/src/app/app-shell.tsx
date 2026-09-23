@@ -20,6 +20,7 @@ import { usePlatformBranding, BrandLogo } from './platform-branding';
 import { CommandPalette } from './command-palette';
 import { TenantSwitcher, ScopeBar } from './tenant-switcher';
 import { NotificationBell } from './notification-bell';
+import { LicenseCapBanner } from './license-cap-banner';
 
 const ICONS: Record<string, LucideIcon> = {
   Gauge, Building2, Radar, Workflow, Wallet, Activity, ToggleRight, Library, UsersRound, ScrollText, Bell, Settings2, ShieldAlert, FileCheck2, Layers, Megaphone, LifeBuoy,
@@ -44,7 +45,7 @@ export function AppShell() {
   const { user, logout } = usePlatformAuth();
   const { hasPermission } = usePlatformPermissions();
   const { name, logoUrl } = usePlatformBranding();
-  const { capabilities, edition } = usePlatformEdition();
+  const { capabilities, edition, license } = usePlatformEdition();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Global ⌘K / Ctrl+K opens the command palette.
@@ -67,7 +68,9 @@ export function AppShell() {
   // edition, so a Core build never offers MSP/Enterprise sections whose backend
   // it does not mount. The route guards (RequirePlatformPermission /
   // RequirePlatformEdition) back both up against deep links.
-  const visible = visibleSections(hasPermission, capabilities);
+  // Third gate: the LICENCE edition (Plans & Pricing hidden on Enterprise,
+  // Billing & Revenue only on MSP) — the build cannot tell those apart.
+  const visible = visibleSections(hasPermission, capabilities, SECTIONS, license);
   const groups: { label: string | null; items: typeof SECTIONS }[] = [
     { label: null, items: visible.filter((s) => s.group === null) },
     { label: 'Platform', items: visible.filter((s) => s.group === 'Platform') },
@@ -229,6 +232,7 @@ export function AppShell() {
         </header>
 
         <ScopeBar />
+        <LicenseCapBanner />
 
         <main style={{ flex: 1, overflowY: 'auto' }}>
           <Outlet />

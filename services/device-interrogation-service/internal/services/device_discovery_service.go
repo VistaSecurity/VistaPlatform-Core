@@ -1,15 +1,16 @@
 package services
 
 import (
-	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/vistasecurity/vistaplatform/shared/network"
+	sharedinterrogation "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
 // DeviceDiscoveryService handles connecting to devices and discovering their information
@@ -17,22 +18,54 @@ type DeviceDiscoveryService struct {
 	httpClient *http.Client
 }
 
-// NewDeviceDiscoveryService creates a new device discovery service
-func NewDeviceDiscoveryService() *DeviceDiscoveryService {
+// NewDeviceDiscoveryService creates a discovery service with the same guarded
+// transport used for recurring appliance interrogation. Private customer
+// networks are reachable; loopback, link-local, metadata, and unsafe redirects
+// remain blocked. TLS verification is disabled only when explicitly requested.
+func NewDeviceDiscoveryService(insecureSkipVerify bool) *DeviceDiscoveryService {
 	return &DeviceDiscoveryService{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true, //nolint:gosec // intentional — device discovery probes vendor management interfaces with self-signed/expired certs
-				},
-				// SSRF guard: the management URL is tenant-supplied, so
-				// refuse internal/metadata IPs at connect time (closes the
-				// resolve-then-dial TOCTOU even with InsecureSkipVerify on).
-				DialContext: network.SafeDialContext(30 * time.Second),
-			},
-		},
+		httpClient: sharedinterrogation.NewDeviceHTTPClient(insecureSkipVerify, 30*time.Second),
 	}
+}
+
+func newDeviceDiscoveryServiceWithClient(client *http.Client) *DeviceDiscoveryService {
+	return &DeviceDiscoveryService{httpClient: client}
+}
+
+// DeviceDiscoveryError is safe to return to a tenant. Err is retained for
+// internal diagnostics but its target-controlled text is never copied into the
+// HTTP response.
+type DeviceDiscoveryError struct {
+	Code    string
+	Message string
+	Err     error
+}
+
+func (e *DeviceDiscoveryError) Error() string { return e.Message + ": " + e.Err.Error() }
+func (e *DeviceDiscoveryError) Unwrap() error { return e.Err }
+
+type discoveryHTTPStatusError struct{ status int }
+
+func (e *discoveryHTTPStatusError) Error() string {
+	return fmt.Sprintf("device returned HTTP status %d", e.status)
+}
+
+func classifyDeviceDiscoveryError(err error) *DeviceDiscoveryError {
+	if strings.Contains(err.Error(), "ssrf guard") || strings.Contains(err.Error(), "refusing to follow a redirect") {
+		return &DeviceDiscoveryError{Code: "target_disallowed", Message: "That management address is not allowed. Loopback, link-local, metadata, and cross-host redirect targets cannot be probed.", Err: err}
+	}
+	var statusErr *discoveryHTTPStatusError
+	if errors.As(err, &statusErr) {
+		if statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden {
+			return &DeviceDiscoveryError{Code: "authentication_failed", Message: "The device rejected the credentials. Check the username and password.", Err: err}
+		}
+		return &DeviceDiscoveryError{Code: "unsupported_response", Message: "The endpoint responded, but it did not expose a supported discovery API.", Err: err}
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) || strings.Contains(err.Error(), "certificate") {
+		return &DeviceDiscoveryError{Code: "connection_failed", Message: "Could not connect to the management endpoint. Check its URL and reachability; for a self-signed certificate, enable Skip TLS verification.", Err: err}
+	}
+	return &DeviceDiscoveryError{Code: "discovery_failed", Message: "The endpoint responded, but Vista could not discover supported device information.", Err: err}
 }
 
 // DiscoveredDeviceInfo contains information discovered from a device
@@ -48,20 +81,26 @@ type DiscoveredDeviceInfo struct {
 
 // DiscoverDevice connects to a device and retrieves its information
 func (s *DeviceDiscoveryService) DiscoverDevice(deviceType, managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
+	var info *DiscoveredDeviceInfo
+	var err error
 	switch deviceType {
 	case "unifi":
-		return s.discoverUniFiDevice(managementURL, username, password)
+		info, err = s.discoverUniFiDevice(managementURL, username, password)
 	case "cisco":
-		return s.discoverCiscoDevice(managementURL, username, password)
+		info, err = s.discoverCiscoDevice(managementURL, username, password)
 	case "f5":
-		return s.discoverF5Device(managementURL, username, password)
+		info, err = s.discoverF5Device(managementURL, username, password)
 	case "fortinet":
-		return s.discoverFortinetDevice(managementURL, username, password)
+		info, err = s.discoverFortinetDevice(managementURL, username, password)
 	case "palo_alto":
-		return s.discoverPaloAltoDevice(managementURL, username, password)
+		info, err = s.discoverPaloAltoDevice(managementURL, username, password)
 	default:
-		return nil, fmt.Errorf("unsupported device type: %s", deviceType)
+		err = fmt.Errorf("unsupported device type: %s", deviceType)
 	}
+	if err != nil {
+		return nil, classifyDeviceDiscoveryError(err)
+	}
+	return info, nil
 }
 
 // unifiLogin attempts to login to a UniFi device and returns session cookies
@@ -84,6 +123,7 @@ func (s *DeviceDiscoveryService) unifiLogin(managementURL, username, password st
 		fmt.Printf("UniFi login successful using /api/auth/login\n")
 		return cookies, nil
 	}
+	firstErr := err
 
 	fmt.Printf("Failed to login with /api/auth/login: %v, trying /api/login\n", err)
 
@@ -93,6 +133,10 @@ func (s *DeviceDiscoveryService) unifiLogin(managementURL, username, password st
 	if err == nil {
 		fmt.Printf("UniFi login successful using /api/login\n")
 		return cookies, nil
+	}
+	var firstStatus *discoveryHTTPStatusError
+	if errors.As(firstErr, &firstStatus) && (firstStatus.status == http.StatusUnauthorized || firstStatus.status == http.StatusForbidden) {
+		return nil, fmt.Errorf("failed to login to UniFi device: %w", firstErr)
 	}
 
 	return nil, fmt.Errorf("failed to login to UniFi device using both endpoints: %w", err)
@@ -113,8 +157,7 @@ func (s *DeviceDiscoveryService) attemptUnifiLogin(loginURL string, loginData []
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("login failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, &discoveryHTTPStatusError{status: resp.StatusCode}
 	}
 
 	return resp.Cookies(), nil
@@ -246,8 +289,6 @@ func (s *DeviceDiscoveryService) getUniFiSystemInfo(managementURL string, cookie
 		if err != nil {
 			continue
 		}
-
-		fmt.Printf("Got response from %s: %s\n", endpoint, string(body))
 
 		// Try parsing as standard sysinfo response
 		var sysinfoResp struct {

@@ -10,8 +10,31 @@ package handlers
 // OIDC is done manually (no oauth2 dep in admin-service): code→token POST, then a
 // userinfo GET. State is carried in a short-lived Lax cookie so it survives the
 // IdP's top-level redirect back to the callback.
+//
+// Two further gates sit between the userinfo response and the session:
+//
+//  1. The email must be VERIFIED by the IdP — the shared ssoclaims policy every
+// SSO path uses. Platform providers carry no domain allow-list, so
+// the Microsoft relaxation (allow-listed domain => org-verified) never
+//     applies here: a provider that does not assert email_verified cannot sign
+//     staff in. Refusals are audited.
+//  2. A provider signs in only staff its last writer (updated_by) outranks.
+//     Provider writes need platform.security.manage, which the seed grants to
+//     super_admin alone — but an owner can grant it to a custom role, and the
+//     provider's token/userinfo endpoints name the account that signs in. So:
+//       - a SUPER ADMINISTRATOR signs in only through a provider whose last
+//         writer is, now, an active super administrator;
+//       - anyone else signs in only if the last writer currently holds every
+//         permission of that person's role (the same "does this role outrank
+//         the caller?" test platform-user management uses). A provider with no
+//         recorded writer (saved before updated_by existed) still signs in
+//         non-super staff, so an upgrade does not lock them out.
+//     Holding platform.security.manage is therefore never, by itself, a path
+//     into an account with permissions the holder lacks. Every outcome is
+//     audited; password sign-in (break-glass) is unaffected.
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -29,7 +52,82 @@ import (
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
+	"github.com/vistasecurity/vistaplatform/shared/security/ssoclaims"
 )
+
+// staffSSOSuperAdminRole is the seeded platform role that holds every platform
+// permission.
+const staffSSOSuperAdminRole = "super_admin"
+
+// staffSSOProviderTrustedForSuperAdmin reports whether the provider's last
+// writer (platform_sso_providers.updated_by) is, NOW, an active super
+// administrator. It fails closed: a row no one is recorded against (created
+// before updated_by existed, or its author deleted), an author since demoted
+// or deactivated — all untrusted until a super administrator saves the
+// provider again.
+func staffSSOProviderTrustedForSuperAdmin(db *sql.DB, updatedBy uuid.NullUUID) (bool, error) {
+	if !updatedBy.Valid {
+		return false, nil
+	}
+	var trusted bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM platform_users pu
+			JOIN platform_roles pr ON pr.id = pu.role_id
+			WHERE pu.id = $1 AND pr.name = $2 AND pu.is_active = true AND pu.deleted_at IS NULL)`,
+		updatedBy.UUID, staffSSOSuperAdminRole).Scan(&trusted)
+	return trusted, err
+}
+
+// staffSSOProviderTrustedFor reports whether a provider last written by
+// updatedBy may sign in a platform user holding targetRoleID (targetRoleName).
+// Super administrators keep the stricter named-role rule above. For everyone
+// else the writer must currently hold every permission the target's role
+// grants — evaluated through platform_user_has_permission, so a writer since
+// deactivated, deleted or demoted below the target is untrusted until someone
+// who does outrank the target saves the provider again. A NULL writer (a row
+// saved before updated_by existed) is trusted for non-super staff only.
+func staffSSOProviderTrustedFor(ctx context.Context, db *sql.DB, updatedBy uuid.NullUUID, targetRoleID uuid.UUID, targetRoleName string) (bool, error) {
+	if targetRoleName == staffSSOSuperAdminRole {
+		return staffSSOProviderTrustedForSuperAdmin(db, updatedBy)
+	}
+	if !updatedBy.Valid {
+		return true, nil
+	}
+	missing, err := rolePermissionsNotHeldBy(ctx, db, updatedBy.UUID.String(), targetRoleID.String())
+	if err != nil {
+		return false, err
+	}
+	return len(missing) == 0, nil
+}
+
+// recordStaffSSORefusal audits a staff SSO sign-in the callback refused after
+// the IdP answered. The request has no session, so the actor is the identity
+// the provider asserted (and the matched platform user, when there is one).
+func recordStaffSSORefusal(c *gin.Context, reason, userID, email, providerType, providerID string) {
+	recordStaffSSOLogin(c, true, reason, userID, email, providerType, providerID)
+}
+
+// recordStaffSSOLogin audits a staff SSO sign-in outcome. failed=false records
+// a session issued through the provider (reason empty).
+func recordStaffSSOLogin(c *gin.Context, failed bool, reason, userID, email, providerType, providerID string) {
+	meta := map[string]interface{}{"provider_type": providerType, "purpose": "admin_login"}
+	if reason != "" {
+		meta["reason"] = reason
+	}
+	recordPlatformAudit(c, PlatformAuditEntry{
+		EventType:     "auth.sso_login",
+		Action:        "sso_login",
+		EventCategory: "authentication",
+		ResourceType:  "platform_identity_provider",
+		ResourceID:    providerID,
+		Failed:        failed,
+		ErrorCode:     reason,
+		ActorID:       userID,
+		ActorEmail:    email,
+		Metadata:      meta,
+	})
+}
 
 func staffStateToken() string {
 	b := make([]byte, 24)
@@ -135,11 +233,12 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 			return
 		}
 
-		var clientID, secretEnc, tokenURL, userinfoURL string
+		var providerID, clientID, secretEnc, tokenURL, userinfoURL string
+		var providerUpdatedBy uuid.NullUUID
 		if err := db.QueryRow(`
-			SELECT client_id, client_secret_encrypted, token_url, userinfo_url FROM platform_sso_providers
+			SELECT id, client_id, client_secret_encrypted, token_url, userinfo_url, updated_by FROM platform_sso_providers
 			WHERE provider_type = $1 AND purpose = 'admin_login' AND is_enabled = true
-		`, providerType).Scan(&clientID, &secretEnc, &tokenURL, &userinfoURL); err != nil {
+		`, providerType).Scan(&providerID, &clientID, &secretEnc, &tokenURL, &userinfoURL, &providerUpdatedBy); err != nil {
 			c.Redirect(http.StatusFound, "/login?error=sso_unavailable")
 			return
 		}
@@ -184,17 +283,44 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 			return
 		}
 
+		// Gate 1: the IdP must vouch for the address. nil allow-list: platform
+		// providers have none, so the claim is mandatory for every provider type.
+		if !ssoclaims.EmailEffectivelyVerified(ssoclaims.EmailVerifiedClaim(ui["email_verified"]), providerType, email, nil) {
+			recordStaffSSORefusal(c, "email_not_verified", "", email, providerType, providerID)
+			c.Redirect(http.StatusFound, "/login?error=sso_email_unverified")
+			return
+		}
+
 		// Match an EXISTING active platform admin — never provision from the IdP.
-		var userID uuid.UUID
+		var userID, roleID uuid.UUID
 		var roleName string
 		var forcePasswordChange bool
 		err = db.QueryRow(`
-			SELECT pu.id, pr.name, pu.force_password_change FROM platform_users pu
+			SELECT pu.id, pr.id, pr.name, pu.force_password_change FROM platform_users pu
 			JOIN platform_roles pr ON pu.role_id = pr.id
 			WHERE pu.email = $1 AND pu.is_active = true AND pu.deleted_at IS NULL
-		`, email).Scan(&userID, &roleName, &forcePasswordChange)
+		`, email).Scan(&userID, &roleID, &roleName, &forcePasswordChange)
 		if err != nil {
 			c.Redirect(http.StatusFound, "/login?error=no_admin_account")
+			return
+		}
+
+		// Gate 2: only staff the provider's last writer outranks (a super
+		// administrator: only a provider a super administrator last configured).
+		trusted, terr := staffSSOProviderTrustedFor(c.Request.Context(), db, providerUpdatedBy, roleID, roleName)
+		if terr != nil {
+			recordStaffSSORefusal(c, "provider_trust_check_error", userID.String(), email, providerType, providerID)
+			c.Redirect(http.StatusFound, "/login?error=sso_session")
+			return
+		}
+		if !trusted {
+			if roleName == staffSSOSuperAdminRole {
+				recordStaffSSORefusal(c, "super_admin_provider_untrusted", userID.String(), email, providerType, providerID)
+				c.Redirect(http.StatusFound, "/login?error=sso_super_admin_untrusted_provider")
+				return
+			}
+			recordStaffSSORefusal(c, "provider_author_outranked", userID.String(), email, providerType, providerID)
+			c.Redirect(http.StatusFound, "/login?error=sso_untrusted_provider")
 			return
 		}
 
@@ -212,6 +338,7 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		_, _ = refreshTokenService.StoreRefreshToken(userID, refreshToken, nil, expiresAt, c.ClientIP(), c.Request.UserAgent())
 		_, _ = db.Exec(`UPDATE platform_users SET last_login_at = now() WHERE id = $1`, userID)
 		setPlatformAuthCookies(c, accessToken, 3600, int(sessionTTL.Seconds()), refreshToken, jwtSecret)
+		recordStaffSSOLogin(c, false, "", userID.String(), email, providerType, providerID)
 		c.Redirect(http.StatusFound, "/")
 	}
 }

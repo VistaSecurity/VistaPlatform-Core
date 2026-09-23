@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -43,15 +44,42 @@ type Resolver interface {
 
 // PostgresResolver is the production implementation. It reads from
 // billable_items, tier_entitlements, and tenant_entitlements via a single
-// query per resolution.
+// query per resolution, then applies the install's licence (platform_license)
+// to the result — see applyLicense in license.go.
 type PostgresResolver struct {
-	db *sql.DB
+	db      *sql.DB
+	license LicenseSource
+}
+
+// ResolverOption configures a PostgresResolver.
+type ResolverOption func(*PostgresResolver)
+
+// WithLicenseSource replaces the platform_license lookup. Tests use it to put a
+// resolver under a given licence without writing the global platform_license
+// row, which every other test binary sharing the database would also see.
+// Production code never passes it.
+func WithLicenseSource(src LicenseSource) ResolverOption {
+	return func(r *PostgresResolver) { r.license = src }
 }
 
 // NewPostgresResolver wires a resolver to a *sql.DB. The pool must be
-// ready when this is called.
-func NewPostgresResolver(db *sql.DB) *PostgresResolver {
-	return &PostgresResolver{db: db}
+// ready when this is called. By default the licence is read from
+// platform_license through the same pool, cached for LicenseCacheTTL.
+func NewPostgresResolver(db *sql.DB, opts ...ResolverOption) *PostgresResolver {
+	r := &PostgresResolver{db: db}
+	r.license = func(ctx context.Context) (*License, error) { return LoadLicense(ctx, db) }
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
+
+func (r *PostgresResolver) currentLicense(ctx context.Context) (*License, error) {
+	lic, err := r.license(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("entitlements: licence lookup: %w", err)
+	}
+	return lic, nil
 }
 
 func (r *PostgresResolver) requireTenant(ctx context.Context, tenantID uuid.UUID) error {
@@ -73,6 +101,11 @@ func (r *PostgresResolver) requireTenant(ctx context.Context, tenantID uuid.UUID
 //
 // We compute `source` by walking the same COALESCE order so callers can
 // tell where the value came from without re-reading any of the inputs.
+//
+// The query is not the whole answer: Resolve, ResolveMany and GetQuantityInTx
+// all pass its row through applyLicense, which decides edition-gated items and
+// Enterprise capacity from the install's licence. Anything that runs this SQL
+// without that step would resolve paid capability from tier rows alone.
 //
 // $1 = tenant_id, $2 = item key
 const resolveOneSQL = `
@@ -136,6 +169,11 @@ func (r *PostgresResolver) Resolve(ctx context.Context, tenantID uuid.UUID, item
 	if err != nil {
 		return nil, fmt.Errorf("entitlements: resolve %s for tenant %s: %w", itemKey, tenantID, err)
 	}
+	lic, err := r.currentLicense(ctx)
+	if err != nil {
+		return nil, err
+	}
+	applyLicense(ent, lic, time.Now())
 	return ent, nil
 }
 
@@ -219,6 +257,14 @@ func (r *PostgresResolver) ResolveMany(ctx context.Context, tenantID uuid.UUID, 
 	})
 	if err != nil {
 		return nil, fmt.Errorf("entitlements: resolve many for tenant %s: %w", tenantID, err)
+	}
+	lic, err := r.currentLicense(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	for _, ent := range out {
+		applyLicense(ent, lic, now)
 	}
 	return out, nil
 }

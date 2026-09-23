@@ -222,6 +222,19 @@ func TestContract_CreateDevice_400(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
+func TestContract_CreateDeviceRejectsDisplayNameAsHostname(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newDeviceEngine(&stubDeviceStore{})
+	w := do(eng, http.MethodPost, base+"/devices", strings.NewReader(`{"device_type":"unifi","hostname":"lab gateway"}`))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), "Hostname cannot contain spaces") {
+		t.Fatalf("body=%s, want actionable hostname message", w.Body.String())
+	}
+}
+
 func TestContract_UpdateDevice_200(t *testing.T) {
 	sv := loadSpec(t)
 	// GetDevice (ownership) returns a tenant-owned device; UpdateDevice returns the updated one.

@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
+import toast from 'react-hot-toast';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
@@ -14,7 +15,26 @@ type Device = deviceInterrogationComponents['schemas']['Device'];
 
 // The device types the interrogation service knows how to probe. Free-form on
 // the backend, but these are the canonical vendors (see Device.device_type).
-const DEVICE_TYPES = ['f5', 'palo_alto', 'cisco', 'fortinet', 'unifi', 'other'];
+const DEVICE_TYPES = ['f5', 'palo_alto', 'cisco', 'fortinet', 'unifi', 'other'] as const;
+const DISCOVERABLE_DEVICE_TYPES = ['f5', 'palo_alto', 'cisco', 'fortinet', 'unifi'] as const;
+type DeviceType = typeof DEVICE_TYPES[number];
+type DiscoverableDeviceType = typeof DISCOVERABLE_DEVICE_TYPES[number];
+
+function apiErrorMessage(error: unknown, fallback: string) {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message;
+  return fallback;
+}
+
+export function isValidDeviceHostname(value: string) {
+  const hostname = value.trim();
+  if (!hostname) return true;
+  if (hostname.length > 253 || /\s/.test(hostname)) return false;
+  if (hostname.includes(':')) return /^[0-9a-f:]+$/i.test(hostname);
+  return hostname.split('.').every((label) => (
+    label.length > 0 && label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+  ));
+}
 
 // ---- Create / edit device ------------------------------------------------
 export function DeviceFormModal({ open, device, onClose }: {
@@ -27,8 +47,8 @@ export function DeviceFormModal({ open, device, onClose }: {
   const qc = useQueryClient();
   const navigate = useNavigate();
 
-  const [deviceType, setDeviceType] = useState('f5');
-  const [name, setName] = useState('');
+  const [deviceType, setDeviceType] = useState<DeviceType>('f5');
+  const [hostname, setHostname] = useState('');
   const [vendor, setVendor] = useState('');
   const [model, setModel] = useState('');
   const [ipAddress, setIpAddress] = useState('');
@@ -41,8 +61,8 @@ export function DeviceFormModal({ open, device, onClose }: {
 
   // (Re)hydrate from the target device whenever it changes or the modal reopens.
   useEffect(() => {
-    setDeviceType(device?.device_type || 'f5');
-    setName(device?.hostname ?? '');
+    setDeviceType((device?.device_type || 'f5') as DeviceType);
+    setHostname(device?.hostname ?? '');
     setVendor(device?.vendor ?? '');
     setModel(device?.model ?? '');
     setIpAddress(device?.ip_address ?? '');
@@ -55,7 +75,8 @@ export function DeviceFormModal({ open, device, onClose }: {
   }, [device, open]);
 
   // Need a way to reach the device: hostname/IP or a management URL.
-  const valid = !!deviceType && !!(name.trim() || ipAddress.trim() || managementUrl.trim());
+  const hostnameValid = isValidDeviceHostname(hostname);
+  const valid = !!deviceType && hostnameValid && !!(hostname.trim() || ipAddress.trim() || managementUrl.trim());
 
   const save = useMutation({
     mutationFn: async () => {
@@ -63,7 +84,7 @@ export function DeviceFormModal({ open, device, onClose }: {
         const body: deviceInterrogationComponents['schemas']['UpdateDeviceRequest'] = {
           vendor: vendor.trim() || undefined,
           model: model.trim() || undefined,
-          hostname: name.trim() || undefined,
+          hostname: hostname.trim() || undefined,
           ip_address: ipAddress.trim() || undefined,
           management_url: managementUrl.trim() || undefined,
           serial_number: serialNumber.trim() || undefined,
@@ -75,14 +96,14 @@ export function DeviceFormModal({ open, device, onClose }: {
         const { data, error } = await clients.devices.PUT('/devices/{id}', {
           params: { path: { id: device!.id } }, body,
         });
-        if (error || !data) throw new Error('Failed to update device');
+        if (error || !data) throw new Error(apiErrorMessage(error, 'Failed to update device'));
         return data;
       }
       const body: deviceInterrogationComponents['schemas']['CreateDeviceRequest'] = {
         device_type: deviceType,
         vendor: vendor.trim() || undefined,
         model: model.trim() || undefined,
-        hostname: name.trim() || undefined,
+        hostname: hostname.trim() || undefined,
         ip_address: ipAddress.trim() || undefined,
         management_url: managementUrl.trim() || undefined,
         serial_number: serialNumber.trim() || undefined,
@@ -92,7 +113,7 @@ export function DeviceFormModal({ open, device, onClose }: {
         tls_insecure_skip_verify: tlsInsecure,
       };
       const { data, error } = await clients.devices.POST('/devices', { body });
-      if (error || !data) throw new Error('Failed to create device');
+      if (error || !data) throw new Error(apiErrorMessage(error, 'Failed to create device'));
       return data;
     },
     onSuccess: (result) => {
@@ -101,6 +122,7 @@ export function DeviceFormModal({ open, device, onClose }: {
         void qc.invalidateQueries({ queryKey: ['identity-observations'] });
         void qc.invalidateQueries({ queryKey: ['identity-summary'] });
         void navigate(`/discovery/observations?observation_id=${result.observation_id}`);
+        toast.success(result.message ?? 'Management settings were saved with the observation. Resolve its identity to finish adding the device.');
       }
       onClose();
     },
@@ -129,11 +151,14 @@ export function DeviceFormModal({ open, device, onClose }: {
     >
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
         <ModalField label="Device type">
-          <ModalSelect data-autofocus value={deviceType} onChange={(e) => setDeviceType(e.target.value)} disabled={isEdit}>
+          <ModalSelect data-autofocus value={deviceType} onChange={(e) => setDeviceType(e.target.value as DeviceType)} disabled={isEdit}>
             {DEVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </ModalSelect>
         </ModalField>
-        <ModalField label="Hostname / name"><ModalInput value={name} onChange={(e) => setName(e.target.value)} placeholder="edge-fw-01" /></ModalField>
+        <ModalField label="Hostname">
+          <ModalInput value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="edge-fw-01" aria-invalid={!hostnameValid} />
+          {!hostnameValid && <span role="alert" style={{ color: 'var(--danger-text)', fontSize: 12 }}>Use a DNS hostname without spaces (for example, edge-fw-01).</span>}
+        </ModalField>
         <ModalField label="IP address"><ModalInput value={ipAddress} onChange={(e) => setIpAddress(e.target.value)} placeholder="10.0.0.1" /></ModalField>
         <ModalField label="Management URL"><ModalInput value={managementUrl} onChange={(e) => setManagementUrl(e.target.value)} placeholder="https://10.0.0.1" /></ModalField>
         <ModalField label="Vendor"><ModalInput value={vendor} onChange={(e) => setVendor(e.target.value)} placeholder="F5" /></ModalField>
@@ -262,13 +287,14 @@ export function TestConnectionModal({ open, device, onClose }: {
 export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [deviceType, setDeviceType] = useState('f5');
+  const [deviceType, setDeviceType] = useState<DiscoverableDeviceType>('f5');
   const [managementUrl, setManagementUrl] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [tlsInsecure, setTlsInsecure] = useState(false);
 
   useEffect(() => {
-    if (open) { setDeviceType('f5'); setManagementUrl(''); setUsername(''); setPassword(''); }
+    if (open) { setDeviceType('f5'); setManagementUrl(''); setUsername(''); setPassword(''); setTlsInsecure(false); }
   }, [open]);
 
   const valid = !!deviceType && !!managementUrl.trim() && !!username.trim() && !!password.trim();
@@ -280,13 +306,12 @@ export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose:
         management_url: managementUrl.trim(),
         username: username.trim(),
         password: password.trim(),
+        tls_insecure_skip_verify: tlsInsecure,
       };
       const { data, error } = await clients.devices.POST('/devices/discover-and-create', {
-        // The contract types this body as an empty object; the Go handler reads
-        // the four fields above. Cast through the openapi-fetch body slot.
-        body: body as unknown as Record<string, never>,
+        body,
       });
-      if (error || !data) throw new Error('Discovery failed — check the URL and credentials.');
+      if (error || !data) throw new Error(apiErrorMessage(error, 'Discovery failed. Check the management URL, reachability, and credentials.'));
       return data;
     },
     onSuccess: (result) => {
@@ -295,6 +320,7 @@ export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose:
         void qc.invalidateQueries({ queryKey: ['identity-observations'] });
         void qc.invalidateQueries({ queryKey: ['identity-summary'] });
         void navigate(`/discovery/observations?observation_id=${result.observation_id}`);
+        toast.success(result.message ?? 'Management settings were saved with the observation. Resolve its identity to finish adding the device.');
       }
       onClose();
     },
@@ -322,13 +348,17 @@ export function DiscoverDeviceModal({ open, onClose }: { open: boolean; onClose:
       footerNote={footerErr ? <span style={{ color: 'var(--danger-text)' }}>{footerErr}</span> : undefined}
     >
       <ModalField label="Device type">
-        <ModalSelect data-autofocus value={deviceType} onChange={(e) => setDeviceType(e.target.value)}>
-          {DEVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+        <ModalSelect data-autofocus value={deviceType} onChange={(e) => setDeviceType(e.target.value as DiscoverableDeviceType)}>
+          {DISCOVERABLE_DEVICE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
         </ModalSelect>
       </ModalField>
       <ModalField label="Management URL"><ModalInput value={managementUrl} onChange={(e) => setManagementUrl(e.target.value)} placeholder="https://10.0.0.1" /></ModalField>
       <ModalField label="Username"><ModalInput value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" autoComplete="off" /></ModalField>
       <ModalField label="Password"><ModalInput type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete="new-password" /></ModalField>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, fontSize: 12.5, color: 'var(--app-t1)', cursor: 'pointer' }}>
+        <input type="checkbox" checked={tlsInsecure} onChange={(e) => setTlsInsecure(e.target.checked)} />
+        Skip TLS verification (self-signed management certs)
+      </label>
     </Modal>
   );
 }

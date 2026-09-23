@@ -81,13 +81,25 @@ function ManualLinkModal({ title, description, link, expiry, onClose }: { title:
 }
 
 // User form modal (create / invite / edit share fields) ------------------------
-function UserFormModal({ mode, roles, user, onClose, onSubmit, loading }: {
+//
+// `roleLockedReason`, when set, disables the Role select and explains why. The
+// admin-service refuses any role write without platform_roles.assign, any role
+// broader than the caller's own permissions, and any change to the caller's own
+// role (security-staff-1) — the select mirrors the first and last so an operator
+// is not invited to submit something that can only 403. Anything the server
+// still refuses (e.g. a role broader than the viewer holds) comes back as
+// `serverError` and is shown inline.
+export type UserFormValues = { email: string; first_name: string; last_name: string; role_id?: string; password?: string; is_active?: boolean; force_password_change?: boolean };
+
+export function UserFormModal({ mode, roles, user, onClose, onSubmit, loading, roleLockedReason, serverError }: {
   mode: 'create' | 'invite' | 'edit';
   roles: Role[];
   user?: PlatformUser;
   onClose: () => void;
-  onSubmit: (v: { email: string; first_name: string; last_name: string; role_id: string; password?: string; is_active?: boolean; force_password_change?: boolean }) => void;
+  onSubmit: (v: UserFormValues) => void;
   loading: boolean;
+  roleLockedReason?: string | null;
+  serverError?: string | null;
 }) {
   const [f, setF] = useState({
     email: user?.email ?? '',
@@ -111,14 +123,23 @@ function UserFormModal({ mode, roles, user, onClose, onSubmit, loading }: {
     if (mode !== 'edit' && !f.email.trim()) return setErr('Email is required');
     if (!f.first_name.trim()) return setErr('First name is required');
     if (!f.last_name.trim()) return setErr('Last name is required');
-    if (!f.role_id) return setErr('Role is required');
+    // Create/invite always set a role. An edit needs one only when the viewer
+    // can change it and the user already has one (a role cannot be cleared) —
+    // so a viewer without platform_roles.assign can still fix the name or
+    // status of a user whose role_id is null, with the Role select locked.
+    const roleRequired = mode !== 'edit' || (!roleLockedReason && !!user?.role_id);
+    if (roleRequired && !f.role_id) return setErr('Role is required');
     if (mode === 'create' && f.password.length < 8) return setErr('Password must be at least 8 characters');
     setErr(null);
+    // On edit, send role_id only when it actually changes: an unchanged role is
+    // not a role change and needs no role authority, and a locked select must
+    // never write one.
+    const sendRole = mode !== 'edit' || (!roleLockedReason && !!f.role_id && f.role_id !== user?.role_id);
     onSubmit({
       email: f.email.trim(),
       first_name: f.first_name.trim(),
       last_name: f.last_name.trim(),
-      role_id: f.role_id,
+      ...(sendRole ? { role_id: f.role_id } : {}),
       ...(mode === 'create' ? { password: f.password, force_password_change: f.force_password_change } : {}),
       ...(mode === 'edit' ? { is_active: f.is_active, force_password_change: f.force_password_change } : {}),
     });
@@ -139,10 +160,18 @@ function UserFormModal({ mode, roles, user, onClose, onSubmit, loading }: {
         <ModalField label="Password"><input type="password" autoComplete="new-password" placeholder="Min 8 characters" style={modalInputStyle} value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></ModalField>
       )}
       <ModalField label="Role">
-        <select style={{ ...modalInputStyle, appearance: 'auto' as any }} value={f.role_id} onChange={(e) => setF({ ...f, role_id: e.target.value })}>
+        <select
+          aria-label="Role"
+          style={{ ...modalInputStyle, appearance: 'auto' as any, ...(roleLockedReason ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }}
+          value={f.role_id}
+          disabled={!!roleLockedReason}
+          title={roleLockedReason ?? undefined}
+          onChange={(e) => setF({ ...f, role_id: e.target.value })}
+        >
           <option value="">Select role…</option>
           {roles.map((r) => <option key={r.id} value={r.id}>{r.display_name || r.name}</option>)}
         </select>
+        {roleLockedReason && <div style={{ fontSize: 11, color: 'var(--op-t3)', marginTop: 4 }}>{roleLockedReason}</div>}
       </ModalField>
       {mode === 'edit' && (
         <label style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 12.5, color: 'var(--op-t2)', cursor: 'pointer' }}>
@@ -154,7 +183,7 @@ function UserFormModal({ mode, roles, user, onClose, onSubmit, loading }: {
           <input type="checkbox" checked={f.force_password_change} onChange={(e) => setF({ ...f, force_password_change: e.target.checked })} /> Require password change on next login
         </label>
       )}
-      {err && <div style={{ fontSize: 12, color: 'var(--danger)' }}>{err}</div>}
+      {(err || serverError) && <div role="alert" style={{ fontSize: 12, color: 'var(--danger)' }}>{err ?? serverError}</div>}
     </Modal>
   );
 }
@@ -190,11 +219,17 @@ export function StaffListPage() {
   const { hasPermission } = usePlatformPermissions();
   const canManage = hasPermission(PLATFORM_PERMISSIONS.platformUsers.manage);
   const canDelete = hasPermission(PLATFORM_PERMISSIONS.platformUsers.delete);
+  // Setting or changing a role needs platform_roles.assign on top of
+  // platform_users.manage. Create and invite always set one, so they need it too.
+  const canAssign = hasPermission(PLATFORM_PERMISSIONS.platformRoles.assign);
   const { data: staff, isLoading, isError, refetch } = useStaff();
   const { data: roles } = useRoles();
   const [q, setQ] = useState('');
   const [modal, setModal] = useState<ModalKind>(null);
   const [manualLink, setManualLink] = useState<{ title: string; description: string; link: string; expiry: string } | null>(null);
+  // The server's refusal for the open user form, shown inline in the modal.
+  const [formError, setFormError] = useState<string | null>(null);
+  const openModal = (m: ModalKind) => { setFormError(null); setModal(m); };
 
   const createM = useCreateUser();
   const inviteM = useInviteUser();
@@ -226,7 +261,7 @@ export function StaffListPage() {
   // mutation handlers ----------------------------------------------------------
   const doCreate = (v: any) => createM.mutate(
     { email: v.email, password: v.password, first_name: v.first_name, last_name: v.last_name, role_id: v.role_id, force_password_change: v.force_password_change },
-    { onSuccess: () => { toast.success('User created'); setModal(null); }, onError: (e) => toast.error(errMsg(e, 'Failed to create user')) },
+    { onSuccess: () => { toast.success('User created'); setModal(null); }, onError: (e) => setFormError(errMsg(e, 'Failed to create user')) },
   );
 
   const doInvite = (v: any) => inviteM.mutate(
@@ -237,14 +272,25 @@ export function StaffListPage() {
         if (data.invite_link) setManualLink({ title: 'Invitation link', description: 'Email is not configured. Share this link with the new user.', link: data.invite_link, expiry: '24 hours' });
         else toast.success(data.message || 'Invitation sent');
       },
-      onError: (e) => toast.error(errMsg(e, 'Failed to send invitation')),
+      onError: (e) => setFormError(errMsg(e, 'Failed to send invitation')),
     },
   );
 
-  const doEdit = (user: PlatformUser, v: any) => updateM.mutate(
-    { id: user.id, body: { first_name: v.first_name, last_name: v.last_name, role_id: v.role_id, is_active: v.is_active, force_password_change: v.force_password_change } },
-    { onSuccess: () => { toast.success('User updated'); setModal(null); }, onError: (e) => toast.error(errMsg(e, 'Failed to update user')) },
+  const doEdit = (user: PlatformUser, v: UserFormValues) => updateM.mutate(
+    { id: user.id, body: { first_name: v.first_name, last_name: v.last_name, ...(v.role_id ? { role_id: v.role_id } : {}), is_active: v.is_active, force_password_change: v.force_password_change } },
+    { onSuccess: () => { toast.success('User updated'); setModal(null); }, onError: (e) => setFormError(errMsg(e, 'Failed to update user')) },
   );
+
+  // Why the Role select is locked for a given form, or null when it is not.
+  // Mirrors the server: no platform_roles.assign → no role writes at all; your
+  // own role → only a super_admin may change it (and not as the last one — the
+  // server answers that case with a 409 shown inline).
+  const roleLockFor = (target?: PlatformUser): string | null => {
+    if (!canAssign) return 'Changing roles requires the platform_roles.assign permission.';
+    if (target && me && target.id === me.id && me.role !== 'super_admin') return "You can't change your own role. Ask another administrator.";
+    return null;
+  };
+  const assignHint = 'Adding staff sets a role, which requires the platform_roles.assign permission.';
 
   const doSetPw = (user: PlatformUser, v: any) => setPwM.mutate(
     { id: user.id, body: v },
@@ -288,8 +334,8 @@ export function StaffListPage() {
             <Search size={14} style={{ color: 'var(--op-t3)' }} />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search staff…" style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: 'var(--op-t1)', fontSize: 12.5, fontFamily: 'var(--font-body)' }} />
           </div>
-          {canManage && <button className="op-btn ghost sm" onClick={() => setModal({ kind: 'invite' })}><Mail size={14} />Invite</button>}
-          {canManage && <button className="op-btn primary sm" onClick={() => setModal({ kind: 'create' })}><UserPlus size={14} />Create</button>}
+          {canManage && <button className="op-btn ghost sm" disabled={!canAssign} title={canAssign ? undefined : assignHint} onClick={() => openModal({ kind: 'invite' })}><Mail size={14} />Invite</button>}
+          {canManage && <button className="op-btn primary sm" disabled={!canAssign} title={canAssign ? undefined : assignHint} onClick={() => openModal({ kind: 'create' })}><UserPlus size={14} />Create</button>}
         </div>
 
         <table className="op-table">
@@ -340,7 +386,7 @@ export function StaffListPage() {
                   {canManage && (
                     <RowMenu
                       onAction={(a) => {
-                        if (a === 'edit') setModal({ kind: 'edit', user: u });
+                        if (a === 'edit') openModal({ kind: 'edit', user: u });
                         else if (a === 'set-password') setModal({ kind: 'set-password', user: u });
                         else if (a === 'send-reset') doSendReset(u);
                       }}
@@ -368,9 +414,9 @@ export function StaffListPage() {
       </div>
 
       {/* modals */}
-      {modal?.kind === 'invite' && <UserFormModal mode="invite" roles={roleList} onClose={() => setModal(null)} onSubmit={doInvite} loading={inviteM.isPending} />}
-      {modal?.kind === 'create' && <UserFormModal mode="create" roles={roleList} onClose={() => setModal(null)} onSubmit={doCreate} loading={createM.isPending} />}
-      {modal?.kind === 'edit' && <UserFormModal mode="edit" roles={roleList} user={modal.user} onClose={() => setModal(null)} onSubmit={(v) => doEdit(modal.user, v)} loading={updateM.isPending} />}
+      {modal?.kind === 'invite' && <UserFormModal mode="invite" roles={roleList} onClose={() => setModal(null)} onSubmit={doInvite} loading={inviteM.isPending} roleLockedReason={roleLockFor()} serverError={formError} />}
+      {modal?.kind === 'create' && <UserFormModal mode="create" roles={roleList} onClose={() => setModal(null)} onSubmit={doCreate} loading={createM.isPending} roleLockedReason={roleLockFor()} serverError={formError} />}
+      {modal?.kind === 'edit' && <UserFormModal mode="edit" roles={roleList} user={modal.user} onClose={() => setModal(null)} onSubmit={(v) => doEdit(modal.user, v)} loading={updateM.isPending} roleLockedReason={roleLockFor(modal.user)} serverError={formError} />}
       {modal?.kind === 'set-password' && <SetPasswordModal user={modal.user} onClose={() => setModal(null)} onSubmit={(v) => doSetPw(modal.user, v)} loading={setPwM.isPending} />}
       {modal?.kind === 'deactivate' && (
         <Modal open onClose={() => setModal(null)} title="Deactivate user" description={`Deactivate ${modal.user.first_name} ${modal.user.last_name} (${modal.user.email})? They lose access immediately until reactivated.`} tone="danger" size="sm" primaryLabel="Deactivate" onPrimary={() => { doToggleActive(modal.user); setModal(null); }} primaryLoading={updateM.isPending} />

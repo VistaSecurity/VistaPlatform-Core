@@ -5,9 +5,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Search, CornerDownLeft } from 'lucide-react';
-import { SECTIONS, editionAllows } from './nav';
+import { SECTIONS, editionAllows, licenseAllows } from './nav';
 import { Avatar, initialsFromName } from '../components/ui/primitives';
-import { useTenants } from '../sections/tenants/queries';
+import { useTenants, planLabel } from '../sections/tenants/queries';
 import { usePlatformEdition } from '../lib/edition';
 
 type Result =
@@ -17,7 +17,7 @@ type Result =
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
   const navigate = useNavigate();
   const { data: tenants } = useTenants();
-  const { capabilities } = usePlatformEdition();
+  const { capabilities, license } = usePlatformEdition();
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -32,15 +32,15 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     // same sections, so leaving it unfiltered would hand a Core operator the
     // 404-ing Tenants page the rail no longer offers.
     const navHits: Result[] = SECTIONS
-      .filter((s) => editionAllows(s, capabilities))
+      .filter((s) => editionAllows(s, capabilities) && licenseAllows(s, license))
       .filter((s) => !ql || s.label.toLowerCase().includes(ql) || s.title.toLowerCase().includes(ql))
       .map((s) => ({ kind: 'nav', id: s.id, label: s.label, sub: s.subtitle }));
     const tenantHits: Result[] = (tenants ?? [])
       .filter((t) => !ql || t.name.toLowerCase().includes(ql) || t.slug.toLowerCase().includes(ql))
       .slice(0, 6)
-      .map((t) => ({ kind: 'tenant', id: t.id, label: t.name, sub: `${t.slug}${t.subscription_tier ? ` · ${t.subscription_tier}` : ''}`, brand: t.subscription_tier === 'Sovereign' }));
+      .map((t) => ({ kind: 'tenant', id: t.id, label: t.name, sub: `${t.slug} · ${planLabel(t)}`, brand: planLabel(t) === 'Sovereign' }));
     return [...navHits, ...tenantHits];
-  }, [q, tenants, capabilities]);
+  }, [q, tenants, capabilities, license]);
 
   useEffect(() => { setIdx(0); }, [q]);
 

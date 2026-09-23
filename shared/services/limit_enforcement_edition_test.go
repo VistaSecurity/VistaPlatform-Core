@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
@@ -32,6 +33,7 @@ import (
 func TestIntegration_EditionGate_NoTierDeniesPaidCapabilities(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
+	requireCoreDatabase(t, db)
 	tenant := testdb.NewTenant(t, db) // no subscription_tier_id — the Core shape
 	svc := services.NewLimitEnforcementService(db)
 
@@ -120,9 +122,10 @@ func TestIntegration_EditionGate_EnterpriseTierAloneGrantsNothing(t *testing.T) 
 // platform admin on a Core deployment could re-tick the box the seed fix cleared
 // and be back where we started, using nothing but the shipped UI.
 //
-// This is why the rule belongs in code and not only in data: no tier row, seeded
-// or hand-edited, may grant an edition-gated capability. Only the tenant override
-// layer that a verified token seeds can.
+// This is why the rule belongs in code and not only in data: on an install with
+// no licence, no tier row, seeded or hand-edited, may grant an edition-gated
+// capability. The resolver's licence step (shared/entitlements/license.go) is
+// that code.
 func TestIntegration_EditionGate_AdminEditedTierGrantsNothing(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
@@ -134,19 +137,13 @@ func TestIntegration_EditionGate_AdminEditedTierGrantsNothing(t *testing.T) {
 	// The mechanism under test is a tier_entitlements row that grants the
 	// capability, which a private tier reproduces exactly. Writing it onto the
 	// SEEDED enterprise row instead is seed-row pollution across suites: nothing
-	// puts the shipped value back, and
-	// shared/entitlements.TestResolve_EditionGatedCapabilitiesNeverGrantedByTier
-	// — a different package binary, running in parallel against the same database
-	// — asserts that no ACTIVE tier grants an edition-gated capability, and reads
-	// whatever is in the table. That test used to be shielded by the ~200
-	// re-applies of seed.sql per run, whose edition-gate corrective UPDATE reset
-	// every boolean on every tier; since schema/seed are applied once per database
-	// the reset never happens, and the two tests became a coin flip on
-	// which binary reaches the row first (deterministic failure on the second run
-	// against one database).
+	// puts the shipped value back (seed.sql no longer rewrites tier grants at
+	// all), and every other package binary on this database would see the
+	// seeded enterprise tier granting a paid capability.
 	//
-	// is_active = false for the same reason: it is not a shipped tier, so the
-	// shipped-tier invariant must not see it. The resolver filters
+	// is_active = false for the same reason: it is not a shipped tier, so
+	// shared/entitlements.TestResolve_CoreInstallNeverGrantsGatedCapabilities,
+	// which enumerates the active tiers, must not see it. The resolver filters
 	// billable_items.is_active, never subscription_tiers.is_active, so the grant
 	// path being tested here is unchanged.
 	tierName := "it-editiongate-" + uuid.NewString()[:8]
@@ -184,8 +181,14 @@ func TestIntegration_EditionGate_AdminEditedTierGrantsNothing(t *testing.T) {
 	// the capability at the entitlement layer. Without this the test passes just
 	// as happily when the tier write silently did nothing — a tier the tenant was
 	// never assigned, a renamed billable item — and would then be proving that
-	// the gate denies a capability nobody granted.
-	ent, err := entitlements.NewPostgresResolver(db).Resolve(context.Background(), tenant, "custom_policies")
+	// the gate denies a capability nobody granted. Read under an injected MSP
+	// licence, which leaves the SQL layers' answer untouched; the production
+	// resolver on this Core database would report the licence step's denial.
+	sqlLayer := entitlements.NewPostgresResolver(db, entitlements.WithLicenseSource(
+		func(context.Context) (*entitlements.License, error) {
+			return &entitlements.License{Edition: entitlements.EditionMSP, ExpiresAt: time.Now().Add(time.Hour)}, nil
+		}))
+	ent, err := sqlLayer.Resolve(context.Background(), tenant, "custom_policies")
 	if err != nil {
 		t.Fatalf("Resolve(custom_policies): %v", err)
 	}
@@ -204,71 +207,136 @@ func TestIntegration_EditionGate_AdminEditedTierGrantsNothing(t *testing.T) {
 	}
 }
 
-// TestIntegration_EditionGate_TokenOverrideGrants is the other half, and the
-// reason the test above is not simply a wall: capability arrives through the
-// tenant_entitlements override layer that a verified edition token seeds
-// (admin-service/ee/edition/seeder.go). Without this, the gate could be
-// "correct" by denying everything and the paid editions would ship broken.
-func TestIntegration_EditionGate_TokenOverrideGrants(t *testing.T) {
+// TestIntegration_EditionGate_OverrideAloneGrantsNothingOnCore: a per-tenant
+// override used to be the one layer that COULD switch a paid capability on
+// (it was what the old token seeder wrote), which meant anyone able to write
+// tenant_entitlements on a Core install — the admin API ships in Core — could
+// unlock the paid product. Under the licence model an override is an operator
+// exception WITHIN a licence, and on Core there is no licence.
+func TestIntegration_EditionGate_OverrideAloneGrantsNothingOnCore(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
+	requireCoreDatabase(t, db)
 	tenant := testdb.NewTenant(t, db)
 	svc := services.NewLimitEnforcementService(db)
 
-	// Exactly what the token seeder writes: a per-tenant override with an expiry.
 	if _, err := db.Exec(`
 		INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, reason, effective_from, expires_at)
-		SELECT $1, bi.id, '{"enabled": true}'::jsonb, 'test: edition token', now() - interval '1 hour', now() + interval '30 days'
+		SELECT $1, bi.id, '{"enabled": true}'::jsonb, 'test: operator override', now() - interval '1 hour', now() + interval '30 days'
 		FROM billable_items bi WHERE bi.key = 'custom_policies'`, tenant); err != nil {
-		t.Fatalf("seed token override: %v", err)
+		t.Fatalf("seed override: %v", err)
 	}
-
+	entitlements.FlushLicenseCache()
 	allowed, err := svc.CheckFeatureAccess(tenant, "custom_policies")
 	if err != nil {
 		t.Fatalf("CheckFeatureAccess(custom_policies): %v", err)
 	}
-	if !allowed {
-		t.Error("CheckFeatureAccess(custom_policies) = false with an active token override; " +
-			"a licensed Enterprise deployment would ship with its own feature disabled")
+	if allowed {
+		t.Error("CheckFeatureAccess(custom_policies) = true from an override on a Core install; " +
+			"only a licence may unlock a paid capability")
 	}
 }
 
-// TestIntegration_EditionGate_PilotDeniedThenGranted walks the pilot
-// capability across the boundary in one test, which is the end-to-end
-// statement Phase B set out to prove: same code, same database, entitlement
-// state alone decides.
-func TestIntegration_EditionGate_PilotDeniedThenGranted(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
-	tenant := testdb.NewTenant(t, db)
+// TestIntegration_EditionGate_LicenceDecides walks one capability across every
+// licence state through the real enforcement path (LimitEnforcementService →
+// PostgresResolver → platform_license), on a database of its own because it
+// writes the global licence row.
+func TestIntegration_EditionGate_LicenceDecides(t *testing.T) {
+	db := testdb.ScratchDatabase(t)
 	svc := services.NewLimitEnforcementService(db)
-
+	t.Cleanup(entitlements.FlushLicenseCache)
 	const pilot = "custom_policies"
 
-	allowed, err := svc.CheckFeatureAccess(tenant, pilot)
-	if err != nil {
-		t.Fatalf("CheckFeatureAccess(%s) pre-grant: %v", pilot, err)
-	}
-	if allowed {
-		t.Fatalf("%s allowed before any grant", pilot)
-	}
-
-	// Grant via a per-tenant override — the mechanism an edition token will
-	// seed. No tier assignment, no billing involved.
+	// A plan that includes the capability and one that does not — an MSP's
+	// "Premium" and "Basic".
+	premium := planGranting(t, db, pilot, true)
+	basic := planGranting(t, db, pilot, false)
+	onPremium := tenantOnPlan(t, db, premium)
+	onBasic := tenantOnPlan(t, db, basic)
+	switchedOff := tenantOnPlan(t, db, premium)
 	if _, err := db.Exec(`
-		INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, effective_from)
-		SELECT $1, id, '{"enabled": true}'::jsonb, NOW()
-		FROM billable_items WHERE key = $2`, tenant, pilot); err != nil {
-		t.Fatalf("seed tenant entitlement: %v", err)
+		INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, reason, effective_from)
+		SELECT $1, id, '{"enabled": false}'::jsonb, 'contractor tenant', now() - interval '1 hour'
+		FROM billable_items WHERE key = $2`, switchedOff, pilot); err != nil {
+		t.Fatalf("switch tenant off: %v", err)
 	}
 
-	allowed, err = svc.CheckFeatureAccess(tenant, pilot)
-	if err != nil {
-		t.Fatalf("CheckFeatureAccess(%s) post-grant: %v", pilot, err)
+	setLicence := func(edition string) {
+		t.Helper()
+		if _, err := db.Exec(`DELETE FROM platform_license`); err != nil {
+			t.Fatalf("clear licence: %v", err)
+		}
+		if edition != "" {
+			if _, err := db.Exec(`INSERT INTO platform_license (subject, edition, expires_at, token_sha256)
+				VALUES ('it', $1, now() + interval '1 day', 'x')`, edition); err != nil {
+				t.Fatalf("write %s licence: %v", edition, err)
+			}
+		}
+		entitlements.FlushLicenseCache()
 	}
-	if !allowed {
-		t.Errorf("%s still denied after an active tenant_entitlements grant; "+
-			"the edition token would have no way to unlock it", pilot)
+	expect := func(label string, tenant uuid.UUID, want bool) {
+		t.Helper()
+		got, err := svc.CheckFeatureAccess(tenant, pilot)
+		if err != nil {
+			t.Fatalf("%s: CheckFeatureAccess: %v", label, err)
+		}
+		if got != want {
+			t.Errorf("%s: CheckFeatureAccess(%s) = %v, want %v", label, pilot, got, want)
+		}
+	}
+
+	setLicence("")
+	expect("Core, Premium plan", onPremium, false)
+	expect("Core, Basic plan", onBasic, false)
+
+	// MSP: the plan decides. This is the case the old "must come from an
+	// override" rule made impossible.
+	setLicence("msp")
+	expect("MSP, Premium plan", onPremium, true)
+	expect("MSP, Basic plan", onBasic, false)
+	expect("MSP, Premium plan switched off", switchedOff, false)
+
+	// Enterprise: every tenant, whatever its plan, unless switched off.
+	setLicence("enterprise")
+	expect("Enterprise, Premium plan", onPremium, true)
+	expect("Enterprise, Basic plan", onBasic, true)
+	expect("Enterprise, switched off", switchedOff, false)
+}
+
+func planGranting(t *testing.T, db *sql.DB, key string, enabled bool) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	name := "it-plan-" + uuid.NewString()[:8]
+	if err := db.QueryRow(`INSERT INTO subscription_tiers (name, display_name, is_active) VALUES ($1, $1, true) RETURNING id`, name).Scan(&id); err != nil {
+		t.Fatalf("create plan: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO tier_entitlements (tier_id, item_id, included_value)
+		SELECT $1, id, jsonb_build_object('enabled', $3::boolean) FROM billable_items WHERE key = $2`, id, key, enabled); err != nil {
+		t.Fatalf("compose plan: %v", err)
+	}
+	return id
+}
+
+func tenantOnPlan(t *testing.T, db *sql.DB, plan uuid.UUID) uuid.UUID {
+	t.Helper()
+	tenant := testdb.NewTenant(t, db)
+	if _, err := db.Exec(`UPDATE tenants SET subscription_tier_id = $1 WHERE id = $2`, plan, tenant); err != nil {
+		t.Fatalf("assign plan: %v", err)
+	}
+	return tenant
+}
+
+// requireCoreDatabase asserts the shared test database carries no licence.
+// Tests that write platform_license must use testdb.ScratchDatabase; a row here
+// would turn every Core assertion into a test of something else.
+func requireCoreDatabase(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM platform_license`).Scan(&n); err != nil {
+		t.Fatalf("count platform_license: %v", err)
+	}
+	if n != 0 {
+		t.Fatal("the shared test database carries a platform_license row — a test wrote global licence state outside testdb.ScratchDatabase")
 	}
 }
 

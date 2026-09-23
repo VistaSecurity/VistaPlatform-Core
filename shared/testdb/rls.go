@@ -83,11 +83,21 @@ func ConnectAsBypassRole(t *testing.T, owner *sql.DB) *sql.DB {
 // opens it and registers cleanup. The role must already have LOGIN.
 func openAsRole(t *testing.T, role, password string) *sql.DB {
 	t.Helper()
+	return openAsRoleOn(t, role, password, "")
+}
+
+// openAsRoleOn is openAsRole against database dbName on the same server ("" =
+// TEST_DATABASE_URL's own database).
+func openAsRoleOn(t *testing.T, role, password, dbName string) *sql.DB {
+	t.Helper()
 	u, err := url.Parse(os.Getenv(URLEnv))
 	if err != nil {
 		t.Fatalf("testdb: parse %s: %v", URLEnv, err)
 	}
 	u.User = url.UserPassword(role, password)
+	if dbName != "" {
+		u.Path = "/" + dbName
+	}
 	db, err := sql.Open("postgres", u.String())
 	if err != nil {
 		t.Fatalf("testdb: open as %s: %v", role, err)
@@ -101,6 +111,36 @@ func openAsRole(t *testing.T, role, password string) *sql.DB {
 	}
 	t.Cleanup(func() { _ = shareddb.CloseWithSessionPool(db) })
 	return db
+}
+
+// ConnectScratchAsAppRole opens scratch — a database from ScratchDatabase — as
+// RLSAppRole, and ConnectScratchAsBypassRole as BypassRole. The privileges in
+// force are the ones scratch's own schema.sql apply granted (roles are
+// cluster-wide, privileges are per database), so a test can assert exactly what
+// the shipped schema lets each role do to global tables such as
+// platform_license — without writing them on the shared database.
+func ConnectScratchAsAppRole(t *testing.T, scratch *sql.DB) *sql.DB {
+	t.Helper()
+	execUnderSchemaLock(t, Connect(t), "grant LOGIN to "+RLSAppRole,
+		[]string{`ALTER ROLE ` + RLSAppRole + ` LOGIN PASSWORD '` + appRolePassword + `'`})
+	return openAsRoleOn(t, RLSAppRole, appRolePassword, scratchName(t, scratch))
+}
+
+// ConnectScratchAsBypassRole: see ConnectScratchAsAppRole.
+func ConnectScratchAsBypassRole(t *testing.T, scratch *sql.DB) *sql.DB {
+	t.Helper()
+	execUnderSchemaLock(t, Connect(t), "grant LOGIN to "+BypassRole,
+		[]string{`ALTER ROLE ` + BypassRole + ` LOGIN PASSWORD '` + bypassRolePassword + `'`})
+	return openAsRoleOn(t, BypassRole, bypassRolePassword, scratchName(t, scratch))
+}
+
+func scratchName(t *testing.T, scratch *sql.DB) string {
+	t.Helper()
+	var name string
+	if err := scratch.QueryRow(`SELECT current_database()`).Scan(&name); err != nil {
+		t.Fatalf("testdb: scratch database name: %v", err)
+	}
+	return name
 }
 
 // RLSAppRole is the non-owner, NOBYPASSRLS application role that ships in the
@@ -140,7 +180,26 @@ func EnsureRLSAppRole(t *testing.T, db *sql.DB) {
 		   REVOKE ALL ON public.mv_remediation_queue FROM ` + RLSAppRole + `; END IF; END $$;`,
 		`DO $$ BEGIN IF to_regclass('public.tenant_cost_summary') IS NOT NULL THEN
 		   REVOKE ALL ON public.tenant_cost_summary FROM ` + RLSAppRole + `; END IF; END $$;`,
+		// And its licence hardening: the install's licence and identity are
+		// read-only for the app role (only admin-service's reconciler, on the
+		// bypass pool, writes them). Re-granting write here would let a test
+		// pass a write production refuses.
+		`DO $$ BEGIN IF to_regclass('public.platform_license') IS NOT NULL THEN
+		   REVOKE ALL ON public.platform_license FROM ` + RLSAppRole + `;
+		   GRANT SELECT ON public.platform_license TO ` + RLSAppRole + `; END IF; END $$;`,
+		`DO $$ BEGIN IF to_regclass('public.platform_install') IS NOT NULL THEN
+		   REVOKE ALL ON public.platform_install FROM ` + RLSAppRole + `;
+		   GRANT SELECT ON public.platform_install TO ` + RLSAppRole + `; END IF; END $$;`,
 	}
+	// The MSP usage-metering ledger is read-only for the app role too, and the
+	// dev signing key is not readable by it at all (schema.sql ROLE GRANTS).
+	for _, table := range []string{"license_usage_events", "license_usage_snapshot_runs", "license_usage_daily", "license_usage_reports"} {
+		stmts = append(stmts, `DO $$ BEGIN IF to_regclass('public.`+table+`') IS NOT NULL THEN
+		   REVOKE ALL ON public.`+table+` FROM `+RLSAppRole+`;
+		   GRANT SELECT ON public.`+table+` TO `+RLSAppRole+`; END IF; END $$;`)
+	}
+	stmts = append(stmts, `DO $$ BEGIN IF to_regclass('public.license_signing_dev_key') IS NOT NULL THEN
+		   REVOKE ALL ON public.license_signing_dev_key FROM `+RLSAppRole+`; END IF; END $$;`)
 	execUnderSchemaLock(t, db, "EnsureRLSAppRole", stmts)
 }
 

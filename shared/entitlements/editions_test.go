@@ -46,6 +46,9 @@ func TestEditionFor_PaidCapabilities(t *testing.T) {
 		"custom_branding":     entitlements.EditionEnterprise,
 		"ot_active_probing":   entitlements.EditionEnterprise,
 		"ot_primary_lens":     entitlements.EditionEnterprise,
+		// MSP-only (owner decision: billing is for a provider
+		// billing its own customers; an Enterprise licence does not cover it.
+		"billing_portal": entitlements.EditionMSP,
 	}
 	for key, wantEd := range want {
 		if got := entitlements.EditionFor(key); got != wantEd {
@@ -82,5 +85,48 @@ func TestEditionGatedKeys_SortedAndFilterable(t *testing.T) {
 	// not a bucket of gated items.
 	if core := entitlements.EditionGatedKeys(entitlements.EditionCore); len(core) != 0 {
 		t.Errorf("EditionGatedKeys(Core) = %v, want empty", core)
+	}
+}
+
+// EditionCovers is the licence half of the boundary: which items a licence of
+// a given edition may unlock at all.
+func TestEditionCovers(t *testing.T) {
+	const (
+		core       = entitlements.EditionCore
+		enterprise = entitlements.EditionEnterprise
+		msp        = entitlements.EditionMSP
+	)
+	cases := []struct {
+		licence entitlements.Edition
+		item    string
+		want    bool
+	}{
+		// Core items are covered by every edition, Core included.
+		{core, "max_sensors", true},
+		{enterprise, "max_sensors", true},
+		{msp, "max_sensors", true},
+		// Enterprise items: Enterprise and MSP, never Core.
+		{core, "sso_saml", false},
+		{enterprise, "sso_saml", true},
+		{msp, "sso_saml", true},
+		// MSP items: MSP only.
+		{core, "billing_portal", false},
+		{enterprise, "billing_portal", false},
+		{msp, "billing_portal", true},
+		// An edition this build does not know covers no gated item.
+		{"platinum", "sso_saml", false},
+		{"", "sso_saml", false},
+	}
+	for _, c := range cases {
+		if got := entitlements.EditionCovers(c.licence, c.item); got != c.want {
+			t.Errorf("EditionCovers(%q, %q) = %v, want %v", c.licence, c.item, got, c.want)
+		}
+	}
+
+	// MSP covers EVERY gated item: one MSP licence grants the whole product.
+	for _, k := range entitlements.EditionGatedKeys() {
+		if !entitlements.EditionCovers(msp, k) {
+			t.Errorf("an MSP licence does not cover %q — MSP must cover every gated capability", k)
+		}
 	}
 }

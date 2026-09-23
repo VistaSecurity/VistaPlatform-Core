@@ -71,6 +71,21 @@ export interface FeaturesMap {
   billing_portal: boolean;
 }
 
+/**
+ * The tenant's plan as a person should read it — the `plan` block on
+ * GET /tenant/features (edition-licensing spec §3). "Vista Platform Core";
+ * "Vista Platform Enterprise" with the licensee (never a tier name, never a
+ * trial); or on MSP the MSP's own plan, with `trial` when that plan is a trial.
+ * No trial is the ABSENT key.
+ */
+export interface TenantPlan {
+  edition: 'core' | 'enterprise' | 'msp';
+  display_name: string;
+  licensee: string | null;
+  expires_at: string | null;
+  trial?: { ends_at: string };
+}
+
 export interface UsageLimit {
   current: number;
   /** null = unlimited */

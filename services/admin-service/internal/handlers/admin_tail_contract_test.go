@@ -34,13 +34,27 @@ type stubPlatformSettingsStore struct {
 	list      []platformSettingKV
 	listErr   error
 	upsertErr error
+	// securityManage is what HasPlatformPermission answers for
+	// platform.security.manage; permErr fails the lookup.
+	securityManage bool
+	permErr        error
+	permAsked      []string
+	upserted       []string
 }
 
 func (s *stubPlatformSettingsStore) ListSettings(context.Context) ([]platformSettingKV, error) {
 	return s.list, s.listErr
 }
-func (s *stubPlatformSettingsStore) UpsertSetting(context.Context, string, []byte, uuid.UUID) error {
+func (s *stubPlatformSettingsStore) UpsertSetting(_ context.Context, key string, _ []byte, _ uuid.UUID) error {
+	s.upserted = append(s.upserted, key)
 	return s.upsertErr
+}
+func (s *stubPlatformSettingsStore) HasPlatformPermission(_ context.Context, _ uuid.UUID, perm string) (bool, error) {
+	s.permAsked = append(s.permAsked, perm)
+	if s.permErr != nil {
+		return false, s.permErr
+	}
+	return perm == "platform.security.manage" && s.securityManage, nil
 }
 
 func newSettingsEngine(store platformSettingsStore, withUser bool) *gin.Engine {
@@ -117,7 +131,7 @@ func TestContract_UpdatePlatformSettings_RejectsOutOfRangePolicy(t *testing.T) {
 		"session_timeout too long":    `{"session_timeout_minutes":999999}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			eng := newSettingsEngine(&stubPlatformSettingsStore{}, true)
+			eng := newSettingsEngine(&stubPlatformSettingsStore{securityManage: true}, true)
 			w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings", strings.NewReader(body))
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 for %s; body=%s", w.Code, body, w.Body.String())
@@ -130,7 +144,7 @@ func TestContract_UpdatePlatformSettings_RejectsOutOfRangePolicy(t *testing.T) {
 // In-range values are accepted, so the guard above is a range check and not a
 // blanket rejection.
 func TestContract_UpdatePlatformSettings_AcceptsInRangePolicy(t *testing.T) {
-	eng := newSettingsEngine(&stubPlatformSettingsStore{}, true)
+	eng := newSettingsEngine(&stubPlatformSettingsStore{securityManage: true}, true)
 	body := `{"password_min_length":14,"max_login_attempts":3,"lockout_duration_minutes":60,"session_timeout_minutes":90}`
 	w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings", strings.NewReader(body))
 	if w.Code != http.StatusOK {
@@ -193,6 +207,137 @@ func TestContract_UpdatePlatformSettings_500(t *testing.T) {
 		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// ===================== security-gated settings keys ===========================
+//
+// The keys in securityGatedSettingKeys decide how staff authenticate or where
+// their reset/invite email goes, so writing any of them needs
+// platform.security.manage on top of the route's platform.settings. The
+// real-router half (seeded roles, real platform_user_has_permission) is
+// TestIntegration_StaffSSOTakeover_RealRouter in internal/api.
+
+// One body per gated key, each the smallest write of that key alone.
+var securityGatedBodies = map[string]string{
+	"admin_ui_base_url":                 `{"admin_ui_base_url":"https://admin.example.test"}`,
+	"email_config":                      `{"email_config":{"smtp_host":"smtp.example.test","smtp_port":"587"}}`,
+	"password_min_length":               `{"password_min_length":12}`,
+	"session_timeout_minutes":           `{"session_timeout_minutes":60}`,
+	"max_login_attempts":                `{"max_login_attempts":5}`,
+	"lockout_duration_minutes":          `{"lockout_duration_minutes":15}`,
+	"admin_email_verification_required": `{"admin_email_verification_required":false}`,
+}
+
+// Every gated key has a body above, and every body names a gated key — so the
+// table below cannot silently stop covering a key that was added to the list.
+func TestSecurityGatedBodies_CoverEveryGatedKey(t *testing.T) {
+	if len(securityGatedBodies) != len(securityGatedSettingKeys) {
+		t.Fatalf("securityGatedBodies has %d entries, securityGatedSettingKeys has %d", len(securityGatedBodies), len(securityGatedSettingKeys))
+	}
+	for _, k := range securityGatedSettingKeys {
+		if _, ok := securityGatedBodies[k]; !ok {
+			t.Errorf("no test body for gated key %q", k)
+		}
+	}
+}
+
+func TestContract_UpdatePlatformSettings_403_GatedKeyWithoutSecurityManage(t *testing.T) {
+	sv := loadSpec(t)
+	for key, body := range securityGatedBodies {
+		t.Run(key, func(t *testing.T) {
+			store := &stubPlatformSettingsStore{securityManage: false}
+			eng := newSettingsEngine(store, true)
+			w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings", strings.NewReader(body))
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+			}
+			sv.assertConforms(t, "SecurityManageRequiredError", w.Body.Bytes())
+			var got struct {
+				RequiredPermission string   `json:"required_permission"`
+				Fields             []string `json:"fields"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.RequiredPermission != "platform.security.manage" || len(got.Fields) != 1 || got.Fields[0] != key {
+				t.Fatalf("403 body = %s, want required_permission platform.security.manage and fields [%s]", w.Body.String(), key)
+			}
+			if len(store.upserted) != 0 {
+				t.Fatalf("a refused request still wrote %v", store.upserted)
+			}
+		})
+	}
+}
+
+func TestContract_UpdatePlatformSettings_200_GatedKeyWithSecurityManage(t *testing.T) {
+	for key, body := range securityGatedBodies {
+		t.Run(key, func(t *testing.T) {
+			store := &stubPlatformSettingsStore{securityManage: true}
+			eng := newSettingsEngine(store, true)
+			w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings", strings.NewReader(body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			if len(store.upserted) != 1 || store.upserted[0] != key {
+				t.Fatalf("upserted %v, want [%s]", store.upserted, key)
+			}
+		})
+	}
+}
+
+// A request mixing an ungated key with a gated one is refused WHOLE: the
+// ungated key must not be saved either.
+func TestContract_UpdatePlatformSettings_403_MixedBodyWritesNothing(t *testing.T) {
+	store := &stubPlatformSettingsStore{securityManage: false}
+	eng := newSettingsEngine(store, true)
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings",
+		strings.NewReader(`{"platform_name":"Acme","admin_ui_base_url":"https://elsewhere.example.test"}`))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if len(store.upserted) != 0 {
+		t.Fatalf("a refused request still wrote %v", store.upserted)
+	}
+}
+
+// Ungated keys (tenant-facing sign-up gates, branding) never consult the
+// permission, so a stock platform_admin keeps them.
+func TestContract_UpdatePlatformSettings_UngatedKeysNeedNoSecurityManage(t *testing.T) {
+	store := &stubPlatformSettingsStore{securityManage: false}
+	eng := newSettingsEngine(store, true)
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings",
+		strings.NewReader(`{"platform_name":"Acme","registration_enabled":true,"email_verification_required":true,"block_personal_email_domains":false,"admin_ui_base_url":""}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if len(store.permAsked) != 0 {
+		t.Fatalf("an ungated write consulted permissions %v", store.permAsked)
+	}
+}
+
+func TestContract_UpdatePlatformSettings_500_PermissionLookupFails(t *testing.T) {
+	store := &stubPlatformSettingsStore{permErr: errAdminTail}
+	eng := newSettingsEngine(store, true)
+	w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings", strings.NewReader(`{"max_login_attempts":5}`))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
+	}
+	if len(store.upserted) != 0 {
+		t.Fatalf("a failed permission check still wrote %v", store.upserted)
+	}
+}
+
+// The audit record of a gated write never carries the SMTP password.
+func TestSecuritySettingsAuditValues_OmitsSMTPPassword(t *testing.T) {
+	s := PlatformSettings{EmailConfig: &EmailConfig{SMTPHost: "smtp.example.test", SMTPPassword: "hunter2-not-real"}}
+	got := securitySettingsAuditValues(s, []string{"email_config"})
+	b, _ := json.Marshal(got)
+	if strings.Contains(string(b), "hunter2-not-real") {
+		t.Fatalf("audit values leak the SMTP password: %s", b)
+	}
+	if !strings.Contains(string(b), `"smtp_password_changed":true`) {
+		t.Fatalf("audit values should record the rotation as a boolean: %s", b)
+	}
 }
 
 // =============================== system logs =================================

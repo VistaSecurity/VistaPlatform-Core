@@ -44,8 +44,8 @@ describe('the dashboard registry', () => {
     expect(findDashboard('overview')!.path).toBe('/dashboard');
   });
 
-  it('lists the four dashboards, Overview first', () => {
-    expect(DASHBOARDS.map((d) => d.key)).toEqual(['overview', 'assets', 'compliance', 'pqc']);
+  it('lists the dashboards, Overview first', () => {
+    expect(DASHBOARDS.map((d) => d.key)).toEqual(['overview', 'assets', 'compliance', 'pqc', 'overview-next']);
   });
 
   it('gives every non-Overview dashboard a /dashboard/<key> path', () => {

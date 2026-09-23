@@ -13,7 +13,7 @@ type PlatformUser struct {
 	FirstName            string        `json:"first_name" db:"first_name"`
 	LastName             string        `json:"last_name" db:"last_name"`
 	IsActive             bool          `json:"is_active" db:"is_active"`
-	RoleID               uuid.UUID     `json:"role_id" db:"role_id"`
+	RoleID               *uuid.UUID    `json:"role_id" db:"role_id"` // nil (JSON null), never the zero UUID, for a row without a role
 	EmailVerified        bool          `json:"email_verified" db:"email_verified"`
 	ForcePasswordChange  bool          `json:"force_password_change" db:"force_password_change"`
 	PasswordChangedAt    *time.Time    `json:"password_changed_at,omitempty" db:"password_changed_at"`
@@ -62,6 +62,7 @@ type Tenant struct {
 	StripeCustomerID   *string                `json:"stripe_customer_id" db:"stripe_customer_id"`
 	SsoEnabled         bool                   `json:"sso_enabled" db:"sso_enabled"`
 	IsActive           bool                   `json:"is_active" db:"is_active"`
+	IsOperator         bool                   `json:"is_operator" db:"is_operator"` // the MSP's own tenant; never counted against an MSP licence's tenant limit
 	CustomBranding     map[string]interface{} `json:"custom_branding" db:"custom_branding"`
 	UiConfig           map[string]interface{} `json:"ui_config" db:"ui_config"`
 	Settings           map[string]interface{} `json:"settings" db:"settings"`

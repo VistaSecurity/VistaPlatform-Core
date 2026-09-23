@@ -99,9 +99,9 @@ billing:
 # applies a Secret containing the token; the chart mounts it as a file and never
 # templates the value itself.
 #
-# The mount is OPTIONAL: a Core deployment supplies no token and runs with the
-# Community entitlement floor. The token GRANTS capability with an expiry — it is
-# not a boot gate, and no service refuses to start without one.
+# The mount is OPTIONAL: a deployment with no token runs as Vista Platform Core.
+# The token GRANTS capability with an expiry — it is not a boot gate, and no
+# service refuses to start without one.
 license:
   # -- Existing Secret in the release namespace holding the entitlement JWT.
   # Mounted at <mountPath>/<secretKey>; LICENSE_TOKEN_FILE points at it.
@@ -111,6 +111,56 @@ license:
   secretKey: token
   # -- Mount path for the license file inside each backend pod.
   mountPath: /etc/vistaplatform/license
+
+# This install's identity. An MSP licence is bound to it, so it must never
+# change. The chart keeps it in the Secret `<fullname>-install`, which
+# admin-service reads (INSTALL_ID) and records in the database on first boot;
+# from then on the DATABASE copy is authoritative, and a different value in the
+# Secret is ignored with a warning in the admin-service log.
+install:
+  # -- Pin the install id (a UUID). Leave empty for `helm install` / `helm
+  # upgrade`: the chart generates an id once and preserves it with `lookup`.
+  # SET IT if you deploy with ArgoCD, Flux, or `helm template | kubectl apply`:
+  # those cannot run `lookup`, so without a pinned id every render writes a new
+  # one into the Secret. Use the id admin-service logs at boot
+  # (`[edition] this install's id: …`). Used verbatim when set.
+  id: ""
+  # -- Pin the install SIGNING KEY: an ECDSA P-256 private key in PEM
+  # ("-----BEGIN EC PRIVATE KEY-----" or PKCS#8 "-----BEGIN PRIVATE KEY-----").
+  # admin-service signs every licence usage report with it, and Vista
+  # Security's receiver pins the first key it sees to the licence, so it must
+  # never change. Leave empty for `helm install` / `helm upgrade`: the chart
+  # generates one on first install and preserves it with `lookup` in the same
+  # `<fullname>-install` Secret. SET IT for ArgoCD / Flux / `helm template`
+  # renders (which cannot lookup) — from an encrypted values file (SOPS, sealed
+  # secrets), never plain git. To adopt the key a running install already has:
+  # `kubectl get secret <fullname>-install -o jsonpath='{.data.signing-key\.pem}' | base64 -d`.
+  signingKeyPEM: ""
+
+# Licence usage reporting (MSP licence only; the chart cannot tell the edition
+# at render time, so these apply on every install and are inert unless the
+# licence is MSP). admin-service takes a daily usage snapshot and produces one
+# signed report per month; the database is the system of record.
+licensing:
+  reports:
+    # -- Where admin-service writes a copy of each report, as
+    # <report_id>.json, when persistence is enabled.
+    dir: /var/lib/vistaplatform/license-reports
+    persistence:
+      # -- Mount a PersistentVolumeClaim at `dir` for the report copies.
+      # false = reports live in the database only (still downloadable from
+      # admin-ui → Settings → License & Usage). Only an MSP licence ever writes
+      # a report, but the edition is not knowable at render time: on a Core or
+      # Enterprise install set this to false to skip the PVC and the Recreate
+      # strategy below.
+      enabled: true
+      size: 1Gi
+      # -- ReadWriteOnce limits admin-service to one replica and switches it to
+      # the Recreate update strategy; use ReadWriteMany (with a class that
+      # supports it) for more replicas.
+      accessMode: ReadWriteOnce
+      # -- Storage class; empty = datastores.storageClassName.
+      storageClassName: ""
 
 # TLS termination at the cluster ingress.
 tls:

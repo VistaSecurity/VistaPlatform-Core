@@ -29,6 +29,12 @@ const (
 	// SourceDefault means neither tier nor override matched; billable_items.default_value
 	// was used. This is the fall-through case — usually conservative.
 	SourceDefault Source = "default"
+	// SourceEdition means the deployment's licence decided the value, not the
+	// tenant's rows: a gated capability denied because no valid licence covers
+	// it, a gated capability granted because the install is Enterprise, or a
+	// capacity made unlimited because the install is Enterprise. See
+	// license.go for the rules.
+	SourceEdition Source = "edition"
 )
 
 // BillableItem is the catalog row a resolved entitlement points at.

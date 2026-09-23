@@ -61,6 +61,23 @@ type PlatformAuditEntry struct {
 	ResourceType  string                 // e.g. "platform_role", "platform_user"
 	ResourceID    string                 // affected resource UUID (string); parsed best-effort
 	Metadata      map[string]interface{} // optional extra context (permission_ids, etc.)
+
+	// ChangedFields names the fields the action wrote; NewValues carries their
+	// new values. Both must be secret-free — record a rotated secret as a
+	// boolean, never its value.
+	ChangedFields []string
+	NewValues     map[string]interface{}
+
+	// Failed records a refused or failed action (success=false) with ErrorCode
+	// as the machine-readable reason. Refusals are flagged requires_attention.
+	Failed    bool
+	ErrorCode string
+
+	// ActorID / ActorEmail name the actor when the request carries no session —
+	// the public staff SSO callback, where the actor is the identity the
+	// provider asserted. Ignored when the auth middleware already set one.
+	ActorID    string
+	ActorEmail string
 }
 
 // InitializePlatformAuditor constructs the package-level platform audit emitter.
@@ -120,9 +137,18 @@ func (e *PlatformAuditEmitter) Emit(c *gin.Context, entry PlatformAuditEntry) {
 		EventType:     entry.EventType,
 		EventCategory: entry.EventCategory,
 		Action:        entry.Action,
-		Success:       true,
+		Success:       !entry.Failed,
 		OccurredAt:    time.Now(),
 		Metadata:      entry.Metadata,
+		ChangedFields: entry.ChangedFields,
+		NewValues:     entry.NewValues,
+	}
+	if entry.Failed {
+		req.RequiresAttention = true
+		if entry.ErrorCode != "" {
+			code := entry.ErrorCode
+			req.ErrorCode = &code
+		}
 	}
 
 	// Actor: the authenticated platform user. AuthMiddleware + StringifyUserID
@@ -133,6 +159,15 @@ func (e *PlatformAuditEmitter) Emit(c *gin.Context, entry PlatformAuditEntry) {
 		}
 	}
 	if email := c.GetString("email"); email != "" {
+		req.UserEmail = &email
+	}
+	if req.UserID == nil && entry.ActorID != "" {
+		if uid, err := uuid.Parse(entry.ActorID); err == nil {
+			req.UserID = &uid
+		}
+	}
+	if req.UserEmail == nil && entry.ActorEmail != "" {
+		email := entry.ActorEmail
 		req.UserEmail = &email
 	}
 

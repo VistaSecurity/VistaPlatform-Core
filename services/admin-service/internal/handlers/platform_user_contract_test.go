@@ -53,13 +53,75 @@ type stubPlatformUserStore struct {
 	createID      string
 	createErr     error
 	updateErr     error
-	pwAffected    int64
 	pwErr         error
 	deleteErr     error
 	// passwordMinLength stands in for platform_settings.password_min_length. The
 	// zero value means "unset", which the handler clamps to the built-in floor —
 	// same as the repository's fail-safe read.
 	passwordMinLength int
+
+	// Role-assignment seams (platform_role_assignment.go). Zero values PERMIT,
+	// so the contract tests above describe the authorized path; the
+	// escalation tests in platform_role_assignment_test.go set these to deny.
+	denyAssign bool
+	permErr    error
+	// missingByRole maps a role id to the permissions it grants that the
+	// caller lacks. Absent → the role is a subset of the caller's permissions.
+	missingByRole map[string][]string
+	// roleRefs maps a user id to its current role. nil map → every user
+	// exists with no role; non-nil → users absent from the map are not found.
+	roleRefs  map[string]platformUserRoleRef
+	roleNames map[uuid.UUID]string
+	// otherSuperAdmins stands in for the repository's in-transaction guard:
+	// when it is 0, a write that takes a super_admin (per roleRefs) out of the
+	// active set — deactivate, delete, or a role change away from super_admin —
+	// returns errLastActiveSuperAdmin and writes nothing.
+	otherSuperAdmins int
+	// updated records the last UpdatePlatformUser write, so a test can prove a
+	// denied request wrote nothing.
+	updated *platformUserUpdateFields
+	created bool
+	// permChecks records, in order, every permission name passed to
+	// HasPlatformPermission.
+	permChecks []string
+	// passwordSet / resetStored / deleted record the other writes, for the same
+	// "a denied request wrote nothing" assertions.
+	passwordSet bool
+	resetStored bool
+	deleted     bool
+
+	// onRoleRead, when set, runs once — right after the handler's FIRST
+	// PlatformUserRole read, i.e. between its rank check and its write. A test
+	// uses it to change the target's role (roleRefs) the way a concurrent
+	// operator would. The writes then behave like the repository's
+	// conditional UPDATEs: when the target's current role (per roleRefs) is not
+	// the expectedRole the handler passes, they return errPlatformUserChanged
+	// and write nothing.
+	onRoleRead func()
+	// expectedRoles records the expectedRole passed to every conditional write.
+	expectedRoles []*uuid.UUID
+}
+
+// staleRole mirrors "role_id IS NOT DISTINCT FROM $expected": true when the
+// target no longer holds the role the handler checked.
+func (s *stubPlatformUserStore) staleRole(id string, expected *uuid.UUID) bool {
+	s.expectedRoles = append(s.expectedRoles, expected)
+	if s.roleRefs == nil {
+		return false
+	}
+	cur := s.roleRefs[id].RoleID
+	if cur == nil || expected == nil {
+		return cur != expected
+	}
+	return *cur != *expected
+}
+
+// removesLastSuperAdmin mirrors platformUserRepository.withLastSuperAdminGuard.
+func (s *stubPlatformUserStore) removesLastSuperAdmin(id string, removes bool) bool {
+	if s.roleRefs == nil || s.otherSuperAdmins > 0 || !removes {
+		return false
+	}
+	return s.roleRefs[id].RoleName == superAdminRoleName
 }
 
 func (s *stubPlatformUserStore) ListPlatformUsers(context.Context, platformUserListFilters) ([]models.PlatformUser, int, error) {
@@ -78,19 +140,46 @@ func (s *stubPlatformUserStore) PasswordMinLength(context.Context) int {
 	return s.passwordMinLength
 }
 func (s *stubPlatformUserStore) CreatePlatformUser(context.Context, platformUserInsert) (string, time.Time, time.Time, error) {
+	s.created = true
 	now := time.Now().UTC()
 	return s.createID, now, now, s.createErr
 }
-func (s *stubPlatformUserStore) UpdatePlatformUser(context.Context, string, platformUserUpdateFields) error {
+func (s *stubPlatformUserStore) UpdatePlatformUser(_ context.Context, id string, expected *uuid.UUID, f platformUserUpdateFields) error {
+	if s.staleRole(id, expected) {
+		return errPlatformUserChanged
+	}
+	removes := (f.IsActive != nil && !*f.IsActive) ||
+		(f.RoleID != nil && s.roleNames[*f.RoleID] != superAdminRoleName)
+	if s.removesLastSuperAdmin(id, removes) {
+		return errLastActiveSuperAdmin
+	}
+	s.updated = &f
+	if s.updateErr == nil && f.RoleID != nil && s.roleRefs != nil {
+		// Mirror the write so a read-back (the role_changed audit) sees it.
+		rid := *f.RoleID
+		s.roleRefs[id] = platformUserRoleRef{RoleID: &rid, RoleName: s.roleNames[rid]}
+	}
 	return s.updateErr
 }
-func (s *stubPlatformUserStore) UpdatePlatformUserPassword(context.Context, string, string, bool) (int64, error) {
-	return s.pwAffected, s.pwErr
+func (s *stubPlatformUserStore) UpdatePlatformUserPassword(_ context.Context, id string, expected *uuid.UUID, _ string, _ bool) error {
+	if s.staleRole(id, expected) {
+		return errPlatformUserChanged
+	}
+	s.passwordSet = true
+	return s.pwErr
 }
-func (s *stubPlatformUserStore) DeletePlatformUser(context.Context, string) error {
+func (s *stubPlatformUserStore) DeletePlatformUser(_ context.Context, id string, expected *uuid.UUID) error {
+	if s.staleRole(id, expected) {
+		return errPlatformUserChanged
+	}
+	if s.removesLastSuperAdmin(id, true) {
+		return errLastActiveSuperAdmin
+	}
+	s.deleted = true
 	return s.deleteErr
 }
 func (s *stubPlatformUserStore) CreateInvitedPlatformUser(context.Context, platformUserInviteInsert) (string, time.Time, error) {
+	s.created = true
 	return s.createID, time.Now().UTC(), s.createErr
 }
 func (s *stubPlatformUserStore) InviterDisplayName(context.Context, string) string { return "" }
@@ -100,8 +189,41 @@ func (s *stubPlatformUserStore) EnabledAdminSsoProviderLabels(context.Context) [
 func (s *stubPlatformUserStore) ActiveUserEmail(context.Context, string) (string, bool, error) {
 	return s.user.Email, s.userFound, s.userErr
 }
-func (s *stubPlatformUserStore) StorePasswordResetToken(context.Context, string, string, time.Time) error {
+func (s *stubPlatformUserStore) StorePasswordResetToken(_ context.Context, id string, expected *uuid.UUID, _ string, _ time.Time) error {
+	if s.staleRole(id, expected) {
+		return errPlatformUserChanged
+	}
+	s.resetStored = true
 	return s.updateErr
+}
+
+// HasPlatformPermission records every permission the handler asks about, and
+// denies only the literal "platform_roles.assign" when denyAssign is set — so a
+// handler that checks some other permission neither passes the escalation
+// tests by accident nor escapes TestRoleAssign_ChecksPlatformRolesAssign.
+func (s *stubPlatformUserStore) HasPlatformPermission(_ context.Context, _ string, permission string) (bool, error) {
+	s.permChecks = append(s.permChecks, permission)
+	if permission == "platform_roles.assign" && s.denyAssign {
+		return false, s.permErr
+	}
+	return true, s.permErr
+}
+func (s *stubPlatformUserStore) RolePermissionsNotHeldBy(_ context.Context, _ string, roleID string) ([]string, error) {
+	return s.missingByRole[roleID], nil
+}
+func (s *stubPlatformUserStore) PlatformUserRole(_ context.Context, userID string) (platformUserRoleRef, bool, error) {
+	if s.onRoleRead != nil {
+		defer func() {
+			hook := s.onRoleRead
+			s.onRoleRead = nil
+			hook()
+		}()
+	}
+	if s.roleRefs == nil {
+		return platformUserRoleRef{}, true, nil
+	}
+	ref, ok := s.roleRefs[userID]
+	return ref, ok, nil
 }
 
 // --- engine -----------------------------------------------------------------
@@ -110,6 +232,8 @@ func platformUserEngine(store platformUserStore, hasher passwordHasher, currentU
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	grp := r.Group(apiBase + "/admin/users")
+	// The acting operator, as AuthMiddleware + StringifyUserID leave it.
+	grp.Use(func(c *gin.Context) { c.Set("userID", stubCallerID); c.Next() })
 	grp.GET("", listPlatformUsersWithStore(store))
 	grp.POST("", createPlatformUserWithStore(store, hasher))
 	grp.GET("/:id", getPlatformUserWithStore(store))
@@ -130,6 +254,10 @@ func platformUserEngine(store platformUserStore, hasher passwordHasher, currentU
 
 const platformUserBase = apiBase + "/admin/users"
 
+// stubCallerID is the operator every /admin/users request in these tests is
+// made by.
+const stubCallerID = "0a000000-0000-4000-8000-00000000ca11"
+
 func strongPassword() string { return "Str0ng!Passw0rd" }
 
 func samplePlatformUserRole() *models.PlatformRole {
@@ -146,18 +274,19 @@ func samplePlatformUser() models.PlatformUser {
 	changed := now.Add(-24 * time.Hour)
 	accepted := now.Add(-48 * time.Hour)
 	inviter := uuid.New()
+	role := samplePlatformUserRole()
 	return models.PlatformUser{
 		ID:                   uuid.New(),
 		Email:                "admin@vistaplatform.local",
 		FirstName:            "Grace",
 		LastName:             "Hopper",
 		IsActive:             true,
-		RoleID:               uuid.New(),
+		RoleID:               &role.ID,
 		EmailVerified:        true,
 		ForcePasswordChange:  false,
 		PasswordChangedAt:    &changed,
 		LastLoginAt:          &login,
-		Role:                 samplePlatformUserRole(),
+		Role:                 role,
 		InvitedBy:            &inviter,
 		InvitationAcceptedAt: &accepted,
 		CreatedAt:            now,
@@ -165,7 +294,9 @@ func samplePlatformUser() models.PlatformUser {
 	}
 }
 
-// minimalPlatformUser leaves role + nullable/omitempty fields unset.
+// minimalPlatformUser leaves role + nullable/omitempty fields unset. It is a
+// roleless user: the repository maps a NULL role_id to a nil RoleID, which
+// must reach the wire as "role_id": null (never the zero UUID).
 func minimalPlatformUser() models.PlatformUser {
 	now := time.Now().UTC()
 	return models.PlatformUser{
@@ -174,7 +305,6 @@ func minimalPlatformUser() models.PlatformUser {
 		FirstName: "Min",
 		LastName:  "Imal",
 		IsActive:  false,
-		RoleID:    uuid.New(),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -343,7 +473,7 @@ func TestContract_UpdatePlatformUser_400_invalidRole(t *testing.T) {
 
 func TestContract_AdminSetPassword_200(t *testing.T) {
 	sv := loadSpec(t)
-	eng := platformUserEngine(&stubPlatformUserStore{pwAffected: 1}, stubPasswordHasher{}, "")
+	eng := platformUserEngine(&stubPlatformUserStore{}, stubPasswordHasher{}, "")
 	w := doRequest(eng, http.MethodPut, platformUserBase+"/"+uuid.New().String()+"/set-password", strings.NewReader(`{"new_password":"`+strongPassword()+`"}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
@@ -351,10 +481,10 @@ func TestContract_AdminSetPassword_200(t *testing.T) {
 	sv.assertConforms(t, "MessageResponse", w.Body.Bytes())
 }
 
-// no row updated → 404.
+// unknown user → 404 (from the rank check's role lookup).
 func TestContract_AdminSetPassword_404(t *testing.T) {
 	sv := loadSpec(t)
-	eng := platformUserEngine(&stubPlatformUserStore{pwAffected: 0}, stubPasswordHasher{}, "")
+	eng := platformUserEngine(&stubPlatformUserStore{roleRefs: map[string]platformUserRoleRef{}}, stubPasswordHasher{}, "")
 	w := doRequest(eng, http.MethodPut, platformUserBase+"/"+uuid.New().String()+"/set-password", strings.NewReader(`{"new_password":"`+strongPassword()+`"}`))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())

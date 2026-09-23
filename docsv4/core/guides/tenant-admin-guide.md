@@ -96,7 +96,7 @@ rail with its own navigation, in this order:
 | Settings section | Pages |
 |---|---|
 | **Organization** | Overview · Branding |
-| **Account** | Billing *(Enterprise)* · Usage & Limits |
+| **Account** | Billing account · Usage & Limits |
 | **People & Access** | Members · Roles & Permissions · Security & SSO *(Enterprise)* |
 | **Integrations** | Integrations · AI assistant |
 | **Notifications & Alerts** | Routing Rules · Alert Rules · Delivery History |
@@ -181,12 +181,18 @@ menu.
 
 ## Account: Billing & Usage
 
-**Usage & Limits** is included in every edition. The Billing page is not.
+Both pages are in every edition. The billing *controls* are not.
 
-> **Self-service billing is an Enterprise capability.** A Core deployment has no
-> subscription, no invoices and no payment provider, so there is nothing for a
-> Billing page to show and Core does not mount one. Tier assignment and
-> usage-against-limits still work.
+### Billing account
+
+**Settings → Account → Billing account** shows what your organization is on:
+
+- On a free install: **Vista Platform Core**. It is free to run for any purpose,
+  with no plan, no invoices and no payment provider.
+
+> **Self-service billing is an MSP capability.** It exists for a service
+> provider billing its own customers. The subscription, invoice and payment
+> controls appear only when your provider bills you through the platform.
 
 
 ### Usage & Limits

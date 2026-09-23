@@ -4,12 +4,35 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { adminServiceComponents, tenantHealthServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { usePlatformEdition } from '../../lib/edition';
+import { licenseCapKey } from '../../lib/license-cap';
 
 export type Tenant = adminServiceComponents['schemas']['Tenant'];
 export type TenantHealthSummary = tenantHealthServiceComponents['schemas']['TenantHealthSummary'];
 export type TenantStats = adminServiceComponents['schemas']['TenantStats'];
 export type TenantCost = adminServiceComponents['schemas']['TenantCost'];
 export type TierEntitlement = adminServiceComponents['schemas']['TierEntitlement'];
+export type TenantPlan = adminServiceComponents['schemas']['TenantPlan'];
+export type TenantFeatures = adminServiceComponents['schemas']['TenantFeatures'];
+export type TenantFeature = adminServiceComponents['schemas']['TenantFeature'];
+
+/**
+ * The name to show for a tenant's plan: the resolved plan block
+ * (edition-licensing spec §3). "Vista Platform Enterprise" on Enterprise,
+ * "Vista Platform Core" on Core, the MSP's own plan on MSP. Never a tier name
+ * on Enterprise — the backend omits `subscription_tier` there — and never the
+ * old "Trial" fallback, which labelled every tier-less tenant a trial.
+ */
+export function planLabel(t: Pick<Tenant, 'plan' | 'subscription_tier'>): string {
+  return t.plan?.display_name ?? t.subscription_tier ?? '—';
+}
+
+/** The nil UUID a tenant with no tier used to serialise as (RC-10). */
+const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+/** The tenant's tier id, or null when it has none. */
+export function tierIdOf(t: Pick<Tenant, 'subscription_tier_id'>): string | null {
+  return t.subscription_tier_id && t.subscription_tier_id !== NIL_UUID ? t.subscription_tier_id : null;
+}
 export type CouponRedemption = adminServiceComponents['schemas']['CouponRedemption'];
 
 /** Edit form payload — partial; `subscription_tier` is intentionally omitted (PUT ignores it). */
@@ -176,6 +199,39 @@ export function useUpdateTenant() {
   });
 }
 
+/**
+ * Mark (or unmark) a tenant as the MSP's own — PUT /admin/tenants/{id}/operator.
+ * The MSP's own tenants never count against the licence's tenant limit, so the
+ * change refreshes the licensed-tenant banner too. MSP licences only: the
+ * server answers 409 otherwise, and its message is surfaced as-is.
+ */
+export function useSetTenantOperator() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, isOperator }: { id: string; isOperator: boolean }) => {
+      const { data, error } = await clients.admin.PUT('/admin/tenants/{id}/operator', {
+        params: { path: { id } },
+        body: { is_operator: isOperator },
+      });
+      if (error || !data) {
+        throw new Error((error as { error?: string } | undefined)?.error ?? 'Failed to update the tenant');
+      }
+      return data;
+    },
+    onSuccess: (data) => {
+      // Patch every cached directory (one per operator scope) with the saved
+      // value first, so the drawer — which reads its tenant from this cache —
+      // shows it immediately instead of after the refetch lands.
+      qc.setQueriesData<Tenant[]>({ queryKey: tenantsKey }, (rows) =>
+        rows?.map((t) => (t.id === data.id ? { ...t, is_operator: data.is_operator } : t)),
+      );
+      void qc.invalidateQueries({ queryKey: tenantsKey });
+      if (data.cap) qc.setQueryData(licenseCapKey, data.cap);
+      else void qc.invalidateQueries({ queryKey: licenseCapKey });
+    },
+  });
+}
+
 /** Soft-delete a tenant (DELETE /admin/tenants/{id} — sets deleted_at), then refresh. */
 export function useDeleteTenant() {
   const qc = useQueryClient();
@@ -184,7 +240,11 @@ export function useDeleteTenant() {
       const { error } = await clients.admin.DELETE('/admin/tenants/{id}', { params: { path: { id } } });
       if (error) throw new Error('Failed to delete tenant');
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: tenantsKey }); },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: tenantsKey });
+      // A deleted tenant can take an MSP install back under its licence.
+      void qc.invalidateQueries({ queryKey: licenseCapKey });
+    },
   });
 }
 
@@ -305,6 +365,48 @@ export function useUpdateTenantSettings() {
     },
     onSuccess: (_d, { id }) => {
       void qc.invalidateQueries({ queryKey: tenantSettingsKey(id) });
+    },
+  });
+}
+
+// ---- Per-tenant feature switches (Tenants ▸ a tenant ▸ Entitlements) --------
+//
+// GET /admin/tenants/{id}/features lists every paid capability the licence
+// covers, as the tenant resolves it; PUT .../features/{key} switches one off
+// (reason required) or back on. Enterprise only — the backend answers 409 on
+// any other licence, and `switchable` says so up front.
+
+const tenantFeaturesKey = (id: string | null) => ['platform', 'tenant-features', id] as const;
+
+export function useTenantFeatures(id: string | null) {
+  return useQuery({
+    queryKey: tenantFeaturesKey(id),
+    enabled: !!id,
+    staleTime: 30 * 1000,
+    queryFn: async (): Promise<TenantFeatures> => {
+      const { data, error } = await clients.admin.GET('/admin/tenants/{id}/features', { params: { path: { id: id! } } });
+      if (error || !data) throw new Error('Failed to load features');
+      return data;
+    },
+  });
+}
+
+export function useSetTenantFeature() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, key, enabled, reason }: { id: string; key: string; enabled: boolean; reason?: string }) => {
+      const { data, error } = await clients.admin.PUT('/admin/tenants/{id}/features/{key}', {
+        params: { path: { id, key } },
+        body: enabled ? { enabled } : { enabled, reason: reason ?? '' },
+      });
+      if (error || !data) {
+        const msg = (error as { error?: string } | undefined)?.error;
+        throw new Error(msg ?? 'Failed to update the feature');
+      }
+      return data;
+    },
+    onSuccess: (data, { id }) => {
+      qc.setQueryData(tenantFeaturesKey(id), data);
     },
   });
 }

@@ -71,56 +71,20 @@ describe('the view switch', () => {
     expect(shell).toMatch(/lazy\(/);
   });
 
-  it('keeps the neighbourhood as the default, so an old bookmark still lands there', () => {
+  it('keeps an old focus= link on the neighbourhood while the estate is the default', () => {
     expect(readMapView(null)).toBe(DEFAULT_MAP_VIEW);
-    expect(DEFAULT_MAP_VIEW).toBe('neighbourhood');
+    expect(DEFAULT_MAP_VIEW).toBe('network');
+    // The shell must pass the focus through, or every pre- map link
+    // would open the estate instead of the asset it names.
+    expect(shell).toContain("readMapView(params.get('view'), params.has('focus'))");
   });
 
-  it('leaves the default OUT of the URL rather than writing it in', () => {
-    // `/inventory?lens=map` has always meant the neighbourhood. Writing
-    // `?view=neighbourhood` on every visit would churn every shared link.
+  it('mounts the network view lazily too', () => {
+    expect(shell).toContain("import('./network-map-view')");
+  });
+
+  it('leaves the implied view OUT of the URL rather than writing it in', () => {
+    // Writing `?view=` on every tab switch would churn every shared link.
     expect(shell).toContain("p.delete('view')");
-  });
-});
-
-describe('the Inventory page reaches the switch', () => {
-  it('routes the map lens through MapShell rather than straight at one renderer', () => {
-    const page = read('inventory-page.tsx');
-    expect(page).toContain('<MapShell />');
-    // The other polarity: if the page still mounted AssetMapLens directly, the
-    // switch would exist and never render.
-    expect(page).not.toContain('<AssetMapLens />');
-  });
-});
-
-describe('the topology view is wired to a real endpoint', () => {
-  it('reads GET /infrastructure-assets/topology through the generated client', () => {
-    // A component with no caller is a gap; so is a hook nothing calls. Both
-    // halves are asserted, in the source, because there is no router to drive.
-    expect(read('relationship-queries.ts')).toContain("'/infrastructure-assets/topology'");
-    expect(read('topology-view.tsx')).toContain('useAssetTopology');
-  });
-
-  it('drills through to the asset list rather than dead-ending', () => {
-    const view = read('topology-view.tsx');
-    expect(view).toContain('classDrillThroughQuery');
-    expect(view).toContain('segmentDrillThroughQuery');
-    expect(view).toContain('topologyAssetsHref');
-  });
-});
-
-describe('the dashboard hero offers the topology', () => {
-  it('links at it by its deep-linkable URL', () => {
-    // The hero is where an ops persona starts, and "where is everything" is the
-    // question the topology answers. A view reachable only by finding a segmented
-    // control on another page is a view most people never see.
-    const hero = readFileSync(join(here, '..', 'dashboard', 'inventory-health-hero.tsx'), 'utf8');
-    expect(hero).toContain('/inventory?lens=map&view=topology');
-  });
-
-  it('is mounted on the dashboard, not on a page of its own', () => {
-    // ADR-0006 D5 is explicit: "No new dashboard." Both personas read one page.
-    const page = readFileSync(join(here, '..', 'dashboard', 'dashboard-page.tsx'), 'utf8');
-    expect(page).toContain('<InventoryHealthHero />');
   });
 });

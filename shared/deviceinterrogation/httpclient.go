@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/internal/dialguard"
 )
 
 // One http.Client constructor for every appliance collector, so the SSRF
@@ -49,19 +49,24 @@ const deviceHTTPTimeout = 30 * time.Second
 // maxDeviceRedirects bounds a same-host redirect chain. Go's own default is 10.
 const maxDeviceRedirects = 5
 
-// dialContextForDevice is the dial guard [newDeviceHTTPClient] installs.
+// The dial guard itself is [dialguard.Dial], which defaults to
+// [network.OnPremDialContext] and which no production path writes.
 //
-// It is a package-private variable for ONE reason: this package's own tests
-// stand fake appliances up on 127.0.0.1, which is precisely the address the
-// guard exists to refuse, so a test binary swaps in an unguarded dialer (see
-// TestMain in the package's tests). Nothing outside this package can reach it
-// and no production path writes it.
+// It lives in an internal package, rather than as a variable here, for ONE
+// reason: fake appliances in tests are httptest servers on 127.0.0.1, which is
+// precisely the address the guard exists to refuse. This package's own tests
+// swap in an unguarded dialer (see TestMain in ssrf_test.go), and the
+// DB-integration tests of the services that drive a collector end to end open
+// exactly one loopback listener through [devicetest.AllowListener]. The
+// internal-package rule keeps the variable out of reach of everything else, and
+// AllowListener refuses to run outside a test binary.
 //
 // The swap is what makes the guard tests load-bearing rather than incidental:
-// they put the real value back for their own duration and assert the refusal
-// against a live loopback listener, so deleting the assignment below — or
-// letting a collector build its own http.Client — turns them red.
-var dialContextForDevice = network.OnPremDialContext
+// ssrf_test.go puts the real guard back for its own duration and asserts the
+// refusal against a live loopback listener, so letting a collector build its
+// own http.Client turns it red. Those tests name the guard rather than reading
+// the default, so the DEFAULT is pinned by devicetest's own test, which runs
+// with no TestMain swap: an unguarded default fails it before the seam opens.
 
 // newDeviceHTTPClient returns the guarded client every appliance collector
 // dials with. insecureSkipVerify is the existing per-device opt-in for
@@ -74,13 +79,21 @@ func newDeviceHTTPClient(insecureSkipVerify bool, timeout time.Duration) *http.C
 	}
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify}, //nolint:gosec // per-device opt-in for self-signed appliance mgmt certs
-		DialContext:     dialContextForDevice(timeout),
+		DialContext:     dialguard.Dial(timeout),
 	}
 	return &http.Client{
 		Transport:     transport,
 		Timeout:       timeout,
 		CheckRedirect: refuseCrossOriginRedirect,
 	}
+}
+
+// NewDeviceHTTPClient returns the same guarded client used by the recurring
+// appliance collectors. Bootstrap discovery must use this constructor too so
+// private management networks work without weakening the loopback, metadata,
+// DNS-rebinding, or redirect protections.
+func NewDeviceHTTPClient(insecureSkipVerify bool, timeout time.Duration) *http.Client {
+	return newDeviceHTTPClient(insecureSkipVerify, timeout)
 }
 
 // refuseCrossOriginRedirect is the http.Client.CheckRedirect policy above.

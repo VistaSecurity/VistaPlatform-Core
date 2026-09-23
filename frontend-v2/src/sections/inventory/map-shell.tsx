@@ -1,21 +1,20 @@
-// The Map lens's two views (ADR-0006 D4, workstream 3.8).
+// The Map lens's views (ADR-0006 D4, workstream 3.8).
 //
-// D4 is "the map is TWO views, not one":
-//
-//   - **Neighbourhood** — the interactive graph around one asset. Shipped in
-//     2.9; untouched here.
-//   - **Topology** — the tenant-wide "where is everything", as a site → segment
-//     → class tree with counts. Added in 3.8.
+//   - **Network** — every device by site and network, badged by the crypto it
+// serves, with any device explodable into its services. The
+//     default when nothing is focused.
+//   - **Neighbourhood** — the interactive graph around one asset (2.9). Any
+//     URL carrying `focus=` still opens here.
+//   - **Topology** — the site → segment → class tree with counts (3.8).
 //
 // This shell owns only the switch between them and the `?view=` parameter that
 // makes each one a link somebody can paste into a ticket. It holds no data and
-// no layout of its own, so neither view has to know the other exists.
+// no layout of its own, so no view has to know the others exist.
 //
-// Both halves are LAZY, and for different reasons. The neighbourhood pulls in
-// `@xyflow/react` and `dagre`, which is the reason the map lens was code-split
-// in the first place; the topology pulls in nothing heavy but there is no
-// reason to ship it to somebody who only ever opens the neighbourhood. A user
-// who never opens the map downloads neither.
+// Every view is LAZY. The neighbourhood pulls in `@xyflow/react` and `dagre`,
+// which is the reason the map lens was code-split in the first place; the
+// others pull in nothing heavy, but there is no reason to ship them to someone
+// who never opens them. A user who never opens the map downloads none of them.
 import { Suspense, lazy } from 'react';
 import { useSearchParams } from 'react-router';
 import { Icon } from '../../components/ui';
@@ -23,10 +22,16 @@ import { MAP_VIEWS, readMapView, type MapView } from './topology-model';
 
 const AssetMapLens = lazy(() => import('./map-lens').then((m) => ({ default: m.AssetMapLens })));
 const TopologyView = lazy(() => import('./topology-view').then((m) => ({ default: m.TopologyView })));
+const NetworkMapView = lazy(() => import('./network-map-view').then((m) => ({ default: m.NetworkMapView })));
 
 /** What each view is called, and what it answers. The sub-label is the whole
  *  point of having two: the names alone do not say which question is which. */
 const VIEW_META: Readonly<Record<MapView, { label: string; icon: string; hint: string }>> = {
+  network: {
+    label: 'Network',
+    icon: 'network',
+    hint: 'Every device by site and network, and the crypto each one serves.',
+  },
   neighbourhood: {
     label: 'Neighbourhood',
     icon: 'waypoints',
@@ -41,14 +46,14 @@ const VIEW_META: Readonly<Record<MapView, { label: string; icon: string; hint: s
 
 export function MapShell() {
   const [params, setParams] = useSearchParams();
-  const view = readMapView(params.get('view'));
+  const view = readMapView(params.get('view'), params.has('focus'));
 
   const setView = (next: MapView) => {
     const p = new URLSearchParams(params);
-    // The default is left OUT of the URL rather than written into it, so
-    // `/inventory?lens=map` keeps meaning what it has always meant and an old
-    // bookmark lands where it used to.
-    if (next === 'neighbourhood') p.delete('view'); else p.set('view', next);
+    // The view the URL would imply anyway is left OUT of it rather than written
+    // in, so `/inventory?lens=map` stays the estate and an old `focus=` link
+    // stays a neighbourhood, and switching tabs does not churn shared links.
+    if (next === readMapView(null, p.has('focus'))) p.delete('view'); else p.set('view', next);
     setParams(p, { replace: true });
   };
 
@@ -90,7 +95,7 @@ export function MapShell() {
           </div>
         }
       >
-        {view === 'topology' ? <TopologyView /> : <AssetMapLens />}
+        {view === 'topology' ? <TopologyView /> : view === 'network' ? <NetworkMapView /> : <AssetMapLens />}
       </Suspense>
     </div>
   );

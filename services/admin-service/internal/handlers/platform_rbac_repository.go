@@ -1,12 +1,15 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/shared/models"
 )
 
@@ -34,6 +37,23 @@ type platformRBACStore interface {
 	SetRolePermissions(roleID string, permissionIDs []string) error
 	ListPermissions() ([]models.PlatformPermission, error)
 	GetPermission(id string) (models.PlatformPermission, error)
+
+	// Escalation seams for SetPlatformRolePermissions (platform_roles.manage
+	// must not be a way to grant yourself, or anyone, more than you hold).
+	//
+	// PlatformUserRole is a (non-deleted) platform user's current role: a nil
+	// RoleID when they have none or do not exist.
+	PlatformUserRole(userID string) (platformUserRoleRef, error)
+	// RolePermissionsNotHeldBy lists the permissions roleID grants today that
+	// callerID does not hold.
+	RolePermissionsNotHeldBy(callerID, roleID string) ([]string, error)
+	// PermissionsNotHeldBy lists, by name, the permissions among permissionIDs
+	// that callerID does not hold. Unknown ids are not listed (the write's
+	// foreign key rejects them). The ids are compared as uuid, never as text:
+	// the handler canonicalizes them (canonicalUUIDs) and the query casts, so
+	// no spelling of an id (upper case, braces, no hyphens) can be written by
+	// SetRolePermissions while going unmatched here.
+	PermissionsNotHeldBy(callerID string, permissionIDs []string) ([]string, error)
 }
 
 // userPermissionProvider is the one-method dependency of
@@ -211,6 +231,51 @@ func (r *platformRBACRepository) SetRolePermissions(roleID string, permissionIDs
 	}
 
 	return tx.Commit()
+}
+
+func (r *platformRBACRepository) PlatformUserRole(userID string) (platformUserRoleRef, error) {
+	var roleID uuid.NullUUID
+	var roleName sql.NullString
+	err := r.db.QueryRow(`
+		SELECT pu.role_id, pr.name
+		FROM platform_users pu
+		LEFT JOIN platform_roles pr ON pr.id = pu.role_id
+		WHERE pu.id = $1 AND pu.deleted_at IS NULL`, userID,
+	).Scan(&roleID, &roleName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return platformUserRoleRef{}, nil
+	}
+	if err != nil {
+		return platformUserRoleRef{}, err
+	}
+	ref := platformUserRoleRef{RoleName: roleName.String}
+	if roleID.Valid {
+		id := roleID.UUID
+		ref.RoleID = &id
+	}
+	return ref, nil
+}
+
+func (r *platformRBACRepository) RolePermissionsNotHeldBy(callerID, roleID string) ([]string, error) {
+	return rolePermissionsNotHeldBy(context.Background(), r.db, callerID, roleID)
+}
+
+func (r *platformRBACRepository) PermissionsNotHeldBy(callerID string, permissionIDs []string) ([]string, error) {
+	if len(permissionIDs) == 0 {
+		return nil, nil
+	}
+	// Compared as uuid[]. It used to be pp.id::text = ANY($2), an exact
+	// lower-case string match, while the write let Postgres cast each id to
+	// uuid — so an upper-case or braced id of a permission the caller lacked
+	// skipped this check and was still written. A malformed id now fails the
+	// query instead of passing it; the handler rejects those with a 400 first.
+	return permissionNames(context.Background(), r.db, `
+		SELECT pp.name
+		FROM platform_permissions pp
+		WHERE pp.id = ANY($2::uuid[])
+		  AND NOT platform_user_has_permission($1, pp.name)
+		ORDER BY pp.name
+	`, callerID, pq.Array(permissionIDs))
 }
 
 func (r *platformRBACRepository) ListPermissions() ([]models.PlatformPermission, error) {

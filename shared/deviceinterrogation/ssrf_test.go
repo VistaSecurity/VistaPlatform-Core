@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/internal/dialguard"
 	"github.com/vistasecurity/vistaplatform/shared/network"
 )
 
@@ -28,7 +29,7 @@ import (
 // removed from it, those tests go red while every other test in the package
 // carries on passing.
 func TestMain(m *testing.M) {
-	dialContextForDevice = func(timeout time.Duration) func(ctx context.Context, network string, addr string) (net.Conn, error) {
+	dialguard.Dial = func(timeout time.Duration) func(ctx context.Context, network string, addr string) (net.Conn, error) {
 		return (&net.Dialer{Timeout: timeout}).DialContext
 	}
 	os.Exit(m.Run())
@@ -37,9 +38,9 @@ func TestMain(m *testing.M) {
 // withRealDialGuard restores the production dialer for the duration of one test.
 func withRealDialGuard(t *testing.T) {
 	t.Helper()
-	saved := dialContextForDevice
-	dialContextForDevice = network.OnPremDialContext
-	t.Cleanup(func() { dialContextForDevice = saved })
+	saved := dialguard.Dial
+	dialguard.Dial = network.OnPremDialContext
+	t.Cleanup(func() { dialguard.Dial = saved })
 }
 
 // Every appliance collector must dial through the guard. The property asserted

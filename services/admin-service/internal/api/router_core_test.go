@@ -90,6 +90,8 @@ func TestCoreRouter_BuildsAndMountsTheOperatorConsole(t *testing.T) {
 		// Edition read-out — Core MUST mount it, because it is how the admin
 		// console learns to stop rendering MSP/Enterprise navigation here.
 		"GET /api/v1/admin-service/admin/platform/edition",
+		// Licensed tenant limit — the console shell asks on every build.
+		"GET /api/v1/admin-service/admin/license/cap",
 		// staff SSO
 		"GET /api/v1/admin-service/admin/sso/providers",
 		"GET /api/v1/admin-service/admin/sso/:provider/authorize",

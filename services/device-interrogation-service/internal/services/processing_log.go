@@ -27,6 +27,10 @@ const (
 	StageDiscoveryTarget  = "discovery_target"
 	StageDiscoveryFinding = "discovery_finding"
 	StageSensorDiscovery  = "sensor_discovery"
+	// StageObservations is the ops-observation write (facts, identity, edges)
+	// for the interrogated asset. It is not per discovered asset: one failed
+	// step is one fact, edge or identity write the ObservationSink dropped.
+	StageObservations = "observations"
 )
 
 // Step outcomes.
@@ -99,6 +103,27 @@ func (p *ProcessingLog) skip(target, stage, reason string) {
 	p.record(target, stage, StepSkipped, reason)
 }
 
+// observationsFailed records what ObservationSink.Persist could not write.
+//
+// Persist joins one error per dropped fact, edge or identity write and keeps
+// going, so the joined error is split back into one failed step each: the
+// count is then how many observations were lost, and distinctErrors collapses
+// the repeats. Before this, the error only reached stdout, and a UniFi run
+// that dropped 139 of 143 facts and every edge still read
+// `errors: [], fully_materialized: true`.
+func (p *ProcessingLog) observationsFailed(target string, err error) {
+	if err == nil {
+		return
+	}
+	errs := []error{err}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		errs = joined.Unwrap()
+	}
+	for _, e := range errs {
+		p.fail(target, StageObservations, e)
+	}
+}
+
 // counts returns per-stage ok/failed/skipped tallies.
 func (p *ProcessingLog) counts(stage string) (ok, failed, skipped int) {
 	for _, s := range p.steps {
@@ -155,6 +180,7 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 	findingsOK, findingsFailed, _ := p.counts(StageDiscoveryFinding)
 	discOK, discFailed, discSkipped := p.counts(StageSensorDiscovery)
 	targetsOK, targetsFailed, _ := p.counts(StageDiscoveryTarget)
+	_, observationsFailed, _ := p.counts(StageObservations)
 
 	summary := map[string]interface{}{
 		"assets_received":        p.AssetsReceived,
@@ -167,8 +193,9 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 		"discoveries_written":    discOK,
 		"discoveries_failed":     discFailed,
 		"discoveries_skipped":    discSkipped,
+		"observations_failed":    observationsFailed,
 		"materialized":           findingsOK + p.ExistingFindings,
-		"fully_materialized":     p.fullyMaterialized(findingsFailed, discFailed, targetsFailed),
+		"fully_materialized":     p.fullyMaterialized(findingsFailed, discFailed, targetsFailed) && observationsFailed == 0,
 		"errors":                 p.distinctErrors(),
 		"steps":                  p.steps,
 		"processing_finished_at": time.Now().UTC().Format(time.RFC3339),
@@ -185,7 +212,7 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 		// been materialised. Saying it again now would be the opposite of
 		// honest.
 		summary["materialized"] = p.HostInventory.Materialized()
-		summary["fully_materialized"] = p.Fatal == "" && p.HostInventory.FullyMaterialized()
+		summary["fully_materialized"] = p.Fatal == "" && p.HostInventory.FullyMaterialized() && observationsFailed == 0
 	}
 	return summary
 }

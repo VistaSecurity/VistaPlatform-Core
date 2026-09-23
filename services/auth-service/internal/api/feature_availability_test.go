@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 type stubFeatureAvailabilityStore struct {
@@ -24,6 +25,14 @@ type stubFeatureAvailabilityStore struct {
 	caps     map[string]*int
 	capsErr  error
 	askedFor []string
+	plan     entitlements.Plan // zero = Core
+}
+
+func (s *stubFeatureAvailabilityStore) TenantPlan(context.Context, uuid.UUID) (entitlements.Plan, error) {
+	if s.plan.Edition == "" {
+		return entitlements.Plan{Edition: entitlements.EditionCore, DisplayName: entitlements.PlanDisplayNameCore}, nil
+	}
+	return s.plan, nil
 }
 
 func (s *stubFeatureAvailabilityStore) GetTenantTierName(context.Context, uuid.UUID) (string, error) {

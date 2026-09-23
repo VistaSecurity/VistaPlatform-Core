@@ -206,6 +206,7 @@ const FINDING_FIELDS: FieldInfo[] = [
     'plaintext_management', 'default_credentials_exposed', 'insecure_service_exposed',
     'no_owner', 'no_class', 'no_location', 'duplicate_suspected', 'stale', 'orphan_relationship',
     'new_class_in_segment', 'unexpected_protocol', 'port_profile_changed', 'new_issuer',
+    'host_key_changed',
   ),
   enumAs(
     'subject_type', 'subject_type',

@@ -66,7 +66,12 @@ const goEd = readFileSync('shared/entitlements/editions.go', 'utf8');
 const edBlock = goEd.match(/^var editionByItem = map\[string\]Edition\{([\s\S]*?)^\}/m);
 if (!edBlock) failures.push('could not locate the editionByItem map literal in shared/entitlements/editions.go');
 const gatedEntryCount = edBlock ? (edBlock[1].match(/:\s*Edition[A-Za-z]+\s*,/g) || []).length : 0;
-const gatedKeys = [...goEd.matchAll(/^\s*"([a-z0-9_]+)":\s*Edition(Enterprise|MSP),/gm)].map((m) => m[1]);
+const gatedMatches = [...goEd.matchAll(/^\s*"([a-z0-9_]+)":\s*Edition(Enterprise|MSP),/gm)];
+const gatedKeys = gatedMatches.map((m) => m[1]);
+// The minimum edition per key. An MSP-only key (billing_portal) must NOT tick
+// Enterprise: an Enterprise licence does not cover it (shared/entitlements
+// EditionCovers), and a README that ticks it sells something the resolver denies.
+const editionOf = Object.fromEntries(gatedMatches.map((m) => [m[1], m[2]]));
 if (edBlock && gatedKeys.length !== gatedEntryCount) {
   failures.push(
     `editionByItem has ${gatedEntryCount} entr${gatedEntryCount === 1 ? 'y' : 'ies'} but only ${gatedKeys.length} could be read ` +
@@ -104,7 +109,14 @@ for (const key of gatedKeys) {
   const cells = row.split('|').map((c) => c.trim());
   // cells: ['', label, core, enterprise, msp, '']
   if (cells[2] === '✅') failures.push(`README row "${label}" ticks Core, but "${key}" is edition-gated`);
-  if (cells[3] !== '✅' || cells[4] !== '✅') failures.push(`README row "${label}" must tick Enterprise and MSP for gated key "${key}"`);
+  if (cells[4] !== '✅') failures.push(`README row "${label}" must tick MSP for gated key "${key}" — an MSP licence covers every gated capability`);
+  if (editionOf[key] === 'MSP') {
+    if (cells[3] === '✅') {
+      failures.push(`README row "${label}" ticks Enterprise, but "${key}" is MSP-only — an Enterprise licence does not cover it`);
+    }
+  } else if (cells[3] !== '✅') {
+    failures.push(`README row "${label}" must tick Enterprise for Enterprise-gated key "${key}"`);
+  }
 }
 // Tier authoring is Core in the shipping build (admin-service mounts tier CRUD
 // unconditionally); the README must not present it as paid.

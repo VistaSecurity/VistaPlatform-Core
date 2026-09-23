@@ -37,7 +37,27 @@ All required fields are validated by `values.schema.json` at parse time. Minimum
 
 - `tls.dnsName` — external hostname for the install
 - `tls.issuerRef.name` — cert-manager Issuer / ClusterIssuer (when `tls.mode: certManager`, the default)
-- `license.existingSecretName` — Secret holding the JWT (default `vistaplatform-license`)
+- `license.existingSecretName` — Secret holding the JWT (default `vistaplatform-license`). Optional: without it the install runs as Core.
+
+The chart also creates `<fullname>-install` (for release `vista`,
+`vista-vistaplatform-install`), a Secret holding this install's identity
+(`install-id`, a UUID generated once and kept across upgrades and uninstalls).
+admin-service records it in the database on first boot, and from then on the
+database copy is authoritative — it logs the id in use at every start
+(`[edition] this install's id: …`). An MSP licence is issued for that id.
+**GitOps (ArgoCD, Flux, `helm template`) users must set `install.id`**: those
+renders cannot `lookup` the existing Secret and would otherwise write a new id
+on every sync (admin-service keeps the database id and warns). When set,
+`install.id` is used verbatim.
+The same Secret holds `signing-key.pem`, the install's ECDSA P-256 signing
+key: on an MSP licence admin-service signs every licence usage report with it,
+and Vista Security's receiver pins the first key it sees, so it is generated
+once and kept exactly like the id. GitOps users set `install.signingKeyPEM`
+too (from an encrypted values file). Reports are also written to a
+`<fullname>-license-reports` PVC (`licensing.reports.persistence`, on by
+default, 1Gi, ReadWriteOnce — which makes admin-service single-replica with
+the `Recreate` strategy; use ReadWriteMany for more replicas, or disable it to
+keep reports in the database only).
 - Either `platform.existingSecretName` OR all three of `platform.{jwtSecret,internalAuthSecret,encryptionMasterKey}`
 
 See `examples/values-customer.yaml.example` (bundled with this chart) for the full annotated starter. After `helm pull --untar`, copy it into your own infrastructure repo, edit, and apply with `-f`.

@@ -15,11 +15,16 @@ import "sort"
 //	                    that is NOT listed in editionByItem.
 //	EditionEnterprise — paid. Compliance authoring, SSO, CBOM evidence,
 //	                    white-label, and the regulated framework catalog.
-//	EditionMSP        — paid, superset of Enterprise. The multi-tenant
-//	                    management plane: tenant lifecycle, cross-tenant views,
-//	                    customer comms and support. (Billing is currently
-//	                    classified Enterprise — see billing_portal — and tier
-//	                    authoring is Core; both are open product questions.)
+//	EditionMSP        — paid, superset of Enterprise. Everything Enterprise
+//	                    has, plus what only a service provider needs: selling
+//	                    plans to its own customers and billing them (see
+//	                    billing_portal). Tier authoring stays Core; what MSP
+//	                    adds is plans that may GRANT paid capabilities.
+//
+// Which edition a deployment IS comes from its verified licence
+// (platform_license, written by admin-service/ee/edition), not from anything in
+// this file. This file only says which edition a capability belongs to; see
+// EditionCovers for how the two meet.
 type Edition string
 
 const (
@@ -34,9 +39,11 @@ const (
 // that it is cheap, unit-testable, and usable during startup.
 //
 // IMPORTANT — this map governs *gating*, not *packaging*. A key's presence
-// here means: a Core deployment must never resolve it to enabled, regardless
-// of tier state. Which paid tier includes it is still a tier_entitlements
-// question that the operator controls.
+// here means: a deployment whose licence does not cover it (Core, an expired
+// licence, or Enterprise for an MSP item) must never resolve it to enabled,
+// regardless of tier or override state. Within a covering licence, packaging
+// is the operator's: an MSP's plans (tier_entitlements) decide which tenant
+// gets it; an Enterprise install gives it to every tenant not switched off.
 //
 // Keys that are absent are Core: the default is "free and open", so adding a
 // new capability to the platform does not accidentally paywall it. Making
@@ -62,15 +69,6 @@ var editionByItem = map[string]Edition{
 	// Core ships local users, invitations, and RBAC. Federated identity in
 	// all three flavors (tenant OIDC/SAML, social signup, staff SSO) is paid.
 	"sso_saml": EditionEnterprise,
-
-	// --- Enterprise: monetization ---------------------------------------
-	// The tenant-facing self-service billing surface — subscription, invoices,
-	// plan change, payment portal — is served by admin-service/ee/billingapi
-	// (`/my-billing/**`). Core mounts none of it, and there is nothing for it
-	// to show: a Core deployment has no subscription, no invoices and no
-	// payment provider. Tier ASSIGNMENT and usage-against-limits stay Core, so
-	// entitlements still resolve and Settings → Usage & Limits still works.
-	"billing_portal": EditionEnterprise,
 
 	// --- Enterprise: white-label ----------------------------------------
 	// Core keeps the palette/theme selector (a single org styling itself).
@@ -107,6 +105,17 @@ var editionByItem = map[string]Edition{
 	// adoption driver rather than a vertical upsell.
 	"ot_active_probing": EditionEnterprise,
 	"ot_primary_lens":   EditionEnterprise,
+
+	// --- MSP: monetization ----------------------------------------------
+	// The tenant-facing self-service billing surface — subscription, invoices,
+	// plan change, payment portal — is served by admin-service/ee/billingapi
+	// (`/my-billing/**`). It exists for a service provider billing its own
+	// customers. An Enterprise company runs the platform for itself and has
+	// nobody to bill, so an Enterprise licence does not cover it (owner
+	// decision. Core mounts none of it. Tier ASSIGNMENT and
+	// usage-against-limits stay Core, so entitlements still resolve and
+	// Settings → Usage & Limits still works.
+	"billing_portal": EditionMSP,
 }
 
 // EditionFor returns the minimum edition required to grant itemKey.
@@ -121,14 +130,43 @@ func EditionFor(itemKey string) Edition {
 
 // IsEditionGated reports whether itemKey belongs to a paid edition.
 //
-// This is the predicate that makes Core deployments deterministic. Gates that
-// apply onboarding-style "not configured yet, allow it" carve-outs MUST
-// consult this first and refuse to extend the carve-out to a gated item:
-// otherwise a deployment that never assigns a tier — which is exactly what a
-// single-org Core install looks like — would silently unlock every paid
-// capability.
+// The resolver consults this to decide which items the licence step applies
+// to: a gated item is enabled only under a valid licence whose edition covers
+// it (see license.go). Gates that apply onboarding-style "not configured yet,
+// allow it" carve-outs MUST also consult it and refuse to extend the carve-out
+// to a gated item: otherwise a deployment that never assigns a tier — which is
+// exactly what a single-org Core install looks like — would skip the resolver
+// and with it the licence check.
 func IsEditionGated(itemKey string) bool {
 	return EditionFor(itemKey) != EditionCore
+}
+
+// EditionCovers reports whether a deployment licensed for `license` may unlock
+// itemKey at all.
+//
+//   - A Core item (not gated) is covered by every edition, Core included.
+//   - An MSP licence covers every gated item: one MSP licence grants the whole
+//     product, and the MSP's own plans decide which tenant gets what.
+//   - An Enterprise licence covers the gated items whose edition is Enterprise,
+//     and nothing mapped to MSP.
+//   - Core, or any unrecognised edition string, covers no gated item.
+//
+// "Covered" is necessary, not sufficient: the resolver still applies the
+// edition's own rule (Enterprise on unless a tenant is switched off, MSP per
+// plan). See shared/entitlements/license.go.
+func EditionCovers(license Edition, itemKey string) bool {
+	item := EditionFor(itemKey)
+	if item == EditionCore {
+		return true
+	}
+	switch license {
+	case EditionMSP:
+		return true
+	case EditionEnterprise:
+		return item == EditionEnterprise
+	default:
+		return false
+	}
 }
 
 // EditionGatedKeys returns every paid-edition item key, sorted, optionally

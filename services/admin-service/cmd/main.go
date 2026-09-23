@@ -50,10 +50,11 @@ func main() {
 	}
 	defer func() { _ = bypassDB.Close() }()
 
-	// Enterprise builds verify the entitlement token and seed its grants here,
-	// once the pool is up and before serving. Nil in Core — an open-source
-	// build has no token concept, so there is nothing to check and nothing to
-	// fail. Never fatal: see ee/edition.Apply.
+	// Enterprise builds verify the entitlement token and record the install's
+	// licence here, once the pool is up and before serving. Nil in Core — an
+	// open-source build has no token concept, so there is nothing to check and
+	// nothing to fail, and with no platform_license row every service resolves
+	// the install as Core. Never fatal: see ee/edition.Apply.
 	if hooks.ApplyEditionToken != nil {
 		hooks.ApplyEditionToken(bypassDB)
 	}

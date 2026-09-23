@@ -58,6 +58,15 @@ export const DASHBOARDS: DashboardEntry[] = [
     path: '/dashboard/pqc',
     sublabel: 'Post-quantum readiness and the migration worklist',
   },
+  // The visualization rework of Overview, carried alongside it rather than
+  // replacing it so the two can be compared on a live tenant. When one wins,
+  // the other's entry comes out of this list and its page file is deleted.
+  {
+    key: 'overview-next',
+    label: 'Overview 2',
+    path: '/dashboard/overview-next',
+    sublabel: 'The same health overview, drawn fewer times and in better shapes',
+  },
 ];
 
 /** The three pages added by the multi-dashboard work, i.e. everything but Overview. */

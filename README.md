@@ -97,7 +97,7 @@ security in a security product is indefensible.
 | SIEM forwarding, scheduled audit reports | | ✅ | ✅ |
 | White-label branding | | ✅ | ✅ |
 | OT/ICS active probing + OT inventory lens | | ✅ | ✅ |
-| Self-service billing — subscription, invoices, payment portal | | ✅ | ✅ |
+| Self-service billing — subscription, invoices, payment portal | | | ✅ |
 | Generative AI assistants (ask, author, enrich, narrate, remediate) | | ✅ | ✅ |
 | Multi-tenant management plane — tenant lifecycle, cross-tenant views | | | ✅ |
 

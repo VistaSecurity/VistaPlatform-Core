@@ -22,7 +22,16 @@ describe('visibleSettingsNav', () => {
     const keys = keysOf(visibleSettingsNav(defaultFeatures));
     expect(keys).not.toContain('custom-policies'); // compliance-engine/ee/policyauthoring
     expect(keys).not.toContain('security-sso');    // auth-service/ee/sso
-    expect(keys).not.toContain('billing');         // admin-service/ee/billingapi
+  });
+
+  it('keeps Billing account on every edition — the plan block is for everyone', () => {
+    // edition-licensing spec §6: the page shows what the tenant is on (Core,
+    // Enterprise "provided by <licensee>", or the MSP plan); only the billing
+    // CONTROLS inside it follow billing_portal. Gating the entry would hide the
+    // plan from every Enterprise tenant, which is the page's whole point there.
+    expect(keysOf(visibleSettingsNav(defaultFeatures))).toContain('billing');
+    expect(settingsPageMeta('billing').feature).toBeUndefined();
+    expect(settingsPageMeta('billing').label).toBe('Billing account');
   });
 
   it('shows them once the entitlements resolve on', () => {
@@ -39,8 +48,8 @@ describe('visibleSettingsNav', () => {
     // from every free install.
     const sections = visibleSettingsNav(defaultFeatures);
     const account = sections.find((s) => s.section === 'Account');
-    expect(account, 'the Account section must survive with Billing removed').toBeTruthy();
-    expect(account!.items.map((i) => i.key)).toEqual(['usage']);
+    expect(account, 'the Account section must survive on Core').toBeTruthy();
+    expect(account!.items.map((i) => i.key)).toEqual(['billing', 'usage']);
   });
 
   it('keeps every Core entry visible with all flags off', () => {
@@ -148,14 +157,15 @@ describe('settingsPageMeta', () => {
     expect(meta.section).toBe('Policies');
   });
 
-  it('gates the Billing deep link, so /settings/billing cannot bypass the rail', () => {
-    // The rail is only half the gate. `SettingsPage` reads this same meta and
-    // renders the lock instead of <BillingPage/>, so a bookmark from an
-    // Enterprise deployment lands on an upgrade card rather than a page whose
-    // every call 404s.
+  it('Billing account is not a lock page: the billing calls are gated inside it', () => {
+    // It used to render an upgrade card on every edition without
+    // billing_portal. It now renders the plan block for everyone, and
+    // BillingPage only mounts the /my-billing queries (which 404 outside an
+    // ee build) when billing_portal resolves on — pinned by
+    // billing-account.test.tsx and edition-gating.test.ts.
     const meta = settingsPageMeta('billing');
-    expect(meta.feature).toBe('billing_portal');
-    expect(meta.lock?.title).toBeTruthy();
+    expect(meta.feature).toBeUndefined();
+    expect(meta.lock).toBeUndefined();
     expect(meta.section).toBe('Account');
   });
 

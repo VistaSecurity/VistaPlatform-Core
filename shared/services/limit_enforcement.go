@@ -29,7 +29,8 @@ import (
 // returns true for capabilities that are NOT edition-gated. The resolver
 // itself falls through to default_value (conservative); the legacy
 // carve-out keeps unfinished signups from being hard-blocked. Paid-edition
-// capabilities are excluded from the carve-out — see CheckFeatureAccess.
+// capabilities are excluded from the carve-out, because the carve-out skips
+// the resolver and with it the licence step — see CheckFeatureAccess.
 // Numeric caps deliberately have NO such carve-out: they still resolve to
 // the resolver's default value (conservative — usually 0) when a tenant has
 // no tier. Failing those open would hand every tier-less tenant unlimited
@@ -38,7 +39,9 @@ import (
 // tier at tenant creation (auth.DefaultSignupTierName, "community"), and
 // seed.sql backfills any tenant that predates it, so "no tier" is not a state
 // a live tenant reaches. When it happens anyway, checkCap says so in the
-// denial message rather than reporting an inscrutable "0/0".
+// denial message rather than reporting an inscrutable "0/0". (On an
+// Enterprise-licensed install the question does not arise: the resolver's
+// licence step makes every capacity unlimited unless an override caps it.)
 type LimitEnforcementService struct {
 	db       *sql.DB
 	resolver entitlements.Resolver
@@ -129,14 +132,21 @@ func (s *LimitEnforcementService) CheckUserLimit(tenantID uuid.UUID) (*LimitChec
 // hard-blocking before a tier is chosen.
 //
 // The carve-out is deliberately NOT extended to paid-edition capabilities
-// (entitlements.IsEditionGated). Tenants are created with a NULL
-// subscription_tier_id, and a single-org Core deployment may never assign one
-// at all — so an unconditional carve-out would resolve every Enterprise/MSP
-// capability to enabled on exactly the deployments that are not entitled to
-// them. Gated items require an active tenant override (the layer seeded by a
-// verified edition token) rather than trusting seeded tier rows; otherwise a
-// Core/no-token deployment could unlock paid surfaces by assigning the
-// Enterprise tier.
+// (entitlements.IsEditionGated). A tier-less tenant is exactly what a
+// single-org Core install can look like, and the carve-out answers without
+// asking the resolver — so extending it would skip the licence step and
+// unlock every Enterprise/MSP capability on the deployments that are not
+// entitled to them.
+//
+// For a gated item the answer is simply the resolver's, and the resolver's
+// licence step (shared/entitlements/license.go) is what enforces the edition:
+// no valid licence covering the item means disabled, whatever a tier or
+// override says; an Enterprise licence enables it unless an override switches
+// the tenant off; an MSP licence lets the tenant's plan decide. There used to
+// be a further rule here — a gated item counted only when it came from a
+// per-tenant override, the layer the old token seeder wrote — and it is gone
+// on purpose: it is what stopped an MSP plan from granting a paid capability
+// at all.
 //
 // Unknown feature keys return (false, nil) — same shape as the legacy
 // implementation. They are *not* treated as an error here so a missing
@@ -166,13 +176,7 @@ func checkFeatureAccess(ctx context.Context, resolver entitlements.Resolver, ten
 		return false, fmt.Errorf("entitlements: item %s is %s, expected boolean", feature, ent.Item.Kind)
 	}
 	enabled, _ := ent.BooleanValue()
-	if !enabled {
-		return false, nil
-	}
-	if editionGated && ent.Source != entitlements.SourceOverride {
-		return false, nil
-	}
-	return true, nil
+	return enabled, nil
 }
 
 // GetComplianceFrameworkUsage returns (current_active_licenses, limit) for

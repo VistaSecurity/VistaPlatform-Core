@@ -1,0 +1,48 @@
+{{/*
+Licence usage reports volume (edition-licensing spec PR 4).
+
+On an MSP licence admin-service produces one signed usage report per month
+(and any an operator generates on demand). The DATABASE is the system of
+record; this volume holds a copy of each report as <report_id>.json so an
+operator can collect them from the cluster without the console — for a manual
+upload, an archive, or an auditor. admin-service also re-writes any report
+missing from the volume on start, so mounting it later loses nothing.
+
+The chart cannot know at render time whether the licence is MSP (the edition
+is decided by the token admin-service verifies at runtime), so the volume is
+governed by its own value, licensing.reports.persistence.enabled, default
+true. On an Enterprise or Core install it simply stays empty. Set it to false
+to keep reports in the database only.
+
+ReadWriteOnce by default: admin-service then uses the Recreate update
+strategy (backend/_deployment.tpl), and it cannot run more than one replica —
+the render fails below rather than leave a second pod stuck on Multi-Attach.
+For more replicas use a ReadWriteMany storage class and accessMode.
+
+helm.sh/resource-policy: keep — an uninstall must not delete reports that
+have not been delivered.
+*/}}
+{{- $p := .Values.licensing.reports.persistence }}
+{{- if $p.enabled }}
+{{- $admin := index .Values.backends "admin-service" | default dict }}
+{{- $replicas := int (default .Values.defaultReplicas $admin.replicas) }}
+{{- if and (ne $p.accessMode "ReadWriteMany") (gt $replicas 1) }}
+{{- fail (printf "licensing.reports.persistence uses a %s volume, which only one admin-service pod can mount, but admin-service runs %d replicas. Use a ReadWriteMany storage class (licensing.reports.persistence.accessMode=ReadWriteMany, storageClassName=...), or set licensing.reports.persistence.enabled=false to keep reports in the database only." $p.accessMode $replicas) }}
+{{- end }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vistaplatform.licenseReportsClaimName" . }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: license-reports
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ $p.accessMode }}
+  storageClassName: {{ $p.storageClassName | default .Values.datastores.storageClassName }}
+  resources:
+    requests:
+      storage: {{ $p.size }}
+{{- end }}

@@ -40,8 +40,16 @@ spec:
   hangs on Multi-Attach, the old pod won't terminate until the new one's
   Ready, and the upgrade deadlocks. See pcap-processor's `strategy:` entry
   in values.yaml.
+
+  admin-service mounts the licence-reports PVC (licensing.reports.persistence),
+  so on a ReadWriteOnce claim it gets the same `Recreate` by default — unless
+  its own `strategy:` says otherwise (e.g. with a ReadWriteMany class).
   */}}
-  {{- with $svc.strategy }}
+  {{- $strategy := $svc.strategy }}
+  {{- if and (not $strategy) (eq $name "admin-service") $ctx.Values.licensing.reports.persistence.enabled (ne $ctx.Values.licensing.reports.persistence.accessMode "ReadWriteMany") }}
+  {{- $strategy = "Recreate" }}
+  {{- end }}
+  {{- with $strategy }}
   strategy:
     type: {{ . }}
   {{- end }}
@@ -411,6 +419,32 @@ spec:
                   name: {{ $ctx.Values.ai.apiKey.existingSecret }}
                   key: {{ $ctx.Values.ai.apiKey.existingSecretKey | default "api-key" }}
             {{- end }}
+            {{- if eq $name "admin-service" }}
+            {{/*
+              This install's identity (secrets-install.yaml). admin-service
+              alone reads it: it records it in platform_install on first boot
+              (after which the database copy is authoritative) and checks an
+              install-bound licence against it. No other service has a use for
+              it, so no other service gets it.
+            */}}
+            - name: INSTALL_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.installSecretName" $ctx }}
+                  key: install-id
+            {{/*
+              The install signing key (same Secret, mounted as a file below):
+              admin-service signs every licence usage report with it. A file,
+              not an env var, so the private key is not in the process
+              environment.
+            */}}
+            - name: INSTALL_SIGNING_KEY_FILE
+              value: /etc/vistaplatform/install-signing/signing-key.pem
+            {{- if $ctx.Values.licensing.reports.persistence.enabled }}
+            - name: LICENSE_REPORTS_DIR
+              value: {{ $ctx.Values.licensing.reports.dir | quote }}
+            {{- end }}
+            {{- end }}
             {{- if $secrets.encryptionMasterKey }}
             - name: ENCRYPTION_MASTER_KEY
               valueFrom:
@@ -475,6 +509,15 @@ spec:
               mountPath: /app/jwt-keys
               readOnly: true
             {{- end }}
+            {{- if eq $name "admin-service" }}
+            - name: install-signing
+              mountPath: /etc/vistaplatform/install-signing
+              readOnly: true
+            {{- if $ctx.Values.licensing.reports.persistence.enabled }}
+            - name: license-reports
+              mountPath: {{ $ctx.Values.licensing.reports.dir }}
+            {{- end }}
+            {{- end }}
             {{- with $svc.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -511,6 +554,24 @@ spec:
           secret:
             secretName: {{ include "vistaplatform.fullname" $ctx }}-jwt-signing
             defaultMode: 0400
+        {{- end }}
+        {{- if eq $name "admin-service" }}
+        {{/*
+          Only the signing key is projected — not install-id, which reaches
+          admin-service as INSTALL_ID above.
+        */}}
+        - name: install-signing
+          secret:
+            secretName: {{ include "vistaplatform.installSecretName" $ctx }}
+            defaultMode: 0400
+            items:
+              - key: signing-key.pem
+                path: signing-key.pem
+        {{- if $ctx.Values.licensing.reports.persistence.enabled }}
+        - name: license-reports
+          persistentVolumeClaim:
+            claimName: {{ include "vistaplatform.licenseReportsClaimName" $ctx }}
+        {{- end }}
         {{- end }}
         {{- with $svc.extraVolumes }}
         {{- toYaml . | nindent 8 }}

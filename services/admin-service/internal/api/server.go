@@ -510,7 +510,7 @@ func (s *Server) setupRouter() {
 			// reads as a broken product rather than an absent edition.
 			// No permission gate: every operator's nav depends on it, same as
 			// /auth/me and /user/permissions above.
-			protected.GET("/platform/edition", PlatformEdition(s.hooks.Info()))
+			protected.GET("/platform/edition", PlatformEdition(s.hooks.Info(), s.db))
 
 			// Platform statistics (/admin/stats/**) and the cross-tenant
 			// dashboard (/admin/dashboard/**) are MSP: every one of those
@@ -548,13 +548,35 @@ func (s *Server) setupRouter() {
 			// Platform Settings endpoints - Platform-wide configuration
 			// Manage platform-wide settings: branding, email delivery, access
 			// control, and the authentication policy enforced by
-			// shared/security/authpolicy.
+			// shared/security/authpolicy. The PUT additionally requires
+			// platform.security.manage for the keys that shape staff
+			// authentication (handlers.securityGatedSettingKeys) — a per-field
+			// check, so it lives in the handler.
 			platformSettings := protected.Group("/settings")
 			platformSettings.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSettings))
 			{
 				platformSettings.GET("", handlers.GetPlatformSettings(s.db))       // Get platform settings
 				platformSettings.PUT("", handlers.UpdatePlatformSettings(s.db))    // Update platform settings
 				platformSettings.POST("/test-email", handlers.SendTestEmail(s.db)) // Send SMTP test email
+			}
+
+			// Settings → License & Usage: the install's licence as recorded in
+			// platform_license (never the token), and the Enterprise
+			// data-retention cap. CORE: a Core build answers "no licence
+			// installed", which is the page's Core state.
+			//
+			// GET /license/cap — licensed tenant limit (MSP soft cap). The admin
+			// console's banner reads it on every build. Core route: Core and
+			// Enterprise answer "uncapped"; only an MSP licence with max_tenants
+			// caps anything. The cap is ENFORCED in shared/entitlements on every
+			// tenant-creation path; this reports it.
+			license := protected.Group("/license")
+			license.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSettings))
+			{
+				license.GET("", handlers.GetLicense(s.db))
+				license.GET("/retention", handlers.GetRetention(s.db))
+				license.PUT("/retention", handlers.UpdateRetention(s.db))
+				license.GET("/cap", handlers.GetLicenseCap(s.bypassDB))
 			}
 
 			// Legal document AUTHORING — Terms of Service / Privacy Policy.
@@ -580,15 +602,23 @@ func (s *Server) setupRouter() {
 				platformBranding.DELETE("/:type", handlers.DeletePlatformBrandingAsset(s.db)) // Delete platform logo/favicon
 			}
 
-			// Platform Identity Providers — configure Vista's OWN OAuth app
-			// (Google/Microsoft) used by social signup. Platform-wide, one per type.
+			// Platform Identity Providers — Vista's OWN OAuth apps
+			// (Google/Microsoft) for social signup and staff sign-in. Reads stay on
+			// platform.settings (the secret is never returned). Every write needs
+			// platform.security.manage: an admin_login provider's endpoints name
+			// the staff account that signs in, so writing one is a way to become
+			// any staff member — not a setting.
 			platformIdPs := protected.Group("/identity-providers")
 			platformIdPs.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSettings))
 			{
 				platformIdPs.GET("", handlers.ListPlatformIdentityProviders(s.db))
-				platformIdPs.POST("", handlers.CreatePlatformIdentityProvider(s.db))
-				platformIdPs.PUT("/:id", handlers.UpdatePlatformIdentityProvider(s.db))
-				platformIdPs.DELETE("/:id", handlers.DeletePlatformIdentityProvider(s.db))
+			}
+			manageIdPs := protected.Group("/identity-providers")
+			manageIdPs.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSecurityManage))
+			{
+				manageIdPs.POST("", handlers.CreatePlatformIdentityProvider(s.db))
+				manageIdPs.PUT("/:id", handlers.UpdatePlatformIdentityProvider(s.db))
+				manageIdPs.DELETE("/:id", handlers.DeletePlatformIdentityProvider(s.db))
 			}
 
 			// Storage Configuration endpoints - Configure S3 storage for artifacts

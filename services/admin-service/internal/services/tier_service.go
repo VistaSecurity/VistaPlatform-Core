@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
+	"github.com/vistasecurity/vistaplatform/shared/licenseusage"
 )
 
 // Billable-item keys for the numeric caps surfaced by GetEffectiveLimits.
@@ -50,12 +51,15 @@ type TierService struct {
 	// for callers running cross-tenant platform aggregates (Phase 4).
 	bypassDB *sql.DB
 	pricer   TierPricer
+	// resolvePlan is entitlements.ResolvePlan; a seam so the fail-closed
+	// path of GetEffectiveLimits can be tested.
+	resolvePlan func(ctx context.Context, db *sql.DB, tenantID uuid.UUID) (entitlements.Plan, error)
 }
 
 // NewTierService creates a new tier service.
 // bypassDB is the cross-tenant (BYPASSRLS) handle exposed via BypassDB().
 func NewTierService(db, bypassDB *sql.DB) *TierService {
-	return &TierService{db: db, bypassDB: bypassDB}
+	return &TierService{db: db, bypassDB: bypassDB, resolvePlan: entitlements.ResolvePlan}
 }
 
 // SetPricer wires the Stripe price provisioner used when saving stripe-billed
@@ -795,7 +799,10 @@ type AssignTierResult struct {
 // For a stripe-billed plan this only sets the tier; card collection still flows
 // through the normal checkout (HandleCreateSubscription), so payment_status is
 // left untouched.
-func (s *TierService) AssignTierToTenant(tierID, tenantID uuid.UUID) (*AssignTierResult, error) {
+//
+// Marking a SUSPENDED tenant active is a reactivation, and is recorded in the
+// licence usage ledger as one (shared/licenseusage), attributed to actor.
+func (s *TierService) AssignTierToTenant(tierID, tenantID uuid.UUID, actor string) (*AssignTierResult, error) {
 	tier, err := s.GetTier(tierID)
 	if err != nil {
 		return nil, fmt.Errorf("tier not found: %w", err)
@@ -830,14 +837,27 @@ func (s *TierService) AssignTierToTenant(tierID, tenantID uuid.UUID) (*AssignTie
 	res := &AssignTierResult{TenantID: tenantID, TierID: tierID, TierName: tier.Name, BillingMethod: tier.BillingMethod}
 
 	if tier.BillingMethod == "invoice" {
-		if _, err := s.db.Exec(
-			`UPDATE tenants SET subscription_tier_id = $1, payment_status = 'active', updated_at = NOW() WHERE id = $2`,
+		// The prior payment_status comes back from the same statement (the
+		// subquery locks the row), so the reactivation below is judged on the
+		// state this UPDATE actually replaced.
+		var prev sql.NullString
+		if err := s.db.QueryRow(
+			`UPDATE tenants t SET subscription_tier_id = $1, payment_status = 'active', updated_at = NOW()
+			   FROM (SELECT payment_status FROM tenants WHERE id = $2 FOR UPDATE) old
+			  WHERE t.id = $2
+			  RETURNING old.payment_status`,
 			tierID, tenantID,
-		); err != nil {
+		).Scan(&prev); err != nil {
 			return nil, fmt.Errorf("assign invoice plan: %w", err)
 		}
 		res.PaymentStatus = "active"
 		res.Activated = true
+		// The ledger is written on the bypass pool (read-only for the app role),
+		// after the change has committed: best effort, like every call site
+		// whose change commits on another pool.
+		if licenseusage.StateOf(prev.String) == licenseusage.StateSuspended {
+			licenseusage.RecordBestEffort(context.Background(), s.bypassDB, tenantID, licenseusage.Reactivated, actor)
+		}
 		// Best-effort: the plan is already assigned + enforced even if the
 		// billing-view mirror fails.
 		if err := s.recordManualSubscription(tenantID, tier); err != nil {
@@ -998,7 +1018,12 @@ func (s *TierService) GetTierHistory(tierID uuid.UUID) ([]models.TierHistory, er
 	return history, nil
 }
 
-// GetEffectiveLimits gets effective limits for a tenant (tier + overrides)
+// GetEffectiveLimits gets effective limits for a tenant.
+//
+// Every value comes from the entitlement resolver, licence step included:
+// numeric caps, retention (the platform cap on Enterprise), and the boolean
+// capabilities in Features. The tier row supplies only the tier id and — on
+// Core and MSP, where a tier is the tenant's plan — its name.
 func (s *TierService) GetEffectiveLimits(tenantID uuid.UUID) (*models.EffectiveLimits, error) {
 	// Get tenant's tier
 	var tierID uuid.UUID
@@ -1019,7 +1044,9 @@ func (s *TierService) GetEffectiveLimits(tenantID uuid.UUID) (*models.EffectiveL
 		return nil, fmt.Errorf("failed to get tier: %w", err)
 	}
 
-	// Build effective limits starting with tier values
+	// Tier values are only the starting point; applyResolvedLimits replaces
+	// each with what the resolver answers. They survive only when the
+	// resolver cannot be reached (best-effort read-out, see below).
 	effective := &models.EffectiveLimits{
 		TenantID:      tenantID,
 		TierID:        tierID,
@@ -1027,7 +1054,7 @@ func (s *TierService) GetEffectiveLimits(tenantID uuid.UUID) (*models.EffectiveL
 		MaxSensors:    tier.MaxSensors,
 		MaxAssets:     tier.MaxAssets,
 		MaxUsers:      tier.MaxUsers,
-		RetentionDays: tier.RetentionDays,
+		RetentionDays: intPtr(tier.RetentionDays),
 		Features:      tier.Features,
 		Overrides:     []models.LimitOverride{},
 	}
@@ -1058,15 +1085,34 @@ func (s *TierService) GetEffectiveLimits(tenantID uuid.UUID) (*models.EffectiveL
 
 	// The tier columns above are only a fallback. Per-tenant overrides live
 	// in tenant_entitlements and are what enforcement actually resolves
-	// against (override > tier > default via shared/entitlements). Overlay
-	// the resolved caps so this read agrees with enforcement instead of
-	// reporting tier-only values ().
+	// against (override > tier > default via shared/entitlements, then the
+	// licence step). Overlay the resolved values so this read agrees with
+	// enforcement instead of reporting tier-only values ().
 	s.applyResolvedLimits(tenantID, effective)
+
+	// The plan block, and on Enterprise no tier name: the tier there is a
+	// capacity placeholder, never a plan. Fails CLOSED, like the tenant
+	// list/detail presenter: without the plan this read-out cannot know
+	// whether the tier name may be shown, and on Enterprise it must not be.
+	resolvePlan := s.resolvePlan
+	if resolvePlan == nil {
+		resolvePlan = entitlements.ResolvePlan
+	}
+	plan, perr := resolvePlan(context.Background(), s.db, tenantID)
+	if perr != nil {
+		return nil, fmt.Errorf("resolve plan: %w", perr)
+	}
+	effective.Plan = &plan
+	if plan.HidesTierDetail() {
+		effective.TierName = ""
+	}
 
 	return effective, nil
 }
 
-// applyResolvedLimits overlays the entitlement-resolved numeric caps onto a
+func intPtr(v int) *int { return &v }
+
+// applyResolvedLimits overlays the entitlement-resolved values onto a
 // tier-derived EffectiveLimits and populates Overrides/HasOverrides from the
 // tenant's active tenant_entitlements rows. It is best-effort: if the
 // resolver or the override listing fails, the tier-derived values are left in
@@ -1076,14 +1122,20 @@ func (s *TierService) applyResolvedLimits(tenantID uuid.UUID, effective *models.
 	ctx := context.Background()
 	resolver := entitlements.NewPostgresResolver(s.db)
 
-	resolved, err := resolver.ResolveMany(ctx, tenantID, []string{
+	booleanKeys, kerr := s.activeBooleanItemKeys(ctx)
+	if kerr != nil {
+		log.Printf("admin-service: effective-limits capability list failed: %v", kerr)
+	}
+	keys := append([]string{
 		itemMaxSensors,
 		itemMaxAssets,
 		itemMaxUsers,
 		itemRetentionDays,
 		itemComplianceFrameworksMax,
 		itemIntegrationsMax,
-	})
+	}, booleanKeys...)
+
+	resolved, err := resolver.ResolveMany(ctx, tenantID, keys)
 	if err != nil {
 		log.Printf("admin-service: effective-limits resolve failed for tenant %s: %v", tenantID, err)
 	} else {
@@ -1105,12 +1157,12 @@ func (s *TierService) applyResolvedLimits(tenantID uuid.UUID, effective *models.
 				effective.MaxUsers = qty
 			}
 		}
-		// RetentionDays is a non-pointer int; only override when the resolved
-		// value is a concrete cap (an "unlimited" retention can't be
-		// represented, so the tier value is kept).
+		// Retention resolves through the licence step like everything else:
+		// on Enterprise it is the platform retention cap, unlimited (nil)
+		// unless a platform admin set one.
 		if ent, ok := resolved[itemRetentionDays]; ok {
-			if qty, ok := ent.QuantityValue(); ok && qty != nil {
-				effective.RetentionDays = *qty
+			if qty, ok := ent.QuantityValue(); ok {
+				effective.RetentionDays = qty
 			}
 		}
 		if ent, ok := resolved[itemComplianceFrameworksMax]; ok {
@@ -1123,6 +1175,20 @@ func (s *TierService) applyResolvedLimits(tenantID uuid.UUID, effective *models.
 				effective.MaxIntegrations = qty
 			}
 		}
+		// Capabilities: the resolved boolean of every active capability in
+		// the catalogue — what RequireFeature gates on — replacing the tier's
+		// legacy display-only features JSON, which the plan editor never
+		// writes and which enforcement stopped consulting.
+		if len(booleanKeys) > 0 {
+			features := make(map[string]interface{}, len(booleanKeys))
+			for _, k := range booleanKeys {
+				if ent, ok := resolved[k]; ok {
+					on, _ := ent.BooleanValue()
+					features[k] = on
+				}
+			}
+			effective.Features = features
+		}
 	}
 
 	// Surface the tenant's currently-active per-tenant overrides truthfully.
@@ -1133,6 +1199,25 @@ func (s *TierService) applyResolvedLimits(tenantID uuid.UUID, effective *models.
 	}
 	effective.Overrides = overrides
 	effective.HasOverrides = len(overrides) > 0
+}
+
+// activeBooleanItemKeys lists the active capability (boolean) items in the
+// catalogue, sorted by key.
+func (s *TierService) activeBooleanItemKeys(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key FROM billable_items WHERE is_active AND kind = 'boolean' ORDER BY key`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
 }
 
 // activeTenantOverrides maps the tenant's currently-effective

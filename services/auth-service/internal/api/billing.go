@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
 
@@ -154,6 +156,20 @@ func GetTenantBillingWithStore(store tenantBillingStore, cfg *config.Config) gin
 			return
 		}
 
+		// On Enterprise the tier this tenant points at is a capacity
+		// placeholder (the seeded "community" tier), never a plan, and there
+		// are no trials: the tier's name, price, legacy features/limits and a
+		// trial status must not reach the tenant (edition-licensing spec §1).
+		// Fails closed — an unreadable plan cannot say whether they may.
+		plan, err := store.TenantPlan(c.Request.Context(), tenantID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch billing info"})
+			return
+		}
+		if plan.HidesTierDetail() {
+			row = enterpriseBillingRow(row, plan)
+		}
+
 		tierID, tierName, displayName, billingInterval := row.TierID, row.TierName, row.DisplayName, row.BillingInterval
 		subscriptionStatus := row.SubscriptionStatus
 		currentPeriodStart, currentPeriodEnd := row.CurrentPeriodStart, row.CurrentPeriodEnd
@@ -252,6 +268,25 @@ func GetTenantBillingWithStore(store tenantBillingStore, cfg *config.Config) gin
 
 		c.JSON(http.StatusOK, response)
 	}
+}
+
+// enterpriseBillingRow is the billing row as an Enterprise tenant may see it:
+// the plan's display name in place of the tier's name, no price, interval or
+// legacy tier features/limits, and a stored trial status read as active.
+func enterpriseBillingRow(row *tenantBillingRow, plan entitlements.Plan) *tenantBillingRow {
+	out := *row
+	if out.TierID.Valid {
+		out.TierName = sql.NullString{String: plan.DisplayName, Valid: true}
+		out.DisplayName = sql.NullString{String: plan.DisplayName, Valid: true}
+	}
+	out.PriceCents = sql.NullInt64{}
+	out.BillingInterval = sql.NullString{}
+	out.FeaturesJSON = nil
+	out.LimitsJSON = nil
+	if out.SubscriptionStatus.Valid && strings.Contains(strings.ToLower(out.SubscriptionStatus.String), "trial") {
+		out.SubscriptionStatus = sql.NullString{String: "active", Valid: true}
+	}
+	return &out
 }
 
 // resolveUsageLimits turns the tier's raw limit columns into a UsageLimits
@@ -681,6 +716,10 @@ func CheckLimitsWithStore(store billingUsageStore) gin.HandlerFunc {
 type featureAvailabilityStore interface {
 	GetTenantTierName(ctx context.Context, tenantID uuid.UUID) (string, error)
 	ResolveCaps(ctx context.Context, tenantID uuid.UUID, keys []string) (map[string]*int, error)
+	// TenantPlan is the tenant's plan block. On an Enterprise install the tier
+	// is a capacity placeholder, never a plan, so the `tier` label reads the
+	// plan's display name there instead of the tier's name.
+	TenantPlan(ctx context.Context, tenantID uuid.UUID) (entitlements.Plan, error)
 }
 
 // featureAvailabilityCapKeys are the numeric caps the response's `limits` map
@@ -736,6 +775,15 @@ func GetFeatureAvailabilityWithDeps(store featureAvailabilityStore, limitSvc lim
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch feature availability"})
 			return
+		}
+
+		plan, err := store.TenantPlan(ctx, tenantID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch feature availability"})
+			return
+		}
+		if plan.HidesTierDetail() {
+			tierName = plan.DisplayName
 		}
 
 		features := make(map[string]interface{}, len(knownFeatures))

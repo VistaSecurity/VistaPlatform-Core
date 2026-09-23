@@ -3525,6 +3525,64 @@ paths:
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
+  /infrastructure-assets/network-map:
+    get:
+      operationId: getAssetNetworkMap
+      tags: [infrastructure-assets]
+      summary: Every live asset, placed by site and network, with a crypto summary
+      description: >
+        The data behind Inventory → Map → Network: one row per asset with the
+        site and network segment it is placed in, and a SUMMARY of the crypto
+        its services carry — enough to colour a device and to group devices by
+        a shared crypto trait, and no more. The per-service detail a device's
+        exploded view shows is read on demand from the asset's endpoints,
+        crypto configurations and certificates.
+
+
+        ## What is included
+
+
+        Assets whose status is `monitoring` or `pending_approval`. Archived,
+        denied and deleted assets are not on the map. `segments` lists every
+        ACTIVE network segment, including those no returned asset sits in, so an
+        empty network is drawn as empty rather than missing.
+
+
+        ## Sites
+
+
+        `site` uses the same expression as the topology tree and the `site`
+        facet, so the three can never name a site differently. An asset with no
+        site is `Unassigned`.
+
+
+        ## Unknown is not zero
+
+
+        `risk_score` is only meaningful when `risk_assessed` is true. A score of
+        0 with `risk_assessed: false` means nothing has assessed the asset yet,
+        not that it is safe.
+
+
+        ## Caps
+
+
+        Bounded at `asset_cap` assets, ordered by risk then name. Past the cap
+        the response sets `truncated` and still reports the real
+        `total_assets`. It is never silently shortened. An empty estate is 200
+        with empty arrays.
+      responses:
+        '200':
+          description: The network map.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkMapResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
   /infrastructure-assets/stats:
     get:
       operationId: getAssetStats
@@ -9913,6 +9971,123 @@ components:
       properties:
         topology:
           $ref: '#/components/schemas/AssetTopology'
+    NetworkMapSegment:
+      type: object
+      additionalProperties: false
+      description: One active network segment.
+      required: [segment_id, name, value, segment_type]
+      properties:
+        segment_id: { type: string, format: uuid }
+        name: { type: string }
+        value: { type: string, description: 'The segment definition: a CIDR, a range, or a cloud network reference.' }
+        segment_type: { type: string }
+    NetworkMapComponent:
+      type: object
+      additionalProperties: false
+      description: >
+        One DISTINCT algorithm-catalogue component linked to any of the asset's
+        live crypto configurations (`crypto_implementation_algorithms` joined to
+        `algorithms`). The assessment is the catalogue's, so the map never holds
+        a second opinion about an algorithm.
+      required: [algorithm_type, name, strength, is_pqc, observed]
+      properties:
+        algorithm_type:
+          type: string
+          enum: [protocol_version, cipher_suite, key_exchange, signature, symmetric, hash]
+        name: { type: string, description: The catalogue name. }
+        strength:
+          type: string
+          description: Catalogue strength (weak / acceptable / strong / recommended). Empty string when the catalogue row records none.
+        is_pqc: { type: boolean }
+        observed:
+          type: boolean
+          description: True when at least one configuration uses it (a junction link with is_inferred false). False when it is only offered or derived.
+    NetworkMapPQC:
+      type: object
+      additionalProperties: false
+      description: >
+        The asset's live crypto configurations classified by the platform's one
+        PQC classifier (the same one behind /pqc/progress and /pqc/summary).
+        The four counts partition the configurations: any classical asymmetric
+        component makes a configuration need migration, whatever else it uses.
+      required: [needs_migration, pqc_ready, symmetric_safe, unclassified]
+      properties:
+        needs_migration: { type: integer }
+        pqc_ready: { type: integer }
+        symmetric_safe: { type: integer }
+        unclassified: { type: integer }
+    NetworkMapCrypto:
+      type: object
+      additionalProperties: false
+      description: A summary of the crypto the asset's live configurations carry.
+      required: [components, pqc, certs_expiring_90d]
+      properties:
+        components:
+          type: array
+          description: Sorted by algorithm_type then name. Empty means nothing resolved against the catalogue (not assessed), not "clean".
+          items:
+            $ref: '#/components/schemas/NetworkMapComponent'
+        pqc:
+          $ref: '#/components/schemas/NetworkMapPQC'
+        certs_expiring_90d:
+          type: integer
+          description: Distinct leaf certificates presented by the asset's live configurations whose not_after is within 90 days of now (expired included). Chain intermediates and roots are not counted.
+    NetworkMapAsset:
+      type: object
+      additionalProperties: false
+      required: [asset_id, display_name, class_key, asset_status, site, risk_score, risk_assessed, service_count, crypto_service_count, crypto]
+      properties:
+        asset_id: { type: string, format: uuid }
+        display_name: { type: string, description: 'Display name, else hostname, else the primary address, else "".' }
+        class_key: { type: string }
+        address: { type: string, description: The primary address, without a prefix length. Omitted when none is recorded. }
+        segment_id:
+          type: [string, "null"]
+          format: uuid
+          description: The network segment the asset is placed in. Null for an unsegmented asset.
+        site: { type: string }
+        asset_status: { type: string, enum: [monitoring, pending_approval] }
+        risk_score: { type: integer, minimum: 0, maximum: 100 }
+        risk_assessed:
+          type: boolean
+          description: True when something has assessed the asset's risk (risk_assessed_by is non-empty). A 0 score with this false is "not assessed".
+        cloud_account: { type: string, description: 'The cloud account the resource records. Omitted when absent.' }
+        cloud_region: { type: string, description: 'The cloud region the resource records. Omitted when absent.' }
+        service_count: { type: integer, description: Live endpoints (network services) on the asset. }
+        crypto_service_count:
+          type: integer
+          description: >
+            Live endpoints carrying at least one live crypto configuration, plus
+            ONE when the asset also carries live configurations no live endpoint
+            accounts for (none recorded, or since closed), which the exploded
+            view shows as a single "not tied to a service" group. May exceed
+            service_count for that reason.
+        crypto:
+          $ref: '#/components/schemas/NetworkMapCrypto'
+    NetworkMap:
+      type: object
+      additionalProperties: false
+      required: [segments, assets, total_assets, truncated, asset_cap]
+      properties:
+        segments:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/NetworkMapSegment'
+        assets:
+          type: [array, "null"]
+          items:
+            $ref: '#/components/schemas/NetworkMapAsset'
+        total_assets: { type: integer, description: Assets on the map before the cap. }
+        truncated: { type: boolean, description: True when total_assets exceeded asset_cap. }
+        asset_cap: { type: integer }
+    NetworkMapResponse:
+      type: object
+      additionalProperties: false
+      description: 'Envelope for GET /infrastructure-assets/network-map — `{ network_map }`.'
+      required: [network_map]
+      properties:
+        network_map:
+          $ref: '#/components/schemas/NetworkMap'
     AssetStats:
       type: object
       additionalProperties: false

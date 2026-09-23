@@ -46,6 +46,19 @@ const MonitoredConfigurationsSQL = `
             AND na.deleted_at IS NULL AND na.asset_status = 'monitoring'
      WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL`
 
+// pqcPartitionSQL is the four-way partition over `impl_class`
+// (cryptoassess.PQCClassCTE), as a SELECT-list fragment. It is the ONE place
+// the categories and their precedence are spelled: the tenant-wide classifier
+// below and the per-asset network map both select it, so a device's counts and
+// the tenant's /pqc numbers cannot be two different partitions.
+//
+// Precedence: vulnerable first, then has_pqc, then fully-known symmetric; the
+// rest is unclassified. Mutually exclusive and exhaustive by construction.
+const pqcPartitionSQL = `COUNT(*) FILTER (WHERE vulnerable)                                                        AS needs_migration,
+			COUNT(*) FILTER (WHERE NOT vulnerable AND has_pqc)                                        AS pqc_ready,
+			COUNT(*) FILTER (WHERE NOT vulnerable AND NOT has_pqc AND known > 0 AND unknown = 0)      AS symmetric_safe,
+			COUNT(*) FILTER (WHERE NOT vulnerable AND NOT has_pqc AND (known = 0 OR unknown > 0))     AS unclassified`
+
 // pqcCounts is a per-tenant classification of crypto implementations into four
 // mutually exclusive, collectively exhaustive categories. Because they
 // partition the population, NeedsMigration+PQCReady+SymmetricSafe+Unclassified
@@ -98,10 +111,7 @@ func classifyTenantImplementationsPQC(db *database.DB, tenantID uuid.UUID) (pqcC
 		WITH ` + cryptoassess.PQCClassCTE(MonitoredConfigurationsSQL, "$2", "$3") + `
 		SELECT
 			COUNT(*)                                                                                  AS total,
-			COUNT(*) FILTER (WHERE vulnerable)                                                        AS needs_migration,
-			COUNT(*) FILTER (WHERE NOT vulnerable AND has_pqc)                                        AS pqc_ready,
-			COUNT(*) FILTER (WHERE NOT vulnerable AND NOT has_pqc AND known > 0 AND unknown = 0)      AS symmetric_safe,
-			COUNT(*) FILTER (WHERE NOT vulnerable AND NOT has_pqc AND (known = 0 OR unknown > 0))     AS unclassified
+			` + pqcPartitionSQL + `
 		  FROM impl_class
 	`
 

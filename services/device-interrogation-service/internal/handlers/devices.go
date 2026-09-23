@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -91,6 +92,10 @@ func (h *DeviceHandlers) CreateDevice(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
+	if hostnameHasWhitespace(req.Hostname) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_hostname", "message": "Hostname cannot contain spaces. Use the device's DNS hostname."})
+		return
+	}
 
 	device, err := h.deviceService.CreateDevice(c.Request.Context(), tenantID, req)
 	if err != nil {
@@ -116,7 +121,14 @@ func (h *DeviceHandlers) CreateDevice(c *gin.Context) {
 func writeDeviceIdentityConflict(c *gin.Context, err error) bool {
 	var retained *identity.RetainedObservation
 	if errors.As(err, &retained) {
-		c.JSON(http.StatusAccepted, retained.Result)
+		body := gin.H{
+			"outcome": retained.Result.Outcome, "observation_id": retained.Result.ObservationID,
+			"message": "Management settings were saved with this observation. Link it to an existing asset or confirm a new asset to finish adding the device.",
+		}
+		if retained.Result.ProposalID != "" {
+			body["proposal_id"] = retained.Result.ProposalID
+		}
+		c.JSON(http.StatusAccepted, body)
 		return true
 	}
 	var contested *services.DeviceIdentityContestedError
@@ -134,6 +146,10 @@ func writeDeviceIdentityConflict(c *gin.Context, err error) bool {
 	}
 	c.JSON(http.StatusConflict, body)
 	return true
+}
+
+func hostnameHasWhitespace(hostname *string) bool {
+	return hostname != nil && strings.IndexFunc(*hostname, unicode.IsSpace) >= 0
 }
 
 // DiscoverAndCreateDevice handles POST /devices/discover-and-create
@@ -154,10 +170,11 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 
 	// Simplified request with just the essentials
 	var req struct {
-		DeviceType    string `json:"device_type" binding:"required"`
-		ManagementURL string `json:"management_url" binding:"required"`
-		Username      string `json:"username" binding:"required"`
-		Password      string `json:"password" binding:"required"`
+		DeviceType            string `json:"device_type" binding:"required"`
+		ManagementURL         string `json:"management_url" binding:"required"`
+		Username              string `json:"username" binding:"required"`
+		Password              string `json:"password" binding:"required"`
+		TLSInsecureSkipVerify bool   `json:"tls_insecure_skip_verify"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -167,25 +184,33 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 	}
 
 	// Create discovery service and attempt to discover device info
-	discoveryService := services.NewDeviceDiscoveryService()
+	discoveryService := services.NewDeviceDiscoveryService(req.TLSInsecureSkipVerify)
 	discoveredInfo, err := discoveryService.DiscoverDevice(req.DeviceType, req.ManagementURL, req.Username, req.Password)
 	if err != nil {
 		fmt.Printf("Device discovery failed: %v\n", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to discover device information",
-		})
+		var discoveryErr *services.DeviceDiscoveryError
+		if errors.As(err, &discoveryErr) {
+			status := http.StatusUnprocessableEntity
+			if discoveryErr.Code == "connection_failed" {
+				status = http.StatusBadGateway
+			}
+			c.JSON(status, gin.H{"error": discoveryErr.Code, "message": discoveryErr.Message})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "discovery_failed", "message": "Device discovery failed."})
 		return
 	}
 
 	// Build device creation request with discovered information
 	createReq := models.CreateDeviceRequest{
-		DeviceType:      req.DeviceType,
-		ManagementURL:   &req.ManagementURL,
-		Username:        &req.Username,
-		Password:        &req.Password,
-		DiscoveryMethod: "device_interrogation",
-		Metadata:        make(map[string]interface{}),
-		Tags:            make(map[string]interface{}),
+		DeviceType:            req.DeviceType,
+		ManagementURL:         &req.ManagementURL,
+		Username:              &req.Username,
+		Password:              &req.Password,
+		TLSInsecureSkipVerify: &req.TLSInsecureSkipVerify,
+		DiscoveryMethod:       "device_interrogation",
+		Metadata:              make(map[string]interface{}),
+		Tags:                  make(map[string]interface{}),
 	}
 
 	// Populate discovered fields
@@ -373,6 +398,10 @@ func (h *DeviceHandlers) UpdateDevice(c *gin.Context) {
 	var req models.UpdateDeviceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if hostnameHasWhitespace(req.Hostname) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_hostname", "message": "Hostname cannot contain spaces. Use the device's DNS hostname."})
 		return
 	}
 

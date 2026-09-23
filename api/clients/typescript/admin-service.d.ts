@@ -264,7 +264,10 @@ export interface paths {
          */
         get: operations["listPlatformRoles"];
         put?: never;
-        /** Create a platform role */
+        /**
+         * Create a platform role
+         * @description Creates an empty custom role — a new role never carries permissions; they are set with PUT /admin/roles/{id}/permissions, which enforces that the caller holds every permission granted.
+         */
         post: operations["createPlatformRole"];
         delete?: never;
         options?: never;
@@ -283,13 +286,13 @@ export interface paths {
         get: operations["getPlatformRole"];
         /**
          * Update a platform role
-         * @description Partial update of display_name and/or description. Returns 400 when neither field is supplied.
+         * @description Partial update of display_name and/or description. Returns 400 when neither field is supplied or the id is not a UUID; 404 for an unknown role. The caller must hold every permission the role grants (403 with `missing_permissions`), and only a super_admin may change a system role's display_name (403; re-sending the current name is not a change).
          */
         put: operations["updatePlatformRole"];
         post?: never;
         /**
          * Delete a platform role
-         * @description System roles cannot be deleted (400). A missing role surfaces as 404 (the system-role check fails to find it).
+         * @description System roles cannot be deleted (400); a non-UUID id is also 400. A missing role surfaces as 404 (the system-role check fails to find it). The caller must hold every permission the role grants (403 with `missing_permissions`).
          */
         delete: operations["deletePlatformRole"];
         options?: never;
@@ -307,7 +310,7 @@ export interface paths {
         get?: never;
         /**
          * Set a platform role's permissions
-         * @description Replaces the role's permission set with the supplied permission ids (an empty array clears all). System roles are immutable — modifying one returns 403. A missing role returns 404.
+         * @description Replaces the role's permission set with the supplied permission ids (an empty array clears all). System roles are immutable — modifying one returns 403. A missing role returns 404. The role id and every permission id must be a UUID (400 otherwise); ids are compared and written in canonical form and duplicates collapse. Otherwise the caller may not edit their own role (403), may not edit a role whose current permissions include one they lack (403 with `missing_permissions`), and may not set permissions they lack (403 with `missing_permissions`).
          */
         put: operations["setPlatformRolePermissions"];
         post?: never;
@@ -643,13 +646,13 @@ export interface paths {
         };
         /**
          * List platform identity providers
-         * @description Vista's own OAuth apps (Google/Microsoft) used by social signup. One row per provider type. The client secret is never returned; `has_secret` flags whether one is set..
+         * @description Vista's own OAuth apps (Google/Microsoft) used by social signup (purpose signup) and staff sign-in to the admin console (purpose admin_login). One row per (provider type, purpose). Requires platform.settings. The client secret is never returned; `has_secret` flags whether one is set..
          */
         get: operations["listPlatformIdentityProviders"];
         put?: never;
         /**
          * Create a platform identity provider
-         * @description One row per provider type; a duplicate type returns 409..
+         * @description Requires platform.security.manage (not platform.settings): an admin_login provider's endpoints decide which staff account signs in. One row per (provider type, purpose); a duplicate returns 409. The caller is recorded as the provider's last writer, and a platform audit event names the fields set (never the secret)..
          */
         post: operations["createPlatformIdentityProvider"];
         delete?: never;
@@ -668,11 +671,14 @@ export interface paths {
         get?: never;
         /**
          * Update a platform identity provider
-         * @description A blank client_secret keeps the stored one; provider_type is immutable..
+         * @description Requires platform.security.manage. Also how a provider is enabled or disabled (is_enabled). A blank client_secret keeps the stored one; provider_type and purpose are immutable. The caller is recorded as the provider's last writer — staff SSO signs in a super administrator only through a provider a super administrator last saved — and a platform audit event names the fields that changed (never the secret)..
          */
         put: operations["updatePlatformIdentityProvider"];
         post?: never;
-        /** Delete a platform identity provider */
+        /**
+         * Delete a platform identity provider
+         * @description Requires platform.security.manage. Audited..
+         */
         delete: operations["deletePlatformIdentityProvider"];
         options?: never;
         head?: never;
@@ -1826,7 +1832,7 @@ export interface paths {
         get: operations["getTenant"];
         /**
          * Update a tenant
-         * @description Partial update of name / domain / billing_email / payment_status. An empty body (no updatable fields) returns 400. `subscription_tier` in the body is accepted but ignored.
+         * @description Partial update of name / domain / billing_email / payment_status. An empty body (no updatable fields) returns 400. `subscription_tier` in the body is accepted but ignored. `payment_status` is an MSP concept: on any install not licensed as MSP (Enterprise, Core, expired) a body carrying it returns 409 and nothing is written.
          */
         put: operations["updateTenant"];
         post?: never;
@@ -1911,6 +1917,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/tenants/{id}/operator": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Mark a tenant as the MSP's own (excluded from the licensed tenant limit)
+         * @description Sets `tenants.is_operator`. An MSP licence's `max_tenants` counts the
+         *     MSP's customers; the MSP's own tenant(s) are marked here and never
+         *     counted. MSP licences only — 409 on Core or Enterprise, where there is
+         *     no tenant limit for the flag to affect. Audited
+         *     (`tenant.operator_changed`). The response carries the licensed tenant
+         *     limit re-evaluated after the change.
+         */
+        put: operations["setTenantOperator"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/tenants/{id}/entitlements": {
         parameters: {
             query?: never;
@@ -1959,6 +1990,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/tenants/{id}/features": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A tenant's paid features and per-tenant switches
+         * @description Every paid capability the install's licence covers (Enterprise: every
+         *     Enterprise item; MSP: every paid item; Core: none), as this tenant
+         *     resolves it — the same value RequireFeature and `GET /tenant/features`
+         *     see. `switched_off` marks a capability a platform admin switched off
+         *     for this tenant; `switchable` says whether the PUT below is accepted
+         *     (Enterprise only). Gated by `tenants.read`.
+         */
+        get: operations["listTenantFeatures"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tenants/{id}/features/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Switch a paid feature off (or back on) for one tenant
+         * @description Enterprise only. `enabled: false` (reason required) writes a
+         *     `tenant_entitlements` override of `{"enabled": false}` with the reason
+         *     `operator: <reason>`, which the resolver honours over the licence
+         *     grant. `enabled: true` deletes that override, returning the tenant to
+         *     the licence default. Idempotent; a change is recorded in the platform
+         *     audit log. 409 on any other edition (on MSP a tenant's plan decides;
+         *     use a plan exception), 404 for a tenant that does not exist or a key
+         *     the licence does not cover. Gated by `tenants.manage`.
+         */
+        put: operations["setTenantFeature"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/tenants/{id}/limits": {
         parameters: {
             query?: never;
@@ -1967,8 +2050,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * A tenant's effective limits (tier + overrides)
-         * @description The resolved numeric caps for the tenant — tier values overlaid with active tenant_entitlements overrides (the same override > tier > default resolution enforcement uses; ADR-0004 /).
+         * A tenant's effective limits (resolved)
+         * @description The resolved limits for the tenant — override > tier > default, then the licence step, exactly as enforcement resolves them (ADR-0004 /). `features` is the resolved boolean of every active capability; `retention_days` is null for unlimited (on Enterprise it is the platform retention cap). On an Enterprise install `tier_name` is omitted — read `plan.display_name`.
          */
         get: operations["getEffectiveLimits"];
         put?: never;
@@ -2038,7 +2121,7 @@ export interface paths {
         put?: never;
         /**
          * Create a platform user
-         * @description Creates a platform-admin user with a caller-supplied password. 400 on invalid role_id or weak password; 409 if the email already exists.
+         * @description Creates a platform-admin user with a caller-supplied password. 400 on invalid role_id or weak password; 403 unless the caller holds platform_roles.assign AND every permission the requested role grants (the body then carries `required_permission` or `missing_permissions`); 409 if the email already exists.
          */
         post: operations["createPlatformUser"];
         delete?: never;
@@ -2058,7 +2141,7 @@ export interface paths {
         put?: never;
         /**
          * Invite a platform user
-         * @description Creates an inactive-password platform user and emails them a one-time invite link to set their password. The user is created regardless of email outcome, so this always returns 201 on success. When email is not configured or the send fails, the response additionally carries `invite_link` so the admin can deliver it manually. 400 on invalid role_id; 409 if the email already exists.
+         * @description Creates an inactive-password platform user and emails them a one-time invite link to set their password. The user is created regardless of email outcome, so this always returns 201 on success. When email is not configured or the send fails, the response additionally carries `invite_link` so the admin can deliver it manually. 400 on invalid role_id; 403 unless the caller holds platform_roles.assign AND every permission the requested role grants; 409 if the email already exists.
          */
         post: operations["invitePlatformUser"];
         delete?: never;
@@ -2078,11 +2161,14 @@ export interface paths {
         get: operations["getPlatformUser"];
         /**
          * Update a platform user
-         * @description Partial update of first_name / last_name / role_id / is_active / force_password_change. Empty body (no updatable fields) returns 400; invalid role_id returns 400.
+         * @description Partial update of first_name / last_name / role_id / is_active / force_password_change. Empty body (no updatable fields) returns 400; invalid role_id returns 400. Every mutation of an existing platform user needs rank over them: the target's current role must be a subset of the caller's effective permissions, else 403 with `missing_permissions`; 404 for an unknown user. A caller may not deactivate themselves (403). A role_id different from the user's current role is a role change: it also needs platform_roles.assign (403 with `required_permission`), the new role must be within the caller's own permissions (403 with `missing_permissions`), and a caller may not change their own role (403) except a super_admin stepping down. Re-sending the current role_id is not a change and is not written; a body carrying only it is a 200 no-op. 409 when the write would leave no active super_admin (role change away from super_admin or is_active=false on the last one), and 409 when the user's role changed between the authorization check and the write (nothing is written; reload and retry).
          */
         put: operations["updatePlatformUser"];
         post?: never;
-        /** Soft-delete a platform user */
+        /**
+         * Soft-delete a platform user
+         * @description Soft-deletes a platform user. Every mutation of an existing platform user needs rank over them: the target's current role must be a subset of the caller's effective permissions, else 403 with `missing_permissions`; 404 for an unknown user. A caller may not delete themselves (403). 409 when the user is the last active super_admin, or when their role changed between the authorization check and the write (nothing is written; reload and retry).
+         */
         delete: operations["deletePlatformUser"];
         options?: never;
         head?: never;
@@ -2099,7 +2185,7 @@ export interface paths {
         get?: never;
         /**
          * Set a platform user's password
-         * @description Admin directly sets a new password (optionally forcing a change on next login). 400 on invalid id / weak password; 404 if the user does not exist.
+         * @description Admin directly sets a new password (optionally forcing a change on next login). 400 on invalid id / weak password. Every mutation of an existing platform user needs rank over them: the target's current role must be a subset of the caller's effective permissions, else 403 with `missing_permissions`; 404 for an unknown user; 409 when their role changed between the authorization check and the write (nothing is written; reload and retry).
          */
         put: operations["adminSetPlatformUserPassword"];
         post?: never;
@@ -2120,7 +2206,7 @@ export interface paths {
         put?: never;
         /**
          * Send a platform user a password-reset link
-         * @description Generates a one-hour reset token for an active platform user and emails them a branded reset link. The token is always stored, so this returns 200 on success. When email is not configured or the send fails, the response additionally carries `reset_link` so the admin can deliver it manually. 400 on invalid id; 404 if the user does not exist or is inactive.
+         * @description Generates a one-hour reset token for an active platform user and emails them a branded reset link. The token is always stored, so this returns 200 on success. When email is not configured or the send fails, the response additionally carries `reset_link` so the admin can deliver it manually. 400 on invalid id; 404 if the user does not exist or is inactive. Every mutation of an existing platform user needs rank over them: the target's current role must be a subset of the caller's effective permissions, else 403 with `missing_permissions`; 404 for an unknown user; 409 when their role changed between the authorization check and the write (no token is stored; reload and retry).
          */
         post: operations["adminSendPlatformUserPasswordReset"];
         delete?: never;
@@ -2221,6 +2307,45 @@ export interface paths {
          * @description The authenticated platform user. NOTE: unlike the list/get endpoints, `role` here is the role *name* string (not the role object).
          */
         get: operations["getCurrentPlatformUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/license/cap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The licensed tenant limit (MSP soft cap) and its grace state
+         * @description What the admin console's banner shows. Only an active MSP licence with
+         *     `max_tenants` caps anything; every other install answers
+         *     `state: uncapped`, so this is a Core route every build mounts.
+         *
+         *     `current` counts live tenants that are not the operator's own
+         *     (`tenants.is_operator`); `operator` counts those. When a tenant creation
+         *     takes `current` over `licensed`, a grace period of `grace_days` starts
+         *     (`grace_started_at`); while it lasts (`state: grace`) new tenants are
+         *     still allowed, and once it ends (`state: blocked`) every
+         *     tenant-creation path answers 409 for a creation that would take
+         *     `current` over `licensed`. Existing tenants are never affected.
+         *     `state` describes what the next creation would meet.
+         *
+         *     The grace period is granted once per licence: dropping back to
+         *     `licensed` or below does not clear or restart it, so an install back
+         *     at `licensed` after it has ended reads `blocked`. Only a new licence
+         *     starts a new one. Over the licence with no grace period recorded yet,
+         *     `grace_started_at` is null and `grace_ends_at` is `grace_days` from
+         *     now. This route is read-only: reading it never starts or changes the
+         *     grace period.
+         */
+        get: operations["getLicenseCap"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2351,6 +2476,67 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/license": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The install's licence (Settings → License & Usage)
+         * @description The licence this install runs under, as admin-service's licence
+         *     reconciler recorded it in `platform_license` after verifying the signed
+         *     token, plus the install id from `platform_install`. Never the token.
+         *
+         *     Core code: a build with no licence (every Core build) answers
+         *     `status: none`, `edition: core` — the page's "Vista Platform Core — no
+         *     licence installed" state. `edition` is what the install runs as NOW,
+         *     so an expired licence reads `core` with `status: expired`.
+         *     Gated by `platform.settings`.
+         */
+        get: operations["getLicense"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/license/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The Enterprise data-retention cap
+         * @description The platform data-retention cap (`platform_settings`
+         *     `retention.max_days`). On an Enterprise install every tenant's
+         *     `retention_days` entitlement resolves to it; null means unlimited, the
+         *     default. MSP retention is per plan and Core's is unchanged, so
+         *     `applies` is true only on an active Enterprise licence. This is the
+         *     DATA retention cap only; log retention is a separate setting.
+         */
+        get: operations["getLicenseRetention"];
+        /**
+         * Set the Enterprise data-retention cap
+         * @description `max_days` is required: a whole number of days from 1 to 36500, or null
+         *     for unlimited. An empty body is refused rather than read as unlimited.
+         *     A change is recorded in the platform audit log with the previous and
+         *     new values. Takes effect in this service at once and in every other
+         *     service within the licence cache TTL (30 s).
+         */
+        put: operations["updateLicenseRetention"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/settings": {
         parameters: {
             query?: never;
@@ -2363,7 +2549,19 @@ export interface paths {
          * @description Returns the merged platform settings (defaults overlaid with persisted overrides).
          */
         get: operations["getPlatformSettings"];
-        /** Update platform-wide settings */
+        /**
+         * Update platform-wide settings
+         * @description Partial update: only the provided fields are persisted. The route needs
+         *     platform.settings. Writing any of the keys that shape how staff
+         *     authenticate or where their password-reset and invitation email goes —
+         *     `admin_ui_base_url`, `email_config`, `password_min_length`,
+         *     `session_timeout_minutes`, `max_login_attempts`,
+         *     `lockout_duration_minutes`, `admin_email_verification_required` — also
+         *     needs platform.security.manage. A request that includes one without it is
+         *     refused whole with 403 (nothing is saved), and every accepted write of
+         *     those keys records a platform audit event (field names and non-secret
+         *     values; the SMTP password only as `smtp_password_changed`).
+         */
         put: operations["updatePlatformSettings"];
         post?: never;
         delete?: never;
@@ -2665,6 +2863,70 @@ export interface paths {
         put?: never;
         /** Issue an account credit (async; acknowledged) */
         post: operations["issueCredits"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/license/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * This month's licence usage (MSP licence only)
+         * @description The Settings → License & Usage panel's summary for the current UTC month: licensed tenants (the licence's soft cap, when it sets one), live tenants now (operator tenants counted and broken out), this month's peak computed exactly as the monthly report computes it, the snapshot coverage so far, when the next snapshot and report are due, and the install's id and signing-key fingerprint. Requires platform.settings. Answers 404 with reason not_msp unless the install runs under an active MSP licence.
+         */
+        get: operations["getLicenseUsage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/license/reports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List stored usage reports, newest first
+         * @description Every usage report this install has generated — the scheduled monthly reports and any on-demand ones, including month-to-date previews (complete=false, never billed). Requires platform.settings. On an install that is not under an active MSP licence this answers 200 with no reports, available=false and reason not_msp, so a console that asks anyway renders an explanation rather than an error.
+         */
+        get: operations["listLicenseUsageReports"];
+        put?: never;
+        /**
+         * Generate a signed usage report for a month
+         * @description Builds, signs (ES256, install key) and stores the usage report for one UTC calendar month (format: LICENSE_USAGE_REPORT_V1). A closed month defaults to complete=true, and a complete report exists at most once per month — asking again answers 200 with the stored report and created=false. The current month can only be a month-to-date preview (complete=false, 400 otherwise); previews are never billed and may be generated repeatedly. Future months and months before metering existed are refused with 400. A complete report for a month in which no daily snapshot was taken (before the MSP licence, or the platform down all month) is refused with 409 and reason no_snapshots; a preview of it is allowed. Requires platform.settings; audited as license.usage_report.generated. 404 with reason not_msp unless the install runs under an active MSP licence.
+         */
+        post: operations["generateLicenseUsageReport"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/license/reports/{id}/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download a stored usage report
+         * @description The stored report document exactly as it was signed — the same bytes the transmitter sends and that are written to the reports volume as <report_id>.json — served as an attachment. Verify it with shared/licensing/ee/usagereport.Verify. Requires platform.settings; audited as license.usage_report.downloaded. 404 with reason not_msp unless the install runs under an active MSP licence, or a plain 404 when no report has that id.
+         */
+        get: operations["downloadLicenseUsageReport"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3083,9 +3345,15 @@ export interface components {
             log_storage_config?: components["schemas"]["LogStorageConfig"];
             email_config?: components["schemas"]["EmailConfig"];
         };
-        /** @description Body for PUT /admin/settings (handlers.PlatformSettings). All fields optional; only provided ones are persisted. */
+        /** @description Body for PUT /admin/settings (handlers.PlatformSettings). All fields optional; only provided ones are persisted. The security-gated keys (see updatePlatformSettings) additionally need platform.security.manage. */
         PlatformSettingsInput: {
             [key: string]: unknown;
+        };
+        /** @description A 403 from a permission gate. `required_permission` names the permission the caller lacks; for PUT /admin/settings refused over security-gated keys, `fields` lists the keys that needed it. */
+        SecurityManageRequiredError: {
+            error: string;
+            required_permission: string;
+            fields?: string[];
         };
         /** @description Response for PUT /admin/settings — confirmation message + the merged settings. */
         UpdatePlatformSettingsResponse: {
@@ -3225,20 +3493,23 @@ export interface components {
             version: number;
         };
         /**
-         * @description A tenant's effective numeric limits — tier values overlaid with active
-         *     tenant_entitlements overrides (override > tier > default, the same path
-         * enforcement uses; ADR-0004 /).
+         * @description A tenant's effective limits — what the entitlement resolver answers
+         *     (override > tier > default, then the licence step), the same path
+         * enforcement uses; ADR-0004 /. `tier_name` is omitted on an
+         *     Enterprise install, which has no plans.
          */
         EffectiveLimits: {
             /** Format: uuid */
             tenant_id: string;
             /** Format: uuid */
             tier_id: string;
-            tier_name: string;
+            tier_name?: string;
+            plan?: components["schemas"]["TenantPlan"];
             max_sensors?: number | null;
             max_assets?: number | null;
             max_users?: number | null;
-            retention_days: number;
+            /** @description Days of data retained; null = unlimited. */
+            retention_days: number | null;
             compliance_frameworks?: number | null;
             max_integrations?: number | null;
             features?: {
@@ -3340,6 +3611,12 @@ export interface components {
         /** @description Acknowledgement for POST /admin/billing/credits. */
         IssueCreditsResponse: {
             message: string;
+        };
+        /** @description A 403 from platform authorization. `required_permission` names the one permission a gate asked for; `missing_permissions` lists what a role (being granted, being edited, or held by the target user) carries that the caller does not. Self-protection refusals carry `error` only. */
+        PlatformPermissionDenied: {
+            error: string;
+            required_permission?: string;
+            missing_permissions?: string[];
         };
         /** @description CURRENT error shape — a single human-readable string under `error`. Superseded by the ADR-0002 Error envelope as endpoints are hardened. */
         LegacyError: {
@@ -4223,21 +4500,23 @@ export interface components {
             data_purged: boolean;
             offboarding_settings: string | null;
         };
-        /** @description A tenant organization (shared/models.Tenant — the whole struct is marshaled, so fields the list/get query does not scan appear at their zero value: subscription_tier_id is the zero UUID; custom_branding / ui_config / settings are null). */
+        /** @description A tenant organization (shared/models.Tenant — the whole struct is marshaled, so fields the list/get query does not scan appear at their zero value: custom_branding / ui_config / settings are null; subscription_tier_id is the zero UUID only for a tenant with no tier) plus the resolved `plan` block. On an Enterprise install `subscription_tier` and `trial_ends_at` are OMITTED and a stored payment_status of `trial` reads `active`: Enterprise has no plans and no trials, and `plan` is what to display. */
         Tenant: {
             id: string;
             name: string;
             slug: string;
             domain: string | null;
-            subscription_tier: string | null;
+            subscription_tier?: string | null;
             subscription_tier_id: string;
             /** Format: date-time */
-            trial_ends_at: string | null;
+            trial_ends_at?: string | null;
             billing_email: string;
             payment_status: string;
             stripe_customer_id: string | null;
             sso_enabled: boolean;
             is_active: boolean;
+            /** @description The MSP's own tenant — never counted against an MSP licence's tenant limit. */
+            is_operator: boolean;
             custom_branding: Record<string, never> | null;
             ui_config: Record<string, never> | null;
             settings: Record<string, never> | null;
@@ -4247,6 +4526,37 @@ export interface components {
             updated_at: string;
             /** Format: date-time */
             deleted_at: string | null;
+            plan?: components["schemas"]["TenantPlan"];
+        };
+        TenantOperatorRequest: {
+            is_operator: boolean;
+        };
+        TenantOperatorResponse: {
+            id: string;
+            is_operator: boolean;
+            /** @description The licensed tenant limit after the change; omitted if re-evaluating it failed (the flag is saved regardless). */
+            cap?: components["schemas"]["LicenseCapResponse"];
+        };
+        LicenseCapResponse: {
+            /**
+             * @description The active licence's edition (core = no active licence).
+             * @enum {string}
+             */
+            edition: "core" | "enterprise" | "msp";
+            /** @description The licence's max_tenants; null when uncapped. */
+            licensed: number | null;
+            /** @description Live tenants that are not the operator's own. */
+            current: number;
+            /** @description Live tenants marked as the operator's own (never counted). */
+            operator: number;
+            /** Format: date-time */
+            grace_started_at: string | null;
+            /** @description The grace period in days (30 when the licence does not set one); null when uncapped. */
+            grace_days: number | null;
+            /** Format: date-time */
+            grace_ends_at: string | null;
+            /** @enum {string} */
+            state: "under" | "grace" | "blocked" | "uncapped";
         };
         /** @description A tenant user (shared/models.User — the whole struct is marshaled, so fields the query does not scan appear at their zero value: tenant_id is the zero UUID; email_verified false; last_login_at / avatar_url / timezone / preferences null; updated_at the zero time). */
         TenantUser: {
@@ -4330,14 +4640,14 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description A platform-admin user (shared/models.PlatformUser) as returned by list/get. `role` is the joined role object, null when the join misses. `password_changed_at`, `invited_by`, and `invitation_accepted_at` are omitted entirely when unset (json omitempty), so they are not required. */
+        /** @description A platform-admin user (shared/models.PlatformUser) as returned by list/get. `role_id` is the user's role id; the schema declares it NOT NULL, and should a row without a role exist anyway it is returned as null — never the zero UUID. `role` is the joined role object, null when the join misses. `password_changed_at`, `invited_by`, and `invitation_accepted_at` are omitted entirely when unset (json omitempty), so they are not required. */
         PlatformUser: {
             id: string;
             email: string;
             first_name: string;
             last_name: string;
             is_active: boolean;
-            role_id: string;
+            role_id: string | null;
             email_verified: boolean;
             force_password_change: boolean;
             /** Format: date-time */
@@ -4403,6 +4713,94 @@ export interface components {
              */
             billing: boolean;
         };
+        /**
+         * @description The resolved plan block (shared/entitlements.PlanFor). Core: "Vista
+         *     Platform Core". Enterprise: "Vista Platform Enterprise" with the
+         *     licensee and licence expiry — never a tier name, never a trial. MSP:
+         *     the tier's display name (the MSP's own plan) and, when that plan is a
+         *     trial with an end date, `trial`. No trial is the ABSENT key, not null.
+         */
+        TenantPlan: {
+            /** @enum {string} */
+            edition: "core" | "enterprise" | "msp";
+            display_name: string;
+            licensee: string | null;
+            /**
+             * Format: date-time
+             * @description The licence expiry; null on Core.
+             */
+            expires_at: string | null;
+            trial?: {
+                /** Format: date-time */
+                ends_at: string;
+            };
+        };
+        /** @description GET /admin/license. Never carries the token or its hash. */
+        LicenseInfo: {
+            /**
+             * @description What the install runs as now (an expired licence is core).
+             * @enum {string}
+             */
+            edition: "core" | "enterprise" | "msp";
+            display_name: string;
+            /** @enum {string} */
+            status: "none" | "active" | "expired";
+            /** @description The edition the recorded licence names, even when expired. */
+            licensed_edition: string | null;
+            licensee: string | null;
+            subject: string | null;
+            /** Format: date-time */
+            issued_at: string | null;
+            /** Format: date-time */
+            expires_at: string | null;
+            /** @description Whole days until expiry, rounded up. */
+            days_left: number | null;
+            /** @description MSP soft cap on tenants; null = not set by the licence. */
+            max_tenants: number | null;
+            grace_days: number | null;
+            /** Format: date-time */
+            verified_at: string | null;
+            /** @description This installation's id (platform_install). */
+            install_id: string | null;
+            /** @description The install id the licence carries, if any. */
+            bound_install_id: string | null;
+        };
+        RetentionSetting: {
+            /** @description The cap in days; null = unlimited. */
+            max_days: number | null;
+            /** @description True only on an active Enterprise licence. */
+            applies: boolean;
+        };
+        RetentionSettingInput: {
+            max_days: number | null;
+        };
+        TenantFeatures: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** @enum {string} */
+            edition: "core" | "enterprise" | "msp";
+            /** @description Whether per-tenant switches are accepted (Enterprise only). */
+            switchable: boolean;
+            features: components["schemas"]["TenantFeature"][];
+        };
+        TenantFeature: {
+            key: string;
+            display_name: string;
+            description: string | null;
+            /** @description What the resolver answers for this tenant. */
+            enabled: boolean;
+            /** @enum {string} */
+            source: "edition" | "override" | "tier" | "default";
+            /** @description A platform admin switched this off for this tenant. */
+            switched_off: boolean;
+            /** @description The switch's reason, without the "operator:" prefix. */
+            reason: string | null;
+        };
+        TenantFeatureSwitch: {
+            enabled: boolean;
+            /** @description Required when switching off. */
+            reason?: string;
+        };
         PlatformEditionResponse: {
             /**
              * @description Coarse build edition. Gate on `capabilities`, not on this.
@@ -4410,6 +4808,15 @@ export interface components {
              */
             edition: "core" | "enterprise";
             capabilities: components["schemas"]["PlatformEditionCapabilities"];
+            /**
+             * @description What the install is LICENSED as now (platform_license; an expired
+             *     licence is core). The build cannot tell Enterprise from MSP — one
+             *     ee binary serves both — so the console hides Plans & Pricing on
+             *     Enterprise and Billing unless MSP on this. Null when the licence
+             *     could not be read; treat as unknown and fail open.
+             * @enum {string|null}
+             */
+            license_edition: "core" | "enterprise" | "msp" | null;
         };
         PlatformLoginRequest: {
             /** Format: email */
@@ -4876,6 +5283,124 @@ export interface components {
             generated_at?: string;
             message: string;
         };
+        /** @description Usage reporting answered on an install that is not under an active MSP licence. reason is always not_msp; edition is the install's current edition (core when there is no active licence). */
+        LicenseNotMSPError: {
+            error: string;
+            /** @enum {string} */
+            reason: "not_msp";
+            /** @enum {string} */
+            edition: "core" | "enterprise";
+        };
+        /** @description Whether reports are transmitted to Vista Security. Not configured until the transmitter ships — reports are stored and downloadable only. */
+        LicenseUsageDelivery: {
+            configured: boolean;
+        };
+        LicenseUsage: {
+            /** @enum {string} */
+            edition: "msp";
+            period: {
+                /** Format: date-time */
+                start: string;
+                /** Format: date-time */
+                end: string;
+            };
+            /** @description The licence's soft tenant cap (max_tenants); null when it sets none. */
+            licensed_tenants: number | null;
+            /** @description Live tenants now, operator tenants included. */
+            current_tenants: number;
+            /** @description Live tenants now, operator tenants left out. */
+            customer_tenants: number;
+            operator_tenants: number;
+            /** @description This month's peak so far, by the monthly report's rule (snapshots and lifecycle events, operator tenants included). */
+            peak_tenants: number;
+            /** Format: date-time */
+            peak_at: string | null;
+            snapshots_taken: number;
+            snapshots_expected: number;
+            /** Format: date-time */
+            last_snapshot_at: string | null;
+            /** Format: date-time */
+            next_snapshot_at: string;
+            /** Format: date-time */
+            next_report_at: string;
+            /** Format: uuid */
+            install_id: string;
+            /** @description Lowercase hex SHA-256 of the signing key's SPKI DER — the key_id in every report. */
+            signing_key_id: string;
+            /** @description True when no key is mounted and reports are signed with a generated development key. */
+            signing_key_dev: boolean;
+            delivery: components["schemas"]["LicenseUsageDelivery"];
+        };
+        /** @description A stored usage report's metadata (the document itself is the download). */
+        LicenseUsageReport: {
+            /** Format: uuid */
+            report_id: string;
+            /** @description The UTC month, YYYY-MM. */
+            period: string;
+            /** Format: date-time */
+            period_start: string;
+            /** Format: date-time */
+            period_end: string;
+            /** @description False for a month-to-date preview, which is never billed. */
+            complete: boolean;
+            /** Format: date-time */
+            generated_at: string;
+            /** @description "scheduler" for the monthly run, or platform_user:<uuid> for an on-demand report. */
+            generated_by: string;
+            tenant_count: number;
+            signing_key_id: string;
+            /** @enum {string} */
+            delivery_status: "pending" | "delivered" | "failed";
+            delivery_attempts: number;
+            last_error: string | null;
+            /** Format: date-time */
+            delivered_at: string | null;
+        };
+        LicenseUsageReportList: {
+            reports: components["schemas"]["LicenseUsageReport"][];
+            /** @description False when the install is not under an active MSP licence (reports is then empty). */
+            available: boolean;
+            /** @enum {string} */
+            reason?: "not_msp";
+            /** @enum {string} */
+            edition: "core" | "enterprise" | "msp";
+            delivery: components["schemas"]["LicenseUsageDelivery"];
+        };
+        GenerateLicenseUsageReportRequest: {
+            /** @description The UTC month, YYYY-MM. */
+            period: string;
+            /** @description Defaults to true for a closed month and false for the current one; true for the current month is refused. */
+            complete?: boolean;
+        };
+        GenerateLicenseUsageReportResponse: {
+            report: components["schemas"]["LicenseUsageReport"];
+            /** @description False when the month's complete report already existed and was returned instead. */
+            created: boolean;
+        };
+        /** @description A signed licence usage report, format v1 (docs: LICENSE_USAGE_REPORT_V1). The body is signed with ES256 over its RFC 8785 canonical form; the envelope is canonical JSON too. */
+        LicenseUsageReportEnvelope: {
+            /** @constant */
+            format: "vista.license-usage-report";
+            /** @constant */
+            format_version: 1;
+            body: {
+                report_id: string;
+                generated_at: string;
+                period: Record<string, never>;
+                license: Record<string, never>;
+                install: Record<string, never>;
+                summary: Record<string, never>;
+                tenants: Record<string, never>[];
+                collection: Record<string, never>;
+            };
+            signature: {
+                /** @constant */
+                alg: "ES256";
+                key_id: string;
+                public_key: string;
+                value: string;
+            };
+        };
     };
     responses: {
         /** @description Invalid request. */
@@ -4903,6 +5428,24 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description Refused by platform authorization: the route permission (`required_permission`), platform_roles.assign for a role write (`required_permission`), a role or target that holds permissions the caller lacks (`missing_permissions`), or an act on the caller's own account/role (`error` only). */
+        PlatformPermissionDenied: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["PlatformPermissionDenied"];
+            };
+        };
+        /** @description The install is not under an active MSP licence (usage reporting is an MSP licence obligation), or no report has that id. */
+        LicenseNotMSP: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LicenseNotMSPError"] | components["schemas"]["LegacyError"];
             };
         };
         /** @description Resource not found. */
@@ -5394,6 +5937,8 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5419,6 +5964,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -5449,7 +5995,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
+            403: components["responses"]["PlatformPermissionDenied"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -7812,6 +8358,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7936,6 +8483,38 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    setTenantOperator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantOperatorRequest"];
+            };
+        };
+        responses: {
+            /** @description Saved. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantOperatorResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     listTenantEntitlements: {
         parameters: {
             query?: never;
@@ -8043,6 +8622,66 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listTenantFeatures: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's paid features. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantFeatures"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    setTenantFeature: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantFeatureSwitch"];
+            };
+        };
+        responses: {
+            /** @description The tenant's paid features after the change. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantFeatures"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8220,6 +8859,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
             409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -8248,6 +8888,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
             409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -8303,6 +8944,9 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8328,6 +8972,9 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8357,7 +9004,9 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
             404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8383,7 +9032,9 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
             404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8512,6 +9163,29 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getLicenseCap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cap's current state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseCapResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8667,6 +9341,80 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    getLicense: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The licence status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseInfo"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getLicenseRetention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The retention cap. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionSetting"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    updateLicenseRetention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetentionSettingInput"];
+            };
+        };
+        responses: {
+            /** @description The saved retention cap. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionSetting"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["PlatformPermissionDenied"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     getPlatformSettings: {
         parameters: {
             query?: never;
@@ -8711,6 +9459,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description The caller lacks platform.settings, or lacks platform.security.manage for one of the security-gated keys it sent (listed in `fields`). Nothing was saved. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityManageRequiredError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9245,6 +10002,126 @@ export interface operations {
                     "application/json": components["schemas"]["IssueCreditsResponse"];
                 };
             };
+        };
+    };
+    getLicenseUsage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The usage summary. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseUsage"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LicenseNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listLicenseUsageReports: {
+        parameters: {
+            query?: {
+                /** @description Page size (1–500, default 100). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The stored reports. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseUsageReportList"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    generateLicenseUsageReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateLicenseUsageReportRequest"];
+            };
+        };
+        responses: {
+            /** @description The complete report for that month already existed; it is returned unchanged. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GenerateLicenseUsageReportResponse"];
+                };
+            };
+            /** @description A new report was generated and stored. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GenerateLicenseUsageReportResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LicenseNotMSP"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    downloadLicenseUsageReport: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The report id (UUID). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The signed report envelope. */
+            200: {
+                headers: {
+                    /** @description attachment; filename="<report_id>.json" */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseUsageReportEnvelope"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LicenseNotMSP"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
 }

@@ -34,7 +34,7 @@ Enterprise, plus the multi-tenant management plane. Note that tenant isolation i
 
 | Capability | Edition | What it does | Documentation |
 |---|---|---|---|
-| **Self-Service Billing** | Enterprise | Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional. | in Enterprise docs |
+| **Self-Service Billing** | MSP | Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional. | in MSP docs |
 | **CBOM Signing & Attestation** | Enterprise | Cryptographic signing of CBOM artifacts with compliance-attestation layers | in Enterprise docs |
 | **CMDB / ITSM Sync** | Enterprise | Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds) | [Guide](features/cmdb-integrations.md) |
 | **NetBox Connector** | Enterprise | Pull sites, prefixes, VLANs, device types and devices from a NetBox network source of truth, and see the drift between NetBox and discovered inventory. Read-only towards NetBox. | in Enterprise docs |
@@ -66,12 +66,6 @@ Core ships local users, invitations, and RBAC. Federated identity in all three f
 
 `sso_saml`
 
-**Enterprise: monetization**
-
-The tenant-facing self-service billing surface — subscription, invoices, plan change, payment portal — is served by admin-service/ee/billingapi (`/my-billing/**`). Core mounts none of it, and there is nothing for it to show: a Core deployment has no subscription, no invoices and no payment provider. Tier ASSIGNMENT and usage-against-limits stay Core, so entitlements still resolve and Settings → Usage & Limits still works.
-
-`billing_portal`
-
 **Enterprise: white-label**
 
 Core keeps the palette/theme selector (a single org styling itself). Replacing product marks with your own is the paid surface.
@@ -101,6 +95,12 @@ Core logs every audit event and serves every audit query. Forwarding them to an 
 Retains the platform's existing gating: OT active probing and the OT lens have only ever shipped enabled on the paid tiers. Core keeps the full TLS/SSH/SMB discovery pipeline. Revisit if OT proves to be an adoption driver rather than a vertical upsell.
 
 `ot_active_probing` · `ot_primary_lens`
+
+**MSP: monetization**
+
+The tenant-facing self-service billing surface — subscription, invoices, plan change, payment portal — is served by admin-service/ee/billingapi (`/my-billing/**`). It exists for a service provider billing its own customers. An Enterprise company runs the platform for itself and has nobody to bill, so an Enterprise licence does not cover it (owner decision 2026-09-23). Core mounts none of it. Tier ASSIGNMENT and usage-against-limits stay Core, so entitlements still resolve and Settings → Usage & Limits still works.
+
+`billing_portal`
 
 ---
 

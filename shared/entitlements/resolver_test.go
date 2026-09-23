@@ -10,7 +10,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -98,13 +98,43 @@ func makeTenant(t *testing.T, db *sql.DB, tierName string) uuid.UUID {
 }
 
 // setupResolver returns a primed DB and a fresh tenant on the named tier.
+//
+// The resolver it returns is a SQL-layer resolver (see sqlLayerResolver): the
+// tests built on it are about override > tier > default, not about the
+// licence.
 func setupResolver(t *testing.T, tier string) (*entitlements.PostgresResolver, *sql.DB, uuid.UUID) {
 	t.Helper()
 	db := openTestDB(t)
 	applySchemaAndSeed(t, db)
-	r := entitlements.NewPostgresResolver(db)
+	r := sqlLayerResolver(db)
 	tenant := makeTenant(t, db, tier)
 	return r, db, tenant
+}
+
+// sqlLayerResolver is a resolver under an MSP licence, injected rather than
+// written to platform_license.
+//
+// Most tests in this file pin the SQL half of resolution — override beats
+// tier, expired overrides are ignored, a tier-less tenant falls to the
+// default. The licence step leaves those results exactly as the SQL produced
+// them only under an MSP licence (MSP lets the tenant's rows decide), so that
+// is the licence these tests run under. Injecting it keeps them off the global
+// platform_license row, which every other test binary on this database would
+// see. The licence step itself is pinned by license_internal_test.go (the
+// decision table) and by TestIntegration_Resolver_* below (the wiring).
+func sqlLayerResolver(db *sql.DB) *entitlements.PostgresResolver {
+	return entitlements.NewPostgresResolver(db, entitlements.WithLicenseSource(staticLicense(entitlements.EditionMSP)))
+}
+
+// staticLicense returns a LicenseSource for a valid licence of edition ed, or
+// Core (no licence) for EditionCore.
+func staticLicense(ed entitlements.Edition) entitlements.LicenseSource {
+	return func(context.Context) (*entitlements.License, error) {
+		if ed == entitlements.EditionCore {
+			return nil, nil
+		}
+		return &entitlements.License{Edition: ed, ExpiresAt: time.Now().Add(24 * time.Hour)}, nil
+	}
 }
 
 func TestResolve_ScopesTenantEntitlementLookup(t *testing.T) {
@@ -116,7 +146,7 @@ func TestResolve_ScopesTenantEntitlementLookup(t *testing.T) {
 
 	tenantID := uuid.New()
 	itemID := uuid.New()
-	r := entitlements.NewPostgresResolver(db)
+	r := entitlements.NewPostgresResolver(db, entitlements.WithLicenseSource(staticLicense(entitlements.EditionMSP)))
 
 	mock.ExpectQuery(`SELECT 1 FROM tenants WHERE id = \$1`).
 		WithArgs(tenantID).
@@ -158,7 +188,7 @@ func TestResolveMany_ScopesTenantEntitlementLookup(t *testing.T) {
 
 	tenantID := uuid.New()
 	itemID := uuid.New()
-	r := entitlements.NewPostgresResolver(db)
+	r := entitlements.NewPostgresResolver(db, entitlements.WithLicenseSource(staticLicense(entitlements.EditionMSP)))
 
 	mock.ExpectQuery(`SELECT 1 FROM tenants WHERE id = \$1`).
 		WithArgs(tenantID).
@@ -194,24 +224,13 @@ func TestResolveMany_ScopesTenantEntitlementLookup(t *testing.T) {
 // makeTierGrantingBoolean creates a throwaway subscription tier that grants
 // `key` and returns a fresh tenant on it.
 //
-// It exists because after the open-core carve NO seeded tier grants ANY boolean
-// capability: every boolean item in the catalogue is edition-gated, and the
-// seed's "edition-gate correction" UPDATE forces all of them to
-// `{"enabled": false}` on every tier (see the invariant pinned by
-// TestResolve_EditionGatedCapabilitiesNeverGrantedByTier below). Reading the
-// resolver's tier-boolean-true path off the seed is therefore no longer
-// possible — and the tests that tried to broke the nightly for a month.
-// A private tier keeps this test about the resolver instead of about the seed,
-// and cannot leak into other tests the way mutating `pro` would.
-//
-// It DID leak, for as long as the harness happened to clean up after it. The tier
-// is `is_active`, and TestResolve_EditionGatedCapabilitiesNeverGrantedByTier
-// iterates every active tier — so this one, which exists precisely to grant an
-// edition-gated boolean, failed that invariant. It passed anyway because that test
-// called ApplySchemaAndSeed, and seed.sql's edition-gate correction UPDATE forced
-// every boolean item back to `{"enabled": false}` on EVERY tier, this one
-// included. Once the harness stopped re-applying the seed on an already-seeded
-// database, the leak surfaced. Hence the explicit cleanup: residue that only
+// It exists because NO seeded tier grants ANY boolean capability: every boolean
+// item in the catalogue is edition-gated, and the seed ships all of them
+// `{"enabled": false}` on every tier. Reading the resolver's tier-boolean-true
+// path off the seed is therefore not possible — and the tests that tried to
+// broke the nightly for a month. A private tier keeps this test about
+// the resolver instead of about the seed, and cannot leak into other tests the
+// way mutating `pro` would. It is cleaned up explicitly: residue that only
 // another test's side effect removes is residue.
 func makeTierGrantingBoolean(t *testing.T, db *sql.DB, key string) uuid.UUID {
 	t.Helper()
@@ -248,7 +267,7 @@ func makeTierGrantingBoolean(t *testing.T, db *sql.DB, key string) uuid.UUID {
 func TestResolve_TierBoolean_Enabled(t *testing.T) {
 	db := openTestDB(t)
 	applySchemaAndSeed(t, db)
-	r := entitlements.NewPostgresResolver(db)
+	r := sqlLayerResolver(db)
 	tenant := makeTierGrantingBoolean(t, db, "ot_active_probing")
 
 	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
@@ -264,19 +283,25 @@ func TestResolve_TierBoolean_Enabled(t *testing.T) {
 	}
 }
 
-// TestResolve_EditionGatedCapabilitiesNeverGrantedByTier pins the open-core
-// invariant that broke the two tests above: no subscription tier may grant an
-// edition-gated capability, because seed.sql ships in the public repository and
-// a platform admin could otherwise unlock every paid capability from the tier
-// editor. Edition-gated capability arrives as a tenant_entitlements override
-// written by the entitlement-token seeder, and overrides outrank tiers.
+// TestResolve_CoreInstallNeverGrantsGatedCapabilities pins the open-core
+// boundary through the PRODUCTION resolver (no injected licence): on an install
+// with no platform_license row — Core — no tier may switch on an edition-gated
+// capability. Not the seeded tiers, and not a tier a platform admin edited to
+// grant every one of them, which the shipped tier editor allows.
 //
-// Keep the key list in step with editionByItem in editions.go and with the
-// corrective UPDATE at the bottom of scripts/database/seed.sql; `make audit`
-// enforces the same partition.
-func TestResolve_EditionGatedCapabilitiesNeverGrantedByTier(t *testing.T) {
+// This used to be enforced by data: seed.sql forced every tier's gated grants
+// to false on each seed run. The licence step (license.go) enforces it in code
+// now, which is what lets an MSP's plans grant paid capabilities; this test is
+// what proves Core did not lose the protection in the trade.
+//
+// `make audit` checks that the gated list below matches editionByItem in
+// editions.go (scripts/generate-edition-matrix.mjs), so a new paid capability
+// cannot be left out of it.
+func TestResolve_CoreInstallNeverGrantsGatedCapabilities(t *testing.T) {
 	db := openTestDB(t)
 	applySchemaAndSeed(t, db)
+	requireNoLicenceRow(t, db)
+	entitlements.FlushLicenseCache()
 	r := entitlements.NewPostgresResolver(db)
 
 	gated := []string{
@@ -286,38 +311,96 @@ func TestResolve_EditionGatedCapabilitiesNeverGrantedByTier(t *testing.T) {
 		"cmdb_sync", "connector_netbox", "siem_export", "billing_portal",
 	}
 
+	// Every seeded active tier, plus one of the test's own that grants ALL of
+	// the gated capabilities — the shape an admin produces by ticking every box.
 	rows, err := db.Query(`SELECT name FROM subscription_tiers WHERE is_active`)
 	if err != nil {
 		t.Fatalf("list tiers: %v", err)
 	}
-	defer func() { _ = rows.Close() }()
-	var tiers []string
+	var tenants []uuid.UUID
+	var labels []string
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
 			t.Fatalf("scan tier: %v", err)
 		}
-		tiers = append(tiers, n)
+		labels = append(labels, n)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate tiers: %v", err)
-	}
-	if len(tiers) == 0 {
+	_ = rows.Close()
+	if len(labels) == 0 {
 		t.Fatal("no seeded tiers found; seed.sql did not apply")
 	}
+	for _, n := range labels {
+		tenants = append(tenants, makeTenant(t, db, n))
+	}
+	allGranting := makeTierGrantingBooleans(t, db, gated)
+	tenants = append(tenants, allGranting)
+	labels = append(labels, "admin-edited tier granting every gated key")
 
-	for _, tier := range tiers {
-		tenant := makeTenant(t, db, tier)
+	// Premise: the admin-edited tier really does grant them at the SQL layer,
+	// or this test would pass by proving the gate denies what nobody granted.
+	for _, key := range gated {
+		ent, err := sqlLayerResolver(db).Resolve(context.Background(), allGranting, key)
+		if err != nil {
+			t.Fatalf("premise Resolve(%s): %v", key, err)
+		}
+		if on, _ := ent.BooleanValue(); !on || ent.Source != entitlements.SourceTier {
+			t.Fatalf("premise failed: the test tier does not grant %s (source %q)", key, ent.Source)
+		}
+	}
+
+	for i, tenant := range tenants {
 		for _, key := range gated {
 			ent, err := r.Resolve(context.Background(), tenant, key)
 			if err != nil {
-				t.Fatalf("Resolve(%s) on tier %s: %v", key, tier, err)
+				t.Fatalf("Resolve(%s) on %s: %v", key, labels[i], err)
 			}
 			if enabled, _ := ent.BooleanValue(); enabled {
-				t.Errorf("tier %q grants edition-gated %q — tiers must never grant paid capability", tier, key)
+				t.Errorf("%s grants edition-gated %q on a Core install — no tier may unlock a paid capability without a licence", labels[i], key)
 			}
 		}
 	}
+}
+
+// requireNoLicenceRow asserts the shared test database is Core. Only tests on a
+// ScratchDatabase may write platform_license; a row here means one did not, and
+// every Core assertion in every package would then be measuring the wrong thing.
+func requireNoLicenceRow(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM platform_license`).Scan(&n); err != nil {
+		t.Fatalf("count platform_license: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("the shared test database carries a platform_license row — some test wrote global licence state " +
+			"outside testdb.ScratchDatabase; this test cannot assert Core behaviour")
+	}
+}
+
+// makeTierGrantingBooleans is makeTierGrantingBoolean for several keys at once.
+func makeTierGrantingBooleans(t *testing.T, db *sql.DB, keys []string) uuid.UUID {
+	t.Helper()
+	tierName := "test-tier-" + uuid.New().String()[:8]
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM tenants WHERE subscription_tier_id =
+			(SELECT id FROM subscription_tiers WHERE name = $1)`, tierName)
+		_, _ = db.Exec(`DELETE FROM tier_entitlements WHERE tier_id =
+			(SELECT id FROM subscription_tiers WHERE name = $1)`, tierName)
+		_, _ = db.Exec(`DELETE FROM subscription_tiers WHERE name = $1`, tierName)
+	})
+	// is_active = false: it is not a shipped tier, and must not be picked up by
+	// another test that enumerates the active ones.
+	if _, err := db.Exec(`INSERT INTO subscription_tiers (name, display_name, is_active) VALUES ($1, $1, false)`, tierName); err != nil {
+		t.Fatalf("create throwaway tier: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO tier_entitlements (tier_id, item_id, included_value)
+		SELECT st.id, bi.id, '{"enabled": true}'::jsonb
+		FROM subscription_tiers st, billable_items bi
+		WHERE st.name = $1 AND bi.key = ANY($2)`, tierName, pq.Array(keys)); err != nil {
+		t.Fatalf("grant keys on throwaway tier: %v", err)
+	}
+	return makeTenant(t, db, tierName)
 }
 
 func TestResolve_TierBoolean_Disabled(t *testing.T) {
@@ -461,7 +544,7 @@ func TestResolve_UnknownItem(t *testing.T) {
 func TestIsEnabled(t *testing.T) {
 	db := openTestDB(t)
 	applySchemaAndSeed(t, db)
-	r := entitlements.NewPostgresResolver(db)
+	r := sqlLayerResolver(db)
 	// Same reason as TestResolve_TierBoolean_Enabled: no seeded tier grants a
 	// boolean any more, so the true branch needs a tier of its own.
 	tenant := makeTierGrantingBoolean(t, db, "ot_active_probing")
@@ -587,7 +670,7 @@ func TestResolve_EnumSupport(t *testing.T) {
 func TestResolve_TenantWithoutTier_FallsToDefault(t *testing.T) {
 	db := openTestDB(t)
 	applySchemaAndSeed(t, db)
-	r := entitlements.NewPostgresResolver(db)
+	r := sqlLayerResolver(db)
 
 	id := uuid.New()
 	_, err := db.Exec(`

@@ -2,10 +2,17 @@
 // settings that didn't fit the v1 admin-ui's ad-hoc settings-page layout).
 // The Email tab is the primary target: it wires the platform SMTP config that
 // drives user invitations, password resets, and the onboarding flow.
+//
+// Saving the SMTP config needs platform.security.manage (server-enforced): the
+// relay carries every staff password-reset link and invitation, so whoever
+// points it somewhere else can read them. Viewing and "Send test" stay on
+// platform.settings.
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Mail, CheckCircle, XCircle, Send } from 'lucide-react';
+import { Mail, CheckCircle, XCircle, Send, Lock } from 'lucide-react';
+import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { clients } from '../../lib/clients';
+import { SecurityManageNotice } from './settings-identity-providers-page';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -66,10 +73,10 @@ function useSendTestEmail() {
 // ── field helpers ─────────────────────────────────────────────────────────────
 
 function Field({
-  label, value, onChange, type = 'text', placeholder, hint,
+  label, value, onChange, type = 'text', placeholder, hint, disabled,
 }: {
   label: string; value: string; onChange: (v: string) => void;
-  type?: string; placeholder?: string; hint?: string;
+  type?: string; placeholder?: string; hint?: string; disabled?: boolean;
 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -79,6 +86,7 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        disabled={disabled}
         autoComplete={type === 'password' ? 'new-password' : 'off'}
         style={{
           background: 'var(--op-input-bg, rgba(255,255,255,.05))', border: '1px solid var(--op-border)',
@@ -118,6 +126,9 @@ export function SettingsEmailPage() {
   const { data: stored, isLoading } = useEmailConfig();
   const save = useSaveEmailConfig();
   const sendTest = useSendTestEmail();
+  const perms = usePlatformPermissions();
+  const canManage = perms.hasPermission(PLATFORM_PERMISSIONS.platform.securityManage);
+  const ro = !canManage;
 
   const [form, setForm] = useState<EmailConfig | null>(null);
   const [testTo, setTestTo] = useState('');
@@ -173,7 +184,12 @@ export function SettingsEmailPage() {
               Configured
             </div>
           )}
+          {ro && (
+            <span style={{ marginLeft: stored ? 12 : 'auto', display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--op-t3)' }}><Lock size={12} />Read-only</span>
+          )}
         </div>
+
+        {ro && <SecurityManageNotice what="Changing the email relay" />}
 
         {isLoading ? (
           <div style={{ color: 'var(--op-t3)', fontSize: 13 }}>Loading…</div>
@@ -183,14 +199,15 @@ export function SettingsEmailPage() {
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--op-t3)', marginBottom: 14 }}>SMTP Connection</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 12 }}>
-                <Field label="SMTP Host" value={current.smtp_host} onChange={(v) => set({ smtp_host: v })} placeholder="smtp.example.com" />
-                <Field label="Port" value={current.smtp_port} onChange={(v) => set({ smtp_port: v })} placeholder="587" />
+                <Field label="SMTP Host" disabled={ro} value={current.smtp_host} onChange={(v) => set({ smtp_host: v })} placeholder="smtp.example.com" />
+                <Field label="Port" disabled={ro} value={current.smtp_port} onChange={(v) => set({ smtp_port: v })} placeholder="587" />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
-                <Field label="Username" value={current.smtp_username} onChange={(v) => set({ smtp_username: v })} placeholder="user@example.com" />
+                <Field label="Username" disabled={ro} value={current.smtp_username} onChange={(v) => set({ smtp_username: v })} placeholder="user@example.com" />
                 <Field
                   label="Password"
                   type="password"
+                  disabled={ro}
                   value={current.smtp_password}
                   onChange={(v) => set({ smtp_password: v })}
                   placeholder={current.smtp_password_set ? '••••••••  (leave blank to keep)' : 'Set password'}
@@ -203,21 +220,23 @@ export function SettingsEmailPage() {
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--op-t3)', marginBottom: 14 }}>Sender Identity</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <Field label="From Email" value={current.from_email} onChange={(v) => set({ from_email: v })} placeholder="noreply@yourplatform.com" />
-                <Field label="From Name" value={current.from_name} onChange={(v) => set({ from_name: v })} placeholder="Vista" />
+                <Field label="From Email" disabled={ro} value={current.from_email} onChange={(v) => set({ from_email: v })} placeholder="noreply@yourplatform.com" />
+                <Field label="From Name" disabled={ro} value={current.from_name} onChange={(v) => set({ from_name: v })} placeholder="Vista" />
               </div>
             </div>
 
             {/* actions */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 4, borderTop: '1px solid var(--op-border)' }}>
-              <button
-                className="op-btn"
-                onClick={handleSave}
-                disabled={save.isPending}
-                style={{ minWidth: 100 }}
-              >
-                {save.isPending ? 'Saving…' : 'Save settings'}
-              </button>
+              {canManage && (
+                <button
+                  className="op-btn"
+                  onClick={handleSave}
+                  disabled={save.isPending}
+                  style={{ minWidth: 100 }}
+                >
+                  {save.isPending ? 'Saving…' : 'Save settings'}
+                </button>
+              )}
 
               {/* test email */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>

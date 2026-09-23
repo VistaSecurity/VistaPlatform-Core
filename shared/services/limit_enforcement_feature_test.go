@@ -37,51 +37,80 @@ func boolEntitlement(key string, source entitlements.Source, enabled bool) *enti
 	}
 }
 
-func TestCheckFeatureAccess_EditionGatedRequiresOverride(t *testing.T) {
+// checkFeatureAccess must take the resolver's answer for an edition-gated item
+// whatever layer it came from. The resolver's licence step is the edition
+// boundary; a second rule here — the old "a gated item counts only from an
+// override" — is exactly what stopped an MSP plan (a tier) from granting a paid
+// capability, and re-adding it turns the "tier grant" row red.
+func TestCheckFeatureAccess_ResolverDecidesGatedItems(t *testing.T) {
 	tenantID := uuid.New()
 
 	tests := []struct {
-		name    string
-		feature string
-		hasTier bool
-		ent     *entitlements.EffectiveEntitlement
-		err     error
-		want    bool
+		name         string
+		feature      string
+		hasTier      bool
+		ent          *entitlements.EffectiveEntitlement
+		err          error
+		want         bool
+		wantResolved bool
 	}{
 		{
-			name:    "tier alone cannot unlock edition gated feature",
-			feature: "custom_policies",
-			hasTier: true,
-			ent:     boolEntitlement("custom_policies", entitlements.SourceTier, true),
-			want:    false,
+			name:         "tier grant (an MSP plan) unlocks a gated feature",
+			feature:      "custom_policies",
+			hasTier:      true,
+			ent:          boolEntitlement("custom_policies", entitlements.SourceTier, true),
+			want:         true,
+			wantResolved: true,
 		},
 		{
-			name:    "active override unlocks edition gated feature",
-			feature: "custom_policies",
-			hasTier: true,
-			ent:     boolEntitlement("custom_policies", entitlements.SourceOverride, true),
-			want:    true,
+			name:         "edition grant (an Enterprise licence) unlocks a gated feature",
+			feature:      "custom_policies",
+			hasTier:      true,
+			ent:          boolEntitlement("custom_policies", entitlements.SourceEdition, true),
+			want:         true,
+			wantResolved: true,
 		},
 		{
-			name:    "disabled override stays denied",
-			feature: "custom_policies",
-			hasTier: true,
-			ent:     boolEntitlement("custom_policies", entitlements.SourceOverride, false),
-			want:    false,
+			name:         "edition denial (no licence) stays denied",
+			feature:      "custom_policies",
+			hasTier:      true,
+			ent:          boolEntitlement("custom_policies", entitlements.SourceEdition, false),
+			want:         false,
+			wantResolved: true,
 		},
 		{
-			name:    "unknown gated feature stays denied",
-			feature: "custom_policies",
-			hasTier: true,
-			err:     entitlements.ErrUnknownItem,
-			want:    false,
+			name:         "disabled override stays denied",
+			feature:      "custom_policies",
+			hasTier:      true,
+			ent:          boolEntitlement("custom_policies", entitlements.SourceOverride, false),
+			want:         false,
+			wantResolved: true,
 		},
 		{
-			name:    "ungated onboarding carve out still avoids resolver",
-			feature: "core_feature",
-			hasTier: false,
-			ent:     nil,
-			want:    true,
+			name:         "unknown gated feature stays denied",
+			feature:      "custom_policies",
+			hasTier:      true,
+			err:          entitlements.ErrUnknownItem,
+			want:         false,
+			wantResolved: true,
+		},
+		{
+			// The onboarding carve-out must NOT reach gated items: it answers
+			// without the resolver, and so without the licence step.
+			name:         "gated feature with no tier still asks the resolver",
+			feature:      "custom_policies",
+			hasTier:      false,
+			ent:          boolEntitlement("custom_policies", entitlements.SourceEdition, false),
+			want:         false,
+			wantResolved: true,
+		},
+		{
+			name:         "ungated onboarding carve out still avoids resolver",
+			feature:      "core_feature",
+			hasTier:      false,
+			ent:          nil,
+			want:         true,
+			wantResolved: false,
 		},
 	}
 
@@ -95,8 +124,8 @@ func TestCheckFeatureAccess_EditionGatedRequiresOverride(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("checkFeatureAccess() = %v, want %v", got, tt.want)
 			}
-			if tt.feature == "core_feature" && resolver.called {
-				t.Fatal("ungated no-tier carve-out should not call the resolver")
+			if resolver.called != tt.wantResolved {
+				t.Fatalf("resolver called = %v, want %v", resolver.called, tt.wantResolved)
 			}
 		})
 	}

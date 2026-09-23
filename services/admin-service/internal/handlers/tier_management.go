@@ -9,6 +9,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/api"
+	"github.com/vistasecurity/vistaplatform/shared/licenseusage"
 )
 
 var tierService *services.TierService
@@ -209,7 +210,7 @@ func AssignTier(c *gin.Context) {
 		return
 	}
 
-	res, err := tierService.AssignTierToTenant(tierID, tenantID)
+	res, err := tierService.AssignTierToTenant(tierID, tenantID, licenseusage.PlatformActor(c.GetString("userID")))
 	if err != nil {
 		api.ErrorResponse(c, http.StatusBadRequest, "failed to assign tier to tenant", err)
 		return

@@ -419,10 +419,13 @@ func (r *RBACService) GetPlatformUsers() ([]*models.PlatformUser, error) {
 			return nil, fmt.Errorf("failed to scan platform user: %w", err)
 		}
 
-		user.Role = &models.PlatformRole{
-			ID:          user.RoleID,
-			Name:        roleName,
-			DisplayName: roleDisplayName,
+		// The query INNER JOINs platform_roles, so role_id is never NULL here.
+		if user.RoleID != nil {
+			user.Role = &models.PlatformRole{
+				ID:          *user.RoleID,
+				Name:        roleName,
+				DisplayName: roleDisplayName,
+			}
 		}
 
 		users = append(users, &user)

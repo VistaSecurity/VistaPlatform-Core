@@ -412,7 +412,8 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	// Interrogate device using device interrogation service. This creates its own
 	// discovery job and materializes the targets, findings AND sensor_discoveries
 	// rows there.
-	discoveryJobID, materialized, err := w.deviceInterrogation.InterrogateDevice(ctx, job.TenantID, systemUserID, *job.AssetID)
+	var observationsErr error
+	discoveryJobID, materialized, err := w.deviceInterrogation.interrogateDevice(ctx, job.TenantID, systemUserID, *job.AssetID, &observationsErr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to interrogate device: %w", err)
 	}
@@ -438,6 +439,9 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 		Success:     true,
 		Assets:      []models.DiscoveredAsset{}, // Assets created via discovery integration
 		CompletedAt: time.Now(),
+		// What the in-cluster sink dropped of the facts and edges it wrote,
+		// so the processing block reports it (see ProcessJobResults).
+		ObservationsErr: observationsErr,
 		Metadata: map[string]interface{}{
 			"asset_id": device.ID.String(),
 			// Deprecated alias, emitted for one release: the value IS the asset id.

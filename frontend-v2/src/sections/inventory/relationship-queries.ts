@@ -8,6 +8,7 @@ import { clients } from '../../lib/clients';
 import { errorMessage } from './asset-queries';
 import type { Impact, Neighbourhood, Relationship, RelationshipType } from './relationships';
 import type { TopologyPayload } from './topology-model';
+import type { NetworkMap } from './network-map-model';
 
 export const RELATIONSHIPS_PAGE_SIZE = 100;
 export const RELATIONSHIP_PROPOSALS_PAGE_SIZE = 50;
@@ -254,6 +255,26 @@ export function useAssetTopology(enabled = true) {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets/topology', {});
       if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load the topology');
       return data.topology;
+    },
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * The Network view's data: every live asset placed by site and
+ * network, with a catalogue-sourced crypto summary per asset.
+ *
+ * One call, like the topology: the server bounds it and REPORTS the bound
+ * (`truncated`, `total_assets`). Cached for a minute for the same reason.
+ */
+export function useNetworkMap(enabled = true) {
+  return useQuery({
+    queryKey: ['inventory', 'network-map'],
+    enabled,
+    queryFn: async (): Promise<NetworkMap> => {
+      const { data, error } = await clients.inventory.GET('/infrastructure-assets/network-map', {});
+      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load the network map');
+      return data.network_map;
     },
     staleTime: 60_000,
   });
