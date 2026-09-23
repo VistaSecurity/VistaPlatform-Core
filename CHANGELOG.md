@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.2] - 2026-09-22
+## [1.1.0-rc.3] - 2026-09-22
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
