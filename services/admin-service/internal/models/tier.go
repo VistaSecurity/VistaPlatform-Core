@@ -97,9 +97,17 @@ type TierUpdateRequest struct {
 	IsCustom         *bool                  `json:"is_custom"`
 	OwnerTenantID    *uuid.UUID             `json:"owner_tenant_id"`
 	DisplayOrder     *int                   `json:"display_order"`
-	// Entitlements, when non-nil, bulk-replaces the tier's composition in
-	// tier_entitlements (the enforced layer).
+	// Entitlements upserts the named items in tier_entitlements (the enforced
+	// layer). Items it does not name are left as they are — omission never
+	// deletes; RemoveEntitlements is the only way to take an item off a tier.
 	Entitlements []TierEntitlementInput `json:"entitlements"`
+	// RemoveEntitlements lists item keys to delete from the tier's
+	// composition (the tier then inherits the catalogue default for them).
+	RemoveEntitlements []string `json:"remove_entitlements"`
+	// EntitlementsVersion is the composition version the caller read (GET
+	// /tiers/:id/entitlements). Required whenever Entitlements or
+	// RemoveEntitlements is present; a stale one fails the whole update.
+	EntitlementsVersion *string `json:"entitlements_version"`
 }
 
 // EffectiveLimits represents the effective limits for a tenant: every value is

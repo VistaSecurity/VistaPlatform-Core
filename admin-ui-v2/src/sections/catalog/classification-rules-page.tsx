@@ -35,9 +35,10 @@
 import { useState } from 'react';
 import { Crosshair, Plus, Search, Trash2, Pencil, X } from 'lucide-react';
 import { Tag, num } from '../../components/ui/primitives';
+import { AcceptUpdateButton, SeededContentBadges } from './seeded-content';
 import {
   useClassificationRules, useCreateClassificationRule, useUpdateClassificationRule,
-  useDeleteClassificationRule, errMsg,
+  useDeleteClassificationRule, useAcceptClassificationRuleUpdate, errMsg,
   RULE_KIND_LABEL, RULE_KIND_HINT, MIN_CONFIDENCE, MAX_CONFIDENCE, PAGE_SIZE,
   type ClassificationRule, type ClassificationRuleInput, type ClassificationRuleKind,
 } from './catalog-queries';
@@ -234,6 +235,7 @@ export function ClassificationRulesPage() {
   const create = useCreateClassificationRule();
   const update = useUpdateClassificationRule();
   const remove = useDeleteClassificationRule();
+  const accept = useAcceptClassificationRuleUpdate();
 
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
@@ -317,7 +319,10 @@ export function ClassificationRulesPage() {
             {rows.map((r) => (
               <tr key={r.id}>
                 <td><Tag color={KIND_COLOR[r.rule_kind] ?? 'var(--op-t2)'}>{RULE_KIND_LABEL[r.rule_kind] ?? r.rule_kind}</Tag></td>
-                <td className="mono" style={{ fontSize: 12, color: 'var(--op-t1)', wordBreak: 'break-all' }}>{r.pattern}</td>
+                <td className="mono" style={{ fontSize: 12, color: 'var(--op-t1)', wordBreak: 'break-all' }}>
+                  {r.pattern}
+                  <span style={{ display: 'inline-flex', gap: 4, marginLeft: 6, verticalAlign: 'middle' }}><SeededContentBadges row={r} /></span>
+                </td>
                 <td>
                   {/* A null class is the NORMAL shape of a vendor-only rule, so
                       it says so rather than rendering a dash that reads as
@@ -335,6 +340,9 @@ export function ClassificationRulesPage() {
                     : <span className="t-muted" style={{ fontSize: 11.5 }} title="This rule cites nothing.">uncited</span>}
                 </td>
                 <td style={{ whiteSpace: 'nowrap' }}>
+                  <span style={{ marginRight: 6 }}>
+                    <AcceptUpdateButton row={r} label={r.pattern} pending={accept.isPending} onAccept={() => accept.mutate(r.id)} />
+                  </span>
                   <button
                     className="op-btn sm" type="button" aria-label={`Edit ${r.pattern}`}
                     onClick={() => { create.reset(); update.reset(); setEditing(r); }}
@@ -369,6 +377,11 @@ export function ClassificationRulesPage() {
             )}
           </tbody>
         </table>
+        {accept.error && (
+          <div style={{ fontSize: 12, color: 'var(--danger)', padding: '8px 16px' }} data-testid="accept-error">
+            {errMsg(accept.error, 'Failed to accept the update')}
+          </div>
+        )}
 
         {!isLoading && !isError && total > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderTop: '1px solid var(--op-border)' }}>
@@ -392,14 +405,13 @@ export function ClassificationRulesPage() {
               <X size={12} />
             </button>
           </div>
-          {/* Two things worth knowing before clicking, both of which surprise
-              people: existing proposals keep their evidence, and a seeded rule
-              comes back on the next release. */}
-          <div className="t-muted" style={{ fontSize: 11.5, lineHeight: 1.6 }}>
+          {/* Two things worth knowing before clicking: existing proposals keep
+              their evidence, and deleting a shipped rule is remembered — upgrades
+              no longer put it back (decision 4, RC-12). */}
+          <div className="t-muted" style={{ fontSize: 11.5, lineHeight: 1.6 }} data-testid="delete-consequences">
             Class proposals already made from this rule keep their copy of it, so past
-            decisions stay reviewable. If it is one of the seeded rules, the next release's
-            seed run will put it back — to override a seeded answer durably, add a more
-            specific rule instead.
+            decisions stay reviewable. Deleting a rule that ships with Vista is remembered:
+            upgrades will not put it back.
           </div>
           {remove.error && (
             <div style={{ fontSize: 12, color: 'var(--danger)' }} data-testid="delete-error">
@@ -420,6 +432,9 @@ export function ClassificationRulesPage() {
 
       <div className="t-muted" style={{ fontSize: 11.5, lineHeight: 1.6 }} data-testid="rules-footnote">
         Seeded from <span className="mono">standards/classification-rules.yaml</span> and curated here.
+        Rules marked <strong>Vista</strong> ship with the platform. Your edits to them survive upgrades,
+        and when a later release changes a rule you edited, it shows <strong>Update available</strong> instead
+        of overwriting your version.
         Every rule produces a class <em>proposal</em> that goes through Approvals in the tenant&rsquo;s
         own queue — nothing on this page classifies anything on its own. When two rules disagree about the class at similar confidence,
         the classifier proposes <strong>no</strong> class and reports both, which is the intended outcome

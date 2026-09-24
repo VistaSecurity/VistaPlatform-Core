@@ -131,7 +131,45 @@ func (e *PlatformAuditEmitter) Emit(c *gin.Context, entry PlatformAuditEntry) {
 	if e == nil || !e.enabled || e.client == nil {
 		return
 	}
+	req := buildPlatformActivity(entry)
 
+	// Actor: the authenticated platform user. AuthMiddleware + StringifyUserID
+	// place the id under "userID" and the email under "email".
+	if actorID := c.GetString("userID"); actorID != "" && actorID != "system" {
+		if uid, err := uuid.Parse(actorID); err == nil {
+			req.UserID = &uid
+		}
+	}
+	if email := c.GetString("email"); email != "" {
+		req.UserEmail = &email
+	}
+	applyEntryActor(req, entry)
+	if ip := c.ClientIP(); ip != "" {
+		req.IPAddress = &ip
+	}
+	if ua := c.Request.UserAgent(); ua != "" {
+		req.UserAgent = &ua
+	}
+	e.send(req, entry.EventType)
+}
+
+// EmitSystem records a platform event that no request caused — the outcome of
+// background work such as the licence usage-report transmitter. There is no
+// session, so the actor is whatever the entry names (usually nobody: the
+// record carries user_type="platform" with no user id). Non-blocking, like
+// Emit.
+func (e *PlatformAuditEmitter) EmitSystem(entry PlatformAuditEntry) {
+	if e == nil || !e.enabled || e.client == nil {
+		return
+	}
+	req := buildPlatformActivity(entry)
+	applyEntryActor(req, entry)
+	e.send(req, entry.EventType)
+}
+
+// buildPlatformActivity maps an entry onto the ingest request, less the actor
+// and request metadata.
+func buildPlatformActivity(entry PlatformAuditEntry) *audit.ActivityLogRequest {
 	req := &audit.ActivityLogRequest{
 		UserType:      "platform",
 		EventType:     entry.EventType,
@@ -150,27 +188,6 @@ func (e *PlatformAuditEmitter) Emit(c *gin.Context, entry PlatformAuditEntry) {
 			req.ErrorCode = &code
 		}
 	}
-
-	// Actor: the authenticated platform user. AuthMiddleware + StringifyUserID
-	// place the id under "userID" and the email under "email".
-	if actorID := c.GetString("userID"); actorID != "" && actorID != "system" {
-		if uid, err := uuid.Parse(actorID); err == nil {
-			req.UserID = &uid
-		}
-	}
-	if email := c.GetString("email"); email != "" {
-		req.UserEmail = &email
-	}
-	if req.UserID == nil && entry.ActorID != "" {
-		if uid, err := uuid.Parse(entry.ActorID); err == nil {
-			req.UserID = &uid
-		}
-	}
-	if req.UserEmail == nil && entry.ActorEmail != "" {
-		email := entry.ActorEmail
-		req.UserEmail = &email
-	}
-
 	if entry.ResourceType != "" {
 		rt := entry.ResourceType
 		req.ResourceType = &rt
@@ -180,18 +197,29 @@ func (e *PlatformAuditEmitter) Emit(c *gin.Context, entry PlatformAuditEntry) {
 			req.ResourceID = &rid
 		}
 	}
-	if ip := c.ClientIP(); ip != "" {
-		req.IPAddress = &ip
-	}
-	if ua := c.Request.UserAgent(); ua != "" {
-		req.UserAgent = &ua
-	}
+	return req
+}
 
+// applyEntryActor fills the actor from the entry where nothing else set it.
+func applyEntryActor(req *audit.ActivityLogRequest, entry PlatformAuditEntry) {
+	if req.UserID == nil && entry.ActorID != "" {
+		if uid, err := uuid.Parse(entry.ActorID); err == nil {
+			req.UserID = &uid
+		}
+	}
+	if req.UserEmail == nil && entry.ActorEmail != "" {
+		email := entry.ActorEmail
+		req.UserEmail = &email
+	}
+}
+
+// send posts in the background; a failure is logged, never surfaced.
+func (e *PlatformAuditEmitter) send(req *audit.ActivityLogRequest, eventType string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		if err := e.client.LogActivity(ctx, req); err != nil {
-			log.Printf("[platform-audit] failed to record %q: %v", entry.EventType, err)
+			log.Printf("[platform-audit] failed to record %q: %v", eventType, err)
 		}
 	}()
 }
@@ -228,4 +256,11 @@ func PlatformAuditActivityLogger() audit.ActivityLogger {
 // record support-granted plan changes.
 func RecordPlatformAudit(c *gin.Context, entry PlatformAuditEntry) {
 	recordPlatformAudit(c, entry)
+}
+
+// RecordPlatformSystemAudit records a platform event raised by background work
+// rather than a request (see EmitSystem). Safe before the emitter is wired and
+// when auditing is disabled: it records nothing.
+func RecordPlatformSystemAudit(entry PlatformAuditEntry) {
+	platformAuditor.EmitSystem(entry)
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { algorithmUpdateBody, catalogueRiskLevel, compareCatalogueRisk, explicitRiskScore } from './ratings-page';
+import { RISK_BANDS } from '@vistasecurity/primitives/ratings';
+import {
+  OBSOLETE_RISK_FLOOR, algorithmUpdateBody, catalogueRiskLevel, compareCatalogueRisk, deprecateDescription,
+  explicitRiskScore, obsoleteRiskScore,
+} from './ratings-page';
 
 const editFields = {
   strength: 'weak',
@@ -62,5 +66,53 @@ describe('catalogue risk presentation', () => {
       { name: 'high', risk_score: 100 },
     ].sort(compareCatalogueRisk);
     expect(rows.map((row) => row.name)).toEqual(['high', 'zero', 'unknown']);
+  });
+});
+
+// Decision 12 (RC-38): Deprecate makes the algorithm grade Critical, and the
+// console must say exactly what the server does.
+describe('obsolete grades Critical', () => {
+  it('takes the floor from the shared Critical band, not a literal', () => {
+    const critical = RISK_BANDS.find((b) => b.label === 'Critical');
+    expect(OBSOLETE_RISK_FLOOR).toBe(critical?.min);
+    expect(catalogueRiskLevel(OBSOLETE_RISK_FLOOR)).toBe('Critical');
+    expect(catalogueRiskLevel(OBSOLETE_RISK_FLOOR - 1)).not.toBe('Critical');
+  });
+
+  it('raises a lower score to the floor and keeps a higher one', () => {
+    expect(obsoleteRiskScore(30)).toBe(OBSOLETE_RISK_FLOOR);
+    expect(obsoleteRiskScore(null)).toBe(OBSOLETE_RISK_FLOOR);
+    expect(obsoleteRiskScore(OBSOLETE_RISK_FLOOR + 5)).toBe(OBSOLETE_RISK_FLOOR + 5);
+  });
+
+  it('describes the score change and the restore', () => {
+    const text = deprecateDescription(30);
+    expect(text).toContain(`from 30 to ${OBSOLETE_RISK_FLOOR}`);
+    expect(text).toContain('Critical');
+    expect(text).toContain('restores its 30 score');
+    expect(deprecateDescription(null)).toContain('restores it to unassessed');
+    expect(deprecateDescription(OBSOLETE_RISK_FLOOR + 3)).toContain(`stays ${OBSOLETE_RISK_FLOOR + 3}`);
+  });
+
+  it('does not echo an unchanged score, so leaving obsolete restores the remembered one', () => {
+    const body = algorithmUpdateBody(OBSOLETE_RISK_FLOOR, {
+      ...editFields, deprecationStatus: 'current', risk: String(OBSOLETE_RISK_FLOOR),
+    });
+    expect(body).not.toBeNull();
+    expect(body).not.toHaveProperty('risk_score');
+    expect(body).toMatchObject({ deprecation_status: 'current' });
+  });
+
+  it('still sends a score the admin actually changed', () => {
+    expect(algorithmUpdateBody(40, { ...editFields, risk: '55' })).toMatchObject({ risk_score: 55 });
+  });
+
+  it('refuses a below-floor score while the algorithm stays obsolete', () => {
+    expect(algorithmUpdateBody(OBSOLETE_RISK_FLOOR, {
+      ...editFields, deprecationStatus: 'obsolete', risk: String(OBSOLETE_RISK_FLOOR - 10),
+    })).toBeNull();
+    expect(algorithmUpdateBody(OBSOLETE_RISK_FLOOR, {
+      ...editFields, deprecationStatus: 'obsolete', risk: String(OBSOLETE_RISK_FLOOR + 1),
+    })).toMatchObject({ risk_score: OBSOLETE_RISK_FLOOR + 1 });
   });
 });

@@ -49,6 +49,9 @@ func TestRotateAgentCertificate_RefusedWithoutClientCertificate(t *testing.T) {
 	mock.ExpectQuery(`SELECT tenant_id FROM device_agents WHERE id = \$1 AND deleted_at IS NULL`).
 		WithArgs(agentID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
+	// AgentAuth: the tenant is usable (RC-4 /).
+	mock.ExpectQuery(`FROM tenants WHERE id = \$1`).WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"payment_status", "deleted", "session_version"}).AddRow("active", false, 0))
 
 	r := gin.New()
 	g := r.Group("/agents")
@@ -91,6 +94,9 @@ func TestRotateAgentCertificate_RefusedWithForeignCertificate(t *testing.T) {
 	mock.ExpectQuery(`SELECT tenant_id FROM device_agents WHERE id = \$1 AND deleted_at IS NULL`).
 		WithArgs(victimID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
+	// AgentAuth: the tenant is usable (RC-4 /).
+	mock.ExpectQuery(`FROM tenants WHERE id = \$1`).WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"payment_status", "deleted", "session_version"}).AddRow("active", false, 0))
 
 	r := gin.New()
 	g := r.Group("/agents")
@@ -130,6 +136,9 @@ func TestRotateAgentCertificate_RefusedWithSupersededCertificate(t *testing.T) {
 	mock.ExpectQuery(`SELECT tenant_id FROM device_agents WHERE id = \$1 AND deleted_at IS NULL`).
 		WithArgs(agentID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
+	// AgentAuth: the tenant is usable (RC-4 /).
+	mock.ExpectQuery(`FROM tenants WHERE id = \$1`).WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"payment_status", "deleted", "session_version"}).AddRow("active", false, 0))
 	// Guard: tenant CA lookup (RLS tx), then the active-certificate binding.
 	mock.ExpectBegin()
 	mock.ExpectExec(`SELECT set_tenant_context\(\$1\)`).WithArgs(tenantID).WillReturnResult(sqlmock.NewResult(0, 1))

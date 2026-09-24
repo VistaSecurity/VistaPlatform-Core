@@ -30,8 +30,11 @@
 /** Why the session ended, so the app can word the sign-in prompt correctly.
  *  - 'expired'    — a session existed and the refresh exchange failed, or a
  *                   "successful" refresh produced a session that doesn't work.
- *  - 'no-session' — a protected call 401'd with no session signal present. */
-export type SessionExpiredReason = 'expired' | 'no-session';
+ *  - 'no-session' — a protected call 401'd with no session signal present.
+ *  - 'tenant_suspended' / 'tenant_deleted' — a call was refused (403) because
+ *                   the organization is suspended, canceled or deleted (RC-4);
+ *                   the sign-in page explains which. */
+export type SessionExpiredReason = 'expired' | 'no-session' | 'tenant_suspended' | 'tenant_deleted';
 
 export interface SessionExpiryHandlerOptions {
   /** Does a session exist at all (csrf-cookie presence)? When false the refresh
@@ -56,6 +59,10 @@ export interface SessionExpiryHandlerOptions {
 export interface SessionExpiryHandlers {
   onAuthFailure(): Promise<boolean>;
   onRecoveryFailed(): Promise<void>;
+  /** A 403 said the organization is suspended/canceled/deleted (RC-4): end the
+   * session once, with that reason. No refresh is attempted — it would be
+   * refused for the same reason. */
+  onTenantBlocked(code: 'tenant_suspended' | 'tenant_deleted'): void;
 }
 
 export function createSessionExpiryHandler(
@@ -88,6 +95,10 @@ export function createSessionExpiryHandler(
       }
       const recovered = await inflight;
       return recovered || giveUp('expired');
+    },
+
+    onTenantBlocked(code) {
+      giveUp(code);
     },
 
     async onRecoveryFailed() {

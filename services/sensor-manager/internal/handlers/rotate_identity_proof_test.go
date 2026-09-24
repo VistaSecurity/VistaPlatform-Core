@@ -70,6 +70,8 @@ func TestRotate_RefusedWithoutClientCertificate_FailOpenMode(t *testing.T) {
 
 	sensorID := uuid.New()
 	// Fail-open mode: the handler resolves the owning tenant from the path id.
+	// SensorAuth (fail-open mode) resolves the tenant and checks it is usable (RC-4).
+	expectSensorAuthTenantLive(bypassMock, sensorID)
 	bypassMock.ExpectQuery(`SELECT tenant_id FROM sensors WHERE id = \$1 AND deleted_at IS NULL`).
 		WithArgs(sensorID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(testTenantID))
@@ -118,6 +120,8 @@ func TestRotate_RefusedWithForeignCertificate(t *testing.T) {
 	attackerID := uuid.New()
 	_, _, _, attackerLeaf := testSensorCAWithLeaf(t, attackerID, big.NewInt(4242))
 
+	// SensorAuth (fail-open mode) resolves the tenant and checks it is usable (RC-4).
+	expectSensorAuthTenantLive(bypassMock, victimID)
 	bypassMock.ExpectQuery(`SELECT tenant_id FROM sensors WHERE id = \$1 AND deleted_at IS NULL`).
 		WithArgs(victimID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(testTenantID))
@@ -158,6 +162,8 @@ func TestRotate_RefusedWithSupersededCertificate(t *testing.T) {
 	sensorID := uuid.New()
 	caID, caPEM, encKey, leaf := testSensorCAWithLeaf(t, sensorID, big.NewInt(111))
 
+	// SensorAuth (fail-open mode) resolves the tenant and checks it is usable (RC-4).
+	expectSensorAuthTenantLive(bypassMock, sensorID)
 	bypassMock.ExpectQuery(`SELECT tenant_id FROM sensors WHERE id = \$1 AND deleted_at IS NULL`).
 		WithArgs(sensorID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(testTenantID))
@@ -211,6 +217,7 @@ func TestRotate_AllowedWithCurrentCertificate(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(testTenantID))
 	expectActiveCA(dbMock, testTenantID, caID, caPEM, encKey)
 	expectActiveSensorCert(bypassMock, sensorID, serial)
+	expectTenantLive(bypassMock, testTenantID) // SensorAuth: the tenant is usable (RC-4)
 	// Handler identity-proof guard: CA chain + active-cert binding again.
 	expectActiveCA(dbMock, testTenantID, caID, caPEM, encKey)
 	expectActiveSensorCert(bypassMock, sensorID, serial)
@@ -348,4 +355,20 @@ func testCSRPEMEscaped(t *testing.T, sensorID uuid.UUID) string {
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 	return strings.ReplaceAll(string(csrPEM), "\n", "\\n")
+}
+
+// expectSensorAuthTenantLive queues what SensorAuth reads in fail-open mode
+// before the handler runs: the sensor's tenant, then that tenant's state
+// (RC-4 /), answered "active".
+func expectSensorAuthTenantLive(mock sqlmock.Sqlmock, sensorID uuid.UUID) {
+	mock.ExpectQuery(`SELECT tenant_id FROM sensors WHERE id = \$1 AND deleted_at IS NULL`).
+		WithArgs(sensorID).
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(testTenantID))
+	expectTenantLive(mock, testTenantID)
+}
+
+func expectTenantLive(mock sqlmock.Sqlmock, tenantID interface{}) {
+	mock.ExpectQuery(`FROM tenants WHERE id = \$1`).
+		WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"payment_status", "deleted", "session_version"}).AddRow("active", false, 0))
 }

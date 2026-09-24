@@ -46,6 +46,9 @@ type PlatformFramework struct {
 	// Computed fields
 	ControlsCount int `json:"controls_count" db:"controls_count"`
 
+	// Seeded-content ownership (decision 4, RC-12); set by the admin catalogue reads.
+	SeededContent
+
 	// Joined fields
 	Controls []PlatformFrameworkControl `json:"controls,omitempty" db:"-"`
 }
@@ -83,6 +86,9 @@ type PlatformFrameworkControl struct {
 
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+
+	// Seeded-content ownership (decision 4, RC-12); set by the admin catalogue reads.
+	SeededContent
 
 	// Joined fields
 	Family       *Family              `json:"family,omitempty" db:"-"`

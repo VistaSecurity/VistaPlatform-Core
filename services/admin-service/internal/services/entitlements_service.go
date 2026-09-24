@@ -9,15 +9,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
-// UnknownItemKeyError is returned by ReplaceTierEntitlements when the
-// request references a key that doesn't resolve to an active
-// billable_items row. Handlers translate this into a 400, preserving
-// the offending key for the admin UI to pinpoint the bad cell.
+// UnknownItemKeyError is returned by a composition write when the request
+// references a key that doesn't resolve to an active billable_items row (or,
+// for a removal, to any billable_items row). Handlers translate this into a
+// 400, preserving the offending key for the admin UI to pinpoint the bad cell.
 type UnknownItemKeyError struct {
 	Key string
 }
@@ -26,11 +25,11 @@ func (e *UnknownItemKeyError) Error() string {
 	return "unknown or inactive billable_item key: " + e.Key
 }
 
-// DuplicateItemKeyError is returned by ReplaceTierEntitlements when the same
-// item_key appears more than once in one composition. Before this check the
-// second row tripped the (tier_id, item_id) primary key and surfaced as a
-// bare 500 with the message swallowed; a composition that names a lever
-// twice is ambiguous about which value it meant, so it is a 400 with the key.
+// DuplicateItemKeyError is returned by a composition write when the same
+// item_key appears more than once in one request (set and remove together).
+// Before this check the second row tripped the (tier_id, item_id) primary
+// key and surfaced as a bare 500 with the message swallowed; a composition
+// that names a lever twice is ambiguous about which value it meant, so it is a 400 with the key.
 type DuplicateItemKeyError struct {
 	Key string
 }
@@ -186,7 +185,13 @@ type TierEntitlement struct {
 // NOT included — the composer fills missing items in from the catalog
 // using each item's default_value.
 func (s *EntitlementsService) GetTierEntitlements(tierID uuid.UUID) ([]TierEntitlement, error) {
-	rows, err := s.db.Query(`
+	return queryTierEntitlements(s.db, tierID)
+}
+
+// queryTierEntitlements is GetTierEntitlements over any runner, so the
+// composition writers read the rows inside their own transaction.
+func queryTierEntitlements(q sqlRunner, tierID uuid.UUID) ([]TierEntitlement, error) {
+	rows, err := q.Query(`
 		SELECT bi.id, bi.key, bi.display_name, bi.category, bi.kind, bi.unit,
 		       te.included_value, te.overage_price_cents, te.overage_unit_size
 		FROM tier_entitlements te
@@ -236,122 +241,15 @@ func (s *EntitlementsService) GetTierEntitlements(tierID uuid.UUID) ([]TierEntit
 	return out, nil
 }
 
-// TierEntitlementInput is one cell of the composer's bulk replace.
-// Item is identified by key (stable) rather than UUID so admin UIs
-// can build the payload without a UUID round-trip.
+// TierEntitlementInput is one item of a composition write (see
+// tier_composition.go). Item is identified by key (stable) rather than UUID so
+// admin UIs can build the payload without a UUID round-trip. Omitted overage
+// fields leave the stored values as they are.
 type TierEntitlementInput struct {
 	ItemKey           string          `json:"item_key"`
 	IncludedValue     json.RawMessage `json:"included_value"`
 	OveragePriceCents *int            `json:"overage_price_cents,omitempty"`
 	OverageUnitSize   *int            `json:"overage_unit_size,omitempty"`
-}
-
-// ReplaceTierEntitlements bulk-replaces a tier's composition in a
-// single transaction. Anything not in the input is deleted; new
-// keys are inserted; existing keys are updated. The whole set is
-// validated up-front (every item_key must resolve to a known,
-// active billable_items row, appear once, and carry a value of the
-// shape that row's kind requires) so a typo can't half-apply.
-//
-// An omitted or empty included_value is rejected rather than defaulted.
-// It used to default to `{}` "to keep PUT requests tolerant of a
-// partially-typed UI form" — and `{}` resolved as an unlimited quantity,
-// so a blank cell in the composer granted unlimited capacity to every
-// tenant on the tier. See entitlements.ValidateValue.
-//
-// Idempotent: running the same input twice produces the same end
-// state. Concurrent calls for the same tier race; admin-UI prevents
-// this with optimistic UI patterns, but the DB transaction means at
-// worst the loser overwrites the winner — never corrupt state.
-func (s *EntitlementsService) ReplaceTierEntitlements(tierID uuid.UUID, inputs []TierEntitlementInput) error {
-	// Resolve and validate all item keys up front.
-	keys := make([]string, 0, len(inputs))
-	for _, in := range inputs {
-		keys = append(keys, in.ItemKey)
-	}
-
-	type catalogRow struct {
-		id   uuid.UUID
-		kind string
-	}
-	keyToItem := make(map[string]catalogRow, len(keys))
-	if len(keys) > 0 {
-		rows, err := s.db.Query(`
-			SELECT key, id, kind FROM billable_items
-			WHERE key = ANY($1) AND is_active = true
-		`, pq.Array(keys))
-		if err != nil {
-			return fmt.Errorf("resolve item keys: %w", err)
-		}
-		for rows.Next() {
-			var (
-				key  string
-				id   uuid.UUID
-				kind string
-			)
-			if err := rows.Scan(&key, &id, &kind); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("scan item key: %w", err)
-			}
-			keyToItem[key] = catalogRow{id: id, kind: kind}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("iterate item keys: %w", err)
-		}
-		_ = rows.Close()
-	}
-	seen := make(map[string]bool, len(inputs))
-	for _, in := range inputs {
-		item, ok := keyToItem[in.ItemKey]
-		if !ok {
-			return &UnknownItemKeyError{Key: in.ItemKey}
-		}
-		if seen[in.ItemKey] {
-			return &DuplicateItemKeyError{Key: in.ItemKey}
-		}
-		seen[in.ItemKey] = true
-		if err := validateItemValue(in.ItemKey, item.kind, in.IncludedValue); err != nil {
-			return err
-		}
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Delete-all-then-insert is the simplest correct semantic for a
-	// bulk replace. tier_entitlements has no FKs pointing INTO it
-	// from other tables, so cascading concerns don't apply. The
-	// transaction makes the swap atomic from any concurrent reader.
-	if _, err := tx.Exec(`DELETE FROM tier_entitlements WHERE tier_id = $1`, tierID); err != nil {
-		return fmt.Errorf("clear tier entitlements: %w", err)
-	}
-
-	for _, in := range inputs {
-		itemID := keyToItem[in.ItemKey].id
-		val := []byte(in.IncludedValue)
-		var overageCents, overageSize interface{}
-		if in.OveragePriceCents != nil {
-			overageCents = *in.OveragePriceCents
-		}
-		if in.OverageUnitSize != nil {
-			overageSize = *in.OverageUnitSize
-		}
-		if _, err := tx.Exec(`
-			INSERT INTO tier_entitlements (tier_id, item_id, included_value, overage_price_cents, overage_unit_size)
-			VALUES ($1, $2, $3::jsonb, $4, $5)
-		`, tierID, itemID, val, overageCents, overageSize); err != nil {
-			return fmt.Errorf("insert tier entitlement %s: %w", in.ItemKey, err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
 }
 
 // BillableItemInput captures the writeable fields for create + update.

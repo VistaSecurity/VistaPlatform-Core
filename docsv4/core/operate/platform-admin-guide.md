@@ -11,7 +11,7 @@ This guide is for **platform administrators** — the staff who operate Vista Pl
 
 It documents the administration console (admin-ui v2). The console has a single, persistent **left-rail navigation**: top-level sections, with sub-pages indented underneath the active section (there are no in-page tabs). The sections are grouped into three blocks — an ungrouped operations block at the top, then **Platform**, then **Governance**.
 
-**Core vs. paid editions.** A handful of sections belong to a specific edition and simply don't exist in a Core build — their rail entries are hidden and their routes render an edition notice rather than a page whose calls 404. **Tenants** and **Comms** are part of the MSP tenant-lifecycle surface; **Billing & Revenue** is part of the MSP billing surface (the tenant-facing billing portal is MSP-only; see the [edition matrix](../editions.md)). Everything else on this page — Mission Control, Support, Fleet, Jobs & Queues, Plans & Pricing, System Health, Catalog, Settings, Staff & Access, and Security & Trust — ships in every edition, including Core.
+**Core vs. paid editions.** A handful of sections belong to a specific edition and simply don't exist in a Core build — their rail entries are hidden and their routes render an edition notice rather than a page whose calls 404. **Tenants** is part of the MSP tenant-lifecycle surface; **Billing & Revenue** is part of the MSP billing surface (the tenant-facing billing portal is MSP-only; see the [edition matrix](../editions.md)). **Plans & Pricing** and **Billing & Revenue** appear only on an MSP licence: plans, pricing and billing are how a service provider sells to its own customers, so a Core or Enterprise console does not show them. Everything else on this page — Mission Control, Support, Fleet, Jobs & Queues, System Health, Catalog, Settings, Staff & Access, and Security & Trust — ships in every edition, including Core.
 
 ---
 
@@ -26,12 +26,11 @@ It documents the administration console (admin-ui v2). The console has a single,
 7. [Billing & Revenue](#billing--revenue)
 8. [Plans & Pricing](#plans--pricing)
 9. [System Health](#system-health)
-10. [Comms](#comms)
-11. [Catalog](#catalog)
-12. [Settings](#settings)
-13. [Staff & Access](#staff--access)
-14. [Security & Trust](#security--trust)
-15. [Appendix: Tenant Roles (support reference)](#appendix-tenant-roles-support-reference)
+10. [Catalog](#catalog)
+11. [Settings](#settings)
+12. [Staff & Access](#staff--access)
+13. [Security & Trust](#security--trust)
+14. [Appendix: Tenant Roles (support reference)](#appendix-tenant-roles-support-reference)
 
 ---
 
@@ -62,9 +61,20 @@ Access is role-based. Roles and the permissions they carry are managed in **Staf
 
 - **Super Administrator** — full access, including billing, packaging, and security policy.
 - **Platform Administrator** — day-to-day platform and tenant management, excluding the most sensitive billing/settings actions. It holds **Manage platform settings** (`platform.settings`) but not **Manage security settings** (`platform.security.manage`) — see [Settings that need Security management](#settings-that-need-security-management).
-- **Support Administrator** — read-oriented access for assisting tenants.
+- **Support Agent** — read-oriented access for assisting tenants: tenant health, fleet, jobs and queues, system health, and the activity trail, retention policies and SIEM integrations (read-only). It cannot retry or cancel a customer's job or change settings.
 
-Permissions are enforced by the services, not just hidden in the UI — a missing permission yields a `403` even on a direct request. The console only shows you the sections and actions your role permits, and an edition your build doesn't ship is hidden regardless of role.
+Permissions are enforced by the services, not just hidden in the UI — a missing permission yields a `403` even on a direct request. What counts is the **permissions the role holds**, never the role's name: a custom role you build in **Roles** gets exactly the sections its permissions open, and no role gets in by being called "Platform Administrator". The console only shows you the sections and sub-pages your role permits — each is gated on the same permission its service checks — and an edition your build doesn't ship is hidden regardless of role.
+
+The permissions behind the operator sections that are easiest to get wrong when building a custom role:
+
+| To… | the role needs |
+|---|---|
+| See Fleet, Jobs & Queues, System Health, Support → Tenant Health / Job Repair | `platform.health` |
+| Retry or cancel a customer's job (Support → Job Repair), re-evaluate a tenant | `tenants.manage` |
+| Read Security → Retention and SIEM Export | `platform.audit` |
+| Change retention policies, SIEM integrations or audit alert rules | `platform.audit.manage` |
+| Open Plans & Pricing | `platform.settings` |
+| Author frameworks, end-of-life, vulnerability and classification catalogues | `catalogs.manage` |
 
 #### Who can assign a role
 
@@ -89,7 +99,7 @@ The left rail is the spine of the console. Top-level sections in order:
 | Block | Sections |
 |---|---|
 | (top) | Mission Control · Tenants · Support · Fleet · Jobs & Queues · Billing & Revenue · Plans & Pricing |
-| **Platform** | System Health · Comms · Catalog · Settings |
+| **Platform** | System Health · Catalog · Settings |
 | **Governance** | Staff & Access · Security & Trust |
 
 When a section has sub-pages, selecting it expands them indented in the rail; the first sub-page is the section's default view. The topbar shows the active section's title and a one-line subtitle so you always know where you are.
@@ -118,13 +128,15 @@ A command palette (**Cmd/Ctrl + K**) lets you jump to any page by name; it respe
 
 ## Support
 
-**What it's for:** the customer-success operator cockpit — **tenant health, impersonation, and job repair**. Three sub-pages:
+**What it's for:** the customer-success operator cockpit — **tenant health and job repair**. Two sub-pages:
 
 - **Tenant Health** — per-tenant health indices and the alerts that drive them, so you can spot a customer trending toward churn or trouble before they open a ticket. The composite is displayed as an index such as `82/100 · Good`, not as a percentage. Bands are Excellent (90+), Good (75+), Fair (60+), Poor (40+) and Failing (below 40); unavailable factors remain unavailable and do not become zero.
-- **Impersonation** — the audit trail of support-impersonation sessions: who impersonated which tenant's user, when, and for how long.
+  - The index weighs four factors: **performance** (25), **security posture** (20), **business activity** (15) and **cost** (15), out of 75. **Resource efficiency** is shown as **Not measured** and is not part of the index: nothing measures a tenant's own CPU and memory use, so the console leaves it out rather than estimating it.
+  - A factor shown as **Unavailable** could not be measured this time because a platform service did not answer; the drawer names the service and says how much of the index the remaining factors cover.
+  - **Active alerts** counts every open health alert, of any severity. A tenant has at most one open alert of each kind: recalculating updates it, and it is resolved once the condition clears. Deleted tenants are not listed.
 - **Job Repair** — retry or cancel stuck discovery jobs on a tenant's behalf, without needing database access.
 
-**Key tasks:** triage tenant health, review impersonation history, and unstick a discovery job a tenant has reported as hung.
+**Key tasks:** triage tenant health and unstick a discovery job a tenant has reported as hung.
 
 ---
 
@@ -157,7 +169,7 @@ A command palette (**Cmd/Ctrl + K**) lets you jump to any page by name; it respe
 
 ## Plans & Pricing
 
-**What it's for:** **packaging** — *what you sell and how it's composed.* This section ships in every edition: browse the **Entitlements** catalogue (the levers), the **Tiers** built from them, and any **Add-ons**, and assign a tenant to a tier. Tier assignment and enforcement work on every edition, so entitlements still resolve correctly on a Core deployment.
+**What it's for:** **packaging** — *what you sell and how it's composed.* The console shows this section on an **MSP licence only**: browse the **Entitlements** catalogue (the levers), the **Tiers** built from them, and any **Add-ons**, and assign a tenant to a tier. On Core and Enterprise the section is hidden, but tier enforcement still runs underneath, so entitlements resolve correctly on a Core deployment.
 
 Sub-pages: **Entitlements** · **Tiers** · **Add-ons**.
 
@@ -170,11 +182,9 @@ Sub-pages: **Entitlements** · **Tiers** · **Add-ons**.
 
 - **Services** — backend service status and latency. The first place to look when something feels slow or broken.
 - **Gateway** — API gateway routers, services, and routing health.
-- **Alerts** — system alert history and the thresholds that fire them.
+- **Alerts** — system alert history, the thresholds that fire them, and **maintenance windows**. While a maintenance window is active, notification delivery is suppressed, so planned work does not page anyone. This is the console's only maintenance-window setting.
 
-**Key tasks:** confirm all services are healthy, diagnose latency or routing problems, and review what's been alerting.
-
----
+**Key tasks:** confirm all services are healthy, diagnose latency or routing problems, review what's been alerting, and schedule a maintenance window before planned work.
 
 ---
 
@@ -218,11 +228,11 @@ All three are gated on the platform permission `catalogs.manage`, separate from 
 - **Access & Sign-up** — self-service sign-up and email-verification gates for new organizations.
 - **Branding** — white-label the platform: product name, logos, and favicon.
 - **Legal** — author and version your Terms of Service and Privacy Policy.
-- **Identity Providers** — the platform's own Google / Microsoft OAuth apps, used for social sign-up and for staff sign-in to this console. Adding, editing, enabling, disabling or deleting a provider needs Security management (see below); anyone with Settings access can view them.
+- **Identity Providers** — the platform's own Google / Microsoft OAuth apps, used for staff sign-in to this console (**Admin login**) and, with an Enterprise or MSP licence, for social sign-up (**Sign-up**). On Core the form offers Admin login only, and the server refuses a new Sign-up provider (`402`), because social sign-up is not part of Core. Adding, editing, enabling, disabling or deleting a provider needs Security management (see below); anyone with Settings access can view them.
 - **Notification Delivery** — the platform-level notification channels (chat webhook, email, generic webhook, paging), the routing rules that send alerts of a given source/severity to them, and delivery history. These are platform-level notifications — from monitoring and security — distinct from any tenant's own channels.
 - **License & Usage** — the licence this install runs under and this install's ID. A Core install reads **Vista Platform Core — no licence installed**. Needs `platform.settings`.
 
-**Key tasks:** wire up email delivery, configure self-service sign-up policy, white-label the console, keep your legal documents current, connect an identity provider for social sign-up, and configure where platform alerts go.
+**Key tasks:** wire up email delivery, configure self-service sign-up policy, white-label the console, keep your legal documents current, connect an identity provider for staff sign-in (or, with an Enterprise or MSP licence, social sign-up), and configure where platform alerts go.
 
 ### Settings that need Security management
 
@@ -239,10 +249,10 @@ Without the permission those pages are read-only and say which permission is mis
 
 Staff sign-in through an identity provider has two more rules:
 
-- The provider must assert that the email address is **verified**. A provider that does not (Microsoft Entra, for example) cannot be used for staff sign-in; use a password.
+- The email address must be **verified**. Google asserts it. Microsoft Entra never does, so a Microsoft admin-login provider signs staff in only through its **Allowed email domains** list: a sign-in whose email domain exactly matches an entry is accepted. The list is accepted only when the provider's authorization and token URLs name your Entra directory (`login.microsoftonline.com/<tenant-id>/…`), not `common`, `organizations` or `consumers`. Through a multi-tenant endpoint, any Entra directory's administrator could assert an address in your domain. Domains match exactly: no subdomains, wildcards or non-ASCII lookalikes. With an empty list, a Microsoft provider cannot be used for staff sign-in; use a password.
 - A provider signs in only staff its most recent editor outranks. A **Super Administrator** is signed in only through a provider that a Super Administrator saved most recently; anyone else only if the provider's most recent editor currently holds every permission of their role. If the provider is changed by someone with fewer permissions — or its last editor is deactivated or loses permissions — the affected staff must use their password until someone who outranks them reviews and saves the provider again. A provider saved before this rule existed has no recorded editor: it keeps signing in everyone except Super Administrators.
 
-Staff SSO sign-ins appear in the Activity Log as `auth.sso_login` events; refusals are marked failed with the reason.
+Staff SSO sign-ins appear in the Activity Log as `auth.sso_login` events. A refusal is marked failed with the reason. A success records whether the address was verified by the provider's claim (`idp_claim`) or by an allowed domain (`allowed_domain`).
 
 If no platform notification channels are configured yet, the Notification Delivery page shows a prominent warning — platform-level alerts (from monitoring and security) are still recorded but reach nobody until at least one channel and a matching routing rule exist. The **bell icon** in the admin console header gives platform staff a live in-app feed of these alerts independent of that external-channel setup.
 
@@ -269,7 +279,7 @@ The platform **roles and their permissions**. Create, edit, and delete roles, an
 **What it's for:** the consolidated "are we trustworthy" home — posture, the platform-wide activity trail, and the outbound integrations and retention controls around it. Five sub-pages:
 
 - **Dashboard** — security events, anomalies, and overall posture across the platform.
-- **Activity Log** — the full platform-wide activity trail: user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Scope-to-tenant sessions and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
+- **Activity Log** — the full platform-wide activity trail: user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Tenant suspensions, deletions, role changes and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
 - **Retention** — log **retention and archival** policies: how long activity is kept hot vs. archived. Set these to match the compliance regimes you operate under; longer retention typically means tiered/archived storage rather than indefinite hot storage.
 - **SIEM Export** — outbound **SIEM forwarding**: stream the activity trail to your external security tooling (Splunk, Datadog, Elasticsearch, etc.) for correlation and long-term analysis. Configure and verify the forwarding integration here.
 - **Policy** — platform security and authentication settings (the policy that governs how the platform itself is secured): registration toggles, email-verification requirement, password policy, and session/lockout controls. Editing it needs Security management; see [Settings that need Security management](#settings-that-need-security-management).

@@ -12,6 +12,7 @@ import { clients } from '../../lib/clients';
 export type EolEntry = adminServiceComponents['schemas']['EolCatalogueEntry'];
 export type VulnerabilityEntry = adminServiceComponents['schemas']['VulnerabilityCatalogueEntry'];
 export type CatalogFeedStatus = adminServiceComponents['schemas']['CatalogFeedStatus'];
+export type CatalogFeedEcosystem = adminServiceComponents['schemas']['CatalogFeedEcosystemStatus'];
 export type CatalogFeedList = adminServiceComponents['schemas']['CatalogFeedListResponse'];
 export type CatalogBundleImport = adminServiceComponents['schemas']['CatalogBundleImportResponse'];
 
@@ -398,6 +399,28 @@ export function useDeleteClassificationRule() {
         params: { path: { id } },
       });
       if (error) throw ruleWriteError(error, response?.status, 'Failed to delete the rule');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: RULES_KEY }),
+  });
+}
+
+/**
+ * Accepts the update an upgrade offered for a shipped rule the admin had
+ * edited (decision 4, RC-12): upgrades keep the edit and store the new shipped
+ * values as an offer. 409 means there is no longer anything to accept.
+ */
+export function useAcceptClassificationRuleUpdate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string): Promise<ClassificationRule> => {
+      const { data, error, response } = await clients.admin.POST('/admin/catalogs/classification-rules/{id}/accept-update', {
+        params: { path: { id } },
+      });
+      if (error || !data) {
+        if (response?.status === 409) throw new Error('No update available any more');
+        throw ruleWriteError(error, response?.status, 'Failed to accept the update');
+      }
+      return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: RULES_KEY }),
   });

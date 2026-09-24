@@ -9,6 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+
+	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 )
 
 // AdminSensor is one row of the platform-admin, cross-tenant Fleet view.
@@ -39,9 +41,11 @@ type AdminSensor struct {
 	Tags                []string `json:"tags"`
 	IPAddress           *string  `json:"ip_address"`
 
-	// IsPlatformSensor flags the in-cluster Platform Sensor registered by
-	// cluster-sensor-service for every tenant. There is no dedicated column for
-	// this; it is derived from the registration signature (platform='platform').
+	// IsPlatformSensor flags a platform-managed row — the Platform Discovery
+	// Sensor or Platform Device Interrogation Agent the platform registers for
+	// every tenant. There is no dedicated column; it is models.Sensor
+	// .IsPlatformManaged (platform = 'platform' OR the 'system' tag), the same
+	// test the tenant-side delete guard and the web-ui's isPlatformManaged use.
 	IsPlatformSensor bool `json:"is_platform_sensor"`
 
 	LastHeartbeat *time.Time `json:"last_heartbeat"`
@@ -136,9 +140,10 @@ func (h *Handler) GetAdminSensors(c *gin.Context) {
 		if ipAddress.Valid && ipAddress.String != "" {
 			s.IPAddress = &ipAddress.String
 		}
-		// The in-cluster Platform Sensor is registered by cluster-sensor-service
-		// with platform="platform" (see cluster-sensor-service auto_register.go).
-		s.IsPlatformSensor = platform.Valid && platform.String == "platform"
+		// One definition of "platform-managed" (admin-ui review RC-16): the
+		// platform marker OR the 'system' tag. Checking the platform column alone
+		// missed a row marked only by its tag.
+		s.IsPlatformSensor = (&models.Sensor{Platform: platform.String, Tags: s.Tags}).IsPlatformManaged()
 
 		sensors = append(sensors, s)
 	}

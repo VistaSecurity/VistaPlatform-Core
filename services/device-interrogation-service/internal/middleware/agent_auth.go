@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/certificates"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // AgentAuth authenticates device-agent outbound routes (jobs, results,
@@ -45,6 +47,14 @@ import (
 // connection as db.
 func AgentAuth(db, bypassDB *sql.DB, requireMTLS bool) gin.HandlerFunc {
 	certService := certificates.NewCertificateService(db, bypassDB, "")
+
+	// A device agent of a suspended, canceled or deleted tenant is refused
+	// (RC-4 /) with 403 and a tenant_suspended / tenant_deleted code: no
+	// job polls, no results, no host inventory for a tenant that is not usable.
+	var tenantState sharedmw.TenantStateChecker
+	if bypassDB != nil {
+		tenantState = tenantstate.NewChecker(bypassDB, tenantstate.CacheTTLFromEnv())
+	}
 
 	return func(c *gin.Context) {
 		// The agent identity comes from the route param where there is one, and
@@ -181,6 +191,9 @@ func AgentAuth(db, bypassDB *sql.DB, requireMTLS bool) gin.HandlerFunc {
 					c.Abort()
 					return
 				}
+				if tenantState != nil && !sharedmw.EnforceTenantState(c, tenantState, tenantID, "agent") {
+					return
+				}
 				c.Next()
 				return
 			}
@@ -198,6 +211,13 @@ func AgentAuth(db, bypassDB *sql.DB, requireMTLS bool) gin.HandlerFunc {
 
 		if !requireMTLS && !hasPeerCert {
 			log.Printf("AgentAuth: WARNING agent %s authenticated WITHOUT a client certificate (AGENT_MTLS_REQUIRED is off)", agentIDStr)
+		}
+
+		// Authenticated — now refuse an agent whose tenant is not usable. After
+		// the certificate checks on purpose: an unauthenticated caller learns
+		// nothing about a tenant's state.
+		if tenantState != nil && tenantID != uuid.Nil && !sharedmw.EnforceTenantState(c, tenantState, tenantID, "agent") {
+			return
 		}
 
 		c.Next()

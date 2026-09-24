@@ -92,6 +92,12 @@ func (p probeSIEMExporter) RegisterRoutes(api *gin.RouterGroup) {
 
 func newGateTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
+	// Tenant state is not what this gate test is about, so switch the
+	// DATABASE_URL-built check off explicitly. Left on (the nightly sets
+	// DATABASE_URL), the random tenant ids minted here have no tenants row and
+	// are refused 403 tenant_deleted before the platform gate is ever reached
+	// ( item 2) — a 403 from the wrong gate.
+	t.Setenv("DATABASE_URL", "")
 	gin.SetMode(gin.TestMode)
 	mw := newTestAuditMiddleware(t)
 	cfg := &config.Config{

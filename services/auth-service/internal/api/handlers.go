@@ -19,6 +19,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -98,6 +99,10 @@ type AuthHandlers struct {
 	authService authServiceStore
 	config      *config.Config
 	rateLimiter *middleware.RateLimiter
+	// plans resolves the tenant's plan block for GET /auth/me (the same
+	// resolver /tenant/features uses). SetupRouter wires
+	// entitlements.ResolvePlan; nil omits the block.
+	plans tenantPlanResolver
 }
 
 // NewAuthHandlers creates a new instance of auth handlers.
@@ -384,6 +389,9 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 				case auth.ErrAccountLocked:
 					errMsg = "Account temporarily locked"
 				}
+				if be, ok := tenantstate.AsBlocked(err); ok {
+					errMsg = "Tenant not usable: " + be.Code
+				}
 				ipAddr := c.ClientIP()
 				ua := c.Request.UserAgent()
 				resType := "user"
@@ -420,6 +428,9 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 			}
 		}
 
+		if respondTenantBlocked(c, err) {
+			return
+		}
 		switch err {
 		case auth.ErrInvalidCredentials:
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -578,6 +589,9 @@ func (h *AuthHandlers) RefreshToken(c *gin.Context) {
 
 	authResponse, err := h.authService.RefreshToken(req.RefreshToken, clientIP, userAgent)
 	if err != nil {
+		if respondTenantBlocked(c, err) {
+			return
+		}
 		switch err {
 		case auth.ErrInvalidToken, auth.ErrExpiredToken:
 			c.JSON(http.StatusUnauthorized, gin.H{
@@ -669,20 +683,60 @@ func (h *AuthHandlers) GetMe(c *gin.Context) {
 	// Remove password hash from response
 	user.PasswordHash = ""
 
+	resp := gin.H{"user": user}
+
 	// Fetch tenant data
 	tenant, err := h.authService.GetTenantByID(user.TenantID)
 	if err != nil {
 		// Log error but don't fail - user info is still valid
-		c.JSON(http.StatusOK, gin.H{
-			"user": user,
-		})
+		c.JSON(http.StatusOK, resp)
 		return
 	}
+	resp["tenant"] = presentMeTenant(tenant)
 
-	c.JSON(http.StatusOK, gin.H{
-		"user":   user,
-		"tenant": tenant,
-	})
+	// The tenant's plan as a person should read it — the same block
+	// /tenant/features carries (edition-licensing spec §3). The raw billing
+	// columns it replaces are not in `tenant` any more (presentMeTenant). On
+	// a plan lookup failure the key is omitted: the UI hides the plan rather
+	// than falling back to a tier name or a trial label.
+	if h.plans != nil {
+		if plan, perr := h.plans(c.Request.Context(), tenant.ID); perr == nil {
+			resp["plan"] = plan
+		} else {
+			logrus.WithError(perr).WithField("tenant_id", tenant.ID).Warn("GetMe: resolve plan")
+		}
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// meTenant is the tenant as GET /auth/me presents it: the organisation's own
+// details, WITHOUT the raw billing columns payment_status and trial_ends_at.
+// Those are billing state, not the plan: signup used to write every tenant as
+// a 30-day 'trial' whatever the install's licence, so on an Enterprise install
+// they read as a trial that does not exist (the reconciler normalises the rows,
+// but the response must not depend on that having run). The plan — edition,
+// licensee, and on MSP the plan's own trial — is the response's `plan` block,
+// resolved from the licence exactly as /tenant/features resolves it.
+type meTenant struct {
+	ID                 uuid.UUID              `json:"id"`
+	Name               string                 `json:"name"`
+	Slug               string                 `json:"slug"`
+	Domain             *string                `json:"domain,omitempty"`
+	SubscriptionTierID uuid.UUID              `json:"subscription_tier_id"`
+	BillingEmail       string                 `json:"billing_email"`
+	Settings           map[string]interface{} `json:"settings"`
+	CreatedAt          time.Time              `json:"created_at"`
+	UpdatedAt          time.Time              `json:"updated_at"`
+	DeletedAt          *time.Time             `json:"deleted_at"`
+}
+
+func presentMeTenant(t *models.Tenant) meTenant {
+	return meTenant{
+		ID: t.ID, Name: t.Name, Slug: t.Slug, Domain: t.Domain,
+		SubscriptionTierID: t.SubscriptionTierID, BillingEmail: t.BillingEmail,
+		Settings: t.Settings, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, DeletedAt: t.DeletedAt,
+	}
 }
 
 // UpdateMe handles user profile updates

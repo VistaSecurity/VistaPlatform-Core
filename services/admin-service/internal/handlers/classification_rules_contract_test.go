@@ -68,6 +68,7 @@ func (s *stubRuleStore) Create(_ context.Context, in classificationrules.Input) 
 		ID: "id-" + itoa(s.nextID), RuleKind: in.RuleKind, Pattern: in.Pattern,
 		ClassKey: in.ClassKey, Vendor: in.Vendor, Model: in.Model,
 		Confidence: in.Confidence, SourceURL: in.SourceURL,
+		ContentOrigin: "custom",
 	}
 	s.rules = append(s.rules, r)
 	return r, nil
@@ -82,6 +83,8 @@ func (s *stubRuleStore) Update(_ context.Context, id string, in classificationru
 			ID: id, RuleKind: in.RuleKind, Pattern: in.Pattern,
 			ClassKey: in.ClassKey, Vendor: in.Vendor, Model: in.Model,
 			Confidence: in.Confidence, SourceURL: in.SourceURL,
+			ContentOrigin: r.ContentOrigin, AdminModified: r.ContentOrigin == "vista",
+			UpdateAvailable: r.UpdateAvailable, OfferedUpdate: r.OfferedUpdate,
 		}
 		return s.rules[i], nil
 	}
@@ -96,6 +99,28 @@ func (s *stubRuleStore) Delete(_ context.Context, id string) error {
 		}
 	}
 	return classificationrules.ErrNotFound
+}
+
+// AcceptUpdate models the database's accept: the offered confidence (the only
+// column these fixtures offer) is written and the offer cleared; the rule stays
+// the admin's.
+func (s *stubRuleStore) AcceptUpdate(_ context.Context, id string) (classificationrules.Rule, classificationrules.Rule, error) {
+	for i, r := range s.rules {
+		if r.ID != id {
+			continue
+		}
+		if !r.UpdateAvailable {
+			return classificationrules.Rule{}, classificationrules.Rule{}, classificationrules.ErrNoUpdate
+		}
+		before := r
+		if c, ok := r.OfferedUpdate["confidence"].(float64); ok {
+			r.Confidence = c
+		}
+		r.UpdateAvailable, r.OfferedUpdate = false, nil
+		s.rules[i] = r
+		return r, before, nil
+	}
+	return classificationrules.Rule{}, classificationrules.Rule{}, classificationrules.ErrNotFound
 }
 
 func itoa(n int) string {
@@ -121,6 +146,7 @@ func ruleRouter(store ClassificationRuleStore) *gin.Engine {
 	g.GET("/classification-rules/:id", GetClassificationRule(store))
 	g.PUT("/classification-rules/:id", UpdateClassificationRule(store))
 	g.DELETE("/classification-rules/:id", DeleteClassificationRule(store))
+	g.POST("/classification-rules/:id/accept-update", AcceptClassificationRuleUpdate(store))
 	return r
 }
 

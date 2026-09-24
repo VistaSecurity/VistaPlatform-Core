@@ -34,6 +34,16 @@ const (
 	SourceAuth            = "auth-service"
 	SourceInventory       = "inventory-service"
 	SourceResourceTracker = "resource-tracker-service"
+
+	// SourceResourceMetering is NOT a peer service. It names a producer that
+	// does not exist: nothing meters per-tenant CPU and memory, so the
+	// resource-efficiency factor has no inputs. The factor used to be built
+	// from hard-coded storage 50 / network 60 plus CPU and memory columns
+	// nothing writes, and carried 25% of the index. Owner decision 8
+	// (ADMIN_UI_DATA_REVIEW_2026-09, RC-14) dropped it from the index; it is
+	// always reported here, in unavailable_sources, so the console can show the
+	// factor as "not measured" rather than silently omitting it.
+	SourceResourceMetering = "resource-metering"
 )
 
 // HealthStatusUnknown is stored when no valid health index is available,
@@ -45,10 +55,11 @@ const HealthStatusUnknown = healthbands.Unknown
 // SourceFactors maps a metric source to the health factors it feeds. Used by
 // the scorer to decide which factors are unknown when a peer is unreachable.
 var SourceFactors = map[string][]string{
-	SourceMonitoring:      {FactorPerformanceMetrics},
-	SourceAuth:            {FactorSecurityPosture},
-	SourceInventory:       {FactorBusinessActivity},
-	SourceResourceTracker: {FactorResourceEfficiency, FactorCostOptimization},
+	SourceMonitoring:       {FactorPerformanceMetrics},
+	SourceAuth:             {FactorSecurityPosture},
+	SourceInventory:        {FactorBusinessActivity},
+	SourceResourceTracker:  {FactorCostOptimization},
+	SourceResourceMetering: {FactorResourceEfficiency},
 }
 
 // Health factor names, matching the HealthBreakdown JSON keys.
@@ -66,8 +77,11 @@ const (
 // service that supplies it was unreachable. It does NOT mean zero. A nil factor
 // is excluded from the weighted overall score (the remaining weights are
 // renormalised) and rendered as "Unavailable" in the UI.
+//
+// ResourceEfficiency is ALWAYS nil: no producer measures it (see
+// SourceResourceMetering), and it carries no weight in the index.
 type HealthBreakdown struct {
-	ResourceEfficiency *float64 `json:"resource_efficiency"` // 0-100, null = not measured
+	ResourceEfficiency *float64 `json:"resource_efficiency"` // always null — not measured (no producer)
 	PerformanceMetrics *float64 `json:"performance_metrics"` // 0-100, null = not measured
 	SecurityPosture    *float64 `json:"security_posture"`    // 0-100, null = not measured
 	BusinessActivity   *float64 `json:"business_activity"`   // 0-100, null = not measured
@@ -75,11 +89,14 @@ type HealthBreakdown struct {
 
 	// UnavailableSources names the peer services that could not be reached,
 	// so an operator sees WHY a factor is missing rather than just that it is.
+	// It always includes SourceResourceMetering, which is not a service but
+	// the missing producer behind the resource-efficiency factor.
 	UnavailableSources []string `json:"unavailable_sources,omitempty"`
 
 	// DataCompleteness is the fraction of total factor weight that was
 	// actually measured (1 = everything, 0 = nothing). The overall score is
-	// only meaningful in proportion to this.
+	// only meaningful in proportion to this. Resource efficiency carries no
+	// weight, so its absence does not lower this.
 	DataCompleteness float64 `json:"data_completeness"`
 }
 
@@ -197,14 +214,19 @@ type HealthScoreResponse struct {
 
 // TenantHealthSummary provides a summary of health for multiple tenants
 type TenantHealthSummary struct {
-	TenantID        uuid.UUID `json:"tenant_id"`
-	TenantName      string    `json:"tenant_name"`
-	OverallScore    float64   `json:"overall_score"`
-	HealthStatus    string    `json:"health_status"`
-	LastCalculated  time.Time `json:"last_calculated"`
-	TrendDirection  string    `json:"trend_direction"`
-	CriticalAlerts  int       `json:"critical_alerts"`
-	Recommendations int       `json:"recommendations"`
+	TenantID       uuid.UUID `json:"tenant_id"`
+	TenantName     string    `json:"tenant_name"`
+	OverallScore   float64   `json:"overall_score"`
+	HealthStatus   string    `json:"health_status"`
+	LastCalculated time.Time `json:"last_calculated"`
+	TrendDirection string    `json:"trend_direction"`
+	// ActiveAlerts counts every active health alert for the tenant, whatever
+	// its severity. The board's "Active alerts" column used to show
+	// CriticalAlerts, so a tenant with an open high-severity "Poor Health
+	// Status" alert read as having none.
+	ActiveAlerts    int `json:"active_alerts"`
+	CriticalAlerts  int `json:"critical_alerts"`
+	Recommendations int `json:"recommendations"`
 }
 
 // HealthComparison represents comparison data between tenants

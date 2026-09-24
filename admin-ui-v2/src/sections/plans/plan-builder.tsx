@@ -1,25 +1,34 @@
 // Plan builder (ADR-0004 /, Slice 3b). The single-plan create/edit view:
 // EVERY lever from the Entitlements catalog (grouped, kind-aware), plus identity,
 // pricing, a live customer-facing plan card, a margin signal, and Save. Opens from
-// "+ New plan" (blank/defaults) or a tier header (pre-filled). Writes the full
-// composition to tier_entitlements (the enforced layer): create posts entitlements
-// inline; edit PUTs identity/price then the entitlements bulk-replace.
+// "+ New plan" (blank/defaults) or a tier header (pre-filled). Writes to
+// tier_entitlements (the enforced layer): create posts every active lever inline;
+// edit sends ONE PUT /admin/tiers/{id} carrying identity, price and only the
+// levers the admin changed, plus the composition version it was opened on. The
+// server applies all of it in one transaction or none of it — it used to be two
+// PUTs, and a rejected composition left the new price saved. A 409 means someone
+// changed the plan's entitlements meanwhile: the admin's own edits are kept, the
+// rest reloads, and saving again applies them to the current composition.
+//
+// Edit mode cannot save until the composition has loaded. Before, a Save while it
+// was still loading (or after it failed) sent every lever at its blank draft —
+// blank reads as "unlimited" — and silently rewrote the plan.
 //
 // There is no backend "draft" state today — a saved plan is live — so this ships
 // Save (+ Deprecate for existing) rather than a faked draft→publish lifecycle.
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { X, ToggleRight, Gauge, Activity, ListChecks, Trash2, UserPlus } from 'lucide-react';
+import { X, ToggleRight, Gauge, Activity, ListChecks, Trash2, UserPlus, RefreshCw } from 'lucide-react';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { modalInputStyle } from '../../components/ui/modal';
 import { money } from '../../components/ui/primitives';
 import { AssignTierModal } from './assign-tier-modal';
+import { apiDetail, fetchTierComposition, tierCompositionKey } from './composition';
 
 type SubscriptionTier = adminServiceComponents['schemas']['SubscriptionTier'];
 type BillableItem = adminServiceComponents['schemas']['BillableItem'];
-type TierEntitlement = adminServiceComponents['schemas']['TierEntitlement'];
 type TierEntitlementInput = adminServiceComponents['schemas']['TierEntitlementInput'];
 
 const GROUPS: { kind: string; label: string; icon: typeof ToggleRight; note?: string }[] = [
@@ -62,11 +71,6 @@ function leverDraftError(kind: string, draft: string): string | null {
   if (kind === 'enum_choice' && !(draft ?? '').trim()) return 'cannot be blank';
   return null;
 }
-/** The server's 400 carries a `detail` naming the bad item and the expected shape; prefer it to a generic message. */
-function apiDetail(err: unknown, fallback: string): string {
-  const d = (err as { detail?: unknown } | null)?.detail;
-  return typeof d === 'string' && d ? d : fallback;
-}
 function fmtCard(kind: string, draft: string): string {
   if (kind === 'numeric_cap' || kind === 'numeric_metered') return draft.trim() === '' ? 'Unlimited' : Number(draft).toLocaleString();
   return draft;
@@ -74,20 +78,19 @@ function fmtCard(kind: string, draft: string): string {
 
 const INFRA_PER_CUSTOMER = 28; // cost-model assumption (100-customer scale); see Vista Cost Model
 
-export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier; items: BillableItem[]; onClose: () => void }) {
+export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: SubscriptionTier; items: BillableItem[]; onClose: () => void }) {
   const isEdit = !!tier;
   const qc = useQueryClient();
+  // Only active catalogue items can be composed — the server rejects the rest.
+  const items = useMemo(() => allItems.filter((it) => it.is_active), [allItems]);
 
-  // Edit mode: load the tier's current composition to pre-fill.
+  // Edit mode: load the tier's current composition (and its version) to pre-fill.
   const entQ = useQuery({
-    queryKey: ['platform', 'tier-entitlements', tier?.id],
+    queryKey: tierCompositionKey(tier?.id ?? ''),
     enabled: isEdit,
-    queryFn: async (): Promise<TierEntitlement[]> => {
-      const { data, error } = await clients.admin.GET('/admin/tiers/{id}/entitlements', { params: { path: { id: tier!.id } } });
-      if (error || !data) throw new Error('Failed to load composition');
-      return data.entitlements ?? [];
-    },
+    queryFn: () => fetchTierComposition(tier!.id),
     staleTime: 0,
+    retry: 0,
   });
 
   const [assigning, setAssigning] = useState(false);
@@ -97,19 +100,22 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
   const [billingMethod, setBillingMethod] = useState<'stripe' | 'invoice'>((tier?.billing_method as 'stripe' | 'invoice') ?? 'stripe');
   const [isCustom, setIsCustom] = useState(!!tier?.is_custom);
 
-  // Lever drafts, keyed by item_key. Initialised once data is ready.
-  const [drafts, setDrafts] = useState<Record<string, string> | null>(null);
+  // Levers: `initDrafts` is what the plan grants now (its composition, else the
+  // catalogue default); `edits` holds only the levers the admin touched. Keeping
+  // them apart is what lets a save send only real changes, and lets a reload
+  // after a 409 refresh the untouched levers without losing the admin's work.
+  const [edits, setEdits] = useState<Record<string, string>>({});
   const ready = !isEdit || entQ.isSuccess;
   const initDrafts = useMemo(() => {
     if (!ready) return null;
-    const ents = entQ.data ?? [];
+    const ents = entQ.data?.entitlements ?? [];
     const byKey = new Map(ents.map((e) => [e.item_key, e.included_value]));
     const d: Record<string, string> = {};
     for (const it of items) d[it.key] = draftFrom(it.kind, byKey.has(it.key) ? byKey.get(it.key) : it.default_value);
     return d;
   }, [ready, entQ.data, items]);
-  const draft = useMemo(() => drafts ?? initDrafts ?? {}, [drafts, initDrafts]);
-  const setLever = (k: string, v: string) => setDrafts({ ...(drafts ?? initDrafts ?? {}), [k]: v });
+  const draft = useMemo(() => ({ ...(initDrafts ?? {}), ...edits }), [initDrafts, edits]);
+  const setLever = (k: string, v: string) => setEdits((e) => ({ ...e, [k]: v }));
 
   const byKind = useMemo(() => {
     const m = new Map<string, BillableItem[]>();
@@ -118,17 +124,38 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
     return m;
   }, [items]);
 
+  // Create: the whole composition. Edit: only the levers whose draft differs
+  // from what the plan grants now — an untouched lever is never re-sent, so it
+  // cannot overwrite a change someone else made to it.
   const entitlementsBody = (): TierEntitlementInput[] => items.map((it) => ({ item_key: it.key, included_value: toValue(it.kind, draft[it.key] ?? '') }));
+  const changedLevers = (): TierEntitlementInput[] =>
+    items
+      .filter((it) => it.key in edits && edits[it.key] !== initDrafts?.[it.key])
+      .map((it) => ({ item_key: it.key, included_value: toValue(it.kind, edits[it.key] ?? '') }));
 
   const save = useMutation({
     mutationFn: async () => {
       const price_cents = Math.round(Number(monthly || 0) * 100);
       const annual_price_cents = annual.trim() === '' ? undefined : Math.round(Number(annual) * 100);
       if (isEdit) {
-        const u = await clients.admin.PUT('/admin/tiers/{id}', { params: { path: { id: tier!.id } }, body: { display_name: displayName.trim(), price_cents, annual_price_cents, billing_method: billingMethod, is_custom: isCustom } });
-        if (u.error) throw new Error('Failed to save plan');
-        const e = await clients.admin.PUT('/admin/tiers/{id}/entitlements', { params: { path: { id: tier!.id } }, body: { entitlements: entitlementsBody() } });
-        if (e.error) throw new Error(apiDetail(e.error, 'Saved the plan, but its entitlements failed to save'));
+        if (!entQ.isSuccess) throw new Error('The plan’s entitlements have not loaded — reload before saving');
+        const changed = changedLevers();
+        const res = await clients.admin.PUT('/admin/tiers/{id}', {
+          params: { path: { id: tier!.id } },
+          body: {
+            display_name: displayName.trim(), price_cents, annual_price_cents, billing_method: billingMethod, is_custom: isCustom,
+            ...(changed.length ? { entitlements: changed, entitlements_version: entQ.data.version } : {}),
+          },
+        });
+        if (res.response.status === 409) {
+          // Someone changed this plan's entitlements since it was opened.
+          // Nothing was saved. Reload the composition: untouched levers pick
+          // up the new values, the admin's edits stay, and the next Save goes
+          // against the current version.
+          void qc.invalidateQueries({ queryKey: tierCompositionKey(tier!.id) });
+          throw new Error(apiDetail(res.error, 'This plan changed since you opened it. Nothing was saved — review and save again.'));
+        }
+        if (res.error) throw new Error(apiDetail(res.error, 'Failed to save plan — nothing was changed'));
       } else {
         const { error } = await clients.admin.POST('/admin/tiers', { body: { name: slug(displayName), display_name: displayName.trim(), billing_interval: 'month', billing_method: billingMethod, price_cents, annual_price_cents, is_custom: isCustom, entitlements: entitlementsBody() } });
         if (error) throw new Error(apiDetail(error, 'Failed to create plan'));
@@ -137,7 +164,10 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
     onSuccess: () => {
       toast.success(isEdit ? `Saved ${displayName}` : `Created ${displayName}`);
       qc.invalidateQueries({ queryKey: ['platform', 'tiers'] });
-      if (isEdit) qc.invalidateQueries({ queryKey: ['platform', 'tier-entitlements', tier!.id] });
+      if (isEdit) {
+        void qc.invalidateQueries({ queryKey: tierCompositionKey(tier!.id) });
+        void qc.invalidateQueries({ queryKey: ['platform', 'tier-entitlements', tier!.id] });
+      }
       onClose();
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
@@ -159,7 +189,9 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
     }
     return null;
   }, [items, draft]);
-  const error = !displayName.trim() ? 'Plan name is required' : leverError;
+  const error = !ready
+    ? (entQ.isError ? 'The plan’s entitlements failed to load' : 'Loading the plan’s entitlements…')
+    : !displayName.trim() ? 'Plan name is required' : leverError;
   const price = Number(monthly || 0);
   const stripeFee = billingMethod === 'stripe' && price > 0 ? price * 0.029 + 0.3 : 0;
   const marginAbs = price - INFRA_PER_CUSTOMER - stripeFee;
@@ -229,7 +261,12 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
           )}
 
           <Eyebrow>Entitlements · set every lever for this plan</Eyebrow>
-          {!ready ? (
+          {entQ.isError ? (
+            <div role="alert" style={{ padding: 24, color: 'var(--op-t3)', fontSize: 12.5 }}>
+              Couldn&apos;t load this plan&apos;s entitlements, so it can&apos;t be saved yet.{' '}
+              <button className="op-btn sm" onClick={() => { void entQ.refetch(); }}><RefreshCw size={13} />Retry</button>
+            </div>
+          ) : !ready ? (
             <div style={{ padding: 24, color: 'var(--op-t3)', fontSize: 12.5 }}>Loading composition…</div>
           ) : GROUPS.map((g) => {
             const rows = byKind.get(g.kind) ?? [];
@@ -249,11 +286,11 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
                       {it.unit ? <span style={{ fontSize: 11, color: 'var(--op-t3)' }}> · {it.unit}</span> : null}
                     </div>
                     {it.kind === 'boolean' ? (
-                      <button onClick={() => setLever(it.key, draft[it.key] === 'on' ? 'off' : 'on')} className="op-chip" style={{ width: 64, justifyContent: 'center', color: draft[it.key] === 'on' ? 'var(--op-accent-text)' : 'var(--op-t3)', fontWeight: 600 }}>{draft[it.key] === 'on' ? 'On' : 'Off'}</button>
+                      <button aria-label={it.display_name} onClick={() => setLever(it.key, draft[it.key] === 'on' ? 'off' : 'on')} className="op-chip" style={{ width: 64, justifyContent: 'center', color: draft[it.key] === 'on' ? 'var(--op-accent-text)' : 'var(--op-t3)', fontWeight: 600 }}>{draft[it.key] === 'on' ? 'On' : 'Off'}</button>
                     ) : (it.kind === 'numeric_cap' || it.kind === 'numeric_metered') ? (
-                      <input inputMode="numeric" value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="∞" aria-invalid={!!leverDraftError(it.kind, draft[it.key] ?? '')} title={leverDraftError(it.kind, draft[it.key] ?? '') ?? 'Whole number, or blank for unlimited'} style={{ ...modalInputStyle, width: 120, textAlign: 'right', borderColor: leverDraftError(it.kind, draft[it.key] ?? '') ? 'var(--op-danger, #d33)' : undefined }} />
+                      <input aria-label={it.display_name} inputMode="numeric" value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="∞" aria-invalid={!!leverDraftError(it.kind, draft[it.key] ?? '')} title={leverDraftError(it.kind, draft[it.key] ?? '') ?? 'Whole number, or blank for unlimited'} style={{ ...modalInputStyle, width: 120, textAlign: 'right', borderColor: leverDraftError(it.kind, draft[it.key] ?? '') ? 'var(--op-danger, #d33)' : undefined }} />
                     ) : (
-                      <input value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="—" style={{ ...modalInputStyle, width: 160 }} />
+                      <input aria-label={it.display_name} value={draft[it.key] ?? ''} onChange={(e) => setLever(it.key, e.target.value)} placeholder="—" style={{ ...modalInputStyle, width: 160 }} />
                     )}
                   </div>
                 ))}
@@ -294,7 +331,7 @@ export function PlanBuilder({ tier, items, onClose }: { tier?: SubscriptionTier;
             {isEdit && <button onClick={() => { if (window.confirm(`Deprecate ${displayName}? Existing tenants are grandfathered.`)) deprecate.mutate(); }} disabled={deprecate.isPending} className="op-btn danger sm"><Trash2 size={14} />Deprecate</button>}
             <div style={{ flex: 1 }} />
             <button onClick={onClose} className="op-btn ghost sm">Cancel</button>
-            <button onClick={() => { if (error) { toast.error(error); return; } save.mutate(); }} disabled={!!error || save.isPending} className="op-btn primary sm">{save.isPending ? 'Saving…' : isEdit ? 'Save plan' : 'Create plan'}</button>
+            <button onClick={() => { if (error) { toast.error(error); return; } save.mutate(); }} disabled={!!error || save.isPending} title={error ?? undefined} className="op-btn primary sm">{save.isPending ? 'Saving…' : isEdit ? 'Save plan' : 'Create plan'}</button>
           </div>
         </div>
       </div>

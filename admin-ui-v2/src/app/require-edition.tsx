@@ -29,7 +29,7 @@ const COPY: Record<EditionCapability, { title: string; body: string }> = {
     title: 'Part of the multi-tenant management plane',
     body:
       'This deployment runs the Core edition of admin-service, which manages a single organization. ' +
-      'The tenant directory, cross-tenant dashboards, customer announcements and maintenance windows ' +
+      'The tenant directory, cross-tenant dashboards and cross-tenant support tooling ' +
       'belong to the MSP edition — the management plane you need when you operate other organizations. ' +
       'Everything else in this console works exactly as it does on a paid edition.',
   },
@@ -99,14 +99,10 @@ const LICENSE_COPY: Record<LicenseGate, { title: string; body: string }> = {
   msp: {
     title: 'Part of Vista Platform MSP',
     body:
-      'Billing, invoices, coupons, trials and revenue analytics exist for a service provider billing its own ' +
-      'customers. This install is not licensed as MSP, so there is nobody to bill and nothing here to manage.',
-  },
-  'not-enterprise': {
-    title: 'Vista Platform Enterprise has no plans',
-    body:
-      'On an Enterprise install every tenant gets every feature the licence covers — there are no plans or tiers ' +
-      'to compose. To switch a feature off for one tenant, open Tenants, select the tenant, then Entitlements.',
+      'Plans, pricing, billing, invoices, coupons, trials and revenue analytics exist for a service provider ' +
+      'selling to its own customers. This install is not licensed as MSP, so there are no plans to compose and ' +
+      'nobody to bill. On an Enterprise install, switch a feature off for one tenant from Tenants → the tenant → ' +
+      'Entitlements.',
   },
 };
 

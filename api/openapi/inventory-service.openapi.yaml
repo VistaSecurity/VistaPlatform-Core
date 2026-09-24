@@ -667,6 +667,15 @@ paths:
         endpoint. Omitted fields are left unchanged; `recommended_alternatives`,
         when supplied, replaces the existing list. The before/after state is
         emitted to the audit log (resource_type `algorithm`).
+
+        **Obsolete grades Critical.** Setting `deprecation_status` to
+        `obsolete` raises `risk_score` to at least the bottom of the Critical
+        risk band and remembers the score it replaced; moving the algorithm out
+        of `obsolete` again restores that score unless the same request sends
+        `risk_score` explicitly. While an algorithm stays obsolete, a
+        `risk_score` below the Critical band is refused with 400 and nothing is
+        written. The audit metadata names the transition
+        (`obsolete_transition`) and the remembered score.
       requestBody:
         required: true
         content:

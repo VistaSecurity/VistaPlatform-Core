@@ -115,6 +115,7 @@ func TestSensorAuth_AcceptsCurrentClientCertificate(t *testing.T) {
 			"id", "sensor_id", "tenant_id", "certificate_pem", "serial_number", "issued_at", "expires_at", "revoked_at", "revocation_reason", "created_at",
 		}).AddRow(uuid.New().String(), sensorID.String(), tenantID.String(), "active-cert", leaf.SerialNumber.String(), time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour), nil, nil, time.Now()))
 
+	expectSensorTenantState(bypassMock, tenantID, "active", false)
 	r := gin.New()
 	g := r.Group("/sensors")
 	g.Use(SensorAuth(db, bypassDB, "test-key", true))

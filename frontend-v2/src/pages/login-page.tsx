@@ -4,6 +4,7 @@ import { useAuth } from '@vistasecurity/primitives/auth';
 import { Icon } from '../components/ui';
 import { clients } from '../lib/clients';
 import { usePlatformBranding, BrandLogo } from '../app/platform-branding';
+import { socialSignInErrorMessage } from './social-sign-in-errors';
 
 // An SSO sign-in option discovered for the typed email via POST /auth/methods.
 type SsoOption = { provider: string; providerName: string; tenantId: string };
@@ -58,11 +59,20 @@ export function LoginPage() {
   // in main.tsx) explains WHY the user is back at sign-in, instead of leaving
   // them staring at "Couldn't load …" cards on the page they came from.
   const [error, setError] = useState<string | null>(() => {
+    // A refused returning social sign-in lands here with ?error=<code>.
+    const social = socialSignInErrorMessage(new URLSearchParams(window.location.search).get('error'));
+    if (social) return social;
     switch (new URLSearchParams(window.location.search).get('reason')) {
       case 'session-expired':
         return 'Your session has expired. Please sign in again.';
       case 'signed-out':
         return 'You have been signed out. Please sign in again.';
+      // The organization was suspended or deleted by the platform (RC-4). Same
+      // sentences auth-service returns on a refused sign-in (shared/tenantstate).
+      case 'tenant_suspended':
+        return "Your organization's account is suspended. Contact your administrator or Vista Security support.";
+      case 'tenant_deleted':
+        return "Your organization's account has been deleted.";
       default:
         return null;
     }

@@ -146,4 +146,20 @@ describe('main session-expiry handler', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
+  // RC-4 /: a 403 that says the organization is suspended or deleted
+  // ends the session and lands on sign-in with THAT reason (not "expired"), so
+  // the page can say why; no refresh is attempted — it would be refused too.
+  it.each(['tenant_suspended', 'tenant_deleted'] as const)(
+    'a %s refusal ends the session and names the reason at sign-in',
+    async (code) => {
+      const { assign, clearTokens, refresh, handler } = await loadMain('/dashboard');
+
+      await handler.onTenantBlocked?.(code);
+
+      expect(refresh).not.toHaveBeenCalled();
+      expect(clearTokens).toHaveBeenCalledTimes(1);
+      expect(assign).toHaveBeenCalledWith(`/login?reason=${code}`);
+    },
+  );
+
 });

@@ -2,8 +2,8 @@
 //
 // Settings ▸ License & Usage — the MSP usage panel, MOUNTED, in every state the
 // spec's screen table names: default, empty, loading, error and success for the
-// usage summary, the reports table and the Generate modal, plus the delivery
-// status and the development-key warning.
+// usage summary, the reports table and the Generate modal, plus every delivery
+// status (spec PR 5), the Retry action and the development-key warning.
 //
 // Mounts the real LicenseUsagePanel with only the data hooks (and the toast)
 // stubbed, jsdom + React's own `act`, no testing-library (the staff page's
@@ -22,6 +22,7 @@ const state = vi.hoisted(() => {
   usage: idle(),
   reports: idle(),
   generate: { isPending: false, mutate: vi.fn<(body: unknown, opts: MutateOpts) => void>() },
+  retry: { isPending: false, variables: undefined as string | undefined, mutate: vi.fn<(id: string, opts: MutateOpts) => void>() },
   download: vi.fn<(r: unknown) => Promise<void>>(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock('./license-usage-queries', async (importOriginal) => {
     useLicenseUsage: () => state.usage,
     useLicenseUsageReports: () => state.reports,
     useGenerateLicenseUsageReport: () => state.generate,
+    useRetryLicenseUsageReport: () => state.retry,
     downloadLicenseUsageReport: state.download,
   };
 });
@@ -84,6 +86,7 @@ const report = (over: Partial<LicenseUsageReport> = {}): LicenseUsageReport => (
   delivery_attempts: 0,
   last_error: null,
   delivered_at: null,
+  next_attempt_at: null,
   ...over,
 });
 
@@ -109,6 +112,7 @@ beforeEach(() => {
     isLoading: false, isError: false, error: null, refetch: vi.fn(),
   };
   state.generate = { isPending: false, mutate: vi.fn() };
+  state.retry = { isPending: false, variables: undefined, mutate: vi.fn() };
   state.download.mockReset().mockResolvedValue(undefined);
   state.toastSuccess.mockReset();
   state.toastError.mockReset();
@@ -197,18 +201,84 @@ describe('reports table', () => {
     expect(state.download).toHaveBeenCalledWith(expect.objectContaining({ report_id: '4f8e1c2a-7d1b-4e8a-9c55-2b1d0f6e9a10' }));
   });
 
-  it('delivery statuses render once delivery is configured', () => {
+  const configured = { configured: true, endpoint: 'https://usage.example.test', interval_minutes: 60 };
+  const rowOf = (period: string) =>
+    Array.from(container.querySelectorAll('tbody tr')).find((tr) => tr.textContent?.includes(period)) as HTMLElement;
+  const retryButtons = () => Array.from(container.querySelectorAll('button')).filter((b) => b.getAttribute('aria-label')?.startsWith('Retry delivery'));
+
+  it('every delivery status renders once delivery is configured, with a Retry only on failed rows', () => {
     state.reports.data = {
       reports: [
-        report({ delivery_status: 'delivered' }),
-        report({ report_id: 'c0000000-0000-4000-8000-000000000003', delivery_status: 'failed', last_error: 'receiver said 422' }),
+        report({ period: '2026-09', delivery_status: 'delivered', delivered_at: '2026-10-01T00:16:00Z', delivery_attempts: 1 }),
+        report({ report_id: 'c0000000-0000-4000-8000-000000000002', period: '2026-08', delivery_status: 'pending' }),
+        report({ report_id: 'c0000000-0000-4000-8000-000000000003', period: '2026-07', delivery_status: 'pending',
+          last_error: 'HTTP 503: maintenance', next_attempt_at: '2026-10-12T11:00:00Z', delivery_attempts: 2 }),
+        report({ report_id: 'c0000000-0000-4000-8000-000000000004', period: '2026-06', delivery_status: 'failed',
+          last_error: 'HTTP 401: licence subject unknown or revoked', next_attempt_at: '2026-10-12T13:00:00Z', delivery_attempts: 3 }),
+        report({ report_id: 'c0000000-0000-4000-8000-000000000005', period: '2026-05', delivery_status: 'failed',
+          last_error: 'HTTP 422: signed by a different key', next_attempt_at: null, delivery_attempts: 1 }),
+        report({ report_id: 'c0000000-0000-4000-8000-000000000006', period: '2026-10', complete: false }),
       ],
-      available: true, edition: 'msp', delivery: { configured: true },
+      available: true, edition: 'msp', delivery: configured,
     };
     mount();
-    expect(text()).toContain('Delivered');
-    expect(text()).toContain('Failed');
+    expect(rowOf('September 2026').textContent).toContain('Delivered');
+    expect(rowOf('September 2026').textContent).toContain('2026-10-01 00:16 UTC');
+    expect(rowOf('August 2026').textContent).toContain('Pending');
+    expect(rowOf('August 2026').textContent).toContain('next delivery pass');
+    expect(rowOf('July 2026').textContent).toContain('Pending retry');
+    expect(rowOf('July 2026').textContent).toContain('Next attempt 2026-10-12 11:00 UTC');
+    expect(rowOf('July 2026').textContent).toContain('HTTP 503: maintenance');
+    expect(rowOf('June 2026').textContent).toContain('Failed');
+    expect(rowOf('June 2026').textContent).toContain('HTTP 401: licence subject unknown or revoked');
+    expect(rowOf('June 2026').textContent).toContain('Retrying automatically 2026-10-12 13:00 UTC');
+    expect(rowOf('May 2026').textContent).toContain('HTTP 422: signed by a different key');
+    expect(rowOf('May 2026').textContent).toContain('Not retried automatically');
+    expect(rowOf('October 2026').textContent).toContain('Not sent (preview)');
     expect(text()).not.toContain('Not configured');
+    expect(text()).toContain('sent automatically to https://usage.example.test');
+    expect(retryButtons().map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Retry delivery of the 2026-06 report', 'Retry delivery of the 2026-05 report',
+    ]);
+  });
+
+  it('not configured: every complete, undelivered report says so, with no Retry; a delivered one stays delivered', () => {
+    state.reports.data = {
+      reports: [
+        report({ period: '2026-09', delivery_status: 'failed', last_error: 'HTTP 422: x' }),
+        report({ report_id: 'c0000000-0000-4000-8000-000000000002', period: '2026-08', delivery_status: 'delivered', delivered_at: '2026-09-01T00:16:00Z' }),
+      ],
+      available: true, edition: 'msp', delivery: { configured: false },
+    };
+    mount();
+    expect(rowOf('September 2026').textContent).toContain('Not configured');
+    expect(rowOf('August 2026').textContent).toContain('Delivered');
+    expect(retryButtons()).toHaveLength(0);
+    expect(text()).toContain('download them and upload them to Vista Security');
+  });
+
+  it('Retry re-queues the report and confirms with a toast; a refusal is a toast too', () => {
+    state.reports.data = {
+      reports: [report({ period: '2026-09', delivery_status: 'failed', last_error: 'HTTP 422: x' })],
+      available: true, edition: 'msp', delivery: configured,
+    };
+    mount();
+    act(() => { retryButtons()[0].click(); });
+    expect(state.retry.mutate).toHaveBeenCalledWith('4f8e1c2a-7d1b-4e8a-9c55-2b1d0f6e9a10', expect.anything());
+    act(() => { state.retry.mutate.mock.calls[0][1].onSuccess?.({}); });
+    expect(state.toastSuccess).toHaveBeenCalledWith('The September 2026 report will be sent again shortly');
+    act(() => { state.retry.mutate.mock.calls[0][1].onError?.(new Error('Only a complete report whose delivery failed can be retried.')); });
+    expect(state.toastError).toHaveBeenCalledWith('Only a complete report whose delivery failed can be retried.');
+  });
+
+  it('Retry is disabled while that report is being re-queued', () => {
+    state.reports.data = {
+      reports: [report({ period: '2026-09', delivery_status: 'failed', last_error: 'HTTP 422: x' })],
+      available: true, edition: 'msp', delivery: configured,
+    };
+    state.retry = { isPending: true, variables: '4f8e1c2a-7d1b-4e8a-9c55-2b1d0f6e9a10', mutate: vi.fn() };
+    mount();
+    expect(retryButtons()[0].disabled).toBe(true);
   });
 
   it('empty: says when the first report comes', () => {

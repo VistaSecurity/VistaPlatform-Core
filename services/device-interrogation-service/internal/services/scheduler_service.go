@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/robfig/cron/v3"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // SchedulerService handles scheduled interrogation jobs
@@ -638,17 +640,27 @@ func (s *SchedulerService) ProcessDueSchedules(ctx context.Context) (int, error)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// A suspended, canceled or deleted tenant's schedules do not fire (RC-4 /
+	//): interrogating a customer's devices is something we do TO their
+	// estate, and that tenant is not usable. Their next_run_at is left as it
+	// is, so a reactivated tenant's overdue schedules run on the next sweep.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, tenant_id, name, cron_expression
-		FROM interrogation_schedules
-		WHERE is_enabled = true
-			AND next_run_at IS NOT NULL
-			AND next_run_at <= $1
-			AND deleted_at IS NULL
-		ORDER BY next_run_at ASC
+		SELECT s.id, s.tenant_id, s.name, s.cron_expression
+		FROM interrogation_schedules s
+		WHERE s.is_enabled = true
+			AND s.next_run_at IS NOT NULL
+			AND s.next_run_at <= $1
+			AND s.deleted_at IS NULL
+			AND EXISTS (
+				SELECT 1 FROM tenants t
+				WHERE t.id = s.tenant_id
+				  AND t.deleted_at IS NULL
+				  AND COALESCE(t.payment_status, '') <> ALL($3)
+			)
+		ORDER BY s.next_run_at ASC
 		LIMIT $2
-		FOR UPDATE SKIP LOCKED
-	`, time.Now(), dueScheduleBatch)
+		FOR UPDATE OF s SKIP LOCKED
+	`, time.Now(), dueScheduleBatch, pq.Array(tenantstate.BlockedPaymentStatuses))
 	if err != nil {
 		return 0, fmt.Errorf("failed to query due schedules: %w", err)
 	}

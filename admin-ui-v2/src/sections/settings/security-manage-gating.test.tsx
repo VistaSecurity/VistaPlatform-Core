@@ -3,7 +3,7 @@
 // writes. A stock Platform Admin (platform.settings only) sees both pages
 // read-only, with a notice that names the permission — not a Save button the
 // server will answer with 403.
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
@@ -32,7 +32,7 @@ vi.mock('@tanstack/react-query', () => ({
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('../../lib/clients', () => ({ clients: { admin: {} } }));
 
-import { SettingsIdentityProvidersPage } from './settings-identity-providers-page';
+import { IdpModal, SettingsIdentityProvidersPage } from './settings-identity-providers-page';
 import { SettingsEmailPage } from './settings-email-page';
 
 const provider = {
@@ -47,6 +47,20 @@ const provider = {
   userinfo_url: 'https://openidconnect.googleapis.com/v1/userinfo',
   scopes: 'openid email profile',
   is_enabled: true,
+  allowed_email_domains: [] as string[],
+};
+
+const entraDirectory = 'https://login.microsoftonline.com/0b6f3c9e-1d2a-4c5b-9e8f-7a6b5c4d3e2f/oauth2/v2.0/';
+const entraProvider = {
+  ...provider,
+  id: '22222222-2222-4222-8222-222222222222',
+  provider_type: 'microsoft',
+  provider_name: 'Microsoft',
+  client_id: 'entra-client',
+  auth_url: entraDirectory + 'authorize',
+  token_url: entraDirectory + 'token',
+  userinfo_url: 'https://graph.microsoft.com/oidc/userinfo',
+  allowed_email_domains: ['contoso.example', 'contoso.example.org'],
 };
 
 beforeEach(() => {
@@ -105,5 +119,47 @@ describe('Email delivery page', () => {
     expect(html).not.toContain('role="note"');
     const inputs = html.match(/<input[^>]*>/g) ?? [];
     for (const i of inputs) expect(i).not.toContain('disabled');
+  });
+});
+
+// Allowed email domains: listed on the row, editable only on a Microsoft
+// admin-login provider, and the form refuses (as the server does) a list on a
+// provider that is not pinned to one Entra directory.
+describe('Identity Providers allowed email domains', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', { location: { origin: 'https://admin.example.test' } });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows a provider's allowed domains on its row", () => {
+    state.queryData = [entraProvider];
+    const html = renderToStaticMarkup(createElement(SettingsIdentityProvidersPage));
+    expect(html).toContain('Allowed domains:');
+    expect(html).toContain('contoso.example, contoso.example.org');
+  });
+
+  it('offers the field for a Microsoft admin-login provider, pre-filled', () => {
+    const html = renderToStaticMarkup(createElement(IdpModal, { provider: entraProvider as never, onClose: () => {} }));
+    expect(html).toContain('Allowed email domains');
+    expect(html).toContain('contoso.example\ncontoso.example.org');
+    expect(html).not.toContain('replace common, organizations, consumers or the personal-account directory');
+  });
+
+  it('does not offer the field for a Google provider', () => {
+    const html = renderToStaticMarkup(createElement(IdpModal, { provider: provider as never, onClose: () => {} }));
+    expect(html).not.toContain('Allowed email domains');
+  });
+
+  it('flags a list on a multi-tenant Entra endpoint and blocks saving', () => {
+    const common = 'https://login.microsoftonline.com/common/oauth2/v2.0/';
+    const html = renderToStaticMarkup(createElement(IdpModal, {
+      provider: { ...entraProvider, auth_url: common + 'authorize', token_url: common + 'token' } as never,
+      onClose: () => {},
+    }));
+    expect(html).toContain('replace common, organizations, consumers or the personal-account directory');
+    const save = (html.match(/<button[^>]*>[^<]*Save changes/g) ?? [])[0] ?? '';
+    expect(save).toContain('disabled');
   });
 });

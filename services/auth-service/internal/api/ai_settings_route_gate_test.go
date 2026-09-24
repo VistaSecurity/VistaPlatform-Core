@@ -100,6 +100,7 @@ func TestTenantAIRoute_GetNeedsOnlyAuthentication(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	userID, tenantID := uuid.New(), uuid.New()
+	expectLiveTenantState(mock, tenantID)
 	expectAIControlsRead(mock, tenantID)
 
 	w := aiRouteRequest(t, db, http.MethodGet, nil, userID, tenantID)
@@ -149,6 +150,7 @@ func TestTenantAIRoute_PutRefusedWithoutSettingsUpdate(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	userID, tenantID := uuid.New(), uuid.New()
+	expectLiveTenantState(mock, tenantID)
 	expectSettingsUpdateCheck(mock, userID, tenantID, false)
 
 	w := aiRouteRequest(t, db, http.MethodPut,
@@ -174,6 +176,7 @@ func TestTenantAIRoute_PutAllowedWithSettingsUpdate(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	userID, tenantID := uuid.New(), uuid.New()
+	expectLiveTenantState(mock, tenantID)
 	expectSettingsUpdateCheck(mock, userID, tenantID, true)
 	expectAIControlsRead(mock, tenantID) // read-before-write
 	mock.ExpectBegin()

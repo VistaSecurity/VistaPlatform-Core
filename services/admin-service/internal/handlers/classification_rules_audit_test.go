@@ -38,6 +38,7 @@ func auditedRuleEngine(store ClassificationRuleStore) *gin.Engine {
 	g.POST("/classification-rules", CreateClassificationRule(store))
 	g.PUT("/classification-rules/:id", UpdateClassificationRule(store))
 	g.DELETE("/classification-rules/:id", DeleteClassificationRule(store))
+	g.POST("/classification-rules/:id/accept-update", AcceptClassificationRuleUpdate(store))
 	return r
 }
 

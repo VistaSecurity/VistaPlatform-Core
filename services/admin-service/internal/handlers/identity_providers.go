@@ -19,17 +19,43 @@ package handlers
 // a super administrator only when a super administrator made the last change
 // (see staffSSOProviderTrustedForSuperAdmin) — and emits a platform audit event
 // naming the changed fields, never the secret.
+//
+// allowed_email_domains (admin-login Microsoft providers only): Microsoft Entra
+// does not put email_verified in its userinfo, so without a list an Entra staff
+// sign-in always fails closed. With one, a staff sign-in whose email domain
+// exactly matches an entry is accepted as organisation-verified — but only
+// through a provider pinned to a single Entra directory, because Entra does
+// not verify the email claim and a multi-tenant endpoint (common,
+// organizations, consumers) would let any directory's administrator assert an
+// allow-listed address. Both rules are validated here on every write and
+// enforced again at sign-in (staff_sso.go).
+//
+// A sign-up provider needs a paid licence (settings-8, admin-ui review
+// decision 11). Social sign-up is served only by auth-service's Enterprise
+// build (auth-service/ee/sso), so on Core — no active licence, which is also
+// every Core build, since only the Enterprise build records one — a sign-up
+// row would save, show as "Enabled", and do nothing. Creating one is refused
+// with 402 there; admin-login providers are Core and unaffected. Updating or
+// deleting an existing sign-up row is still allowed, so an install whose
+// licence lapsed can switch one off or remove it.
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
+	"github.com/vistasecurity/vistaplatform/shared/security/ssoclaims"
 )
 
 var validPlatformProviderTypes = map[string]bool{"google": true, "microsoft": true}
@@ -50,6 +76,25 @@ func titleProviderType(s string) string {
 // staff sign-in to admin-ui. One row per (provider_type, purpose).
 var validPlatformProviderPurposes = map[string]bool{"signup": true, "admin_login": true}
 
+// platformSignupPurpose is the purpose whose only consumer is Enterprise code.
+const platformSignupPurpose = "signup"
+
+// errSignupNeedsLicence is the 402 body for a sign-up provider on Core.
+const errSignupNeedsLicence = "Sign-up identity providers need an Enterprise or MSP licence: social sign-up is not part of Vista Platform Core"
+
+// platformSignupLicensed reports whether the install's licence, right now, is
+// a paid edition — the condition under which a sign-up provider has a
+// consumer. It reads through the shared licence cache, the same read the
+// console's edition read-out uses (GET /admin/platform/edition), so the form
+// and the server agree. A variable so unit tests can answer without Postgres.
+var platformSignupLicensed = func(ctx context.Context, db *sql.DB) (bool, error) {
+	lic, err := entitlements.LoadLicense(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return lic.EffectiveEdition(time.Now()) != entitlements.EditionCore, nil
+}
+
 type platformIdPRequest struct {
 	ProviderType string `json:"provider_type"`
 	ProviderName string `json:"provider_name"`
@@ -61,6 +106,8 @@ type platformIdPRequest struct {
 	UserinfoURL  string `json:"userinfo_url"`
 	Scopes       string `json:"scopes"`
 	IsEnabled    *bool  `json:"is_enabled"`
+	// Omitted (nil) on update keeps the stored list; [] clears it.
+	AllowedEmailDomains *[]string `json:"allowed_email_domains"`
 }
 
 type platformIdPResponse struct {
@@ -75,6 +122,8 @@ type platformIdPResponse struct {
 	UserinfoURL  string `json:"userinfo_url"`
 	Scopes       string `json:"scopes"`
 	IsEnabled    bool   `json:"is_enabled"`
+	// Always an array (never null); empty = the IdP must assert email_verified.
+	AllowedEmailDomains []string `json:"allowed_email_domains"`
 }
 
 // platformIdPFields is the non-secret, mutable part of a provider row — what an
@@ -87,10 +136,12 @@ type platformIdPFields struct {
 	UserinfoURL  string
 	Scopes       string
 	IsEnabled    bool
+	// Never nil once validated, so diff compares [] with [] rather than nil.
+	AllowedEmailDomains []string
 }
 
 // platformIdPFieldOrder fixes the order changed fields are reported in.
-var platformIdPFieldOrder = []string{"provider_name", "client_id", "auth_url", "token_url", "userinfo_url", "scopes", "is_enabled"}
+var platformIdPFieldOrder = []string{"provider_name", "client_id", "auth_url", "token_url", "userinfo_url", "scopes", "is_enabled", "allowed_email_domains"}
 
 func (f platformIdPFields) values() map[string]interface{} {
 	return map[string]interface{}{
@@ -101,6 +152,8 @@ func (f platformIdPFields) values() map[string]interface{} {
 		"userinfo_url":  f.UserinfoURL,
 		"scopes":        f.Scopes,
 		"is_enabled":    f.IsEnabled,
+		// A copy: audit values must not alias the slice a caller may reuse.
+		"allowed_email_domains": append([]string{}, f.AllowedEmailDomains...),
 	}
 }
 
@@ -109,7 +162,7 @@ func (f platformIdPFields) diff(next platformIdPFields) []string {
 	a, b := f.values(), next.values()
 	changed := []string{}
 	for _, k := range platformIdPFieldOrder {
-		if a[k] != b[k] {
+		if !reflect.DeepEqual(a[k], b[k]) {
 			changed = append(changed, k)
 		}
 	}
@@ -162,12 +215,37 @@ func platformSecretEncrypt(plaintext string) string {
 	return enc
 }
 
+// validatePlatformIdPDomains normalises an allow-list and checks it may be
+// stored on a provider of this type, purpose and endpoints. It returns the
+// canonical list, or a client-facing reason. An empty list is always valid.
+func validatePlatformIdPDomains(providerType, purpose, authURL, tokenURL string, domains []string) ([]string, string) {
+	norm, err := ssoclaims.NormalizeAllowedDomains(domains)
+	if err != nil {
+		return nil, "Invalid allowed email domain: " + err.Error()
+	}
+	if len(norm) == 0 {
+		return norm, ""
+	}
+	if purpose != "admin_login" {
+		return nil, "Allowed email domains apply only to admin-login providers"
+	}
+	if providerType != "microsoft" {
+		// Google always asserts email_verified; a domain list there could only
+		// ever relax the check for an address Google itself says is unverified.
+		return nil, "Allowed email domains apply only to Microsoft providers (Google asserts email_verified itself)"
+	}
+	if !ssoclaims.EntraAuthorityIsSingleTenant(authURL) || !ssoclaims.EntraAuthorityIsSingleTenant(tokenURL) {
+		return nil, "Allowed email domains need the authorization and token URLs to name your Entra directory (login.microsoftonline.com/<tenant-id>/…), not common, organizations, consumers or the personal-account directory"
+	}
+	return norm, ""
+}
+
 // ListPlatformIdentityProviders handles GET /admin/identity-providers.
 func ListPlatformIdentityProviders(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rows, err := db.Query(`
 			SELECT id, provider_type, provider_name, purpose, client_id, client_secret_encrypted,
-			       auth_url, token_url, userinfo_url, scopes, is_enabled
+			       auth_url, token_url, userinfo_url, scopes, is_enabled, allowed_email_domains
 			FROM platform_sso_providers
 			ORDER BY purpose, provider_type`)
 		if err != nil {
@@ -180,8 +258,11 @@ func ListPlatformIdentityProviders(db *sql.DB) gin.HandlerFunc {
 			var p platformIdPResponse
 			var secret string
 			if err := rows.Scan(&p.ID, &p.ProviderType, &p.ProviderName, &p.Purpose, &p.ClientID, &secret,
-				&p.AuthURL, &p.TokenURL, &p.UserinfoURL, &p.Scopes, &p.IsEnabled); err == nil {
+				&p.AuthURL, &p.TokenURL, &p.UserinfoURL, &p.Scopes, &p.IsEnabled, pq.Array(&p.AllowedEmailDomains)); err == nil {
 				p.HasSecret = secret != ""
+				if p.AllowedEmailDomains == nil {
+					p.AllowedEmailDomains = []string{}
+				}
 				providers = append(providers, p)
 			}
 		}
@@ -231,15 +312,38 @@ func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 		if req.IsEnabled != nil {
 			enabled = *req.IsEnabled
 		}
+		var requested []string
+		if req.AllowedEmailDomains != nil {
+			requested = *req.AllowedEmailDomains
+		}
+		domains, reason := validatePlatformIdPDomains(req.ProviderType, purpose, req.AuthURL, req.TokenURL, requested)
+		if reason != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": reason})
+			return
+		}
+
+		// Last, so a malformed request is still a 400 on every edition.
+		if purpose == platformSignupPurpose {
+			licensed, err := platformSignupLicensed(c.Request.Context(), db)
+			if err != nil {
+				log.Printf("[identity-providers] licence read failed, refusing a sign-up provider: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not read licence status"})
+				return
+			}
+			if !licensed {
+				c.JSON(http.StatusPaymentRequired, gin.H{"error": errSignupNeedsLicence, "purpose": purpose})
+				return
+			}
+		}
 
 		var id string
 		err := db.QueryRow(`
 			INSERT INTO platform_sso_providers
-			    (provider_type, provider_name, purpose, client_id, client_secret_encrypted, auth_url, token_url, userinfo_url, scopes, is_enabled, updated_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			    (provider_type, provider_name, purpose, client_id, client_secret_encrypted, auth_url, token_url, userinfo_url, scopes, is_enabled, updated_by, allowed_email_domains)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			RETURNING id`,
 			req.ProviderType, name, purpose, req.ClientID, platformSecretEncrypt(req.ClientSecret),
-			req.AuthURL, req.TokenURL, req.UserinfoURL, scopes, enabled, callerID).Scan(&id)
+			req.AuthURL, req.TokenURL, req.UserinfoURL, scopes, enabled, callerID, pq.Array(domains)).Scan(&id)
 		if err != nil {
 			if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
 				c.JSON(http.StatusConflict, gin.H{"error": "An identity provider of this type and purpose already exists. Edit it instead."})
@@ -251,7 +355,7 @@ func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 
 		created := platformIdPFields{
 			ProviderName: name, ClientID: req.ClientID, AuthURL: req.AuthURL, TokenURL: req.TokenURL,
-			UserinfoURL: req.UserinfoURL, Scopes: scopes, IsEnabled: enabled,
+			UserinfoURL: req.UserinfoURL, Scopes: scopes, IsEnabled: enabled, AllowedEmailDomains: domains,
 		}
 		recordPlatformAudit(c, PlatformAuditEntry{
 			EventType:     "platform_identity_provider.created",
@@ -271,7 +375,10 @@ func CreatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 // A blank client_secret keeps the stored one; a blank provider_name, client_id,
 // auth_url, token_url or scopes keeps the stored value. userinfo_url and
 // is_enabled are always taken from the request (is_enabled defaults to true).
-// provider_type and purpose are immutable.
+// provider_type and purpose are immutable. allowed_email_domains omitted keeps
+// the stored list, [] clears it; the resulting list is validated against the
+// resulting endpoints, so re-pointing a domain-listed provider at a
+// multi-tenant endpoint is refused too.
 //
 // The stored row is read under FOR UPDATE so the audit event names the fields
 // that actually changed. Any update — even one that changes nothing — records
@@ -305,10 +412,10 @@ func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 		var before platformIdPFields
 		var providerType, purpose string
 		err = tx.QueryRowContext(ctx, `
-			SELECT provider_type, purpose, provider_name, client_id, auth_url, token_url, userinfo_url, scopes, is_enabled
+			SELECT provider_type, purpose, provider_name, client_id, auth_url, token_url, userinfo_url, scopes, is_enabled, allowed_email_domains
 			FROM platform_sso_providers WHERE id = $1 FOR UPDATE`, id).
 			Scan(&providerType, &purpose, &before.ProviderName, &before.ClientID, &before.AuthURL,
-				&before.TokenURL, &before.UserinfoURL, &before.Scopes, &before.IsEnabled)
+				&before.TokenURL, &before.UserinfoURL, &before.Scopes, &before.IsEnabled, pq.Array(&before.AllowedEmailDomains))
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Identity provider not found"})
 			return
@@ -318,6 +425,9 @@ func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
+		if before.AllowedEmailDomains == nil {
+			before.AllowedEmailDomains = []string{}
+		}
 		after := before
 		for dst, v := range map[*string]string{
 			&after.ProviderName: req.ProviderName,
@@ -335,6 +445,16 @@ func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 		if req.IsEnabled != nil {
 			after.IsEnabled = *req.IsEnabled
 		}
+		requested := before.AllowedEmailDomains
+		if req.AllowedEmailDomains != nil {
+			requested = *req.AllowedEmailDomains
+		}
+		domains, reason := validatePlatformIdPDomains(providerType, purpose, after.AuthURL, after.TokenURL, requested)
+		if reason != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": reason})
+			return
+		}
+		after.AllowedEmailDomains = domains
 		// COALESCE keeps the stored secret when the caller sends a blank one.
 		var newSecret interface{}
 		secretRotated := strings.TrimSpace(req.ClientSecret) != ""
@@ -353,10 +473,12 @@ func UpdatePlatformIdentityProvider(db *sql.DB) gin.HandlerFunc {
 			    scopes        = $8,
 			    is_enabled    = $9,
 			    updated_by    = $10,
+			    allowed_email_domains = $11,
 			    updated_at    = now()
 			WHERE id = $1`,
 			id, after.ProviderName, after.ClientID, newSecret,
-			after.AuthURL, after.TokenURL, after.UserinfoURL, after.Scopes, after.IsEnabled, callerID); err != nil {
+			after.AuthURL, after.TokenURL, after.UserinfoURL, after.Scopes, after.IsEnabled, callerID,
+			pq.Array(after.AllowedEmailDomains)); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update identity provider"})
 			return
 		}

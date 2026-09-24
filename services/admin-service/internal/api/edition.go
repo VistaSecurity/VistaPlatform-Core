@@ -34,8 +34,8 @@ import (
 //	MSP        — the management plane you only need when you operate OTHER
 //	             organizations: the whole /admin/tenants/** surface, tenant
 //	             lifecycle, per-tenant entitlement overrides, cross-tenant
-//	             stats/dashboard/cost aggregates, announcements, maintenance
-//	             windows, support tickets, and the cross-tenant legal
+//	             stats/dashboard/cost aggregates, announcements, support
+//	             tickets, and the cross-tenant legal
 //	             acceptance ledger. Mechanically identifiable: it either serves
 //	             a /platform aggregate or reads the BYPASSRLS handle to span
 //	             tenants.
@@ -169,8 +169,8 @@ type EditionHooks struct {
 
 	// RegisterMSP mounts the whole MSP management plane (/admin/tenants/**,
 	// /admin/stats/**, /admin/dashboard/**, /admin/costs/**,
-	// /admin/announcements, /admin/maintenance-windows, /admin/support-tickets,
-	// /admin/legal/acceptances, /admin/monitoring/metrics) and returns a handle
+	// /admin/announcements, /admin/support-tickets, /admin/legal/acceptances,
+	// /admin/monitoring/metrics) and returns a handle
 	// to its background work. Returning nil is legal and means "routes mounted,
 	// no workers".
 	//
@@ -255,8 +255,7 @@ func (h EditionHooks) Edition() string {
 // the routes exist at all — so it cannot drift from reality the way a
 // hand-maintained capability list would. `msp` true means /admin/tenants/**,
 // /admin/stats/**, /admin/dashboard/**, /admin/costs/**, /admin/announcements,
-// /admin/maintenance-windows, /admin/support-tickets and
-// /admin/legal/acceptances are mounted; `billing` true means /admin/billing/**
+// /admin/support-tickets and /admin/legal/acceptances are mounted; `billing` true means /admin/billing/**
 // and /admin/tenants/:id/billing are.
 //
 // Deliberately NOT a list of every paid capability in the product: this service

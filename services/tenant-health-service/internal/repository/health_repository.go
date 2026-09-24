@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
@@ -207,21 +208,71 @@ func (r *HealthRepository) GetHealthMetrics(ctx context.Context, tenantID uuid.U
 	return metrics, nil
 }
 
-// SaveHealthAlert saves a health alert.
-// RLS-scoped write over health_alerts — WithTenantTx sets app.tenant_id so the
-// INSERT's tenant_id satisfies the policy's WITH CHECK.
-func (r *HealthRepository) SaveHealthAlert(ctx context.Context, alert *models.HealthAlert) error {
-	query := `
+// ReconcileHealthAlerts makes the tenant's ACTIVE health alerts exactly
+// `desired`, one per alert_type.
+//
+// health_alerts used to be insert-only: every 30-minute cycle inserted the
+// same alerts again and nothing ever resolved one, so a stale "Poor Health
+// Status" alert sat next to a "fair" score indefinitely (RC-14). Now, in one
+// transaction:
+//
+//   - each desired alert is UPSERTED on (tenant_id, alert_type) among active
+//     rows — the partial unique index health_alerts_one_active_per_type makes
+//     a duplicate impossible, and an existing alert keeps its id and
+//     created_at (so "open since" stays true) while its severity, text and
+//     values follow the latest calculation;
+//   - every other active alert for the tenant is RESOLVED (is_active=false,
+//     resolved_at=now()), because this service is the only writer of
+//     health_alerts and a condition it no longer reports has cleared.
+//
+// RLS-scoped: WithTenantTx sets app.tenant_id, and every statement is also
+// confined by WHERE tenant_id.
+func (r *HealthRepository) ReconcileHealthAlerts(ctx context.Context, tenantID uuid.UUID, desired []models.HealthAlert) error {
+	upsert := `
 		INSERT INTO health_alerts (id, tenant_id, alert_type, severity, title, description,
 			category, current_value, threshold, is_active, created_at, resolved_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true, $10, NULL)
+		ON CONFLICT (tenant_id, alert_type) WHERE is_active DO UPDATE SET
+			severity = EXCLUDED.severity,
+			title = EXCLUDED.title,
+			description = EXCLUDED.description,
+			category = EXCLUDED.category,
+			current_value = EXCLUDED.current_value,
+			threshold = EXCLUDED.threshold
+	`
+	resolve := `
+		UPDATE health_alerts
+		SET is_active = false, resolved_at = NOW()
+		WHERE tenant_id = $1 AND is_active = true AND NOT (alert_type = ANY($2))
 	`
 
-	return shareddatabase.WithTenantTx(ctx, r.db, alert.TenantID, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, query, alert.ID, alert.TenantID, alert.AlertType, alert.Severity,
-			alert.Title, alert.Description, alert.Category, alert.CurrentValue, alert.Threshold,
-			alert.IsActive, alert.CreatedAt, alert.ResolvedAt)
-		return err
+	keep := make([]string, 0, len(desired))
+	for i := range desired {
+		if desired[i].TenantID != tenantID {
+			return fmt.Errorf("alert %q belongs to tenant %s, not %s", desired[i].AlertType, desired[i].TenantID, tenantID)
+		}
+		keep = append(keep, desired[i].AlertType)
+	}
+
+	return shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
+		for _, a := range desired {
+			id := a.ID
+			if id == uuid.Nil {
+				id = uuid.New()
+			}
+			createdAt := a.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = time.Now()
+			}
+			if _, err := tx.ExecContext(ctx, upsert, id, tenantID, a.AlertType, a.Severity,
+				a.Title, a.Description, a.Category, a.CurrentValue, a.Threshold, createdAt); err != nil {
+				return fmt.Errorf("upsert %s alert: %w", a.AlertType, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, resolve, tenantID, pq.Array(keep)); err != nil {
+			return fmt.Errorf("resolve cleared alerts: %w", err)
+		}
+		return nil
 	})
 }
 
@@ -320,20 +371,31 @@ type GetAllTenantHealthOptions struct {
 // tenant (platform-admin view); runs on the bypass role (Phase 4). Not wrapped
 // in WithTenantTx, which would confine it to a single tenant.
 func (r *HealthRepository) GetAllTenantHealth(options *GetAllTenantHealthOptions) ([]models.TenantHealthSummary, error) {
-	// Build query with filters
+	// Build query with filters.
+	//
+	// INNER JOIN tenants + deleted_at IS NULL: a soft-deleted tenant keeps its
+	// tenant_health row, and the old LEFT JOIN kept it on the board — with its
+	// alerts — after the tenant was gone (RC-14). A row with no tenant at all
+	// is dropped for the same reason instead of showing as "Unknown Tenant".
+	//
+	// active_alerts counts every active alert; the board's "Active alerts"
+	// column used to show only the critical ones.
 	query := `
-		SELECT th.tenant_id, 
-			COALESCE(t.name, 'Unknown Tenant') as tenant_name,
+		SELECT th.tenant_id,
+			t.name as tenant_name,
 			th.overall_score, th.health_status, th.last_calculated,
 			th.trends->>'trend_direction' as trend_direction,
+			COALESCE(alert_counts.active_alerts, 0) as active_alerts,
 			COALESCE(alert_counts.critical_alerts, 0) as critical_alerts,
 			COALESCE(rec_counts.recommendations, 0) as recommendations
 		FROM tenant_health th
-		LEFT JOIN tenants t ON th.tenant_id = t.id
+		JOIN tenants t ON th.tenant_id = t.id AND t.deleted_at IS NULL
 		LEFT JOIN (
-			SELECT tenant_id, COUNT(*) as critical_alerts
+			SELECT tenant_id,
+				COUNT(*) as active_alerts,
+				COUNT(*) FILTER (WHERE severity = 'critical') as critical_alerts
 			FROM health_alerts
-			WHERE severity = 'critical' AND is_active = true
+			WHERE is_active = true
 			GROUP BY tenant_id
 		) alert_counts ON th.tenant_id = alert_counts.tenant_id
 		LEFT JOIN (
@@ -416,8 +478,8 @@ func (r *HealthRepository) GetAllTenantHealth(options *GetAllTenantHealthOptions
 
 		err := rows.Scan(
 			&summary.TenantID, &summary.TenantName, &summary.OverallScore, &summary.HealthStatus,
-			&summary.LastCalculated, &trendDirection, &summary.CriticalAlerts,
-			&summary.Recommendations,
+			&summary.LastCalculated, &trendDirection, &summary.ActiveAlerts,
+			&summary.CriticalAlerts, &summary.Recommendations,
 		)
 
 		if err != nil {
@@ -431,6 +493,9 @@ func (r *HealthRepository) GetAllTenantHealth(options *GetAllTenantHealthOptions
 		}
 
 		summaries = append(summaries, summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return summaries, nil

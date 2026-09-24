@@ -62,6 +62,10 @@ type ControlMeasurement struct {
 	CreatedAt         time.Time              `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at" db:"updated_at"`
 
+	// Seeded-content ownership (decision 4, RC-12); set by the platform
+	// catalogue's measurement reads, never for a tenant rule.
+	SeededContent
+
 	// Joined fields
 	MeasurementType *MeasurementType `json:"measurement_type,omitempty" db:"-"`
 }

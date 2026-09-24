@@ -1,6 +1,6 @@
 // VISTA Operations — Security ▸ Dashboard (index sub-page). The platform's
 // security posture, read from the ACTIVITY TRAIL (audit.activity_logs via
-// admin-service /admin/security/*), plus impersonation activity from auth-service.
+// admin-service /admin/security/*).
 //
 // This page used to read public.security_events and public.compliance_framework_status.
 // Neither table has a writer anywhere in the product, so half the page rendered
@@ -15,10 +15,13 @@
 //     There is no severity or anomaly breakdown, because nothing measures either.
 //   - The compliance-framework panel is removed outright (no source). Tenant
 //     framework scores are a different question and live in compliance-engine.
+//   - The impersonation-activity panel is removed too (owner decision 10,
+//     RC-21): nothing can start an impersonation, so its audit feed was
+//     always empty. It returns with the impersonation flow.
 import { useState } from 'react';
-import { ChartBar, AlertTriangle, ShieldAlert, KeyRound, UserCog, RefreshCw, Layers } from 'lucide-react';
+import { ChartBar, AlertTriangle, ShieldAlert, KeyRound, RefreshCw, Layers } from 'lucide-react';
 import { StatTile, StatusTag, MiniBar, relTime } from '../../components/ui/primitives';
-import { useSecurityStats, useSecurityEvents, useImpersonationAudit } from './queries';
+import { useSecurityStats, useSecurityEvents } from './queries';
 
 const TIME_RANGES = [
   { id: '1h', label: 'Last hour' },
@@ -56,13 +59,11 @@ export function SecurityDashboardPage() {
   const [range, setRange] = useState('24h');
   const statsQ = useSecurityStats(range);
   const eventsQ = useSecurityEvents(25);
-  const impQ = useImpersonationAudit();
 
   const stats = statsQ.data ?? {};
   const byCategory = stats.events_by_category ?? {};
   const byOutcome = stats.events_by_outcome ?? {};
   const events = eventsQ.data ?? [];
-  const imps = impQ.data ?? [];
 
   return (
     <div className="op-fade" style={{ padding: '20px 24px 40px', display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -135,27 +136,6 @@ export function SecurityDashboardPage() {
             ))}
             {(eventsQ.isLoading || eventsQ.isError || events.length === 0) && (
               <tr><td colSpan={6} style={{ textAlign: 'center', padding: 36, color: 'var(--op-t3)' }}>{eventsQ.isLoading ? 'Loading…' : eventsQ.isError ? <>Couldn't load. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => eventsQ.refetch()}>Retry</button></> : 'No security events in range.'}</td></tr>
-            )}
-          </tbody>
-        </table>
-      </Panel>
-
-      {/* impersonation activity */}
-      <Panel title="Impersonation activity" icon={UserCog}>
-        <table className="op-table">
-          <thead><tr><th>Event</th><th>Status</th><th>IP address</th><th>User agent</th><th>When</th></tr></thead>
-          <tbody>
-            {imps.map((e, i) => (
-              <tr key={`${e.occurred_at}-${i}`}>
-                <td style={{ fontWeight: 500, color: 'var(--op-t1)' }}>{e.event_type}</td>
-                <td><StatusTag status={e.event_status === 'success' ? 'success' : e.event_status === 'failed' ? 'failed' : e.event_status} /></td>
-                <td className="t-muted mono" style={{ fontSize: 11 }}>{e.ip_address || '—'}</td>
-                <td className="t-muted" style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }}>{e.user_agent || '—'}</td>
-                <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(e.occurred_at)}</td>
-              </tr>
-            ))}
-            {(impQ.isLoading || impQ.isError || imps.length === 0) && (
-              <tr><td colSpan={5} style={{ textAlign: 'center', padding: 36, color: 'var(--op-t3)' }}>{impQ.isLoading ? 'Loading…' : impQ.isError ? <>Couldn't load. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => impQ.refetch()}>Retry</button></> : 'No impersonation activity recorded.'}</td></tr>
             )}
           </tbody>
         </table>

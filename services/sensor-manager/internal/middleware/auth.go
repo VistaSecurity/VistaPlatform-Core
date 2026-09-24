@@ -48,14 +48,6 @@ func RequireTenant() gin.HandlerFunc {
 	return sharedmw.RequireTenant()
 }
 
-// RequirePlatformAdmin ensures the caller has a platform-admin role
-// (super_admin / platform_admin / support_admin). Delegates to the shared
-// middleware, mirroring device-interrogation-service's platform-admin gate.
-// Must be used after RequireAuth.
-func RequirePlatformAdmin() gin.HandlerFunc {
-	return sharedmw.RequirePlatformAdmin()
-}
-
 // RequireInternalHMAC verifies HMAC-signed service-to-service requests (INTERNAL_AUTH_SECRET).
 func RequireInternalHMAC() gin.HandlerFunc {
 	secret := os.Getenv("INTERNAL_AUTH_SECRET")

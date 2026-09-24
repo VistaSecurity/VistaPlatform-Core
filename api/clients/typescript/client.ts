@@ -246,6 +246,29 @@ export type SessionExpiredHandler = (request: Request) => Promise<boolean>;
 export interface SessionExpiryHandlers {
   onAuthFailure: SessionExpiredHandler;
   onRecoveryFailed(request: Request): Promise<void>;
+  /** The caller's organization was suspended, canceled or deleted (RC-4):
+   * every request now answers 403 with one of TENANT_BLOCKED_CODES. The app
+   * ends the session and explains why at sign-in. Optional: a handler without
+   * it leaves those 403s to the caller, as before. */
+  onTenantBlocked?(code: TenantBlockedCode): Promise<void> | void;
+}
+
+/** The 403 `code` values that mean "your organization is not usable" — the
+ * same on auth-service and on every service's JWT middleware
+ * (shared/tenantstate). */
+export const TENANT_BLOCKED_CODES = ["tenant_suspended", "tenant_deleted"] as const;
+export type TenantBlockedCode = (typeof TENANT_BLOCKED_CODES)[number];
+
+/** Read a tenant-blocked code off a 403, without consuming the body the
+ * caller will read. Anything else (other 403s, non-JSON) is null. */
+async function tenantBlockedCode(response: Response): Promise<TenantBlockedCode | null> {
+  try {
+    const body: unknown = await response.clone().json();
+    const code = body && typeof body === "object" ? (body as { code?: unknown }).code : undefined;
+    return (TENANT_BLOCKED_CODES as readonly unknown[]).includes(code) ? (code as TenantBlockedCode) : null;
+  } catch {
+    return null;
+  }
 }
 
 let sessionExpiredHandler: SessionExpiryHandlers | null = null;
@@ -323,6 +346,17 @@ export function makeSessionExpiryMiddleware(
 ): Middleware {
   return {
     async onResponse({ request, response }) {
+      // A suspended/deleted organization: end the session with the reason,
+      // on any endpoint (including refresh, which is how a session that
+      // outlived its access token learns about it). The 403 still reaches the
+      // caller; the app navigates to sign-in.
+      if (response.status === 403 && sessionExpiredHandler?.onTenantBlocked) {
+        const code = await tenantBlockedCode(response);
+        if (code) {
+          await sessionExpiredHandler.onTenantBlocked(code);
+          return undefined;
+        }
+      }
       if (response.status !== 401 || !sessionExpiredHandler) return undefined;
       if (isAuthFlowPath(new URL(request.url).pathname)) return undefined;
       const handler = sessionExpiredHandler;

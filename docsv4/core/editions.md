@@ -126,7 +126,7 @@ The MSP edition is carved by which services ship, not by capability flags, so th
 |---|---|
 | **Tenant lifecycle** | Creating, suspending, migrating and deleting tenants; the tenant switcher and cross-tenant views. |
 | **Billing and subscriptions** | Payment provider wiring, invoicing, plans and pricing, trials, and the subscription lifecycle. |
-| **Announcements and maintenance windows** | Platform-wide notices and scheduled maintenance windows across tenants. |
+| **Announcements** | Platform-wide notices to tenants. The authoring API exists; delivery to tenants, and the console page with it, are not built yet. |
 | **Support tickets** | Operator-side support queue spanning tenants. |
 | **Cost monitoring** | Per-tenant cost attribution and platform cost dashboards. |
 | **Cross-tenant security and SIEM** | Fleet-wide security posture and audit forwarding across every tenant, as distinct from a single tenant's own SIEM export. |

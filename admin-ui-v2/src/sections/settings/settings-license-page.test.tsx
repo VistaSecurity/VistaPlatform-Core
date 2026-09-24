@@ -10,11 +10,12 @@ import type { LicenseState } from '../../lib/edition';
 
 type Q<T> = { data?: T; isLoading: boolean; isError: boolean; refetch: () => void };
 
-const state: { license: Q<LicenseInfo>; retention: Q<RetentionSetting>; canEdit: boolean; edition: LicenseState } = vi.hoisted(() => ({
+const state: { license: Q<LicenseInfo>; retention: Q<RetentionSetting>; canEdit: boolean; edition: LicenseState; build: 'core' | 'enterprise' | null } = vi.hoisted(() => ({
   license: { isLoading: false, isError: false, refetch: () => {} },
   retention: { isLoading: false, isError: false, refetch: () => {} },
   canEdit: true,
   edition: 'enterprise',
+  build: 'enterprise',
 }));
 
 vi.mock('./license-queries', async (orig) => {
@@ -26,10 +27,11 @@ vi.mock('./license-queries', async (orig) => {
     useSaveRetention: () => ({ mutateAsync: vi.fn(), isPending: false }),
   };
 });
-// The licence edition as the console knows it (GET /admin/platform/edition).
+// The licence edition as the console knows it (GET /admin/platform/edition),
+// and the BUILD edition from the same read-out (null until it settles).
 // isMsp mirrors the real hook: it fails OPEN on 'unknown'.
 vi.mock('../../lib/edition', () => ({
-  usePlatformEdition: () => ({ license: state.edition, isMsp: state.edition === 'msp' || state.edition === 'unknown' }),
+  usePlatformEdition: () => ({ license: state.edition, edition: state.build, isMsp: state.edition === 'msp' || state.edition === 'unknown' }),
 }));
 // The usage panel's own data: loading, so the real panel renders its chrome.
 vi.mock('./license-usage-queries', async (orig) => {
@@ -40,6 +42,7 @@ vi.mock('./license-usage-queries', async (orig) => {
     useLicenseUsage: () => loading,
     useLicenseUsageReports: () => loading,
     useGenerateLicenseUsageReport: () => ({ isPending: false, mutate: vi.fn() }),
+    useRetryLicenseUsageReport: () => ({ isPending: false, variables: undefined, mutate: vi.fn() }),
   };
 });
 vi.mock('@vistasecurity/primitives/platform-auth', () => ({
@@ -66,6 +69,7 @@ beforeEach(() => {
   state.retention = ok({ max_days: null, applies: true });
   state.canEdit = true;
   state.edition = 'enterprise';
+  state.build = 'enterprise';
 });
 
 describe('licence card', () => {
@@ -83,13 +87,49 @@ describe('licence card', () => {
     expect(html).toContain('Retry');
   });
 
-  it('empty (no licence): Core, and how to install one', () => {
-    state.license = ok({ ...base, edition: 'core', display_name: 'Vista Platform Core', status: 'none', licensed_edition: null, licensee: null, subject: null, expires_at: null, days_left: null, issued_at: null, verified_at: null });
+  const unlicensed = (): LicenseInfo => ({ ...base, edition: 'core', display_name: 'Vista Platform Core', status: 'none', licensed_edition: null, licensee: null, subject: null, expires_at: null, days_left: null, issued_at: null, verified_at: null });
+
+  it('empty (no licence) on the Enterprise images: Core, and how to install one', () => {
+    state.license = ok(unlicensed());
+    state.edition = 'core';
     const html = render();
     expect(html).toContain('Vista Platform Core — no licence installed');
     expect(html).toContain('vistaplatform-license');
     expect(html).toContain(base.install_id!);
+    expect(html).not.toContain('data-testid="core-upgrade-note"');
     expect(html).not.toContain('Data retention');
+  });
+
+  // A Core BUILD has no licence verifier: telling its operator to create the
+  // licence Secret would send them to do something that changes nothing.
+  it('empty (no licence) on the Core images: Enterprise needs the Enterprise images plus a licence', () => {
+    state.license = ok(unlicensed());
+    state.edition = 'core';
+    state.build = 'core';
+    const html = render();
+    expect(html).toContain('Vista Platform Core — no licence installed');
+    expect(html).toContain('data-testid="core-upgrade-note"');
+    expect(html).toContain('Enterprise chart and images');
+    expect(html).toContain('the licence Vista Security issues you');
+    expect(html).toContain('Upgrading from Core');
+    // Who to ask, and why: the Enterprise docs are not public, and the two
+    // lines are numbered separately, so the operator cannot pick the release.
+    expect(html).toContain('Contact Vista Security');
+    expect(html).toContain('numbered separately');
+    expect(html).not.toContain('vistaplatform-license');
+    // The install ID is still shown: Vista Security needs it to issue a licence.
+    expect(html).toContain(base.install_id!);
+    // Plain text: the console has no route to the docs, so no dead link.
+    expect(html).not.toContain('<a ');
+  });
+
+  it('empty (no licence) before the build edition is known: the install instructions, not a guess', () => {
+    state.license = ok(unlicensed());
+    state.edition = 'core';
+    state.build = null;
+    const html = render();
+    expect(html).toContain('vistaplatform-license');
+    expect(html).not.toContain('data-testid="core-upgrade-note"');
   });
 
   it('default (Enterprise): edition, licensee, expiry, days left — and no warning far from expiry', () => {

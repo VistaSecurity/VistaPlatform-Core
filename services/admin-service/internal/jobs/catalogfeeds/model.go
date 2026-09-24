@@ -154,6 +154,37 @@ type FeedState struct {
 	LastError  *string    `json:"last_error"`
 	RowCount   int64      `json:"row_count"`
 	UpdatedAt  *time.Time `json:"updated_at"`
+	// Ecosystems is the per-ecosystem outcome of a feed that mirrors several
+	// independent sources (today only OSV: Debian, Ubuntu, Alpine, …). Always
+	// emitted, empty for the other feeds, so the console can render "Debian ok,
+	// Ubuntu failed: <reason>" instead of one red row for the whole feed
+	// (decision 13, RC-29).
+	Ecosystems []EcosystemStatus `json:"ecosystems"`
+}
+
+// Ecosystem status values. A subset of the feed lifecycle: an ecosystem is
+// either done for this run or failed.
+const (
+	EcosystemOK    = StatusOK
+	EcosystemError = StatusError
+)
+
+// EcosystemStatus is one ecosystem's outcome within a feed run, persisted in
+// catalog_feed_state.ecosystem_status.
+type EcosystemStatus struct {
+	Name      string  `json:"name"`
+	Status    string  `json:"status"`
+	LastError *string `json:"last_error"`
+	// Rows is what this ecosystem wrote in its last run — measured, and kept
+	// even when the run failed partway (its batches were already committed).
+	Rows int64 `json:"rows"`
+	// Watermark is the newest upstream `modified` this ecosystem has fully
+	// imported: where its next run resumes.
+	Watermark *string    `json:"watermark"`
+	LastRunAt *time.Time `json:"last_run_at"`
+	// LastSuccessAt survives a failed run, so "Ubuntu failing since …" is
+	// answerable.
+	LastSuccessAt *time.Time `json:"last_success_at"`
 }
 
 // SyncResult is what a feed hands back after a run: how many catalogue rows it
@@ -161,6 +192,16 @@ type FeedState struct {
 type SyncResult struct {
 	Rows   int64
 	Cursor string
+	// PartialProgress means Cursor records ONLY units of work that fully
+	// completed, so it is safe to persist even when the run as a whole failed.
+	// OSV sets it: its cursor is a per-ecosystem map and a failed ecosystem
+	// keeps its old watermark, so persisting the map cannot skip anything —
+	// and not persisting it made every run re-download every ecosystem
+	// whenever any one of them failed (RC-29). Feeds with a single linear
+	// window (NVD) leave it false: their cursor must not move on failure.
+	PartialProgress bool
+	// Ecosystems is the per-ecosystem outcome, for feeds that have them.
+	Ecosystems []EcosystemStatus
 }
 
 // ptr is the one-liner every nullable column in this package needs.

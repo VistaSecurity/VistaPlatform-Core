@@ -42,6 +42,25 @@ staged into files/ee/ at release time. When the flag is on:
 Re-applying is a no-op for the deployments that already hold these frameworks
 (UPSERT by code/version and by control id, NOT EXISTS guards on
 control_measurements). Turning the flag off deletes nothing.
+
+ADMIN EDITS WIN (seeded-content ownership, decision 4 / RC-12)
+
+The bundle is applied in a SEED PASS (`SET vista.seed_apply = on`, the same
+mode seed.sql puts itself in). The seeded-content guard triggers in schema.sql
+then keep what a platform admin changed or deleted and turn shipped changes to
+those rows into "update available" offers, instead of letting the bundle's
+UPSERTs overwrite them. None of that needs the signed bundle to change.
+
+One consequence the signed bundle cannot know about: its last statement RAISEs
+unless all five regulated frameworks are PUBLISHED, and an admin may now keep
+one archived (or delete it) across upgrades. With ON_ERROR_STOP that is the
+statement psql stops on, so everything before it has already been applied. The
+Job accepts exactly that failure — the bundle's own "incomplete" message AND
+public.seeded_frameworks_unaccounted() = 0, i.e. every missing framework is one
+an admin archived or deleted — and fails on anything else. It then runs
+public.classify_seeded_measurements(), so the bundle's measurement rules that
+predate the ownership marker are marked on this upgrade (seed.sql runs it too,
+but before the bundle).
 */}}
 {{- if .Values.enterprise.contentBundle.enabled }}
 {{- $bundleSQL := .Files.Get "files/ee/frameworks-regulated.sql" }}
@@ -208,6 +227,33 @@ spec:
             - -c
             - |
               set -e
+              {{- if .Values.enterprise.contentBundle.enabled }}
+              # Apply the signed bundle in a seed pass. Extra args select the
+              # database (none: PG* env; else -d "$DATABASE_URL"). See the
+              # header: the bundle's own "incomplete" summary is accepted only
+              # when every missing regulated framework is one an admin archived
+              # or deleted. scripts/test-chart-content-bundle.mjs executes this
+              # function against a stub psql.
+              apply_content_bundle() {
+                if psql "$@" -v ON_ERROR_STOP=1 -c "SET vista.seed_apply = on" \
+                    -f /seed/frameworks-regulated.sql 2>/tmp/bundle.err; then
+                  cat /tmp/bundle.err >&2
+                else
+                  cat /tmp/bundle.err >&2
+                  if grep -q 'Enterprise content bundle incomplete' /tmp/bundle.err \
+                     && [ "$(psql "$@" -tAc "SELECT public.seeded_frameworks_unaccounted(ARRAY['soc2','pci-dss','iso27001','nist-csf','iec-62351-3'])")" = "0" ]; then
+                    echo "Enterprise content bundle applied. Regulated frameworks a platform admin archived or deleted were left that way (admin edits win)."
+                  else
+                    echo "ERROR: applying the Enterprise content bundle failed (see above)."
+                    return 1
+                  fi
+                fi
+                # Mark the bundle's measurement rules that predate the
+                # seeded-content marker on THIS upgrade, not the next one
+                # (schema.sql, classify_seeded_measurements()).
+                psql "$@" -v ON_ERROR_STOP=1 -tAc "SELECT public.classify_seeded_measurements()" >/dev/null || return 1
+              }
+              {{- end }}
               echo "Waiting for Postgres to be ready..."
               {{- if .Values.datastores.postgres.enabled }}
               until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE"; do
@@ -228,7 +274,7 @@ spec:
               {{- if .Values.enterprise.contentBundle.enabled }}
               # Signature already verified by the init container.
               echo "Applying Enterprise content bundle (regulated compliance frameworks)..."
-              psql -v ON_ERROR_STOP=1 -f /seed/frameworks-regulated.sql
+              apply_content_bundle
               {{- end }}
               {{- else }}
               until pg_isready -d "$DATABASE_URL"; do
@@ -249,7 +295,7 @@ spec:
               {{- if .Values.enterprise.contentBundle.enabled }}
               # Signature already verified by the init container.
               echo "Applying Enterprise content bundle (regulated compliance frameworks)..."
-              psql -d "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /seed/frameworks-regulated.sql
+              apply_content_bundle -d "$DATABASE_URL"
               {{- end }}
               {{- end }}
               echo "Seed data applied."

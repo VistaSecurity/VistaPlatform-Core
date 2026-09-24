@@ -18,7 +18,6 @@ import { OverviewPage } from './sections/overview/overview-page';
 import { PlansPage } from './sections/plans/plans-page';
 import { FleetPage } from './sections/fleet/fleet-page';
 import { JobsPage } from './sections/jobs/jobs-page';
-import { CommsPage } from './sections/comms/comms-page';
 import { SettingsPage } from './sections/settings/settings-page';
 import { SecurityPage } from './sections/security/security-page';
 import { SupportPage } from './sections/support/support-page';
@@ -36,7 +35,6 @@ const BUILT: Record<string, React.ComponentType> = {
   billing: BillingPage,
   fleet: FleetPage,
   jobs: JobsPage,
-  comms: CommsPage,
   settings: SettingsPage,
   security: SecurityPage,
 };
@@ -77,9 +75,9 @@ export default function App() {
             // backend? A Core operator holds `tenants.read`, so the permission
             // guard above happily lets them into a section whose routes 404.
             // Pass-through when `s.edition` is undefined (Core sections).
-            // Third gate: the install's LICENCE edition (Plans & Pricing on
-            // Enterprise, Billing unless MSP). Pass-through when `s.license`
-            // is undefined.
+            // Third gate: the install's LICENCE edition (Plans & Pricing and
+            // Billing only on MSP). Pass-through when `s.license` is
+            // undefined.
             return (
               <Route key={s.id} path={path} element={
                 <RequirePlatformEdition capability={s.edition}>
@@ -88,6 +86,12 @@ export default function App() {
               } />
             );
           })}
+          {/* Retired Comms section (owner decision 9, RC-20). Its maintenance
+              form wrote a table nothing read; the one maintenance-window store
+              is System → Alerts. Announcements are hidden until they can be
+              delivered, so the rest of /comms has nowhere to go. */}
+          <Route path="/comms/maintenance" element={<Navigate to="/system/alerts" replace />} />
+          <Route path="/comms/*" element={<Navigate to="/overview" replace />} />
           <Route path="*" element={<SectionPlaceholder title="Not found" />} />
         </Route>
       </Route>

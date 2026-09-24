@@ -199,7 +199,7 @@ func TestGetTierCaps_ComposedTierAndCatalogueDefault(t *testing.T) {
 	scratch, err := svc.CreateTier(models.TierCreateRequest{
 		Name: name, DisplayName: name, BillingInterval: "month", BillingMethod: "invoice",
 		MaxSensors: &n999, MaxAssets: &n999, MaxUsers: &n999,
-	})
+	}, uuid.Nil)
 	if err != nil {
 		t.Fatalf("CreateTier: %v", err)
 	}

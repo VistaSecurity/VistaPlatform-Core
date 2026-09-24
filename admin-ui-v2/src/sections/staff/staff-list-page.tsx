@@ -4,12 +4,14 @@
 // admin client (see queries.ts). UX ported from _legacy/admin-ui users-page.tsx into
 // the v2 op-* design + shared <Modal>.
 //
-// Honest gaps (NEEDS-BACKEND): PlatformUser exposes no `team` or MFA/2FA field, so the
-// 2FA cell uses email-verification as a stand-in and there is no Team column.
+// Honest gaps: PlatformUser exposes no `team` field, so there is no Team column. The
+// platform has no MFA for staff, so there is no 2FA column either: the column that
+// used to be headed "2FA" showed `email_verified` and is now labelled for what it is
+// (security-staff-20, decision 15). MFA itself is a seeded roadmap item.
 import { useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
-  Search, UsersRound, ShieldCheck, ShieldOff, Mail, BadgeCheck, UserPlus, MoreHorizontal,
+  Search, UsersRound, ShieldCheck, Mail, MailQuestion, BadgeCheck, UserPlus, MoreHorizontal,
   Pencil, KeyRound, RotateCcw, Trash2, UserMinus, UserCheck, ClipboardCopy, Check,
 } from 'lucide-react';
 import { usePlatformAuth, usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
@@ -340,7 +342,7 @@ export function StaffListPage() {
 
         <table className="op-table">
           <thead><tr>
-            <th>Name</th><th>Role</th><th>Status</th><th>2FA</th><th>Last active</th><th />
+            <th>Name</th><th>Role</th><th>Status</th><th>Email verified</th><th>Last active</th><th />
           </tr></thead>
           <tbody>
             {rows.map((u: PlatformUser) => {
@@ -358,8 +360,10 @@ export function StaffListPage() {
                 </td>
                 <td style={{ color: roleColor(u.role?.name), fontWeight: 500 }}>{u.role?.display_name ?? '—'}</td>
                 <td><StatusTag status={staffStatus(u)} /></td>
-                <td title="MFA status not exposed by the API yet">
-                  {u.email_verified ? <ShieldCheck size={15} style={{ color: 'var(--ok)' }} /> : <ShieldOff size={15} style={{ color: 'var(--op-t3)' }} />}
+                <td>
+                  {u.email_verified
+                    ? <span role="img" aria-label="Email verified" title="Email verified" style={{ display: 'inline-flex' }}><BadgeCheck size={15} style={{ color: 'var(--ok)' }} /></span>
+                    : <span role="img" aria-label="Email not verified" title="Email not verified" style={{ display: 'inline-flex' }}><MailQuestion size={15} style={{ color: 'var(--op-t3)' }} /></span>}
                 </td>
                 <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(u.last_login_at)}</td>
                 <td style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
@@ -410,7 +414,7 @@ export function StaffListPage() {
         </table>
       </div>
       <div style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>
-        Team and 2FA columns from the kit aren't exposed by the platform-user API yet — the 2FA cell uses email-verification as a stand-in. Wiring an MFA signal is a follow-up.
+        "Email verified" shows whether a staff member has confirmed their email address. It is not multi-factor authentication: staff sign-in has no second factor yet.
       </div>
 
       {/* modals */}

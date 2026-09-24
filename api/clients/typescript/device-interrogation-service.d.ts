@@ -793,8 +793,9 @@ export interface paths {
         /**
          * Platform-wide device/integration/job health summary
          * @description Aggregate health metrics across ALL tenants for the admin-ui platform
-         *     oversight dashboard. Platform-admin only (`RequirePlatformAdmin()` — a
-         *     tenant JWT is rejected with 401/403). Returns the bare
+         *     oversight dashboard. Requires a platform token whose role holds `platform.health`
+         *     (platform_user_has_permission — the role name is not consulted); a
+         *     tenant token or a role without it gets 403. Returns the bare
          *     `PlatformHealthSummary` object (NOT enveloped under a key).
          *
          *     Shape note: the admin-ui's `getMetrics()` (`platform-devices-api.ts`)
@@ -824,8 +825,9 @@ export interface paths {
          * Platform-wide interrogation-agent roster (Fleet view)
          * @description Read-only roll-up of every device interrogation agent across ALL
          *     tenants, for the VISTA Operations "Fleet" view in admin-ui.
-         *     Platform-admin only (`RequirePlatformAdmin()` — a tenant JWT is
-         *     rejected with 403). Unlike the tenant-scoped `GET /agents` this
+         *     Requires a platform token whose role holds `platform.health`
+         *     (platform_user_has_permission — the role name is not consulted); a
+         *     tenant token or a role without it gets 403. Unlike the tenant-scoped `GET /agents` this
          *     deliberately omits the tenant_id filter and joins `tenants` so each row
          *     carries tenant identity (`tenant_id` + `tenant_name` + `tenant_slug`).
          *
@@ -857,8 +859,9 @@ export interface paths {
         /**
          * Platform-wide interrogation jobs (Jobs & Queues view)
          * @description Read-only roll-up of interrogation jobs across ALL tenants, for the VISTA
-         *     Operations "Jobs & Queues" view in admin-ui. Platform-admin only
-         *     (`RequirePlatformAdmin()` — a tenant JWT is rejected with 403). Unlike the
+         *     Operations "Jobs & Queues" view in admin-ui. Requires a platform token whose role holds `platform.health`
+         *     (platform_user_has_permission — the role name is not consulted); a
+         *     tenant token or a role without it gets 403. Unlike the
          *     tenant-scoped `GET /jobs` this deliberately omits the tenant_id filter and
          *     joins `tenants` so each row carries tenant identity (`tenant_id` +
          *     `tenant_name` + `tenant_slug`), plus the assigned `worker` (the executing
@@ -897,8 +900,9 @@ export interface paths {
          * Retry a failed or cancelled job across any tenant (platform-admin)
          * @description Cross-tenant retry for the Support cockpit's Job Repair action. Looks the
          *     job up by id alone (no tenant scope) and resets it to pending. Only
-         *     failed/cancelled jobs may be retried (else 400). Platform-admin only
-         *     (`RequirePlatformAdmin()` — a tenant JWT is rejected with 403).
+         *     failed/cancelled jobs may be retried (else 400). Requires a platform
+         *     token whose role holds `tenants.manage` (it changes a customer's job);
+         *     a tenant token or a role without it gets 403.
          */
         post: operations["retryAdminInterrogationJob"];
         delete?: never;
@@ -923,8 +927,9 @@ export interface paths {
          * Cancel a pending or in-progress job across any tenant (platform-admin)
          * @description Cross-tenant cancel for the Support cockpit's Job Repair action. Looks the
          *     job up by id alone (no tenant scope). Only pending / assigned / in-progress
-         *     jobs may be cancelled (else 400). Platform-admin only
-         *     (`RequirePlatformAdmin()` — a tenant JWT is rejected with 403).
+         *     jobs may be cancelled (else 400). Requires a platform token whose role
+         *     holds `tenants.manage` (it changes a customer's job); a tenant token or
+         *     a role without it gets 403.
          */
         post: operations["cancelAdminInterrogationJob"];
         delete?: never;
@@ -944,8 +949,9 @@ export interface paths {
          * Platform-wide JetStream queue (stream/consumer) telemetry
          * @description Read-only per-queue backlog telemetry for the VISTA Operations "Queues"
          *     panel, sourced live from NATS JetStream stream + durable-consumer info.
-         *     Platform-admin only (`RequirePlatformAdmin()` — a tenant JWT is rejected
-         *     with 403).
+         *     Requires a platform token whose role holds `platform.health`
+         *     (platform_user_has_permission — the role name is not consulted); a
+         *     tenant token or a role without it gets 403.
          *
          *     Each queue is one JetStream stream (the platform's DefaultStreams). The
          *     meaningful per-queue depth is each consumer's `depth` (JetStream
@@ -1951,8 +1957,16 @@ export interface components {
             profile: string | null;
             /** @description Agent binary version. */
             version: string;
-            /** @description Agent status: active, inactive, or error. */
+            /** @description Agent status as stored: active, inactive, or error. Written active at enrollment and never updated by heartbeats — show effective_status instead. */
             status: string;
+            /**
+             * @description What the Fleet view shows: `status`, except that an `active` agent
+             *     whose last heartbeat is 15 minutes old or more (or that has never
+             *     heartbeated) is `offline` — the same window the web-ui and the
+             *     discovery_agent_offline alert use.
+             * @enum {string}
+             */
+            effective_status: "active" | "offline" | "inactive" | "error";
             /**
              * @description The agent host's primary address, self-reported on each heartbeat —
              *     the source address its kernel uses to reach the platform. Null until

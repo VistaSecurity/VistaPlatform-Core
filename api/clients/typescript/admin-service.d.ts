@@ -518,13 +518,13 @@ export interface paths {
         get: operations["getTier"];
         /**
          * Update a subscription tier
-         * @description Partial update. Existing tenants are grandfathered. Requires an authenticated platform user (user_id in context); returns 401 when absent.
+         * @description Partial update. Existing tenants are grandfathered. Requires an authenticated platform user; returns 401 when absent. Column changes and composition changes (`entitlements` upserts, `remove_entitlements` deletes, `entitlements_version` required with either) commit in one transaction with the tier's history row: any error leaves the tier unchanged. 409 with `current_version` when `entitlements_version` is stale; 428 when it is missing; 400 with `item_key` / `detail` on an unknown, inactive or malformed entitlement; 404 for an unknown tier.
          */
         put: operations["updateTier"];
         post?: never;
         /**
          * Deprecate a subscription tier
-         * @description Soft deprecation — existing tenants are grandfathered. Requires an authenticated platform user (user_id in context); returns 401 when absent.
+         * @description Soft deprecation — existing tenants are grandfathered. Requires an authenticated platform user; returns 401 when absent.
          */
         delete: operations["deprecateTier"];
         options?: never;
@@ -652,7 +652,7 @@ export interface paths {
         put?: never;
         /**
          * Create a platform identity provider
-         * @description Requires platform.security.manage (not platform.settings): an admin_login provider's endpoints decide which staff account signs in. One row per (provider type, purpose); a duplicate returns 409. The caller is recorded as the provider's last writer, and a platform audit event names the fields set (never the secret)..
+         * @description Requires platform.security.manage (not platform.settings): an admin_login provider's endpoints decide which staff account signs in. One row per (provider type, purpose); a duplicate returns 409. The caller is recorded as the provider's last writer, and a platform audit event names the fields set (never the secret). A signup provider (the default purpose) needs an active Enterprise or MSP licence, because social sign-up is served only by the Enterprise build: on Core an otherwise valid signup request returns 402 and writes nothing. admin_login providers are Core..
          */
         post: operations["createPlatformIdentityProvider"];
         delete?: never;
@@ -671,7 +671,7 @@ export interface paths {
         get?: never;
         /**
          * Update a platform identity provider
-         * @description Requires platform.security.manage. Also how a provider is enabled or disabled (is_enabled). A blank client_secret keeps the stored one; provider_type and purpose are immutable. The caller is recorded as the provider's last writer — staff SSO signs in a super administrator only through a provider a super administrator last saved — and a platform audit event names the fields that changed (never the secret)..
+         * @description Requires platform.security.manage. Also how a provider is enabled or disabled (is_enabled). A blank client_secret keeps the stored one; provider_type and purpose are immutable. allowed_email_domains omitted keeps the stored list and [] clears it; the resulting list is validated against the resulting endpoints, so re-pointing a domain-listed Microsoft provider at a multi-tenant authority returns 400. The caller is recorded as the provider's last writer — staff SSO signs in a super administrator only through a provider a super administrator last saved — and a platform audit event names the fields that changed (never the secret)..
          */
         put: operations["updatePlatformIdentityProvider"];
         post?: never;
@@ -1203,11 +1203,11 @@ export interface paths {
          *     Validated exactly as create is. 409 means the new `(rule_kind, pattern)`
          *     pair belongs to a different rule.
          *
-         *     Editing a SEEDED rule works, but the next release's seed run restates it
-         *     from `standards/classification-rules.yaml` and the edit is lost. To
-         *     override a seeded answer durably, add a more specific rule instead — a
-         *     longer sysObjectID prefix, a longer model prefix — which wins on its own
-         *     merits. Rules you ADD are never touched by a seed run.
+         *     Editing a SHIPPED rule sticks (decision 4, RC-12): the rule becomes the
+         *     admin's (`admin_modified`), upgrades no longer restate it, and a later
+         *     shipped change to it arrives as an offer (`update_available`,
+         *     `offered_update`) accepted with `POST .../{id}/accept-update`. Rules you
+         *     ADD are never touched by a seed run.
          */
         put: operations["updateClassificationRule"];
         post?: never;
@@ -1222,10 +1222,38 @@ export interface paths {
          *     COPY of the rules that matched, precisely so a reviewer can still see the
          *     argument after the rule is gone.
          *
-         *     Deleting a SEEDED rule works and the next release's seed run puts it
-         *     back. Gated by `catalogs.manage`.
+         *     Deleting a SHIPPED rule sticks: the deletion is remembered, and upgrades
+         *     do not put the rule back (decision 4, RC-12). Gated by `catalogs.manage`.
          */
         delete: operations["deleteClassificationRule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/catalogs/classification-rules/{id}/accept-update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept the shipped update offered for a classification rule
+         * @description Upgrades keep a platform admin's edits to the rules the platform ships,
+         *     and store a new shipped value for an edited rule as an offer instead of
+         *     writing it (decision 4, RC-12). This applies the offer
+         *     (`offered_update`) and clears it. The rule stays the admin's, so a later
+         *     shipped change is offered again rather than applied. Audited
+         *     (`classification_rule.update_accepted`, with the values before and
+         *     after). Gated by `catalogs.manage`. 400 when `id` is not a UUID.
+         */
+        post: operations["acceptClassificationRuleUpdate"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1368,51 +1396,6 @@ export interface paths {
         post?: never;
         /** Delete a platform announcement */
         delete: operations["deleteAnnouncement"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/maintenance-windows": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List maintenance windows
-         * @description Scheduled maintenance windows (admin-ui Announcements page → Maintenance Windows). Optional status filter. `maintenance_windows` is always a non-null array (empty when none).
-         */
-        get: operations["listMaintenanceWindows"];
-        put?: never;
-        /**
-         * Create a maintenance window
-         * @description Both `starts_at` and `ends_at` are required RFC3339 timestamps; `ends_at` must not precede `starts_at` (else 400).
-         */
-        post: operations["createMaintenanceWindow"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/maintenance-windows/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Update a maintenance window
-         * @description Partial update. An empty body (no updatable fields) returns 400. Supplying `actual_start` or `actual_end` as an empty string clears it (sets NULL).
-         */
-        put: operations["updateMaintenanceWindow"];
-        post?: never;
-        /** Delete a maintenance window */
-        delete: operations["deleteMaintenanceWindow"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1892,7 +1875,17 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Suspend a tenant */
+        /**
+         * Suspend a tenant
+         * @description Sets payment_status to 'suspended', remembering the status it replaced
+         *     so Reactivate can restore it, and revokes every refresh token the
+         *     tenant's users hold. From then on the tenant is not usable: sign-in,
+         *     token refresh and already-issued access tokens are refused with 403
+         *     `tenant_suspended` by auth-service and every service's JWT middleware
+         *     (within the per-request cache TTL, 30s by default). Platform
+         *     administrators are unaffected and may still impersonate the tenant's
+         *     users for support.
+         */
         post: operations["suspendTenant"];
         delete?: never;
         options?: never;
@@ -1909,7 +1902,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Activate a tenant */
+        /**
+         * Activate a tenant
+         * @description Lifts a suspension (or cancellation), restoring the payment status the
+         *     tenant had before it was suspended — 'active' when none was remembered.
+         *     Sessions revoked by the suspension stay revoked; users sign in again.
+         */
         post: operations["activateTenant"];
         delete?: never;
         options?: never;
@@ -1933,6 +1931,12 @@ export interface paths {
          *     no tenant limit for the flag to affect. Audited
          *     (`tenant.operator_changed`). The response carries the licensed tenant
          *     limit re-evaluated after the change.
+         *
+         *     Unmarking (`is_operator: false`) is refused with 409 and reason
+         *     `license_tenant_limit` when the licence's grace period has ended and
+         *     the unmark would put the customer count over `max_tenants` — the rule a
+         * tenant creation meets. Audited as
+         *     `tenant.operator_change_refused_license_limit`.
          */
         put: operations["setTenantOperator"];
         post?: never;
@@ -2786,13 +2790,40 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a tier's entitlement composition */
+        /**
+         * Get a tier's entitlement composition
+         * @description The tier's composed items (items it does not compose inherit the catalogue default and are absent here) and the composition `version`, which a multi-item write must send back.
+         */
         get: operations["getTierEntitlements"];
         /**
-         * Bulk-replace a tier's entitlement composition
-         * @description The body is the complete desired composition (atomic replace). Every `included_value` is validated against its item's `kind` before anything is written — `{"enabled": bool}` for boolean, `{"quantity": N>=0}` or `{"quantity": null}` (unlimited) for numeric_cap/numeric_metered, `{"value": "..."}` for enum_choice; an omitted or empty value is rejected, not defaulted. 400 with `item_key` on an unknown or duplicated item key; 400 with `kind` and `detail` on a malformed value. Nothing is written on any 400.
+         * Change several items of a tier's entitlement composition
+         * @description Upserts every item in `entitlements` and deletes every key in `remove`; items named in neither are left exactly as they are (omission never deletes — this used to be a delete-everything replace, and a body built from an empty client cache erased the composition). `version` is the one GET returned: missing → 428, no longer current → 409 with `current_version`, and nothing is written. Every `included_value` is validated against its item's `kind` before anything is written — `{"enabled": bool}` for boolean, `{"quantity": N>=0}` or `{"quantity": null}` (unlimited) for numeric_cap/numeric_metered, `{"value": "..."}` for enum_choice; an omitted or empty value is rejected, not defaulted. An upserted key must be an active catalogue item; omitted overage fields keep their stored values. 400 with `item_key` on an unknown, inactive or duplicated key; 400 with `kind` and `detail` on a malformed value. Changes are recorded in the tier's history and the platform audit log.
          */
         put: operations["updateTierEntitlements"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tiers/{id}/entitlements/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                /** @description The billable item's stable key (billable_items.key). */
+                key: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set one item of a tier's entitlement composition
+         * @description Sets ONE item on the tier — the Plans & Pricing matrix cell edit. Cannot remove or change any other item, so it takes no version; two edits to the same cell resolve last-writer-wins. The item must be an active catalogue item and `included_value` must match its `kind` (shapes as for PUT /admin/tiers/{id}/entitlements). Omitted overage fields keep their stored values. Recorded in the tier's history and the platform audit log when it changes anything.
+         */
+        put: operations["upsertTierEntitlement"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2904,7 +2935,7 @@ export interface paths {
         put?: never;
         /**
          * Generate a signed usage report for a month
-         * @description Builds, signs (ES256, install key) and stores the usage report for one UTC calendar month (format: LICENSE_USAGE_REPORT_V1). A closed month defaults to complete=true, and a complete report exists at most once per month — asking again answers 200 with the stored report and created=false. The current month can only be a month-to-date preview (complete=false, 400 otherwise); previews are never billed and may be generated repeatedly. Future months and months before metering existed are refused with 400. A complete report for a month in which no daily snapshot was taken (before the MSP licence, or the platform down all month) is refused with 409 and reason no_snapshots; a preview of it is allowed. Requires platform.settings; audited as license.usage_report.generated. 404 with reason not_msp unless the install runs under an active MSP licence.
+         * @description Builds, signs (ES256, install key) and stores the usage report for one UTC calendar month (format: LICENSE_USAGE_REPORT_V1). A closed month defaults to complete=true, and a complete report exists at most once per month — asking again answers 200 with the stored report and created=false. Around an MSP licence lapse a month has two complete reports: the final report up to the lapse, and (once licensed again) the rest of the month from the lapse on; asking for the month then generates the missing rest, or returns the latest part. The current month can only be a month-to-date preview (complete=false, 400 otherwise); previews are never billed and may be generated repeatedly. Future months and months before metering existed are refused with 400. A complete report for a month in which no daily snapshot was taken (before the MSP licence, or the platform down all month) is refused with 409 and reason no_snapshots; a preview of it is allowed. Requires platform.settings; audited as license.usage_report.generated. 404 with reason not_msp unless the install runs under an active MSP licence.
          */
         post: operations["generateLicenseUsageReport"];
         delete?: never;
@@ -2927,6 +2958,26 @@ export interface paths {
         get: operations["downloadLicenseUsageReport"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/license/reports/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry a failed usage report delivery
+         * @description Re-queues the delivery of a complete report whose transmission failed — including one the receiver rejected (422), which is otherwise never retried: it goes back to pending, its backoff restarts, and the transmitter is asked for a pass. The last error stays on the report until the next attempt replaces it. 409 with reason not_configured when licensing.reporting.endpoint is empty, or not_failed when the report is a preview (never sent), pending (already retried automatically) or delivered. Requires platform.settings; audited as license.usage_report.delivery_retry_requested. 404 with reason not_msp unless the install runs under an active MSP licence, or a plain 404 when no report has that id.
+         */
+        post: operations["retryLicenseUsageReportDelivery"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3020,6 +3071,8 @@ export interface components {
             userinfo_url?: string;
             scopes: string;
             is_enabled: boolean;
+            /** @description Admin-login Microsoft providers only. Microsoft Entra omits email_verified from userinfo; a staff sign-in whose email domain exactly matches an entry (ASCII, case-insensitive, no subdomains) is accepted as organisation-verified, but only while auth_url and token_url name a single Entra directory (not common, organizations, consumers or the personal-account directory 9188040d-6c67-4c5b-b112-36a304b66dad). Empty = the IdP must assert email_verified. Always an array. */
+            allowed_email_domains: string[];
         };
         PlatformIdentityProviderListResponse: {
             providers: components["schemas"]["PlatformIdentityProvider"][];
@@ -3044,6 +3097,8 @@ export interface components {
             userinfo_url?: string;
             scopes?: string;
             is_enabled?: boolean;
+            /** @description Exact email domains (e.g. example.com; punycode for internationalised domains). Trimmed, lower-cased and de-duplicated on save. Refused (400) for wildcards, email addresses, trailing dots, non-ASCII, a Google or sign-up provider, or a Microsoft provider whose auth_url/token_url use a multi-tenant authority (common, organizations, consumers). Omitted on update keeps the stored list; [] clears it. */
+            allowed_email_domains?: string[];
         };
         StaffSsoProvider: {
             /** @enum {string} */
@@ -3413,13 +3468,15 @@ export interface components {
         };
         /**
          * @description Envelope for the tier-entitlements endpoints. `entitlements` is null when
-         *     the tier has none, and OMITTED on the PUT path when the post-write
-         *     readback fails (the write still succeeded).
+         *     the tier has none. Writes answer with the composition read inside the
+         *     write's own transaction, so it is always the state they committed.
          */
         TierEntitlementsResponse: {
             /** Format: uuid */
             tier_id: string;
             entitlements?: components["schemas"]["TierEntitlement"][] | null;
+            /** @description A content hash of the composition. Send it back on PUT /admin/tiers/{id}/entitlements (`version`) or PUT /admin/tiers/{id} (`entitlements_version`). */
+            version?: string;
         };
         /**
          * @description A per-tenant entitlement override ("Plan Exception", ADR-0004) — a single
@@ -3540,9 +3597,29 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** @description Body for PUT /admin/tiers/{id}/entitlements — the complete desired composition. */
+        /** @description Body for PUT /admin/tiers/{id}/entitlements. Upserts `entitlements`, deletes `remove`; anything named in neither is untouched. */
         UpdateTierEntitlementsRequest: {
-            entitlements: components["schemas"]["TierEntitlementInput"][];
+            entitlements?: components["schemas"]["TierEntitlementInput"][];
+            /** @description Item keys to take off the tier (it then inherits the catalogue default). */
+            remove?: string[];
+            /** @description The composition version GET returned. */
+            version: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** @description Body for PUT /admin/tiers/{id}/entitlements/{key}. */
+        UpsertTierEntitlementRequest: {
+            included_value: unknown;
+            overage_price_cents?: number;
+            overage_unit_size?: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** @description 409 body for a stale composition version. */
+        CompositionConflictError: {
+            error: string;
+            detail?: string;
+            current_version: string;
         } & {
             [key: string]: unknown;
         };
@@ -3654,6 +3731,12 @@ export interface components {
         /** @description A bare acknowledgement — `{ "message": "..." }`. Returned by role update/delete. */
         MessageResponse: {
             message: string;
+        };
+        /** @description Reactivation acknowledgement, naming the payment status the suspension had interrupted and that is now restored. */
+        TenantActivateResponse: {
+            message: string;
+            /** @enum {string} */
+            payment_status: "trial" | "active" | "past_due" | "incomplete";
         };
         CreateRoleRequest: {
             name: string;
@@ -3967,8 +4050,12 @@ export interface components {
             /** Format: uuid */
             owner_tenant_id?: string;
             display_order?: number;
-            /** @description When present, bulk-replaces the tier composition in tier_entitlements. */
+            /** @description Items to upsert in tier_entitlements. Items not named are left as they are. Requires `entitlements_version`. */
             entitlements?: components["schemas"]["TierEntitlementInput"][];
+            /** @description Item keys to take off the tier. Requires `entitlements_version`. */
+            remove_entitlements?: string[];
+            /** @description The composition version GET /admin/tiers/{id}/entitlements returned. A stale one fails the whole update (409). */
+            entitlements_version?: string;
         } & {
             [key: string]: unknown;
         };
@@ -4168,69 +4255,6 @@ export interface components {
             is_active?: boolean;
             starts_at?: string;
             expires_at?: string;
-        } & {
-            [key: string]: unknown;
-        };
-        /** @description A scheduled maintenance window (handlers.MaintenanceWindow). `description`, `actual_start`, `actual_end` and `created_by` are null when unset; `affected_services` is null when the column is NULL. */
-        MaintenanceWindow: {
-            id: string;
-            title: string;
-            description: string | null;
-            /** @description scheduled / emergency / rolling. */
-            type: string;
-            /** @description scheduled / in_progress / completed / cancelled. */
-            status: string;
-            affected_services: string[] | null;
-            /** Format: date-time */
-            starts_at: string;
-            /** Format: date-time */
-            ends_at: string;
-            /** Format: date-time */
-            actual_start: string | null;
-            /** Format: date-time */
-            actual_end: string | null;
-            notify_before_minutes: number;
-            created_by: string | null;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /** @description Envelope for GET /admin/maintenance-windows. `maintenance_windows` is always a non-null array (the handler seeds an empty slice). */
-        MaintenanceWindowListResponse: {
-            maintenance_windows: components["schemas"]["MaintenanceWindow"][];
-        };
-        CreateMaintenanceWindowResponse: {
-            message: string;
-            id: string;
-        };
-        CreateMaintenanceWindowRequest: {
-            title: string;
-            description?: string;
-            /** @description Defaults to 'scheduled' when omitted. */
-            type?: string;
-            affected_services?: string[];
-            /** @description RFC3339; required. */
-            starts_at: string;
-            /** @description RFC3339; required; must not precede starts_at. */
-            ends_at: string;
-            /** @description Defaults to 60 when omitted. */
-            notify_before_minutes?: number;
-        } & {
-            [key: string]: unknown;
-        };
-        /** @description Partial update — all fields optional. actual_start / actual_end = "" clears it (NULL). */
-        UpdateMaintenanceWindowRequest: {
-            title?: string;
-            description?: string;
-            type?: string;
-            status?: string;
-            affected_services?: string[];
-            starts_at?: string;
-            ends_at?: string;
-            actual_start?: string;
-            actual_end?: string;
-            notify_before_minutes?: number;
         } & {
             [key: string]: unknown;
         };
@@ -4584,7 +4608,14 @@ export interface components {
             tenant_name: string;
             user_count: number;
             asset_count: number;
+            /** @description Live customer-deployed sensors. The platform-managed rows every tenant is given (platform = 'platform' or the 'system' tag) are platform_managed_count, never part of this. */
             sensor_count: number;
+            /** @description Live discovery agents (device_agents). */
+            device_agent_count: number;
+            /** @description What the customer deployed — sensor_count + device_agent_count. */
+            agent_count: number;
+            /** @description Live platform-managed sensors rows (the in-cluster discovery sensor and device interrogation agent the platform registers for each tenant). Reported separately; not a customer deployment. */
+            platform_managed_count: number;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -4703,7 +4734,7 @@ export interface components {
             /**
              * @description True when the multi-tenant management plane is mounted:
              *     /admin/tenants/**, /admin/stats/**, /admin/dashboard/**,
-             *     /admin/costs/**, /admin/announcements, /admin/maintenance-windows,
+             *     /admin/costs/**, /admin/announcements,
              *     /admin/support-tickets, /admin/legal/acceptances.
              */
             msp: boolean;
@@ -5166,6 +5197,19 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description Seeded-content ownership (decision 4, RC-12). `vista` for a rule the platform ships (generated from `standards/classification-rules.yaml`), `custom` for one a platform admin added.
+             * @enum {string}
+             */
+            content_origin: "vista" | "custom";
+            /** @description A platform admin changed this shipped rule. Upgrades keep the admin's values and offer later shipped changes instead of applying them. */
+            admin_modified: boolean;
+            /** @description An upgrade shipped new values for this rule and kept the admin's instead. Accept them with `POST .../{id}/accept-update`. */
+            update_available: boolean;
+            /** @description The shipped values on offer, column by column (any of class_key, vendor, model, confidence, source_url): what accepting would write. Present only while `update_available` is true. */
+            offered_update?: {
+                [key: string]: unknown;
+            };
         };
         /**
          * @description A rule to create, or the full replacement for an existing one. On PUT
@@ -5229,7 +5273,7 @@ export interface components {
         CatalogFeedStatus: {
             /** @enum {string} */
             feed: "eol" | "nvd" | "osv";
-            /** @description Opaque and per-feed: NVD stores the end of the last modification window it consumed, OSV a JSON map of per-ecosystem watermarks, and the EOL feed the date it last completed a full pass. Advanced only on success, so a failed run retries its window rather than skipping it. */
+            /** @description Opaque and per-feed: NVD stores the end of the last modification window it consumed, OSV a JSON map of per-ecosystem watermarks, and the EOL feed the date it last completed a full pass. NVD's and EOL's advance only on success, so a failed run retries its window rather than skipping it. OSV's holds only ecosystems that completed, so it is saved even when another ecosystem failed. */
             cursor: string | null;
             /** Format: date-time */
             last_run_at: string | null;
@@ -5239,10 +5283,31 @@ export interface components {
              */
             last_status: "never" | "running" | "ok" | "error";
             last_error: string | null;
-            /** @description Catalogue rows written by the last successful run. */
+            /** @description Catalogue rows written by the most recent run. A failed run reports the rows it wrote before it failed; those rows are kept. */
             row_count: number;
             /** Format: date-time */
             updated_at?: string | null;
+            /** @description Per-ecosystem outcome for a feed that mirrors several sources (OSV: Debian, Ubuntu, Alpine, …), so one failing ecosystem is shown against its own name instead of turning the whole feed red. Always present; empty for `eol` and `nvd` and for a feed that has not run. */
+            ecosystems: components["schemas"]["CatalogFeedEcosystemStatus"][];
+        };
+        /** @description One ecosystem's outcome in the most recent run of a multi-source feed. */
+        CatalogFeedEcosystemStatus: {
+            /** @description The osv.dev ecosystem name, e.g. `Ubuntu`. */
+            name: string;
+            /** @enum {string} */
+            status: "ok" | "error";
+            last_error: string | null;
+            /** @description Rows this ecosystem wrote in the most recent run, including a run that failed partway. */
+            rows: number;
+            /** @description The newest upstream `modified` time this ecosystem has fully imported; where its next run resumes. */
+            watermark: string | null;
+            /** Format: date-time */
+            last_run_at: string | null;
+            /**
+             * Format: date-time
+             * @description Kept when the ecosystem fails, so the console can say how long it has been failing.
+             */
+            last_success_at: string | null;
         };
         /** @description Status of every catalogue feed, plus the deployment-level switches the console renders. */
         CatalogFeedListResponse: {
@@ -5283,7 +5348,13 @@ export interface components {
             generated_at?: string;
             message: string;
         };
-        /** @description Usage reporting answered on an install that is not under an active MSP licence. reason is always not_msp; edition is the install's current edition (core when there is no active licence). */
+        /** @description A change refused because it would put the install over its licensed tenant limit after the grace period. error is operator-facing text with the counts; reason is always license_tenant_limit. */
+        LicenseTenantLimitError: {
+            error: string;
+            /** @enum {string} */
+            reason: "license_tenant_limit";
+        };
+        /** @description An MSP-only route (usage reporting, billing) answered on an install that is not under an active MSP licence. reason is always not_msp; edition is the install's current edition (core when there is no active licence). */
         LicenseNotMSPError: {
             error: string;
             /** @enum {string} */
@@ -5291,9 +5362,13 @@ export interface components {
             /** @enum {string} */
             edition: "core" | "enterprise";
         };
-        /** @description Whether reports are transmitted to Vista Security. Not configured until the transmitter ships — reports are stored and downloadable only. */
+        /** @description Whether reports are transmitted to Vista Security automatically (licensing.reporting.endpoint). Not configured: reports are stored and downloadable only, and nothing leaves the install. */
         LicenseUsageDelivery: {
             configured: boolean;
+            /** @description The receiver's base URL (https); reports are POSTed to <endpoint>/v1/usage-reports. Present when configured. */
+            endpoint?: string;
+            /** @description How often the transmitter looks for reports that are due. Present when configured. */
+            interval_minutes?: number;
         };
         LicenseUsage: {
             /** @enum {string} */
@@ -5349,12 +5424,22 @@ export interface components {
             generated_by: string;
             tenant_count: number;
             signing_key_id: string;
-            /** @enum {string} */
+            /**
+             * @description pending — not yet delivered (never tried, or retrying after a network error / 5xx); delivered — the receiver answered 202, or 409 (it already held this report); failed — the receiver refused it (400/401: retried on the backoff; 422: rejected, retried only after a manual retry). Previews are never sent and stay pending.
+             * @enum {string}
+             */
             delivery_status: "pending" | "delivered" | "failed";
+            /** @description Attempts since the report was generated or last manually retried. */
             delivery_attempts: number;
+            /** @description The last attempt's failure (the receiver's status and message, or the connection error). Cleared on delivery. */
             last_error: string | null;
             /** Format: date-time */
             delivered_at: string | null;
+            /**
+             * Format: date-time
+             * @description When the transmitter will next send it. Null on a pending report means at the next pass; null on a failed report means not until a manual retry (the receiver rejected it).
+             */
+            next_attempt_at: string | null;
         };
         LicenseUsageReportList: {
             reports: components["schemas"]["LicenseUsageReport"][];
@@ -5376,6 +5461,9 @@ export interface components {
             report: components["schemas"]["LicenseUsageReport"];
             /** @description False when the month's complete report already existed and was returned instead. */
             created: boolean;
+        };
+        RetryLicenseUsageReportResponse: {
+            report: components["schemas"]["LicenseUsageReport"];
         };
         /** @description A signed licence usage report, format v1 (docs: LICENSE_USAGE_REPORT_V1). The body is signed with ES256 over its RFC 8785 canonical form; the envelope is canonical JSON too. */
         LicenseUsageReportEnvelope: {
@@ -5439,6 +5527,15 @@ export interface components {
                 "application/json": components["schemas"]["PlatformPermissionDenied"];
             };
         };
+        /** @description Billing is part of Vista Platform MSP: the install is not under an active MSP licence (reason not_msp; the route exists on every ee build, but only an MSP licence may use it). On a route that looks something up, also: that resource was not found. */
+        BillingNotMSP: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LicenseNotMSPError"] | components["schemas"]["LegacyError"];
+            };
+        };
         /** @description The install is not under an active MSP licence (usage reporting is an MSP licence obligation), or no report has that id. */
         LicenseNotMSP: {
             headers: {
@@ -5468,6 +5565,24 @@ export interface components {
         };
         /** @description Conflicting state. */
         LegacyConflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description The tier's entitlement composition changed since the caller read it; nothing was written. `current_version` is the version now in force. */
+        CompositionConflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["CompositionConflictError"];
+            };
+        };
+        /** @description A multi-item composition write carried no version; nothing was written. Read the tier's entitlements and send their `version`. */
+        CompositionVersionRequired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -5509,6 +5624,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5532,7 +5648,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5561,6 +5677,7 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5589,6 +5706,7 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5614,7 +5732,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5637,6 +5755,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5664,6 +5783,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5691,6 +5811,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5714,6 +5835,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5736,6 +5858,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5763,6 +5886,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5785,6 +5909,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5807,6 +5932,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5834,6 +5960,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6091,6 +6218,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6118,6 +6246,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6143,7 +6272,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6173,7 +6302,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6199,6 +6328,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6224,6 +6354,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6251,6 +6382,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6276,6 +6408,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6383,6 +6516,9 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["CompositionConflict"];
+            428: components["responses"]["CompositionVersionRequired"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6596,6 +6732,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description A signup provider on Core (no active Enterprise or MSP licence). Nothing is written. */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             403: components["responses"]["LegacyForbidden"];
             /** @description A provider of this type already exists. */
             409: {
@@ -7295,6 +7440,34 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    acceptClassificationRuleUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule as it now stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClassificationRule"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     getTenantCost: {
         parameters: {
             query?: {
@@ -7534,114 +7707,6 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
-    listMaintenanceWindows: {
-        parameters: {
-            query?: {
-                /** @description Filter by status (e.g. scheduled / in_progress / completed / cancelled). Empty value lists all. */
-                status?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The maintenance windows. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MaintenanceWindowListResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    createMaintenanceWindow: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateMaintenanceWindowRequest"];
-            };
-        };
-        responses: {
-            /** @description The created maintenance window id — `{ "message": "...", "id": "..." }`. */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CreateMaintenanceWindowResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    updateMaintenanceWindow: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateMaintenanceWindowRequest"];
-            };
-        };
-        responses: {
-            /** @description Update acknowledged — `{ "message": "..." }`. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MessageResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    deleteMaintenanceWindow: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Delete acknowledged — `{ "message": "..." }`. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MessageResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
     listSupportTickets: {
         parameters: {
             query?: {
@@ -7855,6 +7920,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7881,6 +7947,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7907,6 +7974,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7929,6 +7997,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7955,6 +8024,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7981,6 +8051,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8003,6 +8074,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8025,6 +8097,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8050,6 +8123,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8075,6 +8149,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8213,6 +8288,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8470,13 +8546,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Activate acknowledged — `{ "message": "..." }`. */
+            /** @description Activate acknowledged, with the payment status that was restored. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": components["schemas"]["TenantActivateResponse"];
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
@@ -8511,7 +8587,15 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
             404: components["responses"]["LegacyNotFound"];
-            409: components["responses"]["LegacyConflict"];
+            /** @description Not an MSP licence, or the unmark would put the install over its licence after the grace period. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseTenantLimitError"] | components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9870,7 +9954,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The updated entitlements (entitlements omitted if the post-write readback fails). */
+            /** @description The composition after the write, with its new version. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9880,6 +9964,40 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["CompositionConflict"];
+            428: components["responses"]["CompositionVersionRequired"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    upsertTierEntitlement: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                /** @description The billable item's stable key (billable_items.key). */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpsertTierEntitlementRequest"];
+            };
+        };
+        responses: {
+            /** @description The whole composition after the write, with its new version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TierEntitlementsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9981,6 +10099,7 @@ export interface operations {
                     "application/json": components["schemas"]["AdminInvoiceListResponse"];
                 };
             };
+            404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -10002,6 +10121,7 @@ export interface operations {
                     "application/json": components["schemas"]["IssueCreditsResponse"];
                 };
             };
+            404: components["responses"]["BillingNotMSP"];
         };
     };
     getLicenseUsage: {
@@ -10121,6 +10241,35 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
             404: components["responses"]["LicenseNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    retryLicenseUsageReportDelivery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The report id (UUID). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The report, re-queued. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetryLicenseUsageReportResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LicenseNotMSP"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };

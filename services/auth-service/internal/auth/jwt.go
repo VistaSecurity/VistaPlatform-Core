@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -18,11 +19,12 @@ var (
 
 // JWTClaims represents the claims in a JWT token
 type JWTClaims struct {
-	UserID   uuid.UUID `json:"user_id"`
-	TenantID uuid.UUID `json:"tenant_id"`
-	Email    string    `json:"email"`
-	Role     string    `json:"role"`
-	Type     string    `json:"type"` // "access" or "refresh"
+	UserID               uuid.UUID `json:"user_id"`
+	TenantID             uuid.UUID `json:"tenant_id"`
+	Email                string    `json:"email"`
+	Role                 string    `json:"role"`
+	Type                 string    `json:"type"` // "access" or "refresh"
+	TenantSessionVersion int64     `json:"tenant_session_version,omitempty"`
 
 	// TokenType + Scopes mark a PAT-derived, scope-narrowed access token.
 	// Empty on normal login tokens. Mirrors shared/models.JWTClaims.
@@ -82,6 +84,52 @@ type JWTService struct {
 	verifier      *jwtkeys.Verifier
 	accessExpiry  time.Duration
 	refreshExpiry time.Duration
+
+	// tenantGate, when set, is consulted before any session is minted for a
+	// tenant user (see SetTenantGate).
+	tenantGate        func(ctx context.Context, tenantID uuid.UUID) error
+	tenantVersionGate func(ctx context.Context, tenantID uuid.UUID) (int64, error)
+}
+
+// SetTenantGate installs the check every tenant-session mint runs first. It is
+// the ONE place in auth-service that decides "may this tenant have a session":
+// password login, refresh, every SSO callback, invitation acceptance and the
+// PAT→JWT exchange all mint through this service, so a suspended, canceled or
+// deleted tenant is refused on all of them — including any mint path added
+// later — rather than on whichever ones remembered to check (RC-4 /).
+//
+// The gate returns a *tenantstate.BlockedError for a blocked tenant (callers
+// map it to 403 with its code) and a plain error when the state cannot be read
+// (callers fail closed). Platform tokens (tenant uuid.Nil) and impersonation
+// tokens are not gated: platform administrators are unaffected, and may still
+// impersonate a user of a suspended tenant for support.
+func (j *JWTService) SetTenantGate(gate func(ctx context.Context, tenantID uuid.UUID) error) {
+	j.tenantGate = gate
+}
+
+// SetTenantVersionGate installs the atomic state + session-generation lookup
+// used by production token issuance. SetTenantGate remains for small callers
+// and tests that only need the blocked-state decision.
+func (j *JWTService) SetTenantVersionGate(gate func(ctx context.Context, tenantID uuid.UUID) (int64, error)) {
+	j.tenantVersionGate = gate
+}
+
+// checkTenant runs the tenant gate for a mint. No gate, or no tenant, is a pass.
+func (j *JWTService) checkTenant(tenantID uuid.UUID) error {
+	if j.tenantGate == nil || tenantID == uuid.Nil {
+		return nil
+	}
+	return j.tenantGate(context.Background(), tenantID)
+}
+
+func (j *JWTService) checkTenantVersion(tenantID uuid.UUID) (int64, error) {
+	if tenantID == uuid.Nil {
+		return 0, nil
+	}
+	if j.tenantVersionGate != nil {
+		return j.tenantVersionGate(context.Background(), tenantID)
+	}
+	return 0, j.checkTenant(tenantID)
 }
 
 // NewJWTService creates a JWT service using only the legacy shared secret.
@@ -158,8 +206,13 @@ func (j *JWTService) GenerateTokensWithRefreshExpiry(userID, tenantID uuid.UUID,
 // authenticates platform_users, including the published seeded super-admin
 // whose seed row carries force_password_change = true.
 func (j *JWTService) GenerateTokensWithPasswordChange(userID, tenantID uuid.UUID, email, role string, refreshExpiry time.Duration, passwordChangeRequired bool) (string, string, error) {
+	tenantSessionVersion, err := j.checkTenantVersion(tenantID)
+	if err != nil {
+		return "", "", err
+	}
+
 	// Generate access token
-	accessToken, err := j.generateToken(userID, tenantID, email, role, "access", j.accessExpiry, passwordChangeRequired)
+	accessToken, err := j.generateToken(userID, tenantID, email, role, "access", j.accessExpiry, passwordChangeRequired, tenantSessionVersion)
 	if err != nil {
 		return "", "", err
 	}
@@ -167,7 +220,7 @@ func (j *JWTService) GenerateTokensWithPasswordChange(userID, tenantID uuid.UUID
 	// Generate refresh token. The claim rides the refresh token too, so a
 	// limited session cannot be laundered into an unrestricted one by calling
 	// /auth/refresh once — which would make the access-token claim inert.
-	refreshToken, err := j.generateToken(userID, tenantID, email, role, "refresh", refreshExpiry, passwordChangeRequired)
+	refreshToken, err := j.generateToken(userID, tenantID, email, role, "refresh", refreshExpiry, passwordChangeRequired, tenantSessionVersion)
 	if err != nil {
 		return "", "", err
 	}
@@ -176,15 +229,16 @@ func (j *JWTService) GenerateTokensWithPasswordChange(userID, tenantID uuid.UUID
 }
 
 // generateToken generates a JWT token with the given parameters
-func (j *JWTService) generateToken(userID, tenantID uuid.UUID, email, role, tokenType string, expiry time.Duration, passwordChangeRequired bool) (string, error) {
+func (j *JWTService) generateToken(userID, tenantID uuid.UUID, email, role, tokenType string, expiry time.Duration, passwordChangeRequired bool, tenantSessionVersion int64) (string, error) {
 	now := time.Now()
 	jti := uuid.NewString()
 	claims := JWTClaims{
-		UserID:   userID,
-		TenantID: tenantID,
-		Email:    email,
-		Role:     role,
-		Type:     tokenType,
+		UserID:               userID,
+		TenantID:             tenantID,
+		Email:                email,
+		Role:                 role,
+		Type:                 tokenType,
+		TenantSessionVersion: tenantSessionVersion,
 		// Only access tokens are ever presented from a browser, so only they
 		// need a double-submit value.
 		CSRF:                   csrfIfAccess(tokenType),
@@ -205,15 +259,20 @@ func (j *JWTService) generateToken(userID, tenantID uuid.UUID, email, role, toke
 
 // GenerateAccessTokenWithTTL generates an access token with a custom TTL and returns token, expiry, and jti
 func (j *JWTService) GenerateAccessTokenWithTTL(userID, tenantID uuid.UUID, email, role string, ttl time.Duration) (string, time.Time, string, error) {
+	tenantSessionVersion, err := j.checkTenantVersion(tenantID)
+	if err != nil {
+		return "", time.Time{}, "", err
+	}
 	now := time.Now()
 	jti := uuid.NewString()
 	claims := JWTClaims{
-		UserID:   userID,
-		TenantID: tenantID,
-		Email:    email,
-		Role:     role,
-		Type:     "access",
-		CSRF:     newCSRF(),
+		UserID:               userID,
+		TenantID:             tenantID,
+		Email:                email,
+		Role:                 role,
+		Type:                 "access",
+		TenantSessionVersion: tenantSessionVersion,
+		CSRF:                 newCSRF(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -238,17 +297,22 @@ func (j *JWTService) GenerateAccessTokenWithTTL(userID, tenantID uuid.UUID, emai
 // list, which the shared middleware intersects with the user's role
 // permissions on every request. Returns token, expiry, and jti.
 func (j *JWTService) GenerateScopedAccessTokenWithTTL(userID, tenantID uuid.UUID, email, role string, scopes []string, ttl time.Duration) (string, time.Time, string, error) {
+	tenantSessionVersion, err := j.checkTenantVersion(tenantID)
+	if err != nil {
+		return "", time.Time{}, "", err
+	}
 	now := time.Now()
 	jti := uuid.NewString()
 	claims := JWTClaims{
-		UserID:    userID,
-		TenantID:  tenantID,
-		Email:     email,
-		Role:      role,
-		Type:      "access",
-		TokenType: "pat",
-		Scopes:    scopes,
-		CSRF:      newCSRF(),
+		UserID:               userID,
+		TenantID:             tenantID,
+		Email:                email,
+		Role:                 role,
+		Type:                 "access",
+		TenantSessionVersion: tenantSessionVersion,
+		TokenType:            "pat",
+		Scopes:               scopes,
+		CSRF:                 newCSRF(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),

@@ -11,11 +11,12 @@ missing from the volume on start, so mounting it later loses nothing.
 The chart cannot know at render time whether the licence is MSP (the edition
 is decided by the token admin-service verifies at runtime), so the volume is
 governed by its own value, licensing.reports.persistence.enabled, default
-true. On an Enterprise or Core install it simply stays empty. Set it to false
-to keep reports in the database only.
+false: a Core or Enterprise install would only carry an empty volume. MSP
+installs set it to true; off, reports live in the database only.
 
-ReadWriteOnce by default: admin-service then uses the Recreate update
-strategy (backend/_deployment.tpl), and it cannot run more than one replica —
+ReadWriteOnce by default: admin-service then updates with a no-surge
+RollingUpdate (backend/_deployment.tpl — not Recreate, which a live release
+cannot be switched to), and it cannot run more than one replica —
 the render fails below rather than leave a second pod stuck on Multi-Attach.
 For more replicas use a ReadWriteMany storage class and accessMode.
 

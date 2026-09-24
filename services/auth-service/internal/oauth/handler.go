@@ -1,12 +1,14 @@
 package oauth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,10 +16,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/apitokens"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 const (
@@ -40,16 +44,41 @@ type Handler struct {
 	jwtService *auth.JWTService
 	patService *apitokens.Service
 	cfg        *config.Config
+	// tenantState is the per-request tenant check the JWT middleware applies
+	// (RC-4 /). /oauth/authorize reads the session cookie itself rather
+	// than through that middleware, so it applies the same check here
+	// ( item 1). nil skips it (no database).
+	tenantState tenantSessionChecker
 }
 
+// tenantSessionChecker is *tenantstate.Checker's session check: the tenant's
+// state plus whether the token predates a revocation of all its sessions.
+type tenantSessionChecker interface {
+	CheckSession(ctx context.Context, tenantID uuid.UUID, tokenVersion int64) (code string, blocked, revoked bool, err error)
+}
+
+// errSessionRevoked is a token minted before its tenant's sessions were
+// revoked: treated like no session at all.
+var errSessionRevoked = errors.New("session revoked")
+
+// errTenantStateUnavailable is a tenant-state lookup failure. Enforcement
+// fails CLOSED: an unreadable state is not permission.
+var errTenantStateUnavailable = errors.New("tenant state unavailable")
+
 func NewHandler(db *sql.DB, bypassDB *sql.DB, jwtService *auth.JWTService, cfg *config.Config) *Handler {
-	return &Handler{
+	h := &Handler{
 		db:         db,
 		bypassDB:   bypassDB,
 		jwtService: jwtService,
 		patService: apitokens.NewService(db, bypassDB),
 		cfg:        cfg,
 	}
+	if db != nil {
+		// `tenants` is global, so the app-role pool reads it (as the login
+		// gate and the RequireAuth checker in router.go do).
+		h.tenantState = tenantstate.NewChecker(db, tenantstate.CacheTTLFromEnv())
+	}
+	return h
 }
 
 // WellKnown serves the RFC 8414 authorization server metadata.
@@ -79,6 +108,17 @@ func (h *Handler) AuthorizeGET(c *gin.Context) {
 
 	// Check for a valid session cookie.
 	claims, err := h.sessionFromCookie(c)
+	if be, blocked := tenantstate.AsBlocked(err); blocked {
+		// The organization is suspended, canceled or deleted: no consent
+		// page. The sign-in page explains the reason code (as the SSO
+		// callbacks do).
+		c.Redirect(http.StatusFound, getFrontendURL(h.cfg)+"/login?reason="+url.QueryEscape(be.Code))
+		return
+	}
+	if errors.Is(err, errTenantStateUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": tenantstate.Message(tenantstate.CodeUnavailable), "code": tenantstate.CodeUnavailable})
+		return
+	}
 	if err != nil {
 		// Not logged in — redirect to web-ui login with ?next= pointing back here.
 		loginURL := h.loginRedirectURL(c.Request.URL.String())
@@ -110,6 +150,14 @@ func (h *Handler) AuthorizePOST(c *gin.Context) {
 	}
 
 	claims, err := h.sessionFromCookie(c)
+	if be, blocked := tenantstate.AsBlocked(err); blocked {
+		c.JSON(http.StatusForbidden, gin.H{"error": tenantstate.Message(be.Code), "code": be.Code})
+		return
+	}
+	if errors.Is(err, errTenantStateUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": tenantstate.Message(tenantstate.CodeUnavailable), "code": tenantstate.CodeUnavailable})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 		return
@@ -229,6 +277,17 @@ func (h *Handler) Token(c *gin.Context) {
 		return
 	}
 
+	// The organization may have been suspended, canceled or deleted in the
+	// minutes since the code was issued: mint nothing for it ( item 1).
+	if err := tenantstate.Gate(h.db)(c.Request.Context(), tenantID); err != nil {
+		if be, blocked := tenantstate.AsBlocked(err); blocked {
+			tokenError(c, "invalid_grant", be.Code)
+			return
+		}
+		tokenError(c, "server_error", "")
+		return
+	}
+
 	// Mark the code as used before minting the token (prevents replay on error).
 	_, err = h.bypassDB.ExecContext(c.Request.Context(),
 		`UPDATE oauth_authorization_codes SET used_at = now() WHERE code_hash = $1`,
@@ -302,7 +361,38 @@ func (h *Handler) sessionFromCookie(c *gin.Context) (*auth.JWTClaims, error) {
 	if err != nil || token == "" {
 		return nil, http.ErrNoCookie
 	}
-	return h.jwtService.ValidateToken(token)
+	claims, err := h.jwtService.ValidateToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if err := h.checkTenantSession(c.Request.Context(), claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+// checkTenantSession applies the tenant-state check the JWT middleware applies
+// to every other authenticated route (sharedmw.EnforceTenantSession), with the
+// same exemptions: platform tokens (no tenant) and impersonation tokens. A
+// suspended, canceled or deleted tenant — or one whose row is gone — yields a
+// *tenantstate.BlockedError; a token from before a session revocation yields
+// errSessionRevoked; a failed lookup yields errTenantStateUnavailable.
+func (h *Handler) checkTenantSession(ctx context.Context, claims *auth.JWTClaims) error {
+	if h.tenantState == nil || claims.TenantID == uuid.Nil || claims.Type == "impersonation" {
+		return nil
+	}
+	code, blocked, revoked, err := h.tenantState.CheckSession(ctx, claims.TenantID, claims.TenantSessionVersion)
+	if err != nil {
+		logrus.WithError(err).WithField("tenant_id", claims.TenantID).Error("tenant state lookup failed; refusing OAuth authorize (fail-closed)")
+		return errTenantStateUnavailable
+	}
+	if blocked {
+		return &tenantstate.BlockedError{Code: code}
+	}
+	if revoked {
+		return errSessionRevoked
+	}
+	return nil
 }
 
 func (h *Handler) loginRedirectURL(nextURL string) string {

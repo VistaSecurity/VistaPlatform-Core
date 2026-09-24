@@ -469,6 +469,10 @@ const agentDeletedUnrunnableJobError = "the agent assigned to this job was delet
 // tenantID optionally narrows the cross-tenant roll-up to one tenant (operator
 // scope). Empty = all tenants. When set it is applied as a parameterized
 // WHERE a.tenant_id = $1 so other tenants' rows are never shipped to the client.
+//
+// Each row carries EffectiveStatus (models.EffectiveAgentStatus): the stored
+// status is never maintained after enrollment, so online state comes from
+// last_heartbeat.
 func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*models.AdminAgent, error) {
 	query := `
 		SELECT a.id, a.tenant_id, t.name AS tenant_name, t.slug AS tenant_slug,
@@ -494,6 +498,7 @@ func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*m
 	defer func() { _ = rows.Close() }()
 
 	var agents []*models.AdminAgent
+	now := time.Now()
 	for rows.Next() {
 		agent := &models.AdminAgent{}
 		var tenantName, tenantSlug sql.NullString
@@ -507,6 +512,7 @@ func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*m
 		}
 		agent.TenantName = tenantName.String
 		agent.TenantSlug = tenantSlug.String
+		agent.EffectiveStatus = models.EffectiveAgentStatus(agent.Status, agent.LastHeartbeat, now)
 		agents = append(agents, agent)
 	}
 	if err := rows.Err(); err != nil {

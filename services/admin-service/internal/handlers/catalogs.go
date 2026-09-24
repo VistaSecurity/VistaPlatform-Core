@@ -165,6 +165,13 @@ func ListCatalogFeeds(store CatalogStore, runner CatalogFeedRunner) gin.HandlerF
 		if states == nil {
 			states = []catalogfeeds.FeedState{}
 		}
+		for i := range states {
+			// Always an array on the wire (the contract requires it), so the
+			// console never has to tell "no ecosystems" from "field missing".
+			if states[i].Ecosystems == nil {
+				states[i].Ecosystems = []catalogfeeds.EcosystemStatus{}
+			}
+		}
 		resp := catalogFeedListResponse{Feeds: states}
 		if runner != nil {
 			resp.Enabled = runner.Enabled()

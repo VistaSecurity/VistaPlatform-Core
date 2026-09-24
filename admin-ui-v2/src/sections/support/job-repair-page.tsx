@@ -6,6 +6,7 @@
 import { useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { Wrench, RotateCcw, Ban } from 'lucide-react';
+import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { StatusTag, relTime } from '../../components/ui/primitives';
 import { Modal } from '../../components/ui/modal';
 import { useAdminJobs, useJobRepairMutations, errMsg, type AdminInterrogationJob } from './support-queries';
@@ -26,6 +27,12 @@ type Confirm = { action: 'retry' | 'cancel'; job: AdminInterrogationJob } | null
 export function JobRepairPage() {
   const { data, isLoading, isError, refetch } = useAdminJobs();
   const mut = useJobRepairMutations();
+  // Viewing the list needs platform.health (the section's gate); retrying or
+  // cancelling a customer's job needs tenants.manage — the permission
+  // device-interrogation-service enforces on POST /admin/jobs/:id/retry|cancel.
+  // Without it the actions are not offered, rather than offered and 403'd.
+  const { hasPermission } = usePlatformPermissions();
+  const canRepair = hasPermission(PLATFORM_PERMISSIONS.tenants.manage);
   const [filter, setFilter] = useState<StatusFilter>('problems');
   const [confirm, setConfirm] = useState<Confirm>(null);
 
@@ -89,13 +96,13 @@ export function JobRepairPage() {
                 <td className="t-muted" style={{ fontSize: 11.5, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: j.error_message ? 'var(--danger-text)' : 'var(--op-t3)' }} title={j.error_message || ''}>{j.error_message || '—'}</td>
                 <td style={{ textAlign: 'right' }}>
                   <div style={{ display: 'inline-flex', gap: 6 }}>
-                    {canRetry(j.status) && (
+                    {canRepair && canRetry(j.status) && (
                       <button className="op-btn sm" disabled={pending} onClick={() => setConfirm({ action: 'retry', job: j })}><RotateCcw size={13} />Retry</button>
                     )}
-                    {canCancel(j.status) && (
+                    {canRepair && canCancel(j.status) && (
                       <button className="op-btn sm danger" disabled={pending} onClick={() => setConfirm({ action: 'cancel', job: j })}><Ban size={13} />Cancel</button>
                     )}
-                    {!canRetry(j.status) && !canCancel(j.status) && <span className="t-muted" style={{ fontSize: 11 }}>—</span>}
+                    {(!canRepair || (!canRetry(j.status) && !canCancel(j.status))) && <span className="t-muted" style={{ fontSize: 11 }}>—</span>}
                   </div>
                 </td>
               </tr>
@@ -111,7 +118,9 @@ export function JobRepairPage() {
         <Wrench size={13} />
         <span>{filtered.length} jobs</span>
         <span>·</span>
-        <span>Retry failed or cancelled jobs; cancel stuck pending/in-progress jobs.</span>
+        <span>{canRepair
+          ? 'Retry failed or cancelled jobs; cancel stuck pending/in-progress jobs.'
+          : 'Read-only — retrying or cancelling a job needs the tenants.manage permission.'}</span>
       </div>
 
       {confirm && (

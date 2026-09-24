@@ -8,7 +8,7 @@
 // admin-service is split: a Core build ships a barebones single-organization
 // operator console and does NOT mount the MSP management plane
 // (/admin/tenants/**, /admin/stats/**, /admin/dashboard/**, /admin/costs/**,
-// /admin/announcements, /admin/maintenance-windows, /admin/support-tickets,
+// /admin/announcements, /admin/support-tickets,
 // /admin/legal/acceptances, /admin/monitoring/metrics) or the Enterprise
 // billing surface (/admin/billing/**). Those routes 404 in a Core deployment —
 // they are absent, not forbidden, so no permission check can stand in for this.
@@ -17,7 +17,7 @@
 // (Core routes answer 401 unauthenticated; absent ones answer 404):
 //   Core        support · fleet · jobs · plans · system · catalog · settings ·
 //               staff · security
-//   MSP-only    tenants · comms
+//   MSP-only    tenants
 //   Enterprise  billing (its finops child reads /admin/costs, which is MSP)
 //   Partial     overview (revenue hero = billing, tenant roster = MSP; the
 //               service-health tiles are Core) ·
@@ -67,6 +67,16 @@ export interface NavChild {
    * edition notice instead of a page whose calls 404.
    */
   edition?: EditionCapability;
+  /**
+   * Platform permission this sub-view's backend requires to READ, when it is
+   * not the section's own gate. It hides the rail entry AND guards the
+   * sub-route (RequireChildPermission in section-child.tsx reads this same
+   * field), so the nav gate and the route gate cannot differ. Omit when the
+   * section's gate already covers the sub-view.
+   */
+  permission?: string;
+  /** Any-of variant of `permission`. */
+  anyOf?: string[];
 }
 
 export interface NavItem {
@@ -96,10 +106,11 @@ export interface NavItem {
   anyOf?: string[];
   /**
    * Licence-edition gate, independent of `edition` (which is about the BUILD):
-   *   'msp'            — shown only when the licence is MSP (Billing & Revenue:
-   *                      billing is MSP-only, edition-licensing spec §1);
-   *   'not-enterprise' — hidden on an Enterprise licence (Plans & Pricing:
-   *                      Enterprise has no plans; Core keeps tier authoring).
+   *   'msp' — shown only when the licence is MSP. Billing & Revenue and Plans &
+   *           Pricing: billing, plans and pricing are how a service provider
+   *           sells to its own customers (edition-licensing spec §1). Enterprise
+   *           has no plans, and Core is a single organisation with nobody to
+   * sell to, so both are hidden there (owner decision.
    */
   license?: LicenseGate;
   /**
@@ -112,7 +123,7 @@ export interface NavItem {
   edition?: EditionCapability;
 }
 
-export type LicenseGate = 'msp' | 'not-enterprise';
+export type LicenseGate = 'msp';
 
 const P = PLATFORM_PERMISSIONS;
 
@@ -125,15 +136,22 @@ const P = PLATFORM_PERMISSIONS;
 export function licenseAllows(entry: { license?: LicenseGate }, license: LicenseState): boolean {
   if (!entry.license || license === 'unknown') return true;
   if (license === 'pending') return false;
-  if (entry.license === 'msp') return license === 'msp';
-  return license !== 'enterprise';
+  return license === 'msp';
+}
+
+/**
+ * True if the operator passes an entry's permission gate. Ungated entries
+ * pass — a child without a gate inherits its section's.
+ */
+export function gateAllows(entry: { permission?: string; anyOf?: string[] }, has: (p: string) => boolean): boolean {
+  if (entry.permission) return has(entry.permission);
+  if (entry.anyOf?.length) return entry.anyOf.some(has);
+  return true;
 }
 
 /** True if the operator may see this section, given a permission predicate. */
 export function sectionVisible(s: NavItem, has: (p: string) => boolean): boolean {
-  if (s.permission) return has(s.permission);
-  if (s.anyOf?.length) return s.anyOf.some(has);
-  return true;
+  return gateAllows(s, has);
 }
 
 /**
@@ -152,7 +170,7 @@ export function editionAllows(
 
 /**
  * SECTIONS filtered by BOTH gates — permission (who you are) and edition (what
- * this build ships) — with children and grandchildren filtered by edition too,
+ * this build ships) — with children and grandchildren filtered by both too,
  * and any section left with no children dropped.
  *
  * Pure: the shell passes in the resolved predicate and capability map. Keeping
@@ -170,10 +188,10 @@ export function visibleSections(
     .map((s) => {
       if (!s.children?.length) return s;
       const children = s.children
-        .filter((c) => editionAllows(c, capabilities))
+        .filter((c) => editionAllows(c, capabilities) && gateAllows(c, has))
         .map((c) =>
           c.children?.length
-            ? { ...c, children: c.children.filter((g) => editionAllows(g, capabilities)) }
+            ? { ...c, children: c.children.filter((g) => editionAllows(g, capabilities) && gateAllows(g, has)) }
             : c,
         );
       return { ...s, children };
@@ -192,15 +210,27 @@ export const SECTIONS: NavItem[] = [
   { id: 'tenants', label: 'Tenants', icon: 'Building2', group: null,
     title: 'Tenants', subtitle: 'Every customer organization', source: 'tenants-page (+ detail/sso/billing/entitlements)', permission: P.tenants.read,
     edition: 'msp' },
-  // Support — the customer-success operator cockpit. Three read/repair sub-views,
-  // all on the typed contract (tenant-health, auth impersonation audit, device
-  // interrogation job repair).
+  // Support — the customer-success operator cockpit. Two read/repair sub-views,
+  // both on the typed contract (tenant-health, device interrogation job
+  // repair), and both read with platform.health:
+  //   health        tenant-health-service /tenants/**      platform.health
+  //   repair        device-interrogation /admin/jobs        platform.health
+  //                 (retry/cancel additionally need tenants.manage; the page
+  //                 gates those buttons)
+  // It used to gate the whole section on tenants.read, which none of these
+  // backends checks — a support_agent saw pages that all 403'd.
+  //
+  // There is no Impersonation sub-view. It listed an audit trail that nothing
+  // could ever write — no start/stop flow exists — so it was always empty
+  // (owner decision 10, RC-21). Impersonation is seeded as a feature
+  // (break-glass, audited, time-boxed) in the feature index; the page comes
+  // back with that flow, not before.
   { id: 'support', label: 'Support', icon: 'LifeBuoy', group: null,
-    title: 'Support', subtitle: 'Tenant health, impersonation, and job repair', source: '(new — CS cockpit)', permission: P.tenants.read,
+    title: 'Support', subtitle: 'Tenant health and job repair', source: '(new — CS cockpit)',
+    permission: P.platform.health,
     children: [
-      { id: 'health', label: 'Tenant Health', title: 'Tenant Health', subtitle: 'Per-tenant health scores and alerts' },
-      { id: 'impersonation', label: 'Impersonation', title: 'Impersonation', subtitle: 'Support impersonation sessions and history' },
-      { id: 'repair', label: 'Job Repair', title: 'Job Repair', subtitle: 'Retry or cancel stuck discovery jobs' },
+      { id: 'health', label: 'Tenant Health', title: 'Tenant Health', subtitle: 'Per-tenant health scores and alerts', permission: P.platform.health },
+      { id: 'repair', label: 'Job Repair', title: 'Job Repair', subtitle: 'Retry or cancel stuck discovery jobs', permission: P.platform.health },
     ] },
   { id: 'fleet', label: 'Fleet', icon: 'Radar', group: null,
     title: 'Fleet', subtitle: 'Every discovery sensor and agent across all tenants', source: 'platform-devices-page', permission: P.platform.health },
@@ -230,13 +260,21 @@ export const SECTIONS: NavItem[] = [
   // Plans & Pricing — the packaging area (ADR-0004). Entitlements = the lever
   // catalog (billable_items; absorbs the retired Feature Flags section); Tiers
   // and Add-ons land in later slices of.
+  //
+  // platform.settings, because that is what every route it calls requires
+  // (admin-service /admin/tiers/** and /admin/billable-items/**, which the
+  // Tenants drawer also reads). It was platform.billing, so a role holding
+  // billing alone saw a section that 403'd on every call and a role holding
+  // settings alone could manage tiers over the API but not reach the page.
   { id: 'plans', label: 'Plans & Pricing', icon: 'Layers', group: null,
     title: 'Plans & Pricing', subtitle: 'Entitlements, tiers, and add-ons — what we sell and how it’s composed',
-    source: 'feature-flags registry + billing-analytics/billable-items + subscription-tiers', permission: P.platform.billing,
-    // Enterprise has no plans (every tenant gets the licence, minus per-tenant
-    // switches in the tenant drawer), so the whole area is hidden there. Core
-    // keeps tier authoring; MSP designs its own plans here.
-    license: 'not-enterprise',
+    source: 'feature-flags registry + billing-analytics/billable-items + subscription-tiers', permission: P.platform.settings,
+    // MSP only. Enterprise has no plans (every tenant gets the licence, minus
+    // per-tenant switches in the tenant drawer), and Core is one organisation
+    // with nobody to sell plans to. The tier ROUTES stay mounted on Core —
+    // shared/entitlements still resolves against the seeded tiers — only the
+    // authoring area is hidden.
+    license: 'msp',
     children: [
       { id: 'entitlements', label: 'Entitlements', title: 'Entitlements', subtitle: 'The lever catalog: capability gates, capacity caps, metered meters, support' },
       { id: 'tiers', label: 'Tiers', title: 'Tiers', subtitle: 'Compose entitlements into plans, price, and publish' },
@@ -250,16 +288,16 @@ export const SECTIONS: NavItem[] = [
       { id: 'gateway', label: 'Gateway', title: 'API Gateway', subtitle: 'Routers, services, and routing health' },
       { id: 'alerts', label: 'Alerts', title: 'System Alerts', subtitle: 'Alert history and thresholds' },
     ] },
-  { id: 'comms', label: 'Comms', icon: 'Megaphone', group: 'Platform',
-    title: 'Comms', subtitle: 'Customer announcements and maintenance windows',
-    source: 'announcements + maintenance-windows', permission: P.platform.notificationsManage,
-    // Both children are ee/msp: announcing to, and scheduling downtime for,
-    // OTHER organizations is the management plane's job.
-    edition: 'msp',
-    children: [
-      { id: 'announcements', label: 'Announcements', title: 'Announcements', subtitle: 'Platform-wide announcements' },
-      { id: 'maintenance', label: 'Maintenance', title: 'Maintenance Windows', subtitle: 'Scheduled maintenance windows' },
-    ] },
+  // There is no Comms section (owner decision 9, RC-20). Its two sub-views
+  // are gone:
+  //   Maintenance   wrote public.maintenance_windows, which nothing read.
+  //                 Alert suppression reads platform_maintenance_windows, whose
+  //                 form is System → Alerts; that is the one store now.
+  //                 /comms/maintenance redirects there (App.tsx).
+  //   Announcements saved announcements nothing delivered to any tenant. It is
+  //                 hidden until tenant delivery exists (seeded in the feature
+  //                 index); admin-service /admin/announcements stays mounted
+  //                 for that work to build on.
   // Catalog — the platform's curated reference data. Crypto is ONE catalogue
   // among several (ADR-0006 D7), which is why End-of-life and Vulnerability feed
   // sit here beside Algorithms and Frameworks rather than in a section of their
@@ -276,20 +314,22 @@ export const SECTIONS: NavItem[] = [
     anyOf: [P.algorithms.manage, P.catalogs.manage],
     children: [
       { id: 'ratings', label: 'Algorithms', title: 'Algorithms', subtitle: 'Crypto-assessment source of truth' },
-      { id: 'frameworks', label: 'Frameworks', title: 'Framework Catalog', subtitle: 'Compliance framework authoring' },
+      // compliance-engine /admin/frameworks/** — catalogs.manage for reads too.
+      { id: 'frameworks', label: 'Frameworks', title: 'Framework Catalog', subtitle: 'Compliance framework authoring', permission: P.catalogs.manage },
       // Three views of one catalogue (ADR-0008 workstream 4.5b). Sub-navigation
       // in this console lives in the LEFT rail — see the NavChild doc comment —
       // so Proposals and Gaps are grandchildren with their own routes, not
       // in-page tabs. They are Core: a Core deployment has the lookup, the gap
       // list and the review queue, and an empty queue.
       { id: 'eol', label: 'End-of-life', title: 'End-of-life Catalogue', subtitle: 'Release cycles and their support dates, mirrored from endoflife.date',
+        permission: P.catalogs.manage,
         children: [
           { id: 'catalogue', label: 'Catalogue', title: 'End-of-life Catalogue', subtitle: 'Release cycles and their support dates, mirrored from endoflife.date' },
           { id: 'proposals', label: 'Proposals', title: 'End-of-life Proposals', subtitle: 'AI-proposed catalogue rows awaiting review — nothing here is in the catalogue yet' },
           { id: 'gaps', label: 'Gaps', title: 'End-of-life Gaps', subtitle: 'Products the catalogue could not answer for, ordered by how often they were asked about' },
         ] },
-      { id: 'vulnerabilities', label: 'Vulnerability feed', title: 'Vulnerability Catalogue', subtitle: 'CVEs mirrored from NVD and OSV, and the health of both feeds' },
-      { id: 'classification-rules', label: 'Classification rules', title: 'Classification Rules', subtitle: 'The fingerprint rules behind every class proposal — OUI, sysObjectID, cloud type, banner, model, platform' },
+      { id: 'vulnerabilities', label: 'Vulnerability feed', title: 'Vulnerability Catalogue', subtitle: 'CVEs mirrored from NVD and OSV, and the health of both feeds', permission: P.catalogs.manage },
+      { id: 'classification-rules', label: 'Classification rules', title: 'Classification Rules', subtitle: 'The fingerprint rules behind every class proposal — OUI, sysObjectID, cloud type, banner, model, platform', permission: P.catalogs.manage },
     ] },
   { id: 'settings', label: 'Settings', icon: 'Settings2', group: 'Platform',
     title: 'Settings', subtitle: 'Platform configuration — email, branding, and notification delivery', source: 'settings-page', permission: P.platform.settings,
@@ -299,7 +339,8 @@ export const SECTIONS: NavItem[] = [
       { id: 'branding', label: 'Branding', title: 'Branding', subtitle: 'White-label the platform — product name, logos, and favicon' },
       { id: 'legal', label: 'Legal', title: 'Legal Documents', subtitle: 'Terms of Service and Privacy Policy — authoring, versioning, and acceptance audit' },
       { id: 'identity-providers', label: 'Identity Providers', title: 'Identity Providers', subtitle: "Vista's Google / Microsoft OAuth apps for social sign-up" },
-      { id: 'notifications', label: 'Notification Delivery', title: 'Notification Delivery', subtitle: 'Channels, routing rules, and delivery history' },
+      // notification-service /platform/** — platform.notifications.manage.
+      { id: 'notifications', label: 'Notification Delivery', title: 'Notification Delivery', subtitle: 'Channels, routing rules, and delivery history', permission: P.platform.notificationsManage },
       // Core: a Core build answers "no licence installed", which is this
       // page's Core state (GET /admin/license is Core code).
       { id: 'license', label: 'License & Usage', title: 'License & Usage', subtitle: 'The licence this install runs under, and the data-retention cap' },
@@ -316,15 +357,28 @@ export const SECTIONS: NavItem[] = [
   // Export moved in alongside the existing Dashboard + Policy. The cut Audit sub-views
   // (Alerts, Alert Rules, Compliance Reports) were dropped. There is no standalone Audit
   // section anymore — its one daily-visited surface (the activity trail) lives here.
+  //
+  // Each sub-view carries the permission its backend reads with; the section is
+  // visible to anyone holding one of them:
+  //   dashboard  admin-service /admin/security/**          platform.security
+  //   activity   audit-service /activity-logs (no permission gate for a
+  //              platform token) — kept on the section's historic pair
+  //   retention  audit-service /retention-policies        platform.audit
+  //   siem       audit-service /siem/integrations          platform.audit
+  //              (both pages gate their writes on platform.audit.manage)
+  //   policy     admin-service GET /admin/settings        platform.settings
+  //              (editing needs platform.security.manage, enforced server-side
+  // per key since; the page renders read-only without it)
   { id: 'security', label: 'Security & Trust', icon: 'ShieldAlert', group: 'Governance',
     title: 'Security & Trust', subtitle: 'Posture, policy, and the platform activity trail',
-    source: 'security-dashboard-page/security-settings-page/audit-page/impersonation-log-page', anyOf: [P.platform.security, P.platform.audit],
+    source: 'security-dashboard-page/security-settings-page/audit-page/impersonation-log-page',
+    anyOf: [P.platform.security, P.platform.audit, P.platform.settings],
     children: [
-      { id: 'dashboard', label: 'Dashboard', title: 'Security Dashboard', subtitle: 'Security events, anomalies, and posture' },
-      { id: 'activity', label: 'Activity Log', title: 'Activity Log', subtitle: 'Platform-wide staff and tenant activity trail' },
-      { id: 'retention', label: 'Retention', title: 'Retention Policies', subtitle: 'Log retention and archival' },
-      { id: 'siem', label: 'SIEM Export', title: 'SIEM Integrations', subtitle: 'Outbound SIEM forwarding' },
-      { id: 'policy', label: 'Policy', title: 'Security Policy', subtitle: 'Platform security and authentication settings' },
+      { id: 'dashboard', label: 'Dashboard', title: 'Security Dashboard', subtitle: 'Security events, anomalies, and posture', permission: P.platform.security },
+      { id: 'activity', label: 'Activity Log', title: 'Activity Log', subtitle: 'Platform-wide staff and tenant activity trail', anyOf: [P.platform.security, P.platform.audit] },
+      { id: 'retention', label: 'Retention', title: 'Retention Policies', subtitle: 'Log retention and archival', permission: P.platform.audit },
+      { id: 'siem', label: 'SIEM Export', title: 'SIEM Integrations', subtitle: 'Outbound SIEM forwarding', permission: P.platform.audit },
+      { id: 'policy', label: 'Policy', title: 'Security Policy', subtitle: 'Platform security and authentication settings', permission: P.platform.settings },
     ] },
 ];
 

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -32,7 +33,7 @@ type algorithmReader interface {
 	GetAlgorithmByCode(code string) (*services.Algorithm, error)
 	GetBatchRecommendations(algorithmCodes []string) (map[string]*services.Algorithm, []string, error)
 	GetPQCProgress(tenantID uuid.UUID) (*models.PQCProgress, error)
-	UpdateAlgorithmAssessment(code string, upd services.AlgorithmAssessmentUpdate) (*services.Algorithm, error)
+	UpdateAlgorithmAssessment(code string, upd services.AlgorithmAssessmentUpdate) (*services.Algorithm, services.AlgorithmAssessmentOutcome, error)
 	CreateAlgorithm(in services.AlgorithmCreate) (*services.Algorithm, error)
 	DB() *database.DB
 }
@@ -508,7 +509,7 @@ func (h *AlgorithmHandler) UpdateAlgorithm(c *gin.Context) {
 		return
 	}
 
-	updated, err := h.algorithmService.UpdateAlgorithmAssessment(code, services.AlgorithmAssessmentUpdate{
+	updated, outcome, err := h.algorithmService.UpdateAlgorithmAssessment(code, services.AlgorithmAssessmentUpdate{
 		Strength:                 req.Strength,
 		RiskScore:                req.RiskScore,
 		DeprecationStatus:        req.DeprecationStatus,
@@ -520,6 +521,15 @@ func (h *AlgorithmHandler) UpdateAlgorithm(c *gin.Context) {
 		RemediationGuidance:      req.RemediationGuidance,
 		ComplianceMappings:       req.ComplianceMappings,
 	})
+	if errors.Is(err, services.ErrObsoleteRiskBelowFloor) {
+		// An obsolete algorithm grades Critical (decision 12). Refused rather
+		// than silently raised: the admin typed a number and must not be told
+		// "saved" about a different one.
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf(
+			"An obsolete algorithm must grade Critical: risk_score must be at least %d. Change the deprecation status first to lower it.",
+			services.ObsoleteRiskFloor())})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update algorithm"})
 		return
@@ -562,6 +572,19 @@ func (h *AlgorithmHandler) UpdateAlgorithm(c *gin.Context) {
 			changedFields = append(changedFields, field)
 		}
 	}
+	metadata := map[string]interface{}{"algorithm_code": updated.Code}
+	if outcome.ObsoleteTransition != services.ObsoleteTransitionNone {
+		// Say WHY risk_score moved when the caller did not send one: marking
+		// obsolete raised it to the Critical floor, and leaving obsolete
+		// restored the score remembered at that moment (decision 12).
+		metadata["obsolete_transition"] = outcome.ObsoleteTransition
+		metadata["obsolete_risk_floor"] = outcome.RiskFloor
+		if outcome.RememberedRiskScore != nil {
+			metadata["remembered_risk_score"] = *outcome.RememberedRiskScore
+		} else {
+			metadata["remembered_risk_score"] = nil
+		}
+	}
 	logAuditActivity(c,
 		"configuration.algorithm.updated",
 		auditmiddleware.EventCategoryConfig,
@@ -571,7 +594,7 @@ func (h *AlgorithmHandler) UpdateAlgorithm(c *gin.Context) {
 		oldValues,
 		newValues,
 		changedFields,
-		map[string]interface{}{"algorithm_code": updated.Code},
+		metadata,
 	)
 
 	c.JSON(http.StatusOK, gin.H{"algorithm": updated})

@@ -1,7 +1,7 @@
 // VISTA Operations — Jobs & Queues. Wired to device-interrogation /admin/jobs
 // (cross-tenant discovery/interrogation runs) + /admin/queues (live NATS
-// JetStream stream/consumer stats). Observe-only (no platform retry/cancel —
-// act on a customer's job via impersonation). Honest: JetStream gives depth /
+// JetStream stream/consumer stats). Observe-only (no retry/cancel here — stuck
+// jobs are repaired from Support → Job Repair). Honest: JetStream gives depth /
 // in-flight / message counts but NOT throughput rate or p95 (no fabrication).
 import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -10,17 +10,36 @@ import { clients } from '../../lib/clients';
 import { StatusTag, statusOf, num, relTime } from '../../components/ui/primitives';
 import { useScope } from '../../app/scope';
 
+/**
+ * A failed read that remembers its HTTP status, so the page can tell "you may
+ * not see this" (403) from "the backend could not answer". The queue panel used
+ * to render every failure as "NATS/JetStream not reachable" — including the
+ * 403 an operator without platform.health gets — which sent people debugging a
+ * healthy message bus.
+ */
+export class JobsReadError extends Error {
+  constructor(readonly status: number | undefined, message: string) {
+    super(message);
+    this.name = 'JobsReadError';
+  }
+}
+
+/** True when a query failed because the operator lacks the permission. */
+export const isForbidden = (e: unknown): boolean => e instanceof JobsReadError && e.status === 403;
+
+const NO_ACCESS = "You don't have access to this — it needs the platform.health permission.";
+
 function useAdminJobs(scopeId: string | null) {
   return useQuery({
     // scopeId is part of the key so switching the operator scope refetches the
     // narrowed page instead of reusing the full cross-tenant cache.
     queryKey: ['platform', 'jobs', scopeId],
     queryFn: async () => {
-      const { data, error } = await clients.devices.GET('/admin/jobs', {
+      const { data, error, response } = await clients.devices.GET('/admin/jobs', {
         // Narrow server-side so other tenants' rows are never shipped to the client.
         params: { query: { page_size: 100, ...(scopeId ? { tenant_id: scopeId } : {}) } },
       });
-      if (error || !data) throw new Error('Failed to load jobs');
+      if (error || !data) throw new JobsReadError(response?.status, 'Failed to load jobs');
       return data.jobs ?? [];
     },
     staleTime: 20 * 1000, refetchInterval: 30 * 1000,
@@ -30,8 +49,8 @@ function useAdminQueues() {
   return useQuery({
     queryKey: ['platform', 'queues'],
     queryFn: async () => {
-      const { data, error } = await clients.devices.GET('/admin/queues', {});
-      if (error || !data) throw new Error('queues');
+      const { data, error, response } = await clients.devices.GET('/admin/queues', {});
+      if (error || !data) throw new JobsReadError(response?.status, 'queues');
       return data.queues ?? [];
     },
     staleTime: 15 * 1000, refetchInterval: 20 * 1000, retry: 0,
@@ -61,7 +80,9 @@ export function JobsPage() {
       <div>
         <div className="op-eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 7 }}><Layers size={13} />Queues · live JetStream</div>
         {queuesQ.isError ? (
-          <div className="op-panel" style={{ padding: '16px 18px', fontSize: 12, color: 'var(--op-t3)' }}>NATS/JetStream not reachable (queue metrics unavailable in this environment).</div>
+          <div className="op-panel" style={{ padding: '16px 18px', fontSize: 12, color: 'var(--op-t3)' }}>
+            {isForbidden(queuesQ.error) ? NO_ACCESS : 'NATS/JetStream not reachable (queue metrics unavailable in this environment).'}
+          </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
             {(queuesQ.data ?? []).map((qd) => {
@@ -107,12 +128,18 @@ export function JobsPage() {
               </tr>
             ))}
             {jobsQ.isLoading && <tr><td colSpan={8} style={{ textAlign: 'center', padding: 44, color: 'var(--op-t3)' }}>Loading jobs…</td></tr>}
-            {jobsQ.isError && !jobsQ.isLoading && <tr><td colSpan={8} style={{ textAlign: 'center', padding: 44, color: 'var(--op-t3)' }}>Couldn't load jobs. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => jobsQ.refetch()}>Retry</button></td></tr>}
+            {jobsQ.isError && !jobsQ.isLoading && (
+              <tr><td colSpan={8} style={{ textAlign: 'center', padding: 44, color: 'var(--op-t3)' }}>
+                {isForbidden(jobsQ.error)
+                  ? NO_ACCESS
+                  : <>Couldn't load jobs. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => jobsQ.refetch()}>Retry</button></>}
+              </td></tr>
+            )}
             {!jobsQ.isLoading && !jobsQ.isError && rows.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', padding: 44, color: 'var(--op-t3)' }}>No jobs match.</td></tr>}
           </tbody>
         </table>
         <div style={{ padding: '9px 16px', borderTop: '1px solid var(--op-border)', fontSize: 11.5, color: 'var(--op-t3)' }}>
-          {rows.length} of {all.length} jobs · observe-only (retry a customer's job via Impersonation) · queue rate/p95 need a metrics time-series (JetStream gives depth only).
+          {rows.length} of {all.length} jobs · observe-only (retry a stuck job from Support → Job Repair) · queue rate/p95 need a metrics time-series (JetStream gives depth only).
         </div>
       </div>
     </div>

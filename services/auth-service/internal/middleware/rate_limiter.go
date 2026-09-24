@@ -9,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RateLimiter handles rate limiting using Redis with token bucket algorithm
+// RateLimiter handles rate limiting using Redis fixed-window counters.
 type RateLimiter struct {
 	redis         *redis.Client
 	defaultLimit  int
@@ -44,31 +44,14 @@ func (r *RateLimiter) Allow(ctx context.Context, tenantID, endpoint string) (boo
 		limit = r.loginLimit
 	}
 
-	// Create Redis key
 	key := fmt.Sprintf("rate_limit:%s:%s", tenantID, endpoint)
-
-	// Use Redis INCR with TTL for token bucket
-	// This is a simplified token bucket: count requests in window
-	pipe := r.redis.Pipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, r.defaultWindow)
-	_, err := pipe.Exec(ctx)
+	count, retryAfter, err := r.hit(ctx, key)
 	if err != nil {
 		return true, 0, fmt.Errorf("redis error: %w", err)
 	}
-
-	count := incr.Val()
-
-	// Check if limit exceeded
 	if count > int64(limit) {
-		// Get TTL to calculate retry after
-		ttl, err := r.redis.TTL(ctx, key).Result()
-		if err != nil {
-			ttl = r.defaultWindow
-		}
-		return false, ttl, nil
+		return false, retryAfter, nil
 	}
-
 	return true, 0, nil
 }
 
@@ -87,22 +70,47 @@ func (r *RateLimiter) AllowByEmail(ctx context.Context, email string) (bool, tim
 	}
 
 	key := fmt.Sprintf("rate_limit:email:%s", email)
-	pipe := r.redis.Pipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, r.defaultWindow)
-	_, err := pipe.Exec(ctx)
+	count, retryAfter, err := r.hit(ctx, key)
 	if err != nil {
 		return false, 0, fmt.Errorf("redis error: %w", err)
 	}
-
-	if incr.Val() > int64(r.loginLimit) {
-		ttl, ttlErr := r.redis.TTL(ctx, key).Result()
-		if ttlErr != nil {
-			ttl = r.defaultWindow
-		}
-		return false, ttl, nil
+	if count > int64(r.loginLimit) {
+		return false, retryAfter, nil
 	}
 	return true, 0, nil
+}
+
+// hit counts one request against key's fixed window and returns the new
+// count and the time left in the window.
+//
+// The window is FIXED: its expiry is set only when SET ... NX creates the
+// key, and INCR preserves an existing TTL. An earlier version ran
+// INCR + EXPIRE on every request, so each hit pushed the expiry back a full
+// window — a client retrying under a 429 stayed locked out for as long as it
+// kept retrying, and the retry_after it was told was never true. Do not add
+// an EXPIRE here.
+//
+// MULTI/EXEC makes create-with-TTL and increment atomic, so a crash or a
+// concurrent expiry between them cannot leave a counter with no TTL (which
+// would be a permanent lockout).
+func (r *RateLimiter) hit(ctx context.Context, key string) (int64, time.Duration, error) {
+	pipe := r.redis.TxPipeline()
+	pipe.SetNX(ctx, key, 0, r.defaultWindow)
+	incr := pipe.Incr(ctx, key)
+	pttl := pipe.PTTL(ctx, key)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, 0, err
+	}
+
+	// Round UP to whole seconds: Retry-After is sent in seconds, and rounding
+	// down would tell a client to come back just before its window ends.
+	retryAfter := (pttl.Val() + time.Second - 1).Truncate(time.Second)
+	if pttl.Val() <= 0 {
+		// -1 (no expiry) or -2 (gone) cannot happen inside the transaction;
+		// if it somehow does, report the full window rather than "retry now".
+		retryAfter = r.defaultWindow
+	}
+	return incr.Val(), retryAfter, nil
 }
 
 // isLoginEndpoint checks if the endpoint is a login/authentication endpoint.

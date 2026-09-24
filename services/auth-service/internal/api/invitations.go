@@ -33,6 +33,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/email"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 const invitationTTL = 7 * 24 * time.Hour
@@ -223,6 +224,18 @@ func AcceptInvitation(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, jwtServi
 			return
 		}
 
+		// Refuse BEFORE creating the account: joining a suspended, canceled or
+		// deleted organization must not consume the invitation and leave a user
+		// row behind (the mint gate below would refuse the session, but only
+		// after the account existed). RC-4 /.
+		if err := tenantstate.Gate(db)(c.Request.Context(), inv.tenantID); err != nil {
+			if respondTenantBlocked(c, err) {
+				return
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": tenantstate.Message(tenantstate.CodeUnavailable), "code": tenantstate.CodeUnavailable})
+			return
+		}
+
 		if policyForbidsPassword(db, inv.tenantID) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "This organization requires single sign-on. Use one of the SSO options instead."})
 			return
@@ -251,6 +264,9 @@ func AcceptInvitation(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, jwtServi
 
 		// Log the new member in.
 		accessToken, refreshToken, tErr := jwtService.GenerateTokensWithRefreshExpiry(userID, inv.tenantID, inv.email, role, sessionTTL)
+		if respondTenantBlocked(c, tErr) {
+			return
+		}
 		if tErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Account created but sign-in failed; please sign in."})
 			return

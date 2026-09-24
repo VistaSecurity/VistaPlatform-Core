@@ -39,6 +39,13 @@ const BREAKDOWN_LABELS: { key: FactorKey; label: string }[] = [
 // replaced (an unreachable peer showing as a plausible number). Show the gap.
 const UNAVAILABLE = 'Unavailable';
 
+// `resource-metering` in unavailable_sources is not a service that failed: it
+// is the per-tenant CPU/memory producer that does not exist. Resource
+// efficiency is therefore never measured and carries no weight in the index
+// (owner decision 8, RC-14) — say "not measured", not "unreachable".
+const RESOURCE_METERING_SOURCE = 'resource-metering';
+const NOT_MEASURED = 'Not measured';
+
 export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealthSummary; onClose: () => void }) {
   const id = summary.tenant_id;
   const detailQ = useTenantHealthDetail(id);
@@ -51,7 +58,12 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
   // score.
   const unmeasured = summary.health_status === 'unknown';
   const healthIndex = healthIndexPresentation(summary.overall_score, !unmeasured);
-  const unavailableSources = detail?.score_breakdown.unavailable_sources ?? [];
+  const reported = detail?.score_breakdown.unavailable_sources ?? [];
+  // Real peers that failed this calculation — distinct from the factor no
+  // producer measures at all.
+  const unavailableSources = reported.filter((s) => s !== RESOURCE_METERING_SOURCE);
+  const notMeasured = (key: FactorKey) =>
+    key === 'resource_efficiency' && reported.includes(RESOURCE_METERING_SOURCE);
 
   return (
     <Modal
@@ -84,17 +96,23 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
               const v = detail.score_breakdown[key];
               const measured = typeof v === 'number';
               return (
-                <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div key={key} data-testid={`factor-${key}`} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <span style={{ fontSize: 12, color: 'var(--op-t2)', width: 150, flex: 'none' }}>{label}</span>
                   {measured
                     ? <MiniBar pct={v} color={healthColor(v)} />
-                    : <span style={{ flex: 1, fontSize: 11.5, color: 'var(--op-t3)', fontStyle: 'italic' }}>{UNAVAILABLE}</span>}
+                    : <span style={{ flex: 1, fontSize: 11.5, color: 'var(--op-t3)', fontStyle: 'italic' }}>{notMeasured(key) ? NOT_MEASURED : UNAVAILABLE}</span>}
                   <span className="mono" style={{ fontSize: 11.5, color: measured ? 'var(--op-t1)' : 'var(--op-t3)', width: 32, textAlign: 'right', flex: 'none' }}>
                     {measured ? `${Math.round(v)}/100` : '—'}
                   </span>
                 </div>
               );
             })}
+            {reported.includes(RESOURCE_METERING_SOURCE) && (
+              <div className="t-muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                Resource efficiency is not measured: nothing meters per-tenant CPU and memory, so it is
+                left out of the health index rather than estimated.
+              </div>
+            )}
             {unavailableSources.length > 0 && (
               <div style={{ fontSize: 11.5, color: 'var(--warn)', marginTop: 2 }}>
                 {unmeasured
@@ -188,7 +206,7 @@ export function TenantHealthPage() {
         case 'tenant': return (a.tenant_name || a.tenant_id).localeCompare(b.tenant_name || b.tenant_id);
         case 'score': return a.overall_score - b.overall_score;
         case 'status': return a.health_status.localeCompare(b.health_status);
-        case 'alerts': return a.critical_alerts - b.critical_alerts;
+        case 'alerts': return a.active_alerts - b.active_alerts || a.critical_alerts - b.critical_alerts;
         default: return 0;
       }
     };
@@ -227,9 +245,11 @@ export function TenantHealthPage() {
                     : <span className="mono" style={{ fontWeight: 700, color: index.color }}>{index.score}/100</span>}
                 </td>
                 <td>{index ? <Tag color={index.color}>{index.label}</Tag> : <Tag color="var(--neutral)">Unknown</Tag>}</td>
-                <td style={{ textAlign: 'right' }}>
-                  {t.critical_alerts > 0
-                    ? <Tag color="var(--danger)">{t.critical_alerts}</Tag>
+                <td style={{ textAlign: 'right' }} data-testid="active-alerts">
+                  {/* Every active alert — this column used to count only the
+                      critical ones, so an open high-severity alert showed 0. */}
+                  {t.active_alerts > 0
+                    ? <Tag color={t.critical_alerts > 0 ? 'var(--danger)' : 'var(--warn)'}>{t.active_alerts}</Tag>
                     : <span className="t-muted">0</span>}
                 </td>
                 <td className="t-muted" style={{ fontSize: 12, textTransform: 'capitalize' }}>{t.trend_direction || '—'}</td>

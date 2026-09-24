@@ -1169,7 +1169,12 @@ paths:
 
   # ============================================================
   # Platform-admin framework authoring (/api/v1/compliance-engine/admin/*).
-  # Platform-admin only (RequirePlatformAdmin). Backs the admin-ui-v2 Catalog →
+  # Platform operators only: every route needs a platform token whose ROLE
+  # holds a named platform permission (platform_user_has_permission — the role
+  # name is not consulted). /admin/alerts: platform.health. Framework, control,
+  # measurement and template authoring: catalogs.manage. A tenant's
+  # subscriptions (GET): tenants.read. Re-evaluate, provision and cancel:
+  # tenants.manage. Backs the admin-ui-v2 Catalog →
   # Frameworks authoring surface. Phase 1 = framework lifecycle (list incl.
   # drafts, create, edit, publish/unpublish, delete); control + measurement
   # authoring endpoints are a follow-up slice.
@@ -1181,7 +1186,8 @@ paths:
       summary: List platform-track stateful alerts (platform admin)
       description: >
         Lists the stateful alerts raised under the sentinel platform tenant
-        (service_down, tenant_health_degraded, …). Platform-admin only — no
+        (service_down, tenant_health_degraded, …). Requires a platform token
+        whose role holds `platform.health` (403 otherwise) — no
         tenant context is used; the handler always scopes to the reserved
         platform tenant. Filter with the same query params as the tenant
         `/alerts` read.
@@ -1610,6 +1616,123 @@ paths:
                 $ref: "#/components/schemas/MessageResponse"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks/{id}/accept-update:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminAcceptFrameworkUpdate
+      tags: [admin-frameworks]
+      summary: Accept the shipped update offered for a platform framework
+      description: >
+        Applies the name, description and organization an upgrade offered for this framework. Upgrades keep a platform admin's edits to shipped content and
+        store the content they would have written as an offer (decision 4,
+        RC-12); this applies the offer and clears it. The row stays the admin's,
+        so the next shipped change is offered again. Audited.
+      responses:
+        "200":
+          description: Update accepted; the row as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminFrameworkResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/frameworks/{id}/controls/{controlId}/accept-update:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: path
+        name: controlId
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminAcceptControlUpdate
+      tags: [admin-frameworks]
+      summary: Accept the shipped update offered for a platform framework control
+      description: >
+        Applies the title, description, baseline severity and crypto relevance an upgrade offered for this control. 404 unless the control belongs to the framework in the path. Upgrades keep a platform admin's edits to shipped content and
+        store the content they would have written as an offer (decision 4,
+        RC-12); this applies the offer and clears it. The row stays the admin's,
+        so the next shipped change is offered again. Audited.
+      responses:
+        "200":
+          description: Update accepted; the row as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminControlResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /admin/controls/{id}/measurements/{measurementId}/accept-update:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - in: path
+        name: measurementId
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: adminAcceptMeasurementUpdate
+      tags: [admin-frameworks]
+      summary: Accept the shipped update offered for a control measurement rule
+      description: >
+        Applies the rule type, predicate, severity override and weight an upgrade offered for this measurement rule. 404 unless the rule belongs to the control in the path. Upgrades keep a platform admin's edits to shipped content and
+        store the content they would have written as an offer (decision 4,
+        RC-12); this applies the offer and clears it. The row stays the admin's,
+        so the next shipped change is offered again. Audited.
+      responses:
+        "200":
+          description: Update accepted; the row as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminMeasurementResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
@@ -4431,6 +4554,29 @@ components:
         is_licensed:
           type: boolean
           description: Set when the handler resolves the with-license variant (tenant context present).
+        content_origin:
+          type: string
+          enum: [vista, custom]
+          description: >
+            Seeded-content ownership (decision 4, RC-12). `vista` for a row Vista
+            ships (a seed or content-bundle pass created it), `custom` for one a
+            platform admin created. Returned by the platform admin catalogue reads.
+        admin_modified:
+          type: boolean
+          description: >
+            A platform admin changed this shipped row. Upgrades keep the admin's
+            content and offer later shipped changes instead of applying them.
+        update_available:
+          type: boolean
+          description: >
+            An upgrade shipped new content for this row and kept the admin's
+            instead. Accept it with the row's `accept-update` action.
+        offered_update:
+          type: object
+          additionalProperties: true
+          description: >
+            The shipped content on offer, column by column: what accepting the
+            update would write. Present only while `update_available` is true.
 
     PublishedFrameworkControl:
       type: object
@@ -4492,6 +4638,29 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ControlMeasurement"
+        content_origin:
+          type: string
+          enum: [vista, custom]
+          description: >
+            Seeded-content ownership (decision 4, RC-12). `vista` for a row Vista
+            ships (a seed or content-bundle pass created it), `custom` for one a
+            platform admin created. Returned by the platform admin catalogue reads.
+        admin_modified:
+          type: boolean
+          description: >
+            A platform admin changed this shipped row. Upgrades keep the admin's
+            content and offer later shipped changes instead of applying them.
+        update_available:
+          type: boolean
+          description: >
+            An upgrade shipped new content for this row and kept the admin's
+            instead. Accept it with the row's `accept-update` action.
+        offered_update:
+          type: object
+          additionalProperties: true
+          description: >
+            The shipped content on offer, column by column: what accepting the
+            update would write. Present only while `update_available` is true.
 
     Family:
       type: object
@@ -4534,6 +4703,29 @@ components:
           format: date-time
         measurement_type:
           $ref: "#/components/schemas/MeasurementType"
+        content_origin:
+          type: string
+          enum: [vista, custom]
+          description: >
+            Seeded-content ownership (decision 4, RC-12). `vista` for a row Vista
+            ships (a seed or content-bundle pass created it), `custom` for one a
+            platform admin created. Returned by the platform admin catalogue reads.
+        admin_modified:
+          type: boolean
+          description: >
+            A platform admin changed this shipped row. Upgrades keep the admin's
+            content and offer later shipped changes instead of applying them.
+        update_available:
+          type: boolean
+          description: >
+            An upgrade shipped new content for this row and kept the admin's
+            instead. Accept it with the row's `accept-update` action.
+        offered_update:
+          type: object
+          additionalProperties: true
+          description: >
+            The shipped content on offer, column by column: what accepting the
+            update would write. Present only while `update_available` is true.
 
     # ============================================================
     # Tenant frameworks (custom policies)

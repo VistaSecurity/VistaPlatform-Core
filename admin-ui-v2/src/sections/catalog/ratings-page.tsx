@@ -16,7 +16,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { Search, Pencil, Plus, Archive } from 'lucide-react';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
-import { riskLevelFromScore, type RiskLevel } from '@vistasecurity/primitives/ratings';
+import { RISK_BANDS, riskLevelFromScore, type RiskLevel } from '@vistasecurity/primitives/ratings';
 import { clients } from '../../lib/clients';
 import { relTime } from '../../components/ui/primitives';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
@@ -33,6 +33,33 @@ const STRENGTHS = ['weak', 'acceptable', 'strong', 'recommended'];
 const DEP_STATUSES = ['current', 'deprecated', 'obsolete'];
 const PQC_STATUSES = ['none', 'standardized', 'candidate', 'alternative'];
 const CATEGORIES = ['hash', 'symmetric', 'key_exchange', 'signature', 'protocol_version', 'cipher_suite'];
+
+// Marking an algorithm obsolete makes it grade Critical (owner decision 12): the
+// server raises risk_score to at least the bottom of the Critical band and
+// remembers the old score, which it restores when the algorithm is re-activated.
+// The floor is read from the shared band ladder, never written down here.
+export const OBSOLETE_RISK_FLOOR: number = (() => {
+  const band = RISK_BANDS.find((b) => b.label === 'Critical');
+  if (!band) throw new Error('shared risk bands define no Critical band');
+  return band.min;
+})();
+
+/** The score an algorithm will carry once marked obsolete. */
+export function obsoleteRiskScore(current: number | null | undefined): number {
+  return typeof current === 'number' && current > OBSOLETE_RISK_FLOOR ? current : OBSOLETE_RISK_FLOOR;
+}
+
+/** The Deprecate dialog's description — true to what the server does. */
+export function deprecateDescription(current: number | null | undefined): string {
+  const next = obsoleteRiskScore(current);
+  const from = typeof current === 'number' ? String(current) : 'unassessed';
+  const change = typeof current === 'number' && current >= OBSOLETE_RISK_FLOOR
+    ? `Its risk score stays ${current} (Critical).`
+    : `Its risk score goes from ${from} to ${next}, so it grades as Critical.`;
+  const restored = typeof current === 'number' ? `its ${current} score` : 'it to unassessed';
+  return `Marks this algorithm obsolete. It is not deleted — assets reference it. ${change} `
+    + `Re-activating it later (edit the deprecation status) restores ${restored}.`;
+}
 
 export function catalogueRiskLevel(score: number | null | undefined): RiskLevel | null {
   return typeof score === 'number' && Number.isFinite(score) ? riskLevelFromScore(score) : null;
@@ -146,6 +173,11 @@ export function algorithmUpdateBody(
   const riskScore = explicitRiskScore(fields.risk);
   if (riskScore === null && !(riskBlank && originalRiskScore === null)) return null;
 
+  // While the algorithm stays obsolete the server refuses a score below the
+  // Critical floor; say so here instead of letting the save fail.
+  if (fields.deprecationStatus === 'obsolete' && riskScore !== null && riskScore !== originalRiskScore
+    && riskScore < OBSOLETE_RISK_FLOOR) return null;
+
   const body: UpdateAlgorithmRequest = {
     strength: fields.strength as UpdateAlgorithmRequest['strength'],
     deprecation_status: fields.deprecationStatus as UpdateAlgorithmRequest['deprecation_status'],
@@ -155,7 +187,11 @@ export function algorithmUpdateBody(
     migration_guidance: fields.migrationGuidance,
     recommended_alternatives: fields.recommendedAlternatives.split(',').map((value) => value.trim()).filter(Boolean),
   };
-  if (riskScore !== null) body.risk_score = riskScore;
+  // Send risk_score only when the admin changed it. An unchanged score is not
+  // a decision, and sending it anyway would override the server's own rule —
+  // leaving obsolete restores the score remembered at deprecation, and an echo
+  // of the displayed Critical score would pin the algorithm there instead.
+  if (riskScore !== null && riskScore !== originalRiskScore) body.risk_score = riskScore;
   return body;
 }
 
@@ -174,6 +210,8 @@ function EditAlgorithmModal({ algo, onClose, mut }: { algo: Algorithm; onClose: 
     pqcStatus, migrationGuidance: guidance, recommendedAlternatives: alts,
   });
   const invalid = body === null;
+  const leavingObsolete = algo.deprecation_status === 'obsolete' && dep !== 'obsolete';
+  const riskUnchanged = explicitRiskScore(risk) === algo.risk_score;
 
   const save = () => {
     if (body === null) return;
@@ -219,6 +257,16 @@ function EditAlgorithmModal({ algo, onClose, mut }: { algo: Algorithm; onClose: 
           {DEP_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </ModalField>
+      {dep === 'obsolete' && (
+        <div data-testid="obsolete-floor-note" style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>
+          Obsolete algorithms grade Critical: the risk score is kept at {OBSOLETE_RISK_FLOOR} or above.
+        </div>
+      )}
+      {leavingObsolete && riskUnchanged && (
+        <div data-testid="obsolete-restore-note" style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>
+          Leaving obsolete restores the risk score the algorithm had before it was marked obsolete. Enter a score to set one instead.
+        </div>
+      )}
       <ModalField label="Deprecation date">
         <input type="date" value={depDate} onChange={(e) => setDepDate(e.target.value)} style={modalInputStyle} />
       </ModalField>
@@ -339,7 +387,7 @@ function DeprecateModal({ algo, onClose, mut }: { algo: Algorithm; onClose: () =
     );
   };
   return (
-    <Modal open onClose={onClose} tone="danger" title={`Deprecate — ${algo.name || algo.code}`} description="Marks this algorithm obsolete (deprecation_status = obsolete). It is not deleted — assets reference it — but it will grade as Critical. You can re-activate it later by editing the status." footerNote="Logged to audit" primaryLabel="Mark obsolete" onPrimary={confirm} primaryLoading={mut.isPending} />
+    <Modal open onClose={onClose} tone="danger" title={`Deprecate — ${algo.name || algo.code}`} description={deprecateDescription(algo.risk_score)} footerNote="Logged to audit" primaryLabel="Mark obsolete" onPrimary={confirm} primaryLoading={mut.isPending} />
   );
 }
 

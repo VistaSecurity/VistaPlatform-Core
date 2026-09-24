@@ -288,3 +288,53 @@ describe('createSessionExpiryHandler', () => {
   });
 
 });
+
+// RC-4 /: every service answers a live token of a suspended or deleted
+// organization with 403 + a tenant code. The middleware must hand exactly those
+// to the app (so it can end the session with the reason) and leave every other
+// 403 — a plain permission refusal — alone.
+describe('session-expiry middleware (403 tenant_suspended / tenant_deleted)', () => {
+  const coded = (status: number, body: object) => vi.fn(async () =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
+
+  it.each(['tenant_suspended', 'tenant_deleted'])('a 403 %s is handed to onTenantBlocked, from any service', async (code) => {
+    const onTenantBlocked = vi.fn();
+    contract.setSessionExpiredHandler({ onAuthFailure: vi.fn(async () => false), onRecoveryFailed: vi.fn(async () => {}), onTenantBlocked });
+    const client = contract.createInventoryServiceClient({ baseUrl: 'http://api.test', fetch: coded(403, { code, error: 'x' }) });
+
+    const { response } = await fire(client, 'GET', '/assets');
+    expect(onTenantBlocked).toHaveBeenCalledWith(code);
+    expect(response.status).toBe(403); // the caller still sees its refusal
+  });
+
+  it('a 403 on the refresh exchange itself is handed over too (auth-flow paths are not exempt from this)', async () => {
+    const onTenantBlocked = vi.fn();
+    contract.setSessionExpiredHandler({ onAuthFailure: vi.fn(async () => false), onRecoveryFailed: vi.fn(async () => {}), onTenantBlocked });
+    const client = contract.createAuthServiceClient({ baseUrl: 'http://api.test', fetch: coded(403, { code: 'tenant_suspended', error: 'x' }) });
+
+    await fire(client, 'POST', '/auth/refresh');
+    expect(onTenantBlocked).toHaveBeenCalledWith('tenant_suspended');
+  });
+
+  it('a plain permission 403 (no tenant code) is left alone', async () => {
+    const onTenantBlocked = vi.fn();
+    const onAuthFailure = vi.fn(async () => false);
+    contract.setSessionExpiredHandler({ onAuthFailure, onRecoveryFailed: vi.fn(async () => {}), onTenantBlocked });
+    const client = contract.createInventoryServiceClient({ baseUrl: 'http://api.test', fetch: coded(403, { error: 'Insufficient permissions' }) });
+
+    await fire(client, 'GET', '/assets');
+    expect(onTenantBlocked).not.toHaveBeenCalled();
+    expect(onAuthFailure).not.toHaveBeenCalled();
+  });
+
+  it('createSessionExpiryHandler latches a tenant refusal once, with the code as the reason', () => {
+    const onSessionExpired = vi.fn();
+    const refresh = vi.fn(async () => ({}));
+    const h = createSessionExpiryHandler({ hasSession: () => true, refresh, onSessionExpired });
+    h.onTenantBlocked('tenant_deleted');
+    h.onTenantBlocked('tenant_deleted');
+    expect(onSessionExpired).toHaveBeenCalledTimes(1);
+    expect(onSessionExpired).toHaveBeenCalledWith('tenant_deleted');
+    expect(refresh).not.toHaveBeenCalled();
+  });
+});

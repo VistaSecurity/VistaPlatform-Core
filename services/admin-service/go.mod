@@ -20,6 +20,7 @@ require (
 	github.com/stripe/stripe-go/v85 v85.2.0
 	github.com/vistasecurity/vistaplatform/shared v0.0.0
 	github.com/vistasecurity/vistaplatform/shared/rbac v0.0.0
+	golang.org/x/net v0.59.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -70,7 +71,6 @@ require (
 	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/arch v0.31.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect

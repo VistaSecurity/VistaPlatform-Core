@@ -3,7 +3,6 @@ package middleware
 import (
 	"database/sql"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -23,8 +22,16 @@ const (
 
 var revocationCheckerFromEnv = sharedmw.RedisRevocationCheckerFromEnv
 
+// tenantStateCheckerFromEnv resolves the tenant-state check (RC-4 /) the
+// same way shared RequireJWTAuth does: from DATABASE_URL. A var so tests can
+// substitute a stub.
+var tenantStateCheckerFromEnv = func() sharedmw.TenantStateChecker {
+	return sharedmw.ResolveTenantStateChecker(nil, "audit-service")
+}
+
 func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 	revocation := revocationCheckerFromEnv()
+	tenantState := tenantStateCheckerFromEnv()
 
 	// Signing keys are resolved once, not per request: the keyfunc picks
 	// by algorithm class — ES256 tokens resolve their `kid` against the trusted
@@ -159,6 +166,16 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 				}
 			}
 		}
+		var tenantSessionVersion int64
+		if v, ok := claims["tenant_session_version"].(float64); ok {
+			tenantSessionVersion = int64(v)
+		}
+
+		// A suspended, canceled or deleted tenant is not usable (RC-4 /):
+		// same check, response and exemptions as shared RequireJWTAuth.
+		if !sharedmw.EnforceTenantSession(c, tenantState, tenantID, tokenType, tenantSessionVersion) {
+			return
+		}
 
 		// Set user context
 		c.Set("userID", userID)
@@ -221,35 +238,66 @@ func nonEmptyScopes(in []string) []string {
 	return scopes
 }
 
-// RequirePermission gates a route on a permission.
+// platformAuditGates is the platform half of RequirePermission: for each
+// audit-service permission, the PLATFORM permission that answers it, asked
+// through platform_user_has_permission().
+//
+// Until RC-3 of the admin-ui data review this branch switched on the role
+// NAME — super_admin passed everything, platform_admin passed any "audit.*"
+// by string prefix, and a "support_admin" that has never been seeded got read
+// access. The seeded support_agent role holds platform.audit and was refused
+// every read; a custom role granted platform.audit in Staff & Access ▸ Roles
+// was refused too; and any role called platform_admin passed whatever its
+// grants said. The answer now comes from platform_role_permissions, like
+// every admin-service route.
+//
+// The mapping keeps the two roles the switch admitted exactly where they were:
+// super_admin holds every platform permission, and platform_admin is seeded
+// both platform.audit and platform.audit.manage.
+//
+// A permission missing from this map refuses platform callers outright — a new
+// audit permission must decide what its platform counterpart is before any
+// operator can reach it.
+var platformAuditGates = map[string]func(db *sql.DB) gin.HandlerFunc{
+	rbac.PermissionAuditRead: func(db *sql.DB) gin.HandlerFunc {
+		return sharedrbac.RequirePlatformPermission(db, rbac.PermissionPlatformAudit)
+	},
+	rbac.PermissionAuditManage: func(db *sql.DB) gin.HandlerFunc {
+		return sharedrbac.RequirePlatformPermission(db, rbac.PermissionPlatformAuditManage)
+	},
+}
+
+// RequirePermission gates a route on an audit permission, for either kind of
+// caller.
 //
 // TENANT users resolve through the platform's real RBAC store: the check is
 // delegated to sharedrbac.RequireTenantPermission, which asks
 // user_has_permission(user, tenant, permission) — i.e. the grants in
 // tenant_role_permissions. Until this middleware ran a private permission
-// system: a hardcoded switch on the ROLE NAME granting any `audit.*` by prefix
-// to tenant_admin, and `audit.read`/`audit.security`/`audit.export` to
-// security_admin. Those four strings existed in no registry (seed.sql
-// tenant_permissions, shared/rbac/permissions.go,
-// packages/primitives/src/rbac/constants.ts) and never touched
-// tenant_role_permissions, so no tenant could grant audit access to anyone, the
-// permission-parity audit could not see these routes, and tenant custom roles
-// would have had zero effect here. The permissions are now
-// rbac.PermissionAuditRead / rbac.PermissionAuditManage, seeded and granted like
-// every other tenant permission.
+// system for tenants too (a role-name switch inventing audit.* strings no
+// registry held); the permissions are now rbac.PermissionAuditRead /
+// rbac.PermissionAuditManage, seeded and granted like every other tenant
+// permission.
 //
-// PLATFORM users stay ROLE-BASED, deliberately. The platform Audit section in
-// admin-ui-v2 authenticates with a no-tenant token, so there is no tenant to
-// resolve tenant_role_permissions against — RequireTenantPermission would 401
-// on the missing tenantID for every platform admin. platform_permissions has no
-// audit.* rows either, so there is nothing to check against on that side yet.
-// The branch below is byte-for-byte the pre- platform logic, so the
-// platform half of this middleware is unchanged in behaviour.
+// PLATFORM users carry a no-tenant token, so there is no tenant to resolve
+// tenant_role_permissions against. They resolve the platform counterpart in
+// platformAuditGates through platform_user_has_permission() instead — never
+// through the role name on the token.
 func RequirePermission(db *sql.DB, permission string) gin.HandlerFunc {
-	// Built once, not per request: it opens no connections, it only closes over
-	// the pool. Nil db yields a 503 gate (see sharedrbac), which is the correct
-	// fail-closed answer for a service that cannot reach its RBAC store.
+	// Built once, not per request: they open no connections, they only close
+	// over the pool. Nil db yields a 503 gate (see sharedrbac), which is the
+	// correct fail-closed answer for a service that cannot reach its RBAC store.
 	tenantGate := sharedrbac.RequireTenantPermission(db, permission)
+	platformGate := func(c *gin.Context) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":      "Permission denied",
+			"permission": permission,
+		})
+		c.Abort()
+	}
+	if mk, ok := platformAuditGates[permission]; ok {
+		platformGate = mk(db)
+	}
 
 	return func(c *gin.Context) {
 		userType, exists := c.Get("userType")
@@ -263,36 +311,7 @@ func RequirePermission(db *sql.DB, permission string) gin.HandlerFunc {
 			tenantGate(c)
 			return
 		}
-
-		role, _ := c.Get("role")
-		roleStr, _ := role.(string)
-
-		allowed := false
-		switch roleStr {
-		case "super_admin":
-			allowed = true // Super admins have all permissions
-		case "platform_admin":
-			// Platform admins have platform.audit and related permissions
-			allowed = strings.HasPrefix(permission, "platform.") ||
-				strings.HasPrefix(permission, "audit.") ||
-				permission == "platform_users.manage"
-		case "support_admin":
-			// Support admins have read-only audit access
-			allowed = permission == "platform.audit" ||
-				permission == rbac.PermissionAuditRead ||
-				permission == "platform.audit.read"
-		}
-
-		if !allowed {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":      "Permission denied",
-				"permission": permission,
-			})
-			c.Abort()
-			return
-		}
-
-		c.Next()
+		platformGate(c)
 	}
 }
 

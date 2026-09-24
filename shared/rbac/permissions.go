@@ -11,6 +11,17 @@ const (
 	PermissionPlatformImpersonate         = "platform.impersonate"
 	PermissionPlatformNotificationsManage = "platform.notifications.manage"
 
+	// PermissionPlatformAudit is the platform side of audit-service's
+	// audit.read: reading the platform activity trail, retention policies and
+	// SIEM integrations. Held by every seeded platform role.
+	PermissionPlatformAudit = "platform.audit"
+	// PermissionPlatformAuditManage is the platform side of audit.manage:
+	// writing retention policies (which drive the cross-tenant deletion sweep),
+	// SIEM integrations (which receive every tenant's events) and audit alert
+	// rules / scheduled reports. Seeded to super_admin and platform_admin —
+	// the two roles the old role-name switch let through.
+	PermissionPlatformAuditManage = "platform.audit.manage"
+
 	PermissionPlatformUsersRead   = "platform_users.read"
 	PermissionPlatformUsersManage = "platform_users.manage"
 	PermissionPlatformUsersDelete = "platform_users.delete"

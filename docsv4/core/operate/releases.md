@@ -70,6 +70,7 @@ See **`INSTALL.md`**'s "Run it" section for cross-version upgrade mechanics
 caveats). The chart's `NOTES.txt` echoes the key upgrade flags on every
 `helm upgrade`.
 
+
 **1.0.0 is a fresh install only — there is no upgrade path from a `core-v0.x`
 release.** See `INSTALL.md`'s "Run it" section and the "Breaking / Upgrading"
 notes under `[1.0.0]` in [`CHANGELOG.md`](../../../CHANGELOG.md) before

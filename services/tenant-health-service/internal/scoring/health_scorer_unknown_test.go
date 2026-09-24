@@ -70,15 +70,16 @@ func TestCalculateHealthScore_AllSourcesUnavailable_IsUnknownNotZeroScore(t *tes
 	if b.DataCompleteness != 0 {
 		t.Errorf("data_completeness = %v, want 0", b.DataCompleteness)
 	}
-	if len(b.UnavailableSources) != 4 {
-		t.Errorf("unavailable_sources = %v, want all four peers named", b.UnavailableSources)
+	// All four peers, plus the resource-metering producer that never exists.
+	if len(b.UnavailableSources) != 5 {
+		t.Errorf("unavailable_sources = %v, want all four peers and %s named", b.UnavailableSources, models.SourceResourceMetering)
 	}
 }
 
 func TestCalculateHealthScore_PartialAvailability_RenormalisesAndReportsGap(t *testing.T) {
 	m := measuredMetrics()
-	// resource-tracker-service feeds TWO factors (resource efficiency 0.25 +
-	// cost optimization 0.15 = 0.40 of the total weight).
+	// resource-tracker-service now feeds ONE factor: cost optimization, 15 of
+	// the 75 points that remain once resource efficiency is dropped.
 	m.UnavailableSources = []string{models.SourceResourceTracker}
 
 	hs := NewHealthScorer()
@@ -86,18 +87,18 @@ func TestCalculateHealthScore_PartialAvailability_RenormalisesAndReportsGap(t *t
 
 	b := got.ScoreBreakdown
 	if b.ResourceEfficiency != nil || b.CostOptimization != nil {
-		t.Fatalf("resource-tracker's factors must be nil, got %v / %v", b.ResourceEfficiency, b.CostOptimization)
+		t.Fatalf("resource efficiency and resource-tracker's factor must be nil, got %v / %v", b.ResourceEfficiency, b.CostOptimization)
 	}
 	if b.PerformanceMetrics == nil || b.SecurityPosture == nil || b.BusinessActivity == nil {
 		t.Fatal("factors from reachable peers must still be scored")
 	}
-	if math.Abs(b.DataCompleteness-0.60) > 1e-9 {
-		t.Errorf("data_completeness = %v, want 0.60 (0.25+0.20+0.15 of 1.0)", b.DataCompleteness)
+	if math.Abs(b.DataCompleteness-60.0/75.0) > 1e-9 {
+		t.Errorf("data_completeness = %v, want 0.80 ((25+20+15)/75)", b.DataCompleteness)
 	}
 
 	// Overall must be the weighted average over the MEASURED factors only,
 	// renormalised — not a total that silently counts missing factors as 0.
-	want := (*b.PerformanceMetrics*0.25 + *b.SecurityPosture*0.20 + *b.BusinessActivity*0.15) / 0.60
+	want := (*b.PerformanceMetrics*25 + *b.SecurityPosture*20 + *b.BusinessActivity*15) / 60
 	if math.Abs(got.OverallScore-want) > 1e-9 {
 		t.Errorf("overall_score = %v, want %v (renormalised over measured weight)", got.OverallScore, want)
 	}
@@ -106,27 +107,51 @@ func TestCalculateHealthScore_PartialAvailability_RenormalisesAndReportsGap(t *t
 	}
 }
 
-func TestCalculateHealthScore_EverythingMeasured_UsesFullWeighting(t *testing.T) {
+// Decision 8 (RC-14): resource efficiency is dropped, the other four factors
+// keep their old 25/20/15/15 proportions, and everything measured means
+// completeness 1 — the missing factor is by design, not a gap.
+func TestCalculateHealthScore_EverythingMeasured_UsesReweightedIndex(t *testing.T) {
 	m := measuredMetrics()
 	hs := NewHealthScorer()
 	got := hs.CalculateHealthScore(m)
 
 	b := got.ScoreBreakdown
-	if b.ResourceEfficiency == nil || b.PerformanceMetrics == nil || b.SecurityPosture == nil ||
+	if b.PerformanceMetrics == nil || b.SecurityPosture == nil ||
 		b.BusinessActivity == nil || b.CostOptimization == nil {
-		t.Fatal("no source was unavailable; every factor must be scored")
+		t.Fatal("no peer was unavailable; every measured factor must be scored")
+	}
+	if b.ResourceEfficiency != nil {
+		t.Fatalf("resource_efficiency = %v, want nil — nothing measures it", *b.ResourceEfficiency)
 	}
 	if b.DataCompleteness != 1 {
-		t.Errorf("data_completeness = %v, want 1", b.DataCompleteness)
+		t.Errorf("data_completeness = %v, want 1 (resource efficiency carries no weight)", b.DataCompleteness)
 	}
-	if len(b.UnavailableSources) != 0 {
-		t.Errorf("unavailable_sources = %v, want empty", b.UnavailableSources)
+	if len(b.UnavailableSources) != 1 || b.UnavailableSources[0] != models.SourceResourceMetering {
+		t.Errorf("unavailable_sources = %v, want exactly [%s]", b.UnavailableSources, models.SourceResourceMetering)
 	}
 
-	want := *b.ResourceEfficiency*0.25 + *b.PerformanceMetrics*0.25 + *b.SecurityPosture*0.20 +
-		*b.BusinessActivity*0.15 + *b.CostOptimization*0.15
+	want := (*b.PerformanceMetrics*25 + *b.SecurityPosture*20 +
+		*b.BusinessActivity*15 + *b.CostOptimization*15) / 75
 	if math.Abs(got.OverallScore-want) > 1e-9 {
-		t.Errorf("overall_score = %v, want %v (unchanged full-weight formula)", got.OverallScore, want)
+		t.Errorf("overall_score = %v, want %v (25/20/15/15 over 75)", got.OverallScore, want)
+	}
+
+	w := hs.weights
+	if sum := w.PerformanceMetrics + w.SecurityPosture + w.BusinessActivity + w.CostOptimization; math.Abs(sum-1) > 1e-9 {
+		t.Errorf("weights sum to %v, want 1", sum)
+	}
+}
+
+// The resource inputs no longer move the index at all: the CPU, memory,
+// storage and network fields are not measured, so no value in them may change
+// the score (they used to carry 25% of it, from constants).
+func TestCalculateHealthScore_ResourceInputsDoNotMoveTheIndex(t *testing.T) {
+	hs := NewHealthScorer()
+	base := hs.CalculateHealthScore(measuredMetrics())
+	m := measuredMetrics()
+	m.CPUUtilization, m.MemoryUtilization, m.StorageUtilization, m.NetworkUtilization = 0, 0, 50, 60
+	if got := hs.CalculateHealthScore(m); got.OverallScore != base.OverallScore {
+		t.Fatalf("overall_score moved %v -> %v on resource inputs nothing measures", base.OverallScore, got.OverallScore)
 	}
 }
 

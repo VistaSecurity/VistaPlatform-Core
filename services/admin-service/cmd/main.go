@@ -16,13 +16,14 @@
 //
 // Security:
 // - JWT-based authentication with platform admin roles
-// - Role-based authorization (super_admin, platform_admin, support_admin)
+// - Permission-based authorization (platform_user_has_permission over platform_role_permissions)
 // - Input validation and sanitization
 // - CORS protection and rate limiting
 package main
 
 import (
 	"log"
+	"os"
 
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/api"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/config"
@@ -54,10 +55,10 @@ func main() {
 	// licence here, once the pool is up and before serving. Nil in Core — an
 	// open-source build has no token concept, so there is nothing to check and
 	// nothing to fail, and with no platform_license row every service resolves
-	// the install as Core. Never fatal: see ee/edition.Apply.
-	if hooks.ApplyEditionToken != nil {
-		hooks.ApplyEditionToken(bypassDB)
-	}
+	// the install as Core. Never fatal: see ee/edition.Apply. A Core build
+	// that finds a token configured logs that it is ignoring it
+	// (edition_token.go).
+	applyEdition(hooks, bypassDB, os.Getenv, os.ReadFile, log.Printf)
 
 	// Initialize the HTTP server with all routes and middleware.
 	// `hooks` is the edition seam (see edition.go): zero in a Core build,

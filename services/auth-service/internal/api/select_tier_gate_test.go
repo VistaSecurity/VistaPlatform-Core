@@ -80,6 +80,7 @@ func TestSelectTierRoute_403WhenCallerLacksBillingUpdate(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	userID, tenantID, tierID := uuid.New(), uuid.New(), uuid.New()
+	expectLiveTenantState(mock, tenantID)
 	expectPermissionCheck(mock, userID, tenantID, false)
 
 	w := selectTierRequest(t, db, userID, tenantID, tierID)
@@ -105,6 +106,7 @@ func TestSelectTierRoute_PassesTheGateWhenPermissionHeld(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	userID, tenantID, tierID := uuid.New(), uuid.New(), uuid.New()
+	expectLiveTenantState(mock, tenantID)
 	expectPermissionCheck(mock, userID, tenantID, true)
 	// The handler's first query, on the bypass pool (same mock here).
 	mock.ExpectQuery(`SELECT tenant_id FROM users WHERE id = \$1`).

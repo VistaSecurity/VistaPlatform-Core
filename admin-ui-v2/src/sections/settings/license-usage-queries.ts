@@ -1,5 +1,5 @@
 // VISTA Operations — Settings ▸ License & Usage: licence usage reporting
-// (edition-licensing spec PR 4). Typed hooks over admin-service's
+// (edition-licensing spec PR 4, delivery PR 5). Typed hooks over admin-service's
 // /admin/license/{usage,reports} routes via the generated client
 // (`clients.admin`, @vistasecurity/api-contract); no hand-rolled fetch.
 //
@@ -16,6 +16,7 @@ export type LicenseUsageReport = adminServiceComponents['schemas']['LicenseUsage
 export type LicenseUsageReportList = adminServiceComponents['schemas']['LicenseUsageReportList'];
 export type GenerateReportRequest = adminServiceComponents['schemas']['GenerateLicenseUsageReportRequest'];
 export type GenerateReportResponse = adminServiceComponents['schemas']['GenerateLicenseUsageReportResponse'];
+export type RetryReportResponse = adminServiceComponents['schemas']['RetryLicenseUsageReportResponse'];
 
 const KEY = ['platform', 'license', 'usage'] as const;
 
@@ -67,6 +68,45 @@ export async function generateLicenseUsageReport(body: GenerateReportRequest): P
   return data;
 }
 
+export async function retryLicenseUsageReport(id: string): Promise<RetryReportResponse> {
+  const { data, error } = await clients.admin.POST('/admin/license/reports/{id}/retry', { params: { path: { id } } });
+  if (error) {
+    if (isNotMSP(error)) throw new NotMSPError();
+    throw new Error(messageOf(error, 'Could not retry the delivery'));
+  }
+  if (!data) throw new Error('Could not retry the delivery');
+  return data;
+}
+
+/**
+ * Where a report stands with automatic delivery, for the reports table:
+ *
+ * - `preview` — a month-to-date preview; never sent, never billed.
+ * - `delivered` — the receiver has it (even if delivery was since switched off).
+ * - `not_configured` — licensing.reporting.endpoint is empty: download and upload.
+ * - `queued` — pending, never failed: goes out at the next pass.
+ * - `retrying` — pending after a network error / 5xx; `next_attempt_at` says when.
+ * - `failed` — the receiver refused it (400/401 …); retried on the backoff.
+ * - `rejected` — the receiver rejected it (422); only a manual retry sends it again.
+ */
+export type DeliveryState = 'preview' | 'delivered' | 'not_configured' | 'queued' | 'retrying' | 'failed' | 'rejected';
+
+export function deliveryState(
+  r: Pick<LicenseUsageReport, 'complete' | 'delivery_status' | 'last_error' | 'next_attempt_at'>,
+  configured: boolean,
+): DeliveryState {
+  if (!r.complete) return 'preview';
+  if (r.delivery_status === 'delivered') return 'delivered';
+  if (!configured) return 'not_configured';
+  if (r.delivery_status === 'failed') return r.next_attempt_at ? 'failed' : 'rejected';
+  return r.last_error ? 'retrying' : 'queued';
+}
+
+/** A platform admin can re-queue a report whose delivery failed. */
+export function canRetryDelivery(state: DeliveryState): boolean {
+  return state === 'failed' || state === 'rejected';
+}
+
 export function useLicenseUsage() {
   return useQuery({
     queryKey: [...KEY, 'summary'],
@@ -88,6 +128,14 @@ export function useGenerateLicenseUsageReport() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: generateLicenseUsageReport,
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+  });
+}
+
+export function useRetryLicenseUsageReport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: retryLicenseUsageReport,
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
   });
 }

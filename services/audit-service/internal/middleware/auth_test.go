@@ -29,6 +29,7 @@ func (c testRevocationChecker) IsUserRevoked(_ context.Context, userID uuid.UUID
 }
 
 func TestRequireAuth_PasswordChangeRequiredGate(t *testing.T) {
+	useLiveTenantState(t)
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
@@ -91,6 +92,7 @@ func TestRequireAuth_PasswordChangeRequiredGate(t *testing.T) {
 }
 
 func TestRequireAuth_RevokedTokensRejected(t *testing.T) {
+	useLiveTenantState(t)
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
@@ -174,6 +176,7 @@ func TestRequireAuth_RevokedTokensRejected(t *testing.T) {
 }
 
 func TestRequireAuth_SurfacesPATScopesForDownstreamRBAC(t *testing.T) {
+	useLiveTenantState(t)
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
@@ -260,4 +263,23 @@ func TestRequireAuth_SurfacesPATScopesForDownstreamRBAC(t *testing.T) {
 			}
 		})
 	}
+}
+
+// liveTenants reports every tenant usable.
+type liveTenants struct{}
+
+func (liveTenants) Check(context.Context, uuid.UUID) (string, bool, error) { return "", false, nil }
+
+// useLiveTenantState makes RequireAuth treat every tenant as live for one
+// test. These tests are not about tenant state, and the default resolution is
+// NOT "no check": it builds the real checker from DATABASE_URL, which the
+// nightly test-backend job sets. There the random tenant ids minted here have
+// no tenants row and are refused 403 tenant_deleted ( item 2) — which a
+// status-only assertion can even mistake for the gate under test.
+// tenant_state_integration_test.go covers the real resolution.
+func useLiveTenantState(t *testing.T) {
+	t.Helper()
+	previous := tenantStateCheckerFromEnv
+	tenantStateCheckerFromEnv = func() sharedmw.TenantStateChecker { return liveTenants{} }
+	t.Cleanup(func() { tenantStateCheckerFromEnv = previous })
 }

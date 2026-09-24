@@ -31,7 +31,6 @@ describe('the sections a Core build must not offer', () => {
   // behind them answer 404 unauthenticated, while Core routes answer 401.
   it.each([
     ['tenants', 'ee/msp — the whole /admin/tenants surface'],
-    ['comms', 'ee/msp — announcements + maintenance windows'],
     ['billing', 'ee/billingapi — Stripe, invoices, coupons, trials, analytics'],
   ])('hides %s (%s)', (id) => {
     expect(ids(core)).not.toContain(id);

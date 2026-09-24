@@ -128,6 +128,9 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			//    (algorithms, roles, frameworks); these add the tenant-scoped
 			//    shape that constraint changes are most likely to break.
 			tenant := populateForUpgrade(t, scratch)
+			// ...and a platform admin's edits to shipped content, made before
+			// the release that started protecting them (decision 4, RC-12).
+			editSeededContentBeforeUpgrade(t, scratch)
 
 			// 3. The assertion. This is the exact operation the chart's
 			//    schema-migration Job performs on `helm upgrade`.
@@ -145,6 +148,7 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			// 5. An upgrade that silently discards tenant data is not a
 			//    successful upgrade, even though psql exited 0.
 			assertTenantDataSurvived(t, scratch, tenant, tag)
+			assertSeededContentEditsSurvived(t, scratch, tag)
 		})
 	}
 }
@@ -473,6 +477,24 @@ func populateForUpgrade(t *testing.T, db *sql.DB) uuid.UUID {
 		INSERT INTO certificates (id, tenant_id, serial_number, subject_dn, issuer_dn, fingerprint_sha256, not_before, not_after, created_at, updated_at)
 		VALUES ($1,$2,'01','CN=upgrade','CN=upgrade-ca',encode(gen_random_bytes(32),'hex'),NOW(),NOW()+interval '1 year',NOW(),NOW())`,
 		certID, tenant)
+
+	// A deleted account's social link and a live account's link on one IdP
+	// subject: sign-up ignored deleted accounts until, so any prior
+	// release can hold this pair, and it is exactly the data a bare
+	// CREATE UNIQUE INDEX on uq_user_auth_methods_platform_subject fails on.
+	// schema_platform_subject_index_integration_test.go covers the cases in
+	// detail; this puts the reported one on a real prior release's shape.
+	goneUser, liveUser := uuid.New(), uuid.New()
+	subject := "upgrade-subject-" + tenant.String()[:8]
+	tryExec(t, db, "users", `
+		INSERT INTO users (id, tenant_id, email, deleted_at) VALUES
+			($1, $3, 'gone-'||$4||'@schema-upgrade.example.test', NOW()),
+			($2, $3, 'live-'||$4||'@schema-upgrade.example.test', NULL)`,
+		goneUser, liveUser, tenant, slug)
+	tryExec(t, db, "user_auth_methods", `
+		INSERT INTO user_auth_methods (user_id, auth_type, external_user_id) VALUES
+			($1, 'google', $3), ($2, 'google', $3)`,
+		goneUser, liveUser, subject)
 
 	return tenant
 }

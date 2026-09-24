@@ -45,15 +45,27 @@ type OSVFeed struct {
 	Ecosystems []string
 	// MaxArchiveBytes bounds one downloaded archive.
 	MaxArchiveBytes int64
+	// SpoolDir is where a downloaded archive is written before it is read
+	// ("" = the OS temp dir). The chart points it at a dedicated, size-limited
+	// scratch volume (CATALOG_FEEDS_SPOOL_DIR) sized for the largest export.
+	SpoolDir string
 	// MaxEntries bounds the documents read out of one archive, so a malformed
 	// or hostile zip cannot loop.
 	MaxEntries int
 }
 
 // osv.dev endpoint and defaults.
+//
+// The archive cap is 2 GiB (decision 13, RC-29). Ubuntu is in the default
+// ecosystems and its all.zip was ~705 MiB in September 2026 (Debian ~68 MiB,
+// Alpine ~4 MiB), so the old 512 MiB cap failed the whole feed on every run.
+// 2 GiB leaves room for Ubuntu to keep growing. The archive is spooled to disk
+// and read one entry at a time (never held in memory — Ubuntu's entries total
+// ~7.5 GB uncompressed), so the cap bounds DISK, and the chart gives
+// admin-service a scratch volume sized for it (catalogFeeds.spool).
 const (
 	DefaultOSVBaseURL     = "https://osv-vulnerabilities.storage.googleapis.com"
-	defaultOSVMaxArchive  = 512 << 20 // 512 MiB
+	defaultOSVMaxArchive  = 2 << 30 // 2 GiB
 	defaultOSVMaxEntries  = 500_000
 	osvMaxEntryBytes      = 4 << 20 // one advisory document
 	osvHTTPDateLayout     = http.TimeFormat
@@ -115,42 +127,89 @@ func (c osvCursor) encode() string {
 
 // Sync downloads each configured ecosystem and upserts the records newer than
 // its watermark.
+//
+// Every configured ecosystem gets a status entry, including ones a cancelled
+// run never reached, and the result is PartialProgress: the cursor holds only
+// the watermarks of ecosystems that completed, so the store persists it even
+// when another ecosystem failed. Before that, one failing ecosystem (Ubuntu,
+// over the old archive cap) discarded Debian's and Alpine's progress on every
+// run and made all three re-download from scratch (RC-29).
 func (f *OSVFeed) Sync(ctx context.Context, store Store, cursor string) (SyncResult, error) {
 	cur := parseOSVCursor(cursor)
-	ecosystems := f.Ecosystems
+	ecosystems := append([]string(nil), f.Ecosystems...)
 	if len(ecosystems) == 0 {
-		ecosystems = DefaultOSVEcosystems
+		ecosystems = append(ecosystems, DefaultOSVEcosystems...)
 	}
 	sort.Strings(ecosystems)
 
 	var (
 		total    int64
+		failed   []string
 		firstErr error
+		statuses = make([]EcosystemStatus, 0, len(ecosystems))
 	)
-	for _, eco := range ecosystems {
+	result := func() SyncResult {
+		return SyncResult{Rows: total, Cursor: cur.encode(), PartialProgress: true, Ecosystems: statuses}
+	}
+	for i, eco := range ecosystems {
 		if err := ctx.Err(); err != nil {
-			return SyncResult{Rows: total, Cursor: cur.encode()}, err
+			// Say which ecosystems this run never reached, rather than leaving
+			// their previous "ok" standing as if it were this run's answer.
+			for _, rest := range ecosystems[i:] {
+				statuses = append(statuses, ecosystemFailed(rest, 0, cur[rest], fmt.Errorf("not attempted: %w", err)))
+			}
+			return result(), err
 		}
 		rows, watermark, err := f.syncEcosystem(ctx, store, eco, cur[eco])
 		total += rows
 		if err != nil {
 			// One ecosystem's failure must not discard the others' progress:
-			// the cursor already holds their advanced watermarks, and the run
-			// is reported as degraded so the console shows the error.
+			// the cursor keeps their advanced watermarks (and this one's old
+			// one), and the run is reported as degraded so the console shows
+			// the error against the ecosystem that caused it.
+			failed = append(failed, eco)
 			if firstErr == nil {
-				firstErr = fmt.Errorf("ecosystem %q: %w", eco, err)
+				firstErr = fmt.Errorf("%s: %w", eco, err)
 			}
+			statuses = append(statuses, ecosystemFailed(eco, rows, cur[eco], err))
 			continue
 		}
 		if watermark != "" {
 			cur[eco] = watermark
 		}
+		statuses = append(statuses, EcosystemStatus{
+			Name: eco, Status: EcosystemOK, Rows: rows, Watermark: optionalString(cur[eco]),
+		})
 	}
 
 	if firstErr != nil {
-		return SyncResult{Rows: total, Cursor: cur.encode()}, fmt.Errorf("osv mirror incomplete: %w", firstErr)
+		return result(), fmt.Errorf("osv mirror incomplete: %d of %d ecosystems failed (%s); first error: %w",
+			len(failed), len(ecosystems), strings.Join(failed, ", "), firstErr)
 	}
-	return SyncResult{Rows: total, Cursor: cur.encode()}, nil
+	return result(), nil
+}
+
+// archiveCapText renders the cap for an operator: "2048 MiB", or bytes when
+// it is below a MiB (tests).
+func archiveCapText(n int64) string {
+	if n >= 1<<20 {
+		return fmt.Sprintf("%d MiB", n>>20)
+	}
+	return fmt.Sprintf("%d-byte", n)
+}
+
+func ecosystemFailed(name string, rows int64, watermark string, err error) EcosystemStatus {
+	msg := err.Error()
+	return EcosystemStatus{
+		Name: name, Status: EcosystemError, LastError: &msg, Rows: rows, Watermark: optionalString(watermark),
+	}
+}
+
+func optionalString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func (f *OSVFeed) syncEcosystem(ctx context.Context, store Store, ecosystem, watermark string) (int64, string, error) {
@@ -194,8 +253,10 @@ func (f *OSVFeed) syncEcosystem(ctx context.Context, store Store, ecosystem, wat
 
 	// archive/zip needs a ReaderAt, so the body is spooled to a temp file
 	// rather than held in memory: the larger exports are hundreds of megabytes
-	// and an admin-service pod's memory limit is not sized for them.
-	tmp, err := os.CreateTemp("", "osv-*.zip")
+	// and an admin-service pod's memory limit is not sized for them. Only the
+	// central directory is then held in memory (Ubuntu: ~68k entries, ~5 MB),
+	// and entries are decoded one at a time below.
+	tmp, err := os.CreateTemp(f.SpoolDir, "osv-*.zip")
 	if err != nil {
 		return 0, "", fmt.Errorf("spool archive: %w", err)
 	}
@@ -213,7 +274,7 @@ func (f *OSVFeed) syncEcosystem(ctx context.Context, store Store, ecosystem, wat
 		return 0, "", fmt.Errorf("spool archive: %w", err)
 	}
 	if written > maxBytes {
-		return 0, "", fmt.Errorf("archive for %s exceeds the %d-byte cap", ecosystem, maxBytes)
+		return 0, "", fmt.Errorf("archive for %s exceeds the %s cap", ecosystem, archiveCapText(maxBytes))
 	}
 
 	zr, err := zip.NewReader(tmp, written)

@@ -153,8 +153,8 @@ msp_surface:
       Payment provider wiring, invoicing, plans and pricing, trials, and the
       subscription lifecycle.
     doc: null
-  - name: Announcements and maintenance windows
-    summary: Platform-wide notices and scheduled maintenance windows across tenants.
+  - name: Announcements
+    summary: Platform-wide notices to tenants. The authoring API exists; delivery to tenants, and the console page with it, are not built yet.
     doc: null
   - name: Support tickets
     summary: Operator-side support queue spanning tenants.

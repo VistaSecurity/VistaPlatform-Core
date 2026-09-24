@@ -186,6 +186,24 @@ during upgrades, or set `strategy: Recreate` on the backends you can afford
 brief downtime on (the chart already does this for `pcap-processor`). A wedged
 upgrade recovers with `helm rollback`.
 
+**Switching a backend that is already deployed to `Recreate` needs one extra
+step under Helm's server-side apply** (the default in Helm 4). Kubernetes filled
+in `rollingUpdate: {maxSurge: 25%, maxUnavailable: 25%}` when the Deployment was
+created; server-side apply leaves a field it never set in place, so the
+upgrade that sets `strategy: Recreate` fails with
+`spec.strategy.rollingUpdate: Forbidden: may not be specified when strategy
+type is 'Recreate'` — and the whole upgrade stops there. Clear the field
+first, once per backend, then run the upgrade:
+
+```bash
+kubectl -n <namespace> patch deployment <backend> --type=merge \
+  -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+```
+
+The patch does not restart anything, since the strategy is not part of the pod
+template. Helm 3's client-side apply clears the field without the patch. It is
+only needed when you move a live backend to `Recreate`, not on a fresh install.
+
 ## Common Issues
 
 ### Pods not starting
@@ -221,6 +239,13 @@ helm rollback vista --namespace vista
 Restore your `pg_dump` backup if the upgrade already wrote schema changes you
 need to undo — `helm rollback` reverts the release's Kubernetes objects, not
 data already written to the database.
+
+Restore a whole dump (schema and data) into an empty database. If you restore
+**data only** into a database that already has the schema, pass
+`pg_restore --data-only --disable-triggers`: without it, the triggers that
+tell shipped catalogue content from your own mark every restored shipped
+framework, control and rule as **Custom**, and upgrades stop keeping them
+current (see [Shipped content and upgrades](../catalogs.md#shipped-content-and-upgrades)).
 
 ## Related Documentation
 

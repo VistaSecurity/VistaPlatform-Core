@@ -9,11 +9,12 @@ import (
 // All services must use this canonical definition to avoid type drift.
 // UserID and TenantID are uuid.UUID to match the auth-service that generates tokens.
 type JWTClaims struct {
-	UserID   uuid.UUID `json:"user_id"`
-	TenantID uuid.UUID `json:"tenant_id"`
-	Email    string    `json:"email"`
-	Role     string    `json:"role"`
-	Type     string    `json:"type"` // "access", "refresh", or "impersonation"
+	UserID               uuid.UUID `json:"user_id"`
+	TenantID             uuid.UUID `json:"tenant_id"`
+	Email                string    `json:"email"`
+	Role                 string    `json:"role"`
+	Type                 string    `json:"type"` // "access", "refresh", or "impersonation"
+	TenantSessionVersion int64     `json:"tenant_session_version,omitempty"`
 
 	// TokenType marks a narrowed token. "pat" means this access token was minted
 	// from a Personal Access Token and is constrained to Scopes. Empty on

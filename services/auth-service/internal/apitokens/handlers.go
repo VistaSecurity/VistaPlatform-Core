@@ -7,6 +7,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/shared/api"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -164,6 +165,12 @@ func (h *Handlers) Exchange(c *gin.Context) {
 	// a read-only PAT can no longer act as a full-role bearer at the JWT level.
 	accessToken, expiresAt, _, err := h.jwt.GenerateScopedAccessTokenWithTTL(
 		user.ID, user.TenantID, user.Email, user.Role, token.Permissions, ExchangeTokenTTL)
+	if be, blocked := tenantstate.AsBlocked(err); blocked {
+		// A PAT belonging to a suspended/canceled/deleted tenant exchanges
+		// for nothing (RC-4 /).
+		c.JSON(http.StatusForbidden, gin.H{"error": tenantstate.Message(be.Code), "code": be.Code})
+		return
+	}
 	if err != nil {
 		logrus.WithError(err).Error("Failed to mint exchange JWT")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mint access token"})

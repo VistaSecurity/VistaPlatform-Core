@@ -397,14 +397,38 @@ type AlgorithmAssessmentUpdate struct {
 	ComplianceMappings       map[string]interface{} `json:"compliance_mappings,omitempty"`
 }
 
+// AlgorithmAssessmentOutcome reports the side effects an assessment update had
+// beyond the fields the caller sent — today, the obsolete Critical floor
+// (algorithm_obsolete_floor.go) — so the handler can put them in the audit
+// record instead of re-deriving them from a before/after diff.
+type AlgorithmAssessmentOutcome struct {
+	// ObsoleteTransition is one of the ObsoleteTransition* names ("" = the
+	// update did not enter or leave obsolete).
+	ObsoleteTransition string
+	// RememberedRiskScore is the score stored when entering obsolete, or the
+	// score restored when leaving it (nil = unassessed / not applicable).
+	RememberedRiskScore *int
+	// RiskFloor is the Critical-band floor that applied.
+	RiskFloor int
+}
+
 // UpdateAlgorithmAssessment updates ONLY the assessment fields of an algorithm
 // identified by code. It returns the updated Algorithm. If no algorithm with the
-// given code exists, it returns (nil, nil) so the handler can emit a 404.
+// given code exists, it returns (nil, outcome, nil) so the handler can emit a 404.
 //
 // Identity/CycloneDX fields are never touched. updated_at is always refreshed.
 // COALESCE keeps any field the caller didn't supply (nil pointer) unchanged;
 // recommended_alternatives is replaced wholesale when supplied (non-nil slice).
-func (s *AlgorithmService) UpdateAlgorithmAssessment(code string, upd AlgorithmAssessmentUpdate) (*Algorithm, error) {
+//
+// Entering or leaving deprecation_status=obsolete also moves risk_score (owner
+// decision 12, see planObsoleteRisk). The row is read FOR UPDATE and written in
+// the same transaction, so two concurrent edits cannot both remember a score or
+// restore one the other already spent. ErrObsoleteRiskBelowFloor is returned,
+// with nothing written, when a request keeps the row obsolete but sets a score
+// below the Critical band.
+func (s *AlgorithmService) UpdateAlgorithmAssessment(code string, upd AlgorithmAssessmentUpdate) (*Algorithm, AlgorithmAssessmentOutcome, error) {
+	outcome := AlgorithmAssessmentOutcome{RiskFloor: ObsoleteRiskFloor()}
+
 	// recommended_alternatives: nil => leave unchanged; non-nil => replace.
 	var recAlts interface{}
 	if upd.RecommendedAlternatives != nil {
@@ -416,14 +440,14 @@ func (s *AlgorithmService) UpdateAlgorithmAssessment(code string, upd AlgorithmA
 	if upd.RemediationGuidance != nil {
 		b, err := json.Marshal(upd.RemediationGuidance)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal remediation_guidance: %w", err)
+			return nil, outcome, fmt.Errorf("failed to marshal remediation_guidance: %w", err)
 		}
 		remediationJSON = string(b)
 	}
 	if upd.ComplianceMappings != nil {
 		b, err := json.Marshal(upd.ComplianceMappings)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal compliance_mappings: %w", err)
+			return nil, outcome, fmt.Errorf("failed to marshal compliance_mappings: %w", err)
 		}
 		complianceJSON = string(b)
 	}
@@ -439,10 +463,58 @@ func (s *AlgorithmService) UpdateAlgorithmAssessment(code string, upd AlgorithmA
 		}
 	}
 
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return nil, outcome, fmt.Errorf("failed to begin algorithm update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		cur          obsoleteRiskState
+		status       sql.NullString
+		risk, prior  sql.NullInt64
+		floorApplied bool
+	)
+	err = tx.QueryRow(`
+		SELECT deprecation_status, risk_score, pre_obsolete_risk_score,
+		       obsolete_risk_floor_at IS NOT NULL
+		FROM algorithms WHERE code = $1 FOR UPDATE`, code,
+	).Scan(&status, &risk, &prior, &floorApplied)
+	if err == sql.ErrNoRows {
+		return nil, outcome, nil // not found
+	}
+	if err != nil {
+		return nil, outcome, fmt.Errorf("failed to read algorithm for update: %w", err)
+	}
+	cur.Status = status.String
+	cur.RiskScore = nullInt64ToIntPtr(risk)
+	cur.PriorScore = nullInt64ToIntPtr(prior)
+	cur.FloorApplied = floorApplied
+
+	plan, err := planObsoleteRisk(cur, upd.DeprecationStatus, upd.RiskScore)
+	if err != nil {
+		return nil, outcome, err
+	}
+	outcome.ObsoleteTransition = plan.Transition
+	switch plan.Transition {
+	case ObsoleteTransitionEntered:
+		outcome.RememberedRiskScore = copyIntPtr(plan.Prior)
+	case ObsoleteTransitionRestored:
+		outcome.RememberedRiskScore = copyIntPtr(plan.Risk)
+	}
+
+	recordAction := "keep"
+	switch plan.Record {
+	case obsoleteRecordSet:
+		recordAction = "set"
+	case obsoleteRecordClear:
+		recordAction = "clear"
+	}
+
 	query := `
 		UPDATE algorithms SET
 			strength = COALESCE($2, strength),
-			risk_score = COALESCE($3, risk_score),
+			risk_score = CASE WHEN $13::boolean THEN $14::integer ELSE COALESCE($3::integer, risk_score) END,
 			deprecation_status = COALESCE($4, deprecation_status),
 			migration_guidance = COALESCE($5, migration_guidance),
 			recommended_alternatives = COALESCE($6, recommended_alternatives),
@@ -451,28 +523,49 @@ func (s *AlgorithmService) UpdateAlgorithmAssessment(code string, upd AlgorithmA
 			remediation_guidance = COALESCE($9::jsonb, remediation_guidance),
 			compliance_mappings = COALESCE($10::jsonb, compliance_mappings),
 			deprecation_date = CASE WHEN $11::boolean THEN $12::date ELSE deprecation_date END,
+			pre_obsolete_risk_score = CASE $15::text
+				WHEN 'set' THEN $16::integer
+				WHEN 'clear' THEN NULL
+				ELSE pre_obsolete_risk_score END,
+			obsolete_risk_floor_at = CASE $15::text
+				WHEN 'set' THEN NOW()
+				WHEN 'clear' THEN NULL
+				ELSE obsolete_risk_floor_at END,
 			updated_at = NOW()
 		WHERE code = $1
 	`
 
-	res, err := s.db.Exec(query, code,
+	res, err := tx.Exec(query, code,
 		upd.Strength, upd.RiskScore, upd.DeprecationStatus, upd.MigrationGuidance, recAlts,
 		upd.IsPQC, upd.PQCStandardizationStatus, remediationJSON, complianceJSON,
 		upd.DeprecationDate != nil, depDate,
+		plan.WriteRisk, plan.Risk, recordAction, plan.Prior,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to update algorithm assessment: %w", err)
+		return nil, outcome, fmt.Errorf("failed to update algorithm assessment: %w", err)
 	}
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read update result: %w", err)
+		return nil, outcome, fmt.Errorf("failed to read update result: %w", err)
 	}
 	if rows == 0 {
-		return nil, nil // not found
+		return nil, outcome, nil // not found
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, outcome, fmt.Errorf("failed to commit algorithm update: %w", err)
 	}
 	s.invalidateCatalogue()
 
-	return s.GetAlgorithmByCode(code)
+	updated, err := s.GetAlgorithmByCode(code)
+	return updated, outcome, err
+}
+
+func nullInt64ToIntPtr(n sql.NullInt64) *int {
+	if !n.Valid {
+		return nil
+	}
+	v := int(n.Int64)
+	return &v
 }
 
 // AlgorithmCreate carries all fields for creating a new algorithm row through the
@@ -567,6 +660,18 @@ func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, erro
 		depDate = *in.DeprecationDate
 	}
 
+	// Creating a row directly as obsolete is "entering obsolete" from the score
+	// the caller gave (decision 12): the stored score is raised to the Critical
+	// floor and the given one remembered, so re-activating it later restores it.
+	riskScore := *in.RiskScore
+	var priorScore interface{}
+	var floorAt interface{}
+	if plan := planObsoleteRiskForCreate(in.DeprecationStatus, riskScore); plan.Record == obsoleteRecordSet {
+		riskScore = *plan.Risk
+		priorScore = *plan.Prior
+		floorAt = time.Now().UTC()
+	}
+
 	// COALESCE($n, <default>) lets optional columns fall back to their schema
 	// defaults when the caller omits them. risk_score deliberately has no
 	// COALESCE: accepting an absent assessment here would recreate the old,
@@ -579,7 +684,7 @@ func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, erro
 			recommended_alternatives, remediation_guidance, compliance_mappings,
 			is_standard, algorithm_family, primitive, mode, padding, oid,
 			crypto_functions, classical_security_level, nist_quantum_security_level,
-			parameter_set_identifier, curve
+			parameter_set_identifier, curve, pre_obsolete_risk_score, obsolete_risk_floor_at
 		) VALUES (
 			$1, $2, $3, $4, $5,
 			COALESCE($6, 'acceptable'), $7, COALESCE($8, 'current'), $9::date,
@@ -587,19 +692,19 @@ func (s *AlgorithmService) CreateAlgorithm(in AlgorithmCreate) (*Algorithm, erro
 			COALESCE($13, ARRAY[]::text[]), COALESCE($14::jsonb, '{}'::jsonb), COALESCE($15::jsonb, '{}'::jsonb),
 			COALESCE($16, true), $17, $18, $19, $20, $21,
 			COALESCE($22, ARRAY[]::text[]), $23, $24,
-			$25, $26
+			$25, $26, $27::integer, $28::timestamptz
 		) RETURNING id
 	`
 
 	var algID uuid.UUID
 	err = s.db.QueryRow(insertQuery,
 		in.Code, in.Name, in.Category, in.Subcategory, in.Description,
-		in.Strength, *in.RiskScore, in.DeprecationStatus, depDate,
+		in.Strength, riskScore, in.DeprecationStatus, depDate,
 		in.IsPQC, in.PQCStandardizationStatus, in.MigrationGuidance,
 		recAlts, remediationJSON, complianceJSON,
 		in.IsStandard, in.AlgorithmFamily, in.Primitive, in.Mode, in.Padding, in.OID,
 		cryptoFns, in.ClassicalSecurityLevel, in.NistQuantumSecurityLevel,
-		in.ParameterSetIdentifier, in.Curve,
+		in.ParameterSetIdentifier, in.Curve, priorScore, floorAt,
 	).Scan(&algID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create algorithm: %w", err)

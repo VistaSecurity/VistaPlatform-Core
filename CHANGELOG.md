@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.4] - 2026-09-23
+## [1.1.0-rc.5] - 2026-09-24
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -83,9 +83,88 @@ reports. See **Upgrading** for what an existing install needs to do.
   need a role holding `platform.security.manage`; those pages are read-only
   without it.
 
+- **Tenant suspension is now enforced.** A suspended, canceled or deleted tenant's
+  users can no longer sign in or refresh a session, and existing sessions are
+  revoked. Reactivating restores the tenant's previous status.
+- **Platform operator access follows role permissions.** Admin routes check the
+  operator's permissions instead of the role name. The three seeded roles keep
+  the same access, except that Support Agent can now read the pages its
+  permissions already covered. Custom roles get exactly what their permissions
+  grant.
+- **`licensing.reports.persistence.enabled` now defaults to `false`.** MSP
+  installs that keep usage reports on a volume must set it to `true`.
+- **The first vulnerability-feed run after upgrading downloads the Ubuntu OSV
+  archive** (about 700 MiB, once). admin-service gets a scratch volume for it.
+- **Seeded frameworks and classification rules keep your edits.** Admin changes
+  now survive upgrades, and shipped changes to a row you edited are offered
+  rather than applied. Seeded rows deleted before this release come back once
+  on the first upgrade.
+- **Social sign-in identities must be unique.** The upgrade clears the identity
+  on links held by deleted accounts. If two live accounts still share one, the
+  upgrade leaves the unique index unbuilt and logs a warning. Sign-in refuses
+  that identity until an operator resolves it.
+
 <!-- release-notes-end -->
 
 ### Added
+
+- **Automatic delivery of MSP usage reports.** Set the new chart value
+  `licensing.reporting.endpoint` to the https:// receiver URL Vista Security
+  gives you, and admin-service sends each complete monthly usage report to
+  `<endpoint>/v1/usage-reports` as soon as it is generated. It sends the
+  stored, signed file byte for byte and nothing else; previews are never sent.
+  The pass interval is `licensing.reporting.intervalMinutes`, default 60. The
+  receiver's answer is recorded:
+  - `202` or `409` (already received): **Delivered**.
+  - `422` (rejected): **Failed**, not retried until a platform admin presses
+    **Retry**.
+  - `400`/`401`: **Failed**, retried.
+  - network or TLS errors, `429` and 5xx: **Pending retry**.
+
+  Retries back off from 1 hour to once a day. Settings → License & Usage
+  shows each report's delivery status, with the reason and the next attempt,
+  and a **Retry** action (`POST /admin/license/reports/{id}/retry`,
+  `platform.settings`, audited). Delivery outcomes are audited
+  (`license.usage_report.delivered` / `.delivery_failed`). The connection
+  uses the system trust store and honours `HTTPS_PROXY` / `NO_PROXY`, and
+  redirects are not followed. **Off by default:** with no endpoint nothing
+  leaves the install, and air-gapped installs download the report and upload
+  it instead. The chart refuses a non-https endpoint. Schema: an idempotent
+  `license_usage_reports.next_attempt_at` column. (Spec:
+  `edition-licensing-and-msp-metering`, PR 5.)
+- **Upgrading from Core to Enterprise is documented and tested.** A new guide,
+  `docsv4/enterprise/operate/upgrading-from-core.md`, covers the backup, the
+  licence Secret, which values to change, the `helm upgrade`, how to check the
+  result and how to roll back. It is linked from *Installing a licence* and,
+  for Enterprise readers, from the Core release notes. The whole procedure
+  was run on a local k3s cluster: the published Core 1.1.0-rc.4 chart and
+  images, then an Enterprise chart and images built locally from the same
+  source with a test signing key, then a rollback, a restore and a second
+  upgrade. Tenants, assets, tickets and CBOM artifacts were kept. The licence
+  was verified, every paid capability turned on for the existing tenant, and
+  the five regulated frameworks were applied. A bundle whose signature did not
+  match failed the upgrade and wrote nothing. Core and Enterprise are numbered
+  on separate version lines, so the guide has Vista Security name the matching
+  Enterprise release and warns never to install a 3.x commercial chart, which
+  predates Core, over a Core 1.x install.
+- **Admin console, Settings → License & Usage, on the Core images.** With no
+  licence installed, the card now explains that a licence has no effect on the
+  Core images, and that Enterprise needs the Enterprise chart and images as
+  well as a licence. It tells the operator to ask Vista Security for the
+  matching Enterprise release and the upgrade guide. On the Enterprise images the
+  card still explains how to install a licence.
+
+- **A final usage report when an MSP licence lapses.** The month an MSP
+  licence expires in, or is removed or replaced (by an Enterprise licence)
+  in, used to go unreported: monthly reports are built only while the install
+  is MSP. The platform now records each lapse and issues a complete, signed
+  report for that month up to the lapse, under the lapsed licence, so the
+  last month is billable. Installing a new MSP licence later that month
+  reports the rest of it from the lapse on; a renewal before expiry is not a
+  lapse. Automatic delivery now sends due reports whatever the licence is by
+  then (it used to wait until the install was MSP again). Schema: an
+  idempotent `license_msp_lapses` table (read-only for the app role) and a
+  trigger on `platform_license`.
 
 - **Enterprise presentation of the licence.** On an Enterprise install no tier
   name, trial or "community" label appears anywhere: tenants, the Tenants list
@@ -169,6 +248,95 @@ reports. See **Upgrading** for what an existing install needs to do.
     reports. (Spec: `edition-licensing-and-msp-metering`, PR 4.)
 
 ### Security
+
+- **Returning social sign-in is bound to the IdP account, not its email
+  (nOAuth).** "Continue with Google/Microsoft" through Vista's shared sign-up
+  app used to find the tenant user by the email the IdP reported, with no
+  check that the IdP had verified it and no tie to the IdP account. So any
+  IdP account reporting a victim's address signed in as the victim. Sign-in
+  now resolves the account by the provider's account identifier (`sub`),
+  which sign-up already records. An email tied to a different identifier at
+  that provider is refused. Nothing is ever re-linked automatically. The
+  session carries the account's stored address, so an email change at the
+  IdP is not followed. The email is used only to link an old account that
+  has no identifier recorded, and only when the IdP says the address is
+  verified. Sign-up refuses an IdP account that is already linked, or one
+  that returns no identifier. Links and refusals are audited
+  (`user.sso_identity_linked`, `user.sso_login_refused`), and the login page
+  explains each refusal. **Upgrade note:** Microsoft identifiers are specific
+  to the app registration, so replacing the Microsoft sign-up app's client ID
+  now refuses existing Microsoft users. Rotate the secret instead.
+- **Microsoft Entra staff sign-in works, through an allowed-domain list.**
+  Entra never marks an email verified, so every Entra staff sign-in to the
+  operations console failed closed. Admin-login identity providers now have
+  **Allowed email domains** (Settings → Identity Providers; editing needs
+  `platform.security.manage`; changes are audited). A Microsoft staff
+  sign-in is accepted when the IdP does not send `email_verified` and the
+  email's domain exactly matches an entry. The list is accepted only when the
+  provider's authorization and token URLs name your Entra directory, not
+  `common`, `organizations`, `consumers` or the Microsoft personal-account
+  directory (`9188040d-6c67-4c5b-b112-36a304b66dad`, which behaves as
+  `consumers`): Entra does not verify the email
+  claim, so through a multi-tenant endpoint any directory could assert your
+  domain. This is enforced on save and again at every sign-in. Wildcards,
+  subdomains, trailing dots and non-ASCII entries are refused. Google and
+  sign-up providers cannot carry a list. An empty list keeps the old
+  behaviour. Schema: an idempotent
+  `platform_sso_providers.allowed_email_domains` column.
+- **Non-ASCII lookalike addresses no longer match staff or social accounts.**
+  SSO emails were lower-cased with Unicode folding, which maps the Kelvin
+  sign (U+212A) onto `k`. An IdP could verify a lookalike mailbox and have it
+  treated as an existing ASCII address. Only ASCII letters are folded now,
+  and allowed-domain matching is exact. **Behaviour change for tenant SSO:**
+  the same stricter matcher governs a tenant SSO provider's
+  `allowed_domains`, which Microsoft/Azure just-in-time provisioning uses when
+  the IdP omits `email_verified`. Those entries are not yet validated on save
+ . An entry that would now be refused, such as a Unicode domain name
+  not in punycode (`xn--…`) form, a single-label name, a wildcard or a
+  trailing dot, silently stops matching. Provisioning under it fails closed
+  until the entry is re-entered in its exact ASCII form.
+- **Tenant SSO: a Microsoft provider's allowed domains need a single-directory
+  endpoint (, nOAuth).** Automatic account creation accepted an address
+  on a Microsoft/Azure provider's allowed domains in place of the
+  `email_verified` claim Entra never sends, even when the provider used a
+  multi-tenant endpoint (`common`, `organizations`, `consumers` or the
+  personal-account directory). Through such an endpoint any Entra directory
+  can give a user an address on your domain, and that user was then created
+  in your organization. The allowed-domain rule now applies only when the
+  provider's authorization and token URLs both name your Entra directory,
+  checked at every sign-in. Saving allowed domains on a Microsoft/Azure
+  provider with a multi-tenant endpoint is refused (400
+  `allowed_domains_multi_tenant_authority`). **Upgrade note:** a provider
+  already saved that way keeps signing in existing linked users, but no
+  longer creates accounts automatically. To fix it, point its URLs at
+  `login.microsoftonline.com/<your tenant ID>/…` or clear its allowed domains.
+  **Fix it before making any other change to that provider:** the
+  **Settings → People & Access → Security & SSO** form sends the allowed
+  domains and both URLs on every save, so until one of them is corrected
+  every save of that provider — including disabling it or editing its role
+  mappings — is refused with 400. The form now flags the combination, names
+  the fix and disables **Save changes** until it is made; make the
+  correction in the same save as any other edit. A new Microsoft or Azure
+  provider is still pre-filled with the `common` URLs, which work only
+  without allowed domains, and the form now says so.
+  The endpoint check (tenant and staff SSO) now reads the directory from the
+  cleaned URL path, so `/./common/`, `//common/`, `%2e` segments and `..`
+  segments can no longer disguise a multi-tenant endpoint. It also refuses a
+  directory segment that is not a GUID or a domain name.
+- **Suspended and deleted organizations: remaining gaps closed ( items
+  1–3).**
+  - MCP OAuth (**Connect an AI assistant**) now checks the organization's
+    state. A suspended, canceled or deleted organization's still-valid
+    session can no longer approve a client. The consent page sends the
+    browser to sign-in with the reason, and **Allow** answers 403. A code
+    issued before the block exchanges for nothing (`invalid_grant`).
+  - A purged organization's tokens stay dead. The per-request check treated
+    a missing organization record as live, so a token issued before a
+    soft delete worked again once the organization was purged. A missing
+    record is now refused as deleted, on every service.
+  - Tenant SSO sign-in to a blocked organization is refused before anything
+    is written. It used to create the user, link the identity and consume
+    an invitation before the session was refused.
 
 - **Configuring how staff sign in now requires Security management.** Writing a
   platform identity provider (Settings → Identity Providers: add, edit,
@@ -287,6 +455,61 @@ reports. See **Upgrading** for what an existing install needs to do.
 
 ### Changed
 
+- **Plans & Pricing is shown only on an MSP licence.** Core and Enterprise
+  consoles no longer show it, alongside Billing & Revenue: plans, pricing and
+  billing are how a service provider sells to its own customers. Tier
+  enforcement underneath is unchanged.
+- **The licence-reports volume is off by default.**
+  `licensing.reports.persistence.enabled` now defaults to `false`, because
+  only an MSP licence writes reports and the chart cannot know the edition.
+  Core and Enterprise installs no longer carry an empty PVC or a no-surge
+  admin-service rollout. **MSP installs: set
+  `licensing.reports.persistence.enabled=true`** to keep writing report
+  copies to the volume (reports stay in the database either way; an existing
+  PVC is kept, not deleted, when the value turns off).
+- **Audit-log retention policies have no cold-storage age any more, and S3
+  archival now applies to every policy.** The "Cold storage (days)" field on
+  Security → Retention was stored and shown but never used as a number. Its
+  only effect was hidden: the retention job archived a policy's logs only if
+  the field was set. With S3 archival configured only archived logs are
+  deleted, so a policy without it was never archived and **its logs were
+  never deleted**, whatever its total retention said. The field is gone from
+  the console, the API (`cold_storage_days`, which older clients may still
+  send and is ignored) and the table (dropped idempotently in the schema
+  migration). Whether logs are archived is now decided by the deployment:
+  with S3 archival on, every active policy archives logs past its hot period
+  and then deletes them past its total. **Operators with S3 archival on:** a
+  policy that had no cold-storage value will start archiving, and then
+  deleting, logs older than its total retention on the next daily run.
+  Without S3 archival nothing changes, except that the job reports
+  `logs_archived: 0` where it used to report a count of logs it had skipped.
+  (`security-staff-16`, admin-ui review decision 14.)
+
+- **Tenant Health no longer counts resource efficiency.** The factor was 25%
+  of every tenant's health index and was built from fixed values (storage 50,
+  network 60) and CPU and memory figures nothing records, so every tenant got
+  the same made-up share. The index is now performance 25, security posture
+  20, business activity 15 and cost 15, out of 75 — the old proportions,
+  re-weighted. Support → Tenant Health shows resource efficiency as **Not
+  measured**; the API keeps `resource_efficiency` as `null` and lists
+  `resource-metering` in `unavailable_sources`. Indices move once, on the
+  next calculation after upgrading.
+- **Admin console: Comms is removed.** Its Maintenance form saved maintenance
+  windows that nothing read; alert suppression only reads the windows set in
+  **System Health → Alerts**, which is now the only maintenance-window
+  setting, and old Comms → Maintenance links go there. Announcements are
+  hidden until they can be delivered to tenants: nothing delivered them. The
+  admin-service `/admin/maintenance-windows` routes are removed and the unused
+  `maintenance_windows` table is dropped on upgrade; `/admin/announcements`
+  stays.
+- **Admin console: impersonation stubs removed.** Support → Impersonation and
+  the Security Dashboard's impersonation panel listed an audit trail nothing
+  could write, and "Open in Console" in the tenant drawer and scope bar only
+  showed a notice. They are gone, as is copy pointing to impersonation.
+  **Scope** in the tenant drawer now narrows the console to that tenant,
+  like the tenant switcher, instead of showing a notice. Impersonation itself
+  is planned as a separate feature.
+
 - **Licence model v2.** A licence now names its edition (`vc_edition`:
   `enterprise` or `msp`) and is recorded as one `platform_license` row that
   every service reads, instead of per-tenant entitlement rows written every day.
@@ -328,6 +551,328 @@ reports. See **Upgrading** for what an existing install needs to do.
   on the most CVE-prone module family in the tree.
 
 ### Fixed
+
+- **Social sign-up works again for a person whose earlier account was
+  deleted.** The one-account-per-IdP-identity rule from the social sign-in
+  binding change above also counted the links of deleted accounts, which stay
+  in place after a soft delete. Signing up again with the same Google or
+  Microsoft account failed with a 500 at the last step, after the new
+  organization had already been created. The first login of an older,
+  unlinked account hit the same rule. A deleted account's link now gives up
+  the identity when it is claimed again, and only once the sign-up has passed
+  its own checks, so a refused sign-up changes nothing. Links of live
+  accounts are never touched. A deleted user an operator later restores by
+  hand comes back without that social link.
+- **The one-account-per-IdP-identity index no longer blocks upgrades.** An
+  install that already had a deleted account's social link and a live
+  account's link on the same Google or Microsoft identity (possible before the
+  rule above) failed the schema migration, and so the whole `helm upgrade`,
+  on the new unique index. The migration now first frees the identity from
+  deleted accounts wherever another link also holds it, the same thing sign-in
+  does at runtime, and then builds the index. If two **live** accounts still
+  share an identity, which only a race or a hand edit can cause, the upgrade
+  continues without the index and logs a `WARNING` with the number of such
+  identities. Sign-in already refuses them as ambiguous. Clear
+  `external_user_id` on all but one link per identity, and the next upgrade
+  creates the index.
+- **Deprecating an algorithm now makes it grade Critical, as the dialog
+  says.** Admin console, Catalog → Ratings → Deprecate used to change only
+  `deprecation_status`, so an obsoleted algorithm kept its old risk band.
+  Marking an algorithm obsolete now raises its risk score to at least the
+  bottom of the Critical band (read from the shared risk-band ladder) and
+  remembers the score it replaced. Setting it back to `current` or
+  `deprecated` restores that score, unless you enter a new one. While an
+  algorithm stays obsolete, a score below the Critical band is refused with
+  400. The dialog shows the score change, and both changes are audited with
+  the transition and the remembered score. Schema: idempotent
+  `algorithms.pre_obsolete_risk_score` and `obsolete_risk_floor_at` columns.
+  Algorithms that were already obsolete keep their scores. (Owner decision 12,
+  admin-ui data review RC-38.)
+- **The OSV vulnerability feed can finish with Ubuntu enabled, and one failing
+  ecosystem no longer loses the others' progress.** Ubuntu stays in the default
+  ecosystems. Its bulk archive (about 705 MiB) was over the old 512 MiB cap, so
+  the OSV feed failed every run. When any ecosystem failed, the run recorded 0
+  rows and threw away the bookmark, so Debian and Alpine downloaded again from
+  scratch on every run as well. Now:
+  - The archive cap is 2 GiB, and the OSV download has its own 45-minute
+    timeout. Archives are still written to disk and read one advisory at a time.
+  - Each ecosystem keeps its own bookmark and row count even when another
+    ecosystem fails, so only the failed one starts over. Rows a failed run
+    already wrote are counted.
+  - Admin console, Catalog → Vulnerability feed: the card lists each ecosystem
+    with its own result: rows written, how far it has imported, or its error
+    and when it last worked. A run where only some ecosystems failed shows as
+    **Partial**. The status API returns an `ecosystems` array for each feed.
+  - Chart: `admin-service` gets a dedicated scratch volume for the download,
+    `catalogFeeds.spool.sizeLimit`, default `3Gi`, exposed as
+    `CATALOG_FEEDS_SPOOL_DIR`, and requests `3Gi` of ephemeral storage.
+    Outside Kubernetes, point `CATALOG_FEEDS_SPOOL_DIR` at about 2.5 GiB of
+    free disk.
+
+  Schema: an idempotent `catalog_feed_state.ecosystem_status` column. (Owner
+  decision 13, admin-ui data review RC-29.)
+- **A Core admin service now says when it ignores a licence.** If a licence
+  token source is configured on the Core images, the admin service logs
+  `[edition] WARNING: a licence token source is configured (…), but this is a Core
+  build …` at start-up. The warning names the upgrade guide. Before this,
+  nothing in the logs explained why the install stayed Core.
+- **`scripts/rc-smoke.sh` no longer fails a correct Enterprise install.** The
+  framework row reported the five regulated frameworks as a failure on every
+  install. It now reads the build edition first. On a Core build the regulated
+  frameworks are still a failure. On an Enterprise build they are reported,
+  because the content bundle is optional. If the edition cannot be read, the
+  Core rule applies.
+- **Core no longer offers a "Sign-up" identity provider that does nothing.**
+  Social sign-up ("Sign up with Google/Microsoft") is served only by the
+  Enterprise build, but on Core, Settings → Identity Providers let an
+  operator save a Sign-up provider that then showed as Enabled and was never
+  used. Without an active Enterprise or MSP licence the form now offers only
+  **Admin login** and says why, and `POST /admin/identity-providers` refuses
+  a Sign-up provider with `402` and writes nothing. A malformed request is
+  still a `400` on every edition. A Sign-up provider created under a licence
+  that has since lapsed stays listed and can still be edited, disabled or
+  deleted. (`settings-8`, admin-ui review decision 11.)
+- **Retention policies with a 0 or negative age are refused.** The audit
+  service accepted a hot-storage or total-retention age of 0 or less, and a
+  total of 0 makes every matching log eligible for deletion on the next
+  sweep. `POST` and `PUT /retention-policies` now return `400` naming the
+  field unless both ages are at least 1 day and the total is not shorter
+  than the hot period (the last case used to be a `500` from the database).
+  The Retention form shows the same rule and disables Save.
+  (`security-staff-16`, admin-ui review decision 14.)
+- **The Staff roster no longer claims staff have two-factor sign-in.** The
+  column headed "2FA" on Staff & Access → Staff only ever showed whether a
+  staff member's email address was verified; the platform has no MFA for
+  staff. It is now headed **Email verified**, and the note under the table
+  says plainly that this is not multi-factor authentication. MFA for platform
+  staff is recorded as a roadmap item. (`security-staff-20`, admin-ui review
+  decision 15.)
+- **Retrying under a sign-in rate limit no longer extends the lockout.** The
+  auth-service rate limiter reset its counter's expiry on every request, so
+  each blocked attempt pushed the window back by its full length. A client
+  that kept retrying after a 429 stayed locked out for as long as it kept
+  retrying, and the `retry_after` in the response was never accurate. The
+  window is now fixed: its expiry is set once, when the counter is created,
+  and retries count against it without moving it. `retry_after` now gives
+  the actual time left in the window, rounded up to whole seconds. This
+  covers both the per-address limit on the auth endpoints and the
+  per-account limit on sign-in and password reset. Sign-in still fails
+  closed (503) when Redis is unavailable.
+- **Suspending, canceling or deleting a tenant now actually stops it being
+  used.** These actions wrote `tenants.payment_status` / `deleted_at`, which no
+  sign-in, refresh or request path read, so a suspended or deleted tenant's
+  users could keep signing in and working (admin-ui review RC-4,). Now:
+  password and SSO sign-in, invitation acceptance, token refresh and the
+  PAT→JWT exchange are refused with 403 `tenant_suspended` / `tenant_deleted`;
+  every service's JWT middleware refuses an already-issued access token the
+  same way within 30 seconds (`TENANT_STATE_CACHE_TTL`; fails closed with 503
+  `tenant_status_unavailable` if the state cannot be read); the web UI signs
+  the user out and explains why; the tenant's refresh tokens are revoked and
+  its session generation advances, so an old access token stays revoked after
+  reactivation; its sensors and device agents are refused and its scheduled
+  interrogations stop.
+  Platform administrators are unaffected and may still impersonate for
+  support. **Reactivate** now restores the status the suspension interrupted
+  (it was hard-coded to `active`, turning a trial into a paid tenant) and
+  returns it as `payment_status`; canceling an offboarding does the same.
+  Suspend, reactivate and delete write platform audit events. The Delete
+  confirmation no longer claims a deleted tenant is recoverable. Schema:
+  idempotent `tenants.suspended_from_payment_status` and `session_version`
+  columns.
+- **Platform staff access is decided by the permissions a role holds, not its
+  name.** audit-service, compliance-engine's `/admin` routes,
+  device-interrogation-service's `/admin` routes and sensor-manager's Fleet
+  read used to admit `super_admin`, `platform_admin` and a `support_admin`
+  role that has never existed by name, so Staff & Access → Roles had no
+  effect there: custom roles got 403, the seeded Support Agent was refused
+  pages its grants cover, and any role called `platform_admin` passed. They now
+  check `platform_user_has_permission()` like admin-service. New permission
+  `platform.audit.manage` (seeded to Super and Platform Administrator) gates
+  retention-policy, SIEM and audit-alert-rule writes; `platform.audit` gates
+  the reads; job retry/cancel and tenant re-evaluate need `tenants.manage`.
+  The admin console gates every section and sub-page on the permission its
+  service checks: Plans & Pricing moves to `platform.settings` (was
+  `platform.billing`), Support and Security & Trust sub-pages carry their own
+  gates, and Jobs & Queues shows a 403 as "no access" rather than "NATS not
+  reachable". Super and Platform Administrator access is unchanged; Support
+  Agent now reads Fleet, Jobs & Queues, Job Repair and Retention/SIEM, and no
+  longer sees Impersonation, the Security Dashboard or Policy, which always
+  403'd for it.
+- **The billing API refuses requests unless the licence is MSP.** Every
+  billing route (`/admin/billing/**`, `/admin/tenants/{id}/billing…`,
+  `/my-billing/**`, onboarding `/billing/**`) now answers `404`
+  `{"reason": "not_msp"}` on Core, Enterprise or an expired MSP licence;
+  before, only the console hid them. The Stripe webhook is not gated.
+- **`GET /auth/me` no longer shows a trial on Enterprise.** The tenant it
+  returns drops the raw `payment_status` and `trial_ends_at` columns and the
+  response carries the same resolved `plan` block as `/tenant/features`.
+- **The Enterprise retention cap can only be changed by a platform
+  administrator.** `platform_settings` `retention.max_days` is now writable
+  only by the bypass role or the table owner (a schema trigger), and
+  `PUT /admin/license/retention` writes through the bypass pool — the future
+  retention sweep will delete data on this value.
+- **An MSP install past its grace period can no longer grow by toggling
+  "Your own tenant".** Unticking it is refused (`409`,
+  `reason: license_tenant_limit`, audited) when the grace period under the
+  licence has ended and the untick would put the customer count over the
+  licensed number.
+- **The admin console counts a tenant's agents correctly.** The tenant
+  drawer's Usage tile read "3 sensors" for a tenant with one sensor and one
+  discovery agent: it counted the two platform-managed rows every tenant is
+  given (the in-cluster discovery sensor and device interrogation agent) and
+  left discovery agents out. The tile is now **Agents**, showing the customer's
+  sensors plus discovery agents, with the breakdown underneath and the
+  platform-managed rows named separately. The same counts, made in one place
+  (admin-service `internal/agentcounts`: platform = `platform` or the `system`
+  tag, live rows only), now back the tenant directory, platform stats,
+  `/admin/stats/sensors` (which assumed two platform rows per active tenant
+  instead of counting them, and counted each one twice), the onboarding
+  checklist ("first sensor deployed" no longer ticks for a tenant that has
+  deployed nothing, and a discovery agent now counts) and the tier tenant
+  list. `TenantStats` gains `device_agent_count`, `agent_count` and
+  `platform_managed_count`; `sensor_count` is customer sensors only.
+  **Fleet:** the Platform Device Interrogation Agent is listed and counted as
+  an agent, not a sensor; `is_platform_sensor` also recognises a row marked
+  only by its `system` tag; and a discovery agent's status comes from its
+  heartbeat (new `effective_status` on `GET /admin/agents`: offline after 15
+  minutes without one, as in the tenant console), so a dead agent no longer
+  shows Active forever.
+
+- **`helm upgrade` from a release before the licence-reports volume no longer
+  fails on admin-service.** With the reports volume on its default
+  ReadWriteOnce access mode the chart switched admin-service to the `Recreate`
+  strategy, and under Helm's server-side apply (the default in Helm 4) a
+  Deployment that is already running cannot be switched that way: Kubernetes
+  had filled in `rollingUpdate: {maxSurge: 25%, maxUnavailable: 25%}`, the
+  apply leaves that in place, and the whole upgrade failed with
+  `Deployment.apps "admin-service" is invalid: spec.strategy.rollingUpdate:
+  Forbidden: may not be specified when strategy type is 'Recreate'`. Adding
+  `rollingUpdate: null` to the manifest does not help, because server-side
+  apply ignores the null. admin-service now keeps `RollingUpdate` with
+  `maxSurge: 0` and `maxUnavailable: 1`, so the old pod still stops before
+  the new one starts and two pods never compete for the volume. Upgrades
+  from 1.1.0-rc.3 and rc.4, fresh installs and rollbacks were all checked on
+  a local cluster under both server-side and client-side apply. This replaces
+  the `Recreate` wording in the 1.1.0 upgrade notes. The production
+  checklist now gives the one-time `kubectl patch` needed before moving any
+  *other* backend that is already deployed to `strategy: Recreate`.
+- **An operator scoped to one tenant now gets only that tenant in the admin
+  tenant directory.** With Redis running, which is how every chart install
+  runs, `GET /admin/tenants` uses the cached list handler. That handler
+  ignored the `?tenant_id=` scope that admin-ui sends, so a scoped console
+  got the whole directory. The scoped page and the full page were also
+  cached under the same key, so either one could be served in place of the
+  other. The cached handler now applies the scope, puts it in the cache key,
+  and answers a malformed `tenant_id` with `400`, the same as the uncached
+  handler. Both handlers share one parser for the parameter.
+- **Editing a cell in Plans & Pricing → Tiers can no longer erase the plan.**
+  A cell edit sent the whole plan's entitlements, rebuilt from what the page
+  had loaded, and the server deleted every entitlement it was not sent. If
+  that plan's entitlements were still loading or had failed to load, one
+  click removed all of them, and every capacity cap fell back to 0, so no
+  tenant on the plan could add a sensor or an asset. Now:
+  - a cell edit saves that one entitlement
+    (`PUT /admin/tiers/{id}/entitlements/{key}`);
+  - a plan's column cannot be edited until its entitlements have loaded, and
+    shows **Retry** if they fail;
+  - **no write deletes an entitlement it was not told to delete.**
+    `PUT /admin/tiers/{id}/entitlements` now updates the items it names and
+    removes only those listed in `remove`. It requires the `version` that
+    `GET` returns: missing is 428, and out of date (someone else changed the
+    plan) is 409 with `current_version`.
+
+  The plan builder saves the name, price and changed entitlements in a single
+  `PUT /admin/tiers/{id}` (new `entitlements_version` and
+  `remove_entitlements` fields). All of it is saved or none of it is; before,
+  a rejected entitlement left the new price saved anyway. On a 409 the
+  builder keeps your edits and reloads everything else. Save stays disabled
+  until the plan's entitlements load, where before it could save every lever
+  as blank, which means unlimited. Inactive catalogue items are no longer
+  offered. Every change adds a plan history entry naming the admin and the
+  before/after of each entitlement, and a platform audit event
+  (`subscription_tier.created` / `.updated` / `.deprecated` /
+  `.entitlement_set` / `.entitlements_updated`). Two more bugs meant editing
+  or deprecating a plan had never worked:
+  - both routes read the signed-in admin from a context key nothing sets,
+    so they always answered 401;
+  - every tier update named a SQL parameter that did not exist.
+
+  Creating a plan whose entitlements are rejected no longer leaves the plan
+  behind with no entitlements. Omitted overage fields now keep their stored
+  values instead of being cleared.
+
+- **Upgrades no longer undo a platform admin's edits to shipped catalogue
+  content.** On every `helm upgrade` the seed job re-applied the shipped
+  frameworks, controls, measurement rules and classification rules. That
+  republished archived frameworks, rewrote edited control text and tuned
+  classification rules, and brought back deleted controls and rules. Now the
+  admin's version wins:
+  - a shipped row an admin edits stays edited across upgrades, and a row an
+    admin deletes stays deleted;
+  - rows nobody has edited still receive shipped changes automatically;
+  - when a later release changes a row an admin edited, the upgrade keeps the
+    admin's version and records the new shipped values as an offer. Catalog ▸
+    Frameworks (frameworks, controls, measurement rules) and Catalog ▸
+    Classification rules mark rows as **Vista** or **Custom**, flag edited
+    shipped rows as **Modified**, and show **Update available** with the exact
+    change. Accepting it applies the offer through
+    `POST /admin/frameworks/{id}/accept-update`,
+    `POST /admin/frameworks/{id}/controls/{controlId}/accept-update`,
+    `POST /admin/controls/{id}/measurements/{measurementId}/accept-update`
+    (compliance-engine) or
+    `POST /admin/catalogs/classification-rules/{id}/accept-update`
+    (admin-service). All four need `catalogs.manage` and are audited with the
+    values before and after.
+
+  The database enforces this, so neither `seed.sql` nor the signed Enterprise
+  content bundle had to change shape, and the bundle's bytes and signature
+  are unchanged. The seed-data Job applies the bundle in the same seed mode,
+  and it no longer fails an upgrade because an admin archived or deleted a
+  regulated framework. Schema: idempotent `content_origin`,
+  `admin_modified_at`, `seed_shipped` and `seed_offer` columns on the four
+  tables, a `seeded_content_tombstones` table, and guard triggers. On the
+  first upgrade to this release, each shipped framework, control and
+  classification rule is compared with the whole row the release ships, not
+  only the columns the old upsert rewrote. A row that differs is kept, marked
+  Modified and offered the shipped values. Measurement rules, which the seed
+  never upserts, are classified by `classify_seeded_measurements()`: a rule
+  created with its shipped control is Vista's (Modified if updated since), and
+  any other rule is left as Custom rather than claimed. Rows an admin created
+  are never touched by a seed statement, including correction UPDATEs. The
+  seed's one-time de-duplication of measurement rules used to keep one rule
+  per control and measurement type and delete the rest, which removed any rule
+  an admin added with a type the control already used (and moved or deleted
+  tenant overrides on it). It now removes only exact copies of a shipped rule
+  and never an admin's row. A shipped correction that reaches an untouched rule
+  from before this release is applied, not turned into an offer. The
+  Enterprise seed Job classifies the bundle's rules on the same upgrade. The
+  "Update available" action asks for confirmation and lists the change before
+  it writes anything.
+  (Admin UI data review, decision 4, RC-12.)
+- **Re-seeding no longer piles up the PQC migration advice on algorithms.**
+  Two seed statements prepended `ML-KEM-*` / `ML-DSA-*` to
+  `recommended_alternatives` and appended the "PQC Migration" paragraph to
+  `migration_guidance` on every upgrade, so each upgrade added another copy.
+  They now run once, and the upgrade removes existing duplicates. An upgrade
+  also no longer restores half of that advice after an admin has removed it.
+  (RC-12, catalog-9.)
+- **Tenant health alerts clear, and no longer pile up.** Every calculation
+  (every 30 minutes) used to insert the same alerts again and never resolved
+  one, so a "Poor Health Status" alert stayed open next to a recovered score.
+  A tenant now has at most one open alert of each kind: recalculating updates
+  it, and it is resolved when the condition clears. A calculation that could
+  measure nothing leaves open alerts as they are. On upgrade, duplicate open
+  alerts are resolved, keeping the newest, and a unique index on open alerts
+  per tenant and kind is added.
+- **Support → Tenant Health counts every open alert.** The **Active alerts**
+  column counted only critical alerts, so a tenant with an open high-severity
+  alert showed 0. The list API adds `active_alerts`; `critical_alerts` stays.
+  Soft-deleted tenants are no longer listed.
+- **A failed resource read no longer becomes a health score.** When
+  resource-tracker-service could not read a tenant's usage, it answered with
+  a default efficiency of 75 and zero cost, which Tenant Health scored as
+  measured. It now returns an error, and the cost factor shows as
+  unavailable.
 
 - The admin tenant directory no longer fails to load when a tenant has no
   billing email, and a malformed `INSTALL_ID` no longer stops a licence bound to

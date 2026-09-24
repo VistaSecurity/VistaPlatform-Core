@@ -8,6 +8,8 @@ package api
 //
 // Mutations run against these tests (each turns one red):
 //   - drop resp["plan"] from newTenantFeaturesHandler      → plan cases
+//   - GetMe serialises the raw models.Tenant again         → /auth/me copy guard
+//   - drop resp["plan"] from GetMe                         → /auth/me plan cases
 //   - GetFeatureAvailability keeps the tier name on Enterprise → availability case
 //   - /tiers ignores the licence edition                    → catalogue case
 
@@ -139,3 +141,85 @@ var (
 	_ tierStore                = (*billingRepository)(nil)
 	_ featureAvailabilityStore = (*billingRepository)(nil)
 )
+
+// GET /auth/me presents the tenant through the plan block, not the raw
+// billing columns: on an Enterprise install a tenant row still reading
+// payment_status 'trial' with a trial_ends_at (what signup used to write, and
+// what the reconciler corrects only on its next pass) must not surface as a
+// trial. The copy guard, extended to /auth/me.
+func TestContract_GetMe_PlanBlockAndCopyGuard(t *testing.T) {
+	sv := loadSpec(t)
+	uid, tid := uuid.MustParse(aUserID), uuid.MustParse(aTenantID)
+	ends := time.Now().Add(7 * 24 * time.Hour)
+	for _, tc := range []struct {
+		name string
+		plan entitlements.Plan
+	}{
+		{"core", entitlements.Plan{Edition: entitlements.EditionCore, DisplayName: entitlements.PlanDisplayNameCore}},
+		{"enterprise", enterprisePlan()},
+		{"msp trial", entitlements.Plan{Edition: entitlements.EditionMSP, DisplayName: "Starter", Trial: &entitlements.PlanTrial{EndsAt: ends}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := sampleTenant(tid)
+			tenant.PaymentStatus = "trial"
+			tenant.TrialEndsAt = &ends
+			eng := meEngine(&stubAuthServiceStore{userResult: sampleUser(uid, tid), tenantResult: tenant}, stubPlan(tc.plan))
+			w := do(eng, http.MethodGet, "/api/v1/auth-service/auth/me", nil)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", w.Code, w.Body.String())
+			}
+			sv.assertConforms(t, "MeResponse", w.Body.Bytes())
+			var resp struct {
+				Tenant map[string]any     `json:"tenant"`
+				Plan   *entitlements.Plan `json:"plan"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.Plan == nil || resp.Plan.DisplayName != tc.plan.DisplayName || (resp.Plan.Trial != nil) != (tc.plan.Trial != nil) {
+				t.Fatalf("plan = %+v, want %+v", resp.Plan, tc.plan)
+			}
+			for _, raw := range []string{"payment_status", "trial_ends_at"} {
+				if _, ok := resp.Tenant[raw]; ok {
+					t.Errorf("tenant carries the raw billing column %q: %s", raw, w.Body.String())
+				}
+			}
+			if resp.Tenant["name"] != tenant.Name || resp.Tenant["billing_email"] != tenant.BillingEmail {
+				t.Errorf("tenant lost its own details: %v", resp.Tenant)
+			}
+			if tc.plan.Edition == entitlements.EditionEnterprise {
+				lower := strings.ToLower(w.Body.String())
+				for _, word := range []string{"community", "trial"} {
+					if strings.Contains(lower, word) {
+						t.Errorf("Enterprise /auth/me contains %q: %s", word, w.Body.String())
+					}
+				}
+			}
+		})
+	}
+
+	// A failed plan lookup omits the block; user and tenant still answer.
+	eng := meEngine(&stubAuthServiceStore{userResult: sampleUser(uid, tid), tenantResult: sampleTenant(tid)},
+		func(context.Context, uuid.UUID) (entitlements.Plan, error) {
+			return entitlements.Plan{}, errors.New("db down")
+		})
+	w := do(eng, http.MethodGet, "/api/v1/auth-service/auth/me", nil)
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"plan"`) || !strings.Contains(w.Body.String(), `"tenant"`) {
+		t.Fatalf("plan failure = %d %s, want 200 with a tenant and without a plan key", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "MeResponse", w.Body.Bytes())
+}
+
+func meEngine(store *stubAuthServiceStore, plans tenantPlanResolver) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	grp := r.Group("/api/v1/auth-service")
+	grp.Use(func(c *gin.Context) {
+		c.Set("userID", aUserID)
+		c.Set("tenantID", aTenantID)
+		c.Next()
+	})
+	h := &AuthHandlers{authService: store, plans: plans}
+	grp.GET("/auth/me", h.GetMe)
+	return r
+}

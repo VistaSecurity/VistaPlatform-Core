@@ -23,6 +23,7 @@ const queryState = vi.hoisted(() => ({
   create: { mutate: vi.fn(), reset: vi.fn(), isPending: false, error: undefined as Error | undefined },
   update: { mutate: vi.fn(), reset: vi.fn(), isPending: false, error: undefined as Error | undefined },
   remove: { mutate: vi.fn(), reset: vi.fn(), isPending: false, error: undefined as Error | undefined },
+  accept: { mutate: vi.fn(), reset: vi.fn(), isPending: false, error: undefined as Error | undefined },
 }));
 
 vi.mock('./catalog-queries', async (importOriginal) => {
@@ -35,6 +36,7 @@ vi.mock('./catalog-queries', async (importOriginal) => {
     useCreateClassificationRule: () => queryState.create,
     useUpdateClassificationRule: () => queryState.update,
     useDeleteClassificationRule: () => queryState.remove,
+    useAcceptClassificationRuleUpdate: () => queryState.accept,
   };
 });
 
@@ -53,6 +55,9 @@ const rule = (over: Partial<ClassificationRule> = {}): ClassificationRule => ({
   source_url: 'https://standards-oui.ieee.org/',
   created_at: '2026-09-11T00:00:00Z',
   updated_at: '2026-09-11T00:00:00Z',
+  content_origin: 'vista',
+  admin_modified: false,
+  update_available: false,
   ...over,
 });
 
@@ -199,5 +204,38 @@ describe('Catalog ▸ Classification rules', () => {
     queryState.rules.data = page([]);
     const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
     expect(html).not.toContain('Previous');
+  });
+
+  // Decision 4 (RC-12): shipped rules the admin edits stay edited, and a later
+  // shipped change arrives as an offer. The page has to show which rules are
+  // shipped, which were changed here, and the one action an offer needs.
+  it('marks shipped and custom rules, and a shipped rule edited here', () => {
+    queryState.rules.data = page([
+      rule(),
+      rule({ id: '22222222-2222-4222-8222-222222222222', pattern: '00188B', content_origin: 'custom' }),
+      rule({ id: '33333333-3333-4333-8333-333333333333', pattern: '000048', admin_modified: true }),
+    ]);
+    const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
+    expect(html).toContain('>Vista<');
+    expect(html).toContain('>Custom<');
+    expect(html).toContain('>Modified<');
+  });
+
+  it('offers the shipped update on a rule that has one, and nowhere else', () => {
+    queryState.rules.data = page([
+      rule({ admin_modified: true, confidence: 0.55, update_available: true, offered_update: { confidence: 0.75 } }),
+      rule({ id: '22222222-2222-4222-8222-222222222222', pattern: '00188B' }),
+    ]);
+    const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
+    expect(html).toContain('Accept the shipped update for 00000C');
+    expect(html).not.toContain('Accept the shipped update for 00188B');
+    // The tooltip says exactly what accepting writes.
+    expect(html).toContain('confidence: 0.55 → 0.75');
+  });
+
+  it('says upgrades keep an edited shipped rule rather than that they undo it', () => {
+    queryState.rules.data = page([rule()]);
+    const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
+    expect(html).toContain('Your edits to them survive upgrades');
   });
 });

@@ -38,6 +38,7 @@ const summary = (overrides: Partial<TenantHealthSummary> = {}): TenantHealthSumm
   health_status: 'unknown',
   last_calculated: now,
   trend_direction: '',
+  active_alerts: 0,
   critical_alerts: 0,
   recommendations: 0,
   ...overrides,
@@ -129,6 +130,80 @@ describe('TenantHealthPage unknown health rendering', () => {
     expect(html).toContain('Some factors could not be measured');
     expect(html).toContain('resource-tracker-service');
     expect(html).toContain('score reflects 60% of the factor weight');
+  });
+
+  // Decision 8 (RC-14): resource efficiency is dropped from the index and
+  // reported as `resource-metering` in unavailable_sources. That is not a
+  // failed peer — it must read "Not measured", and must not be listed among
+  // the unreachable services or lower the stated completeness.
+  it('shows resource efficiency as not measured, apart from unreachable peers', () => {
+    queryState.detail.data = detail({
+      overall_score: 80,
+      health_status: 'good',
+      score_breakdown: {
+        resource_efficiency: null,
+        performance_metrics: 80,
+        security_posture: 70,
+        business_activity: 66,
+        cost_optimization: 90,
+        unavailable_sources: ['resource-metering'],
+        data_completeness: 1,
+      },
+    });
+
+    const html = renderToStaticMarkup(
+      createElement(TenantHealthDrawer, {
+        summary: summary({ overall_score: 80, health_status: 'good' }),
+        onClose: vi.fn(),
+      }),
+    );
+
+    const row = html.match(/data-testid="factor-resource_efficiency"[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(row).toContain('Not measured');
+    expect(row).not.toContain('Unavailable');
+    expect(html).toContain('Resource efficiency is not measured');
+    expect(html).not.toContain('could not be measured — these services were unreachable');
+    expect(html).not.toContain('Unavailable');
+  });
+
+  it('still names real unreachable peers alongside the not-measured factor', () => {
+    queryState.detail.data = detail({
+      overall_score: 70,
+      health_status: 'fair',
+      score_breakdown: {
+        resource_efficiency: null,
+        performance_metrics: 80,
+        security_posture: 70,
+        business_activity: 66,
+        cost_optimization: null,
+        unavailable_sources: ['resource-tracker-service', 'resource-metering'],
+        data_completeness: 0.8,
+      },
+    });
+
+    const html = renderToStaticMarkup(
+      createElement(TenantHealthDrawer, {
+        summary: summary({ overall_score: 70, health_status: 'fair' }),
+        onClose: vi.fn(),
+      }),
+    );
+
+    const cost = html.match(/data-testid="factor-cost_optimization"[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(cost).toContain('Unavailable');
+    expect(html).toContain('these services were unreachable: <span class="mono">resource-tracker-service</span>');
+    expect(html).toContain('score reflects 80% of the factor weight');
+  });
+
+  // RC-14: the "Active alerts" column counted only critical alerts, so an open
+  // high-severity "Poor Health Status" alert read as 0.
+  it('counts every active alert in the Active alerts column', () => {
+    queryState.list.data = [summary({ overall_score: 45, health_status: 'poor', active_alerts: 2, critical_alerts: 0 })];
+
+    const html = renderToStaticMarkup(createElement(TenantHealthPage));
+    const cell = html.match(/data-testid="active-alerts"[\s\S]*?<\/td>/)?.[0] ?? '';
+
+    expect(cell).toContain('>2<');
+    expect(cell).not.toContain('>0<');
   });
 
   it('renders the shared band beside an index rather than a percentage', () => {

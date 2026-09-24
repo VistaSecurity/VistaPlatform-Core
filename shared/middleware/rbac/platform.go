@@ -10,93 +10,26 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
 )
 
-// RequirePlatformPermission creates middleware that requires a specific platform permission
-// This middleware should be used after authentication middleware that sets userID in context
+// RequirePlatformPermission requires one platform permission, resolved through
+// platform_user_has_permission(). It is middleware.RequirePlatformAdmin — the
+// single implementation of the platform permission gate — with the HMAC
+// internal-call bypass in front of it.
+//
+// HMAC-verified internal service calls already cleared the trust boundary in
+// RequireJWTAuth and carry the "system" userID sentinel rather than a real user
+// UUID, so the per-user check does not apply to them (parsing "system" as a
+// UUID would otherwise fail with "Invalid user ID format").
+//
+// Must be used after authentication middleware that sets userID and userType.
 func RequirePlatformPermission(db *sql.DB, permission string) gin.HandlerFunc {
-	rbacService := rbac.NewRBACService(db)
+	gate := middleware.RequirePlatformAdmin(db, permission)
 
 	return func(c *gin.Context) {
-		// HMAC-verified internal service calls already cleared the trust boundary
-		// in RequireJWTAuth and carry the "system" userID sentinel rather than a
-		// real user UUID. Skip the per-user permission check for them (parsing
-		// "system" as a UUID would otherwise fail with "Invalid user ID format").
 		if middleware.IsInternalCall(c) {
 			c.Next()
 			return
 		}
-
-		if middleware.GetUserType(c) != middleware.UserTypePlatform {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error": "Platform user required",
-			})
-			c.Abort()
-			return
-		}
-
-		// Get user ID from context (set by auth middleware)
-		userIDVal, exists := c.Get("userID")
-		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "User ID not found in context. Authentication required.",
-			})
-			c.Abort()
-			return
-		}
-
-		// Parse user ID (handle both string and UUID types)
-		var userID uuid.UUID
-		var err error
-		switch v := userIDVal.(type) {
-		case string:
-			userID, err = uuid.Parse(v)
-			if err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{
-					"error": "Invalid user ID format",
-				})
-				c.Abort()
-				return
-			}
-		case uuid.UUID:
-			userID = v
-		default:
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "Invalid user ID type",
-			})
-			c.Abort()
-			return
-		}
-
-		// Check platform permission
-		hasPermission, err := rbacService.CheckPlatformPermission(userID, permission)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to check platform permission",
-			})
-			c.Abort()
-			return
-		}
-
-		if !hasPermission {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":               "Insufficient platform permissions",
-				"required_permission": permission,
-			})
-			c.Abort()
-			return
-		}
-
-		// PAT scope narrowing: a scope-narrowed token (read-only PAT) must
-		// not reach platform-admin actions even if the underlying user could.
-		if !middleware.PermissionWithinTokenScope(c, permission) {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":               "Permission outside token scope",
-				"required_permission": permission,
-			})
-			c.Abort()
-			return
-		}
-
-		c.Next()
+		gate(c)
 	}
 }
 

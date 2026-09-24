@@ -49,6 +49,8 @@ type auditedEntry struct {
 	ResourceType string         `json:"resource_type"`
 	ResourceID   string         `json:"resource_id"`
 	Metadata     map[string]any `json:"metadata"`
+	OldValues    map[string]any `json:"old_values"`
+	NewValues    map[string]any `json:"new_values"`
 }
 
 // newAuditSpy returns a middleware that puts a REAL audit middleware in the gin

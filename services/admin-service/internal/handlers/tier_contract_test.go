@@ -17,6 +17,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
 )
 
 var errTierFail = errors.New("tier failure")
@@ -50,11 +52,14 @@ func (s *stubTierManager) ListTiers(bool) ([]models.SubscriptionTier, error) {
 func (s *stubTierManager) GetTier(uuid.UUID) (*models.SubscriptionTier, error) {
 	return s.tier, s.tierErr
 }
-func (s *stubTierManager) CreateTier(models.TierCreateRequest) (*models.SubscriptionTier, error) {
+func (s *stubTierManager) CreateTier(models.TierCreateRequest, uuid.UUID) (*models.SubscriptionTier, error) {
 	return s.tier, s.createErr
 }
-func (s *stubTierManager) UpdateTier(uuid.UUID, models.TierUpdateRequest, uuid.UUID) (*models.SubscriptionTier, error) {
-	return s.tier, s.updateErr
+func (s *stubTierManager) UpdateTier(uuid.UUID, models.TierUpdateRequest, uuid.UUID) (*services.TierUpdateResult, error) {
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
+	return &services.TierUpdateResult{Tier: s.tier}, nil
 }
 func (s *stubTierManager) DeprecateTier(uuid.UUID, uuid.UUID) error { return s.deprecateErr }
 func (s *stubTierManager) GetTierHistory(uuid.UUID) ([]models.TierHistory, error) {
@@ -69,7 +74,11 @@ func tierEngine(mgr tierManager, withUser bool) *gin.Engine {
 	grp := r.Group(apiBase)
 	if withUser {
 		grp.Use(func(c *gin.Context) {
-			c.Set("user_id", uuid.New())
+			// The key the real auth middleware sets (sharedmw.CtxKeyUserID).
+			// This stub used to set "user_id" — the key the handlers read and
+			// nothing in production set — so the tests passed while every
+			// real PUT/DELETE answered 401.
+			c.Set("userID", uuid.New().String())
 			c.Next()
 		})
 	}
@@ -234,7 +243,7 @@ func TestContract_UpdateTier_200(t *testing.T) {
 	sv.assertConforms(t, "TierUpdateResponse", w.Body.Bytes())
 }
 
-// No user_id in context → 401.
+// No authenticated platform user in context → 401.
 func TestContract_UpdateTier_401(t *testing.T) {
 	sv := loadSpec(t)
 	eng := tierEngine(&stubTierManager{}, false)
@@ -253,6 +262,36 @@ func TestContract_UpdateTier_400_badID(t *testing.T) {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// The composition errors UpdateTier can return map to the same statuses as the
+// entitlements routes: a stale entitlements_version is 409 naming the current
+// one, a missing one is 428, an unknown tier is 404. The plan builder relies on
+// the 409 to tell the admin the plan changed under them.
+func TestContract_UpdateTier_compositionErrors(t *testing.T) {
+	sv := loadSpec(t)
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		schema string
+	}{
+		{"stale version", fmt.Errorf("failed to update tier entitlements: %w", &services.StaleCompositionError{Current: "abc"}), http.StatusConflict, "CompositionConflictError"},
+		{"no version", services.ErrCompositionVersionRequired, http.StatusPreconditionRequired, "LegacyError"},
+		{"unknown tier", services.ErrTierNotFound, http.StatusNotFound, "LegacyError"},
+		{"inactive item", &services.UnknownItemKeyError{Key: "retired"}, http.StatusBadRequest, "LegacyError"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := tierEngine(&stubTierManager{updateErr: tc.err}, true)
+			w := doRequest(eng, http.MethodPut, tierBase+"/"+uuid.New().String(),
+				strings.NewReader(`{"entitlements":[{"item_key":"max_sensors","included_value":{"quantity":5}}],"entitlements_version":"old"}`))
+			if w.Code != tc.status {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, tc.status, w.Body.String())
+			}
+			sv.assertConforms(t, tc.schema, w.Body.Bytes())
+		})
+	}
 }
 
 // --- deprecate --------------------------------------------------------------

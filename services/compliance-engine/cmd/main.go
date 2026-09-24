@@ -454,30 +454,21 @@ func main() {
 		compliance.DELETE("/mappings/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.DeleteMapping)
 	}
 
-	// Admin routes (platform admin only)
-	admin := api.Group("/compliance-engine/admin")
-	admin.Use(middleware.RequirePlatformAuth(cfg.JWTSecret))
-	admin.Use(middleware.StringifyUserID())
-	admin.Use(middleware.RequirePlatformAdmin())
-	{
-		// ADR-0015: manual per-tenant re-evaluation (platform-admin, extraordinary).
-		admin.POST("/tenants/:tenantId/reevaluate", handlers.NewAdminReconcileHandler(reconcileEnqueuer).ReevaluateTenant)
+	// Admin routes (platform operators). Each route is gated on a named
+	// platform permission — see registerAdminRoutes.
+	adminCatalog := registerAdminRoutes(api, cfg.JWTSecret, rawDB, adminHandlers{
+		reevaluateTenant:   handlers.NewAdminReconcileHandler(reconcileEnqueuer).ReevaluateTenant,
+		listPlatformAlerts: alertHandlers.ListPlatformAlerts,
 
-		// Platform-track stateful alerts (service_down, tenant_health_degraded)
-		// raised under the sentinel platform tenant. Read-only here; ack/snooze
-		// UI is a fast-follow.
-		admin.GET("/alerts", alertHandlers.ListPlatformAlerts)
-
-		// Platform framework management
-		admin.GET("/frameworks", platformFrameworkHandlers.ListFrameworks)
-		admin.POST("/frameworks", platformFrameworkHandlers.CreateFramework)
-		admin.GET("/frameworks/:id", platformFrameworkHandlers.GetFramework)
-		admin.PUT("/frameworks/:id", platformFrameworkHandlers.UpdateFramework)
-		admin.DELETE("/frameworks/:id", platformFrameworkHandlers.DeleteFramework)
-		admin.POST("/frameworks/:id/publish", platformFrameworkHandlers.PublishFramework)
-		admin.GET("/frameworks/:id/versions", platformFrameworkHandlers.ListFrameworkVersions)
-		admin.GET("/frameworks/versions/:versionId", platformFrameworkHandlers.GetFrameworkVersion)
-		admin.POST("/frameworks/:id/unpublish", func(c *gin.Context) {
+		listFrameworks:        platformFrameworkHandlers.ListFrameworks,
+		createFramework:       platformFrameworkHandlers.CreateFramework,
+		getFramework:          platformFrameworkHandlers.GetFramework,
+		updateFramework:       platformFrameworkHandlers.UpdateFramework,
+		deleteFramework:       platformFrameworkHandlers.DeleteFramework,
+		publishFramework:      platformFrameworkHandlers.PublishFramework,
+		listFrameworkVersions: platformFrameworkHandlers.ListFrameworkVersions,
+		getFrameworkVersion:   platformFrameworkHandlers.GetFrameworkVersion,
+		unpublishFramework: func(c *gin.Context) {
 			// Unpublish is same as archiving
 			idStr := c.Param("id")
 			id, err := uuid.Parse(idStr)
@@ -494,32 +485,32 @@ func main() {
 				return
 			}
 			c.JSON(200, gin.H{"message": "Framework unpublished successfully", "framework": framework})
-		})
+		},
 
-		// Platform framework controls
-		admin.POST("/frameworks/:id/controls", platformFrameworkHandlers.CreateControl)
-		admin.PUT("/frameworks/:id/controls/:controlId", platformFrameworkHandlers.UpdateControl)
-		admin.DELETE("/frameworks/:id/controls/:controlId", platformFrameworkHandlers.DeleteControl)
+		createControl: platformFrameworkHandlers.CreateControl,
+		updateControl: platformFrameworkHandlers.UpdateControl,
+		deleteControl: platformFrameworkHandlers.DeleteControl,
 
-		// Platform framework control measurements
-		admin.GET("/controls/:id/measurements", platformFrameworkHandlers.ListControlMeasurements)
-		admin.POST("/controls/:id/measurements", platformFrameworkHandlers.AddControlMeasurement)
-		admin.PUT("/controls/:id/measurements/:measurementId", platformFrameworkHandlers.UpdateControlMeasurement)
-		admin.DELETE("/controls/:id/measurements/:measurementId", platformFrameworkHandlers.DeleteControlMeasurement)
+		listControlMeasurements:  platformFrameworkHandlers.ListControlMeasurements,
+		addControlMeasurement:    platformFrameworkHandlers.AddControlMeasurement,
+		updateControlMeasurement: platformFrameworkHandlers.UpdateControlMeasurement,
+		deleteControlMeasurement: platformFrameworkHandlers.DeleteControlMeasurement,
 
-		// Measurement templates
-		admin.GET("/templates", templateHandlers.ListTemplates)
-		admin.GET("/templates/:id", templateHandlers.GetTemplate)
-		admin.POST("/templates", templateHandlers.CreateTemplate)
-		admin.PUT("/templates/:id", templateHandlers.UpdateTemplate)
-		admin.DELETE("/templates/:id", templateHandlers.DeleteTemplate)
+		acceptFrameworkUpdate:   platformFrameworkHandlers.AcceptFrameworkUpdate,
+		acceptControlUpdate:     platformFrameworkHandlers.AcceptControlUpdate,
+		acceptMeasurementUpdate: platformFrameworkHandlers.AcceptMeasurementUpdate,
 
-		// Framework provisioning (admin → tenant)
-		admin.POST("/provision-framework", frameworkLicenseHandlers.AdminProvisionFramework)
-		admin.GET("/tenants/:tenantId/subscriptions", frameworkLicenseHandlers.AdminListTenantSubscriptions)
-		admin.DELETE("/tenants/:tenantId/subscriptions/:frameworkId", frameworkLicenseHandlers.AdminCancelTenantSubscription)
-		admin.POST("/templates/:id/apply", templateHandlers.ApplyTemplate)
-	}
+		listTemplates:  templateHandlers.ListTemplates,
+		getTemplate:    templateHandlers.GetTemplate,
+		createTemplate: templateHandlers.CreateTemplate,
+		updateTemplate: templateHandlers.UpdateTemplate,
+		deleteTemplate: templateHandlers.DeleteTemplate,
+		applyTemplate:  templateHandlers.ApplyTemplate,
+
+		provisionFramework:       frameworkLicenseHandlers.AdminProvisionFramework,
+		listTenantSubscriptions:  frameworkLicenseHandlers.AdminListTenantSubscriptions,
+		cancelTenantSubscription: frameworkLicenseHandlers.AdminCancelTenantSubscription,
+	})
 
 	// ── Author seam: drafting controls from a pasted standard (ADR-0008 D1) ──
 	//
@@ -538,12 +529,12 @@ func main() {
 	// apart from a broken route.
 	authorAvailability := models.AuthorAvailability{Reason: models.AuthorReasonEdition}
 	if hooks.RegisterAuthorRoutes != nil {
-		authorAvailability = hooks.RegisterAuthorRoutes(compliance, admin, db, rawDB,
+		authorAvailability = hooks.RegisterAuthorRoutes(compliance, adminCatalog, db, rawDB,
 			auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"))
 	}
 	authorHandlers := handlers.NewAuthorHandlers(authorAvailability)
 	compliance.GET("/custom-policies/draft-controls/availability", authorHandlers.GetAvailability)
-	admin.GET("/frameworks/draft-controls/availability", authorHandlers.GetAvailability)
+	adminCatalog.GET("/frameworks/draft-controls/availability", authorHandlers.GetAvailability)
 	log.Printf("🖉  control drafting (author seam): available=%t reason=%q provider=%q",
 		authorAvailability.Available, authorAvailability.Reason, authorAvailability.Provider)
 

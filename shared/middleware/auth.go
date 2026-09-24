@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -15,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/models"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // RevokedTokenKeyPrefix is the Redis key prefix for the JWT revocation denylist.
@@ -122,6 +124,114 @@ type AuthConfig struct {
 	// the revocation denylist with no extra wiring. If REDIS_URL is unset
 	// the check is skipped (fail-open — same posture as a Redis outage).
 	RevocationChecker RevocationChecker
+
+	// TenantState, when non-nil, is consulted for every token that carries a
+	// tenant (except impersonation tokens): a suspended, canceled or deleted
+	// tenant is refused with 403 and a tenant_suspended / tenant_deleted code,
+	// so a session issued BEFORE the suspension stops working within one cache
+	// TTL instead of living out its access-token lifetime. When nil,
+	// RequireJWTAuth builds one from DATABASE_URL (tenantstate.CheckerFromEnv)
+	// so every service enforces tenant state with no extra wiring. A lookup
+	// error fails CLOSED (503) — an unreadable state is not permission.
+	TenantState TenantStateChecker
+}
+
+// TenantStateChecker answers whether a tenant is blocked. *tenantstate.Checker
+// implements it; tests substitute their own.
+type TenantStateChecker interface {
+	Check(ctx context.Context, tenantID uuid.UUID) (code string, blocked bool, err error)
+}
+
+type tenantSessionChecker interface {
+	CheckSession(ctx context.Context, tenantID uuid.UUID, tokenVersion int64) (code string, blocked, revoked bool, err error)
+}
+
+// ResolveTenantStateChecker returns the explicit checker when one is given and
+// otherwise the DATABASE_URL-built default, or nil (logged) when neither
+// exists. Exported for the services with their own JWT middleware
+// (auth-service, inventory-service, audit-service) so all of them resolve the
+// check the same way.
+func ResolveTenantStateChecker(explicit TenantStateChecker, service string) TenantStateChecker {
+	if explicit != nil {
+		return explicit
+	}
+	if c := tenantstate.CheckerFromEnv(); c != nil {
+		return c // assigned only when non-nil: a typed-nil *Checker is a non-nil interface
+	}
+	tenantStateUnsetWarning.Do(func() {
+		logrus.WithField("middleware", service).Warn("DATABASE_URL is unset; tenant suspension is NOT enforced by this process's JWT middleware")
+	})
+	return nil
+}
+
+var tenantStateUnsetWarning sync.Once
+
+// tenantBlockAllowedPath matches the only route a user of a blocked tenant may
+// still reach: signing out, so the browser's cookies can be cleared. Same
+// anchoring rules as passwordChangeAllowedPath.
+var tenantBlockAllowedPath = regexp.MustCompile(
+	`^(?:/api/v\d+/[A-Za-z0-9._-]+)?(?:/[A-Za-z0-9._-]+)?/auth/logout$`,
+)
+
+// IsTenantBlockAllowedPath reports whether a user of a suspended or deleted
+// tenant may still reach path (sign-out only).
+func IsTenantBlockAllowedPath(path string) bool {
+	return tenantBlockAllowedPath.MatchString(path)
+}
+
+// EnforceTenantState applies checker to a validated token's tenant and, when
+// the tenant is blocked or its state cannot be read, writes the refusal and
+// aborts. It returns true when the request may proceed. Shared by every JWT
+// middleware so the response shape (status, code, message) is identical
+// everywhere the web UI can meet it.
+//
+// Skipped for platform tokens (no tenant), for impersonation tokens (a platform
+// administrator may still look at a suspended tenant — documented in the admin
+// guide), and for sign-out.
+func EnforceTenantState(c *gin.Context, checker TenantStateChecker, tenantID uuid.UUID, tokenType string) bool {
+	return enforceTenantState(c, checker, tenantID, tokenType, 0, false)
+}
+
+// EnforceTenantSession additionally applies the tenant session generation
+// carried by a JWT. A suspension increments the stored generation, permanently
+// invalidating tokens minted before it even after the tenant is reactivated.
+func EnforceTenantSession(c *gin.Context, checker TenantStateChecker, tenantID uuid.UUID, tokenType string, tokenVersion int64) bool {
+	return enforceTenantState(c, checker, tenantID, tokenType, tokenVersion, true)
+}
+
+func enforceTenantState(c *gin.Context, checker TenantStateChecker, tenantID uuid.UUID, tokenType string, tokenVersion int64, session bool) bool {
+	if checker == nil || tenantID == uuid.Nil || tokenType == "impersonation" ||
+		IsTenantBlockAllowedPath(c.Request.URL.Path) {
+		return true
+	}
+	var code string
+	var blocked, revoked bool
+	var err error
+	if sc, ok := checker.(tenantSessionChecker); session && ok {
+		code, blocked, revoked, err = sc.CheckSession(c.Request.Context(), tenantID, tokenVersion)
+	} else {
+		code, blocked, err = checker.Check(c.Request.Context(), tenantID)
+	}
+	if err != nil {
+		logrus.WithError(err).WithField("tenant_id", tenantID).Error("tenant state lookup failed; refusing request (fail-closed)")
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": tenantstate.Message(tenantstate.CodeUnavailable),
+			"code":  tenantstate.CodeUnavailable,
+		})
+		c.Abort()
+		return false
+	}
+	if blocked {
+		c.JSON(http.StatusForbidden, gin.H{"error": tenantstate.Message(code), "code": code})
+		c.Abort()
+		return false
+	}
+	if revoked {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked", "code": "session_revoked"})
+		c.Abort()
+		return false
+	}
+	return true
 }
 
 // RequireJWTAuth returns Gin middleware that validates JWT tokens and sets
@@ -188,6 +298,10 @@ func RequireJWTAuth(cfg AuthConfig) gin.HandlerFunc {
 	if revocation == nil {
 		revocation = redisRevocationCheckerFromEnv()
 	}
+
+	// Resolve the tenant-state checker once: explicit (tests) wins, otherwise
+	// the DATABASE_URL-built default.
+	tenantState := ResolveTenantStateChecker(cfg.TenantState, "shared-jwt-middleware")
 
 	// Resolve the signing-key verifier once. An explicit one (tests, or a
 	// service with bespoke key sources) wins; otherwise build it from the
@@ -291,6 +405,13 @@ func RequireJWTAuth(cfg AuthConfig) gin.HandlerFunc {
 			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
+			return
+		}
+
+		// A suspended, canceled or deleted tenant is not usable (RC-4 /):
+		// refuse its tokens here so a session issued before the suspension
+		// stops working within one tenant-state cache TTL.
+		if !EnforceTenantSession(c, tenantState, claims.TenantID, claims.Type, claims.TenantSessionVersion) {
 			return
 		}
 
@@ -557,27 +678,5 @@ func RequireTenant() gin.HandlerFunc {
 			return
 		}
 		c.Next()
-	}
-}
-
-// RequirePlatformAdmin ensures the authenticated user has a platform admin role.
-// Accepted roles: super_admin, platform_admin, support_admin.
-// Must be used after RequireJWTAuth.
-func RequirePlatformAdmin() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if GetUserType(c) != UserTypePlatform {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Platform admin access required"})
-			c.Abort()
-			return
-		}
-
-		role := GetRoleFromContext(c)
-		switch role {
-		case "super_admin", "platform_admin", "support_admin":
-			c.Next()
-		default:
-			c.JSON(http.StatusForbidden, gin.H{"error": "Platform admin access required"})
-			c.Abort()
-		}
 	}
 }

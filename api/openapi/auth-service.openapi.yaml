@@ -713,7 +713,7 @@ paths:
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
         - "Sets httpOnly `access_token` + `refresh_token` cookies and a JS-readable `csrf_token` cookie; the body ALSO contains the raw tokens for backward-compat. Cookie auth is authoritative — do not store the body tokens."
-        - "403 covers both inactive account and unverified email (distinguished only by the `error` string). A 429 (not enumerated) is returned for per-email rate-limit / account-lockout with a `Retry-After` header and a `retry_after` seconds field."
+        - "403 covers inactive account and unverified email (distinguished only by the `error` string), and a suspended, canceled or deleted organization — those carry a machine-readable `code` (`tenant_suspended` / `tenant_deleted`, see TenantBlockedError) and an `error` sentence the sign-in page shows verbatim. A 429 (not enumerated) is returned for per-email rate-limit / account-lockout with a `Retry-After` header and a `retry_after` seconds field."
         - "Bare error shape `{ \"error\": \"...\" }` (pre-ADR-0002), matching the Legacy* responses."
 
   /auth/logout:
@@ -762,6 +762,8 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/TenantBlocked"
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
@@ -1911,7 +1913,7 @@ paths:
         '400':
           $ref: "#/components/responses/LegacyBadRequest"
         '409':
-          description: An account with this email already exists, or (MSP installs only) the install is past its licensed tenant limit and grace period — see /auth/register.
+          description: An account with this email already exists, the IdP identity (provider + subject) is already linked to an account, or (MSP installs only) the install is past its licensed tenant limit and grace period — see /auth/register.
           content:
             application/json:
               schema:
@@ -1977,7 +1979,7 @@ paths:
       tags:
         - tenant-sso
       summary: Create an SSO provider
-      description: "Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. Returns the created provider (secrets not included)."
+      description: "Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. A microsoft/azure provider may carry allowed_domains only while auth_url and token_url both name one Entra directory (not common, organizations, consumers or the personal-account directory); otherwise 400 with code allowed_domains_multi_tenant_authority (#1996). Returns the created provider (secrets not included)."
       requestBody:
         required: true
         content:
@@ -2012,7 +2014,7 @@ paths:
       tags:
         - tenant-sso
       summary: Update an SSO provider (partial)
-      description: "Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. Returns the updated provider."
+      description: "Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. When the update sets allowed_domains, auth_url or token_url, the resulting row must satisfy the same Entra single-directory rule as create (400 allowed_domains_multi_tenant_authority otherwise, #1996). Returns the updated provider."
       requestBody:
         required: true
         content:
@@ -2621,6 +2623,15 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/LegacyError"
+    TenantBlocked:
+      description: >
+        The caller's organization is suspended, canceled or deleted, so no
+        session is issued (and an existing one is refused). Every service's
+        JWT middleware answers a live token of such a tenant the same way.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TenantBlockedError"
     LegacyServerError:
       description: Unexpected server error.
       content:
@@ -3060,6 +3071,12 @@ components:
           $ref: "#/components/schemas/User"
         tenant:
           $ref: "#/components/schemas/Tenant"
+        plan:
+          $ref: "#/components/schemas/TenantPlan"
+          description: >
+            The tenant's plan as a person should read it — the same block
+            `/tenant/features` carries. Present with `tenant`; omitted when the
+            tenant lookup or the plan resolution fails.
 
     User:
       type: object
@@ -3140,15 +3157,16 @@ components:
       additionalProperties: false
       description: >
         Tenant organization for the current user. `domain` is `omitempty` in
-        Go and may be absent from the body; other optional time fields
-        (`trial_ends_at`, `deleted_at`) serialize as `null` when unset.
+        Go and may be absent from the body; `deleted_at` serializes as `null`
+        when unset. The raw billing columns (`payment_status`,
+        `trial_ends_at`) are deliberately not part of it: the plan, including
+        any trial, is the response's `plan` block (edition-licensing spec §3).
       required:
         - id
         - name
         - slug
         - subscription_tier_id
         - billing_email
-        - payment_status
         - settings
         - created_at
         - updated_at
@@ -3168,12 +3186,7 @@ components:
           format: uuid
           description: >
             Zero-uuid string during onboarding (tenant with no tier yet).
-        trial_ends_at:
-          type: [string, "null"]
-          format: date-time
         billing_email:
-          type: string
-        payment_status:
           type: string
         settings:
           type: [object, "null"]
@@ -4393,6 +4406,23 @@ components:
     # ============================================================
     # Legacy error envelope (current shape for every error response above)
     # ============================================================
+    TenantBlockedError:
+      type: object
+      additionalProperties: false
+      description: >
+        Refusal for a user of an organization that is not usable (owner
+        decision, RC-4 / #1985). `code` is stable and machine-readable; `error`
+        is a sentence for the sign-in page. `tenant_status_unavailable`
+        accompanies HTTP 503 when the organization's state could not be read —
+        enforcement fails closed.
+      required: [error, code]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+          enum: [tenant_suspended, tenant_deleted, tenant_status_unavailable]
+
     LegacyError:
       type: object
       additionalProperties: true

@@ -248,6 +248,23 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "reporting": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "pattern": "^(https://[^\\s/?#@]+(/[^\\s?#]*)?)?$",
+              "description": "Receiver base URL for automatic usage-report delivery (https:// only; no credentials, query or fragment). Empty = transmission off."
+            },
+            "intervalMinutes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1440,
+              "description": "How often admin-service looks for usage reports that are due for delivery."
+            }
+          }
+        },
         "reports": {
           "type": "object",
           "additionalProperties": false,
@@ -261,7 +278,11 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Mount a PVC at licensing.reports.dir for a copy of each licence usage report. Off by default (only an MSP licence writes reports, and the edition is not known at render time); MSP installs set it to true."
+                },
                 "size": { "type": "string" },
                 "accessMode": { "type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadWriteOncePod"] },
                 "storageClassName": { "type": "string" }
@@ -470,7 +491,7 @@
               "RollingUpdate",
               "Recreate"
             ],
-            "description": "Deployment update strategy. Defaults to RollingUpdate (Kubernetes default). Set to Recreate for services holding a ReadWriteOnce PVC, to avoid Multi-Attach deadlocks during upgrade. ~30s downtime per upgrade is the tradeoff."
+            "description": "Deployment update strategy. Defaults to RollingUpdate (Kubernetes default). Set to Recreate for services holding a ReadWriteOnce PVC, to avoid Multi-Attach deadlocks during upgrade. ~30s downtime per upgrade is the tradeoff. Switching an already-deployed service to Recreate under Helm's server-side apply needs a one-time kubectl patch first — see the production checklist, Single-node clusters."
           }
         }
       }
@@ -615,6 +636,20 @@
                 "description": "Skip TLS certificate verification. Lab clusters only \u2014 when the edge cert is signed by an internal CA the monitoring-service pod doesn't trust. Production deployments using publicly-trusted certs should leave this false."
               }
             }
+          }
+        }
+      }
+    },
+    "catalogFeeds": {
+      "type": "object",
+      "description": "Catalogue mirror feeds (admin-service). spool.sizeLimit sizes the emptyDir the OSV feed downloads its bulk archives into; the feed accepts archives up to 2 GiB, so keep it above that.",
+      "additionalProperties": false,
+      "properties": {
+        "spool": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sizeLimit": { "type": "string", "pattern": "^[0-9]+(Mi|Gi|Ti)$" }
           }
         }
       }

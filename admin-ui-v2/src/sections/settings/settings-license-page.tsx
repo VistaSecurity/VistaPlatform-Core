@@ -3,7 +3,8 @@
 //   • License card — every edition. The licence this install runs under, as
 //     admin-service recorded it after verifying the token (GET /admin/license;
 //     the token itself never leaves the server). Core: "Vista Platform Core —
-//     no licence installed" and how to install one. Expiry warnings at 30, 14
+//     no licence installed", and what it takes to get Enterprise — which
+//     depends on the BUILD (see CoreUpgradeNote). Expiry warnings at 30, 14
 //     and 7 days.
 //   • Data retention — Enterprise only. The platform-wide cap every tenant's
 //     retention resolves to: unlimited (the default) or N days / years. This is
@@ -83,6 +84,9 @@ function MspUsageExtensionPoint() {
 type LicenseQuery = ReturnType<typeof useLicense>;
 
 export function LicenseCard({ q }: { q: LicenseQuery }) {
+  // The BUILD edition (GET /admin/platform/edition), not the licence: it is
+  // what decides whether installing a licence can do anything at all.
+  const { edition: build } = usePlatformEdition();
   const icon = <KeyRound size={16} style={{ color: 'var(--op-accent)' }} />;
   if (q.isLoading) {
     return (
@@ -107,12 +111,14 @@ export function LicenseCard({ q }: { q: LicenseQuery }) {
   if (info.status === 'none') {
     return (
       <Panel icon={icon} title="Vista Platform Core — no licence installed" subtitle="Every Core capability is available; paid features need a licence.">
-        <div style={{ fontSize: 12.5, color: 'var(--op-t2)', lineHeight: 1.6 }}>
-          To install a licence, store the token Vista Security issued you in the Secret the chart mounts
-          (by default <span className="mono">vistaplatform-license</span>, key <span className="mono">token</span>).
-          admin-service picks it up within ten minutes, or at once after a restart; this page then shows the
-          edition, licensee and expiry. An MSP licence is issued for this install's ID, shown below.
-        </div>
+        {build === 'core' ? <CoreUpgradeNote /> : (
+          <div style={{ fontSize: 12.5, color: 'var(--op-t2)', lineHeight: 1.6 }}>
+            To install a licence, store the token Vista Security issued you in the Secret the chart mounts
+            (by default <span className="mono">vistaplatform-license</span>, key <span className="mono">token</span>).
+            admin-service picks it up within ten minutes, or at once after a restart; this page then shows the
+            edition, licensee and expiry. An MSP licence is issued for this install's ID, shown below.
+          </div>
+        )}
         {info.install_id && <Row label="Install ID" value={<span className="mono">{info.install_id}</span>} />}
       </Panel>
     );
@@ -143,6 +149,30 @@ export function LicenseCard({ q }: { q: LicenseQuery }) {
       {info.max_tenants != null && <Row label="Licensed tenants" value={info.max_tenants} />}
       {info.install_id && <Row label="Install ID" value={<span className="mono">{info.install_id}</span>} />}
     </Panel>
+  );
+}
+
+/**
+ * What a Core BUILD (the Core images, built without the Enterprise code) needs
+ * to become Enterprise. Telling this operator to "install a licence" would be
+ * wrong: the Core admin-service has no licence verifier, so a token Secret is
+ * mounted and never read, and the page would go on saying Core.
+ *
+ * Plain text, not a link. The console has no route to the documentation — no
+ * other page links to it, and the Enterprise docs are not public — so a link
+ * here would be the one dead link on the console. The guide is named instead.
+ */
+function CoreUpgradeNote() {
+  return (
+    <div data-testid="core-upgrade-note" style={{ fontSize: 12.5, color: 'var(--op-t2)', lineHeight: 1.6 }}>
+      This install runs the Vista Platform Core images, which do not contain the Enterprise code, so a
+      licence installed here would have no effect. Moving to Enterprise takes two things: upgrading this
+      release to the Enterprise chart and images, and the licence Vista Security issues you. Your
+      tenants and their data stay in place. Contact Vista Security: they name the Enterprise release
+      that matches this one (the two are numbered separately) and send their guide, <strong
+      style={{ color: 'var(--op-t1)' }}>Upgrading from Core</strong>, including the database backup to
+      take first.
+    </div>
   );
 }
 

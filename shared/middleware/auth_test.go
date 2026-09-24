@@ -43,6 +43,7 @@ func newAuthTestRouter(accessCookie string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(RequireJWTAuth(AuthConfig{
+		TenantState:       liveTenantState(),
 		JWTSecret:         testJWTSecret,
 		AccessTokenCookie: accessCookie,
 	}))
@@ -100,6 +101,7 @@ func TestRequireJWTAuth_StrictCookiePair(t *testing.T) {
 		gin.SetMode(gin.TestMode)
 		r := gin.New()
 		r.Use(RequireJWTAuth(AuthConfig{
+			TenantState:       liveTenantState(),
 			JWTSecret:         testJWTSecret,
 			AccessTokenCookie: "platform_access_token",
 			CSRFCookie:        "platform_csrf_token",
@@ -141,6 +143,7 @@ func TestRequireJWTAuth_StrictCookiePairRejectsFallbackOnMutations(t *testing.T)
 	newStrictRouter := func() *gin.Engine {
 		r := gin.New()
 		r.Use(RequireJWTAuth(AuthConfig{
+			TenantState:       liveTenantState(),
 			JWTSecret:         testJWTSecret,
 			AccessTokenCookie: "platform_access_token",
 			CSRFCookie:        "platform_csrf_token",
@@ -189,39 +192,6 @@ func TestRequireJWTAuth_StrictCookiePairRejectsFallbackOnMutations(t *testing.T)
 			req.Header.Set("X-CSRF-Token", tc.csrfValue)
 			w := httptest.NewRecorder()
 			newStrictRouter().ServeHTTP(w, req)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-		})
-	}
-}
-
-func TestRequirePlatformAdminRejectsTenantTokenWithPlatformRole(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	newRouter := func() *gin.Engine {
-		r := gin.New()
-		r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret}))
-		r.Use(RequirePlatformAdmin())
-		r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
-		return r
-	}
-
-	cases := []struct {
-		name       string
-		tenantID   uuid.UUID
-		wantStatus int
-	}{
-		{"platform identity accepted", uuid.Nil, http.StatusOK},
-		{"tenant identity rejected despite platform role string", uuid.New(), http.StatusForbidden},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
-			req.Header.Set("Authorization", "Bearer "+signAccessToken(t, tc.tenantID))
-			w := httptest.NewRecorder()
-			newRouter().ServeHTTP(w, req)
 			if w.Code != tc.wantStatus {
 				t.Fatalf("got status %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}
@@ -282,7 +252,7 @@ func TestRequireJWTAuth_RevokedJTIRejected(t *testing.T) {
 
 	newRouter := func() *gin.Engine {
 		r := gin.New()
-		r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret, RevocationChecker: checker}))
+		r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret, RevocationChecker: checker}))
 		r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 		return r
 	}
@@ -313,7 +283,7 @@ func TestRequireJWTAuth_RevokedUserRejected(t *testing.T) {
 
 	newRouter := func() *gin.Engine {
 		r := gin.New()
-		r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret, RevocationChecker: checker}))
+		r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret, RevocationChecker: checker}))
 		r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 		return r
 	}
@@ -359,7 +329,7 @@ func TestRequireJWTAuth_CSRFEnforcedOnMatchedCookie(t *testing.T) {
 
 	r := gin.New()
 	// Service wired with tenant default; request carries the platform pair.
-	r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret, AccessTokenCookie: "access_token"}))
+	r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret, AccessTokenCookie: "access_token"}))
 	r.POST("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
 	// Missing CSRF header → 403.
@@ -396,7 +366,7 @@ func TestRequireJWTAuth_CSRFBoundToSession(t *testing.T) {
 	foreignCSRF := CSRFToken(testJWTSecret, "attacker-session-jti")
 
 	r := gin.New()
-	r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret}))
+	r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret}))
 	r.POST("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
 	// header == cookie (== foreign CSRF), but not bound to victimToken's jti → 403.
@@ -444,7 +414,7 @@ func TestRequireJWTAuth_PATScopeEnforcement(t *testing.T) {
 
 	newRouter := func(requiredPerm string) *gin.Engine {
 		r := gin.New()
-		r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret}))
+		r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret}))
 		r.GET("/p", func(c *gin.Context) {
 			if !PermissionWithinTokenScope(c, requiredPerm) {
 				c.JSON(http.StatusForbidden, gin.H{"error": "outside scope"})
@@ -509,7 +479,7 @@ func TestRequireJWTAuth_PasswordChangeRequiredGate(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret}))
+	r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret}))
 	ok := func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) }
 	r.GET("/api/v1/admin-service/admin/tenants", ok)
 	r.POST("/api/v1/admin-service/admin/settings", ok)
@@ -569,7 +539,7 @@ func TestRequireJWTAuth_FailsOpenWhenRedisRevocationUnavailable(t *testing.T) {
 	checker := NewRedisRevocationChecker(rdb)
 
 	r := gin.New()
-	r.Use(RequireJWTAuth(AuthConfig{JWTSecret: testJWTSecret, RevocationChecker: checker}))
+	r.Use(RequireJWTAuth(AuthConfig{TenantState: liveTenantState(), JWTSecret: testJWTSecret, RevocationChecker: checker}))
 	r.GET("/protected", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)

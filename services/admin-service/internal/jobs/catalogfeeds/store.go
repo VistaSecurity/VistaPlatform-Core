@@ -3,6 +3,7 @@ package catalogfeeds
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -412,7 +413,7 @@ func (s *SQLStore) ListVulnerabilities(ctx context.Context, q VulnQuery) ([]Vuln
 // run" is an answer, not an absence.
 func (s *SQLStore) FeedStates(ctx context.Context) ([]FeedState, error) {
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT feed, cursor, last_run_at, last_status, last_error, row_count, updated_at
+        SELECT `+feedStateColumns+`
         FROM public.catalog_feed_state`)
 	if err != nil {
 		return nil, fmt.Errorf("list feed state: %w", err)
@@ -421,17 +422,10 @@ func (s *SQLStore) FeedStates(ctx context.Context) ([]FeedState, error) {
 
 	byFeed := map[string]FeedState{}
 	for rows.Next() {
-		var (
-			st               FeedState
-			cursor, lastErr  sql.NullString
-			lastRun, updated sql.NullTime
-		)
-		if err := rows.Scan(&st.Feed, &cursor, &lastRun, &st.LastStatus, &lastErr,
-			&st.RowCount, &updated); err != nil {
-			return nil, fmt.Errorf("scan feed state: %w", err)
+		st, err := scanFeedState(rows)
+		if err != nil {
+			return nil, err
 		}
-		st.Cursor, st.LastError = nullString(cursor), nullString(lastErr)
-		st.LastRunAt, st.UpdatedAt = nullTime(lastRun), nullTime(updated)
 		byFeed[st.Feed] = st
 	}
 	if err := rows.Err(); err != nil {
@@ -444,9 +438,36 @@ func (s *SQLStore) FeedStates(ctx context.Context) ([]FeedState, error) {
 			out = append(out, st)
 			continue
 		}
-		out = append(out, FeedState{Feed: name, LastStatus: StatusNever})
+		out = append(out, FeedState{Feed: name, LastStatus: StatusNever, Ecosystems: []EcosystemStatus{}})
 	}
 	return out, nil
+}
+
+const feedStateColumns = `feed, cursor, last_run_at, last_status, last_error, row_count, updated_at, ecosystem_status`
+
+// scanFeedState reads one catalog_feed_state row in feedStateColumns order.
+func scanFeedState(row interface{ Scan(dest ...any) error }) (FeedState, error) {
+	var (
+		st               FeedState
+		cursor, lastErr  sql.NullString
+		lastRun, updated sql.NullTime
+		ecosystems       []byte
+	)
+	if err := row.Scan(&st.Feed, &cursor, &lastRun, &st.LastStatus, &lastErr,
+		&st.RowCount, &updated, &ecosystems); err != nil {
+		return FeedState{}, fmt.Errorf("scan feed state: %w", err)
+	}
+	st.Cursor, st.LastError = nullString(cursor), nullString(lastErr)
+	st.LastRunAt, st.UpdatedAt = nullTime(lastRun), nullTime(updated)
+	st.Ecosystems = []EcosystemStatus{}
+	if len(ecosystems) > 0 {
+		if err := json.Unmarshal(ecosystems, &st.Ecosystems); err != nil {
+			// Unreadable detail must not take the whole feed list down; the
+			// feed-level status above is still correct.
+			st.Ecosystems = []EcosystemStatus{}
+		}
+	}
+	return st, nil
 }
 
 // MarkRunning stamps a feed as in-flight. It does NOT clear last_error or
@@ -464,54 +485,59 @@ func (s *SQLStore) MarkRunning(ctx context.Context, feed string) error {
 	return nil
 }
 
-// MarkResult records the outcome of a run.
+// MarkResult records the outcome of a run, by the rule in nextFeedState.
 //
 // On failure the CURSOR IS NOT ADVANCED — the run is retried from where the
 // last successful one finished, so a transient NVD outage cannot silently skip
-// a window of CVEs. That is the whole reason the cursor write lives here rather
-// than in the feed clients.
+// a window of CVEs — unless the feed reports PartialProgress, whose cursor
+// holds only completed units (OSV's per-ecosystem watermarks). That is the
+// whole reason the cursor write lives here rather than in the feed clients.
+//
+// The previous row is read FOR UPDATE in the same transaction as the write, so
+// the per-ecosystem last-success times it carries forward cannot be lost to a
+// concurrent writer.
 func (s *SQLStore) MarkResult(ctx context.Context, feed string, res SyncResult, runErr error) error {
-	status := StatusOK
-	var errText any
-	if runErr != nil {
-		status = StatusError
-		// Cap the stored text: a wrapped HTTP error can carry a whole response
-		// body, and this column is read straight into an admin table cell.
-		msg := runErr.Error()
-		if len(msg) > 1000 {
-			msg = msg[:1000] + "…"
-		}
-		errText = msg
-	}
-
-	if runErr != nil {
-		_, err := s.db.ExecContext(ctx, `
-            INSERT INTO public.catalog_feed_state (feed, last_run_at, last_status, last_error, row_count)
-            VALUES ($1, now(), $2, $3, 0)
-            ON CONFLICT (feed) DO UPDATE SET
-                last_run_at = now(), last_status = EXCLUDED.last_status,
-                last_error  = EXCLUDED.last_error, updated_at = now()`,
-			feed, status, errText)
-		if err != nil {
-			return fmt.Errorf("record feed %s failure: %w", feed, err)
-		}
-		return nil
-	}
-
-	var cursor any
-	if res.Cursor != "" {
-		cursor = res.Cursor
-	}
-	_, err := s.db.ExecContext(ctx, `
-        INSERT INTO public.catalog_feed_state (feed, cursor, last_run_at, last_status, last_error, row_count)
-        VALUES ($1, $2, now(), $3, NULL, $4)
-        ON CONFLICT (feed) DO UPDATE SET
-            cursor      = coalesce(EXCLUDED.cursor, public.catalog_feed_state.cursor),
-            last_run_at = now(), last_status = EXCLUDED.last_status,
-            last_error  = NULL, row_count = EXCLUDED.row_count, updated_at = now()`,
-		feed, cursor, status, res.Rows)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("record feed %s success: %w", feed, err)
+		return fmt.Errorf("record feed %s result: begin: %w", feed, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	prev := FeedState{Feed: feed, LastStatus: StatusNever, Ecosystems: []EcosystemStatus{}}
+	row := tx.QueryRowContext(ctx, `SELECT `+feedStateColumns+`
+        FROM public.catalog_feed_state WHERE feed = $1 FOR UPDATE`, feed)
+	switch st, err := scanFeedState(row); {
+	case err == nil:
+		prev = st
+	case errors.Is(err, sql.ErrNoRows):
+		// First run of this feed: nothing to carry forward.
+	default:
+		return fmt.Errorf("record feed %s result: read previous: %w", feed, err)
+	}
+
+	next := nextFeedState(prev, res, runErr, time.Now().UTC())
+	ecosystems, err := json.Marshal(next.Ecosystems)
+	if err != nil {
+		return fmt.Errorf("record feed %s result: encode ecosystems: %w", feed, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+        INSERT INTO public.catalog_feed_state
+            (feed, cursor, last_run_at, last_status, last_error, row_count, ecosystem_status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        ON CONFLICT (feed) DO UPDATE SET
+            cursor           = EXCLUDED.cursor,
+            last_run_at      = EXCLUDED.last_run_at,
+            last_status      = EXCLUDED.last_status,
+            last_error       = EXCLUDED.last_error,
+            row_count        = EXCLUDED.row_count,
+            ecosystem_status = EXCLUDED.ecosystem_status,
+            updated_at       = now()`,
+		feed, next.Cursor, next.LastRunAt, next.LastStatus, next.LastError, next.RowCount, string(ecosystems),
+	); err != nil {
+		return fmt.Errorf("record feed %s result: %w", feed, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("record feed %s result: commit: %w", feed, err)
 	}
 	return nil
 }
@@ -651,9 +677,14 @@ var ErrFeedsDisabled = errors.New("catalogue feeds are disabled (CATALOG_FEEDS_E
 // ErrFeedBusy is returned when a sync is already in flight for that feed.
 var ErrFeedBusy = errors.New("a sync is already running for this feed")
 
-// httpTimeout bounds every outbound feed request. Generous because the OSV
-// bulk export is tens of megabytes.
+// httpTimeout bounds every outbound EOL/NVD request.
 const httpTimeout = 10 * time.Minute
+
+// osvHTTPTimeout bounds one OSV archive download, body included. At the 2 GiB
+// archive cap that still needs only ~0.8 MB/s; Ubuntu's ~705 MiB export at the
+// old shared 10-minute budget needed ~1.2 MB/s and could time out on a slow
+// link before the cap ever mattered. Stays inside feedRunTimeout.
+const osvHTTPTimeout = 45 * time.Minute
 
 // feedRunTimeout bounds one whole PASS of one feed, scheduled or manual.
 //
@@ -680,4 +711,9 @@ const feedRunTimeout = 2 * time.Hour
 // is a public address, and the tests inject their own client.
 func newFeedHTTPClient() *http.Client {
 	return network.SafeHTTPClient(httpTimeout)
+}
+
+// newOSVHTTPClient is newFeedHTTPClient with the OSV download budget.
+func newOSVHTTPClient() *http.Client {
+	return network.SafeHTTPClient(osvHTTPTimeout)
 }

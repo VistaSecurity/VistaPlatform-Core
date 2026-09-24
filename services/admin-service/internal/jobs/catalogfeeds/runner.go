@@ -45,6 +45,10 @@ type Config struct {
 
 	NVDAPIKey     string
 	OSVEcosystems []string
+	// SpoolDir is where downloaded archives are written before they are read
+	// (CATALOG_FEEDS_SPOOL_DIR; "" = the OS temp dir). The chart mounts a
+	// size-limited scratch volume there, sized for the OSV archive cap.
+	SpoolDir string
 }
 
 // LoadConfig reads the runner's settings from the environment.
@@ -64,6 +68,7 @@ func LoadConfig() Config {
 		StartupDelay:  sharedconfig.GetEnvAsDuration("CATALOG_FEEDS_STARTUP_DELAY", 2*time.Minute),
 		NVDAPIKey:     sharedconfig.GetEnv("NVD_API_KEY", ""),
 		OSVEcosystems: eco,
+		SpoolDir:      strings.TrimSpace(sharedconfig.GetEnv("CATALOG_FEEDS_SPOOL_DIR", "")),
 	}
 }
 
@@ -98,13 +103,18 @@ type Runner struct {
 	wg sync.WaitGroup
 }
 
-// NewRunner wires the three production feeds over one HTTP client.
+// NewRunner wires the three production feeds. EOL and NVD share one HTTP
+// client; OSV gets its own with a longer timeout, because a Client.Timeout
+// covers reading the whole body and OSV's bulk archives are up to the 2 GiB
+// cap — a cap the per-request timeout would otherwise enforce first.
 func NewRunner(cfg Config, store Store, db *sql.DB) *Runner {
 	client := newFeedHTTPClient()
+	osv := NewOSVFeed(newOSVHTTPClient(), cfg.OSVEcosystems)
+	osv.SpoolDir = cfg.SpoolDir
 	return NewRunnerWithFeeds(cfg, store, db, []Feed{
 		NewEOLFeed(client),
 		NewNVDFeed(client, cfg.NVDAPIKey),
-		NewOSVFeed(client, cfg.OSVEcosystems),
+		osv,
 	})
 }
 

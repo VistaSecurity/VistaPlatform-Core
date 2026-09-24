@@ -2,8 +2,7 @@
 // ScopeBar strip shown when scoped. Ported from the kit's shell. Tenant list
 // comes from the cached useTenants query.
 import { useEffect, useRef, useState } from 'react';
-import { Building2, ChevronDown, Search, Filter, LogIn, X } from 'lucide-react';
-import toast from 'react-hot-toast';
+import { Building2, ChevronDown, Search, Filter, X } from 'lucide-react';
 import { Avatar, initialsFromName } from '../components/ui/primitives';
 import { useTenants, planLabel } from '../sections/tenants/queries';
 import { usePlatformEdition } from '../lib/edition';
@@ -75,7 +74,6 @@ export function ScopeBar() {
       <Avatar initials={initialsFromName(scopeName ?? '')} size={18} square />
       <span style={{ color: 'var(--op-t1)', fontWeight: 600 }}>{scopeName}</span>
       <div style={{ flex: 1 }} />
-      <button className="op-btn accent sm" onClick={() => toast('Open in Console — wired with the impersonation start-flow', { icon: '🔒' })}><LogIn size={13} />Open in Console</button>
       <button className="op-btn ghost sm" onClick={clear}><X size={13} />Clear scope</button>
     </div>
   );

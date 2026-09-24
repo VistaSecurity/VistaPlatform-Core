@@ -81,8 +81,8 @@ tags:
     rotate). Regenerate is in-process; the others use the DB-backed CA service.
 - name: admin-fleet
   description: Platform-admin, cross-tenant Fleet roll-up (READ-ONLY). Lists
-    sensors across all tenants for the VISTA Operations Fleet view; gated by the
-    platform-admin role check.
+    sensors across all tenants for the VISTA Operations Fleet view; gated on
+    the `platform.health` platform permission.
 
 paths:
   /sensors:
@@ -782,13 +782,16 @@ paths:
         every non-deleted sensor across every tenant and carries tenant identity
         (`tenant_id` / `tenant_name` / `tenant_slug`) on each row.
 
-        Gated by the platform-admin role check (super_admin / platform_admin /
-        support_admin), mirroring device-interrogation-service's `/admin/*`
-        gate. Non-admin callers get 403. There is no mutation surface here.
+        Requires a platform token whose ROLE holds `platform.health`, resolved
+        through platform_user_has_permission() — the role name on the token is
+        not consulted — matching device-interrogation-service's `/admin/agents`,
+        the other half of the Fleet view. A tenant token or a role without the
+        permission gets 403. There is no mutation surface here.
 
-        The in-cluster Platform Sensor (registered by cluster-sensor-service for
-        every tenant) appears like any other sensor; `is_platform_sensor` flags
-        it (derived from its `platform="platform"` registration signature).
+        The platform-managed rows every tenant is given (the Platform Discovery
+        Sensor and the Platform Device Interrogation Agent) appear like any
+        other sensor; `is_platform_sensor` flags them (platform = "platform" OR
+        the "system" tag — models.Sensor.IsPlatformManaged).
       parameters:
       - name: tenant_id
         in: query
@@ -1786,7 +1789,7 @@ components:
           - 'null'
         is_platform_sensor:
           type: boolean
-          description: True for the in-cluster Platform Sensor (derived from platform="platform").
+          description: True for a platform-managed row (platform = "platform" OR the "system" tag — models.Sensor.IsPlatformManaged). A platform row whose profile is device_interrogation is the in-cluster interrogation agent, not a sensor.
         last_heartbeat:
           type:
           - string

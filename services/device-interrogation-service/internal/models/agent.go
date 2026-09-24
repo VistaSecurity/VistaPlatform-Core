@@ -94,19 +94,47 @@ type AgentAddress struct {
 // omits registration_key (a secret) and includes only telemetry fields that exist
 // on the device_agents table plus the tenant name/slug from a cheap join.
 type AdminAgent struct {
-	ID            uuid.UUID  `json:"id" db:"id"`
-	TenantID      uuid.UUID  `json:"tenant_id" db:"tenant_id"`
-	TenantName    string     `json:"tenant_name" db:"tenant_name"`
-	TenantSlug    string     `json:"tenant_slug" db:"tenant_slug"`
-	Name          *string    `json:"name" db:"name"`
-	Platform      string     `json:"platform" db:"platform"`
-	Profile       *string    `json:"profile" db:"profile"`
-	Version       string     `json:"version" db:"version"`
-	Status        string     `json:"status" db:"status"` // "active", "inactive", "error"
-	IPAddress     *string    `json:"ip_address" db:"ip_address"`
-	LastHeartbeat *time.Time `json:"last_heartbeat" db:"last_heartbeat"`
-	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
+	ID         uuid.UUID `json:"id" db:"id"`
+	TenantID   uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	TenantName string    `json:"tenant_name" db:"tenant_name"`
+	TenantSlug string    `json:"tenant_slug" db:"tenant_slug"`
+	Name       *string   `json:"name" db:"name"`
+	Platform   string    `json:"platform" db:"platform"`
+	Profile    *string   `json:"profile" db:"profile"`
+	Version    string    `json:"version" db:"version"`
+	Status     string    `json:"status" db:"status"` // "active", "inactive", "error"
+	// EffectiveStatus is what the Fleet view shows: Status, except that an
+	// "active" agent that has not heartbeated within AgentOfflineAfter (or
+	// never has) is "offline". See EffectiveAgentStatus.
+	EffectiveStatus string     `json:"effective_status" db:"-"`
+	IPAddress       *string    `json:"ip_address" db:"ip_address"`
+	LastHeartbeat   *time.Time `json:"last_heartbeat" db:"last_heartbeat"`
+	CreatedAt       time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// AgentOfflineAfter is how long an agent may go without a heartbeat before it
+// is shown offline. It is the dwell compliance-engine's discovery_agent_offline
+// alert uses (heartbeat_offline_scan_job.go) and the web-ui's OFFLINE_AFTER_MS
+// (frontend-v2 sections/discovery/kit.tsx), so the admin Fleet view, the tenant
+// console and the alert an operator just received cannot disagree.
+const AgentOfflineAfter = 15 * time.Minute
+
+// EffectiveAgentStatus derives an agent's online state from its heartbeat.
+//
+// device_agents.status is written 'active' at enrollment and nothing ever
+// rewrites it — there is no reaper, and heartbeats update last_heartbeat only —
+// so on its own it shows a dead agent as Active forever. An operator's
+// deliberate states ('inactive', 'error') pass through unchanged; 'active' is
+// believed only while the heartbeat is fresh.
+func EffectiveAgentStatus(status string, lastHeartbeat *time.Time, now time.Time) string {
+	if status != "active" {
+		return status
+	}
+	if lastHeartbeat == nil || now.Sub(*lastHeartbeat) >= AgentOfflineAfter {
+		return "offline"
+	}
+	return "active"
 }
 
 // RegisterAgentRequest represents an agent registration request

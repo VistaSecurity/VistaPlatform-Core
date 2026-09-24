@@ -14,36 +14,59 @@ type HealthScorer struct {
 	weights HealthWeights
 }
 
-// HealthWeights defines the relative importance of each health factor
+// HealthWeights defines the relative importance of each health factor.
+//
+// There is no resource-efficiency weight. That factor was 25% of the index and
+// was built from hard-coded storage 50 / network 60 plus CPU and memory
+// columns nothing writes, so every tenant carried the same invented
+// contribution. Owner decision 8 (ADMIN_UI_DATA_REVIEW_2026-09, RC-14) dropped
+// it and re-weighted the rest PROPORTIONALLY: the old 25/20/15/15 split is
+// kept, each divided by the 75% that remains.
 type HealthWeights struct {
-	ResourceEfficiency float64 // 25%
-	PerformanceMetrics float64 // 25%
-	SecurityPosture    float64 // 20%
-	BusinessActivity   float64 // 15%
-	CostOptimization   float64 // 15%
+	PerformanceMetrics float64 // 25/75
+	SecurityPosture    float64 // 20/75
+	BusinessActivity   float64 // 15/75
+	CostOptimization   float64 // 15/75
 }
 
 // NewHealthScorer creates a new health scorer with default weights
 func NewHealthScorer() *HealthScorer {
 	return &HealthScorer{
 		weights: HealthWeights{
-			ResourceEfficiency: 0.25,
-			PerformanceMetrics: 0.25,
-			SecurityPosture:    0.20,
-			BusinessActivity:   0.15,
-			CostOptimization:   0.15,
+			PerformanceMetrics: 25.0 / 75.0,
+			SecurityPosture:    20.0 / 75.0,
+			BusinessActivity:   15.0 / 75.0,
+			CostOptimization:   15.0 / 75.0,
 		},
 	}
 }
 
 // unavailableFactors returns the set of factor names that cannot be scored
-// because the peer service feeding them was unreachable during collection.
-func unavailableFactors(metrics models.HealthMetrics) map[string]bool {
+// because the source feeding them was unreachable (or, for
+// SourceResourceMetering, does not exist).
+func unavailableFactors(sources []string) map[string]bool {
 	out := make(map[string]bool)
-	for _, src := range metrics.UnavailableSources {
+	for _, src := range sources {
 		for _, factor := range models.SourceFactors[src] {
 			out[factor] = true
 		}
+	}
+	return out
+}
+
+// reportedSources is the breakdown's unavailable_sources: the peers that
+// failed during collection, plus SourceResourceMetering, which is always
+// absent (no producer exists). Deduplicated, collection order preserved.
+func reportedSources(collected []string) []string {
+	all := append(append(make([]string, 0, len(collected)+1), collected...), models.SourceResourceMetering)
+	out := make([]string, 0, len(all))
+	seen := make(map[string]bool, len(all))
+	for _, s := range all {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
 	return out
 }
@@ -55,8 +78,12 @@ func unavailableFactors(metrics models.HealthMetrics) map[string]bool {
 // are renormalised. When NOTHING could be measured the result is score 0 with
 // status models.HealthStatusUnknown — deliberately distinguishable from a
 // genuine score of 0, which is what a fabricated placeholder could never be.
+//
+// Resource efficiency is never scored: it is always nil in the breakdown and
+// SourceResourceMetering is always listed in unavailable_sources.
 func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) models.HealthScoreResponse {
-	missing := unavailableFactors(metrics)
+	sources := reportedSources(metrics.UnavailableSources)
+	missing := unavailableFactors(sources)
 
 	// score returns a pointer to the computed factor score, or nil when the
 	// factor's source peer never answered.
@@ -68,7 +95,6 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 		return &v
 	}
 
-	resourceScore := score(models.FactorResourceEfficiency, hs.calculateResourceEfficiency)
 	performanceScore := score(models.FactorPerformanceMetrics, hs.calculatePerformanceMetrics)
 	securityScore := score(models.FactorSecurityPosture, hs.calculateSecurityPosture)
 	businessScore := score(models.FactorBusinessActivity, hs.calculateBusinessActivity)
@@ -85,14 +111,12 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 		weighted += *v * weight
 		totalWeight += weight
 	}
-	accumulate(resourceScore, hs.weights.ResourceEfficiency)
 	accumulate(performanceScore, hs.weights.PerformanceMetrics)
 	accumulate(securityScore, hs.weights.SecurityPosture)
 	accumulate(businessScore, hs.weights.BusinessActivity)
 	accumulate(costScore, hs.weights.CostOptimization)
 
-	allWeight := hs.weights.ResourceEfficiency + hs.weights.PerformanceMetrics +
-		hs.weights.SecurityPosture + hs.weights.BusinessActivity + hs.weights.CostOptimization
+	allWeight := hs.weights.PerformanceMetrics + hs.weights.SecurityPosture + hs.weights.BusinessActivity + hs.weights.CostOptimization
 
 	var overallScore, completeness float64
 	healthStatus := models.HealthStatusUnknown
@@ -105,12 +129,12 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 	}
 
 	breakdown := models.HealthBreakdown{
-		ResourceEfficiency: resourceScore,
+		ResourceEfficiency: nil, // not measured — see models.SourceResourceMetering
 		PerformanceMetrics: performanceScore,
 		SecurityPosture:    securityScore,
 		BusinessActivity:   businessScore,
 		CostOptimization:   costScore,
-		UnavailableSources: metrics.UnavailableSources,
+		UnavailableSources: sources,
 		DataCompleteness:   completeness,
 	}
 
@@ -140,24 +164,6 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 // A nil (unmeasured) factor is never "below" anything — we do not know.
 func belowThreshold(v *float64, threshold float64) bool {
 	return v != nil && *v < threshold
-}
-
-// calculateResourceEfficiency calculates score based on resource utilization
-func (hs *HealthScorer) calculateResourceEfficiency(metrics models.HealthMetrics) float64 {
-	// CPU utilization (lower is better, optimal around 60-70%)
-	cpuScore := hs.calculateUtilizationScore(metrics.CPUUtilization, 65.0, 10.0)
-
-	// Memory utilization (lower is better, optimal around 70-80%)
-	memoryScore := hs.calculateUtilizationScore(metrics.MemoryUtilization, 75.0, 15.0)
-
-	// Storage utilization (lower is better, optimal around 80%)
-	storageScore := hs.calculateUtilizationScore(metrics.StorageUtilization, 80.0, 20.0)
-
-	// Network utilization (moderate is good, optimal around 50-60%)
-	networkScore := hs.calculateUtilizationScore(metrics.NetworkUtilization, 55.0, 20.0)
-
-	// Weighted average
-	return (cpuScore*0.3 + memoryScore*0.3 + storageScore*0.25 + networkScore*0.15)
 }
 
 // calculatePerformanceMetrics calculates score based on performance indicators
@@ -230,15 +236,6 @@ func (hs *HealthScorer) calculateCostOptimization(metrics models.HealthMetrics) 
 }
 
 // Helper functions for individual score calculations
-
-func (hs *HealthScorer) calculateUtilizationScore(utilization, optimal, tolerance float64) float64 {
-	// Score decreases as utilization deviates from optimal
-	deviation := math.Abs(utilization - optimal)
-	if deviation <= tolerance {
-		return 100.0 - (deviation/tolerance)*20.0 // Max 20 point penalty
-	}
-	return math.Max(0, 80.0-(deviation-tolerance)*2.0) // Additional penalty beyond tolerance
-}
 
 func (hs *HealthScorer) calculateResponseTimeScore(responseTime float64) float64 {
 	// Exponential decay: 200ms = 100, 500ms = 50, 1000ms = 0
@@ -358,35 +355,6 @@ func (hs *HealthScorer) determineHealthStatus(score float64) string {
 // generateRecommendations creates actionable recommendations
 func (hs *HealthScorer) generateRecommendations(metrics models.HealthMetrics, breakdown models.HealthBreakdown) []models.Recommendation {
 	var recommendations []models.Recommendation
-
-	// Resource efficiency recommendations
-	if belowThreshold(breakdown.ResourceEfficiency, 70) {
-		if metrics.CPUUtilization > 80 {
-			recommendations = append(recommendations, models.Recommendation{
-				ID:            uuid.New(),
-				Category:      "resource",
-				Priority:      "high",
-				Title:         "Optimize CPU Usage",
-				Description:   "High CPU utilization detected. Consider scaling resources or optimizing code.",
-				Impact:        "high",
-				Effort:        "medium",
-				PotentialGain: 15.0,
-			})
-		}
-
-		if metrics.MemoryUtilization > 85 {
-			recommendations = append(recommendations, models.Recommendation{
-				ID:            uuid.New(),
-				Category:      "resource",
-				Priority:      "high",
-				Title:         "Optimize Memory Usage",
-				Description:   "High memory utilization detected. Consider memory optimization or scaling.",
-				Impact:        "high",
-				Effort:        "medium",
-				PotentialGain: 12.0,
-			})
-		}
-	}
 
 	// Performance recommendations
 	if belowThreshold(breakdown.PerformanceMetrics, 70) {

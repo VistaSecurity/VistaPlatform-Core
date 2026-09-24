@@ -35,7 +35,6 @@ import { SupportPage } from '../sections/support/support-page';
 import { BillingPage } from '../sections/billing/billing-page';
 import { PlansPage } from '../sections/plans/plans-page';
 import { SystemPage } from '../sections/system/system-page';
-import { CommsPage } from '../sections/comms/comms-page';
 import { CatalogPage } from '../sections/catalog/catalog-page';
 import { SettingsPage } from '../sections/settings/settings-page';
 import { StaffPage } from '../sections/staff/staff-page';
@@ -48,7 +47,6 @@ const SECTION_COMPONENTS: Record<string, () => unknown> = {
   billing: BillingPage,
   plans: PlansPage,
   system: SystemPage,
-  comms: CommsPage,
   catalog: CatalogPage,
   settings: SettingsPage,
   staff: StaffPage,

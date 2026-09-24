@@ -1106,7 +1106,7 @@ export interface paths {
         put?: never;
         /**
          * Create an SSO provider
-         * @description Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. Returns the created provider (secrets not included).
+         * @description Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. A microsoft/azure provider may carry allowed_domains only while auth_url and token_url both name one Entra directory (not common, organizations, consumers or the personal-account directory); otherwise 400 with code allowed_domains_multi_tenant_authority. Returns the created provider (secrets not included).
          */
         post: operations["createSSOProvider"];
         delete?: never;
@@ -1128,7 +1128,7 @@ export interface paths {
         get?: never;
         /**
          * Update an SSO provider (partial)
-         * @description Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. Returns the updated provider.
+         * @description Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. When the update sets allowed_domains, auth_url or token_url, the resulting row must satisfy the same Entra single-directory rule as create (400 allowed_domains_multi_tenant_authority otherwise). Returns the updated provider.
          */
         put: operations["updateSSOProvider"];
         post?: never;
@@ -1775,6 +1775,8 @@ export interface components {
         MeResponse: {
             user: components["schemas"]["User"];
             tenant?: components["schemas"]["Tenant"];
+            /** @description The tenant's plan as a person should read it — the same block `/tenant/features` carries. Present with `tenant`; omitted when the tenant lookup or the plan resolution fails. */
+            plan?: components["schemas"]["TenantPlan"];
         };
         /** @description Authenticated user. `password_hash` is stripped before serialization and never present in the response body. `role` is populated from a secondary RBAC lookup (primary role for the user under the tenant); defaults to the literal `"viewer"` when no `user_tenant_roles` assignment exists. */
         User: {
@@ -1813,7 +1815,7 @@ export interface components {
             /** Format: date-time */
             deleted_at?: string | null;
         };
-        /** @description Tenant organization for the current user. `domain` is `omitempty` in Go and may be absent from the body; other optional time fields (`trial_ends_at`, `deleted_at`) serialize as `null` when unset. */
+        /** @description Tenant organization for the current user. `domain` is `omitempty` in Go and may be absent from the body; `deleted_at` serializes as `null` when unset. The raw billing columns (`payment_status`, `trial_ends_at`) are deliberately not part of it: the plan, including any trial, is the response's `plan` block (edition-licensing spec §3). */
         Tenant: {
             /** Format: uuid */
             id: string;
@@ -1826,10 +1828,7 @@ export interface components {
              * @description Zero-uuid string during onboarding (tenant with no tier yet).
              */
             subscription_tier_id: string;
-            /** Format: date-time */
-            trial_ends_at?: string | null;
             billing_email: string;
-            payment_status: string;
             settings: {
                 [key: string]: unknown;
             } | null;
@@ -2330,6 +2329,12 @@ export interface components {
         PublicTiersResponse: {
             tiers: components["schemas"]["PublicTier"][];
         };
+        /** @description Refusal for a user of an organization that is not usable (owner decision, RC-4 /). `code` is stable and machine-readable; `error` is a sentence for the sign-in page. `tenant_status_unavailable` accompanies HTTP 503 when the organization's state could not be read — enforcement fails closed. */
+        TenantBlockedError: {
+            error: string;
+            /** @enum {string} */
+            code: "tenant_suspended" | "tenant_deleted" | "tenant_status_unavailable";
+        };
         /** @description CURRENT error shape returned by these endpoints today: a single human-readable string under `error`. Some 400s carry extra sibling keys (e.g. `details`, `required_permission`), so additionalProperties is permitted here. Unstructured — cannot be branched on safely. Superseded by the ADR-0002 `Error` envelope below as endpoints are hardened. */
         LegacyError: {
             error: string;
@@ -2728,6 +2733,15 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description The caller's organization is suspended, canceled or deleted, so no session is issued (and an existing one is refused). Every service's JWT middleware answers a live token of such a tenant the same way. */
+        TenantBlocked: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["TenantBlockedError"];
             };
         };
         /** @description Unexpected server error. */
@@ -3283,6 +3297,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["TenantBlocked"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -4417,7 +4432,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            /** @description An account with this email already exists, or (MSP installs only) the install is past its licensed tenant limit and grace period — see /auth/register. */
+            /** @description An account with this email already exists, the IdP identity (provider + subject) is already linked to an account, or (MSP installs only) the install is past its licensed tenant limit and grace period — see /auth/register. */
             409: {
                 headers: {
                     [name: string]: unknown;

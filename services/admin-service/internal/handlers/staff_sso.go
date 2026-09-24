@@ -13,11 +13,18 @@ package handlers
 //
 // Two further gates sit between the userinfo response and the session:
 //
-//  1. The email must be VERIFIED by the IdP — the shared ssoclaims policy every
-// SSO path uses. Platform providers carry no domain allow-list, so
-// the Microsoft relaxation (allow-listed domain => org-verified) never
-//     applies here: a provider that does not assert email_verified cannot sign
-//     staff in. Refusals are audited.
+//  1. The email must be VERIFIED — the shared ssoclaims policy every SSO path
+// uses. Either the IdP asserts email_verified, or (Microsoft Entra,
+//     which never sends the claim) the provider carries a non-empty
+//     allowed_email_domains list, the email's domain exactly matches an entry
+//     (ASCII, case-insensitive, no subdomains), AND the provider's authorize
+//     and token URLs name a single Entra directory. The last condition is what
+//     keeps the domain rule from being the "nOAuth" hole: Entra does not verify
+//     the email claim, so through a multi-tenant endpoint (common,
+//     organizations, consumers) any directory's administrator could assert an
+//     allow-listed address. An empty list keeps the claim mandatory. Refusals
+//     are audited with the specific reason; a success records which rule
+//     verified the address.
 //  2. A provider signs in only staff its last writer (updated_by) outranks.
 //     Provider writes need platform.security.manage, which the seed grants to
 //     super_admin alone — but an owner can grant it to a custom role, and the
@@ -44,11 +51,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
@@ -109,11 +116,15 @@ func recordStaffSSORefusal(c *gin.Context, reason, userID, email, providerType, 
 }
 
 // recordStaffSSOLogin audits a staff SSO sign-in outcome. failed=false records
-// a session issued through the provider (reason empty).
-func recordStaffSSOLogin(c *gin.Context, failed bool, reason, userID, email, providerType, providerID string) {
+// a session issued through the provider (reason empty). extra is key/value
+// pairs added to the event metadata.
+func recordStaffSSOLogin(c *gin.Context, failed bool, reason, userID, email, providerType, providerID string, extra ...string) {
 	meta := map[string]interface{}{"provider_type": providerType, "purpose": "admin_login"}
 	if reason != "" {
 		meta["reason"] = reason
+	}
+	for i := 0; i+1 < len(extra); i += 2 {
+		meta[extra[i]] = extra[i+1]
 	}
 	recordPlatformAudit(c, PlatformAuditEntry{
 		EventType:     "auth.sso_login",
@@ -127,6 +138,42 @@ func recordStaffSSOLogin(c *gin.Context, failed bool, reason, userID, email, pro
 		ActorEmail:    email,
 		Metadata:      meta,
 	})
+}
+
+// Staff SSO email-verification outcomes. The refusal codes are the audit
+// event's error_code; the success values are its email_verified_by metadata.
+const (
+	staffEmailVerifiedByClaim  = "idp_claim"
+	staffEmailVerifiedByDomain = "allowed_domain"
+
+	staffRefusalEmailNotVerified   = "email_not_verified"
+	staffRefusalDomainNotAllowed   = "email_domain_not_allowed"
+	staffRefusalDomainsMultiTenant = "allowed_domains_multi_tenant_authority"
+)
+
+// staffSSOEmailVerification decides gate 1. It returns how the address was
+// verified, or a refusal code. The domain rule is the shared ssoclaims one
+// (Microsoft only, exact ASCII match, never for an empty list) and applies
+// only while BOTH the authorize and token URLs name a single Entra directory —
+// admin-service refuses to save a list otherwise, and this re-check keeps a
+// row changed behind its back (or saved before the rule) from relaxing the
+// gate. An IdP that SENDS email_verified and says anything but true is
+// believed: the domain rule stands in for a claim Entra omits, never for one
+// that contradicts it.
+func staffSSOEmailVerification(claim interface{}, providerType, email, authURL, tokenURL string, allowedDomains []string) (string, string) {
+	if ssoclaims.EmailVerifiedClaim(claim) {
+		return staffEmailVerifiedByClaim, ""
+	}
+	if claim != nil || len(allowedDomains) == 0 || providerType != "microsoft" {
+		return "", staffRefusalEmailNotVerified
+	}
+	if !ssoclaims.EntraAuthorityIsSingleTenant(authURL) || !ssoclaims.EntraAuthorityIsSingleTenant(tokenURL) {
+		return "", staffRefusalDomainsMultiTenant
+	}
+	if !ssoclaims.EmailEffectivelyVerified(false, providerType, email, allowedDomains) {
+		return "", staffRefusalDomainNotAllowed
+	}
+	return staffEmailVerifiedByDomain, ""
 }
 
 func staffStateToken() string {
@@ -233,12 +280,13 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 			return
 		}
 
-		var providerID, clientID, secretEnc, tokenURL, userinfoURL string
+		var providerID, clientID, secretEnc, authURL, tokenURL, userinfoURL string
 		var providerUpdatedBy uuid.NullUUID
+		var allowedDomains []string
 		if err := db.QueryRow(`
-			SELECT id, client_id, client_secret_encrypted, token_url, userinfo_url, updated_by FROM platform_sso_providers
+			SELECT id, client_id, client_secret_encrypted, auth_url, token_url, userinfo_url, updated_by, allowed_email_domains FROM platform_sso_providers
 			WHERE provider_type = $1 AND purpose = 'admin_login' AND is_enabled = true
-		`, providerType).Scan(&providerID, &clientID, &secretEnc, &tokenURL, &userinfoURL, &providerUpdatedBy); err != nil {
+		`, providerType).Scan(&providerID, &clientID, &secretEnc, &authURL, &tokenURL, &userinfoURL, &providerUpdatedBy, pq.Array(&allowedDomains)); err != nil {
 			c.Redirect(http.StatusFound, "/login?error=sso_unavailable")
 			return
 		}
@@ -277,16 +325,19 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		var ui map[string]interface{}
 		_ = json.Unmarshal(bodyBytes, &ui)
 		email, _ := ui["email"].(string)
-		email = strings.ToLower(strings.TrimSpace(email))
+		// ASCII-only folding: strings.ToLower would map a non-ASCII lookalike
+		// (U+212A KELVIN SIGN -> "k") onto an existing staff address.
+		email = ssoclaims.CanonicalEmail(email)
 		if email == "" {
 			c.Redirect(http.StatusFound, "/login?error=sso_no_email")
 			return
 		}
 
-		// Gate 1: the IdP must vouch for the address. nil allow-list: platform
-		// providers have none, so the claim is mandatory for every provider type.
-		if !ssoclaims.EmailEffectivelyVerified(ssoclaims.EmailVerifiedClaim(ui["email_verified"]), providerType, email, nil) {
-			recordStaffSSORefusal(c, "email_not_verified", "", email, providerType, providerID)
+		// Gate 1: the address must be verified — by the IdP's own claim, or by
+		// the provider's allowed-domain list under the conditions above.
+		verifiedBy, refusal := staffSSOEmailVerification(ui["email_verified"], providerType, email, authURL, tokenURL, allowedDomains)
+		if refusal != "" {
+			recordStaffSSORefusal(c, refusal, "", email, providerType, providerID)
 			c.Redirect(http.StatusFound, "/login?error=sso_email_unverified")
 			return
 		}
@@ -338,7 +389,7 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		_, _ = refreshTokenService.StoreRefreshToken(userID, refreshToken, nil, expiresAt, c.ClientIP(), c.Request.UserAgent())
 		_, _ = db.Exec(`UPDATE platform_users SET last_login_at = now() WHERE id = $1`, userID)
 		setPlatformAuthCookies(c, accessToken, 3600, int(sessionTTL.Seconds()), refreshToken, jwtSecret)
-		recordStaffSSOLogin(c, false, "", userID.String(), email, providerType, providerID)
+		recordStaffSSOLogin(c, false, "", userID.String(), email, providerType, providerID, "email_verified_by", verifiedBy)
 		c.Redirect(http.StatusFound, "/")
 	}
 }

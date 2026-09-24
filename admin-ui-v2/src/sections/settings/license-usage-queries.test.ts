@@ -78,3 +78,35 @@ describe('selectablePeriods', () => {
     expect(q.selectablePeriods(new Date('2027-01-02T00:00:00Z'), 2).map((x) => x.value)).toEqual(['2027-01', '2026-12']);
   });
 });
+
+describe('delivery (spec PR 5)', () => {
+  const base = { complete: true, delivery_status: 'pending' as const, last_error: null, next_attempt_at: null };
+
+  it('classifies every state the reports table shows', () => {
+    expect(q.deliveryState({ ...base, complete: false }, true)).toBe('preview');
+    expect(q.deliveryState({ ...base, complete: false }, false)).toBe('preview');
+    expect(q.deliveryState({ ...base, delivery_status: 'delivered' }, false)).toBe('delivered');
+    expect(q.deliveryState({ ...base, delivery_status: 'delivered' }, true)).toBe('delivered');
+    expect(q.deliveryState(base, false)).toBe('not_configured');
+    expect(q.deliveryState({ ...base, delivery_status: 'failed', last_error: 'HTTP 422' }, false)).toBe('not_configured');
+    expect(q.deliveryState(base, true)).toBe('queued');
+    expect(q.deliveryState({ ...base, last_error: 'HTTP 503', next_attempt_at: '2026-10-12T10:00:00Z' }, true)).toBe('retrying');
+    expect(q.deliveryState({ ...base, delivery_status: 'failed', last_error: 'HTTP 401', next_attempt_at: '2026-10-12T10:00:00Z' }, true)).toBe('failed');
+    expect(q.deliveryState({ ...base, delivery_status: 'failed', last_error: 'HTTP 422' }, true)).toBe('rejected');
+  });
+
+  it('offers Retry for failed and rejected deliveries only', () => {
+    const all: import('./license-usage-queries').DeliveryState[] = ['preview', 'delivered', 'not_configured', 'queued', 'retrying', 'failed', 'rejected'];
+    expect(all.filter(q.canRetryDelivery)).toEqual(['failed', 'rejected']);
+  });
+
+  it('posts the retry to the report and surfaces the refusal reason', async () => {
+    admin.POST.mockResolvedValue({ data: { report: { report_id: 'r' } } });
+    await q.retryLicenseUsageReport('4f8e1c2a-7d1b-4e8a-9c55-2b1d0f6e9a10');
+    expect(admin.POST).toHaveBeenCalledWith('/admin/license/reports/{id}/retry', { params: { path: { id: '4f8e1c2a-7d1b-4e8a-9c55-2b1d0f6e9a10' } } });
+    admin.POST.mockResolvedValue({ error: { error: 'Automatic delivery is not configured.', reason: 'not_configured' } });
+    await expect(q.retryLicenseUsageReport('x')).rejects.toThrow('Automatic delivery is not configured.');
+    admin.POST.mockResolvedValue({ error: { error: 'x', reason: 'not_msp', edition: 'enterprise' } });
+    await expect(q.retryLicenseUsageReport('x')).rejects.toBeInstanceOf(q.NotMSPError);
+  });
+});

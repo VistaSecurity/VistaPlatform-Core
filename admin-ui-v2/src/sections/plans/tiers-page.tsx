@@ -1,22 +1,29 @@
 // Tiers — the Entitlements × Tiers MATRIX (ADR-0004 /, Slice 3a).
-// Rows = entitlements (billable_items) grouped by lever type; columns = tiers.
-// Cells are inline-editable and persist to `tier_entitlements` (the authoritative,
-// enforced layer) via the bulk-replace PUT. Numbers here are editable DATA, not
-// code — punch in ballpark bands now, refine with the team later, no redeploy.
+// Rows = ACTIVE entitlements (billable_items) grouped by lever type; columns =
+// tiers. Cells are inline-editable and persist to `tier_entitlements` (the
+// authoritative, enforced layer). Numbers here are editable DATA, not code —
+// punch in ballpark bands now, refine with the team later, no redeploy.
 // The per-tier builder DRAWER (price, plan-card preview, margin, publish) is 3b.
+//
+// A cell edit writes ONE item (PUT …/entitlements/{key}). It used to rebuild the
+// tier's whole composition from the react-query cache and send it to a
+// delete-everything-then-insert endpoint, so a cache that was empty (load failed
+// or still running) or stale erased the tier: every missing cap fell back to 0
+// and sensor/asset creation failed for every tenant on it (RC-11). A column is
+// also not editable until its composition has actually loaded — an inherited
+// default shown over a failed load is a guess, not the tier's value.
 import { useMemo, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
-import { Plus, ToggleRight, Gauge, Activity, ListChecks } from 'lucide-react';
+import { Plus, ToggleRight, Gauge, Activity, ListChecks, RefreshCw } from 'lucide-react';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { money, num } from '../../components/ui/primitives';
 import { PlanBuilder } from './plan-builder';
+import { apiDetail, fetchTierComposition, storeTierComposition, tierCompositionKey, type TierEntitlement } from './composition';
 
 type SubscriptionTier = adminServiceComponents['schemas']['SubscriptionTier'];
 type BillableItem = adminServiceComponents['schemas']['BillableItem'];
-type TierEntitlement = adminServiceComponents['schemas']['TierEntitlement'];
-type TierEntitlementInput = adminServiceComponents['schemas']['TierEntitlementInput'];
 
 const GROUPS: { kind: string; label: string; icon: typeof ToggleRight }[] = [
   { kind: 'boolean', label: 'Capability gates', icon: ToggleRight },
@@ -66,26 +73,30 @@ export function TiersPage() {
     () => (tiersQ.data ?? []).filter((t) => !t.deprecated_at).sort((a, b) => a.display_order - b.display_order || a.name.localeCompare(b.name)),
     [tiersQ.data],
   );
-  // Memoised so the fallback `[]` keeps a stable identity — otherwise every
-  // render produces a fresh array and the useMemo blocks below never hit.
-  const items = useMemo(() => itemsQ.data ?? [], [itemsQ.data]);
+  // Only ACTIVE catalogue items are composable: the server refuses to set an
+  // inactive one. Memoised so the fallback `[]` keeps a stable identity —
+  // otherwise every render produces a fresh array and the useMemo blocks below
+  // never hit.
+  const items = useMemo(() => (itemsQ.data ?? []).filter((i) => i.is_active), [itemsQ.data]);
 
-  // One entitlements query per tier; entByTier keyed by tier id.
+  // One composition query per tier.
   const entQueries = useQueries({
     queries: tiers.map((t) => ({
-      queryKey: ['platform', 'tier-entitlements', t.id],
-      queryFn: async (): Promise<TierEntitlement[]> => {
-        const { data, error } = await clients.admin.GET('/admin/tiers/{id}/entitlements', { params: { path: { id: t.id } } });
-        if (error || !data) throw new Error('Failed to load tier entitlements');
-        return data.entitlements ?? [];
-      },
+      queryKey: tierCompositionKey(t.id),
+      queryFn: () => fetchTierComposition(t.id),
       staleTime: 5 * 60 * 1000,
       retry: 0,
     })),
   });
-  const entByTier = useMemo(() => {
-    const m = new Map<string, TierEntitlement[]>();
-    tiers.forEach((t, i) => m.set(t.id, entQueries[i]?.data ?? []));
+  // Per tier: its rows once loaded, and whether its column may be edited.
+  // Undefined rows = not loaded (pending or failed): show nothing, edit nothing.
+  const colByTier = useMemo(() => {
+    const m = new Map<string, { rows?: TierEntitlement[]; state: 'loading' | 'error' | 'ready'; refetch: () => void }>();
+    tiers.forEach((t, i) => {
+      const q = entQueries[i];
+      const state = q?.isSuccess ? 'ready' : q?.isError ? 'error' : 'loading';
+      m.set(t.id, { rows: q?.isSuccess ? q.data.entitlements : undefined, state, refetch: () => { void q?.refetch(); } });
+    });
     return m;
   }, [tiers, entQueries]);
 
@@ -96,21 +107,18 @@ export function TiersPage() {
     return m;
   }, [items]);
 
-  // bulk-replace one tier's composition with a single cell changed
+  // Set ONE item on one tier. The server touches no other row, so nothing a
+  // stale or half-loaded page holds can leak into the save.
   const setCell = useMutation({
     mutationFn: async ({ tierId, itemKey, included_value }: { tierId: string; itemKey: string; included_value: unknown }) => {
-      const current = (qc.getQueryData<TierEntitlement[]>(['platform', 'tier-entitlements', tierId]) ?? []);
-      const inputs: TierEntitlementInput[] = current.map((e) => ({
-        item_key: e.item_key,
-        included_value: e.item_key === itemKey ? included_value : e.included_value,
-        overage_price_cents: e.overage_price_cents,
-        overage_unit_size: e.overage_unit_size,
-      }));
-      if (!current.some((e) => e.item_key === itemKey)) inputs.push({ item_key: itemKey, included_value });
-      const { error } = await clients.admin.PUT('/admin/tiers/{id}/entitlements', { params: { path: { id: tierId } }, body: { entitlements: inputs } });
-      if (error) throw new Error('Failed to save');
+      const { data, error } = await clients.admin.PUT('/admin/tiers/{id}/entitlements/{key}', {
+        params: { path: { id: tierId, key: itemKey } },
+        body: { included_value },
+      });
+      if (error || !data) throw new Error(apiDetail(error, 'Failed to save'));
+      return data;
     },
-    onSuccess: (_d, v) => qc.invalidateQueries({ queryKey: ['platform', 'tier-entitlements', v.tierId] }),
+    onSuccess: (data, v) => storeTierComposition(qc, v.tierId, data),
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
 
@@ -124,6 +132,7 @@ export function TiersPage() {
   };
 
   const loading = tiersQ.isLoading || itemsQ.isLoading;
+  const loadError = tiersQ.isError ? 'Could not load the plans.' : itemsQ.isError ? 'Could not load the entitlements catalogue.' : null;
   const colW = 132;
 
   return (
@@ -137,17 +146,32 @@ export function TiersPage() {
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '0 24px 40px' }}>
         {loading ? (
           <div style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>Loading matrix…</div>
+        ) : loadError ? (
+          <div role="alert" style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>
+            {loadError}{' '}
+            <button className="op-btn sm" onClick={() => { void tiersQ.refetch(); void itemsQ.refetch(); }}><RefreshCw size={13} />Retry</button>
+          </div>
         ) : (
           <table className="op-table" style={{ minWidth: 320 + tiers.length * colW }}>
             <thead>
               <tr>
                 <th style={{ position: 'sticky', left: 0, background: 'var(--op-panel)', minWidth: 240, zIndex: 1 }}>Entitlement</th>
-                {tiers.map((t) => (
-                  <th key={t.id} className="num" style={{ minWidth: colW, cursor: 'pointer' }} onClick={() => setBuilder({ tier: t })} title="Open the plan builder (price, all levers, margin)">
-                    <div style={{ fontWeight: 700, color: 'var(--op-t1)' }}>{t.display_name || t.name}{t.is_custom ? ' ·🔒' : ''}</div>
-                    <div style={{ fontSize: 10.5, color: 'var(--op-t3)', fontWeight: 400 }}>{money(t.price_cents / 100)}/{t.billing_interval?.[0] ?? 'mo'} · edit</div>
-                  </th>
-                ))}
+                {tiers.map((t) => {
+                  const col = colByTier.get(t.id);
+                  return (
+                    <th key={t.id} className="num" style={{ minWidth: colW, cursor: 'pointer' }} onClick={() => setBuilder({ tier: t })} title="Open the plan builder (price, all levers, margin)" data-tier-state={col?.state}>
+                      <div style={{ fontWeight: 700, color: 'var(--op-t1)' }}>{t.display_name || t.name}{t.is_custom ? ' ·🔒' : ''}</div>
+                      <div style={{ fontSize: 10.5, color: 'var(--op-t3)', fontWeight: 400 }}>{money(t.price_cents / 100)}/{t.billing_interval?.[0] ?? 'mo'} · edit</div>
+                      {col?.state === 'loading' && <div style={{ fontSize: 10.5, color: 'var(--op-t3)', fontWeight: 400 }}>Loading…</div>}
+                      {col?.state === 'error' && (
+                        <div role="alert" style={{ fontSize: 10.5, color: 'var(--danger)', fontWeight: 400 }}>
+                          Couldn&apos;t load ·{' '}
+                          <button className="op-chip" style={{ height: 18, padding: '0 6px', fontSize: 10.5 }} onClick={(e) => { e.stopPropagation(); col.refetch(); }}>Retry</button>
+                        </div>
+                      )}
+                    </th>
+                  );
+                })}
                 {tiers.length === 0 && <th className="t-muted">No tiers yet — add one →</th>}
               </tr>
             </thead>
@@ -171,7 +195,16 @@ export function TiersPage() {
                         <div className="mono" style={{ fontSize: 10, color: 'var(--op-t3)' }}>{item.key}{item.unit ? ` · ${item.unit}` : ''}</div>
                       </td>
                       {tiers.map((t) => {
-                        const te = entByTier.get(t.id)?.find((e) => e.item_key === item.key);
+                        const col = colByTier.get(t.id);
+                        if (!col || col.state !== 'ready' || !col.rows) {
+                          // Not loaded: showing the catalogue default here would
+                          // present a guess as this tier's value, and editing it
+                          // would be editing blind.
+                          return (
+                            <td key={t.id} className="num" aria-disabled="true" style={{ color: 'var(--op-t3)' }} title={col?.state === 'error' ? 'This plan’s entitlements failed to load — retry from the column header' : 'Loading…'}>—</td>
+                          );
+                        }
+                        const te = col.rows.find((e) => e.item_key === item.key);
                         const isDefault = !te;
                         const val = te ? te.included_value : item.default_value;
                         const editing = edit && edit.tierId === t.id && edit.itemKey === item.key;
@@ -180,6 +213,7 @@ export function TiersPage() {
                           <td key={t.id} className="num" style={{ cursor: 'pointer', opacity: saving ? 0.5 : 1 }}>
                             {item.kind === 'boolean' ? (
                               <button
+                                disabled={saving}
                                 onClick={() => commit(t, item, ((val ?? {}) as DV).enabled ? 'off' : 'on')}
                                 className="op-chip"
                                 style={{ height: 22, padding: '0 9px', color: ((val ?? {}) as DV).enabled ? 'var(--op-accent-text)' : 'var(--op-t3)', fontWeight: 600 }}
@@ -215,7 +249,8 @@ export function TiersPage() {
           <strong> click a tier header</strong> (or <strong>+ New plan</strong>) to open the full <strong>plan builder</strong> — all levers, price, live plan card, margin, save. Custom (tenant-owned) tiers are marked 🔒.
         </div>
       </div>
-      {builder && <PlanBuilder tier={builder.tier} items={items} onClose={() => setBuilder(null)} />}
+      {/* The builder gets the whole catalogue and applies the same active-only rule itself. */}
+      {builder && <PlanBuilder tier={builder.tier} items={itemsQ.data ?? []} onClose={() => setBuilder(null)} />}
     </div>
   );
 }

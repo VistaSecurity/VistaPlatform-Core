@@ -163,7 +163,13 @@ license:
 # Licence usage reports (MSP licence only; inert otherwise). A copy of each
 # signed monthly report is written to a PVC; the database is the record.
 # ReadWriteOnce (the default) keeps admin-service to one replica.
+# Automatic delivery to Vista Security is OFF until `reporting.endpoint` is
+# set to the https:// receiver URL you were given; leave it empty on an
+# air-gapped install and upload the downloaded reports instead.
 # licensing:
+#   reporting:
+#     endpoint: ""            # e.g. the receiver URL from your licence email
+#     intervalMinutes: 60
 #   reports:
 #     persistence:
 #       enabled: true

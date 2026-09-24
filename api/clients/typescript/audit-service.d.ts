@@ -222,7 +222,10 @@ export interface paths {
          */
         get: operations["getRetentionPolicies"];
         put?: never;
-        /** Create a retention policy */
+        /**
+         * Create a retention policy
+         * @description A malformed body, or an age below 1 day or a total shorter than the hot period, is a 400 that names the field.
+         */
         post: operations["createRetentionPolicy"];
         delete?: never;
         options?: never;
@@ -242,7 +245,10 @@ export interface paths {
         };
         /** Get a single retention policy */
         get: operations["getRetentionPolicyById"];
-        /** Update a retention policy */
+        /**
+         * Update a retention policy
+         * @description Replaces the policy. A malformed body or id, an age below 1 day, or a total shorter than the hot period is a 400 that names the field.
+         */
         put: operations["updateRetentionPolicy"];
         post?: never;
         delete?: never;
@@ -688,7 +694,11 @@ export interface components {
         };
         /**
          * @description An audit-log retention policy (services.RetentionPolicy). `tenant_id`,
-         *     `event_type`, `compliance_framework`, `cold_storage_days` are omitempty.
+         *     `event_type`, `compliance_framework` are omitempty. Logs older than
+         *     `hot_storage_days` are copied to archive storage (S3) when archival is
+         *     configured; logs older than `total_retention_days` are deleted (only
+         *     once archived, when archival is configured). There is no cold-tier age:
+         *     `cold_storage_days` was removed (admin-ui review decision 14).
          */
         RetentionPolicy: {
             /** Format: uuid */
@@ -699,7 +709,6 @@ export interface components {
             event_type?: string;
             compliance_framework?: string;
             hot_storage_days: number;
-            cold_storage_days?: number;
             total_retention_days: number;
             is_active: boolean;
             /** Format: date-time */
@@ -715,13 +724,12 @@ export interface components {
         RetentionPolicyListResponse: {
             policies: components["schemas"]["RetentionPolicy"][] | null;
         };
-        /** @description Body for POST/PUT /retention-policies (services.RetentionPolicy). Read-only fields are ignored. */
+        /** @description Body for POST/PUT /retention-policies (services.RetentionPolicy). Read-only fields are ignored, and so is a `cold_storage_days` sent by an older client (the field was removed). Both ages are whole days of at least 1, and `total_retention_days` may not be shorter than `hot_storage_days`; anything else is a 400 naming the field. */
         RetentionPolicyInput: {
             policy_name?: string;
             event_type?: string | null;
             compliance_framework?: string | null;
             hot_storage_days?: number;
-            cold_storage_days?: number | null;
             total_retention_days?: number;
             is_active?: boolean;
         } & {

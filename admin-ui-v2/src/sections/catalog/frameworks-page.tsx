@@ -15,6 +15,7 @@ import { Tag, relTime } from '../../components/ui/primitives';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { MeasurementRulesModal } from './measurement-rules-modal';
 import { DraftControlsModal, useDraftingAvailability } from './draft-controls-modal';
+import { AcceptUpdateButton, SeededContentBadges } from './seeded-content';
 
 type AdminFramework = complianceEngineComponents['schemas']['PublishedFramework'];
 type FrameworkInput = complianceEngineComponents['schemas']['PlatformFrameworkInput'];
@@ -69,7 +70,16 @@ function useFrameworkMutations() {
     },
     onSuccess: invalidate,
   });
-  return { create, update, publish, remove };
+  // Accept the update an upgrade offered for a shipped framework the admin had
+  // edited (decision 4, RC-12). 409 = nothing on offer any more.
+  const acceptUpdate = useMutation({
+    mutationFn: async (id: string) => {
+      const { error, response } = await clients.compliance.POST('/admin/frameworks/{id}/accept-update', { params: { path: { id } } });
+      if (error) throw new Error(response?.status === 409 ? 'No update available any more' : 'Accepting the update failed');
+    },
+    onSuccess: invalidate,
+  });
+  return { create, update, publish, remove, acceptUpdate };
 }
 
 type AdminControl = complianceEngineComponents['schemas']['PublishedFrameworkControl'];
@@ -100,7 +110,14 @@ function useControlMutations() {
     },
     onSuccess: invalidate,
   });
-  return { create, update, remove };
+  const acceptUpdate = useMutation({
+    mutationFn: async ({ frameworkId, controlId }: { frameworkId: string; controlId: string }) => {
+      const { error, response } = await clients.compliance.POST('/admin/frameworks/{id}/controls/{controlId}/accept-update', { params: { path: { id: frameworkId, controlId } } });
+      if (error) throw new Error(response?.status === 409 ? 'No update available any more' : 'Accepting the update failed');
+    },
+    onSuccess: invalidate,
+  });
+  return { create, update, remove, acceptUpdate };
 }
 
 function FrameworkFormModal({ framework, onClose, mut }: { framework: AdminFramework | null; onClose: () => void; mut: ReturnType<typeof useFrameworkMutations> }) {
@@ -230,7 +247,7 @@ export function FrameworksPage() {
                           {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                         </button>
                         <div>
-                          <div style={{ fontWeight: 600, color: 'var(--op-t1)' }}>{f.name}</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600, color: 'var(--op-t1)' }}>{f.name}<SeededContentBadges row={f} /></div>
                           <div className="mono" style={{ fontSize: 10.5, color: 'var(--op-t3)' }}>{f.code}{f.organization ? ` · ${f.organization}` : ''}</div>
                         </div>
                       </div>
@@ -241,6 +258,7 @@ export function FrameworksPage() {
                     <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(f.updated_at)}</td>
                     <td>
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                        <AcceptUpdateButton row={f} label={f.name} pending={fwMut.acceptUpdate.isPending} onAccept={() => fwMut.acceptUpdate.mutate(f.id, { onSuccess: () => toast.success('Update accepted'), onError: (e) => toast.error(errMsg(e)) })} />
                         {status === 'draft' && <button className="op-btn icon sm" title="Edit metadata" onClick={() => setFwModal({ kind: 'edit', framework: f })}><Pencil size={13} /></button>}
                         {published ? (
                           <button className="op-btn icon sm" title="Unpublish (archive)" disabled={fwMut.publish.isPending} onClick={() => fwMut.publish.mutate({ id: f.id, status: 'archived' }, { onSuccess: () => toast.success('Unpublished'), onError: (e) => toast.error(errMsg(e)) })}><Archive size={13} /></button>
@@ -284,10 +302,12 @@ export function FrameworksPage() {
                                       <span title={`Drafted by ${(ctrl.source_ref ?? '').replace(/^author:/, '') || 'a model'} and accepted by a platform admin`}>drafted</span>
                                     </Tag>
                                   )}
+                                  <SeededContentBadges row={ctrl} />
                                   {ctrl.crypto_relevant && <Tag color="var(--info)">crypto</Tag>}
                                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 600, color: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }}>
                                     <span style={{ width: 6, height: 6, borderRadius: 50, background: CONTROL_SEVERITY_COLOR[ctrl.baseline_severity] ?? 'var(--op-t3)' }} />{severityLabel(ctrl.baseline_severity)}
                                   </span>
+                                  <AcceptUpdateButton row={ctrl} label={ctrl.control_id} pending={ctrlMut.acceptUpdate.isPending} onAccept={() => ctrlMut.acceptUpdate.mutate({ frameworkId: f.id, controlId: ctrl.id }, { onSuccess: () => toast.success('Update accepted'), onError: (e) => toast.error(errMsg(e)) })} />
                                   <button className="op-btn sm ghost" title="Manage measurement rules" onClick={() => setRulesControl({ id: ctrl.id, control_id: ctrl.control_id, title: ctrl.title })}>Rules</button>
                                   <button className="op-btn icon sm" title="Edit control" onClick={() => setControlModal({ kind: 'edit', frameworkId: f.id, control: ctrl })}><Pencil size={12} /></button>
                                   <button className="op-btn icon sm" title="Delete control" disabled={ctrlMut.remove.isPending} onClick={() => { if (window.confirm(`Delete control "${ctrl.control_id}"?`)) ctrlMut.remove.mutate({ frameworkId: f.id, controlId: ctrl.id }, { onSuccess: () => toast.success('Control deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={12} /></button>
@@ -308,7 +328,7 @@ export function FrameworksPage() {
           </tbody>
         </table>
         <div style={{ padding: '9px 16px', borderTop: '1px solid var(--op-border)', fontSize: 11.5, color: 'var(--op-t3)' }}>
-          Create a draft, expand a framework to manage its controls, then publish to make it available to tenants — publishing re-evaluates posture across tenants (ADR-0014). Measurement rule builder (what each control checks) lands next.
+          Create a draft, expand a framework to manage its controls, then publish to make it available to tenants — publishing re-evaluates posture across tenants (ADR-0014). Frameworks marked <strong>Vista</strong> ship with the platform. Your changes to them survive upgrades, including archiving and edited or deleted controls and rules. When a later release changes something you edited, the row shows <strong>Update available</strong> instead of being overwritten.
         </div>
       </div>
 

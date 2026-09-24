@@ -853,9 +853,24 @@ db-seed: ## Seed database with built-in seed data (02-seed.sql)
 # absent from your dev database and every compliance screen looks thinner than
 # a licensed deployment. Signature verification is a chart/release concern and
 # is deliberately not repeated here — locally the file IS the source of truth.
+# Applied in a SEED PASS (vista.seed_apply = on), like the chart's seed-data Job,
+# so the seeded-content guard keeps a platform admin's edits (decision 4,
+# RC-12). Also like the Job, the bundle's own "incomplete" summary is accepted
+# when every missing regulated framework is one an admin archived or deleted —
+# see charts/vistaplatform/templates/jobs/seed-data.yaml.
 db-seed-content-bundle: ## Apply the Enterprise content bundle to the compose database (dev parity with a licensed deployment)
 	@test -f $(CONTENT_BUNDLE_SQL) || (echo "❌ $(CONTENT_BUNDLE_SQL) not found (Core checkout — nothing to apply)" && exit 1)
-	$(DOCKER_COMPOSE) exec -T postgres psql -U crypto_user -d crypto_inventory -v ON_ERROR_STOP=1 < $(CONTENT_BUNDLE_SQL)
+	@out=$$($(DOCKER_COMPOSE) exec -T postgres psql -U crypto_user -d crypto_inventory -v ON_ERROR_STOP=1 \
+		-c "SET vista.seed_apply = on" -f - < $(CONTENT_BUNDLE_SQL) 2>&1); rc=$$?; echo "$$out"; \
+	if [ $$rc -ne 0 ]; then \
+		echo "$$out" | grep -q 'Enterprise content bundle incomplete' \
+		&& [ "$$($(DOCKER_COMPOSE) exec -T postgres psql -U crypto_user -d crypto_inventory -tAc \
+			"SELECT public.seeded_frameworks_unaccounted(ARRAY['soc2','pci-dss','iso27001','nist-csf','iec-62351-3'])")" = "0" ] \
+		&& echo "ℹ️  regulated frameworks a platform admin archived or deleted were left that way (admin edits win)" \
+		|| exit $$rc; \
+	fi; \
+	$(DOCKER_COMPOSE) exec -T postgres psql -U crypto_user -d crypto_inventory -v ON_ERROR_STOP=1 -tAc \
+		"SELECT public.classify_seeded_measurements()" >/dev/null
 
 db-reset: ## Reset database (WARNING: destroys all data) and bring all services back up
 	$(DOCKER_COMPOSE) down -v

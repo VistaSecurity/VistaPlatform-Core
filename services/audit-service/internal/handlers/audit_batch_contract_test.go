@@ -70,14 +70,12 @@ func newRetentionEngine(svc retentionService) *gin.Engine {
 
 func sampleRetentionPolicy() services.RetentionPolicy {
 	now := time.Now().UTC()
-	cold := 90
 	return services.RetentionPolicy{
 		ID:                  uuid.New(),
 		TenantID:            &testTenantID,
 		PolicyName:          "SOC2 default",
 		ComplianceFramework: strPtr("soc2"),
 		HotStorageDays:      30,
-		ColdStorageDays:     &cold,
 		TotalRetentionDays:  365,
 		IsActive:            true,
 		CreatedAt:           now,

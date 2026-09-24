@@ -182,6 +182,30 @@ var (
 	defaultRevocationOnce sync.Once
 )
 
+// tenantStateChecker is the tenant-state check RequireAuth applies, set once by
+// SetupRouter over the service's own app-role pool. Unset (unit tests that
+// build RequireAuth by hand), RequireAuth falls back to the DATABASE_URL-built
+// default the shared middleware uses.
+var (
+	tenantStateMu      sync.Mutex
+	tenantStateChecker sharedmw.TenantStateChecker
+)
+
+// SetTenantStateChecker installs the checker every RequireAuth built AFTER this
+// call applies. SetupRouter calls it before registering any route.
+func SetTenantStateChecker(c sharedmw.TenantStateChecker) {
+	tenantStateMu.Lock()
+	defer tenantStateMu.Unlock()
+	tenantStateChecker = c
+}
+
+func resolveTenantState() sharedmw.TenantStateChecker {
+	tenantStateMu.Lock()
+	c := tenantStateChecker
+	tenantStateMu.Unlock()
+	return sharedmw.ResolveTenantStateChecker(c, "auth-service")
+}
+
 func getDefaultRevocationChecker() sharedmw.RevocationChecker {
 	defaultRevocationOnce.Do(func() {
 		defaultRevocation = sharedmw.RedisRevocationCheckerFromEnv()
@@ -223,6 +247,7 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 	if !opts.revocationSet {
 		revocation = getDefaultRevocationChecker()
 	}
+	tenantState := resolveTenantState()
 	cookiePairs := authCookiePairs
 	if opts.platformFirst {
 		cookiePairs = platformFirstCookiePairs
@@ -325,6 +350,14 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
+			return
+		}
+
+		// A suspended, canceled or deleted tenant is not usable (RC-4 /).
+		// Same check, response and exemptions (platform tokens, impersonation,
+		// sign-out) as shared RequireJWTAuth, so a token issued before the
+		// suspension stops working here too — /auth/me included.
+		if !sharedmw.EnforceTenantSession(c, tenantState, claims.TenantID, claims.Type, claims.TenantSessionVersion) {
 			return
 		}
 
@@ -505,7 +538,7 @@ func RequireTenant() gin.HandlerFunc {
 	}
 }
 
-// RateLimiting applies rate limiting using Redis-backed token bucket.
+// RateLimiting applies rate limiting using Redis-backed fixed-window counters.
 //
 // Failure semantics on Redis errors are endpoint-class-dependent:
 //   - Login / password-reset / register endpoints fail CLOSED (503). A silent

@@ -1,15 +1,17 @@
 // VISTA Operations — Settings ▸ License & Usage: the MSP usage panel
-// (edition-licensing spec PR 4, spec §1 "Usage panel" / "Usage reports table" /
-// "Generate report modal" / "Delivery status").
+// (edition-licensing spec PR 4 and PR 5, spec §1 "Usage panel" / "Usage
+// reports table" / "Generate report modal" / "Delivery status").
 //
 // Shows this month's licence usage (licensed / current / peak tenants), the
 // signed monthly usage reports with their key fingerprint and delivery status,
 // a Generate-report modal (a closed month, or the current month as a
-// never-billed preview) and Download (the stored, signed JSON, byte for byte).
+// never-billed preview), Download (the stored, signed JSON, byte for byte) and
+// Retry for a report whose automatic delivery failed.
 //
 // MSP-only: the License & Usage page renders this panel only when the install
-// runs under an MSP licence. Delivery reads "Not configured" until the
-// transmitter ships — reports are stored and downloadable only.
+// runs under an MSP licence. Delivery reads "Not configured" while
+// licensing.reporting.endpoint is empty — reports are then stored and
+// downloadable only.
 import { useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { AlertTriangle, Download, FileSignature, Gauge, RefreshCw } from 'lucide-react';
@@ -17,12 +19,15 @@ import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { StatTile, Tag, num } from '../../components/ui/primitives';
 import {
   NotMSPError,
+  canRetryDelivery,
+  deliveryState,
   downloadLicenseUsageReport,
   errMsg,
   selectablePeriods,
   useGenerateLicenseUsageReport,
   useLicenseUsage,
   useLicenseUsageReports,
+  useRetryLicenseUsageReport,
   type LicenseUsage,
   type LicenseUsageReport,
 } from './license-usage-queries';
@@ -131,23 +136,69 @@ function UsageTiles({ u }: { u: LicenseUsage }) {
 
 // ── reports table ─────────────────────────────────────────────────────────────
 
+const deliveryNote = { fontSize: 11, marginTop: 3, maxWidth: 280, overflowWrap: 'anywhere' as const };
+
 function DeliveryCell({ r, configured }: { r: LicenseUsageReport; configured: boolean }) {
-  if (!configured) return <span className="t-muted">Not configured</span>;
-  switch (r.delivery_status) {
+  const state = deliveryState(r, configured);
+  switch (state) {
+    case 'preview':
+      return <span className="t-muted">Not sent (preview)</span>;
+    case 'not_configured':
+      return <span className="t-muted">Not configured</span>;
     case 'delivered':
-      return <Tag color="var(--ok)">Delivered</Tag>;
+      return (
+        <>
+          <Tag color="var(--ok)">Delivered</Tag>
+          {r.delivered_at && <div className="t-muted" style={deliveryNote}>{utcStamp(r.delivered_at)}</div>}
+        </>
+      );
+    case 'queued':
+      return (
+        <>
+          <Tag color="var(--op-t3)">Pending</Tag>
+          <div className="t-muted" style={deliveryNote}>Sent at the next delivery pass</div>
+        </>
+      );
+    case 'retrying':
+      return (
+        <>
+          <Tag color="var(--warn, #d97706)">Pending retry</Tag>
+          <div className="t-muted" style={deliveryNote}>
+            Next attempt {utcStamp(r.next_attempt_at)}
+            <br />
+            Last attempt: {r.last_error}
+          </div>
+        </>
+      );
     case 'failed':
-      return <span title={r.last_error ?? undefined}><Tag color="var(--danger)">Failed</Tag></span>;
-    default:
-      return <Tag color="var(--op-t3)">Pending</Tag>;
+    case 'rejected':
+      return (
+        <>
+          <Tag color="var(--danger)">Failed</Tag>
+          <div style={{ ...deliveryNote, color: 'var(--op-t2)' }}>{r.last_error ?? 'The receiver refused the report'}</div>
+          <div className="t-muted" style={deliveryNote}>
+            {state === 'failed'
+              ? `Retrying automatically ${utcStamp(r.next_attempt_at)}`
+              : 'Not retried automatically — fix the cause, then Retry'}
+          </div>
+        </>
+      );
   }
 }
 
 function ReportsTable({ onGenerate }: { onGenerate: () => void }) {
   const { data, isLoading, isError, error, refetch } = useLicenseUsageReports();
+  const retry = useRetryLicenseUsageReport();
   const [busy, setBusy] = useState<string | null>(null);
   const reports = data?.reports ?? [];
   const configured = data?.delivery.configured ?? false;
+
+  const retryDelivery = (r: LicenseUsageReport) => {
+    retry.mutate(r.report_id, {
+      onSuccess: () => toast.success(`The ${monthLabel(r.period)} report will be sent again shortly`),
+      onError: (e) => toast.error(errMsg(e, 'Could not retry the delivery')),
+    });
+  };
 
   const download = async (r: LicenseUsageReport) => {
     setBusy(r.report_id);
@@ -198,7 +249,17 @@ function ReportsTable({ onGenerate }: { onGenerate: () => void }) {
               <td className="op-num">{num(r.tenant_count)}</td>
               <td><span className="mono" title={r.signing_key_id}>{shortFingerprint(r.signing_key_id)}</span></td>
               <td><DeliveryCell r={r} configured={configured} /></td>
-              <td style={{ textAlign: 'right' }}>
+              <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                {canRetryDelivery(deliveryState(r, configured)) && (
+                  <button
+                    className="op-btn ghost sm"
+                    disabled={retry.isPending && retry.variables === r.report_id}
+                    onClick={() => retryDelivery(r)}
+                    aria-label={`Retry delivery of the ${r.period} report`}
+                  >
+                    <RefreshCw size={12} /> Retry
+                  </button>
+                )}
                 <button className="op-btn ghost sm" disabled={busy === r.report_id} onClick={() => void download(r)} aria-label={`Download the ${r.period} report`}>
                   <Download size={12} /> Download
                 </button>
@@ -209,7 +270,9 @@ function ReportsTable({ onGenerate }: { onGenerate: () => void }) {
       </table>
       <div className="t-muted" style={{ fontSize: 11.5, lineHeight: 1.6, padding: '10px 16px', borderTop: '1px solid var(--op-border)' }}>
         A report holds counts and tenant ids only — no names, users, hosts or inventory. Previews (the current month so far) are never billed.
-        {!configured && ' Automatic delivery to Vista Security is not configured: reports are stored here and in the reports volume, ready to download.'}
+        {configured
+          ? <> Complete reports are sent automatically to <span className="mono">{data?.delivery.endpoint}</span>; a failed delivery is retried with a growing delay, up to once a day.</>
+          : ' Automatic delivery to Vista Security is not configured: reports are stored here and in the reports volume — download them and upload them to Vista Security.'}
       </div>
     </div>
   );

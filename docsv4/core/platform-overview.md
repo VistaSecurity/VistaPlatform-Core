@@ -153,8 +153,8 @@ and React 19 (TypeScript, Vite, Tailwind CSS) on the frontend.
   Compliance, and Remediation, plus Settings and My Profile
 - **The operations console** (**VISTA Operations** by default) — Mission
   Control, Tenants, Support, Fleet, Jobs & Queues, System Health, Catalog,
-  Settings, Staff & Access, and Security & Trust (plus Billing & Revenue and
-  Comms on editions that ship them)
+  Settings, Staff & Access, and Security & Trust (plus Billing & Revenue on
+  editions that ship it)
 
 **Backend services** (16) handle authentication and RBAC, inventory
 management, compliance evaluation, CBOM artifact generation, sensor

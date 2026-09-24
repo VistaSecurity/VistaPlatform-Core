@@ -1,16 +1,18 @@
 // Licence-edition gating of the operator navigation (edition-licensing spec §6).
 //
 // The build cannot tell Enterprise from MSP — one ee binary serves both — so a
-// third gate reads the LICENCE: Plans & Pricing is hidden on Enterprise (no
-// plans there; Core keeps tier authoring), Billing & Revenue only shows on MSP.
-// Both directions are pinned, over the REAL SECTIONS registry, plus the
-// pending/unknown rules and the resolver that turns the API answer into them.
+// third gate reads the LICENCE: Plans & Pricing and Billing & Revenue show only
+// on an MSP licence. Enterprise has no plans or billing; Core is one
+// organisation with nobody to sell to (owner decision. Every
+// edition is pinned, over the REAL SECTIONS registry, plus the pending/unknown
+// rules and the resolver that turns the API answer into them.
 //
 // Mutations run against this file (each turns a case red):
-//   - drop `license: 'not-enterprise'` from Plans            → Enterprise keeps Plans
+//   - drop `license: 'msp'` from Plans                       → Core and Enterprise keep Plans
 //   - drop `license: 'msp'` from Billing                     → Enterprise keeps Billing
+//   - licenseAllows lets 'core' through                      → the Core cases
 //   - licenseAllows treats 'unknown' as closed               → fail-open case
-//   - visibleSections ignores the licence argument           → every Enterprise case
+//   - visibleSections ignores the licence argument           → every Core/Enterprise case
 import { describe, expect, it } from 'vitest';
 import { SECTIONS, licenseAllows, visibleSections, type NavItem } from './nav';
 import { resolveEditionState, type EditionCapabilities, type LicenseState } from '../lib/edition';
@@ -42,13 +44,38 @@ describe('MSP licence', () => {
 });
 
 describe('Core (no licence)', () => {
-  it('keeps tier authoring but has no billing', () => {
-    expect(nav('core', CORE_BUILD)).toContain('plans');
+  it('hides Plans & Pricing and Billing & Revenue', () => {
+    expect(nav('core', CORE_BUILD)).not.toContain('plans');
     expect(nav('core', CORE_BUILD)).not.toContain('billing');
-    // An ee build with no licence installed: the billing CODE is present, but
-    // nobody is licensed to bill.
+    // An ee build with no licence installed: the plans and billing CODE is
+    // present, but nobody is licensed to sell.
     expect(nav('core', EE_BUILD)).not.toContain('billing');
-    expect(nav('core', EE_BUILD)).toContain('plans');
+    expect(nav('core', EE_BUILD)).not.toContain('plans');
+  });
+  it('keeps every section a single organisation uses', () => {
+    const got = nav('core', CORE_BUILD);
+    for (const id of ['overview', 'support', 'fleet', 'jobs', 'system', 'catalog', 'settings', 'staff', 'security']) {
+      expect(got).toContain(id);
+    }
+  });
+});
+
+describe('each edition, side by side', () => {
+  it.each([
+    ['core', false],
+    ['enterprise', false],
+    ['msp', true],
+  ] as [LicenseState, boolean][])('%s: Plans & Pricing and Billing shown = %s', (license, shown) => {
+    const got = nav(license);
+    expect(got.includes('plans')).toBe(shown);
+    expect(got.includes('billing')).toBe(shown);
+  });
+  it('the deep-link guard agrees with the rail for every edition', () => {
+    for (const s of SECTIONS.filter((x) => x.license)) {
+      expect(licenseAllows(s, 'core')).toBe(false);
+      expect(licenseAllows(s, 'enterprise')).toBe(false);
+      expect(licenseAllows(s, 'msp')).toBe(true);
+    }
   });
 });
 

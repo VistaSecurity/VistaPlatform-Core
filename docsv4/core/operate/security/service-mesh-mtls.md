@@ -223,8 +223,10 @@ packs by requests, not usage). If that exceeds the node's allocatable CPU, the
 recreated `postgres-0` can't schedule, the schema migration can't connect, and
 the upgrade hangs until it times out. Either size the node for ~2× steady-state
 CPU requests before upgrading, or set `strategy: Recreate` on the backends so
-pods replace in place without surging (brief per-service downtime). If an
-upgrade does wedge, `helm rollback` restores the previous release.
+pods replace in place without surging (brief per-service downtime; on a
+release that is already deployed, see the production checklist's *Single-node
+clusters* for the one-time patch that switch needs). If an upgrade does wedge,
+`helm rollback` restores the previous release.
 
 This applies to **config-only upgrades too**, not just version bumps: the pod
 templates carry a `checksum/config` hash of the app ConfigMap, so changing any

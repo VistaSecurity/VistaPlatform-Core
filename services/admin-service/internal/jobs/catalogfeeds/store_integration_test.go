@@ -345,6 +345,82 @@ func TestIntegration_FeedState_RoundTripsAndAdvancesTheCursorOnlyOnSuccess(t *te
 	}
 }
 
+// Decision 13 (RC-29) against real Postgres: a partially failed OSV run
+// persists the completed ecosystems' cursor, the rows it committed and the
+// per-ecosystem status (jsonb round trip), and the next run carries a failing
+// ecosystem's last success forward.
+func TestIntegration_FeedState_PartialProgressPersistsEcosystems(t *testing.T) {
+	store, db := integrationStore(t)
+	ctx := context.Background()
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM public.catalog_feed_state WHERE feed = $1`, FeedOSV) })
+	_, _ = db.Exec(`DELETE FROM public.catalog_feed_state WHERE feed = $1`, FeedOSV)
+
+	boom := "archive for Ubuntu exceeds the 2048 MiB cap"
+	debWM := "2026-09-20T12:00:00Z"
+	first := SyncResult{
+		Rows: 12, Cursor: `{"Alpine":"2026-09-19T00:00:00Z","Debian":"2026-09-20T12:00:00Z"}`, PartialProgress: true,
+		Ecosystems: []EcosystemStatus{
+			{Name: "Alpine", Status: EcosystemOK, Rows: 2},
+			{Name: "Debian", Status: EcosystemOK, Rows: 10, Watermark: &debWM},
+			{Name: "Ubuntu", Status: EcosystemError, LastError: &boom},
+		},
+	}
+	if err := store.MarkResult(ctx, FeedOSV, first, fmt.Errorf("osv mirror incomplete: 1 of 3 ecosystems failed (Ubuntu)")); err != nil {
+		t.Fatalf("mark partial failure: %v", err)
+	}
+	st := feedState(t, store, FeedOSV)
+	if st.LastStatus != StatusError || st.RowCount != 12 {
+		t.Fatalf("after partial failure: status %q rows %d, want error / 12", st.LastStatus, st.RowCount)
+	}
+	if st.Cursor == nil || *st.Cursor != first.Cursor {
+		t.Fatalf("cursor = %v, want the completed ecosystems' watermarks persisted", st.Cursor)
+	}
+	if len(st.Ecosystems) != 3 {
+		t.Fatalf("ecosystems = %+v, want 3", st.Ecosystems)
+	}
+	var ubuntu, debian EcosystemStatus
+	for _, e := range st.Ecosystems {
+		switch e.Name {
+		case "Ubuntu":
+			ubuntu = e
+		case "Debian":
+			debian = e
+		}
+	}
+	if ubuntu.Status != EcosystemError || ubuntu.LastError == nil || *ubuntu.LastError != boom || ubuntu.LastSuccessAt != nil {
+		t.Fatalf("Ubuntu = %+v, want error with its reason and no success", ubuntu)
+	}
+	if debian.Status != EcosystemOK || debian.Rows != 10 || debian.LastSuccessAt == nil ||
+		debian.Watermark == nil || *debian.Watermark != debWM {
+		t.Fatalf("Debian = %+v, want ok with 10 rows, its watermark and a success time", debian)
+	}
+
+	// Next run: Debian 304s and Ubuntu recovers. Both now carry a success
+	// time, and the feed goes green.
+	second := SyncResult{Rows: 0, Cursor: first.Cursor, PartialProgress: true, Ecosystems: []EcosystemStatus{
+		{Name: "Debian", Status: EcosystemOK},
+		{Name: "Ubuntu", Status: EcosystemOK, Rows: 40},
+	}}
+	if err := store.MarkResult(ctx, FeedOSV, second, nil); err != nil {
+		t.Fatalf("mark success: %v", err)
+	}
+	st = feedState(t, store, FeedOSV)
+	if st.LastStatus != StatusOK || st.LastError != nil || len(st.Ecosystems) != 2 {
+		t.Fatalf("after recovery: %+v", st)
+	}
+	for _, e := range st.Ecosystems {
+		if e.LastSuccessAt == nil {
+			t.Fatalf("%s has no success time after an ok run: %+v", e.Name, e)
+		}
+	}
+
+	// A feed that has never run lists an EMPTY ecosystem array, not null.
+	_, _ = db.Exec(`DELETE FROM public.catalog_feed_state WHERE feed = $1`, FeedOSV)
+	if got := feedState(t, store, FeedOSV); got.Ecosystems == nil || len(got.Ecosystems) != 0 {
+		t.Fatalf("never-run ecosystems = %#v, want an empty array", got.Ecosystems)
+	}
+}
+
 func feedState(t *testing.T, store *SQLStore, feed string) FeedState {
 	t.Helper()
 	states, err := store.FeedStates(context.Background())

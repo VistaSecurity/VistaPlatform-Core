@@ -2,14 +2,17 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/agentcounts"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/licenseusage"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 )
 
 var tierService *services.TierService
@@ -27,8 +30,8 @@ func InitializeTierService(db, bypassDB *sql.DB) {
 type tierManager interface {
 	ListTiers(includeDeprecated bool) ([]models.SubscriptionTier, error)
 	GetTier(tierID uuid.UUID) (*models.SubscriptionTier, error)
-	CreateTier(req models.TierCreateRequest) (*models.SubscriptionTier, error)
-	UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest, changedBy uuid.UUID) (*models.SubscriptionTier, error)
+	CreateTier(req models.TierCreateRequest, changedBy uuid.UUID) (*models.SubscriptionTier, error)
+	UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest, changedBy uuid.UUID) (*services.TierUpdateResult, error)
 	DeprecateTier(tierID uuid.UUID, changedBy uuid.UUID) error
 	GetTierHistory(tierID uuid.UUID) ([]models.TierHistory, error)
 }
@@ -77,12 +80,26 @@ func CreateTier(svc tierManager) gin.HandlerFunc {
 			return
 		}
 
-		tier, err := svc.CreateTier(req)
+		tier, err := svc.CreateTier(req, platformActor(c))
 		if err != nil {
+			if respondCompositionError(c, err) {
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
 
+		recordPlatformAudit(c, PlatformAuditEntry{
+			EventType:     "subscription_tier.created",
+			Action:        "create",
+			EventCategory: "config",
+			ResourceType:  "subscription_tier",
+			ResourceID:    tier.ID.String(),
+			Metadata: map[string]interface{}{
+				"name":              tier.Name,
+				"entitlement_count": len(req.Entitlements),
+			},
+		})
 		c.JSON(http.StatusCreated, tier)
 	}
 }
@@ -103,39 +120,65 @@ func UpdateTier(svc tierManager) gin.HandlerFunc {
 			return
 		}
 
-		// Get user ID from context
-		userID, exists := c.Get("user_id")
-		if !exists {
+		// The acting platform user. This read the context key "user_id",
+		// which nothing sets — the auth middleware stores "userID" — so every
+		// PUT answered 401 and no plan could be edited.
+		actor, ok := sharedmw.GetUserIDFromContext(c)
+		if !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}
 
-		userIDUUID, ok := userID.(uuid.UUID)
-		if !ok {
-			// Try parsing as string
-			if userIDStr, ok := userID.(string); ok {
-				userIDUUID, err = uuid.Parse(userIDStr)
-				if err != nil {
-					c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID"})
-					return
-				}
-			} else {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID"})
+		res, err := svc.UpdateTier(tierID, req, actor)
+		if err != nil {
+			if respondCompositionError(c, err) {
 				return
 			}
-		}
-
-		tier, err := svc.UpdateTier(tierID, req, userIDUUID)
-		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
 
+		auditTierUpdate(c, tierID, res)
 		c.JSON(http.StatusOK, gin.H{
-			"tier":    tier,
+			"tier":    res.Tier,
 			"message": "Tier updated. Existing tenants are grandfathered and will continue using their current tier configuration.",
 		})
 	}
+}
+
+// auditTierUpdate records a tier update that changed something: the tier
+// columns written (with their new values) and the composition diff.
+func auditTierUpdate(c *gin.Context, tierID uuid.UUID, res *services.TierUpdateResult) {
+	if res == nil || (len(res.ChangedFields) == 0 && len(res.EntitlementChanges) == 0) {
+		return
+	}
+	fields := append([]string(nil), res.ChangedFields...)
+	newValues := map[string]interface{}{}
+	if res.Tier != nil {
+		var asMap map[string]interface{}
+		if raw, err := json.Marshal(res.Tier); err == nil && json.Unmarshal(raw, &asMap) == nil {
+			for _, f := range res.ChangedFields {
+				if v, ok := asMap[f]; ok {
+					newValues[f] = v
+				}
+			}
+		}
+	}
+	meta := map[string]interface{}{}
+	if len(res.EntitlementChanges) > 0 {
+		fields = append(fields, compositionChangedFields(res.EntitlementChanges)...)
+		meta["entitlement_changes"] = res.EntitlementChanges
+	}
+	recordPlatformAudit(c, PlatformAuditEntry{
+		EventType:     "subscription_tier.updated",
+		Action:        "update",
+		EventCategory: "config",
+		ResourceType:  "subscription_tier",
+		ResourceID:    tierID.String(),
+		ChangedFields: fields,
+		NewValues:     newValues,
+		Metadata:      meta,
+	})
 }
 
 // DeprecateTier handles DELETE /api/v1/admin-service/admin/tiers/:id
@@ -148,32 +191,26 @@ func DeprecateTier(svc tierManager) gin.HandlerFunc {
 			return
 		}
 
-		// Get user ID from context
-		userID, exists := c.Get("user_id")
-		if !exists {
+		// Same "user_id" → "userID" fix as UpdateTier.
+		actor, ok := sharedmw.GetUserIDFromContext(c)
+		if !ok {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}
 
-		userIDUUID, ok := userID.(uuid.UUID)
-		if !ok {
-			if userIDStr, ok := userID.(string); ok {
-				userIDUUID, err = uuid.Parse(userIDStr)
-				if err != nil {
-					c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID"})
-					return
-				}
-			} else {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID"})
-				return
-			}
-		}
-
-		err = svc.DeprecateTier(tierID, userIDUUID)
+		err = svc.DeprecateTier(tierID, actor)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}
+
+		recordPlatformAudit(c, PlatformAuditEntry{
+			EventType:     "subscription_tier.deprecated",
+			Action:        "delete",
+			EventCategory: "config",
+			ResourceType:  "subscription_tier",
+			ResourceID:    tierID.String(),
+		})
 
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Tier deprecated. Existing tenants are grandfathered and will continue using this tier.",
@@ -282,8 +319,10 @@ func TierImpactAnalysis(c *gin.Context) {
 	//            reserves a seat (CheckUserLimit), so a tenant with 4 users and
 	//            2 open invites breaks on a max_users of 5, not 4.
 	//   sensors  tenant-registered only; the two platform collectors the
-	//            tenant-create trigger seeds (platform = 'platform') are the
-	//            platform's, not the tenant's, and CheckSensorLimit excludes them.
+	//            tenant-create trigger seeds are the platform's, not the
+	//            tenant's, and CheckSensorLimit excludes them. The test is the
+	//            shared platform-managed predicate (internal/agentcounts:
+	//            platform = 'platform' OR the 'system' tag).
 	//
 	// An asset is a host, not one of its listening ports (phase 1): count
 	// `assets`, never a join through `asset_endpoints`.
@@ -292,7 +331,7 @@ func TierImpactAnalysis(c *gin.Context) {
 			COALESCE((SELECT COUNT(*) FROM assets a WHERE a.tenant_id = t.id AND a.deleted_at IS NULL), 0) AS asset_count,
 			COALESCE((SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL), 0)
 			  + COALESCE((SELECT COUNT(*) FROM invitations i WHERE i.tenant_id = t.id AND i.status = 'pending' AND i.expires_at > NOW()), 0) AS user_count,
-			COALESCE((SELECT COUNT(*) FROM sensors s WHERE s.tenant_id = t.id AND s.deleted_at IS NULL AND s.platform <> 'platform'), 0) AS sensor_count
+			COALESCE((SELECT COUNT(*) FROM sensors s WHERE s.tenant_id = t.id AND s.deleted_at IS NULL AND NOT `+agentcounts.PlatformManagedSQL+`), 0) AS sensor_count
 		FROM tenants t
 		WHERE t.subscription_tier_id = $1 AND t.deleted_at IS NULL
 		ORDER BY t.name ASC

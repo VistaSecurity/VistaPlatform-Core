@@ -10,22 +10,73 @@
 // out: never run, running, failed (with the error), and disabled by the
 // deployment. A feed that has never run is LISTED rather than omitted, because
 // a shorter list than the product has feeds reads as "there is no such feed".
+//
+// A feed that mirrors several sources (OSV: Debian, Ubuntu, Alpine) shows each
+// ecosystem's own outcome under its row (decision 13, RC-29): one failing
+// ecosystem is reported against its name, and the feed reads "Partial" rather
+// than a single "Failed" while the others keep their progress.
 import { useRef, useState } from 'react';
 import toast from 'react-hot-toast';
-import { RefreshCw, Upload, Rss, AlertTriangle, PowerOff } from 'lucide-react';
+import { RefreshCw, Upload, Rss, AlertTriangle, PowerOff, Check, X } from 'lucide-react';
 import { PlatformPermissionGate, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { relTime, num } from '../../components/ui/primitives';
 import {
   useCatalogFeeds, useSyncCatalogFeed, useImportCatalogBundle, BundleImportError,
-  FEED_LABEL, errMsg, type FeedName, type CatalogFeedStatus,
+  FEED_LABEL, errMsg, type FeedName, type CatalogFeedStatus, type CatalogFeedEcosystem,
 } from './catalog-queries';
 
 const STATUS_STYLE: Record<string, { color: string; label: string }> = {
   ok: { color: 'var(--ok)', label: 'OK' },
   running: { color: 'var(--info)', label: 'Running' },
   error: { color: 'var(--danger)', label: 'Failed' },
+  partial: { color: 'var(--warn)', label: 'Partial' },
   never: { color: 'var(--neutral)', label: 'Never run' },
 };
+
+/**
+ * The status a row shows. A failed run in which some ecosystems succeeded is
+ * "partial": their rows and bookmarks were kept, so "Failed" would overstate it.
+ */
+export function feedDisplayStatus(feed: Pick<CatalogFeedStatus, 'last_status' | 'ecosystems'>): string {
+  const ecosystems = feed.ecosystems ?? [];
+  if (feed.last_status === 'error' && ecosystems.some((e) => e.status === 'ok')) return 'partial';
+  return feed.last_status;
+}
+
+function EcosystemList({ ecosystems }: { ecosystems: CatalogFeedEcosystem[] }) {
+  return (
+    <div data-testid="feed-ecosystems" style={{ display: 'flex', flexDirection: 'column', gap: 4, padding: '2px 0 4px 18px' }}>
+      {ecosystems.map((e) => {
+        const ok = e.status === 'ok';
+        return (
+          <div
+            key={e.name}
+            data-testid={`feed-ecosystem-${e.name}`}
+            data-status={e.status}
+            style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12, color: 'var(--op-t2)' }}
+          >
+            <span aria-label={ok ? 'ok' : 'failed'} style={{ color: ok ? 'var(--ok)' : 'var(--danger)', display: 'inline-flex', alignSelf: 'center' }}>
+              {ok ? <Check size={13} /> : <X size={13} />}
+            </span>
+            <strong style={{ color: 'var(--op-t1)', fontWeight: 600, minWidth: 64 }}>{e.name}</strong>
+            {ok ? (
+              <span className="t-muted">
+                {num(e.rows)} rows this run{e.watermark ? ` · up to date to ${e.watermark.slice(0, 10)}` : ''}
+              </span>
+            ) : (
+              <span>
+                <span className="mono" style={{ fontSize: 11.5 }}>{e.last_error ?? 'failed, no detail recorded'}</span>
+                <span className="t-muted">
+                  {' · '}{e.last_success_at ? `last worked ${relTime(e.last_success_at)} ago` : 'has not completed yet'}
+                </span>
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function StatusPill({ status }: { status: string }) {
   const s = STATUS_STYLE[status] ?? { color: 'var(--neutral)', label: status };
@@ -52,13 +103,15 @@ function FeedRow({
   onSync: (f: FeedName) => void;
   syncing: boolean;
 }) {
+  const ecosystems = feed.ecosystems ?? [];
   return (
+    <>
     <tr>
       <td style={{ fontWeight: 500, color: 'var(--op-t1)' }}>
         {FEED_LABEL[feed.feed] ?? feed.feed}
         <span className="mono t-muted" style={{ marginLeft: 8, fontSize: 11 }}>{feed.feed}</span>
       </td>
-      <td><StatusPill status={feed.last_status} /></td>
+      <td><StatusPill status={feedDisplayStatus(feed)} /></td>
       <td className="t-muted mono" style={{ fontSize: 11 }}>
         {feed.last_run_at ? relTime(feed.last_run_at) : 'never'}
       </td>
@@ -91,6 +144,14 @@ function FeedRow({
         </PlatformPermissionGate>
       </td>
     </tr>
+    {ecosystems.length > 0 && (
+      <tr>
+        <td colSpan={6} style={{ paddingTop: 0 }}>
+          <EcosystemList ecosystems={ecosystems} />
+        </td>
+      </tr>
+    )}
+    </>
   );
 }
 
@@ -163,15 +224,24 @@ export function FeedStatusCard({ feeds: only, title }: { feeds: FeedName[]; titl
         >
           <AlertTriangle size={14} style={{ color: 'var(--danger)', flex: 'none', marginTop: 2 }} />
           <div>
-            {failing.map((f) => (
-              <div key={f.feed} style={{ marginBottom: 2 }}>
-                <strong>{FEED_LABEL[f.feed] ?? f.feed}</strong> failed on its last run:{' '}
-                <span className="mono" style={{ fontSize: 11.5 }}>{f.last_error ?? 'no detail recorded'}</span>
-              </div>
-            ))}
-            <div className="t-muted" style={{ fontSize: 11.5, marginTop: 2 }}>
-              The bookmark was not advanced, so the next run retries the same window.
-            </div>
+            {failing.map((f) => {
+              const failedEcosystems = (f.ecosystems ?? []).filter((e) => e.status !== 'ok');
+              return failedEcosystems.length > 0 ? (
+                <div key={f.feed} style={{ marginBottom: 2 }}>
+                  <strong>{FEED_LABEL[f.feed] ?? f.feed}</strong>:{' '}
+                  {failedEcosystems.map((e) => e.name).join(', ')} failed on the last run. The other
+                  ecosystems kept their rows and bookmarks; only the failed ones start over next run.
+                </div>
+              ) : (
+                <div key={f.feed} style={{ marginBottom: 2 }}>
+                  <strong>{FEED_LABEL[f.feed] ?? f.feed}</strong> failed on its last run:{' '}
+                  <span className="mono" style={{ fontSize: 11.5 }}>{f.last_error ?? 'no detail recorded'}</span>
+                  <div className="t-muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                    The bookmark was not advanced, so the next run retries the same window.
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

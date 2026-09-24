@@ -41,6 +41,7 @@ export const PLATFORM_PERMISSIONS = {
     security: 'platform.security',
     securityManage: 'platform.security.manage',
     audit: 'platform.audit',
+    auditManage: 'platform.audit.manage',
     notificationsManage: 'platform.notifications.manage',
     impersonate: 'platform.impersonate',
   },

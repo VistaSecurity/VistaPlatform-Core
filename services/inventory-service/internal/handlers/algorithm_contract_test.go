@@ -40,6 +40,7 @@ type stubAlgorithmReader struct {
 	batchErr       error
 	updated        *services.Algorithm
 	updatedErr     error
+	updatedOutcome services.AlgorithmAssessmentOutcome
 	created        *services.Algorithm
 	createdErr     error
 	createdInput   *services.AlgorithmCreate
@@ -69,8 +70,8 @@ func (s *stubAlgorithmReader) GetBatchRecommendations([]string) (map[string]*ser
 func (s *stubAlgorithmReader) GetPQCProgress(uuid.UUID) (*models.PQCProgress, error) {
 	return s.pqcProgress, s.pqcProgressErr
 }
-func (s *stubAlgorithmReader) UpdateAlgorithmAssessment(string, services.AlgorithmAssessmentUpdate) (*services.Algorithm, error) {
-	return s.updated, s.updatedErr
+func (s *stubAlgorithmReader) UpdateAlgorithmAssessment(string, services.AlgorithmAssessmentUpdate) (*services.Algorithm, services.AlgorithmAssessmentOutcome, error) {
+	return s.updated, s.updatedOutcome, s.updatedErr
 }
 func (s *stubAlgorithmReader) CreateAlgorithm(in services.AlgorithmCreate) (*services.Algorithm, error) {
 	s.createdInput = &in
@@ -398,6 +399,23 @@ func TestContract_UpdateAlgorithm_Deprecate_200(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "AlgorithmResponse", w.Body.Bytes())
+}
+
+// Keeping an algorithm obsolete while lowering its score below the Critical
+// band is refused (decision 12) with the LegacyError envelope, not a 500.
+func TestContract_UpdateAlgorithm_400_obsoleteBelowCriticalFloor(t *testing.T) {
+	sv := loadSpec(t)
+	before := sampleAlgorithm()
+	before.DeprecationStatus = "obsolete"
+	eng := newAlgorithmEngine(&stubAlgorithmReader{byCode: &before, updatedErr: services.ErrObsoleteRiskBelowFloor})
+	w := do(eng, http.MethodPut, "/api/v2/inventory-service/admin/algorithms/AES-256-GCM", strings.NewReader(`{"risk_score":10}`))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), strconv.Itoa(services.ObsoleteRiskFloor())) {
+		t.Fatalf("the refusal must name the floor, got %s", w.Body.String())
+	}
 }
 
 // Invalid strength enum -> 400 before the DB is touched.

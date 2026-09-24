@@ -60,6 +60,12 @@ func mintToken(t *testing.T, userID, tenantID uuid.UUID, role string) string {
 // gateRouter builds the REAL discovery router over a sqlmock DB.
 func gateRouter(t *testing.T, db *sql.DB) *gin.Engine {
 	t.Helper()
+	// Tenant state is not what these gate tests are about, so switch the
+	// DATABASE_URL-built check in the shared JWT middleware off explicitly.
+	// Left on (the nightly sets DATABASE_URL), the random tenant ids minted
+	// here have no tenants row and are refused 403 tenant_deleted before the
+	// permission gate runs ( item 2) — a 403 from the wrong gate.
+	t.Setenv("DATABASE_URL", "")
 	gin.SetMode(gin.TestMode)
 	sx := sqlx.NewDb(db, "postgres")
 	h := handlers.NewDiscoveryHandler(

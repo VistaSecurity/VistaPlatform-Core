@@ -104,9 +104,12 @@ type licenseStore interface {
 
 type licenseRepository struct{ db *sql.DB }
 
-// newLicenseStore is the production store over the app pool. platform_license
-// and platform_install are SELECT-only for crypto_app, which is all this reads;
-// platform_settings is writable, like every other platform setting.
+// newLicenseStore is the production store. The reads work on the app pool
+// (platform_license and platform_install are SELECT-only for crypto_app, which
+// is all they need). WriteRetention does NOT: the schema's
+// guard_platform_retention_setting trigger lets only the bypass role or the
+// owner write platform_settings 'retention.max_days', so UpdateRetention must
+// be given the bypass pool (server.go does).
 func newLicenseStore(db *sql.DB) licenseStore { return &licenseRepository{db: db} }
 
 func (r *licenseRepository) ReadLicense(ctx context.Context) (*licenseRow, error) {
@@ -277,9 +280,10 @@ func getRetentionWithStore(store licenseStore) gin.HandlerFunc {
 
 // UpdateRetention handles PUT /admin/license/retention. Body: {"max_days": N}
 // or {"max_days": null}. The key is required — an empty body must not read as
-// "unlimited".
-func UpdateRetention(db *sql.DB) gin.HandlerFunc {
-	return updateRetentionWithStore(newLicenseStore(db))
+// "unlimited". bypassDB must be the bypass pool: the setting is writable only
+// by the bypass role or the owner (guard_platform_retention_setting).
+func UpdateRetention(bypassDB *sql.DB) gin.HandlerFunc {
+	return updateRetentionWithStore(newLicenseStore(bypassDB))
 }
 
 func updateRetentionWithStore(store licenseStore) gin.HandlerFunc {

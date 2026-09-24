@@ -12,6 +12,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -20,11 +21,12 @@ import (
 
 // JWTClaims represents the claims in a JWT token (matching auth service)
 type JWTClaims struct {
-	UserID   uuid.UUID `json:"user_id"`
-	TenantID uuid.UUID `json:"tenant_id"`
-	Email    string    `json:"email"`
-	Role     string    `json:"role"`
-	Type     string    `json:"type"` // "access", "refresh", or "impersonation"
+	UserID               uuid.UUID `json:"user_id"`
+	TenantID             uuid.UUID `json:"tenant_id"`
+	Email                string    `json:"email"`
+	Role                 string    `json:"role"`
+	Type                 string    `json:"type"` // "access", "refresh", or "impersonation"
+	TenantSessionVersion int64     `json:"tenant_session_version,omitempty"`
 
 	// PasswordChangeRequired marks a limited session issued until the user
 	// rotates an admin-forced or seeded default password. Mirrors
@@ -95,6 +97,16 @@ func getInternalVerifier() *serviceauth.Verifier {
 
 var revocationCheckerFromEnv = sharedmw.RedisRevocationCheckerFromEnv
 
+// tenantStateChecker builds the per-request tenant-state check over the
+// service's pool, or the DATABASE_URL default when there is none. A var so
+// tests can substitute a stub.
+var tenantStateChecker = func(db *database.DB) sharedmw.TenantStateChecker {
+	if db != nil && db.DB != nil {
+		return tenantstate.NewChecker(db.DB, tenantstate.CacheTTLFromEnv())
+	}
+	return sharedmw.ResolveTenantStateChecker(nil, "inventory-service")
+}
+
 // isInternalServiceCall checks if the request is from an internal service.
 // Requires HMAC-SHA256 signature verification via INTERNAL_AUTH_SECRET.
 func isInternalServiceCall(c *gin.Context) bool {
@@ -116,6 +128,11 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 	// the SAME revocation denylist here using the shared key + Redis
 	// helper. nil when REDIS_URL is unset → check skipped (fail-open).
 	revocation := revocationCheckerFromEnv()
+
+	// Tenant state (RC-4 /): a suspended, canceled or deleted tenant's
+	// tokens are refused with the same code and exemptions as shared
+	// RequireJWTAuth. Over this service's own pool when it has one.
+	tenantState := tenantStateChecker(db)
 
 	// Same reasoning for signing keys: resolved once, not per request.
 	// The keyfunc picks by algorithm class — ES256 tokens resolve their `kid`
@@ -239,6 +256,10 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 				"code":  "password_change_required",
 			})
 			c.Abort()
+			return
+		}
+
+		if !sharedmw.EnforceTenantSession(c, tenantState, claims.TenantID, claims.Type, claims.TenantSessionVersion) {
 			return
 		}
 

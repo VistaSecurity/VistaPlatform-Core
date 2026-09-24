@@ -43,7 +43,12 @@ setSessionExpiredHandler(
       // SSO callback / legal) are reachable signed out by design, and a stale
       // cookie must not evict a visitor from the link they just followed.
       if (!isPublicPath(window.location.pathname)) {
-        window.location.assign(`/login?reason=${reason === 'expired' ? 'session-expired' : 'signed-out'}`);
+        // tenant_suspended / tenant_deleted pass through verbatim — the sign-in
+        // page explains them (the same codes the SSO callbacks redirect with).
+        const param = reason === 'expired' ? 'session-expired'
+          : reason === 'tenant_suspended' || reason === 'tenant_deleted' ? reason
+          : 'signed-out';
+        window.location.assign(`/login?reason=${param}`);
       }
     },
   }),

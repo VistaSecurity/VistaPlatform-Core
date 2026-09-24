@@ -100,52 +100,88 @@ func TestRequirePermission_TenantGrantDecidesAccess(t *testing.T) {
 	}
 }
 
-// TestRequirePermission_PlatformStaysRoleBased pins the other half: platform
-// admins carry a no-tenant token, so there is no tenant_role_permissions row to
-// resolve and the branch stays role-based. It must never touch the database —
-// an expectation-free mock fails if it does.
-func TestRequirePermission_PlatformStaysRoleBased(t *testing.T) {
+// platformRequest drives one request through RequirePermission with a PLATFORM
+// identity (no tenant) on the context, as RequireAuth sets it for an operator.
+func platformRequest(t *testing.T, db *sql.DB, userID uuid.UUID, role, permission string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.GET("/gated", func(c *gin.Context) {
+		c.Set("userID", userID)
+		c.Set("userType", UserTypePlatform)
+		c.Set("role", role)
+		c.Next()
+	}, RequirePermission(db, permission), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/gated", nil))
+	return w
+}
+
+// TestRequirePermission_PlatformGrantDecidesAccess pins the platform half: an
+// operator's access is platform_user_has_permission() on the mapped PLATFORM
+// permission, never the role name on the token. Under the old role switch the
+// first row passed and the second row was refused regardless of the database.
+func TestRequirePermission_PlatformGrantDecidesAccess(t *testing.T) {
 	cases := []struct {
+		name       string
 		role       string
 		permission string
+		wantAsked  string
+		granted    bool
 		wantStatus int
 	}{
-		{"super_admin", rbac.PermissionAuditManage, http.StatusOK},
-		{"platform_admin", rbac.PermissionAuditManage, http.StatusOK},
-		{"support_admin", rbac.PermissionAuditRead, http.StatusOK},
-		{"support_admin", rbac.PermissionAuditManage, http.StatusForbidden},
-		{"", rbac.PermissionAuditRead, http.StatusForbidden},
+		{"platform_admin_name_without_grant_is_refused", "platform_admin", rbac.PermissionAuditManage, rbac.PermissionPlatformAuditManage, false, http.StatusForbidden},
+		{"super_admin_name_without_grant_is_refused", "super_admin", rbac.PermissionAuditRead, rbac.PermissionPlatformAudit, false, http.StatusForbidden},
+		{"support_agent_with_platform_audit_reads", "support_agent", rbac.PermissionAuditRead, rbac.PermissionPlatformAudit, true, http.StatusOK},
+		{"custom_role_with_audit_manage_writes", "retention_steward", rbac.PermissionAuditManage, rbac.PermissionPlatformAuditManage, true, http.StatusOK},
+		{"custom_role_without_audit_manage_is_refused", "retention_steward", rbac.PermissionAuditManage, rbac.PermissionPlatformAuditManage, false, http.StatusForbidden},
 	}
 
-	gin.SetMode(gin.TestMode)
 	for _, tc := range cases {
 		tc := tc
-		t.Run(tc.role+"_"+tc.permission, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			if err != nil {
 				t.Fatalf("sqlmock.New: %v", err)
 			}
 			defer func() { _ = db.Close() }()
 
-			r := gin.New()
-			r.GET("/gated", func(c *gin.Context) {
-				c.Set("userID", uuid.New())
-				c.Set("userType", UserTypePlatform)
-				c.Set("role", tc.role)
-				c.Next()
-			}, RequirePermission(db, tc.permission), func(c *gin.Context) {
-				c.Status(http.StatusOK)
-			})
+			userID := uuid.New()
+			mock.ExpectQuery(`platform_user_has_permission`).
+				WithArgs(userID, tc.wantAsked).
+				WillReturnRows(sqlmock.NewRows([]string{"has"}).AddRow(tc.granted))
 
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/gated", nil))
+			w := platformRequest(t, db, userID, tc.role, tc.permission)
 			if w.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
 			}
 			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Errorf("platform branch queried the database: %v", err)
+				t.Errorf("the platform check did not ask for %s: %v", tc.wantAsked, err)
 			}
 		})
+	}
+}
+
+// An audit permission with no platform counterpart refuses operators outright
+// and never touches the database — the fail-closed default for a permission
+// added without deciding who on the platform side may use it.
+func TestRequirePermission_UnmappedPermissionRefusesPlatform(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	w := platformRequest(t, db, uuid.New(), "super_admin", "audit.export")
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (body: %s)", w.Code, w.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmapped permission queried the database: %v", err)
 	}
 }
 

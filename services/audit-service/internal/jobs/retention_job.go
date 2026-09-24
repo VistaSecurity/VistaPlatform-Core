@@ -105,6 +105,13 @@ func (j *RetentionJob) executeRetention(ctx context.Context) {
 	j.logger.Println("Completed retention job cycle")
 }
 
+// archivalConfigured reports whether the archive step runs: S3 archival is
+// enabled and the job can read the logs it uploads. Without it nothing is
+// archived (and logs_archived reports 0, not a count of rows it skipped).
+func (j *RetentionJob) archivalConfigured() bool {
+	return j.s3ArchivalService != nil && j.s3ArchivalService.IsEnabled() && j.activityLogService != nil
+}
+
 // processPolicy processes a single retention policy
 func (j *RetentionJob) processPolicy(ctx context.Context, policy services.RetentionPolicy) {
 	jobID := uuid.New()
@@ -122,10 +129,15 @@ func (j *RetentionJob) processPolicy(ctx context.Context, policy services.Retent
 
 	j.logger.Printf("Retention job logged with ID: %s", logID)
 
-	// Archive logs (move to cold storage)
+	// Archive: copy logs past the hot period to S3 and stamp them, when S3
+	// archival is configured. Whether to archive is a property of the
+	// deployment, not of the policy: a policy used to opt in by carrying a
+	// cold_storage_days value that was otherwise never read, so a policy
+	// without one was never archived and — with S3 on, where only archived
+	// rows are deleted — never deleted either (decision 14).
 	archivedCount := 0
 	var archiveS3Keys []string
-	if policy.ColdStorageDays != nil {
+	if j.archivalConfigured() {
 		logIDs, err := j.retentionService.GetLogsForArchival(ctx, &policy)
 		if err != nil {
 			j.logger.Printf("ERROR: Failed to get logs for archival: %v", err)
@@ -137,47 +149,40 @@ func (j *RetentionJob) processPolicy(ctx context.Context, policy services.Retent
 		if len(logIDs) > 0 {
 			j.logger.Printf("Archiving %d logs for policy %s", len(logIDs), policy.PolicyName)
 
-			// Check if S3 archival is available
-			if j.s3ArchivalService != nil && j.s3ArchivalService.IsEnabled() && j.activityLogService != nil {
-				// Fetch the actual log entries for archival
-				logs, err := j.activityLogService.GetActivityLogsByIDs(ctx, logIDs)
-				if err != nil {
-					j.logger.Printf("ERROR: Failed to fetch logs for archival: %v", err)
-					errorMsg := err.Error()
-					_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
-					return
-				}
+			// Fetch the actual log entries for archival
+			logs, err := j.activityLogService.GetActivityLogsByIDs(ctx, logIDs)
+			if err != nil {
+				j.logger.Printf("ERROR: Failed to fetch logs for archival: %v", err)
+				errorMsg := err.Error()
+				_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
+				return
+			}
 
-				// Archive to S3
-				result, err := j.s3ArchivalService.ArchiveLogs(ctx, logs, policy.TenantID)
-				if err != nil {
-					j.logger.Printf("ERROR: Failed to archive logs to S3: %v", err)
-					errorMsg := err.Error()
-					_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
-					return
-				}
+			// Archive to S3
+			result, err := j.s3ArchivalService.ArchiveLogs(ctx, logs, policy.TenantID)
+			if err != nil {
+				j.logger.Printf("ERROR: Failed to archive logs to S3: %v", err)
+				errorMsg := err.Error()
+				_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
+				return
+			}
 
-				archivedCount = result.LogsArchived
-				archiveS3Keys = append(archiveS3Keys, result.S3Key)
-				j.logger.Printf("Archived %d logs to S3: %s", result.LogsArchived, result.S3Key)
+			archivedCount = result.LogsArchived
+			archiveS3Keys = append(archiveS3Keys, result.S3Key)
+			j.logger.Printf("Archived %d logs to S3: %s", result.LogsArchived, result.S3Key)
 
-				// Mark logs as archived in the database. This stamp is the ONLY
-				// evidence the later delete step consults (FilterArchivedLogs),
-				// so a failure here must fail the whole policy run rather than
-				// warn: unstamped rows are re-selected next cycle and
-				// re-uploaded under a fresh S3 key, and the cycle would
-				// otherwise still report logs_archived: N. Returning here also
-				// skips the delete step, which is the safe direction.
-				if err := j.retentionService.MarkLogsAsArchived(ctx, logIDs, result.S3Key); err != nil {
-					j.logger.Printf("ERROR: Failed to mark logs as archived: %v", err)
-					errorMsg := err.Error()
-					_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
-					return
-				}
-			} else {
-				// S3 not enabled - just log the count
-				j.logger.Println("S3 archival not configured, skipping actual archival")
-				archivedCount = len(logIDs)
+			// Mark logs as archived in the database. This stamp is the ONLY
+			// evidence the later delete step consults (FilterArchivedLogs),
+			// so a failure here must fail the whole policy run rather than
+			// warn: unstamped rows are re-selected next cycle and
+			// re-uploaded under a fresh S3 key, and the cycle would
+			// otherwise still report logs_archived: N. Returning here also
+			// skips the delete step, which is the safe direction.
+			if err := j.retentionService.MarkLogsAsArchived(ctx, logIDs, result.S3Key); err != nil {
+				j.logger.Printf("ERROR: Failed to mark logs as archived: %v", err)
+				errorMsg := err.Error()
+				_ = j.jobExecutionService.LogJobCompletion(ctx, logID, "failed", &errorMsg, nil)
+				return
 			}
 
 			_ = j.jobExecutionService.LogJobProgress(ctx, logID, len(logIDs), len(logIDs), 0)

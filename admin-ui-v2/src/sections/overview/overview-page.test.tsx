@@ -71,6 +71,7 @@ function health(tenantId: string, score: number, status: TenantHealthSummary['he
     health_status: status,
     last_calculated: now,
     trend_direction: 'stable',
+    active_alerts: 0,
     critical_alerts: 0,
     recommendations: 0,
   };

@@ -17,6 +17,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 )
 
 // entitlementsService is the package-level singleton initialized at
@@ -170,22 +172,29 @@ func DeleteBillableItem(store billableItemStore) gin.HandlerFunc {
 	}
 }
 
-// GetTierEntitlements handles GET /api/v1/admin-service/admin/tiers/:id/entitlements
-//
-// Returns the composition rows joined with the catalog metadata
-// (kind / category / unit) the composer needs to render each cell.
-// Items not yet composed for this tier are absent from the response —
-// the client fills missing items in from the catalog with each item's
-// default_value.
 // tierEntitlementsProvider is the narrow surface of *services.EntitlementsService
 // the tier-entitlements handlers use. The public handlers delegate to the
 // *WithService variants passing the package-global, so the handlers are
 // contract-testable over an in-memory stub (ADR-0001) with no global-type change.
 type tierEntitlementsProvider interface {
-	GetTierEntitlements(tierID uuid.UUID) ([]services.TierEntitlement, error)
-	ReplaceTierEntitlements(tierID uuid.UUID, inputs []services.TierEntitlementInput) error
+	GetTierComposition(tierID uuid.UUID) (services.TierComposition, error)
+	UpsertTierEntitlement(tierID uuid.UUID, in services.TierEntitlementInput, changedBy uuid.UUID) (*services.CompositionWriteResult, error)
+	UpdateTierComposition(tierID uuid.UUID, u services.CompositionUpdate, changedBy uuid.UUID) (*services.CompositionWriteResult, error)
 }
 
+// tierEntitlementsResponse is the envelope every tier-entitlements route
+// answers with: the rows plus the version a multi-item write must send back.
+func tierEntitlementsResponse(tierID uuid.UUID, comp services.TierComposition) gin.H {
+	return gin.H{"tier_id": tierID, "entitlements": comp.Entitlements, "version": comp.Version}
+}
+
+// GetTierEntitlements handles GET /api/v1/admin-service/admin/tiers/:id/entitlements
+//
+// Returns the composition rows joined with the catalog metadata
+// (kind / category / unit) the composer needs to render each cell, and the
+// composition's `version`. Items not yet composed for this tier are absent
+// from the response — the client fills missing items in from the catalog with
+// each item's default_value.
 func GetTierEntitlements(c *gin.Context) {
 	getTierEntitlementsWithService(c, entitlementsService)
 }
@@ -196,26 +205,75 @@ func getTierEntitlementsWithService(c *gin.Context, svc tierEntitlementsProvider
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tier ID"})
 		return
 	}
-	ents, err := svc.GetTierEntitlements(tierID)
+	comp, err := svc.GetTierComposition(tierID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get tier entitlements"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tier_id": tierID, "entitlements": ents})
+	c.JSON(http.StatusOK, tierEntitlementsResponse(tierID, comp))
 }
 
-// updateTierEntitlementsRequest is the bulk-replace body. Items not
-// present here are deleted from the tier; new keys are inserted.
+// upsertTierEntitlementRequest is the single-item body. The item is the :key
+// path parameter.
+type upsertTierEntitlementRequest struct {
+	IncludedValue     json.RawMessage `json:"included_value"`
+	OveragePriceCents *int            `json:"overage_price_cents,omitempty"`
+	OverageUnitSize   *int            `json:"overage_unit_size,omitempty"`
+}
+
+// UpsertTierEntitlement handles PUT /api/v1/admin-service/admin/tiers/:id/entitlements/:key
+//
+// Sets ONE item on the tier — the Plans & Pricing matrix's cell edit. It can
+// neither remove nor alter any other item, so it needs no version: whatever
+// the client has (or has not yet) loaded, the rest of the composition is safe.
+func UpsertTierEntitlement(c *gin.Context) {
+	upsertTierEntitlementWithService(c, entitlementsService)
+}
+
+func upsertTierEntitlementWithService(c *gin.Context, svc tierEntitlementsProvider) {
+	tierID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tier ID"})
+		return
+	}
+	var req upsertTierEntitlementRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+	key := c.Param("key")
+	res, err := svc.UpsertTierEntitlement(tierID, services.TierEntitlementInput{
+		ItemKey:           key,
+		IncludedValue:     req.IncludedValue,
+		OveragePriceCents: req.OveragePriceCents,
+		OverageUnitSize:   req.OverageUnitSize,
+	}, platformActor(c))
+	if err != nil {
+		if respondCompositionError(c, err) {
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update tier entitlement"})
+		return
+	}
+	auditCompositionChange(c, "subscription_tier.entitlement_set", tierID, res.Changes)
+	c.JSON(http.StatusOK, tierEntitlementsResponse(tierID, res.Composition))
+}
+
+// updateTierEntitlementsRequest is the multi-item body. Items it does not name
+// are left as they are; only `remove` deletes.
 type updateTierEntitlementsRequest struct {
-	Entitlements []services.TierEntitlementInput `json:"entitlements" binding:"required"`
+	Entitlements []services.TierEntitlementInput `json:"entitlements"`
+	Remove       []string                        `json:"remove"`
+	Version      string                          `json:"version"`
 }
 
 // UpdateTierEntitlements handles PUT /api/v1/admin-service/admin/tiers/:id/entitlements
 //
-// Bulk replace: the request body is the complete desired composition.
-// Atomic per the transaction in EntitlementsService.ReplaceTierEntitlements.
-// Returns 400 on unknown item_key (an entire request fails rather than
-// half-applying — better an obvious error than silent drift).
+// Multi-item write: upserts `entitlements`, deletes `remove`, nothing else —
+// this used to be a delete-everything-then-insert "replace", and a request
+// built from an empty client cache erased the tier's composition. `version`
+// (from GET) is required: missing → 428, stale → 409 with current_version.
+// Atomic; every key and value is validated before anything is written.
 func UpdateTierEntitlements(c *gin.Context) {
 	updateTierEntitlementsWithService(c, entitlementsService)
 }
@@ -232,36 +290,91 @@ func updateTierEntitlementsWithService(c *gin.Context, svc tierEntitlementsProvi
 		return
 	}
 
-	if err := svc.ReplaceTierEntitlements(tierID, req.Entitlements); err != nil {
-		// Surface the underlying message for unknown-key errors so the
-		// admin UI can pinpoint the bad cell. Generic 500 for the rest
-		// to avoid leaking SQL detail.
-		var validationErr *services.UnknownItemKeyError
-		if errors.As(err, &validationErr) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or inactive billable_item key", "item_key": validationErr.Key})
-			return
-		}
-		var dupErr *services.DuplicateItemKeyError
-		if errors.As(err, &dupErr) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "billable_item key appears more than once", "item_key": dupErr.Key})
-			return
-		}
-		if respondInvalidValue(c, err) {
+	res, err := svc.UpdateTierComposition(tierID, services.CompositionUpdate{
+		Set: req.Entitlements, Remove: req.Remove, Version: req.Version,
+	}, platformActor(c))
+	if err != nil {
+		if respondCompositionError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update tier entitlements"})
 		return
 	}
+	auditCompositionChange(c, "subscription_tier.entitlements_updated", tierID, res.Changes)
+	c.JSON(http.StatusOK, tierEntitlementsResponse(tierID, res.Composition))
+}
 
-	// Echo back the new state so the client can pin its cached query
-	// without a second round trip.
-	updated, err := svc.GetTierEntitlements(tierID)
-	if err != nil {
-		// The write succeeded; report success even if the readback fails.
-		c.JSON(http.StatusOK, gin.H{"tier_id": tierID})
+// respondCompositionError writes the response for the typed errors a
+// composition write can return and reports whether it did. Validation errors
+// echo the offending key or shape (they describe the request, never the
+// database); anything else is left to the caller's generic 500.
+func respondCompositionError(c *gin.Context, err error) bool {
+	if errors.Is(err, services.ErrTierNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Tier not found"})
+		return true
+	}
+	if errors.Is(err, services.ErrCompositionVersionRequired) {
+		c.JSON(http.StatusPreconditionRequired, gin.H{
+			"error":  "entitlements version required",
+			"detail": "Read the tier's entitlements first and send their version with the change.",
+		})
+		return true
+	}
+	var stale *services.StaleCompositionError
+	if errors.As(err, &stale) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":           "tier entitlements changed since they were read",
+			"detail":          "Someone else changed this plan's entitlements after you opened it. Reload to see the current values, then save again.",
+			"current_version": stale.Current,
+		})
+		return true
+	}
+	var unknown *services.UnknownItemKeyError
+	if errors.As(err, &unknown) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or inactive billable_item key", "item_key": unknown.Key, "detail": unknown.Error()})
+		return true
+	}
+	var dup *services.DuplicateItemKeyError
+	if errors.As(err, &dup) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "billable_item key appears more than once", "item_key": dup.Key, "detail": dup.Error()})
+		return true
+	}
+	return respondInvalidValue(c, err)
+}
+
+// auditCompositionChange records a composition write that changed something.
+// The metadata is the before/after diff — entitlement shapes, never secrets.
+func auditCompositionChange(c *gin.Context, eventType string, tierID uuid.UUID, changes []services.EntitlementChange) {
+	if len(changes) == 0 {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"tier_id": tierID, "entitlements": updated})
+	recordPlatformAudit(c, PlatformAuditEntry{
+		EventType:     eventType,
+		Action:        "update",
+		EventCategory: "config",
+		ResourceType:  "subscription_tier",
+		ResourceID:    tierID.String(),
+		ChangedFields: compositionChangedFields(changes),
+		Metadata:      map[string]interface{}{"entitlement_changes": changes},
+	})
+}
+
+// compositionChangedFields names each changed item as "entitlements.<key>".
+func compositionChangedFields(changes []services.EntitlementChange) []string {
+	keys := services.ChangedKeys(changes)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, "entitlements."+k)
+	}
+	return out
+}
+
+// platformActor is the authenticated platform user, or uuid.Nil when the
+// request carries none (an internal call). The auth middleware stores it under
+// sharedmw.CtxKeyUserID ("userID").
+func platformActor(c *gin.Context) uuid.UUID {
+	id, _ := sharedmw.GetUserIDFromContext(c)
+	return id
 }
 
 // respondInvalidValue writes the 400 for an entitlements.InvalidValueError and

@@ -8,12 +8,12 @@
 import { useState } from 'react';
 import toast from 'react-hot-toast';
 import {
-  X, LogIn, Filter, Pencil, Pause, Play, Trash2, MapPin, RefreshCw,
+  X, Filter, Pencil, Pause, Play, Trash2, MapPin, RefreshCw,
   Users, Boxes, Radar, HardDrive, KeyRound, ShieldCheck, ShieldOff, Ticket, ScrollText,
 } from 'lucide-react';
 import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, money, relTime } from '../../components/ui/primitives';
 import {
-  type Tenant, type TenantHealthSummary, tenantStatus, useTenantStatusMutation,
+  type Tenant, type TenantHealthSummary, tenantStatus, useTenantStatusMutation, agentBreakdown,
   useTenantReevaluateMutation, useTenantStats, useTenantCost, useTenantCoupons,
   useDeleteTenant, useAdminTiers, useAdminChangePlan, planLabel,
 } from './queries';
@@ -22,6 +22,7 @@ import { TenantEntitlementsTab } from './tenant-entitlements-tab';
 import { TenantSettingsPanel } from './tenant-settings-tab';
 import { usePlatformEdition } from '../../lib/edition';
 import { OperatorTenantControl } from './operator-tenant-control';
+import { useScope } from '../../app/scope';
 
 const TABS = ['Overview', 'Billing', 'Entitlements', 'Settings', 'SSO', 'Activity'] as const;
 type DrawerTab = (typeof TABS)[number];
@@ -62,11 +63,12 @@ function Pending({ children }: { children: React.ReactNode }) {
   );
 }
 
-function StatCell({ icon: Icon, label, value }: { icon: typeof Users; label: string; value: React.ReactNode }) {
+function StatCell({ icon: Icon, label, value, sub }: { icon: typeof Users; label: string; value: React.ReactNode; sub?: React.ReactNode }) {
   return (
     <div style={{ background: 'var(--op-panel2)', border: '1px solid var(--op-border)', borderRadius: 'var(--r-sm)', padding: '11px 13px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--op-t3)', fontSize: 11 }}><Icon size={13} />{label}</div>
       <div className="op-num" style={{ fontSize: 19, fontWeight: 700, color: 'var(--op-t1)', marginTop: 5 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: 'var(--op-t3)', marginTop: 3 }}>{sub}</div>}
     </div>
   );
 }
@@ -86,7 +88,12 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
 
   const toggleStatus = () => {
     const action = status === 'suspended' ? 'activate' : 'suspend';
-    if (!window.confirm(`${action === 'suspend' ? 'Suspend' : 'Reactivate'} ${t.name}? This is logged to audit.`)) return;
+    // The copy says what the action actually does (RC-4): suspension is
+    // enforced — sessions end, sign-in is refused, agents are turned away.
+    const prompt = action === 'suspend'
+      ? `Suspend ${t.name}? Its users are signed out and cannot sign in, and its sensors and agents are refused, until you reactivate it. This is logged to audit.`
+      : `Reactivate ${t.name}? The status it had before the suspension is restored and its users can sign in again. This is logged to audit.`;
+    if (!window.confirm(prompt)) return;
     statusMut.mutate(
       { id: t.id, action },
       {
@@ -107,7 +114,8 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
     );
   };
   const remove = () => {
-    if (!window.confirm(`Delete ${t.name}? This soft-deletes the tenant (recoverable) and is logged to audit.`)) return;
+    // No "recoverable": there is no restore for a deleted tenant — only purge.
+    if (!window.confirm(`Delete ${t.name}? Its users are signed out and can no longer sign in, and its sensors and agents are refused. A deleted tenant cannot be restored from here — it can only be purged. This is logged to audit.`)) return;
     deleteMut.mutate(
       { id: t.id },
       {
@@ -141,7 +149,7 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <StatCell icon={Users} label="Users" value={stats.data.user_count.toLocaleString()} />
             <StatCell icon={Boxes} label="Assets" value={stats.data.asset_count.toLocaleString()} />
-            <StatCell icon={Radar} label="Sensors" value={stats.data.sensor_count.toLocaleString()} />
+            <StatCell icon={Radar} label="Agents" value={stats.data.agent_count.toLocaleString()} sub={agentBreakdown(stats.data)} />
             <StatCell icon={HardDrive} label="Storage" value={`${(stats.data.storage_used / 1e9).toFixed(1)} GB`} />
           </div>
         ) : (
@@ -360,7 +368,16 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
   const plan = planLabel(t);
   const { isMsp, has } = usePlatformEdition();
   const tabs = drawerTabs(isMsp && has('billing'));
-  const notWired = (what: string) => () => toast(`${what} — wired with the impersonation flow`, { icon: '🔒' });
+  // Scope narrows the cross-tenant lists (Fleet, Jobs, …) to this tenant and
+  // raises the scope bar — the same global scope the topbar switcher sets.
+  // It used to be a toast. There is no "Open in Console": nothing can start an
+  // impersonation (owner decision 10, RC-21).
+  const { setScope } = useScope();
+  const scopeToTenant = () => {
+    setScope(t.id, t.name);
+    toast.success(`Scoped to ${t.name}`);
+    onClose();
+  };
 
   return (
     <>
@@ -381,8 +398,7 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
             {t.domain && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--op-t2)' }}><MapPin size={12} style={{ color: 'var(--op-t3)' }} />{t.domain}</span>}
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 15 }}>
-            <button onClick={notWired('Open in Console')} className="op-btn accent sm" style={{ flex: 1, justifyContent: 'center' }}><LogIn size={14} />Open in Console</button>
-            <button onClick={notWired('Scope to tenant')} className="op-btn sm" style={{ flex: 1, justifyContent: 'center' }}><Filter size={14} />Scope</button>
+            <button onClick={scopeToTenant} className="op-btn sm" style={{ flex: 1, justifyContent: 'center' }}><Filter size={14} />Scope</button>
             <button onClick={() => setEditing(true)} className="op-btn icon sm" title="Edit tenant"><Pencil size={14} /></button>
           </div>
           {/* tab strip */}

@@ -57,6 +57,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // DefaultTenantCapGraceDays is the grace period when the licence sets
@@ -443,4 +445,96 @@ func startGrace(ctx context.Context, w Execer, licenceKey string, started time.T
 		return fmt.Errorf("entitlements: write license_cap_grace: %w", err)
 	}
 	return nil
+}
+
+// OperatorUnmarkRefusedError refuses taking a tenant out of the operator's own
+// set (is_operator true -> false) when that would put the install over its
+// licence after the grace period under the licence has ended ( item 1).
+// Callers map it to HTTP 409. The only caller is a platform administrator, so
+// the text carries the counts and names the licence vendor.
+type OperatorUnmarkRefusedError struct {
+	Licensed int
+	// After is the customer-tenant count the unmark would produce.
+	After int
+}
+
+func (e *OperatorUnmarkRefusedError) Error() string {
+	return fmt.Sprintf("Unmarking this tenant would make it %d customer tenants against %d licensed, and the grace period under this licence has ended. "+
+		"Remove a customer tenant first, or contact Vista Security to extend the licence.", e.After, e.Licensed)
+}
+
+// IsOperatorUnmarkRefused reports whether err (or anything it wraps) is an
+// unmark refusal, and returns it.
+func IsOperatorUnmarkRefused(err error) (*OperatorUnmarkRefusedError, bool) {
+	var e *OperatorUnmarkRefusedError
+	if errors.As(err, &e) {
+		return e, true
+	}
+	return nil, false
+}
+
+// SetTenantOperator writes tenants.is_operator for a live tenant under the
+// cap's advisory lock, refusing an UNMARK the licence no longer has room for.
+//
+// Without the check an install past its grace period could cycle the flag to
+// grow: mark customer tenants as its own to drop under the licence, create a
+// tenant (admitted: under), unmark them — one more tenant per round.
+// The unmark is refused exactly when a creation would be: the licence is an
+// active MSP licence with max_tenants, the grace period under THIS licence has
+// started and ended, and the unmark would take the customer count OVER
+// max_tenants. Being back AT the licensed number is within the licence, as it
+// is for creations. Before the grace period has started (the unmark then
+// starts it — call EvaluateTenantCap afterwards) or while it lasts, the unmark
+// is allowed. Marking is always allowed, and unmarking a tenant that is not
+// marked writes nothing new.
+//
+// It holds the same lock AdmitTenantCreation takes, so a concurrent creation
+// and unmark cannot both take the last slot. db must be able to write
+// tenants.is_operator: the bypass pool (the schema's guard_tenant_is_operator).
+// found is false when no live tenant has that id.
+func SetTenantOperator(ctx context.Context, db *sql.DB, tenantID uuid.UUID, isOperator bool, now time.Time) (found bool, err error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, tenantCapLockSQL); err != nil {
+		return false, fmt.Errorf("entitlements: tenant cap lock: %w", err)
+	}
+	var marked bool
+	err = tx.QueryRowContext(ctx,
+		`SELECT is_operator FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, tenantID).Scan(&marked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("entitlements: read tenant: %w", err)
+	}
+
+	if marked && !isOperator {
+		lic, err := readLicenseInTx(ctx, tx)
+		if err != nil {
+			return true, err
+		}
+		in, err := loadCapInputs(ctx, tx, lic, now)
+		if err != nil {
+			return true, err
+		}
+		if in.licensed != nil && in.graceStartedAt != nil && in.current+1 > *in.licensed {
+			ends := in.graceStartedAt.Add(time.Duration(in.graceDays) * 24 * time.Hour)
+			if !now.Before(ends) {
+				return true, &OperatorUnmarkRefusedError{Licensed: *in.licensed, After: in.current + 1}
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tenants SET is_operator = $1, updated_at = NOW() WHERE id = $2`, isOperator, tenantID); err != nil {
+		return true, fmt.Errorf("entitlements: update tenant: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return true, err
+	}
+	return true, nil
 }

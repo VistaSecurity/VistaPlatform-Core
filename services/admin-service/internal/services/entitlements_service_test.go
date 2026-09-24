@@ -123,12 +123,23 @@ func restoreBillableItem(t *testing.T, db *sql.DB, id uuid.UUID) {
 }
 
 // restoreTierEntitlements snapshots a tier's whole entitlement matrix and
-// restores it when the test ends. Whole-matrix rather than per-row because
-// ReplaceTierEntitlements deletes every row for the tier before writing.
+// restores it when the test ends, and removes the subscription_tier_history
+// rows the test's composition writes added. Whole-matrix rather than per-row
+// so a test may add, change and remove rows freely.
 func restoreTierEntitlements(t *testing.T, db *sql.DB, tier uuid.UUID) {
 	t.Helper()
 	before := snapshotRow(t, db,
 		`SELECT coalesce(jsonb_agg(to_jsonb(te)), '[]'::jsonb) FROM tier_entitlements te WHERE tier_id = $1`, tier)
+	historyBefore := snapshotRow(t, db,
+		`SELECT coalesce(jsonb_agg(id), '[]'::jsonb) FROM subscription_tier_history WHERE tier_id = $1`, tier)
+	t.Cleanup(func() {
+		if _, err := db.Exec(`
+			DELETE FROM subscription_tier_history
+			WHERE tier_id = $1
+			  AND NOT (to_jsonb(id) <@ $2::jsonb)`, tier, historyBefore); err != nil {
+			t.Errorf("restore subscription_tier_history for %s: %v", tier, err)
+		}
+	})
 
 	t.Cleanup(func() {
 		tx, err := db.Begin()
@@ -292,145 +303,302 @@ func TestGetTierEntitlements_SeededTier(t *testing.T) {
 	}
 }
 
-func TestReplaceTierEntitlements_ReplacesCompletely(t *testing.T) {
+// compose applies a multi-item write the way the admin UI does: read the
+// composition's version, then send it with the change.
+func compose(t *testing.T, svc *EntitlementsService, tier uuid.UUID, set []TierEntitlementInput, remove ...string) (*CompositionWriteResult, error) {
+	t.Helper()
+	cur, err := svc.GetTierComposition(tier)
+	if err != nil {
+		t.Fatalf("GetTierComposition: %v", err)
+	}
+	return svc.UpdateTierComposition(tier, CompositionUpdate{Set: set, Remove: remove, Version: cur.Version}, uuid.Nil)
+}
+
+func countTierRows(t *testing.T, db *sql.DB, tier uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tier_entitlements WHERE tier_id = $1`, tier).Scan(&n); err != nil {
+		t.Fatalf("count tier_entitlements: %v", err)
+	}
+	return n
+}
+
+// The RC-11 regression: a write that names ONE item must leave every other
+// row alone. The old ReplaceTierEntitlements deleted everything it was not
+// sent, so a client with an empty cache erased the tier.
+func TestUpdateTierComposition_OmissionNeverDeletes(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	restoreTierEntitlements(t, db, pro)
-
-	// Start with a minimal replacement set — only one item. Anything else
-	// previously composed for this tier should be deleted.
-	inputs := []TierEntitlementInput{
-		{
-			ItemKey:       "max_sensors",
-			IncludedValue: json.RawMessage(`{"quantity": 50}`),
-		},
-	}
-	if err := svc.ReplaceTierEntitlements(pro, inputs); err != nil {
-		t.Fatalf("ReplaceTierEntitlements: %v", err)
+	before := countTierRows(t, db, pro)
+	if before < 2 {
+		t.Fatalf("seeded pro tier has %d rows; the test needs several", before)
 	}
 
-	got, err := svc.GetTierEntitlements(pro)
+	res, err := compose(t, svc, pro, []TierEntitlementInput{
+		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 50}`)},
+	})
 	if err != nil {
-		t.Fatalf("GetTierEntitlements after replace: %v", err)
+		t.Fatalf("UpdateTierComposition: %v", err)
 	}
-	if len(got) != 1 {
-		t.Errorf("after replace, entitlement count = %d, want 1", len(got))
+	if after := countTierRows(t, db, pro); after != before {
+		t.Errorf("a one-item write changed the row count: %d before, %d after", before, after)
 	}
-	if got[0].ItemKey != "max_sensors" {
-		t.Errorf("remaining entitlement = %s, want max_sensors", got[0].ItemKey)
+	if len(res.Changes) != 1 || res.Changes[0].ItemKey != "max_sensors" {
+		t.Errorf("changes = %+v, want exactly max_sensors", res.Changes)
 	}
-	var v struct{ Quantity int }
-	_ = json.Unmarshal(got[0].IncludedValue, &v)
-	if v.Quantity != 50 {
-		t.Errorf("updated quantity = %d, want 50", v.Quantity)
+	for _, e := range res.Composition.Entitlements {
+		if e.ItemKey == "max_sensors" && string(e.IncludedValue) != `{"quantity": 50}` {
+			t.Errorf("max_sensors = %s, want {\"quantity\": 50}", e.IncludedValue)
+		}
+	}
+
+	// The single-cell path has the same property.
+	if _, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{
+		ItemKey: "max_assets", IncludedValue: json.RawMessage(`{"quantity": 7}`),
+	}, uuid.Nil); err != nil {
+		t.Fatalf("UpsertTierEntitlement: %v", err)
+	}
+	if after := countTierRows(t, db, pro); after != before {
+		t.Errorf("a single-cell write changed the row count: %d before, %d after", before, after)
 	}
 }
 
-func TestReplaceTierEntitlements_Idempotent(t *testing.T) {
+// An identical write changes nothing — no history row, no audit diff — and
+// leaves the version where it was.
+func TestUpdateTierComposition_IdenticalWriteIsNoOp(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	restoreTierEntitlements(t, db, pro)
 
 	inputs := []TierEntitlementInput{
 		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 25}`)},
-		{ItemKey: "ot_active_probing", IncludedValue: json.RawMessage(`{"enabled": true}`)},
+		{ItemKey: "ot_active_probing", IncludedValue: json.RawMessage(`{"enabled": false}`)},
 	}
-	for i := 0; i < 3; i++ {
-		if err := svc.ReplaceTierEntitlements(pro, inputs); err != nil {
-			t.Fatalf("call %d: %v", i, err)
+	if _, err := compose(t, svc, pro, inputs); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	v1, _ := svc.GetTierComposition(pro)
+	for i := 0; i < 2; i++ {
+		res, err := compose(t, svc, pro, inputs)
+		if err != nil {
+			t.Fatalf("repeat %d: %v", i, err)
 		}
-	}
-	got, err := svc.GetTierEntitlements(pro)
-	if err != nil {
-		t.Fatalf("GetTierEntitlements: %v", err)
-	}
-	if len(got) != 2 {
-		t.Errorf("after 3 identical replaces, entitlement count = %d, want 2", len(got))
+		if len(res.Changes) != 0 {
+			t.Errorf("repeat %d reported changes %+v, want none", i, res.Changes)
+		}
+		if res.Composition.Version != v1.Version {
+			t.Errorf("repeat %d moved the version %s → %s", i, v1.Version, res.Composition.Version)
+		}
 	}
 }
 
-func TestReplaceTierEntitlements_UnknownKeyRejected(t *testing.T) {
+func TestUpdateTierComposition_UnknownKeyRejected(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	// Nothing should change here — the restore is the belt to that braces, and
-	// keeps the test honest if validation ever moves after the DELETE.
+	// keeps the test honest if validation ever moves after a write.
 	restoreTierEntitlements(t, db, pro)
+	before, _ := svc.GetTierComposition(pro)
 
-	priorCount := func() int {
-		var n int
-		_ = db.QueryRow(`SELECT COUNT(*) FROM tier_entitlements WHERE tier_id = $1`, pro).Scan(&n)
-		return n
-	}
-	before := priorCount()
-
-	inputs := []TierEntitlementInput{
-		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 25}`)},
+	_, err := compose(t, svc, pro, []TierEntitlementInput{
+		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 99}`)},
 		{ItemKey: "no_such_thing", IncludedValue: json.RawMessage(`{"quantity": 1}`)},
-	}
-	err := svc.ReplaceTierEntitlements(pro, inputs)
-	if err == nil {
-		t.Fatal("expected UnknownItemKeyError; got nil")
-	}
+	})
 	var typedErr *UnknownItemKeyError
-	if !errors.As(err, &typedErr) {
-		t.Errorf("error type = %T, want *UnknownItemKeyError", err)
+	if !errors.As(err, &typedErr) || typedErr.Key != "no_such_thing" {
+		t.Fatalf("error = %v, want UnknownItemKeyError{no_such_thing}", err)
 	}
-	if typedErr != nil && typedErr.Key != "no_such_thing" {
-		t.Errorf("UnknownItemKeyError.Key = %q, want %q", typedErr.Key, "no_such_thing")
-	}
-
-	// Validation runs BEFORE the DELETE, so nothing should have changed.
-	after := priorCount()
-	if after != before {
-		t.Errorf("validation failure should leave row count unchanged; before=%d after=%d", before, after)
+	after, _ := svc.GetTierComposition(pro)
+	if after.Version != before.Version {
+		t.Error("a rejected write changed the composition (max_sensors was written before the bad key was found)")
 	}
 }
 
-func TestReplaceTierEntitlements_OverageFieldsPersist(t *testing.T) {
+// Overage fields round-trip, and a later write that omits them keeps them —
+// the old replace nulled them on every save that did not repeat them.
+func TestUpdateTierComposition_OverageFieldsPersist(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	restoreTierEntitlements(t, db, pro)
 
-	cents := 25
-	size := 1
-	inputs := []TierEntitlementInput{
-		{
-			ItemKey:           "storage_gb",
-			IncludedValue:     json.RawMessage(`{"quantity": 250}`),
-			OveragePriceCents: &cents,
-			OverageUnitSize:   &size,
-		},
+	cents, size := 25, 1
+	if _, err := compose(t, svc, pro, []TierEntitlementInput{{
+		ItemKey: "storage_gb", IncludedValue: json.RawMessage(`{"quantity": 250}`),
+		OveragePriceCents: &cents, OverageUnitSize: &size,
+	}}); err != nil {
+		t.Fatalf("write with overage: %v", err)
 	}
-	if err := svc.ReplaceTierEntitlements(pro, inputs); err != nil {
-		t.Fatalf("ReplaceTierEntitlements: %v", err)
+	if _, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{
+		ItemKey: "storage_gb", IncludedValue: json.RawMessage(`{"quantity": 300}`),
+	}, uuid.Nil); err != nil {
+		t.Fatalf("write without overage: %v", err)
 	}
 	got, err := svc.GetTierEntitlements(pro)
 	if err != nil {
 		t.Fatalf("GetTierEntitlements: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("entitlement count = %d, want 1", len(got))
+	for _, e := range got {
+		if e.ItemKey != "storage_gb" {
+			continue
+		}
+		if string(e.IncludedValue) != `{"quantity": 300}` {
+			t.Errorf("storage_gb = %s, want quantity 300", e.IncludedValue)
+		}
+		if e.OveragePriceCents == nil || *e.OveragePriceCents != 25 {
+			t.Errorf("OveragePriceCents = %v, want 25 (kept)", e.OveragePriceCents)
+		}
+		if e.OverageUnitSize == nil || *e.OverageUnitSize != 1 {
+			t.Errorf("OverageUnitSize = %v, want 1 (kept)", e.OverageUnitSize)
+		}
+		return
 	}
-	if got[0].OveragePriceCents == nil || *got[0].OveragePriceCents != 25 {
-		t.Errorf("OveragePriceCents = %v, want 25", got[0].OveragePriceCents)
-	}
-	if got[0].OverageUnitSize == nil || *got[0].OverageUnitSize != 1 {
-		t.Errorf("OverageUnitSize = %v, want 1", got[0].OverageUnitSize)
-	}
+	t.Fatal("storage_gb row missing")
 }
 
-func TestReplaceTierEntitlements_EmptyClearsAll(t *testing.T) {
+// Only `remove` deletes, and only the keys it names.
+func TestUpdateTierComposition_RemoveDeletesOnlyListed(t *testing.T) {
 	svc, db := setup(t)
 	free := tierID(t, db, "free")
 	restoreTierEntitlements(t, db, free)
+	before := countTierRows(t, db, free)
 
-	if err := svc.ReplaceTierEntitlements(free, nil); err != nil {
-		t.Fatalf("ReplaceTierEntitlements(nil): %v", err)
+	res, err := compose(t, svc, free, nil, "max_sensors")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
 	}
-	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM tier_entitlements WHERE tier_id = $1`, free).Scan(&n)
-	if n != 0 {
-		t.Errorf("empty replace should clear all rows; got %d", n)
+	if after := countTierRows(t, db, free); after != before-1 {
+		t.Errorf("removing one key: %d rows before, %d after, want %d", before, after, before-1)
+	}
+	if len(res.Changes) != 1 || res.Changes[0].After != nil || res.Changes[0].Before == nil {
+		t.Errorf("remove change = %+v, want one before-only change", res.Changes)
+	}
+	// Removing it again is a no-op, not an error.
+	if res, err := compose(t, svc, free, nil, "max_sensors"); err != nil || len(res.Changes) != 0 {
+		t.Errorf("second remove: err %v, changes %+v; want a no-op", err, res)
+	}
+}
+
+// Optimistic concurrency: a write computed from a composition that has since
+// changed is refused, and the refusal writes nothing.
+func TestUpdateTierComposition_StaleVersionRefused(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+
+	read, _ := svc.GetTierComposition(pro)
+	// Someone else edits a cell after we read.
+	if _, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{
+		ItemKey: "max_users", IncludedValue: json.RawMessage(`{"quantity": 3}`),
+	}, uuid.Nil); err != nil {
+		t.Fatalf("concurrent upsert: %v", err)
+	}
+	now, _ := svc.GetTierComposition(pro)
+
+	_, err := svc.UpdateTierComposition(pro, CompositionUpdate{
+		Set:     []TierEntitlementInput{{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 1}`)}},
+		Version: read.Version,
+	}, uuid.Nil)
+	var stale *StaleCompositionError
+	if !errors.As(err, &stale) {
+		t.Fatalf("error = %v, want *StaleCompositionError", err)
+	}
+	if stale.Current != now.Version {
+		t.Errorf("StaleCompositionError.Current = %s, want %s", stale.Current, now.Version)
+	}
+	if after, _ := svc.GetTierComposition(pro); after.Version != now.Version {
+		t.Error("the refused write changed the composition")
+	}
+
+	if _, err := svc.UpdateTierComposition(pro, CompositionUpdate{
+		Set: []TierEntitlementInput{{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 1}`)}},
+	}, uuid.Nil); !errors.Is(err, ErrCompositionVersionRequired) {
+		t.Errorf("no version: error = %v, want ErrCompositionVersionRequired", err)
+	}
+}
+
+// An inactive item cannot be set (the catalogue hides it from the composer),
+// but a row a tier still holds for one can be removed.
+func TestUpdateTierComposition_InactiveItems(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+
+	key := "p7_inactive_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:8]
+	item, err := svc.CreateBillableItem(BillableItemInput{
+		Key: key, DisplayName: "Retired lever", Category: "capability", Kind: "boolean",
+		DefaultValue: json.RawMessage(`{"enabled": false}`), IsActive: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateBillableItem: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM tier_entitlements WHERE item_id = $1`, item.ID)
+		_, _ = db.Exec(`DELETE FROM billable_items WHERE id = $1`, item.ID)
+	})
+	if _, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{ItemKey: key, IncludedValue: json.RawMessage(`{"enabled": true}`)}, uuid.Nil); err != nil {
+		t.Fatalf("set while active: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE billable_items SET is_active = false WHERE id = $1`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.UpsertTierEntitlement(pro, TierEntitlementInput{ItemKey: key, IncludedValue: json.RawMessage(`{"enabled": false}`)}, uuid.Nil)
+	var unknown *UnknownItemKeyError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("setting an inactive item: error = %v, want *UnknownItemKeyError", err)
+	}
+	if res, err := compose(t, svc, pro, nil, key); err != nil || len(res.Changes) != 1 {
+		t.Fatalf("removing an inactive item's row: err %v, result %+v", err, res)
+	}
+}
+
+// Every change is recorded in subscription_tier_history, in the same
+// transaction, with the before/after of each changed item.
+func TestUpdateTierComposition_WritesHistory(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+
+	var before int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM subscription_tier_history WHERE tier_id = $1`, pro).Scan(&before)
+	if _, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{
+		ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 31}`),
+	}, uuid.Nil); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	var (
+		n       int
+		changes []byte
+	)
+	if err := db.QueryRow(`
+		SELECT COUNT(*) OVER (), changes_json
+		FROM subscription_tier_history WHERE tier_id = $1
+		ORDER BY changed_at DESC LIMIT 1`, pro).Scan(&n, &changes); err != nil {
+		t.Fatalf("read history: %v", err)
+	}
+	if n != before+1 {
+		t.Fatalf("history rows %d → %d, want one more", before, n)
+	}
+	var body struct {
+		Entitlements []EntitlementChange `json:"entitlements"`
+	}
+	if err := json.Unmarshal(changes, &body); err != nil {
+		t.Fatalf("decode changes_json %s: %v", changes, err)
+	}
+	if len(body.Entitlements) != 1 || body.Entitlements[0].ItemKey != "max_sensors" ||
+		body.Entitlements[0].After == nil || string(body.Entitlements[0].After.IncludedValue) != `{"quantity": 31}` {
+		t.Errorf("history changes_json = %s, want the max_sensors diff", changes)
+	}
+}
+
+func TestUpsertTierEntitlement_UnknownTier(t *testing.T) {
+	svc, _ := setup(t)
+	_, err := svc.UpsertTierEntitlement(uuid.New(), TierEntitlementInput{
+		ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 1}`),
+	}, uuid.Nil)
+	if !errors.Is(err, ErrTierNotFound) {
+		t.Errorf("error = %v, want ErrTierNotFound", err)
 	}
 }
 
@@ -854,7 +1022,7 @@ func TestUpdateTenantEntitlement_ExpiresBeforeEffectiveRejected(t *testing.T) {
 // distinct, valid values.
 // ---------------------------------------------------------------------------
 
-func TestReplaceTierEntitlements_RejectsMalformedValues(t *testing.T) {
+func TestUpdateTierComposition_RejectsMalformedValues(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	restoreTierEntitlements(t, db, pro)
@@ -883,9 +1051,9 @@ func TestReplaceTierEntitlements_RejectsMalformedValues(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := svc.ReplaceTierEntitlements(pro, tc.inputs)
+			_, err := compose(t, svc, pro, tc.inputs)
 			if err == nil {
-				t.Fatalf("ReplaceTierEntitlements accepted %s", tc.name)
+				t.Fatalf("UpdateTierComposition accepted %s", tc.name)
 			}
 			var ive *entitlements.InvalidValueError
 			if !errors.As(err, &ive) {
@@ -905,12 +1073,19 @@ func TestReplaceTierEntitlements_RejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestReplaceTierEntitlements_DuplicateKeyRejected(t *testing.T) {
+func TestUpdateTierComposition_DuplicateKeyRejected(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	restoreTierEntitlements(t, db, pro)
 
-	err := svc.ReplaceTierEntitlements(pro, []TierEntitlementInput{
+	// A key both set and removed is as ambiguous as one set twice.
+	if _, err := compose(t, svc, pro, []TierEntitlementInput{
+		{ItemKey: "max_assets", IncludedValue: json.RawMessage(`{"quantity": 5}`)},
+	}, "max_assets"); err == nil {
+		t.Error("a request that both sets and removes max_assets was accepted")
+	}
+
+	_, err := compose(t, svc, pro, []TierEntitlementInput{
 		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 5}`)},
 		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 50}`)},
 	})
@@ -926,16 +1101,16 @@ func TestReplaceTierEntitlements_DuplicateKeyRejected(t *testing.T) {
 	}
 }
 
-func TestReplaceTierEntitlements_ZeroAndUnlimitedStayDistinct(t *testing.T) {
+func TestUpdateTierComposition_ZeroAndUnlimitedStayDistinct(t *testing.T) {
 	svc, db := setup(t)
 	pro := tierID(t, db, "pro")
 	restoreTierEntitlements(t, db, pro)
 
-	if err := svc.ReplaceTierEntitlements(pro, []TierEntitlementInput{
+	if _, err := compose(t, svc, pro, []TierEntitlementInput{
 		{ItemKey: "max_sensors", IncludedValue: json.RawMessage(`{"quantity": 0}`)},
 		{ItemKey: "max_assets", IncludedValue: json.RawMessage(`{"quantity": null}`)},
 	}); err != nil {
-		t.Fatalf("ReplaceTierEntitlements: %v", err)
+		t.Fatalf("UpdateTierComposition: %v", err)
 	}
 	got, err := svc.GetTierEntitlements(pro)
 	if err != nil {

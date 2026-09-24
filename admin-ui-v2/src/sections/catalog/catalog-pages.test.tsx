@@ -69,6 +69,7 @@ const feed = (over: Partial<CatalogFeedStatus> = {}): CatalogFeedStatus => ({
   last_status: 'never',
   last_error: null,
   row_count: 0,
+  ecosystems: [],
   ...over,
 });
 
@@ -320,6 +321,59 @@ describe('the mirror-feed status card', () => {
     const html = card();
     expect(html).toContain('403 rate limit exceeded');
     expect(html).toContain('bookmark was not advanced');
+  });
+
+  // Decision 13 (RC-29): one failing ecosystem is reported against its own
+  // name, the others show their progress, and the feed reads Partial — not a
+  // single red "Failed" that hides that Debian and Alpine are fine.
+  it('shows each OSV ecosystem, with the failing one and its reason', () => {
+    const now = new Date().toISOString();
+    const earlier = new Date(Date.now() - 3 * 86400_000).toISOString();
+    queryState.feeds.data = feedList([
+      feed({
+        feed: 'osv', last_status: 'error', last_run_at: now, row_count: 72,
+        last_error: 'osv mirror incomplete: 1 of 3 ecosystems failed (Ubuntu)',
+        ecosystems: [
+          { name: 'Alpine', status: 'ok', last_error: null, rows: 4, watermark: '2026-09-22T00:00:00Z', last_run_at: now, last_success_at: now },
+          { name: 'Debian', status: 'ok', last_error: null, rows: 68, watermark: '2026-09-22T00:00:00Z', last_run_at: now, last_success_at: now },
+          { name: 'Ubuntu', status: 'error', last_error: 'archive for Ubuntu exceeds the 2048 MiB cap', rows: 0, watermark: null, last_run_at: now, last_success_at: earlier },
+        ],
+      }),
+    ]);
+    const html = card(['osv']);
+    expect(html).toContain('data-testid="feed-status-partial"');
+    expect(html).not.toContain('data-testid="feed-status-error"');
+    expect(html).toMatch(/data-testid="feed-ecosystem-Debian" data-status="ok"/);
+    expect(html).toMatch(/data-testid="feed-ecosystem-Alpine" data-status="ok"/);
+    expect(html).toMatch(/data-testid="feed-ecosystem-Ubuntu" data-status="error"/);
+    expect(html).toContain('archive for Ubuntu exceeds the 2048 MiB cap');
+    expect(html).toContain('68 rows this run');
+    expect(html).toContain('last worked 3d ago');
+    // The banner names the failed ecosystem and does NOT claim the whole
+    // bookmark stood still — the others' progress was kept.
+    expect(html).toContain('Ubuntu failed on the last run');
+    expect(html).toContain('kept their rows and bookmarks');
+    expect(html).not.toContain('bookmark was not advanced');
+  });
+
+  it('still reads Failed when every ecosystem failed', () => {
+    const now = new Date().toISOString();
+    queryState.feeds.data = feedList([
+      feed({
+        feed: 'osv', last_status: 'error', last_run_at: now, last_error: 'network down',
+        ecosystems: [
+          { name: 'Debian', status: 'error', last_error: 'dial tcp: timeout', rows: 0, watermark: null, last_run_at: now, last_success_at: null },
+        ],
+      }),
+    ]);
+    const html = card(['osv']);
+    expect(html).toContain('data-testid="feed-status-error"');
+    expect(html).toContain('has not completed yet');
+  });
+
+  it('shows no ecosystem list for a feed without ecosystems', () => {
+    queryState.feeds.data = feedList([feed({ feed: 'eol', last_status: 'ok', row_count: 3 })]);
+    expect(card()).not.toContain('feed-ecosystems');
   });
 
   it('disables Sync now while a run is in flight', () => {

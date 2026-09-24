@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/config"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +33,7 @@ func (c testRevocationChecker) IsUserRevoked(_ context.Context, userID uuid.UUID
 // middleware (not shared/middleware.RequireJWTAuth), so it needs its own
 // pwd_change_required gate mirroring auth-service and audit-service.
 func TestJWTMiddleware_PasswordChangeRequiredGate(t *testing.T) {
+	useLiveTenantState(t)
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
@@ -122,6 +124,7 @@ func TestJWTMiddleware_PasswordChangeRequiredGate(t *testing.T) {
 }
 
 func TestJWTMiddleware_RevokedTokensRejected(t *testing.T) {
+	useLiveTenantState(t)
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
@@ -207,6 +210,7 @@ func TestJWTMiddleware_RevokedTokensRejected(t *testing.T) {
 }
 
 func TestJWTMiddleware_SetsUserTypeFromTenantClaim(t *testing.T) {
+	useLiveTenantState(t)
 	gin.SetMode(gin.TestMode)
 	secret := "test-secret-for-jwt-issuance-only-do-not-use"
 	cfg := &config.Config{JWT: config.JWTConfig{Secret: secret}}
@@ -263,4 +267,22 @@ func TestJWTMiddleware_SetsUserTypeFromTenantClaim(t *testing.T) {
 			}
 		})
 	}
+}
+
+// liveTenants reports every tenant usable.
+type liveTenants struct{}
+
+func (liveTenants) Check(context.Context, uuid.UUID) (string, bool, error) { return "", false, nil }
+
+// useLiveTenantState makes JWTMiddleware treat every tenant as live for one
+// test. These tests pass a nil pool, and with no pool the middleware resolves
+// the check from DATABASE_URL — which the nightly test-backend job sets. There
+// the random tenant ids minted here have no tenants row and are refused 403
+// tenant_deleted ( item 2). tenant_state_middleware_integration_test.go
+// covers the real check.
+func useLiveTenantState(t *testing.T) {
+	t.Helper()
+	previous := tenantStateChecker
+	tenantStateChecker = func(*database.DB) sharedmw.TenantStateChecker { return liveTenants{} }
+	t.Cleanup(func() { tenantStateChecker = previous })
 }

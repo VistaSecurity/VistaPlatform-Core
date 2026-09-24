@@ -42,7 +42,7 @@ func TestIntegration_TierImpactAnalysis_ComparesResolvedEntitlements(t *testing.
 				{ItemKey: "max_users", IncludedValue: json.RawMessage(`{"quantity": ` + strconv.Itoa(users) + `}`)},
 				{ItemKey: "max_assets", IncludedValue: json.RawMessage(`{"quantity": null}`)},
 			},
-		})
+		}, uuid.Nil)
 		if err != nil {
 			t.Fatalf("CreateTier %s: %v", suffix, err)
 		}

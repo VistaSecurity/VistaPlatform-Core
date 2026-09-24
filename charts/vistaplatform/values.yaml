@@ -142,22 +142,40 @@ install:
 # licence is MSP). admin-service takes a daily usage snapshot and produces one
 # signed report per month; the database is the system of record.
 licensing:
+  reporting:
+    # -- Automatic delivery of the signed monthly usage reports to Vista
+    # Security (MSP licence only). The receiver's base URL, https:// only —
+    # admin-service POSTs each complete report to <endpoint>/v1/usage-reports.
+    # Empty (the default) = transmission OFF: reports are stored and can be
+    # downloaded from admin-ui → Settings → License & Usage, and nothing leaves
+    # the install. Air-gapped installs leave it empty and upload the downloaded
+    # file instead. Outbound traffic honours HTTPS_PROXY / NO_PROXY and the
+    # system trust store (SSL_CERT_FILE) — set them on admin-service with
+    # backends.admin-service.extraEnv (see the chart README).
+    endpoint: ""
+    # -- How often (minutes, 1–1440) admin-service looks for reports that are
+    # due. A new monthly report is sent straight away; this paces retries.
+    intervalMinutes: 60
   reports:
     # -- Where admin-service writes a copy of each report, as
     # <report_id>.json, when persistence is enabled.
     dir: /var/lib/vistaplatform/license-reports
     persistence:
       # -- Mount a PersistentVolumeClaim at `dir` for the report copies.
-      # false = reports live in the database only (still downloadable from
-      # admin-ui → Settings → License & Usage). Only an MSP licence ever writes
-      # a report, but the edition is not knowable at render time: on a Core or
-      # Enterprise install set this to false to skip the PVC and the Recreate
-      # strategy below.
-      enabled: true
+      # Off by default: only an MSP licence ever writes a report, and the
+      # edition is not knowable at render time (it is decided by the token
+      # admin-service verifies at runtime), so Core and Enterprise installs
+      # should not carry an empty volume and a no-surge update strategy for
+      # nothing. MSP installs: set licensing.reports.persistence.enabled=true.
+      # Off, reports live in the database only — still downloadable from
+      # admin-ui → Settings → License & Usage, and sent by
+      # licensing.reporting when an endpoint is set.
+      enabled: false
       size: 1Gi
-      # -- ReadWriteOnce limits admin-service to one replica and switches it to
-      # the Recreate update strategy; use ReadWriteMany (with a class that
-      # supports it) for more replicas.
+      # -- ReadWriteOnce limits admin-service to one replica and updates it
+      # with a no-surge RollingUpdate (maxSurge 0, maxUnavailable 1 — the old
+      # pod goes before the new one starts); use ReadWriteMany (with a class
+      # that supports it) for more replicas.
       accessMode: ReadWriteOnce
       # -- Storage class; empty = datastores.storageClassName.
       storageClassName: ""
@@ -586,8 +604,12 @@ backends:
     needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
         true, redisUrl: true, stripeKeys: true}
+    # ephemeral-storage: the catalogue feeds spool one downloaded archive at a
+    # time to disk (see catalogFeeds.spool). Requesting it makes the scheduler
+    # place the pod on a node with room for the spool and keeps the pod out of
+    # the first eviction wave under node disk pressure.
     resources:
-      requests: {cpu: 150m, memory: 192Mi}
+      requests: {cpu: 150m, memory: 192Mi, ephemeral-storage: 3Gi}
       limits: {cpu: 400m, memory: 384Mi}
     image:
       digest: ""
@@ -1024,6 +1046,19 @@ monitoring:
   #     url: https://vistaplatform.example.com/api/v1/auth-service/health
   #   - name: edge-admin
   #     url: https://admin.vistaplatform.example.com/api/v1/auth-service/health
+
+# Catalogue mirror feeds (admin-service → Catalog → End-of-life / Vulnerability
+# feed). The OSV feed downloads each ecosystem's bulk archive and reads it one
+# entry at a time from disk, never from memory. Ubuntu's archive was ~705 MiB in
+# September 2026 (Debian ~68 MiB, Alpine ~4 MiB), and the feed accepts archives
+# up to 2 GiB. The spool is a dedicated emptyDir, mounted only into
+# admin-service and exposed as CATALOG_FEEDS_SPOOL_DIR. One archive is spooled
+# at a time and deleted after it is read, so the size needs to cover the
+# 2 GiB cap plus headroom. Kubernetes evicts the pod if the volume grows past
+# sizeLimit, so do not set it below the cap.
+catalogFeeds:
+  spool:
+    sizeLimit: 3Gi
 
 # Persistent storage for files uploaded to sensor-manager and consumed by
 # pcap-processor. ReadWriteOnce is sufficient because both pods land on the

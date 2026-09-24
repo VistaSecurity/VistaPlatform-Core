@@ -267,7 +267,8 @@ func TestContract_ListCatalogFeeds_200(t *testing.T) {
 	store := &stubCatalogStore{states: []catalogfeeds.FeedState{
 		{Feed: "eol", LastStatus: "ok", LastRunAt: &ran, RowCount: 1842, UpdatedAt: &ran},
 		{Feed: "nvd", LastStatus: "error", LastRunAt: &ran, LastError: &failure},
-		// The feed that has never run must be LISTED, not omitted.
+		// The feed that has never run must be LISTED, not omitted. Its nil
+		// ecosystem list must still go out as an array.
 		{Feed: "osv", LastStatus: "never", Cursor: &cursor},
 	}}
 	eng := catalogEngine(store, &stubFeedRunner{enabled: true, interval: 24 * time.Hour}, nil)
@@ -287,6 +288,47 @@ func TestContract_ListCatalogFeeds_200(t *testing.T) {
 	}
 	if !body.Enabled || body.IntervalSeconds != 86400 {
 		t.Fatalf("enabled=%v interval=%d, want true and 86400", body.Enabled, body.IntervalSeconds)
+	}
+}
+
+// Decision 13 (RC-29): OSV reports per-ecosystem status, so a failing Ubuntu
+// shows against Ubuntu while Debian and Alpine stay green.
+func TestContract_ListCatalogFeeds_200_perEcosystemStatus(t *testing.T) {
+	sv := loadSpec(t)
+	ran := time.Date(2026, 9, 23, 6, 0, 0, 0, time.UTC)
+	earlier := ran.Add(-48 * time.Hour)
+	wm := "2026-09-22T00:00:00Z"
+	runErr := "osv mirror incomplete: 1 of 3 ecosystems failed (Ubuntu)"
+	ubuntuErr := "archive for Ubuntu exceeds the 2048 MiB cap"
+	store := &stubCatalogStore{states: []catalogfeeds.FeedState{
+		{Feed: "osv", LastStatus: "error", LastRunAt: &ran, LastError: &runErr, RowCount: 72,
+			Ecosystems: []catalogfeeds.EcosystemStatus{
+				{Name: "Alpine", Status: "ok", Rows: 4, Watermark: &wm, LastRunAt: &ran, LastSuccessAt: &ran},
+				{Name: "Debian", Status: "ok", Rows: 68, Watermark: &wm, LastRunAt: &ran, LastSuccessAt: &ran},
+				{Name: "Ubuntu", Status: "error", LastError: &ubuntuErr, LastRunAt: &ran, LastSuccessAt: &earlier},
+			}},
+	}}
+	eng := catalogEngine(store, &stubFeedRunner{enabled: true, interval: 24 * time.Hour}, nil)
+	w := doRequest(eng, http.MethodGet, catalogBase+"/feeds", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "CatalogFeedListResponse", w.Body.Bytes())
+	var body struct {
+		Feeds []struct {
+			Ecosystems []struct {
+				Name      string  `json:"name"`
+				Status    string  `json:"status"`
+				LastError *string `json:"last_error"`
+			} `json:"ecosystems"`
+		} `json:"feeds"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(body.Feeds) != 1 || len(body.Feeds[0].Ecosystems) != 3 || body.Feeds[0].Ecosystems[2].Status != "error" ||
+		body.Feeds[0].Ecosystems[2].LastError == nil {
+		t.Fatalf("ecosystems did not reach the wire intact: %s", w.Body.String())
 	}
 }
 

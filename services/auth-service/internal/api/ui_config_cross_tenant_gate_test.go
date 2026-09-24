@@ -42,7 +42,7 @@ func crossTenantUIConfigRequest(t *testing.T, method, roleClaim string) *httptes
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	db, _, err := sqlmock.New()
+	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock: %v", err)
 	}
@@ -56,6 +56,9 @@ func crossTenantUIConfigRequest(t *testing.T, method, roleClaim string) *httptes
 
 	attackerTenant := uuid.New()
 	victimTenant := uuid.New()
+	// The attacker's own tenant is live, so the refusal below has to come
+	// from the identity gate, not from the tenant-state check.
+	expectLiveTenantState(mock, attackerTenant)
 
 	jwtService := auth.NewJWTService(cfg.JWTSecret, time.Hour, time.Hour)
 	access, _, err := jwtService.GenerateTokens(uuid.New(), attackerTenant, "attacker@tenant.test", roleClaim)

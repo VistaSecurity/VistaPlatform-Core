@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,6 +147,12 @@ func (s *TierService) BypassDB() *sql.DB {
 
 // GetTier retrieves a tier by ID
 func (s *TierService) GetTier(tierID uuid.UUID) (*models.SubscriptionTier, error) {
+	return getTier(s.db, tierID)
+}
+
+// getTier is GetTier over any runner, so UpdateTier reads the row it has
+// locked inside its own transaction.
+func getTier(q sqlRunner, tierID uuid.UUID) (*models.SubscriptionTier, error) {
 	query := `
 		SELECT id, name, display_name, max_sensors, max_assets, max_users,
 		       retention_days, price_cents, annual_price_cents, billing_interval,
@@ -163,7 +170,7 @@ func (s *TierService) GetTier(tierID uuid.UUID) (*models.SubscriptionTier, error
 	var featuresJSON, limitsJSON, addonPricingJSON, metadataJSON []byte
 	var deprecatedAt sql.NullTime
 
-	err := s.db.QueryRow(query, tierID).Scan(
+	err := q.QueryRow(query, tierID).Scan(
 		&tier.ID, &tier.Name, &tier.DisplayName,
 		&maxSensors, &maxAssets, &maxUsers,
 		&tier.RetentionDays, &tier.PriceCents, &annualPriceCents, &tier.BillingInterval,
@@ -421,10 +428,23 @@ func (s *TierService) ListTiers(includeDeprecated bool) ([]models.SubscriptionTi
 }
 
 // CreateTier creates a new subscription tier
-func (s *TierService) CreateTier(req models.TierCreateRequest) (*models.SubscriptionTier, error) {
+//
+// The tier row, its initial composition and that composition's history row
+// commit together. This used to insert the tier, write the composition
+// separately and, on a composition error, DELETE the tier as compensation —
+// but the history trigger's AFTER DELETE insert references the deleted id, so
+// that DELETE failed (silently) and left a live tier with no composition,
+// whose capacity caps then resolved to the catalogue default of 0.
+func (s *TierService) CreateTier(req models.TierCreateRequest, changedBy uuid.UUID) (*models.SubscriptionTier, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Validate name uniqueness
 	var exists bool
-	err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM subscription_tiers WHERE name = $1)", req.Name).Scan(&exists)
+	err = tx.QueryRow("SELECT EXISTS(SELECT 1 FROM subscription_tiers WHERE name = $1)", req.Name).Scan(&exists)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check tier name: %w", err)
 	}
@@ -490,7 +510,7 @@ func (s *TierService) CreateTier(req models.TierCreateRequest) (*models.Subscrip
 
 	var tierID uuid.UUID
 	var createdAt, updatedAt time.Time
-	err = s.db.QueryRow(
+	err = tx.QueryRow(
 		query,
 		req.Name, req.DisplayName, maxSensors, maxAssets, maxUsers,
 		req.RetentionDays, req.PriceCents, annualPriceCents, req.BillingInterval,
@@ -506,13 +526,16 @@ func (s *TierService) CreateTier(req models.TierCreateRequest) (*models.Subscrip
 	// grants — the legacy subscription_tiers.* columns above are kept only
 	// for display back-compat. A bad item_key fails the whole create.
 	if len(req.Entitlements) > 0 {
-		if err := NewEntitlementsService(s.db, s.bypassDB).ReplaceTierEntitlements(
-			tierID, toServiceEntitlementInputs(req.Entitlements),
-		); err != nil {
-			// Roll back the orphaned tier row so create is all-or-nothing.
-			_, _ = s.db.Exec(`DELETE FROM subscription_tiers WHERE id = $1`, tierID)
+		changes, err := applyTierComposition(tx, tierID, toServiceEntitlementInputs(req.Entitlements), nil)
+		if err != nil {
 			return nil, fmt.Errorf("failed to write tier entitlements: %w", err)
 		}
+		if err := recordCompositionHistory(tx, tierID, changes, changedBy, "Initial composition"); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tier create: %w", err)
 	}
 
 	created, err := s.GetTier(tierID)
@@ -535,7 +558,7 @@ func (s *TierService) CreateTier(req models.TierCreateRequest) (*models.Subscrip
 
 // toServiceEntitlementInputs converts the models DTO (carried on tier
 // requests to avoid a models→services import cycle) into the services
-// type ReplaceTierEntitlements expects.
+// type the composition writers expect.
 func toServiceEntitlementInputs(in []models.TierEntitlementInput) []TierEntitlementInput {
 	out := make([]TierEntitlementInput, 0, len(in))
 	for _, e := range in {
@@ -549,10 +572,42 @@ func toServiceEntitlementInputs(in []models.TierEntitlementInput) []TierEntitlem
 	return out
 }
 
-// UpdateTier updates an existing tier (grandfathers existing tenants)
-func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest, changedBy uuid.UUID) (*models.SubscriptionTier, error) {
-	// Get existing tier
-	existing, err := s.GetTier(tierID)
+// TierUpdateResult is what UpdateTier changed: the tier as it now stands, the
+// tier columns the request wrote, and the composition rows that changed.
+type TierUpdateResult struct {
+	Tier               *models.SubscriptionTier
+	ChangedFields      []string
+	EntitlementChanges []EntitlementChange
+}
+
+// UpdateTier updates an existing tier (grandfathers existing tenants).
+//
+// The column changes, the composition changes and the history row are ONE
+// transaction under the tier's row lock: any error — a bad billing_method, an
+// unknown item key, a malformed value, a stale entitlements_version — leaves
+// the tier exactly as it was. (The admin UI used to save the identity/price
+// with one PUT and the composition with a second, so a rejected composition
+// left the price change applied.)
+//
+// Composition fields follow tier_composition.go: `entitlements` upserts,
+// `remove_entitlements` deletes, omission never deletes, and either one
+// requires `entitlements_version`.
+func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest, changedBy uuid.UUID) (*TierUpdateResult, error) {
+	writesComposition := req.Entitlements != nil || len(req.RemoveEntitlements) > 0
+	if writesComposition && (req.EntitlementsVersion == nil || *req.EntitlementsVersion == "") {
+		return nil, ErrCompositionVersionRequired
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := lockTier(tx, tierID); err != nil {
+		return nil, err
+	}
+	existing, err := getTier(tx, tierID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get existing tier: %w", err)
 	}
@@ -703,17 +758,25 @@ func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest,
 		argPos++
 	}
 
+	changedFields := make([]string, 0, len(changes))
+	for k := range changes {
+		changedFields = append(changedFields, k)
+	}
+	sort.Strings(changedFields)
+
 	// Nothing to do at all (no column changes and no entitlement payload).
-	if len(updates) == 0 && req.Entitlements == nil {
-		return existing, nil
+	if len(updates) == 0 && !writesComposition {
+		return &TierUpdateResult{Tier: existing}, nil
 	}
 
 	// Apply column updates, if any.
 	if len(updates) > 0 {
-		// Add updated_at
+		// Add updated_at. argPos already names the next free placeholder, which
+		// is the tier id's. (It used to be incremented once more here, so the
+		// WHERE named a parameter that did not exist and EVERY column update
+		// failed — hidden behind the 401 below it in the handler.)
 		updates = append(updates, "updated_at = NOW()")
 		args = append(args, tierID)
-		argPos++
 
 		// Build final query
 		setClause := ""
@@ -730,30 +793,47 @@ func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest,
 			WHERE id = $%d
 		`, setClause, argPos)
 
-		if _, err = s.db.Exec(query, args...); err != nil {
+		if _, err = tx.Exec(query, args...); err != nil {
 			return nil, fmt.Errorf("failed to update tier: %w", err)
 		}
 	}
 
-	// Bulk-replace the billable-item composition (the enforced layer) when a
-	// payload is supplied. A nil slice means "leave entitlements untouched";
-	// a non-nil (even empty) slice replaces them.
-	if req.Entitlements != nil {
-		if err := NewEntitlementsService(s.db, s.bypassDB).ReplaceTierEntitlements(
-			tierID, toServiceEntitlementInputs(req.Entitlements),
-		); err != nil {
+	var entChanges []EntitlementChange
+	if writesComposition {
+		entChanges, err = applyVersionedComposition(tx, tierID, CompositionUpdate{
+			Set:     toServiceEntitlementInputs(req.Entitlements),
+			Remove:  req.RemoveEntitlements,
+			Version: *req.EntitlementsVersion,
+		})
+		if err != nil {
 			return nil, fmt.Errorf("failed to update tier entitlements: %w", err)
 		}
-		changes["entitlements"] = map[string]interface{}{"replaced": len(req.Entitlements)}
+		if len(entChanges) > 0 {
+			changes["entitlements"] = entChanges
+		}
 	}
 
-	// Log change to history (trigger handles this, but we can add notes)
+	// History (the table trigger also logs the raw row; this row carries the
+	// actor and the composition diff). Part of the transaction: a change that
+	// cannot be recorded is not made.
 	if len(changes) > 0 {
-		changesJSON, _ := json.Marshal(changes)
-		_, _ = s.db.Exec(`
+		changesJSON, err := json.Marshal(changes)
+		if err != nil {
+			return nil, fmt.Errorf("marshal tier history: %w", err)
+		}
+		var actor any
+		if changedBy != uuid.Nil {
+			actor = changedBy
+		}
+		if _, err := tx.Exec(`
 			INSERT INTO subscription_tier_history (tier_id, change_type, changes_json, changed_by, notes)
 			VALUES ($1, 'modified', $2, $3, 'Updated via admin API')
-		`, tierID, changesJSON, changedBy)
+		`, tierID, changesJSON, actor); err != nil {
+			return nil, fmt.Errorf("record tier history: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tier update: %w", err)
 	}
 
 	updated, err := s.GetTier(tierID)
@@ -775,7 +855,7 @@ func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest,
 			}
 		}
 	}
-	return updated, nil
+	return &TierUpdateResult{Tier: updated, ChangedFields: changedFields, EntitlementChanges: entChanges}, nil
 }
 
 // AssignTierResult summarizes assigning a plan to a tenant.

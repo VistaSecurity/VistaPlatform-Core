@@ -383,17 +383,9 @@ func main() {
 
 	}
 
-	// Platform-admin cross-tenant Fleet view (READ-ONLY). No tenant context:
-	// platform admins roll up sensors across ALL tenants. Gated by the
-	// platform-admin role check (mirrors device-interrogation-service's
-	// /admin/* gate). This deliberately omits the tenant filter that isolates
-	// the tenant-scoped /sensors list, so it MUST stay behind RequirePlatformAdmin.
-	adminFleet := api.Group("/sensor-manager/admin")
-	adminFleet.Use(middleware.RequirePlatformAuth(cfg.JWTSecret))
-	adminFleet.Use(middleware.RequirePlatformAdmin())
-	{
-		adminFleet.GET("/sensors", handler.GetAdminSensors)
-	}
+	// Platform-admin cross-tenant Fleet view (READ-ONLY) — see
+	// registerAdminFleetRoutes for the gate.
+	registerAdminFleetRoutes(api, cfg.JWTSecret, db, handler.GetAdminSensors)
 
 	// Platform-level endpoints (no tenant context required, for monitoring service)
 	platform := api.Group("/sensor-manager/platform")

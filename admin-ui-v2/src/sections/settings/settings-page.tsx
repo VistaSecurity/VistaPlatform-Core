@@ -17,6 +17,7 @@ import { SettingsIdentityProvidersPage } from './settings-identity-providers-pag
 import { SettingsLegalPage } from './settings-legal-page';
 import { NotificationDeliveryPage } from './notification-delivery-page';
 import { SettingsLicensePage } from './settings-license-page';
+import { RequireChildPermission } from '../../app/section-child';
 
 export function SettingsPage() {
   return (
@@ -27,7 +28,7 @@ export function SettingsPage() {
       <Route path="branding" element={<SettingsBrandingPage />} />
       <Route path="legal" element={<SettingsLegalPage />} />
       <Route path="identity-providers" element={<SettingsIdentityProvidersPage />} />
-      <Route path="notifications" element={<NotificationDeliveryPage />} />
+      <Route path="notifications" element={<RequireChildPermission section="settings" child="notifications"><NotificationDeliveryPage /></RequireChildPermission>} />
       <Route path="license" element={<SettingsLicensePage />} />
       <Route path="*" element={<Navigate to="/settings" replace />} />
     </Routes>

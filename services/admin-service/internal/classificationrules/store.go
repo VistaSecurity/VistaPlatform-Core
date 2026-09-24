@@ -17,6 +17,7 @@ package classificationrules
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -36,6 +37,10 @@ var ErrNotFound = errors.New("classificationrules: rule not found")
 // usable error and "something went wrong".
 var ErrDuplicate = errors.New("classificationrules: a rule with that kind and pattern already exists")
 
+// ErrNoUpdate is returned by AcceptUpdate for a rule no upgrade has offered
+// anything: a 409, because the console's button should not have been there.
+var ErrNoUpdate = errors.New("classificationrules: no update available for this rule")
+
 // Rule is one curated row. It embeds nothing from classify on purpose — the
 // wire shape is this package's, and classify.Rule carries compiled state
 // (a regexp, a parsed port list) that has no business in JSON.
@@ -50,6 +55,20 @@ type Rule struct {
 	SourceURL  *string `json:"source_url"`
 	CreatedAt  string  `json:"created_at"`
 	UpdatedAt  string  `json:"updated_at"`
+
+	// Seeded-content ownership (decision 4, RC-12). The database writes these
+	// (the seeded-content guard trigger in scripts/database/schema.sql); no
+	// Input field can set them.
+	//
+	// ContentOrigin is "vista" for a rule the seed shipped and "custom" for one
+	// a platform admin added. AdminModified: an admin changed a shipped rule,
+	// so upgrades keep the admin's values and OFFER later shipped changes.
+	// UpdateAvailable / OfferedUpdate: an upgrade did exactly that — the offer
+	// is the shipped values, column by column, that AcceptUpdate would write.
+	ContentOrigin   string         `json:"content_origin"`
+	AdminModified   bool           `json:"admin_modified"`
+	UpdateAvailable bool           `json:"update_available"`
+	OfferedUpdate   map[string]any `json:"offered_update,omitempty"`
 }
 
 // Input is a create or update body. The pointers are nullable columns, and
@@ -92,6 +111,11 @@ type Store interface {
 	Update(ctx context.Context, id string, in Input) (Rule, error)
 	Delete(ctx context.Context, id string) error
 
+	// AcceptUpdate applies the shipped update an upgrade offered for a rule an
+	// admin had edited (decision 4, RC-12), and returns the rule as it now is
+	// with the values it had before. ErrNotFound / ErrNoUpdate otherwise.
+	AcceptUpdate(ctx context.Context, id string) (after Rule, before Rule, err error)
+
 	// ListAll returns every rule, unpaginated, for building a classify.Engine.
 	// It is on the same interface because it reads the same table, and an
 	// engine built from a PAGE of the rules is an engine that silently
@@ -108,17 +132,26 @@ type SQLStore struct{ db *sql.DB }
 func NewSQLStore(db *sql.DB) *SQLStore { return &SQLStore{db: db} }
 
 const ruleColumns = `id, rule_kind, pattern, class_key, vendor, model, confidence,
-                     source_url, created_at, updated_at`
+                     source_url, created_at, updated_at,
+                     CASE WHEN content_origin = 'seed' THEN 'vista' ELSE 'custom' END,
+                     admin_modified_at IS NOT NULL, seed_offer IS NOT NULL, seed_offer`
 
 func scanRule(scan func(...any) error) (Rule, error) {
 	var (
 		r                               Rule
 		classKey, vendor, model, srcURL sql.NullString
 		created, updated                sql.NullTime
+		offer                           []byte
 	)
 	if err := scan(&r.ID, &r.RuleKind, &r.Pattern, &classKey, &vendor, &model,
-		&r.Confidence, &srcURL, &created, &updated); err != nil {
+		&r.Confidence, &srcURL, &created, &updated,
+		&r.ContentOrigin, &r.AdminModified, &r.UpdateAvailable, &offer); err != nil {
 		return Rule{}, err
+	}
+	if len(offer) > 0 {
+		if err := json.Unmarshal(offer, &r.OfferedUpdate); err != nil {
+			return Rule{}, fmt.Errorf("decode offered update: %w", err)
+		}
 	}
 	r.ClassKey = nullStr(classKey)
 	r.Vendor = nullStr(vendor)
@@ -279,6 +312,46 @@ func (s *SQLStore) Delete(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// AcceptUpdate applies a rule's offered update through the database's
+// accept_seeded_content_update(), which writes the offer and clears it in one
+// statement. The row is locked for the read-before so the audit's "before" is
+// the state the accept replaced, not a racing edit's.
+func (s *SQLStore) AcceptUpdate(ctx context.Context, id string) (Rule, Rule, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Rule{}, Rule{}, fmt.Errorf("accept classification rule update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	before, err := scanRule(tx.QueryRowContext(ctx,
+		"SELECT "+ruleColumns+" FROM public.classification_rules WHERE id = $1 FOR UPDATE", id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Rule{}, Rule{}, ErrNotFound
+	}
+	if err != nil {
+		return Rule{}, Rule{}, fmt.Errorf("accept classification rule update: %w", err)
+	}
+	// The database decides whether there is anything to accept: the function
+	// updates only a row that carries an offer, and says so.
+	var accepted bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT public.accept_seeded_content_update('classification_rule', $1)`, id).Scan(&accepted); err != nil {
+		return Rule{}, Rule{}, fmt.Errorf("accept classification rule update: %w", err)
+	}
+	if !accepted {
+		return Rule{}, Rule{}, ErrNoUpdate
+	}
+	after, err := scanRule(tx.QueryRowContext(ctx,
+		"SELECT "+ruleColumns+" FROM public.classification_rules WHERE id = $1", id).Scan)
+	if err != nil {
+		return Rule{}, Rule{}, fmt.Errorf("accept classification rule update: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Rule{}, Rule{}, fmt.Errorf("accept classification rule update: %w", err)
+	}
+	return after, before, nil
 }
 
 // ListAll returns every rule as a classify.Rule, for building an engine.

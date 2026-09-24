@@ -2,12 +2,10 @@
 // goes through the generated typed client (@vistasecurity/api-contract); no
 // hand-rolled fetch/axios. Platform CSRF is automatic (see lib/clients.ts).
 //   • Tenant Health  → clients.tenantHealth  (read)
-//   • Impersonation  → clients.auth          (read-only audit trail)
 //   • Job Repair     → clients.devices       (list + retry/cancel)
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   tenantHealthServiceComponents,
-  authServiceComponents,
   deviceInterrogationComponents,
 } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
@@ -17,7 +15,6 @@ export type TenantHealth = tenantHealthServiceComponents['schemas']['TenantHealt
 export type HealthAlert = tenantHealthServiceComponents['schemas']['HealthAlert'];
 export type HealthBreakdown = tenantHealthServiceComponents['schemas']['HealthBreakdown'];
 export type Recommendation = tenantHealthServiceComponents['schemas']['Recommendation'];
-export type ImpersonationEvent = authServiceComponents['schemas']['ImpersonationEvent'];
 export type AdminInterrogationJob = deviceInterrogationComponents['schemas']['AdminInterrogationJob'];
 
 export function errMsg(e: unknown, fallback = 'Action failed'): string {
@@ -66,21 +63,6 @@ export function useTenantHealthAlerts(id: string | null) {
       if (error || !data) throw new Error('Failed to load tenant alerts');
       return data.alerts ?? [];
     },
-  });
-}
-
-/* --------------------------- Impersonation ------------------------------- */
-
-/** Read-only impersonation audit trail — GET /admin/impersonations/audit. */
-export function useImpersonationEvents() {
-  return useQuery({
-    queryKey: ['platform', 'support', 'impersonations'],
-    queryFn: async (): Promise<ImpersonationEvent[]> => {
-      const { data, error } = await clients.auth.GET('/admin/impersonations/audit', {});
-      if (error || !data) throw new Error('Failed to load impersonation history');
-      return data.events ?? [];
-    },
-    staleTime: 30 * 1000,
   });
 }
 

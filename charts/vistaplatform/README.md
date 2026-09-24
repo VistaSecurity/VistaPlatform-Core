@@ -53,11 +53,23 @@ The same Secret holds `signing-key.pem`, the install's ECDSA P-256 signing
 key: on an MSP licence admin-service signs every licence usage report with it,
 and Vista Security's receiver pins the first key it sees, so it is generated
 once and kept exactly like the id. GitOps users set `install.signingKeyPEM`
-too (from an encrypted values file). Reports are also written to a
-`<fullname>-license-reports` PVC (`licensing.reports.persistence`, on by
-default, 1Gi, ReadWriteOnce — which makes admin-service single-replica with
-the `Recreate` strategy; use ReadWriteMany for more replicas, or disable it to
-keep reports in the database only).
+too (from an encrypted values file). **MSP installs: set `licensing.reports.persistence.enabled=true`** to
+write a copy of each report to a `<fullname>-license-reports` PVC (off by
+default, since only an MSP licence produces reports and the chart cannot know
+the edition; 1Gi, ReadWriteOnce — which makes admin-service single-replica
+with a no-surge rolling update, `maxSurge: 0` / `maxUnavailable: 1`; use
+ReadWriteMany for more replicas). Off, reports live in the database only.
+**Automatic report delivery** is off until you set
+`licensing.reporting.endpoint` to the https:// receiver URL Vista Security
+gives you: admin-service then POSTs each complete monthly report to
+`<endpoint>/v1/usage-reports` (checking every `licensing.reporting.intervalMinutes`,
+default 60; failures back off from 1h to 24h per report). It uses the system
+trust store and honours `HTTPS_PROXY` / `NO_PROXY`; behind an egress proxy,
+give admin-service those through `backends.admin-service.extraEnv` (and, if
+the proxy re-signs TLS, mount a CA bundle with `extraVolumes`/`extraVolumeMounts`
+and point `SSL_CERT_FILE` at it — the bundle replaces the system one, so
+include the public roots). Air-gapped installs leave the endpoint empty and
+upload the downloaded report instead.
 - Either `platform.existingSecretName` OR all three of `platform.{jwtSecret,internalAuthSecret,encryptionMasterKey}`
 
 See `examples/values-customer.yaml.example` (bundled with this chart) for the full annotated starter. After `helm pull --untar`, copy it into your own infrastructure repo, edit, and apply with `-f`.

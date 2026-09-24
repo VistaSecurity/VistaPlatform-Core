@@ -35,6 +35,16 @@ also leaves the field blank. Curators can update its metadata without assigning
 a score; the console omits the unchanged blank score from that update. Once a
 row has a numeric score, the console does not allow it to be cleared.
 
+**Deprecate makes an algorithm grade Critical.** The Deprecate action (or
+setting the status to *obsolete* in the edit form) raises the risk score to at
+least the bottom of the Critical band (90), so every configuration that uses the
+algorithm grades Critical. The score it replaced is remembered. Setting the
+status back to *current* or *deprecated* restores that score, unless you enter a
+new one in the same edit. While an algorithm stays obsolete, a score below the
+Critical band is refused. Algorithms that were already obsolete before this
+behaviour existed keep their scores, and re-activating them leaves the score as
+it is. Both the raise and the restore are recorded in the audit log.
+
 Every tenant's inventory is matched against these catalogues nightly (and
 after an SBOM upload): an asset's OS and hardware resolve against the
 end-of-life catalogue, and its installed software resolves against the
@@ -55,6 +65,55 @@ Catalog ▸ Algorithms uses **`algorithms.manage`** for its write controls.
 The routes live under the admin plane (`/api/v1/admin-service/admin/catalogs/**`),
 so they are served on the admin host only — never on the tenant host.
 
+## Shipped content and upgrades
+
+The frameworks (with their controls and measurement rules) and the
+classification rules that ship with Vista Platform are re-applied on every
+`helm upgrade`. Your changes to them win over that:
+
+* **An edit stays.** Archive a shipped framework, reword a control, retune a
+  measurement or classification rule, and the next upgrade leaves it as you
+  set it.
+* **A deletion stays.** A shipped control, measurement rule or classification
+  rule you delete is not put back by an upgrade. The deletion is remembered,
+  and so is the old identity of a control or rule you re-keyed.
+* **Rows you have not touched keep up.** If a release changes shipped content
+  you never edited, the upgrade applies it.
+* **Changes to rows you edited are offered, not applied.** When a release ships
+  new content for a row you changed, the upgrade keeps your version and the row
+  shows **Update available**. Hover it to see exactly what accepting would
+  write, field by field; clicking it shows the same list and asks you to
+  confirm before anything is written. The row stays yours after that, so
+  the next release's change to it is offered again. If you never accept, your
+  version stays.
+
+The catalogue pages mark each row **Vista** (shipped) or **Custom** (added
+here), and a shipped row you have changed as **Modified**. Accepting an update
+needs `catalogs.manage` and is recorded in the audit trail with the values
+before and after.
+
+Rows you added are never touched by an upgrade, even when a shipped correction
+would otherwise match them. That includes a measurement rule of a type the
+control already has — a second `tls_version` pattern, a `key_size` floor and
+ceiling: an upgrade only ever removes exact leftover copies of a shipped rule
+that earlier releases created by mistake.
+
+On the first upgrade to a release with this behaviour, the platform compares
+every shipped framework, control and classification rule with everything the
+release ships for it — not only the fields the upgrade used to rewrite. A row
+that matches is marked as shipped content you have not changed. A row that
+differs is kept as it is, marked **Modified**, and offered the shipped values:
+the platform cannot tell an edit you made from content that changed between
+releases, so it keeps your version and loses nothing. Measurement rules are
+placed by when they were created: one created with its shipped control is
+**Vista** (and **Modified** if it has been updated since); one added later is
+left as **Custom**, which an upgrade never overwrites.
+
+Deletions are remembered only from this release on. A shipped framework,
+control, measurement rule or classification rule you deleted **before**
+upgrading to it left no record, so that first upgrade puts it back once. Delete
+it again afterwards and it stays deleted.
+
 ## The feeds
 
 Three mirror jobs run inside `admin-service`, on a schedule and on demand:
@@ -72,7 +131,23 @@ does not take the admin console down with it, and the failure is visible on the
 page rather than inferred from a catalogue that stopped growing.
 
 **The bookmark only advances on success.** A run that fails retries the same
-window next time rather than skipping it.
+window next time rather than skipping it. OSV is the exception: its bookmark is
+kept per ecosystem, and an ecosystem that completed keeps its bookmark even when
+another ecosystem in the same run fails. Only the failed ecosystem starts over.
+The card lists each OSV ecosystem under the feed with its own result: rows
+written, how far it has imported, or the error and when it last worked. A run
+where some ecosystems failed shows as **Partial**. The **Rows** column counts
+what the most recent run wrote, including rows a failed run wrote before it
+stopped. Those rows are kept.
+
+**OSV downloads are large.** Each ecosystem is one bulk archive, downloaded to
+disk and read one advisory at a time. The feed accepts archives up to 2 GiB.
+Ubuntu's was about 705 MiB in September 2026, Debian's about 68 MiB and
+Alpine's about 4 MiB. On Kubernetes the chart gives `admin-service` a dedicated
+scratch volume for this (`catalogFeeds.spool.sizeLimit`, default `3Gi`) and
+requests matching ephemeral storage. Keep the size above 2 GiB. Outside
+Kubernetes, point `CATALOG_FEEDS_SPOOL_DIR` at a directory with about 2.5 GiB
+free.
 
 ### Configuration
 
@@ -83,6 +158,7 @@ window next time rather than skipping it.
 | `CATALOG_FEEDS_STARTUP_DELAY` | `2m` | Delay before the first pass after a pod starts, so a rolling restart is not N simultaneous passes. |
 | `NVD_API_KEY` | empty | Raises the NVD rate limit from 5 to 50 requests per 30 seconds. |
 | `OSV_ECOSYSTEMS` | `Debian,Ubuntu,Alpine` | Comma-separated osv.dev bucket names to mirror. |
+| `CATALOG_FEEDS_SPOOL_DIR` | empty (the OS temp dir) | Where OSV archives are downloaded before they are read. The chart sets it to its own scratch volume. |
 
 On Kubernetes, set them through the chart's per-backend `extraEnv`:
 
@@ -333,15 +409,15 @@ is rejected, the message names what to change.
 
 Two things are worth knowing before you edit or delete:
 
-* **Editing a shipped rule does not last.** The rules that come with the
-  platform are restated on every upgrade, so an edit to one is overwritten by
-  the next release. To override a shipped answer durably, **add a more specific
-  rule** instead — a longer `sysObjectID` prefix, a longer model prefix. It wins
-  on its own merits and survives every upgrade. Rules *you* add are never
-  touched.
+* **Editing a shipped rule lasts.** Upgrades keep your version; if a later
+  release changes that rule, it shows **Update available** instead (see
+  [Shipped content and upgrades](#shipped-content-and-upgrades)). Adding a more
+  specific rule — a longer `sysObjectID` prefix, a longer model prefix — is
+  still the way to override a shipped answer without touching it. Rules *you*
+  add are never touched by an upgrade.
 * **Deleting does not rewrite history.** Class proposals already made from a
   rule keep their own copy of it, so past decisions stay reviewable. Deleting a
-  shipped rule also only lasts until the next upgrade.
+  shipped rule is remembered, and upgrades do not put it back.
 
 Adding, editing and deleting a rule are all recorded in the audit trail with who
 did it and what the rule was.
@@ -475,6 +551,12 @@ either case; the card says "Bundle refused".
 manifest verified and the write then failed (most often a database connection
 dropping under a large import). Some rows are in. Import the same bundle again —
 it is idempotent, so the repair is a retry, not a cleanup.
+
+**One OSV ecosystem keeps failing.** The card names it and shows its error. An
+error that mentions the archive cap means that ecosystem's export has grown past
+2 GiB. "no space left on device" means the spool volume is smaller than the
+archive, so raise `catalogFeeds.spool.sizeLimit`. The other ecosystems are not
+affected either way.
 
 **An OSV ecosystem is missing.** Check the name against the bucket listing at
 <https://osv-vulnerabilities.storage.googleapis.com> — `OSV_ECOSYSTEMS` uses the

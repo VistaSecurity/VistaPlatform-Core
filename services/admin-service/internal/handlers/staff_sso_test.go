@@ -108,11 +108,10 @@ func TestStaffSsoCallback_UsesConfiguredSessionTTLForRefreshSession(t *testing.T
 	start := time.Now()
 
 	providerAuthor := uuid.New()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, client_id, client_secret_encrypted, token_url, userinfo_url, updated_by FROM platform_sso_providers")).
+	mock.ExpectQuery(regexp.QuoteMeta(staffProviderQuery)).
 		WithArgs("google").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "client_id", "client_secret_encrypted", "token_url", "userinfo_url", "updated_by",
-		}).AddRow(uuid.NewString(), "client-id", "client-secret", idp.URL+"/token", idp.URL+"/userinfo", providerAuthor.String()))
+		WillReturnRows(sqlmock.NewRows(staffProviderColumns).
+			AddRow(uuid.NewString(), "client-id", "client-secret", idp.URL+"/authorize", idp.URL+"/token", idp.URL+"/userinfo", providerAuthor.String(), "{}"))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pu.id, pr.id, pr.name, pu.force_password_change FROM platform_users pu")).
 		WithArgs("admin@example.com").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "role_id", "name", "force_password_change"}).
@@ -265,12 +264,19 @@ func staffCallbackHarness(t *testing.T, userinfoJSON string, expect func(mock sq
 	return w.Header().Get("Location"), mock
 }
 
+// staffProviderQuery / staffProviderColumns are the admin_login provider read
+// the callback makes first.
+const staffProviderQuery = "SELECT id, client_id, client_secret_encrypted, auth_url, token_url, userinfo_url, updated_by, allowed_email_domains FROM platform_sso_providers"
+
+var staffProviderColumns = []string{
+	"id", "client_id", "client_secret_encrypted", "auth_url", "token_url", "userinfo_url", "updated_by", "allowed_email_domains",
+}
+
 func expectStaffProviderRow(mock sqlmock.Sqlmock, tokenURL, userinfoURL string, updatedBy interface{}) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT id, client_id, client_secret_encrypted, token_url, userinfo_url, updated_by FROM platform_sso_providers")).
+	mock.ExpectQuery(regexp.QuoteMeta(staffProviderQuery)).
 		WithArgs("google").
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "client_id", "client_secret_encrypted", "token_url", "userinfo_url", "updated_by",
-		}).AddRow(uuid.NewString(), "client-id", "client-secret", tokenURL, userinfoURL, updatedBy))
+		WillReturnRows(sqlmock.NewRows(staffProviderColumns).
+			AddRow(uuid.NewString(), "client-id", "client-secret", strings.TrimSuffix(tokenURL, "/token")+"/authorize", tokenURL, userinfoURL, updatedBy, "{}"))
 }
 
 // Gate 1: without an explicit email_verified=true the callback refuses before
@@ -334,4 +340,74 @@ func TestStaffSsoCallback_SuperAdminNeedsSuperAdminAuthoredProvider(t *testing.T
 			t.Fatal(err)
 		}
 	})
+}
+
+// Gate 1's decision table. The domain rule is the only relaxation, and each
+// of its conditions has a row that removes exactly that condition.
+func TestStaffSSOEmailVerification(t *testing.T) {
+	const single = "https://login.microsoftonline.com/0b6f3c9e-1d2a-4c5b-9e8f-7a6b5c4d3e2f/oauth2/v2.0/"
+	const multi = "https://login.microsoftonline.com/common/oauth2/v2.0/"
+	domains := []string{"contoso.example"}
+	cases := []struct {
+		name          string
+		claim         interface{}
+		provider      string
+		email         string
+		auth, token   string
+		domains       []string
+		wantBy, wantR string
+	}{
+		{"claim true", true, "google", "a@x.example", "", "", nil, staffEmailVerifiedByClaim, ""},
+		{"claim true beats an unrelated list", true, "microsoft", "a@x.example", multi + "authorize", multi + "token", domains, staffEmailVerifiedByClaim, ""},
+		{"Entra: no claim, allow-listed, single tenant", nil, "microsoft", "a@Contoso.Example", single + "authorize", single + "token", domains, staffEmailVerifiedByDomain, ""},
+		{"Entra: no claim, empty list", nil, "microsoft", "a@contoso.example", single + "authorize", single + "token", nil, "", staffRefusalEmailNotVerified},
+		{"Entra: explicit false is believed", false, "microsoft", "a@contoso.example", single + "authorize", single + "token", domains, "", staffRefusalEmailNotVerified},
+		{"Entra: explicit string false is believed", "false", "microsoft", "a@contoso.example", single + "authorize", single + "token", domains, "", staffRefusalEmailNotVerified},
+		{"Google: list never applies", nil, "google", "a@contoso.example", single + "authorize", single + "token", domains, "", staffRefusalEmailNotVerified},
+		{"Entra: multi-tenant token URL", nil, "microsoft", "a@contoso.example", single + "authorize", multi + "token", domains, "", staffRefusalDomainsMultiTenant},
+		{"Entra: multi-tenant authorize URL", nil, "microsoft", "a@contoso.example", multi + "authorize", single + "token", domains, "", staffRefusalDomainsMultiTenant},
+		{"Entra: domain mismatch", nil, "microsoft", "a@evil.example", single + "authorize", single + "token", domains, "", staffRefusalDomainNotAllowed},
+		{"Entra: lookalike suffix", nil, "microsoft", "a@contoso.example.evil.example", single + "authorize", single + "token", domains, "", staffRefusalDomainNotAllowed},
+		{"Entra: subdomain", nil, "microsoft", "a@mail.contoso.example", single + "authorize", single + "token", domains, "", staffRefusalDomainNotAllowed},
+		{"Entra: Cyrillic lookalike", nil, "microsoft", "a@c\u043Entoso.example", single + "authorize", single + "token", domains, "", staffRefusalDomainNotAllowed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			by, refusal := staffSSOEmailVerification(tc.claim, tc.provider, tc.email, tc.auth, tc.token, tc.domains)
+			if by != tc.wantBy || refusal != tc.wantR {
+				t.Fatalf("got (%q, %q), want (%q, %q)", by, refusal, tc.wantBy, tc.wantR)
+			}
+		})
+	}
+}
+
+// Allow-list validation on provider writes: refused before any DB use unless
+// the list is well-formed AND the provider is a Microsoft admin-login app
+// pinned to one Entra directory.
+func TestValidatePlatformIdPDomains(t *testing.T) {
+	const single = "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/"
+	const multi = "https://login.microsoftonline.com/organizations/oauth2/v2.0/"
+	ok := []string{" Contoso.Example ", "contoso.example", "b.example"}
+	if got, reason := validatePlatformIdPDomains("microsoft", "admin_login", single+"authorize", single+"token", ok); reason != "" || strings.Join(got, ",") != "contoso.example,b.example" {
+		t.Fatalf("valid list: got %v, %q", got, reason)
+	}
+	if got, reason := validatePlatformIdPDomains("google", "signup", "x", "y", nil); reason != "" || got == nil || len(got) != 0 {
+		t.Fatalf("empty list must be valid anywhere and non-nil: %#v, %q", got, reason)
+	}
+	for name, tc := range map[string]struct {
+		typ, purpose, auth, token string
+		domains                   []string
+	}{
+		"wildcard":          {"microsoft", "admin_login", single + "authorize", single + "token", []string{"*.contoso.example"}},
+		"unicode":           {"microsoft", "admin_login", single + "authorize", single + "token", []string{"c\u043Entoso.example"}},
+		"email not domain":  {"microsoft", "admin_login", single + "authorize", single + "token", []string{"a@contoso.example"}},
+		"google":            {"google", "admin_login", single + "authorize", single + "token", []string{"contoso.example"}},
+		"signup purpose":    {"microsoft", "signup", single + "authorize", single + "token", []string{"contoso.example"}},
+		"multi-tenant auth": {"microsoft", "admin_login", multi + "authorize", single + "token", []string{"contoso.example"}},
+		"multi-tenant tok":  {"microsoft", "admin_login", single + "authorize", multi + "token", []string{"contoso.example"}},
+	} {
+		if _, reason := validatePlatformIdPDomains(tc.typ, tc.purpose, tc.auth, tc.token, tc.domains); reason == "" {
+			t.Errorf("%s: accepted, want a refusal", name)
+		}
+	}
 }

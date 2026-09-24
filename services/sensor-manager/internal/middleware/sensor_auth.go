@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/certificates"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // SensorAuth authenticates sensor outbound routes (heartbeat, command polling,
@@ -38,6 +40,17 @@ import (
 // auto-register endpoint), so there is no trusted-proxy bypass.
 func SensorAuth(db, bypassDB *sql.DB, encryptionKey string, requireMTLS bool) gin.HandlerFunc {
 	certService := certificates.NewCertificateService(db, bypassDB, encryptionKey)
+
+	// A sensor of a suspended, canceled or deleted tenant is refused (RC-4 /
+	//): its heartbeats, command polls and discovery submissions stop
+	// being accepted, so nothing it observes is ingested for a tenant that is
+	// not usable. The sensor sees 403 with a tenant_suspended /
+	// tenant_deleted code and keeps retrying on its normal schedule, so
+	// reactivation needs nothing from the customer.
+	var tenantState sharedmw.TenantStateChecker
+	if bypassDB != nil {
+		tenantState = tenantstate.NewChecker(bypassDB, tenantstate.CacheTTLFromEnv())
+	}
 
 	return func(c *gin.Context) {
 		sensorIDStr := c.Param("sensor_id")
@@ -172,8 +185,39 @@ func SensorAuth(db, bypassDB *sql.DB, encryptionKey string, requireMTLS bool) gi
 			log.Printf("SensorAuth: WARNING sensor %s authenticated WITHOUT a client certificate (AGENT_MTLS_REQUIRED is off)", sensorIDStr)
 		}
 
+		if tenantState != nil && !enforceSensorTenantState(c, bypassDB, tenantState, sensorID) {
+			return
+		}
+
 		c.Next()
 	}
+}
+
+// enforceSensorTenantState refuses a sensor whose tenant is not usable. The
+// tenant comes from the mTLS path above when it ran; otherwise it is resolved
+// from the sensor row (a bootstrap lookup — the tenant is the OUTPUT, so the
+// bypass pool). An unknown sensor is left to the handler, which already answers
+// for it; a lookup error fails closed.
+func enforceSensorTenantState(c *gin.Context, bypassDB *sql.DB, checker sharedmw.TenantStateChecker, sensorID uuid.UUID) bool {
+	var tenantID uuid.UUID
+	if v, ok := c.Get("tenantID"); ok {
+		tenantID, _ = v.(uuid.UUID)
+	}
+	if tenantID == uuid.Nil {
+		err := bypassDB.QueryRow("SELECT tenant_id FROM sensors WHERE id = $1 AND deleted_at IS NULL", sensorID).Scan(&tenantID)
+		if err == sql.ErrNoRows {
+			return true
+		}
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": tenantstate.Message(tenantstate.CodeUnavailable),
+				"code":  tenantstate.CodeUnavailable,
+			})
+			c.Abort()
+			return false
+		}
+	}
+	return sharedmw.EnforceTenantState(c, checker, tenantID, "sensor")
 }
 
 // verifySensorCertChain verifies leaf against the tenant's active sensor CA

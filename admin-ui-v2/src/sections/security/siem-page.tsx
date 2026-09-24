@@ -7,6 +7,7 @@
 import { useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { CloudUpload, Plus, Pencil, Trash2, FlaskConical, Lock } from 'lucide-react';
+import { PlatformPermissionGate, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { Tag } from '../../components/ui/primitives';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { useSiemTypes, useSiemIntegrations, useSiemMutations, siemEditionUnavailable, errMsg, type SIEMIntegration, type SIEMIntegrationInput } from './audit-queries';
@@ -229,7 +230,12 @@ export function SiemPage() {
           <CloudUpload size={16} style={{ color: 'var(--op-t3)' }} />
           <span style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--op-t1)' }}>Configured integrations</span>
           <div style={{ flex: 1 }} />
-          <button className="op-btn primary sm" onClick={() => setModal({ kind: 'create' })}><Plus size={14} />Add integration</button>
+          {/* Reading needs platform.audit (the sub-view's gate); every write,
+              including a test send, needs platform.audit.manage — what
+              audit-service enforces on the SIEM write routes. */}
+          <PlatformPermissionGate permission={PLATFORM_PERMISSIONS.platform.auditManage}>
+            <button className="op-btn primary sm" onClick={() => setModal({ kind: 'create' })}><Plus size={14} />Add integration</button>
+          </PlatformPermissionGate>
         </div>
 
         {integrationsQ.isLoading && <div style={{ padding: 50, textAlign: 'center', color: 'var(--op-t3)' }}>Loading integrations…</div>}
@@ -256,11 +262,13 @@ export function SiemPage() {
                     <span className="t-muted" style={{ fontSize: 11 }}>Format: {String(cfg(i, 'format') ?? 'json')}</span>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button className="op-btn sm" disabled={mut.test.isPending} onClick={() => onTest(i)}><FlaskConical size={13} />Test</button>
-                  <button className="op-btn icon sm" title="Edit" onClick={() => setModal({ kind: 'edit', integration: i })}><Pencil size={13} /></button>
-                  <button className="op-btn icon sm" title="Delete" disabled={mut.remove.isPending} onClick={() => remove(i)}><Trash2 size={13} /></button>
-                </div>
+                <PlatformPermissionGate permission={PLATFORM_PERMISSIONS.platform.auditManage}>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button className="op-btn sm" disabled={mut.test.isPending} onClick={() => onTest(i)}><FlaskConical size={13} />Test</button>
+                    <button className="op-btn icon sm" title="Edit" onClick={() => setModal({ kind: 'edit', integration: i })}><Pencil size={13} /></button>
+                    <button className="op-btn icon sm" title="Delete" disabled={mut.remove.isPending} onClick={() => remove(i)}><Trash2 size={13} /></button>
+                  </div>
+                </PlatformPermissionGate>
               </div>
             ))}
           </div>

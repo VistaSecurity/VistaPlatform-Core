@@ -65,10 +65,15 @@ func (f *dispatchFixture) liveSensor(t *testing.T, name string) uuid.UUID {
 	return f.insertSensor(t, name, "active", &beat, nil, "linux")
 }
 
+// createSensorsJob queues a `sensors` job. Its targets are RFC 1918 — the
+// address class every tenant may scan without a registered segment. They were
+// TEST-NET-1 (192.0.2.0/24) until's dispatch target guard began refusing
+// the documentation ranges for every tenant, after which CreateJob rightly
+// rejected this fixture before any dispatch logic ran.
 func (f *dispatchFixture) createSensorsJob(t *testing.T, sensorID uuid.UUID) *models.DiscoveryJob {
 	t.Helper()
 	job, err := f.svc.CreateJob(f.tenant.String(), "system", models.CreateDiscoveryJobRequest{
-		Targets:            []string{"192.0.2.10", "192.0.2.11"},
+		Targets:            []string{"10.183.0.10", "10.183.0.11"},
 		ExecutionMode:      "sensors",
 		PreferredSensorIDs: []string{sensorID.String()},
 		Protocols:          []string{"TLS", "SSH"},
@@ -153,7 +158,7 @@ func TestIntegration_SensorDispatch_WritesOneCommandAndMarksTheJobAwaiting(t *te
 	if err != nil {
 		t.Fatalf("the sensor would refuse the stored payload: %v", err)
 	}
-	if strings.Join(parsed.Targets, ",") != "192.0.2.10,192.0.2.11" || strings.Join(parsed.Protocols, ",") != "SSH,TLS" ||
+	if strings.Join(parsed.Targets, ",") != "10.183.0.10,10.183.0.11" || strings.Join(parsed.Protocols, ",") != "SSH,TLS" ||
 		len(parsed.Ports) != 2 || parsed.Ports[0] != 22 || parsed.Ports[1] != 443 {
 		t.Errorf("payload = %+v", parsed)
 	}
@@ -228,7 +233,7 @@ func TestIntegration_SensorDispatch_CreationRefusesAJobThatCannotRun(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := f.svc.CreateJob(f.tenant.String(), "system", models.CreateDiscoveryJobRequest{
-				Targets:            []string{"192.0.2.10"},
+				Targets:            []string{"10.183.0.10"},
 				ExecutionMode:      "sensors",
 				PreferredSensorIDs: []string{tc.sensor.String()},
 				Protocols:          []string{"TLS"},

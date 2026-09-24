@@ -12,6 +12,7 @@ package auth_test
 // drifted apart in every "the code looks right" bug this repo has hit.
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,6 +34,11 @@ func guardedService(v *jwtkeys.Verifier, legacySecret string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(sharedmw.RequireJWTAuth(sharedmw.AuthConfig{
+		// Explicit: a nil TenantState makes the middleware build the real
+		// checker from DATABASE_URL, which the nightly sets — and there the
+		// random tenant ids minted below have no tenants row and are refused
+		// tenant_deleted. Tenant state is not what this file proves.
+		TenantState:     liveTenants{},
 		JWTSecret:       legacySecret,
 		Verifier:        v,
 		RequireIssuer:   "crypto-inventory-auth",
@@ -44,6 +50,11 @@ func guardedService(v *jwtkeys.Verifier, legacySecret string) *gin.Engine {
 	})
 	return r
 }
+
+// liveTenants reports every tenant usable.
+type liveTenants struct{}
+
+func (liveTenants) Check(context.Context, uuid.UUID) (string, bool, error) { return "", false, nil }
 
 func get(t *testing.T, r *gin.Engine, bearer string) int {
 	t.Helper()

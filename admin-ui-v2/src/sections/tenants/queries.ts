@@ -107,6 +107,21 @@ export function useTenantHealthMap() {
  */
 
 /** Usage stats (users / assets / sensors / storage) — admin `/admin/tenants/{id}/stats`. */
+const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/**
+ * The line under the drawer's Agents tile: what the customer deployed, by kind,
+ * and — separately — the platform-managed rows every tenant is given. Those two
+ * rows (the in-cluster discovery sensor and device interrogation agent) are the
+ * platform's, so they are named beside the figure and never counted in it; the
+ * tile used to read "3 sensors" for 1 sensor + 1 discovery agent because it
+ * counted them and missed the agent (admin-ui review RC-16).
+ */
+export function agentBreakdown(s: Pick<TenantStats, 'sensor_count' | 'device_agent_count' | 'platform_managed_count'>): string {
+  const deployed = `${plural(s.sensor_count, 'sensor', 'sensors')} · ${plural(s.device_agent_count, 'discovery agent', 'discovery agents')}`;
+  return s.platform_managed_count > 0 ? `${deployed} · +${s.platform_managed_count.toLocaleString()} platform-managed` : deployed;
+}
+
 export function useTenantStats(id: string | null) {
   return useQuery({
     queryKey: ['platform', 'tenant-stats', id],

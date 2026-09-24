@@ -263,19 +263,32 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			schedules.POST("/:id/disable", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryUpdate), scheduleHandlers.DisableSchedule)
 		}
 
-		// Admin routes for platform overview (requires platform admin role).
-		// These aggregate data across ALL tenants (no tenant_id filter), so the
-		// WHOLE group is gated at platform-admin — a tenant JWT must never reach
-		// them. Group-level so no route can be added ungated by mistake; keeps
-		// /metrics gated (matching) and covers the agents/jobs/queues lists.
-		admin := deviceInterrogationGroup.Group("/admin", middleware.RequirePlatformAuth(cfg.JWTSecret), sharedmiddleware.RequirePlatformAdmin())
+		// Admin routes for the platform operator console. These aggregate data
+		// across ALL tenants (no tenant_id filter), so a tenant JWT must never
+		// reach them: every route sits on one of the two permission-gated
+		// sub-groups below, each of which requires a PLATFORM identity and a
+		// named platform permission (platform_user_has_permission — never the
+		// role name on the token). A route mounted on `admin` directly would be
+		// ungated; TestIntegration_AdminRoutes_TableIsComplete fails if one is.
+		//
+		//   observe (platform.health) — what admin-ui-v2 shows under Fleet,
+		//     Jobs & Queues and Support ▸ Job Repair, all of which the console
+		//     gates on platform.health. Read-only.
+		//   repair (tenants.manage) — Job Repair's retry/cancel, which change
+		//     a customer's job. Seeded to super_admin and platform_admin only,
+		//     the two roles the old role-name gate admitted.
+		admin := deviceInterrogationGroup.Group("/admin", middleware.RequirePlatformAuth(cfg.JWTSecret))
+		observe := admin.Group("", sharedmiddleware.RequirePlatformAdmin(db, rbac.PermissionPlatformHealth))
 		{
-			admin.GET("/metrics", healthHandlers.GetPlatformHealth)
-			admin.GET("/agents", adminListAgentsHandler(db, bypassDB, redis))
-			admin.GET("/jobs", jobHandlers.ListAdminJobs)
-			admin.POST("/jobs/:id/retry", jobHandlers.RetryJobAdmin)
-			admin.POST("/jobs/:id/cancel", jobHandlers.CancelJobAdmin)
-			admin.GET("/queues", adminQueuesHandler.ListQueues)
+			observe.GET("/metrics", healthHandlers.GetPlatformHealth)
+			observe.GET("/agents", adminListAgentsHandler(db, bypassDB, redis))
+			observe.GET("/jobs", jobHandlers.ListAdminJobs)
+			observe.GET("/queues", adminQueuesHandler.ListQueues)
+		}
+		repair := admin.Group("", sharedmiddleware.RequirePlatformAdmin(db, rbac.PermissionTenantsManage))
+		{
+			repair.POST("/jobs/:id/retry", jobHandlers.RetryJobAdmin)
+			repair.POST("/jobs/:id/cancel", jobHandlers.CancelJobAdmin)
 		}
 
 		// Experimental encryption detection routes

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"os"
@@ -13,11 +14,13 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/oauth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/rbac"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -60,12 +63,24 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		logrus.Warn("no AUTH_JWT signing key configured; signing JWTs with the legacy shared HS256 secret (see #584)")
 	}
 	jwtService := auth.NewJWTServiceWithKeys(cfg.JWTSecret, jwtSigner, cfg.JWTExpiry, 7*24*time.Hour) // 7 days refresh expiry
+	// No session is minted for a suspended, canceled or deleted tenant — on any
+	// path (RC-4 /). `tenants` is global, so the app-role pool reads it.
+	jwtService.SetTenantGate(tenantstate.Gate(db))
+	jwtService.SetTenantVersionGate(tenantstate.VersionGate(db))
+	// ...and a session minted before the suspension stops working on every
+	// RequireAuth-guarded route here within one cache TTL.
+	middleware.SetTenantStateChecker(tenantstate.NewChecker(db, tenantstate.CacheTTLFromEnv()))
 
 	// Initialize auth service
 	authService := auth.NewAuthService(db, bypassDB, redis, jwtService)
 
 	// Initialize handlers
 	authHandlers := NewAuthHandlers(authService, cfg, rateLimiter)
+	// GET /auth/me carries the tenant's plan block, resolved from the licence
+	// as /tenant/features resolves it.
+	authHandlers.plans = func(ctx context.Context, tenantID uuid.UUID) (entitlements.Plan, error) {
+		return entitlements.ResolvePlan(ctx, db, tenantID)
+	}
 
 	// Initialize RBAC service and handlers
 	rbacService := rbac.NewRBACService(db)

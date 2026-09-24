@@ -34,9 +34,9 @@ export interface Tenant {
   slug: string;
   domain?: string | null;
   subscription_tier_id: string;
-  trial_ends_at: string | null;
+  // No payment_status / trial_ends_at: GET /auth/me presents the tenant's plan
+  // (including any trial) as its own `plan` block — see usePlan().
   billing_email: string;
-  payment_status: 'trial' | 'active' | 'past_due' | 'canceled';
   sso_enabled?: boolean;
   custom_branding?: Record<string, any>;
   ui_config?: Record<string, any>;

@@ -42,16 +42,37 @@ spec:
   in values.yaml.
 
   admin-service mounts the licence-reports PVC (licensing.reports.persistence),
-  so on a ReadWriteOnce claim it gets the same `Recreate` by default — unless
-  its own `strategy:` says otherwise (e.g. with a ReadWriteMany class).
+  so on a ReadWriteOnce claim it must not surge either — but it gets a
+  RollingUpdate with `maxSurge: 0, maxUnavailable: 1`, NOT `Recreate`, unless
+  its own `strategy:` says otherwise (e.g. with a ReadWriteMany class). With no
+  surge the old pod is removed before the new one is created, so nothing waits
+  on a pod stuck on Multi-Attach and there is no deadlock.
+
+  Why not `Recreate`: admin-service was a RollingUpdate Deployment in every
+  release before the licence-reports PVC, and a LIVE Deployment cannot be
+  switched to Recreate by Helm's server-side apply (Helm 4's default). The API
+  server defaulted `rollingUpdate: {maxSurge: 25%, maxUnavailable: 25%}` onto
+  it, no field manager owns that default, SSA keeps unowned fields — and it
+  treats an explicit `rollingUpdate: null` as "no opinion", so a null does not
+  remove it either (checked against a real API server). The merged object is
+  invalid and the WHOLE upgrade fails: "spec.strategy.rollingUpdate: Forbidden:
+  may not be specified when strategy type is 'Recreate'". Staying on
+  RollingUpdate and owning both fields explicitly is valid from any prior state.
+
+  The same trap applies to ANY Deployment moved to Recreate after it has been
+  deployed, so never make Recreate the new default of an existing backend.
+  scripts/test-chart-update-strategy.mjs pins the Recreate set.
   */}}
   {{- $strategy := $svc.strategy }}
   {{- if and (not $strategy) (eq $name "admin-service") $ctx.Values.licensing.reports.persistence.enabled (ne $ctx.Values.licensing.reports.persistence.accessMode "ReadWriteMany") }}
-  {{- $strategy = "Recreate" }}
-  {{- end }}
-  {{- with $strategy }}
   strategy:
-    type: {{ . }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  {{- else if $strategy }}
+  strategy:
+    type: {{ $strategy }}
   {{- end }}
   selector:
     matchLabels:
@@ -440,9 +461,36 @@ spec:
             */}}
             - name: INSTALL_SIGNING_KEY_FILE
               value: /etc/vistaplatform/install-signing/signing-key.pem
+            {{/*
+              Where the catalogue feeds spool downloaded archives (the
+              catalog-feed-spool emptyDir below, sized by
+              catalogFeeds.spool.sizeLimit). Decision 13: the OSV archive cap
+              is 2 GiB and Ubuntu's export alone is ~705 MiB, which is more
+              than an unsized /tmp should be trusted with.
+            */}}
+            - name: CATALOG_FEEDS_SPOOL_DIR
+              value: /var/spool/catalog-feeds
             {{- if $ctx.Values.licensing.reports.persistence.enabled }}
             - name: LICENSE_REPORTS_DIR
               value: {{ $ctx.Values.licensing.reports.dir | quote }}
+            {{- end }}
+            {{/*
+              Automatic usage-report delivery (licensing.reporting). Empty
+              endpoint = off, and then nothing is rendered. The values schema
+              already refuses a non-https URL; this repeats it so a render
+              that skips schema validation still cannot point the transmitter
+              at a plaintext or credential-bearing URL.
+            */}}
+            {{- $reporting := $ctx.Values.licensing.reporting | default dict }}
+            {{- $endpoint := $reporting.endpoint | default "" | trim }}
+            {{- if $endpoint }}
+            {{- if not (regexMatch "^https://[^\\s/?#@]+(/[^\\s?#]*)?$" $endpoint) }}
+            {{- fail (printf "licensing.reporting.endpoint must be an https:// URL with a host and no credentials, query or fragment (got %q)" $endpoint) }}
+            {{- end }}
+            - name: LICENSE_REPORTING_ENDPOINT
+              value: {{ $endpoint | quote }}
+            - name: LICENSE_REPORTING_INTERVAL_MINUTES
+              value: {{ $reporting.intervalMinutes | default 60 | int | toString | quote }}
             {{- end }}
             {{- end }}
             {{- if $secrets.encryptionMasterKey }}
@@ -513,6 +561,8 @@ spec:
             - name: install-signing
               mountPath: /etc/vistaplatform/install-signing
               readOnly: true
+            - name: catalog-feed-spool
+              mountPath: /var/spool/catalog-feeds
             {{- if $ctx.Values.licensing.reports.persistence.enabled }}
             - name: license-reports
               mountPath: {{ $ctx.Values.licensing.reports.dir }}
@@ -567,6 +617,10 @@ spec:
             items:
               - key: signing-key.pem
                 path: signing-key.pem
+        {{- $spool := (($ctx.Values.catalogFeeds | default dict).spool | default dict) }}
+        - name: catalog-feed-spool
+          emptyDir:
+            sizeLimit: {{ $spool.sizeLimit | default "3Gi" | quote }}
         {{- if $ctx.Values.licensing.reports.persistence.enabled }}
         - name: license-reports
           persistentVolumeClaim:

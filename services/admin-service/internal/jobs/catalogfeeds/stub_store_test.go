@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 // memStore is an in-memory Store used by every unit test in this package. It
@@ -167,7 +168,7 @@ func (s *memStore) FeedStates(context.Context) ([]FeedState, error) {
 			out = append(out, st)
 			continue
 		}
-		out = append(out, FeedState{Feed: name, LastStatus: StatusNever})
+		out = append(out, FeedState{Feed: name, LastStatus: StatusNever, Ecosystems: []EcosystemStatus{}})
 	}
 	return out, nil
 }
@@ -182,29 +183,18 @@ func (s *memStore) MarkRunning(_ context.Context, feed string) error {
 	return nil
 }
 
-// MarkResult mirrors SQLStore.MarkResult's one load-bearing rule: the cursor
-// advances ONLY on success.
+// MarkResult applies the SAME rule SQLStore.MarkResult does (nextFeedState), so
+// the stub cannot drift from the store on when a cursor may move.
 func (s *memStore) MarkResult(_ context.Context, feed string, res SyncResult, runErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.results = append(s.results, markedResult{feed: feed, res: res, err: runErr})
-	st := s.states[feed]
-	st.Feed = feed
-	if runErr != nil {
-		st.LastStatus = StatusError
-		msg := runErr.Error()
-		st.LastError = &msg
-		s.states[feed] = st
-		return nil
+	prev, ok := s.states[feed]
+	if !ok {
+		prev = FeedState{Feed: feed, LastStatus: StatusNever}
 	}
-	st.LastStatus = StatusOK
-	st.LastError = nil
-	st.RowCount = res.Rows
-	if res.Cursor != "" {
-		c := res.Cursor
-		st.Cursor = &c
-	}
-	s.states[feed] = st
+	prev.Feed = feed
+	s.states[feed] = nextFeedState(prev, res, runErr, time.Now().UTC())
 	return nil
 }
 

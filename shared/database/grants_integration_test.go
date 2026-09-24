@@ -103,6 +103,10 @@ var readOnlyForApp = []string{
 	"license_usage_snapshot_runs",
 	"license_usage_daily",
 	"license_usage_reports",
+	// Which MSP licence lapses still owe a final (partial-month) report. A
+	// crypto_app write could mark one handled, and the last month would never
+	// be billed.
+	"license_msp_lapses",
 }
 
 // noAccessForApp lists the tables crypto_app may not even READ. Same rule as

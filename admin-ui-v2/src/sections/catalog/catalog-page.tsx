@@ -22,13 +22,14 @@ import { FrameworksPage } from './frameworks-page';
 import { EolPage } from './eol-page';
 import { VulnerabilityPage } from './vulnerability-page';
 import { ClassificationRulesPage } from './classification-rules-page';
+import { RequireChildPermission } from '../../app/section-child';
 
 export function CatalogPage() {
   return (
     <Routes>
       <Route index element={<RatingsPage />} />
       <Route path="ratings" element={<RatingsPage />} />
-      <Route path="frameworks" element={<FrameworksPage />} />
+      <Route path="frameworks" element={<RequireChildPermission section="catalog" child="frameworks"><FrameworksPage /></RequireChildPermission>} />
       {/* End-of-life's three rail sub-views. Declared as flat two-segment
           relative paths rather than a nested layout so each grandchild is its
           own route react-router ranks above the catch-all below, and so the
@@ -36,12 +37,12 @@ export function CatalogPage() {
           `eol/catalogue` are the same view: the bare URL is what the parent
           rail entry links to, and nav.resolveActive resolves it to the first
           grandchild. */}
-      <Route path="eol" element={<EolPage view="catalogue" />} />
-      <Route path="eol/catalogue" element={<EolPage view="catalogue" />} />
-      <Route path="eol/proposals" element={<EolPage view="proposals" />} />
-      <Route path="eol/gaps" element={<EolPage view="gaps" />} />
-      <Route path="vulnerabilities" element={<VulnerabilityPage />} />
-      <Route path="classification-rules" element={<ClassificationRulesPage />} />
+      <Route path="eol" element={<RequireChildPermission section="catalog" child="eol"><EolPage view="catalogue" /></RequireChildPermission>} />
+      <Route path="eol/catalogue" element={<RequireChildPermission section="catalog" child="eol"><EolPage view="catalogue" /></RequireChildPermission>} />
+      <Route path="eol/proposals" element={<RequireChildPermission section="catalog" child="eol"><EolPage view="proposals" /></RequireChildPermission>} />
+      <Route path="eol/gaps" element={<RequireChildPermission section="catalog" child="eol"><EolPage view="gaps" /></RequireChildPermission>} />
+      <Route path="vulnerabilities" element={<RequireChildPermission section="catalog" child="vulnerabilities"><VulnerabilityPage /></RequireChildPermission>} />
+      <Route path="classification-rules" element={<RequireChildPermission section="catalog" child="classification-rules"><ClassificationRulesPage /></RequireChildPermission>} />
       <Route path="*" element={<Navigate to="/catalog" replace />} />
     </Routes>
   );

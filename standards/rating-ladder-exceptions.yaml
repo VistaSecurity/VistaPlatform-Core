@@ -57,14 +57,14 @@ services/resource-tracker-service/internal/service/resource_service.go#generateO
   fingerprint: c33cfa50ca1c271831d3554b10f8739aa64d8797292fe3f45f23e49ff0a22ebc
 services/tenant-health-service/internal/scoring/health_scorer.go#generateRecommendations:
   concept: health_recommendation_policy
-  reason: Individual resource/security/usage conditions select workflow
+  reason: Individual performance/security/usage/cost conditions select workflow
     priorities, separate from overall health bands.
-  fingerprint: aa921ee30c6350fbe444350bdd605747107dc3d307b2677d2cf128569505103e
+  fingerprint: f57ebef889fb5ab9cf4a8cc97c29e99ae10ed14b3cc5d4a5144bd2240dec9aed
 services/tenant-health-service/internal/service/health_service.go#generateInsights:
   concept: health_insight_policy
   reason: Factor deficits produce advisory messages and workflow priorities, not a
     second overall health band.
-  fingerprint: f4d62643760f753fd3396826d4fb546f9df247beb761ccc38c6764bbb674f761
+  fingerprint: 4cab91b80f8c782ee8faaa0ffd40405ab3db2ce5a1e0344bfade26d989e65221
 shared/cryptoparse/keysize.go#WeakCryptoSeverityScore:
   concept: detector_score_policy
   reason: Published existing detector contributions 90/70/50/20 are representative

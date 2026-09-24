@@ -26,9 +26,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/classificationrules"
 )
@@ -41,6 +43,7 @@ type ClassificationRuleStore interface {
 	Create(ctx context.Context, in classificationrules.Input) (classificationrules.Rule, error)
 	Update(ctx context.Context, id string, in classificationrules.Input) (classificationrules.Rule, error)
 	Delete(ctx context.Context, id string) error
+	AcceptUpdate(ctx context.Context, id string) (after, before classificationrules.Rule, err error)
 }
 
 type classificationRuleListResponse struct {
@@ -167,6 +170,66 @@ func DeleteClassificationRule(store ClassificationRuleStore) gin.HandlerFunc {
 			c.JSON(http.StatusOK, gin.H{"message": "Classification rule deleted"})
 		}
 	}
+}
+
+// AcceptClassificationRuleUpdate serves POST
+// /admin/catalogs/classification-rules/:id/accept-update.
+//
+// Upgrades keep a platform admin's edits to the rules Vista ships (decision 4,
+// RC-12): a new shipped value for an edited rule is stored as an offer rather
+// than written. This applies the offer. 409 when there is none — the console
+// only offers the action on a rule showing "update available".
+func AcceptClassificationRuleUpdate(store ClassificationRuleStore) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// A malformed id is the caller's error, not a 500 from Postgres (22P02).
+		if _, err := uuid.Parse(c.Param("id")); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid classification rule id"})
+			return
+		}
+		after, before, err := store.AcceptUpdate(c.Request.Context(), c.Param("id"))
+		switch {
+		case errors.Is(err, classificationrules.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "Classification rule not found"})
+		case errors.Is(err, classificationrules.ErrNoUpdate):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case err != nil:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept the update"})
+		default:
+			auditClassificationRuleUpdateAccepted(c, before, after)
+			c.JSON(http.StatusOK, after)
+		}
+	}
+}
+
+// auditClassificationRuleUpdateAccepted records an accepted shipped update
+// with the offered columns' values before and after — the rule changed, and
+// "to what, from what" is the question the trail exists to answer.
+func auditClassificationRuleUpdateAccepted(c *gin.Context, before, after classificationrules.Rule) {
+	fields := make([]string, 0, len(before.OfferedUpdate))
+	for k := range before.OfferedUpdate {
+		fields = append(fields, k)
+	}
+	sort.Strings(fields)
+	recordPlatformAudit(c, PlatformAuditEntry{
+		EventType:     "classification_rule.update_accepted",
+		Action:        "update",
+		EventCategory: "system",
+		ResourceType:  "classification_rule",
+		ResourceID:    after.ID,
+		ChangedFields: fields,
+		NewValues:     before.OfferedUpdate,
+		Metadata: map[string]interface{}{
+			"rule_kind": after.RuleKind,
+			"pattern":   after.Pattern,
+			"previous": map[string]interface{}{
+				"class_key":  before.ClassKey,
+				"vendor":     before.Vendor,
+				"model":      before.Model,
+				"confidence": before.Confidence,
+				"source_url": before.SourceURL,
+			},
+		},
+	})
 }
 
 // auditClassificationRule records a curation change.

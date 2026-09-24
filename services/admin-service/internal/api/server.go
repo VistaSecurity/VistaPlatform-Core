@@ -421,10 +421,13 @@ func (s *Server) setupRouter() {
 				tiers.GET("/:id/impact-analysis", handlers.TierImpactAnalysis) // Tier migration impact analysis
 				tiers.POST("/:id/assign", handlers.AssignTier)                 // Assign plan to a tenant (record-only for invoice plans)
 				// Entitlements composition — backs the admin-UI tier composer.
-				// Reads catalog-enriched rows; bulk-replaces the tier's composition
-				// in one transaction (see EntitlementsService.ReplaceTierEntitlements).
+				// GET reads catalog-enriched rows plus the composition version;
+				// PUT /:key sets one item (matrix cell edits); PUT upserts and
+				// removes several items against that version. Nothing deletes a
+				// row it was not explicitly asked to (services/tier_composition.go).
 				tiers.GET("/:id/entitlements", handlers.GetTierEntitlements)
 				tiers.PUT("/:id/entitlements", handlers.UpdateTierEntitlements)
+				tiers.PUT("/:id/entitlements/:key", handlers.UpsertTierEntitlement)
 			}
 
 			// Billable items catalog — every gateable/billable concept the
@@ -575,7 +578,11 @@ func (s *Server) setupRouter() {
 			{
 				license.GET("", handlers.GetLicense(s.db))
 				license.GET("/retention", handlers.GetRetention(s.db))
-				license.PUT("/retention", handlers.UpdateRetention(s.db))
+				// The write goes through the bypass pool: the schema lets only
+				// the bypass role (or the owner) change retention.max_days
+				// (guard_platform_retention_setting), because the sweep
+				// deletes data on it.
+				license.PUT("/retention", handlers.UpdateRetention(s.bypassDB))
 				license.GET("/cap", handlers.GetLicenseCap(s.bypassDB))
 			}
 
@@ -717,6 +724,9 @@ func (s *Server) setupRouter() {
 				catalogs.GET("/classification-rules/:id", handlers.GetClassificationRule(classificationRuleStore))
 				catalogs.PUT("/classification-rules/:id", handlers.UpdateClassificationRule(classificationRuleStore))
 				catalogs.DELETE("/classification-rules/:id", handlers.DeleteClassificationRule(classificationRuleStore))
+				// Accept the update an upgrade offered for a shipped rule an admin
+				// had edited (decision 4, RC-12).
+				catalogs.POST("/classification-rules/:id/accept-update", handlers.AcceptClassificationRuleUpdate(classificationRuleStore))
 			}
 
 			// Platform Integrations endpoints - AWS, 3rd party SaaS integrations
@@ -733,15 +743,15 @@ func (s *Server) setupRouter() {
 			}
 
 			// Per-tenant integrations (/tenants/:id/integrations), customer comms
-			// (/announcements, /maintenance-windows), support tickets and tenant
+			// (/announcements), support tickets and tenant
 			// notes are all MSP — they exist to run other people's
 			// organizations. Mounted by the RegisterMSP hook.
 		}
 
 		// MSP management plane. In Core the hook is nil, so /admin/tenants/**,
 		// /admin/stats/**, /admin/dashboard/**, /admin/costs/**,
-		// /admin/announcements, /admin/maintenance-windows,
-		// /admin/support-tickets, /admin/legal/acceptances and
+		// /admin/announcements, /admin/support-tickets,
+		// /admin/legal/acceptances and
 		// /admin/monitoring/metrics simply do not exist.
 		//
 		// Registered here rather than inline: gin's radix tree is per-engine and

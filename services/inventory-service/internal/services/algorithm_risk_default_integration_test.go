@@ -35,8 +35,14 @@ func TestIntegration_CreateAlgorithmPreservesExplicitZero(t *testing.T) {
 }
 
 func TestIntegration_Schema_RemovesAlgorithmRiskDefaultWithoutRegradingRows(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
+	// A database of its own: this test rewinds the GLOBAL algorithms table to
+	// its pre-ADR-0016 shape and re-applies all of schema.sql twice. On the
+	// shared database that exposed every concurrently running test to the
+	// legacy default and the missing trigger, and the re-apply's ACCESS
+	// EXCLUSIVE locks deadlocked (40P01) against other packages' ordinary
+	// statements — the advisory schema lock only orders it against other
+	// schema applies, not against DML.
+	db := testdb.ScratchDatabase(t)
 
 	schemaPath := filepath.Join(testdb.RepoRoot(t), "scripts", "database", "schema.sql")
 	schema, err := os.ReadFile(schemaPath)
@@ -50,10 +56,6 @@ func TestIntegration_Schema_RemovesAlgorithmRiskDefaultWithoutRegradingRows(t *t
 		t.Fatalf("acquire connection: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(889)`); err != nil {
-		t.Fatalf("pg_advisory_lock: %v", err)
-	}
-	defer func() { _, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock(889)`) }()
 
 	// Reconstruct the old column shape and rows that could exist on an upgrade:
 	// a deliberate score, an explicitly unknown score, and a write that received

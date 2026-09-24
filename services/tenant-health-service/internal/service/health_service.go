@@ -195,10 +195,15 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		markUnavailable(models.SourceInventory, err)
 	}
 
-	// Collect resource metrics from resource-tracker-service
+	// Collect cost metrics from resource-tracker-service.
+	//
+	// CPU, memory, storage and network utilisation are deliberately NOT
+	// collected: nothing meters them per tenant (the CPU and memory columns are
+	// never written, and storage/network were the constants 50 and 60), so the
+	// resource-efficiency factor they fed was dropped from the index — owner
+	// decision 8, RC-14. The scorer reports it as not measured
+	// (models.SourceResourceMetering).
 	if resMetrics, err := s.getResourceMetrics(tenantID); err == nil {
-		metrics.CPUUtilization = resMetrics.AvgCPUPercent
-		metrics.MemoryUtilization = resMetrics.AvgMemoryMB / 100.0 // Convert MB to percentage (assumes 100MB = 1%)
 		metrics.ResourceCost = resMetrics.TotalCostUSD
 		metrics.CostEfficiency = resMetrics.ResourceEfficiencyScore
 		// Calculate cost per user
@@ -207,9 +212,6 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		} else {
 			metrics.CostPerUser = resMetrics.TotalCostUSD // Fallback if no active users
 		}
-		// Estimate storage/network utilization from resource data
-		metrics.StorageUtilization = 50.0 // Default - could be enhanced with actual storage data
-		metrics.NetworkUtilization = 60.0 // Default - could be enhanced with actual network data
 	} else {
 		markUnavailable(models.SourceResourceTracker, err)
 	}
@@ -379,8 +381,6 @@ func (s *HealthService) getActivityMetrics(tenantID uuid.UUID) (*ActivityMetrics
 
 // ResourceMetrics represents resource metrics from resource-tracker-service
 type ResourceMetrics struct {
-	AvgCPUPercent           float64 `json:"avg_cpu_percent"`
-	AvgMemoryMB             float64 `json:"avg_memory_mb"`
 	TotalCostUSD            float64 `json:"total_cost_usd"`
 	ResourceEfficiencyScore float64 `json:"resource_efficiency_score"`
 }
@@ -485,6 +485,11 @@ type GetAllTenantHealthOptions struct {
 
 // GetAllTenantHealth retrieves health summaries for all tenants with optional filtering and pagination
 func (s *HealthService) GetAllTenantHealth(options *GetAllTenantHealthOptions) ([]models.TenantHealthSummary, error) {
+	if options == nil {
+		// GetHealthComparison passes nil ("no filtering"); dereferencing it
+		// panicked the comparison endpoint.
+		options = &GetAllTenantHealthOptions{}
+	}
 	repoOptions := &repository.GetAllTenantHealthOptions{
 		Limit:     options.Limit,
 		Offset:    options.Offset,
@@ -615,11 +620,27 @@ func (s *HealthService) GenerateHealthInsights(tenantID uuid.UUID) (*models.Heal
 	return healthInsights, nil
 }
 
-// generateHealthAlerts creates alerts based on health score and recommendations
+// generateHealthAlerts reconciles the tenant's active health alerts with the
+// health just calculated: the alerts this calculation raises are upserted (one
+// active row per alert_type) and every other active alert is resolved.
+//
+// It used to INSERT a fresh set every cycle and never resolve anything, so the
+// same alert piled up every 30 minutes and a stale "Poor Health Status" alert
+// stayed open next to a recovered "fair" score (RC-14).
+//
+// An UNKNOWN status (nothing could be measured) reconciles nothing: we have no
+// evidence either way, so an open alert neither clears nor gets re-raised
+// until a calculation actually measures the tenant again.
 func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error {
+	if health.HealthStatus == models.HealthStatusUnknown {
+		return nil
+	}
+
 	var alerts []models.HealthAlert
 
 	// Failing health retains critical alert severity as a separate policy.
+	// Failing and poor share the health_decline type, so a tenant moving
+	// between the two bands updates its one alert rather than holding both.
 	if health.HealthStatus == string(healthbands.Failing) {
 		alerts = append(alerts, models.HealthAlert{
 			ID:           uuid.New(),
@@ -637,7 +658,7 @@ func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error 
 	}
 
 	// Poor health status alert
-	if health.HealthStatus == "poor" {
+	if health.HealthStatus == string(healthbands.Poor) {
 		alerts = append(alerts, models.HealthAlert{
 			ID:           uuid.New(),
 			TenantID:     health.TenantID,
@@ -677,14 +698,10 @@ func (s *HealthService) generateHealthAlerts(health *models.TenantHealth) error 
 		})
 	}
 
-	// Save alerts
-	for _, alert := range alerts {
-		if err := s.repo.SaveHealthAlert(context.Background(), &alert); err != nil {
-			logrus.WithError(err).Error("Failed to save health alert")
-			return err
-		}
+	if err := s.repo.ReconcileHealthAlerts(context.Background(), health.TenantID, alerts); err != nil {
+		logrus.WithError(err).Error("Failed to reconcile health alerts")
+		return err
 	}
-
 	return nil
 }
 
@@ -719,19 +736,6 @@ func (s *HealthService) generateInsights(health *models.TenantHealth, metrics []
 			Description: "Multiple health factors require immediate attention. Focus on high-impact recommendations first.",
 			Impact:      "critical",
 			Confidence:  0.90,
-			Actionable:  true,
-		})
-	}
-
-	// Resource efficiency insights
-	if factorBelow(health.ScoreBreakdown.ResourceEfficiency, 60) {
-		insights = append(insights, models.Insight{
-			Type:        "recommendation",
-			Category:    "resource",
-			Title:       "Resource Optimization Opportunity",
-			Description: "Resource utilization can be significantly improved. Consider implementing auto-scaling or resource optimization strategies.",
-			Impact:      "high",
-			Confidence:  0.85,
 			Actionable:  true,
 		})
 	}

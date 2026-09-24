@@ -150,6 +150,7 @@ func TestAgentAuth_ServiceMeshPeerCertIgnoredWhenAgentMTLSOff(t *testing.T) {
 		WithArgs(agentID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
 
+	expectLiveAgentTenant(mock, tenantID)
 	r := gin.New()
 	g := r.Group("/agents")
 	g.Use(AgentAuth(db, db, false))
@@ -186,6 +187,7 @@ func TestAgentAuth_OK(t *testing.T) {
 		WithArgs(agentID).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id"}).AddRow(tenantID))
 
+	expectLiveAgentTenant(mock, tenantID)
 	r := gin.New()
 	g := r.Group("/agents")
 	g.Use(AgentAuth(db, db, false))
@@ -248,6 +250,7 @@ func TestAgentAuth_RequiredMTLSAcceptsActiveCertificate(t *testing.T) {
 			"id", "agent_id", "tenant_id", "certificate_pem", "serial_number", "issued_at", "expires_at", "revoked_at", "revocation_reason", "created_at",
 		}).AddRow(uuid.New(), agentID, tenantID, leafPEM, leaf.SerialNumber.String(), time.Now(), leaf.NotAfter, nil, nil, time.Now()))
 
+	expectLiveAgentTenant(bypassMock, tenantID)
 	r := gin.New()
 	g := r.Group("/agents")
 	g.Use(AgentAuth(db, bypassDB, true))
@@ -317,6 +320,7 @@ func TestAgentAuth_RequiredMTLSBackfillsLegacyCertificateWithoutHistory(t *testi
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	dbMock.ExpectCommit()
 
+	expectLiveAgentTenant(bypassMock, tenantID)
 	r := gin.New()
 	g := r.Group("/agents")
 	g.Use(AgentAuth(db, bypassDB, true))

@@ -1,13 +1,11 @@
-// Security & Governance data layer — security events/stats/compliance (admin-service),
-// platform settings (admin-service), and impersonation audit (auth-service), all via
-// the typed clients. No hand-rolled fetch.
+// Security & Governance data layer — security events/stats/compliance (admin-service)
+// and platform settings (admin-service), via the typed clients. No hand-rolled fetch.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { adminServiceComponents, authServiceComponents } from '@vistasecurity/api-contract';
+import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 
 export type SecurityEvent = adminServiceComponents['schemas']['SecurityEvent'];
 export type PlatformSettings = adminServiceComponents['schemas']['PlatformSettings'];
-export type ImpersonationEvent = authServiceComponents['schemas']['ImpersonationEvent'];
 
 /**
  * Free-form dashboard-stats blob (admin-service returns `data` as a metrics
@@ -56,19 +54,6 @@ export function useSecurityEvents(limit = 25) {
       return data.data ?? [];
     },
     staleTime: 30 * 1000,
-    retry: 0,
-  });
-}
-
-export function useImpersonationAudit() {
-  return useQuery({
-    queryKey: ['platform', 'security', 'impersonations'],
-    queryFn: async (): Promise<ImpersonationEvent[]> => {
-      const { data, error } = await clients.auth.GET('/admin/impersonations/audit', {});
-      if (error || !data) throw new Error('Failed to load impersonation audit');
-      return data.events ?? [];
-    },
-    staleTime: 60 * 1000,
     retry: 0,
   });
 }

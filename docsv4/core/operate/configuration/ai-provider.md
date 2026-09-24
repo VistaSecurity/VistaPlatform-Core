@@ -59,7 +59,8 @@ the shared ConfigMap into each backend's pod template, deliberately — an
 `envFrom` value is read once at pod start, so without that hash the ConfigMap
 would update while running pods kept the old value and nothing would say so. On a
 single-node cluster, size for the surge or set `strategy: Recreate` per backend;
-see the deployment guide's upgrade notes.
+see the deployment guide's upgrade notes (switching a live backend to `Recreate`
+needs a one-time patch first — production checklist, *Single-node clusters*).
 
 ### A self-hosted endpoint
 

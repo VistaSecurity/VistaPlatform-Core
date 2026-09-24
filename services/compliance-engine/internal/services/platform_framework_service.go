@@ -262,7 +262,8 @@ func (s *PlatformFrameworkService) PublishFramework(id uuid.UUID, input *models.
 // one framework somebody created without naming an organization.
 func (s *PlatformFrameworkService) ListFrameworks(statusFilter string) ([]models.PlatformFramework, error) {
 	query := `
-		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at,
+		       ` + models.SeededContentColumns + `
 		FROM platform_frameworks
 	`
 	args := []interface{}{}
@@ -298,7 +299,8 @@ func (s *PlatformFrameworkService) ListFrameworks(statusFilter string) ([]models
 // GetFramework gets a platform framework by ID with controls loaded
 func (s *PlatformFrameworkService) GetFramework(id uuid.UUID) (*models.PlatformFramework, error) {
 	query := `
-		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at
+		SELECT id, code, name, version, COALESCE(description, '') AS description, COALESCE(organization, '') AS organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at,
+		       ` + models.SeededContentColumns + `
 		FROM platform_frameworks
 		WHERE id = $1
 	`
@@ -328,7 +330,7 @@ func (s *PlatformFrameworkService) GetFramework(id uuid.UUID) (*models.PlatformF
 // getFrameworkControls loads all controls for a platform framework
 func (s *PlatformFrameworkService) getFrameworkControls(frameworkID uuid.UUID) ([]models.PlatformFrameworkControl, error) {
 	query := `
-		SELECT ` + models.FrameworkControlColumns + `
+		SELECT ` + models.FrameworkControlColumns + `, ` + models.SeededContentColumns + `
 		FROM platform_framework_controls
 		WHERE framework_id = $1
 		ORDER BY control_id
@@ -742,7 +744,8 @@ func (s *PlatformFrameworkService) DeleteControlMeasurement(measurementID uuid.U
 // join (the authoring UI already holds the measurement-types catalog).
 func (s *PlatformFrameworkService) ListControlMeasurements(controlID uuid.UUID) ([]models.ControlMeasurement, error) {
 	rows, err := s.db.Query(`
-		SELECT id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at
+		SELECT id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at,
+		       `+models.SeededContentColumns+`
 		FROM control_measurements
 		WHERE control_id = $1 AND framework_type = 'platform'
 		ORDER BY created_at ASC
@@ -757,7 +760,8 @@ func (s *PlatformFrameworkService) ListControlMeasurements(controlID uuid.UUID) 
 		var m models.ControlMeasurement
 		var predicateBytes []byte
 		var severityOverride sql.NullString
-		if err := rows.Scan(&m.ID, &m.ControlID, &m.FrameworkType, &m.MeasurementTypeID, &m.RuleType, &predicateBytes, &severityOverride, &m.Weight, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ControlID, &m.FrameworkType, &m.MeasurementTypeID, &m.RuleType, &predicateBytes, &severityOverride, &m.Weight, &m.CreatedAt, &m.UpdatedAt,
+			&m.ContentOrigin, &m.AdminModified, &m.UpdateAvailable, &m.OfferedUpdate); err != nil {
 			return nil, fmt.Errorf("failed to scan control measurement: %w", err)
 		}
 		if len(predicateBytes) > 0 {

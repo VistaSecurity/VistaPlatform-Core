@@ -1293,7 +1293,6 @@ CREATE TABLE IF NOT EXISTS audit.retention_policies (
     event_type character varying(100),
     compliance_framework character varying(50),
     hot_storage_days integer NOT NULL,
-    cold_storage_days integer,
     total_retention_days integer NOT NULL,
     is_active boolean DEFAULT true,
     created_at timestamp with time zone DEFAULT now(),
@@ -1402,6 +1401,7 @@ CREATE TABLE IF NOT EXISTS public.tenants (
     trial_ends_at timestamp with time zone,
     billing_email character varying(255),
     payment_status character varying(50) DEFAULT 'active'::character varying,
+    session_version bigint DEFAULT 0 NOT NULL,
     stripe_customer_id character varying(255),
     stripe_subscription_id character varying(255),
     sso_enabled boolean DEFAULT false,
@@ -1487,6 +1487,8 @@ CREATE TABLE IF NOT EXISTS public.algorithms (
     curve character varying(100),
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    pre_obsolete_risk_score integer,
+    obsolete_risk_floor_at timestamp with time zone,
     CONSTRAINT valid_category CHECK (((category)::text = ANY ((ARRAY['hash'::character varying, 'symmetric'::character varying, 'key_exchange'::character varying, 'signature'::character varying, 'protocol_version'::character varying, 'cipher_suite'::character varying])::text[]))),
     CONSTRAINT valid_classical_security_level CHECK (((classical_security_level IS NULL) OR (classical_security_level > 0))),
     CONSTRAINT valid_deprecation_status CHECK (((deprecation_status)::text = ANY ((ARRAY['current'::character varying, 'deprecated'::character varying, 'obsolete'::character varying])::text[]))),
@@ -2155,6 +2157,14 @@ CREATE TABLE IF NOT EXISTS public.control_measurements (
     weight integer DEFAULT 1,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    -- Seeded-content ownership (decision 4, RC-12): who owns this row, whether a
+    -- platform admin changed shipped content, and the shipped content an upgrade
+    -- offered instead of overwriting. Written only by the trigger in the
+    -- "seeded content: admin edits win" POST-MIGRATIONS block at the end of this file.
+    content_origin text CONSTRAINT control_measurements_content_origin_check CHECK (content_origin IN ('seed', 'admin')),
+    admin_modified_at timestamp with time zone,
+    seed_shipped jsonb,
+    seed_offer jsonb,
     CONSTRAINT control_measurements_framework_type_check CHECK (((framework_type)::text = ANY ((ARRAY['platform'::character varying, 'tenant'::character varying])::text[]))),
     CONSTRAINT control_measurements_rule_type_check CHECK (((rule_type)::text = ANY ((ARRAY['threshold'::character varying, 'presence'::character varying, 'pattern'::character varying, 'range'::character varying])::text[]))),
     CONSTRAINT control_measurements_severity_override_check CHECK (((severity_override)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[]))),
@@ -3393,25 +3403,6 @@ CREATE TABLE IF NOT EXISTS public.locations (
 );
 
 
--- TABLE: maintenance_windows
-CREATE TABLE IF NOT EXISTS public.maintenance_windows (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    title character varying(255) NOT NULL,
-    description text,
-    type character varying(50) DEFAULT 'scheduled'::character varying NOT NULL,
-    status character varying(50) DEFAULT 'scheduled'::character varying NOT NULL,
-    affected_services text[] DEFAULT '{}'::text[],
-    starts_at timestamp with time zone NOT NULL,
-    ends_at timestamp with time zone NOT NULL,
-    actual_start timestamp with time zone,
-    actual_end timestamp with time zone,
-    notify_before_minutes integer DEFAULT 60,
-    created_by uuid,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
 -- TABLE: measurement_templates
 CREATE TABLE IF NOT EXISTS public.measurement_templates (
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
@@ -4234,6 +4225,14 @@ CREATE TABLE IF NOT EXISTS public.platform_framework_controls (
     source_ref character varying(200),
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    -- Seeded-content ownership (decision 4, RC-12): who owns this row, whether a
+    -- platform admin changed shipped content, and the shipped content an upgrade
+    -- offered instead of overwriting. Written only by the trigger in the
+    -- "seeded content: admin edits win" POST-MIGRATIONS block at the end of this file.
+    content_origin text CONSTRAINT platform_framework_controls_content_origin_check CHECK (content_origin IN ('seed', 'admin')),
+    admin_modified_at timestamp with time zone,
+    seed_shipped jsonb,
+    seed_offer jsonb,
     CONSTRAINT platform_framework_controls_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
     CONSTRAINT platform_framework_controls_baseline_severity_check CHECK (((baseline_severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
 );
@@ -4266,6 +4265,14 @@ CREATE TABLE IF NOT EXISTS public.platform_frameworks (
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
     is_platform_default boolean DEFAULT false NOT NULL,
+    -- Seeded-content ownership (decision 4, RC-12): who owns this row, whether a
+    -- platform admin changed shipped content, and the shipped content an upgrade
+    -- offered instead of overwriting. Written only by the trigger in the
+    -- "seeded content: admin edits win" POST-MIGRATIONS block at the end of this file.
+    content_origin text CONSTRAINT platform_frameworks_content_origin_check CHECK (content_origin IN ('seed', 'admin')),
+    admin_modified_at timestamp with time zone,
+    seed_shipped jsonb,
+    seed_offer jsonb,
     CONSTRAINT platform_frameworks_status_check CHECK (((status)::text = ANY ((ARRAY['draft'::character varying, 'published'::character varying, 'archived'::character varying])::text[])))
 );
 
@@ -4642,6 +4649,11 @@ CREATE TABLE IF NOT EXISTS public.platform_sso_providers (
     -- of their role. No FK: a deleted author must leave the row untrusted,
     -- not rewrite it.
     updated_by uuid,
+    -- Admin-login Microsoft providers only: Entra omits email_verified, so a
+    -- staff sign-in whose email domain exactly matches one of these (and whose
+    -- provider is pinned to a single Entra directory) counts as verified.
+    -- Empty = the IdP must assert email_verified. Validated by admin-service.
+    allowed_email_domains text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT valid_platform_provider_type CHECK (((provider_type)::text = ANY ((ARRAY['google'::character varying, 'microsoft'::character varying])::text[]))),
     CONSTRAINT valid_platform_provider_purpose CHECK (((purpose)::text = ANY ((ARRAY['signup'::character varying, 'admin_login'::character varying])::text[])))
 );
@@ -7618,19 +7630,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.locations
         ADD CONSTRAINT locations_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: maintenance_windows maintenance_windows_pkey
-DO $$ BEGIN
-  IF to_regclass('public.maintenance_windows') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'maintenance_windows_pkey' AND conrelid = to_regclass('public.maintenance_windows')
-     ) THEN
-    ALTER TABLE ONLY public.maintenance_windows
-        ADD CONSTRAINT maintenance_windows_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -10898,10 +10897,6 @@ CREATE INDEX IF NOT EXISTS idx_log_retention_jobs_status ON public.platform_log_
 CREATE INDEX IF NOT EXISTS idx_log_retention_jobs_type ON public.platform_log_retention_jobs USING btree (job_type, started_at DESC);
 
 
--- INDEX: idx_maintenance_windows_status
-CREATE INDEX IF NOT EXISTS idx_maintenance_windows_status ON public.maintenance_windows USING btree (status, starts_at);
-
-
 -- INDEX: idx_measurement_templates_active
 CREATE INDEX IF NOT EXISTS idx_measurement_templates_active ON public.measurement_templates USING btree (is_active) WHERE (is_active = true);
 
@@ -11812,6 +11807,73 @@ CREATE INDEX IF NOT EXISTS idx_trial_tracking_trial_end ON public.billing_trial_
 
 -- INDEX: idx_user_auth_methods_external_id
 CREATE INDEX IF NOT EXISTS idx_user_auth_methods_external_id ON public.user_auth_methods USING btree (external_user_id);
+
+
+-- INDEX: uq_user_auth_methods_platform_subject
+-- One account per social sign-in identity: a (provider type, IdP subject) on a
+-- social link (sso_provider_id IS NULL) may be held by one row only.
+--
+-- Upgrade safety. This index arrived after installs already existed, and those
+-- can hold the very duplicates it forbids: sign-up used to ignore deleted
+-- accounts, so a deleted account's link and a live account's link could share
+-- a subject. A bare CREATE UNIQUE INDEX fails on that data, and under the
+-- migration Job's ON_ERROR_STOP=1 one failed statement aborts the whole
+-- upgrade. So, in order:
+--
+-- 1. Release contended subjects from deleted accounts. Same predicate as the
+--    runtime releaseDeletedPlatformSubject (auth-service), which clears EVERY
+--    deleted holder of a subject at the moment the subject is claimed again —
+--    i.e. only when it is contended. This does the same: a deleted account's
+--    link gives up its subject only when another social link of the same type
+--    holds that subject too (live or deleted — two deleted holders also break
+--    the index). An uncontended deleted link keeps its subject, exactly as it
+--    would at runtime until someone reclaims it. A deleted account cannot sign
+--    in, so nothing that works today stops working.
+UPDATE public.user_auth_methods uam
+SET external_user_id = NULL, updated_at = NOW()
+FROM public.users u
+WHERE u.id = uam.user_id AND u.deleted_at IS NOT NULL
+  AND uam.sso_provider_id IS NULL
+  AND uam.external_user_id IS NOT NULL AND uam.external_user_id <> ''
+  AND EXISTS (
+      SELECT 1 FROM public.user_auth_methods other
+      WHERE other.id <> uam.id
+        AND other.sso_provider_id IS NULL
+        AND other.auth_type = uam.auth_type
+        AND other.external_user_id = uam.external_user_id);
+-- 2. Build the index only when nothing still collides. What can remain is two
+--    LIVE accounts on one subject — only reachable by a race or a hand edit,
+--    and not ours to pick a winner for. The login already refuses such a
+--    subject (sso_identity_ambiguous) rather than resolving it to either
+--    account, so the upgrade proceeds without the index and says so; the next
+--    upgrade after an operator resolves the conflict creates it. The
+--    unique_violation handler covers a duplicate written between the check and
+--    the build (old pods still serve during the Job): same outcome, no abort.
+DO $$
+DECLARE
+  conflicting integer;
+BEGIN
+  IF to_regclass('public.uq_user_auth_methods_platform_subject') IS NOT NULL THEN
+    RETURN;
+  END IF;
+  SELECT count(*) INTO conflicting FROM (
+    SELECT 1 FROM public.user_auth_methods
+    WHERE sso_provider_id IS NULL
+      AND external_user_id IS NOT NULL AND external_user_id <> ''
+    GROUP BY auth_type, external_user_id
+    HAVING count(*) > 1) dup;
+  IF conflicting > 0 THEN
+    RAISE WARNING 'uq_user_auth_methods_platform_subject NOT created: % social sign-in identities (auth_type, external_user_id) are each linked to more than one live account. Sign-in refuses those identities as ambiguous until an operator resolves them (clear external_user_id on all but one link per identity); the index is created on the next schema apply after that.', conflicting;
+    RETURN;
+  END IF;
+  BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_user_auth_methods_platform_subject
+        ON public.user_auth_methods (auth_type, external_user_id)
+        WHERE sso_provider_id IS NULL AND external_user_id IS NOT NULL AND external_user_id <> '';
+  EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'uq_user_auth_methods_platform_subject NOT created: a duplicate social sign-in identity appeared while it was being built (%). Sign-in refuses ambiguous identities until an operator resolves them; the index is created on the next schema apply after that.', SQLERRM;
+  END;
+END $$;
 
 
 -- INDEX: idx_user_auth_methods_user_id
@@ -19389,6 +19451,14 @@ CREATE TABLE IF NOT EXISTS public.classification_rules (
     source_url text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Seeded-content ownership (decision 4, RC-12): who owns this row, whether a
+    -- platform admin changed shipped content, and the shipped content an upgrade
+    -- offered instead of overwriting. Written only by the trigger in the
+    -- "seeded content: admin edits win" POST-MIGRATIONS block at the end of this file.
+    content_origin text CONSTRAINT classification_rules_content_origin_check CHECK (content_origin IN ('seed', 'admin')),
+    admin_modified_at timestamp with time zone,
+    seed_shipped jsonb,
+    seed_offer jsonb,
     CONSTRAINT classification_rules_pkey PRIMARY KEY (id),
     CONSTRAINT classification_rules_rule_kind_check CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text, 'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text, 'mdns_service'::text, 'os_name'::text])),
     CONSTRAINT classification_rules_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
@@ -19428,6 +19498,7 @@ CREATE TABLE IF NOT EXISTS public.catalog_feed_state (
     row_count bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    ecosystem_status jsonb DEFAULT '[]'::jsonb NOT NULL,
     CONSTRAINT catalog_feed_state_pkey PRIMARY KEY (feed),
     CONSTRAINT catalog_feed_state_last_status_check CHECK (last_status = ANY (ARRAY['never'::text, 'running'::text, 'ok'::text, 'error'::text])),
     CONSTRAINT catalog_feed_state_row_count_check CHECK (row_count >= 0)
@@ -22026,8 +22097,18 @@ CREATE TABLE IF NOT EXISTS public.license_usage_daily (
 -- download serves — text, not jsonb, because jsonb would re-serialise them and
 -- the signature is over the bytes. At most one COMPLETE report per period: a
 -- second would be billed twice. Month-to-date previews (complete = false) are
--- never billed and may repeat. The delivery_* columns belong to the
--- transmitter (spec PR 5); 'pending' is what it will pick up.
+-- never billed and may repeat. The delivery_* columns and next_attempt_at
+-- belong to the transmitter (ee/licensing, spec PR 5), which POSTs complete
+-- reports only, when licensing.reporting.endpoint is set:
+--   pending   + next_attempt_at NULL      due now (never tried, or reset by a
+--                                         manual retry)
+--   pending   + next_attempt_at set       retrying a network error / 5xx then
+--   failed    + next_attempt_at set       the receiver refused (400/401, a
+--                                         fixable configuration or licence
+--                                         problem): retried on the backoff
+--   failed    + next_attempt_at NULL      the receiver rejected the report
+--                                         (422): stopped until a manual retry
+--   delivered                             202, or 409 (already received)
 CREATE TABLE IF NOT EXISTS public.license_usage_reports (
     report_id uuid NOT NULL PRIMARY KEY,
     period_start timestamp with time zone NOT NULL,
@@ -22046,6 +22127,7 @@ CREATE TABLE IF NOT EXISTS public.license_usage_reports (
     delivered_at timestamp with time zone,
     CHECK (period_end > period_start)
 );
+ALTER TABLE public.license_usage_reports ADD COLUMN IF NOT EXISTS next_attempt_at timestamp with time zone;
 CREATE UNIQUE INDEX IF NOT EXISTS license_usage_reports_one_complete_per_period
     ON public.license_usage_reports (period_start) WHERE complete;
 CREATE INDEX IF NOT EXISTS idx_license_usage_reports_generated_at ON public.license_usage_reports (generated_at DESC);
@@ -22123,11 +22205,187 @@ CREATE TABLE IF NOT EXISTS public.license_cap_grace (
     recorded_at timestamp with time zone NOT NULL DEFAULT now()
 );
 
+-- platform_settings 'retention.max_days' — the Enterprise data-retention cap —
+-- is writable only by the bypass role or the table owner. platform_settings is
+-- otherwise ordinary app-pool configuration (crypto_app keeps full DML on it),
+-- but this one key decides how long every tenant's data may be kept, and the
+-- retention sweep deletes data on it: an app-pool write (request-driven
+-- SQL, an injection in a tenant-facing handler) that lowered it, or deleted
+-- the row, would destroy data or lift a cap the operator set. The one
+-- legitimate writer is admin-service's PUT /admin/license/retention, on the
+-- bypass pool. A trigger rather than a table of its own: every service already
+-- reads the cap from here (shared/entitlements), so nothing moves and no
+-- rolling-upgrade window exists where a reader looks in the wrong place.
+-- Covers INSERT, UPDATE (including renaming another key TO or FROM it) and
+-- DELETE. Same privilege test as guard_tenant_is_operator: BYPASSRLS
+-- (crypto_bypass), or the privileges of the table's owner (superusers,
+-- installs without the RLS roles). SECURITY INVOKER, so current_user is the
+-- caller.
+CREATE OR REPLACE FUNCTION public.guard_platform_retention_setting() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    touches boolean := false;
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') AND OLD.setting_key = 'retention.max_days' THEN
+        touches := true;
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.setting_key = 'retention.max_days' THEN
+        touches := true;
+    END IF;
+    IF touches
+       AND NOT COALESCE((SELECT rolbypassrls FROM pg_catalog.pg_roles WHERE rolname = current_user), false)
+       AND NOT pg_catalog.pg_has_role(current_user,
+              (SELECT relowner FROM pg_catalog.pg_class WHERE oid = TG_RELID), 'USAGE') THEN
+        RAISE EXCEPTION 'platform_settings retention.max_days can only be changed by a platform administrator'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE OR REPLACE TRIGGER guard_platform_retention_setting BEFORE INSERT OR UPDATE OR DELETE ON public.platform_settings FOR EACH ROW EXECUTE FUNCTION public.guard_platform_retention_setting();
+
+-- license_msp_lapses: every moment an install STOPPED being under an active
+-- MSP licence, so the partial last month is reported and billable (edition-
+-- licensing follow-up). A monthly usage report is generated on the 1st for the
+-- previous month, but only while the install is still MSP; without this, the
+-- month in which an MSP licence expired, was removed, or was replaced by an
+-- Enterprise licence was never reported.
+--
+-- Written by the trigger below, whoever changes platform_license (admin-
+-- service's licence reconciler on the bypass pool, in practice), and by the
+-- usage collector when it finds the recorded MSP licence past its expiry
+-- before the reconciler has removed it. The lapse instant is the licence's
+-- expiry when it expired, else the moment it was removed or replaced. The
+-- licence's descriptive fields are copied because the platform_license row is
+-- gone (or describes another licence) by the time the final report is built.
+-- An MSP licence replaced by another UNEXPIRED MSP licence (a renewal) is not a
+-- lapse: metering continues and the month is reported as usual. Keyed on
+-- (license_id, lapsed_at) so the trigger and the collector recording the same
+-- expiry collapse into one row. handled_at / final_report_id are the
+-- collector's: the final report generated for [start of the unreported part of
+-- the month, lapsed_at), or handled with none when nothing was collected in it.
+-- Read-only for crypto_app, like the rest of the ledger (ROLE GRANTS below).
+CREATE TABLE IF NOT EXISTS public.license_msp_lapses (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    license_id text NOT NULL,
+    lapsed_at timestamp with time zone NOT NULL,
+    reason text NOT NULL CHECK (reason IN ('expired', 'removed', 'replaced')),
+    subject text NOT NULL,
+    licensee text NOT NULL DEFAULT '',
+    expires_at timestamp with time zone NOT NULL,
+    max_tenants integer,
+    token_sha256 text NOT NULL,
+    recorded_at timestamp with time zone NOT NULL DEFAULT now(),
+    handled_at timestamp with time zone,
+    final_report_id uuid,
+    UNIQUE (license_id, lapsed_at)
+);
+
+-- The trigger half. AFTER, so it records only a change that happened; SECURITY
+-- INVOKER — the reconciler's bypass role writes the ledger like the collector
+-- does (crypto_app cannot change platform_license at all).
+CREATE OR REPLACE FUNCTION public.record_msp_licence_lapse() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    lapse_at timestamp with time zone;
+    lapse_reason text;
+BEGIN
+    IF OLD.edition <> 'msp' THEN
+        RETURN NULL;
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.edition = 'msp' AND OLD.expires_at > now() THEN
+        RETURN NULL; -- re-verified or renewed while still valid: no gap
+    END IF;
+    IF OLD.expires_at <= now() THEN
+        lapse_at := OLD.expires_at;
+        lapse_reason := 'expired';
+    ELSIF TG_OP = 'DELETE' THEN
+        lapse_at := now();
+        lapse_reason := 'removed';
+    ELSE
+        lapse_at := now();
+        lapse_reason := 'replaced';
+    END IF;
+    INSERT INTO public.license_msp_lapses
+        (license_id, lapsed_at, reason, subject, licensee, expires_at, max_tenants, token_sha256)
+    VALUES (COALESCE(OLD.license_id, OLD.token_sha256), lapse_at, lapse_reason, OLD.subject,
+            OLD.licensee, OLD.expires_at, OLD.max_tenants, OLD.token_sha256)
+    ON CONFLICT (license_id, lapsed_at) DO NOTHING;
+    RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE TRIGGER record_msp_licence_lapse AFTER UPDATE OR DELETE ON public.platform_license FOR EACH ROW EXECUTE FUNCTION public.record_msp_licence_lapse();
+
 -- POST-MIGRATIONS: license_cap_state ('s single-row grace clock, never in
 -- a release) is replaced by license_cap_grace. A single row could hold only one
 -- licence's clock, so installing another licence overwrote it and re-installing
 -- the first got a fresh grace period.
 DROP TABLE IF EXISTS public.license_cap_state;
+
+-- TABLE: seeded_content_tombstones
+--
+-- Seeded rows a platform admin deleted (or re-keyed), so the seed does not put
+-- them back on the next upgrade (decision 4, RC-12). The seed re-runs on every
+-- helm upgrade and inserts what is "missing"; without this table, a deleted
+-- shipped control, measurement rule or classification rule was missing and so
+-- came back. Written by the seeded_content_tombstone trigger (and by the guard
+-- when an admin changes a row's natural key); read by the guard, which skips a
+-- seed INSERT whose natural key is here. natural_key is a JSON array of the
+-- row's identity in shipped terms — framework code and version, control id,
+-- measurement type code, rule kind and pattern — never a UUID, because the
+-- seed does not know the UUIDs an install assigned. Created here, above the
+-- ROLE GRANTS block, so crypto_app gets DML on it: the admin's delete, on the
+-- app pool, is what writes it.
+CREATE TABLE IF NOT EXISTS public.seeded_content_tombstones (
+    entity text NOT NULL,
+    natural_key text NOT NULL,
+    removed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT seeded_content_tombstones_pkey PRIMARY KEY (entity, natural_key),
+    CONSTRAINT seeded_content_tombstones_entity_check CHECK (entity IN ('framework', 'control', 'measurement', 'classification_rule'))
+);
+
+-- ----------------------------------------------------------------------------
+-- ============================================================================
+-- POST-MIGRATIONS: health_alerts — one ACTIVE alert per (tenant, alert_type)
+-- ============================================================================
+-- tenant-health-service inserted a fresh set of health alerts every cycle and
+-- never resolved one, so the same alert piled up every 30 minutes and a stale
+-- "Poor Health Status" alert sat next to a recovered score (RC-14,
+-- ADMIN_UI_DATA_REVIEW_2026-09). The service now upserts on (tenant_id,
+-- alert_type) among active rows and resolves the rest; this index is what makes
+-- that upsert's ON CONFLICT target exist, and makes a second active duplicate
+-- impossible.
+--
+-- The UPDATE first resolves every active duplicate except the newest per
+-- (tenant, type) — the index cannot be built over the rows existing installs
+-- already hold. Both halves are idempotent: once no duplicates remain the
+-- UPDATE matches nothing, and the index is IF NOT EXISTS. The predicate is
+-- the bare `is_active` the service's ON CONFLICT names, so the two match.
+UPDATE public.health_alerts h
+   SET is_active = false,
+       resolved_at = COALESCE(h.resolved_at, now())
+ WHERE h.is_active
+   AND EXISTS (
+     SELECT 1 FROM public.health_alerts newer
+      WHERE newer.tenant_id = h.tenant_id
+        AND newer.alert_type = h.alert_type
+        AND newer.is_active
+        AND (newer.created_at, newer.id) > (h.created_at, h.id));
+CREATE UNIQUE INDEX IF NOT EXISTS health_alerts_one_active_per_type
+    ON public.health_alerts USING btree (tenant_id, alert_type) WHERE is_active;
+
+-- POST-MIGRATIONS: maintenance_windows retired (owner decision 9, RC-20).
+-- Comms → Maintenance wrote this table and nothing ever read it: alert
+-- suppression reads platform_maintenance_windows (System → Alerts), which is
+-- now the one maintenance-window store. The admin-service routes that wrote it
+-- are removed in the same change. Its CREATE, primary key and index were
+-- removed from the body above, so a fresh install never creates it.
+DROP TABLE IF EXISTS public.maintenance_windows;
 
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
@@ -22227,6 +22485,11 @@ GRANT SELECT ON public.license_usage_reports       TO crypto_app;
 -- bypass pool.
 REVOKE ALL ON public.license_cap_grace FROM crypto_app;
 GRANT SELECT ON public.license_cap_grace TO crypto_app;
+
+-- The MSP licence lapse ledger: the collector's record of which final report
+-- is still owed. Same rule — read-only for crypto_app.
+REVOKE ALL ON public.license_msp_lapses FROM crypto_app;
+GRANT SELECT ON public.license_msp_lapses TO crypto_app;
 -- ADR-0016: compliance severity vocabulary. Preserve judgments and weights;
 -- only spellings change. Run before new writers/seeds; rollback requires the
 -- matching old vocabulary migration, not just restarting old application code.
@@ -22740,3 +23003,613 @@ ALTER TABLE public.tenants ALTER COLUMN payment_status SET DEFAULT 'active';
 -- next save records an author.
 ALTER TABLE IF EXISTS public.platform_sso_providers
     ADD COLUMN IF NOT EXISTS updated_by uuid;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: remember what a suspension interrupted (RC-4)
+-- ----------------------------------------------------------------------------
+-- Suspending (or offboarding → 'canceled') a tenant stores the payment_status
+-- it replaced here, and Reactivate restores it — a trialling tenant returns to
+-- 'trial' instead of being forced to 'active'. NULL = nothing remembered, which
+-- Reactivate reads as 'active'. Holds only values copied from payment_status
+-- (itself CHECK-constrained), so it carries no constraint of its own. Nullable,
+-- no default: a metadata-only add, idempotent.
+ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS suspended_from_payment_status character varying(50);
+ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS session_version bigint DEFAULT 0 NOT NULL;
+-- POST-MIGRATIONS: allowed email domains for admin-login identity providers
+-- ----------------------------------------------------------------------------
+-- The CREATE TABLE above carries the column for a fresh install; this reaches a
+-- database that already has the table. A constant default makes the add
+-- metadata-only; existing rows read '{}' = no allow-list, which is exactly the
+-- behaviour they had before (the IdP must assert email_verified).
+ALTER TABLE IF EXISTS public.platform_sso_providers
+    ADD COLUMN IF NOT EXISTS allowed_email_domains text[] DEFAULT '{}'::text[] NOT NULL;
+
+-- =====================================================================
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: seeded content — admin edits win (decision 4, RC-12)
+-- ============================================================================
+-- seed.sql (and the Enterprise content bundle) re-run on every helm upgrade.
+-- They used to UPSERT the content they ship, so an upgrade silently undid a
+-- platform admin's work: an archived framework came back published, an edited
+-- control title and a tuned classification rule were rewritten, and a deleted
+-- control or measurement rule reappeared. The owner's decision (admin-ui data
+-- review §3, decision 4): admin edits win. Seeded rows carry an origin marker;
+-- upgrades insert only rows that are missing and never overwrite or resurrect
+-- a row an admin changed or removed; content Vista ships later arrives as an
+-- update the admin can accept.
+--
+-- HOW. Nothing in seed.sql or in the SIGNED content bundle has to know about
+-- any of this, which is the point: the bundle cannot change without being
+-- re-signed, and a rule every seed statement had to follow would be broken by
+-- the next one written. The database enforces it instead, with one trigger per
+-- seeded table that can tell a seed pass from anything else. A seed pass is a
+-- session that ran `SET vista.seed_apply = on`: seed.sql does that on its first
+-- statement, and the chart's seed-data Job (and `make db-seed-content-bundle`)
+-- do it before applying the bundle.
+--
+--   * A seed INSERT marks the row content_origin = 'seed'. It is skipped
+--     (RETURN NULL) when the row's natural key is tombstoned, or when its parent
+--     was skipped — a control whose framework_id came back NULL, a rule whose
+--     control_id did — which is how a whole deleted subtree stays deleted.
+--   * An app INSERT marks the row 'admin'. The app cannot choose the origin.
+--   * A seed UPDATE (the ON CONFLICT DO UPDATE arm, or a correction UPDATE):
+--       - on a row an admin CREATED (origin 'admin'): nothing. Not changed,
+--         nothing offered.
+--       - on a PRISTINE seeded row (origin 'seed', never edited), or on a row
+--         that predates this block and matches the WHOLE row the seed's INSERT
+--         proposed (every tracked column, not only the ones the ON CONFLICT
+--         SET list writes): applied. What Vista ships keeps flowing into rows
+--         nobody has touched; there is no admin work to lose there, and making
+--         every untouched row wait for a click would leave installs that never
+--         click on stale content. A correction UPDATE is not an upsert and has
+--         no whole row to compare with, so it never marks a row pristine.
+--       - on the admin's row (edited, or predating this block and differing
+--         from what ships): the row is KEPT exactly as it is.
+--         Any value the seed ships that differs both from the row AND from
+--         what it shipped last time (seed_shipped) is a NEW shipped version,
+--         and goes into seed_offer — the "update available" flag. A value that
+--         differs from the row only because the admin changed it is not an
+--         update and offers nothing. seed_shipped then records what shipped.
+--         A row that predates this block has no seed_shipped, so on its first
+--         seed pass every difference from the whole shipped row is offered,
+--         including columns the SET list never writes: a difference is either
+--         an admin edit or content Vista changed since the row was seeded, the
+--         two cannot be told apart, and keeping the row while offering the
+--         difference is what loses nothing.
+--   * Measurement rules are inserted only when missing and never upserted, so
+--     no seed statement ever meets one that predates this block with a whole
+--     row to compare. classify_seeded_measurements() marks those from their
+--     timestamps instead (see there); what it cannot place stays unmarked,
+--     which the rules above already treat conservatively. A seed correction
+--     that reaches an unmarked rule before that call applies the same test
+--     inline, so an untouched shipped rule takes the correction.
+--   * An app UPDATE that changes a tracked column of a non-admin row stamps
+--     admin_modified_at; from then on the row is the admin's. If it changes the
+--     row's natural key, the old key is tombstoned so the seed does not put a
+--     second copy back under it.
+--   * An app DELETE of a non-admin row tombstones its natural key.
+--   * accept_seeded_content_update() applies a row's seed_offer and clears it.
+--     The row stays admin-owned: the next change Vista ships is offered again
+--     rather than applied, because the admin has shown they curate this row.
+--     An offer key the row already matches (the admin typed the same thing)
+--     drops out on its own; an offer with no keys left is NULL.
+--
+-- "Tracked" columns are what an admin can change; "offered" columns are what an
+-- upgrade may propose. They differ for frameworks: archiving (status) is an
+-- admin change that must stick, but "Vista ships this as published" is not an
+-- update worth offering — accepting it would silently republish.
+--
+-- Only the columns a seed statement writes can differ between OLD and NEW in a
+-- seed UPDATE (ON CONFLICT DO UPDATE leaves the rest as they were), so after a
+-- row's first contact an offer only ever carries what the seed actually changed.
+--
+-- The trigger is named zz_ so it fires AFTER update_*_updated_at (triggers fire
+-- in name order): returning OLD then leaves a kept row's updated_at alone too.
+--
+-- Idempotent: ADD COLUMN IF NOT EXISTS, CREATE OR REPLACE FUNCTION/TRIGGER.
+
+ALTER TABLE public.platform_frameworks ADD COLUMN IF NOT EXISTS content_origin text
+    CONSTRAINT platform_frameworks_content_origin_check CHECK (content_origin IN ('seed', 'admin'));
+ALTER TABLE public.platform_frameworks ADD COLUMN IF NOT EXISTS admin_modified_at timestamp with time zone;
+ALTER TABLE public.platform_frameworks ADD COLUMN IF NOT EXISTS seed_shipped jsonb;
+ALTER TABLE public.platform_frameworks ADD COLUMN IF NOT EXISTS seed_offer jsonb;
+ALTER TABLE public.platform_framework_controls ADD COLUMN IF NOT EXISTS content_origin text
+    CONSTRAINT platform_framework_controls_content_origin_check CHECK (content_origin IN ('seed', 'admin'));
+ALTER TABLE public.platform_framework_controls ADD COLUMN IF NOT EXISTS admin_modified_at timestamp with time zone;
+ALTER TABLE public.platform_framework_controls ADD COLUMN IF NOT EXISTS seed_shipped jsonb;
+ALTER TABLE public.platform_framework_controls ADD COLUMN IF NOT EXISTS seed_offer jsonb;
+ALTER TABLE public.control_measurements ADD COLUMN IF NOT EXISTS content_origin text
+    CONSTRAINT control_measurements_content_origin_check CHECK (content_origin IN ('seed', 'admin'));
+ALTER TABLE public.control_measurements ADD COLUMN IF NOT EXISTS admin_modified_at timestamp with time zone;
+ALTER TABLE public.control_measurements ADD COLUMN IF NOT EXISTS seed_shipped jsonb;
+ALTER TABLE public.control_measurements ADD COLUMN IF NOT EXISTS seed_offer jsonb;
+ALTER TABLE public.classification_rules ADD COLUMN IF NOT EXISTS content_origin text
+    CONSTRAINT classification_rules_content_origin_check CHECK (content_origin IN ('seed', 'admin'));
+ALTER TABLE public.classification_rules ADD COLUMN IF NOT EXISTS admin_modified_at timestamp with time zone;
+ALTER TABLE public.classification_rules ADD COLUMN IF NOT EXISTS seed_shipped jsonb;
+ALTER TABLE public.classification_rules ADD COLUMN IF NOT EXISTS seed_offer jsonb;
+
+-- The named columns of a row image, as one jsonb object. Comparing two of these
+-- is how the guard decides "did anything the admin owns change".
+CREATE OR REPLACE FUNCTION public.seeded_content_pick(r jsonb, cols text[]) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT COALESCE(jsonb_object_agg(c, COALESCE(r -> c, 'null'::jsonb)), '{}'::jsonb)
+      FROM unnest(cols) AS c
+$$;
+
+-- The part of an offer the row does not already have: keys whose offered value
+-- differs from the row's. NULL when nothing is left — an offer the admin has
+-- matched by hand, or one an accept applied, is no longer an update.
+CREATE OR REPLACE FUNCTION public.seeded_content_pending(offer jsonb, r jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE
+    AS $$
+    SELECT NULLIF(COALESCE(jsonb_object_agg(e.k, e.v), '{}'::jsonb), '{}'::jsonb)
+      FROM jsonb_each(offer) AS e(k, v)
+     WHERE COALESCE(r -> e.k, 'null'::jsonb) IS DISTINCT FROM e.v
+$$;
+
+-- A seeded row's identity in the terms the seed uses — never its UUID, which
+-- differs per install. NULL when it cannot be resolved (a control whose
+-- framework is already gone, a tenant-authored measurement rule): such a row
+-- has no seeded identity to protect.
+CREATE OR REPLACE FUNCTION public.seeded_content_natural_key(p_entity text, r jsonb) RETURNS text
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+    k text;
+BEGIN
+    CASE p_entity
+    WHEN 'framework' THEN
+        k := jsonb_build_array(r ->> 'code', r ->> 'version')::text;
+    WHEN 'control' THEN
+        SELECT jsonb_build_array(f.code, f.version, r ->> 'control_id')::text INTO k
+          FROM public.platform_frameworks f
+         WHERE f.id = (r ->> 'framework_id')::uuid;
+    WHEN 'measurement' THEN
+        IF r ->> 'framework_type' IS DISTINCT FROM 'platform' THEN
+            RETURN NULL;
+        END IF;
+        SELECT jsonb_build_array(f.code, f.version, c.control_id, mt.code)::text INTO k
+          FROM public.platform_framework_controls c
+          JOIN public.platform_frameworks f ON f.id = c.framework_id
+          JOIN public.measurement_types mt ON mt.id = (r ->> 'measurement_type_id')::uuid
+         WHERE c.id = (r ->> 'control_id')::uuid;
+    WHEN 'classification_rule' THEN
+        k := jsonb_build_array(r ->> 'rule_kind', r ->> 'pattern')::text;
+    ELSE
+        RAISE EXCEPTION 'seeded_content_natural_key: unknown entity %', p_entity;
+    END CASE;
+    RETURN k;
+END;
+$$;
+
+-- BEFORE INSERT OR UPDATE on every seeded table.
+--   TG_ARGV[0]  entity: framework | control | measurement | classification_rule
+--   TG_ARGV[1]  tracked columns (comma-separated): an admin change to any of
+--               them makes the row the admin's
+--   TG_ARGV[2]  offered columns: what an upgrade may propose for a kept row
+--
+-- vista.seed_row carries the FULL row a seed INSERT proposed, from that row's
+-- BEFORE INSERT firing to the BEFORE UPDATE firing of its ON CONFLICT arm.
+-- Postgres runs both for one row before it moves on to the next, and a
+-- tombstoned row (RETURN NULL) never reaches the conflict check. The UPDATE arm
+-- on its own sees only what the statement's SET list writes — the framework
+-- upsert writes status and is_platform_default, the control upsert leaves
+-- crypto_relevant out — so without the full row, a row that predates the
+-- marker and carries an admin edit to a column the SET list does not name
+-- would read as "matches what ships" and be stamped as untouched Vista content
+-- for good (and then follow the next release's content over the edit).
+CREATE OR REPLACE FUNCTION public.seeded_content_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_entity   text   := TG_ARGV[0];
+    v_tracked  text[] := string_to_array(TG_ARGV[1], ',');
+    v_offered  text[] := string_to_array(TG_ARGV[2], ',');
+    v_mode     text   := COALESCE(current_setting('vista.seed_apply', true), '');
+    v_new      jsonb;
+    v_old      jsonb;
+    v_key      text;
+    v_old_key  text;
+    v_old_off  jsonb;
+    v_new_off  jsonb;
+    v_same     boolean;
+    v_newer    jsonb;
+    v_stash    jsonb;
+    v_shipped  jsonb;
+    v_ship_off jsonb;
+BEGIN
+    -- Tenant-authored measurement rules share control_measurements with the
+    -- platform ones and are never seeded content. (Read through to_jsonb:
+    -- plpgsql does not short-circuit, and the other tables have no
+    -- framework_type field to name.)
+    v_new := to_jsonb(NEW);
+    IF v_entity = 'measurement' AND v_new ->> 'framework_type' IS DISTINCT FROM 'platform' THEN
+        RETURN NEW;
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        NEW.admin_modified_at := NULL;
+        NEW.seed_offer := NULL;
+        IF v_mode <> 'on' THEN
+            NEW.content_origin := 'admin';
+            NEW.seed_shipped := NULL;
+            RETURN NEW;
+        END IF;
+        -- The parent was skipped (tombstoned), so the child has nowhere to go.
+        IF (v_entity = 'control' AND v_new ->> 'framework_id' IS NULL)
+           OR (v_entity = 'measurement' AND v_new ->> 'control_id' IS NULL) THEN
+            RETURN NULL;
+        END IF;
+        v_key := public.seeded_content_natural_key(v_entity, v_new);
+        IF v_key IS NOT NULL AND EXISTS (
+            SELECT 1 FROM public.seeded_content_tombstones t
+             WHERE t.entity = v_entity AND t.natural_key = v_key) THEN
+            RETURN NULL;
+        END IF;
+        -- Hand the whole shipped row to this row's ON CONFLICT arm, if any.
+        PERFORM set_config('vista.seed_row', jsonb_build_object(
+            'entity', v_entity, 'key', v_key,
+            'row', public.seeded_content_pick(v_new, v_tracked))::text, true);
+        NEW.content_origin := 'seed';
+        NEW.seed_shipped := public.seeded_content_pick(v_new, v_offered);
+        RETURN NEW;
+    END IF;
+
+    -- UPDATE
+    v_old := to_jsonb(OLD);
+
+    IF v_mode = 'accept' THEN
+        -- accept_seeded_content_update(): apply the offer, keep the ownership.
+        IF OLD.seed_offer IS NOT NULL THEN
+            NEW := jsonb_populate_record(NEW, OLD.seed_offer);
+        END IF;
+        NEW.content_origin := OLD.content_origin;
+        NEW.admin_modified_at := OLD.admin_modified_at;
+        NEW.seed_shipped := OLD.seed_shipped;
+        NEW.seed_offer := NULL;
+        RETURN NEW;
+    END IF;
+
+    IF v_mode = 'classify' THEN
+        -- classify_seeded_measurements(): mark a row that predates the marker
+        -- and change nothing else, not even updated_at. A marked row is left
+        -- exactly as it is.
+        IF OLD.content_origin IS NOT NULL THEN
+            RETURN OLD;
+        END IF;
+        OLD.content_origin := NEW.content_origin;
+        OLD.admin_modified_at := NEW.admin_modified_at;
+        IF NEW.content_origin = 'seed' AND NEW.admin_modified_at IS NULL THEN
+            OLD.seed_shipped := public.seeded_content_pick(v_old, v_offered);
+        END IF;
+        RETURN OLD;
+    END IF;
+
+    IF v_mode = 'on' THEN
+        -- A row a platform admin created is theirs outright. A seed statement
+        -- that happens to reach it — a correction UPDATE whose WHERE matches it,
+        -- a shipped key the admin used first — neither changes it nor offers
+        -- anything on it.
+        IF OLD.content_origin = 'admin' THEN
+            RETURN OLD;
+        END IF;
+
+        -- A measurement rule that predates the marker, met by a seed correction
+        -- BEFORE classify_seeded_measurements() has placed it (seed.sql's
+        -- corrections, and the content bundle's, run ahead of that call).
+        -- Classify it here by the same rule, so an untouched shipped rule that
+        -- still carries the broken value takes the correction instead of being
+        -- kept as an admin's with the fix merely offered.
+        -- (Nested, and read through v_old: plpgsql does not short-circuit, and
+        -- the other tables have no uuid control_id to name.)
+        IF v_entity = 'measurement' AND OLD.content_origin IS NULL THEN
+            IF EXISTS (
+                SELECT 1 FROM public.platform_framework_controls c
+                 WHERE c.id = (v_old ->> 'control_id')::uuid
+                   AND c.content_origin = 'seed'
+                   AND c.created_at = (v_old ->> 'created_at')::timestamptz) THEN
+                OLD.content_origin := 'seed';
+                IF v_old -> 'updated_at' IS DISTINCT FROM v_old -> 'created_at' THEN
+                    OLD.admin_modified_at := now();
+                END IF;
+            END IF;
+        END IF;
+
+        v_old_off := public.seeded_content_pick(v_old, v_offered);
+        v_new_off := public.seeded_content_pick(v_new, v_offered);
+        v_same := public.seeded_content_pick(v_old, v_tracked) = public.seeded_content_pick(v_new, v_tracked);
+
+        -- The whole row this statement's INSERT proposed, when this UPDATE is
+        -- its ON CONFLICT arm. Consumed once, so it cannot leak to a later row.
+        v_stash := NULLIF(current_setting('vista.seed_row', true), '')::jsonb;
+        IF v_stash IS NOT NULL THEN
+            PERFORM set_config('vista.seed_row', '', true);
+            IF v_stash ->> 'entity' = v_entity
+               AND v_stash ->> 'key' IS NOT DISTINCT FROM public.seeded_content_natural_key(v_entity, v_old) THEN
+                v_shipped := v_stash -> 'row';
+            END IF;
+        END IF;
+
+        -- A pristine shipped row follows Vista's content.
+        IF OLD.content_origin = 'seed' AND OLD.admin_modified_at IS NULL THEN
+            NEW.content_origin := 'seed';
+            NEW.admin_modified_at := NULL;
+            NEW.seed_offer := NULL;
+            NEW.seed_shipped := v_new_off;
+            RETURN NEW;
+        END IF;
+
+        -- A row that predates the marker, met by an upsert: compared with the
+        -- WHOLE shipped row, not just the columns the SET list names.
+        IF OLD.content_origin IS NULL AND v_shipped IS NOT NULL THEN
+            IF public.seeded_content_pick(v_old, v_tracked) = v_shipped THEN
+                -- Exactly what ships: nobody has changed it.
+                NEW.content_origin := 'seed';
+                NEW.admin_modified_at := NULL;
+                NEW.seed_offer := NULL;
+                NEW.seed_shipped := v_new_off;
+                RETURN NEW;
+            END IF;
+            -- It differs: an admin edit since the last upgrade, or content this
+            -- release changed. The two cannot be told apart, so the row is kept
+            -- and every shipped value it does not have is offered. What the SET
+            -- list writes wins over the INSERT's VALUES where they disagree.
+            SELECT public.seeded_content_pick(v_shipped, v_offered)
+                   || COALESCE(jsonb_object_agg(e.k, e.v), '{}'::jsonb) INTO v_ship_off
+              FROM jsonb_each(v_new_off) AS e(k, v)
+             WHERE e.v IS DISTINCT FROM v_old_off -> e.k;
+            OLD.content_origin := 'seed';
+            OLD.admin_modified_at := now();
+            OLD.seed_shipped := v_ship_off;
+            OLD.seed_offer := public.seeded_content_pending(v_ship_off, v_old);
+            RETURN OLD;
+        END IF;
+
+        -- A row that predates the marker, met by a seed statement that is not
+        -- an upsert (a correction UPDATE). Such a statement names only what it
+        -- corrects and cannot vouch for the rest of the row, so it never stamps
+        -- the row pristine: if it changes nothing tracked the row stays
+        -- unmarked; if it would change something, the row is kept and the
+        -- change offered below.
+        IF OLD.content_origin IS NULL AND v_same THEN
+            RETURN NEW;
+        END IF;
+
+        -- The admin's row. What is NEW in this seed pass: a column the seed
+        -- sets to something other than the row's value AND other than what it
+        -- shipped last time. A difference that is only the admin's own edit is
+        -- not an update; a new shipped value is. (An unset column is equal in
+        -- NEW and OLD, so it can never look new.)
+        SELECT COALESCE(jsonb_object_agg(e.k, e.v), '{}'::jsonb) INTO v_newer
+          FROM jsonb_each(v_new_off) AS e(k, v)
+         WHERE e.v IS DISTINCT FROM v_old_off -> e.k
+           AND (OLD.seed_shipped IS NULL OR e.v IS DISTINCT FROM OLD.seed_shipped -> e.k);
+
+        IF v_same THEN
+            NEW.content_origin := OLD.content_origin;
+            NEW.admin_modified_at := OLD.admin_modified_at;
+            NEW.seed_shipped := COALESCE(OLD.seed_shipped, v_old_off);
+            NEW.seed_offer := public.seeded_content_pending(OLD.seed_offer, v_old);
+            RETURN NEW;
+        END IF;
+        IF OLD.content_origin IS NULL THEN
+            -- A correction aimed at a row that predates the marker: the row
+            -- carries the exact value the correction repairs, so it is Vista's,
+            -- but whether the rest of it is cannot be known. Kept, offered.
+            OLD.content_origin := 'seed';
+            OLD.admin_modified_at := now();
+        END IF;
+        OLD.seed_shipped := COALESCE(OLD.seed_shipped, v_old_off) || v_newer;
+        OLD.seed_offer := public.seeded_content_pending(COALESCE(OLD.seed_offer, '{}'::jsonb) || v_newer, v_old);
+        RETURN OLD;
+    END IF;
+
+    -- An application (admin) UPDATE. Ownership columns are the trigger's, not
+    -- the caller's.
+    NEW.content_origin := OLD.content_origin;
+    NEW.admin_modified_at := OLD.admin_modified_at;
+    NEW.seed_shipped := OLD.seed_shipped;
+    NEW.seed_offer := public.seeded_content_pending(OLD.seed_offer, v_new);
+    IF OLD.content_origin IS DISTINCT FROM 'admin'
+       AND public.seeded_content_pick(v_old, v_tracked) <> public.seeded_content_pick(v_new, v_tracked) THEN
+        NEW.admin_modified_at := now();
+        v_old_key := public.seeded_content_natural_key(v_entity, v_old);
+        v_key := public.seeded_content_natural_key(v_entity, v_new);
+        IF v_old_key IS NOT NULL AND v_old_key IS DISTINCT FROM v_key THEN
+            INSERT INTO public.seeded_content_tombstones (entity, natural_key)
+            VALUES (v_entity, v_old_key)
+            ON CONFLICT (entity, natural_key) DO NOTHING;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- AFTER DELETE on every seeded table: an admin removing a shipped row leaves a
+-- tombstone, so the next seed pass does not re-add it. A seed pass deleting is
+-- Vista retiring content, which is not a tombstone. When a framework delete
+-- cascades to its controls, the controls' keys no longer resolve (the framework
+-- row is gone) and only the framework's tombstone is written — which is enough,
+-- since the seed skips the children of a skipped parent.
+CREATE OR REPLACE FUNCTION public.seeded_content_tombstone() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_key text;
+BEGIN
+    IF COALESCE(current_setting('vista.seed_apply', true), '') = 'on'
+       OR OLD.content_origin IS NOT DISTINCT FROM 'admin' THEN
+        RETURN OLD;
+    END IF;
+    v_key := public.seeded_content_natural_key(TG_ARGV[0], to_jsonb(OLD));
+    IF v_key IS NOT NULL THEN
+        INSERT INTO public.seeded_content_tombstones (entity, natural_key)
+        VALUES (TG_ARGV[0], v_key)
+        ON CONFLICT (entity, natural_key) DO NOTHING;
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER zz_seeded_content_guard BEFORE INSERT OR UPDATE ON public.platform_frameworks
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_guard(
+        'framework', 'code,version,name,description,organization,status', 'name,description,organization');
+CREATE OR REPLACE TRIGGER zz_seeded_content_tombstone AFTER DELETE ON public.platform_frameworks
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_tombstone('framework');
+
+CREATE OR REPLACE TRIGGER zz_seeded_content_guard BEFORE INSERT OR UPDATE ON public.platform_framework_controls
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_guard(
+        'control', 'control_id,family_id,title,description,baseline_severity,crypto_relevant',
+        'title,description,baseline_severity,crypto_relevant');
+CREATE OR REPLACE TRIGGER zz_seeded_content_tombstone AFTER DELETE ON public.platform_framework_controls
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_tombstone('control');
+
+CREATE OR REPLACE TRIGGER zz_seeded_content_guard BEFORE INSERT OR UPDATE ON public.control_measurements
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_guard(
+        'measurement', 'control_id,measurement_type_id,rule_type,predicate,severity_override,weight',
+        'rule_type,predicate,severity_override,weight');
+CREATE OR REPLACE TRIGGER zz_seeded_content_tombstone AFTER DELETE ON public.control_measurements
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_tombstone('measurement');
+
+CREATE OR REPLACE TRIGGER zz_seeded_content_guard BEFORE INSERT OR UPDATE ON public.classification_rules
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_guard(
+        'classification_rule', 'rule_kind,pattern,class_key,vendor,model,confidence,source_url',
+        'class_key,vendor,model,confidence,source_url');
+CREATE OR REPLACE TRIGGER zz_seeded_content_tombstone AFTER DELETE ON public.classification_rules
+    FOR EACH ROW EXECUTE FUNCTION public.seeded_content_tombstone('classification_rule');
+
+-- The accept action behind "Update available". Applies the row's seed_offer and
+-- clears it; returns false when the row has no offer (or does not exist). The
+-- mode is transaction-local and reset before returning, so it cannot leak into
+-- anything else the caller's transaction does.
+CREATE OR REPLACE FUNCTION public.accept_seeded_content_update(p_entity text, p_id uuid) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_table text;
+    v_rows  integer;
+BEGIN
+    v_table := CASE p_entity
+        WHEN 'framework' THEN 'platform_frameworks'
+        WHEN 'control' THEN 'platform_framework_controls'
+        WHEN 'measurement' THEN 'control_measurements'
+        WHEN 'classification_rule' THEN 'classification_rules'
+    END;
+    IF v_table IS NULL THEN
+        RAISE EXCEPTION 'accept_seeded_content_update: unknown entity %', p_entity;
+    END IF;
+    PERFORM set_config('vista.seed_apply', 'accept', true);
+    EXECUTE format('UPDATE public.%I SET seed_offer = seed_offer WHERE id = $1 AND seed_offer IS NOT NULL', v_table)
+        USING p_id;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    PERFORM set_config('vista.seed_apply', '', true);
+    RETURN v_rows > 0;
+END;
+$$;
+
+-- Mark the platform measurement rules that predate the marker. The seed only
+-- ever inserts a measurement rule when it is missing (NOT EXISTS) and never
+-- upserts one, so it never meets an existing rule with a whole shipped row to
+-- compare it with, and cannot tell Vista's rule from one an admin added under
+-- a shipped control. The one fact that does: every seed (Core and the content
+-- bundle) inserts a control and its rules in ONE statement's transaction, so a
+-- shipped rule's created_at equals its control's to the microsecond, and a rule
+-- an admin added later cannot. Of those:
+--   * never updated since (updated_at = created_at): pristine Vista content;
+--   * updated since: edited by an admin or repaired by an earlier release's
+--     correction, which cannot be told apart, so treated as the admin's (kept,
+--     later shipped changes offered) — the direction that loses nothing.
+-- Everything else stays unmarked: an admin's rule, or a Vista rule a later
+-- release added under an older control. The guard treats an unmarked row
+-- conservatively (never stamps it pristine, tombstones it when deleted).
+--
+-- Called at the end of seed.sql, and again after the Enterprise content bundle
+-- (the chart's seed-data Job, `make db-seed-content-bundle`) so the regulated
+-- frameworks' rules are marked on the same upgrade. Only rows under a control
+-- already marked as shipped are considered, so it runs after the seed has met
+-- the controls. Changes nothing but the ownership columns; a no-op once every
+-- rule it can place is marked. Returns how many rules it marked.
+CREATE OR REPLACE FUNCTION public.classify_seeded_measurements() RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_prev text := COALESCE(current_setting('vista.seed_apply', true), '');
+    v_rows integer;
+BEGIN
+    PERFORM set_config('vista.seed_apply', 'classify', true);
+    UPDATE public.control_measurements cm
+       SET content_origin = 'seed',
+           admin_modified_at = CASE WHEN cm.updated_at IS NOT DISTINCT FROM cm.created_at THEN NULL ELSE now() END
+      FROM public.platform_framework_controls c
+     WHERE c.id = cm.control_id
+       AND cm.framework_type = 'platform'
+       AND cm.content_origin IS NULL
+       AND c.content_origin = 'seed'
+       AND cm.created_at = c.created_at;
+    GET DIAGNOSTICS v_rows = ROW_COUNT;
+    PERFORM set_config('vista.seed_apply', v_prev, true);
+    RETURN v_rows;
+END;
+$$;
+
+-- How many of the given shipped framework codes are unaccounted for: neither
+-- published, nor held back by an admin (archived or otherwise edited), nor
+-- deleted by one (tombstoned). The Enterprise bundle ends with a summary that
+-- RAISEs unless all five regulated frameworks are published — a check written
+-- before admins could keep one archived, and inside a signed file. The seed-data
+-- Job treats that one failure as success when this returns 0 (see
+-- templates/jobs/seed-data.yaml), so an admin's archive neither fails the
+-- upgrade nor gets undone by it.
+CREATE OR REPLACE FUNCTION public.seeded_frameworks_unaccounted(p_codes text[]) RETURNS integer
+    LANGUAGE sql STABLE
+    AS $$
+    SELECT count(*)::integer
+      FROM unnest(p_codes) AS c(code)
+     WHERE NOT EXISTS (
+               SELECT 1 FROM public.platform_frameworks f
+                WHERE f.code = c.code
+                  AND (f.status = 'published' OR f.admin_modified_at IS NOT NULL
+                       OR f.content_origin = 'admin'))
+       AND NOT EXISTS (
+               SELECT 1 FROM public.seeded_content_tombstones t
+                WHERE t.entity = 'framework' AND (t.natural_key::jsonb) ->> 0 = c.code)
+$$;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: marking an algorithm obsolete makes it Critical (decision 12)
+-- ----------------------------------------------------------------------------
+-- Catalog -> Ratings -> Deprecate raises risk_score to the bottom of the
+-- Critical band and remembers the score it replaced, so re-activating the
+-- algorithm restores it. obsolete_risk_floor_at IS NOT NULL means "a score is
+-- remembered"; pre_obsolete_risk_score is that score, and may itself be NULL
+-- (the row was unassessed before it was obsoleted). Both nullable with no
+-- default: metadata-only adds. Existing rows read NULL = nothing remembered,
+-- so re-activating a row obsoleted before this change leaves its score alone.
+ALTER TABLE public.algorithms ADD COLUMN IF NOT EXISTS pre_obsolete_risk_score integer;
+ALTER TABLE public.algorithms ADD COLUMN IF NOT EXISTS obsolete_risk_floor_at timestamp with time zone;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: per-ecosystem OSV status (decision 13, RC-29)
+-- ----------------------------------------------------------------------------
+-- A JSON array of {name, status, last_error, rows, watermark, last_run_at,
+-- last_success_at}, one element per OSV ecosystem, so the console can say
+-- "Debian ok, Alpine ok, Ubuntu failed: <reason>" instead of one red row. Empty
+-- for feeds that have no ecosystems. A constant default keeps the add
+-- metadata-only; existing rows read '[]' = no per-ecosystem detail yet, which
+-- the next OSV run fills in.
+ALTER TABLE public.catalog_feed_state ADD COLUMN IF NOT EXISTS ecosystem_status jsonb DEFAULT '[]'::jsonb NOT NULL;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: retention policies have no cold tier (decision 14)
+-- ----------------------------------------------------------------------------
+-- audit.retention_policies.cold_storage_days was stored and shown but never
+-- used as a number; the retention job read only whether it was set, and a
+-- policy without one was never archived. Archiving is now decided by whether
+-- S3 archival is configured, nothing reads the column, and admin-ui review
+-- decision 14 removed the field. The CREATE TABLE above no longer carries it
+-- (fresh installs); this drops it from a database that has it. Nothing
+-- (view, index, constraint) depends on it. IF EXISTS makes a re-run a no-op.
+ALTER TABLE IF EXISTS audit.retention_policies DROP COLUMN IF EXISTS cold_storage_days;

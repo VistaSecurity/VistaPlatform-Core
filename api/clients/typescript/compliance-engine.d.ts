@@ -528,7 +528,7 @@ export interface paths {
         };
         /**
          * List platform-track stateful alerts (platform admin)
-         * @description Lists the stateful alerts raised under the sentinel platform tenant (service_down, tenant_health_degraded, …). Platform-admin only — no tenant context is used; the handler always scopes to the reserved platform tenant. Filter with the same query params as the tenant `/alerts` read.
+         * @description Lists the stateful alerts raised under the sentinel platform tenant (service_down, tenant_health_degraded, …). Requires a platform token whose role holds `platform.health` (403 otherwise) — no tenant context is used; the handler always scopes to the reserved platform tenant. Filter with the same query params as the tenant `/alerts` read.
          */
         get: operations["adminListPlatformAlerts"];
         put?: never;
@@ -748,6 +748,74 @@ export interface paths {
         post?: never;
         /** Delete a control measurement rule */
         delete: operations["adminDeleteControlMeasurement"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/frameworks/{id}/accept-update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept the shipped update offered for a platform framework
+         * @description Applies the name, description and organization an upgrade offered for this framework. Upgrades keep a platform admin's edits to shipped content and store the content they would have written as an offer (decision 4, RC-12); this applies the offer and clears it. The row stays the admin's, so the next shipped change is offered again. Audited.
+         */
+        post: operations["adminAcceptFrameworkUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/frameworks/{id}/controls/{controlId}/accept-update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                controlId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept the shipped update offered for a platform framework control
+         * @description Applies the title, description, baseline severity and crypto relevance an upgrade offered for this control. 404 unless the control belongs to the framework in the path. Upgrades keep a platform admin's edits to shipped content and store the content they would have written as an offer (decision 4, RC-12); this applies the offer and clears it. The row stays the admin's, so the next shipped change is offered again. Audited.
+         */
+        post: operations["adminAcceptControlUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/controls/{id}/measurements/{measurementId}/accept-update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                measurementId: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept the shipped update offered for a control measurement rule
+         * @description Applies the rule type, predicate, severity override and weight an upgrade offered for this measurement rule. 404 unless the rule belongs to the control in the path. Upgrades keep a platform admin's edits to shipped content and store the content they would have written as an offer (decision 4, RC-12); this applies the offer and clears it. The row stays the admin's, so the next shipped change is offered again. Audited.
+         */
+        post: operations["adminAcceptMeasurementUpdate"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2069,6 +2137,19 @@ export interface components {
             controls?: components["schemas"]["PublishedFrameworkControl"][];
             /** @description Set when the handler resolves the with-license variant (tenant context present). */
             is_licensed?: boolean;
+            /**
+             * @description Seeded-content ownership (decision 4, RC-12). `vista` for a row Vista ships (a seed or content-bundle pass created it), `custom` for one a platform admin created. Returned by the platform admin catalogue reads.
+             * @enum {string}
+             */
+            content_origin?: "vista" | "custom";
+            /** @description A platform admin changed this shipped row. Upgrades keep the admin's content and offer later shipped changes instead of applying them. */
+            admin_modified?: boolean;
+            /** @description An upgrade shipped new content for this row and kept the admin's instead. Accept it with the row's `accept-update` action. */
+            update_available?: boolean;
+            /** @description The shipped content on offer, column by column: what accepting the update would write. Present only while `update_available` is true. */
+            offered_update?: {
+                [key: string]: unknown;
+            };
         };
         PublishedFrameworkControl: {
             /** Format: uuid */
@@ -2096,6 +2177,19 @@ export interface components {
             updated_at: string;
             family?: components["schemas"]["Family"];
             measurements?: components["schemas"]["ControlMeasurement"][];
+            /**
+             * @description Seeded-content ownership (decision 4, RC-12). `vista` for a row Vista ships (a seed or content-bundle pass created it), `custom` for one a platform admin created. Returned by the platform admin catalogue reads.
+             * @enum {string}
+             */
+            content_origin?: "vista" | "custom";
+            /** @description A platform admin changed this shipped row. Upgrades keep the admin's content and offer later shipped changes instead of applying them. */
+            admin_modified?: boolean;
+            /** @description An upgrade shipped new content for this row and kept the admin's instead. Accept it with the row's `accept-update` action. */
+            update_available?: boolean;
+            /** @description The shipped content on offer, column by column: what accepting the update would write. Present only while `update_available` is true. */
+            offered_update?: {
+                [key: string]: unknown;
+            };
         };
         /** @description Control family grouping (shape is currently free-form; not pinned in this slice). */
         Family: {
@@ -2123,6 +2217,19 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
             measurement_type?: components["schemas"]["MeasurementType"];
+            /**
+             * @description Seeded-content ownership (decision 4, RC-12). `vista` for a row Vista ships (a seed or content-bundle pass created it), `custom` for one a platform admin created. Returned by the platform admin catalogue reads.
+             * @enum {string}
+             */
+            content_origin?: "vista" | "custom";
+            /** @description A platform admin changed this shipped row. Upgrades keep the admin's content and offer later shipped changes instead of applying them. */
+            admin_modified?: boolean;
+            /** @description An upgrade shipped new content for this row and kept the admin's instead. Accept it with the row's `accept-update` action. */
+            update_available?: boolean;
+            /** @description The shipped content on offer, column by column: what accepting the update would write. Present only while `update_available` is true. */
+            offered_update?: {
+                [key: string]: unknown;
+            };
         };
         /** @description A tenant-authored compliance framework (models.TenantFramework). */
         TenantFramework: {
@@ -4785,6 +4892,89 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    adminAcceptFrameworkUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Update accepted; the row as it now stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminFrameworkResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    adminAcceptControlUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                controlId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Update accepted; the row as it now stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminControlResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    adminAcceptMeasurementUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                measurementId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Update accepted; the row as it now stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminMeasurementResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -363,17 +364,21 @@ func (s *ResourceService) generateOptimizationSuggestions(usage *models.Resource
 // GetTenantResourceHealthSummary returns resource health metrics for a specific tenant (for tenant health service)
 func (s *ResourceService) GetTenantResourceHealthSummary(tenantID uuid.UUID) (*models.TenantResourceHealthSummary, error) {
 	summary := &models.TenantResourceHealthSummary{
-		TenantID:                tenantID,
-		LastUpdated:             time.Now(),
-		ResourceEfficiencyScore: 75.0, // Default efficiency score
+		TenantID:    tenantID,
+		LastUpdated: time.Now(),
 	}
 
-	// Get resource usage for last 24 hours
+	// Get resource usage for last 24 hours.
+	//
+	// A read failure is returned, not papered over. This used to answer 200
+	// with a default efficiency score of 75 and zero cost, which
+	// tenant-health-service could not tell from a measurement — so the cost
+	// factor of every tenant's health index was scored from the default. An
+	// error makes the caller list this service in unavailable_sources and
+	// report the factor as unknown (RC-14).
 	usage, err := s.GetTenantResourceUsage(tenantID, "24h")
 	if err != nil {
-		// If we can't get usage data, return defaults
-		s.log.WithError(err).WithField("tenant_id", tenantID).Warn("Failed to get tenant resource usage, using defaults")
-		return summary, nil
+		return nil, fmt.Errorf("tenant resource usage: %w", err)
 	}
 
 	// Populate summary from usage data

@@ -3,8 +3,8 @@
 // kit's ops-shell.jsx (Sidebar + Topbar) against the operator theme tokens.
 //
 // Operator-only signatures from the design that are DATA-dependent — the tenant
-// switcher, scope bar, break-glass impersonation banner, the live platform
-// status mini-card, command palette, and per-route primary actions — are wired
+// switcher, scope bar, the live platform status mini-card, command palette,
+// and per-route primary actions — are wired
 // with the data layer during the Tenants/Overview slices. They're intentionally
 // omitted here so the foundation shell shows no fake data.
 import { useEffect, useState } from 'react';
@@ -68,8 +68,8 @@ export function AppShell() {
   // edition, so a Core build never offers MSP/Enterprise sections whose backend
   // it does not mount. The route guards (RequirePlatformPermission /
   // RequirePlatformEdition) back both up against deep links.
-  // Third gate: the LICENCE edition (Plans & Pricing hidden on Enterprise,
-  // Billing & Revenue only on MSP) — the build cannot tell those apart.
+  // Third gate: the LICENCE edition (Plans & Pricing and Billing & Revenue
+  // only on MSP) — the build cannot tell Enterprise from MSP.
   const visible = visibleSections(hasPermission, capabilities, SECTIONS, license);
   const groups: { label: string | null; items: typeof SECTIONS }[] = [
     { label: null, items: visible.filter((s) => s.group === null) },

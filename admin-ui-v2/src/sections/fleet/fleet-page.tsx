@@ -8,7 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Radar, Wifi, WifiOff, Workflow, Cable, Search } from 'lucide-react';
 import { clients } from '../../lib/clients';
 import { StatTile, MiniBar, StatusDot, StatusTag, Tag, num, relTime } from '../../components/ui/primitives';
-import { useFleetSensors, useFleetAgents, type FleetRow } from './queries';
+import { useFleetSensors, useFleetAgents, fleetKindCounts, type FleetRow } from './queries';
 import { useScope } from '../../app/scope';
 
 // /admin/metrics is explicitly cross-tenant and takes no tenant filter (unlike
@@ -57,18 +57,22 @@ function FleetTable() {
   const [q, setQ] = useState('');
   const [kind, setKind] = useState<'all' | 'sensor' | 'agent'>('all');
 
+  // The two endpoints are the two STORES, not the two kinds: the platform's
+  // in-cluster interrogation agent is a sensor-manager row but an agent
+  // (sensorFleetRow), so the chips count the merged rows by kind.
+  const merged = useMemo<FleetRow[]>(() => [...(sensors.data ?? []), ...(agents.data ?? [])], [sensors.data, agents.data]);
+
   const rows = useMemo<FleetRow[]>(() => {
     // Tenant scope is applied server-side (tenant_id query param); only the kind
     // and text facets are filtered client-side here.
-    const merged = [...(sensors.data ?? []), ...(agents.data ?? [])];
     const ql = q.trim().toLowerCase();
     return merged
       .filter((r) => (kind === 'all' || r.kind === kind) && (!ql || r.name.toLowerCase().includes(ql) || r.tenant.toLowerCase().includes(ql) || r.typeLabel.toLowerCase().includes(ql)))
       .sort((a, b) => a.tenant.localeCompare(b.tenant) || a.name.localeCompare(b.name));
-  }, [sensors.data, agents.data, q, kind]);
+  }, [merged, q, kind]);
 
   const loading = sensors.isLoading || agents.isLoading;
-  const counts = { all: (sensors.data?.length ?? 0) + (agents.data?.length ?? 0), sensor: sensors.data?.length ?? 0, agent: agents.data?.length ?? 0 };
+  const counts = fleetKindCounts(merged);
 
   return (
     <div className="op-panel" style={{ overflow: 'hidden' }}>
@@ -103,7 +107,7 @@ function FleetTable() {
         </tbody>
       </table>
       <div style={{ padding: '9px 16px', borderTop: '1px solid var(--op-border)', fontSize: 11.5, color: 'var(--op-t3)' }}>
-        {rows.length} of {counts.all} agents · live throughput / CPU / mem per row need a join to sensor health metrics (follow-up). Observe-only — act on a customer's agent via Impersonation.
+        {rows.length} of {counts.all} agents · live throughput / CPU / mem per row need a join to sensor health metrics (follow-up). Observe-only.
       </div>
     </div>
   );

@@ -33,7 +33,19 @@ func NewRetentionService(db, bypassDB *sql.DB) *RetentionService {
 	return &RetentionService{db: db, bypassDB: bypassDB}
 }
 
-// RetentionPolicy represents a retention policy
+// RetentionPolicy represents a retention policy.
+//
+// Two ages, both in days and both at least 1 (validated by the handler; the
+// table's valid_retention_days CHECK adds total >= hot):
+//   - HotStorageDays: once a log is older than this, the retention job copies
+//     it to archive storage (S3), when archival is configured;
+//   - TotalRetentionDays: once older than this, it is deleted — only after it
+//     was archived, when archival is configured.
+//
+// There is no cold-tier age. cold_storage_days was stored and shown but never
+// used as a number; its only effect was that leaving it empty silently turned
+// archival off — and with S3 configured, deletion too, since only archived
+// rows are deleted (admin-ui review decision 14, security-staff-16).
 type RetentionPolicy struct {
 	ID                  uuid.UUID  `json:"id" db:"id"`
 	TenantID            *uuid.UUID `json:"tenant_id,omitempty" db:"tenant_id"`
@@ -41,7 +53,6 @@ type RetentionPolicy struct {
 	EventType           *string    `json:"event_type,omitempty" db:"event_type"`
 	ComplianceFramework *string    `json:"compliance_framework,omitempty" db:"compliance_framework"`
 	HotStorageDays      int        `json:"hot_storage_days" db:"hot_storage_days"`
-	ColdStorageDays     *int       `json:"cold_storage_days,omitempty" db:"cold_storage_days"`
 	TotalRetentionDays  int        `json:"total_retention_days" db:"total_retention_days"`
 	IsActive            bool       `json:"is_active" db:"is_active"`
 	CreatedAt           time.Time  `json:"created_at" db:"created_at"`
@@ -52,7 +63,7 @@ type RetentionPolicy struct {
 func (s *RetentionService) GetRetentionPolicies(ctx context.Context) ([]RetentionPolicy, error) {
 	query := `
 		SELECT id, policy_name, event_type, compliance_framework,
-		       hot_storage_days, cold_storage_days, total_retention_days,
+		       hot_storage_days, total_retention_days,
 		       is_active, created_at, updated_at
 		FROM audit.retention_policies
 		ORDER BY policy_name
@@ -69,7 +80,7 @@ func (s *RetentionService) GetRetentionPolicies(ctx context.Context) ([]Retentio
 		var policy RetentionPolicy
 		err := rows.Scan(
 			&policy.ID, &policy.PolicyName, &policy.EventType, &policy.ComplianceFramework,
-			&policy.HotStorageDays, &policy.ColdStorageDays, &policy.TotalRetentionDays,
+			&policy.HotStorageDays, &policy.TotalRetentionDays,
 			&policy.IsActive, &policy.CreatedAt, &policy.UpdatedAt,
 		)
 		if err != nil {
@@ -85,7 +96,7 @@ func (s *RetentionService) GetRetentionPolicies(ctx context.Context) ([]Retentio
 func (s *RetentionService) GetRetentionPolicyByID(ctx context.Context, id uuid.UUID) (*RetentionPolicy, error) {
 	query := `
 		SELECT id, policy_name, event_type, compliance_framework,
-		       hot_storage_days, cold_storage_days, total_retention_days,
+		       hot_storage_days, total_retention_days,
 		       is_active, created_at, updated_at
 		FROM audit.retention_policies
 		WHERE id = $1
@@ -94,7 +105,7 @@ func (s *RetentionService) GetRetentionPolicyByID(ctx context.Context, id uuid.U
 	var policy RetentionPolicy
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&policy.ID, &policy.PolicyName, &policy.EventType, &policy.ComplianceFramework,
-		&policy.HotStorageDays, &policy.ColdStorageDays, &policy.TotalRetentionDays,
+		&policy.HotStorageDays, &policy.TotalRetentionDays,
 		&policy.IsActive, &policy.CreatedAt, &policy.UpdatedAt,
 	)
 	if err != nil {
@@ -109,14 +120,14 @@ func (s *RetentionService) CreateRetentionPolicy(ctx context.Context, policy *Re
 	query := `
 		INSERT INTO audit.retention_policies (
 			policy_name, event_type, compliance_framework,
-			hot_storage_days, cold_storage_days, total_retention_days, is_active
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			hot_storage_days, total_retention_days, is_active
+		) VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at
 	`
 
 	err := s.db.QueryRowContext(ctx, query,
 		policy.PolicyName, policy.EventType, policy.ComplianceFramework,
-		policy.HotStorageDays, policy.ColdStorageDays, policy.TotalRetentionDays, policy.IsActive,
+		policy.HotStorageDays, policy.TotalRetentionDays, policy.IsActive,
 	).Scan(&policy.ID, &policy.CreatedAt, &policy.UpdatedAt)
 
 	return err
@@ -127,14 +138,14 @@ func (s *RetentionService) UpdateRetentionPolicy(ctx context.Context, policy *Re
 	query := `
 		UPDATE audit.retention_policies
 		SET policy_name = $1, event_type = $2, compliance_framework = $3,
-		    hot_storage_days = $4, cold_storage_days = $5, total_retention_days = $6,
-		    is_active = $7, updated_at = NOW()
-		WHERE id = $8
+		    hot_storage_days = $4, total_retention_days = $5,
+		    is_active = $6, updated_at = NOW()
+		WHERE id = $7
 	`
 
 	_, err := s.db.ExecContext(ctx, query,
 		policy.PolicyName, policy.EventType, policy.ComplianceFramework,
-		policy.HotStorageDays, policy.ColdStorageDays, policy.TotalRetentionDays,
+		policy.HotStorageDays, policy.TotalRetentionDays,
 		policy.IsActive, policy.ID,
 	)
 

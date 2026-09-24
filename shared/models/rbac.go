@@ -207,18 +207,31 @@ type PlatformStats struct {
 	ActiveTenants int `json:"active_tenants" db:"active_tenants"`
 	TotalUsers    int `json:"total_users" db:"total_users"`
 	TotalAssets   int `json:"total_assets" db:"total_assets"`
-	TotalSensors  int `json:"total_sensors" db:"total_sensors"`
+	// TotalSensors counts customer-deployed sensors only; the rows the platform
+	// registers for every tenant are TotalPlatformManaged, and discovery agents
+	// (device_agents) are TotalDeviceAgents. See admin-service internal/agentcounts.
+	TotalSensors         int `json:"total_sensors" db:"total_sensors"`
+	TotalDeviceAgents    int `json:"total_device_agents" db:"total_device_agents"`
+	TotalPlatformManaged int `json:"total_platform_managed" db:"total_platform_managed"`
 }
 
 // TenantStats represents statistics for a specific tenant
 type TenantStats struct {
-	TenantID     uuid.UUID `json:"tenant_id" db:"tenant_id"`
-	TenantName   string    `json:"tenant_name" db:"tenant_name"`
-	UserCount    int       `json:"user_count" db:"user_count"`
-	AssetCount   int       `json:"asset_count" db:"asset_count"`
-	SensorCount  int       `json:"sensor_count" db:"sensor_count"`
-	CreatedAt    time.Time `json:"created_at" db:"created_at"`
-	LastActivity time.Time `json:"last_activity" db:"last_activity"`
-	StorageUsed  int64     `json:"storage_used" db:"storage_used"`
-	APIRequests  int64     `json:"api_requests" db:"api_requests"`
+	TenantID   uuid.UUID `json:"tenant_id" db:"tenant_id"`
+	TenantName string    `json:"tenant_name" db:"tenant_name"`
+	UserCount  int       `json:"user_count" db:"user_count"`
+	AssetCount int       `json:"asset_count" db:"asset_count"`
+	// SensorCount is the customer-deployed sensors only — the platform-managed
+	// rows every tenant is given (platform = 'platform' or the 'system' tag) are
+	// PlatformManagedCount, never part of it. DeviceAgentCount is the live
+	// discovery agents, and AgentCount = SensorCount + DeviceAgentCount: what the
+	// customer deployed. Computed by admin-service internal/agentcounts.
+	SensorCount          int       `json:"sensor_count" db:"sensor_count"`
+	DeviceAgentCount     int       `json:"device_agent_count" db:"device_agent_count"`
+	AgentCount           int       `json:"agent_count" db:"agent_count"`
+	PlatformManagedCount int       `json:"platform_managed_count" db:"platform_managed_count"`
+	CreatedAt            time.Time `json:"created_at" db:"created_at"`
+	LastActivity         time.Time `json:"last_activity" db:"last_activity"`
+	StorageUsed          int64     `json:"storage_used" db:"storage_used"`
+	APIRequests          int64     `json:"api_requests" db:"api_requests"`
 }

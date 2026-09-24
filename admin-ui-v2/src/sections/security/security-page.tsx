@@ -16,16 +16,19 @@ import { SecurityPolicyPage } from './policy-page';
 import { ActivityPage } from './activity-page';
 import { RetentionPage } from './retention-page';
 import { SiemPage } from './siem-page';
+import { FirstPermittedChild, RequireChildPermission } from '../../app/section-child';
 
 export function SecurityPage() {
   return (
     <Routes>
-      <Route index element={<SecurityDashboardPage />} />
-      <Route path="dashboard" element={<SecurityDashboardPage />} />
-      <Route path="activity" element={<ActivityPage />} />
-      <Route path="retention" element={<RetentionPage />} />
-      <Route path="siem" element={<SiemPage />} />
-      <Route path="policy" element={<SecurityPolicyPage />} />
+      {/* Each sub-view is guarded on its nav entry's permission; the index
+          lands on the first one this operator may open. */}
+      <Route index element={<FirstPermittedChild section="security" />} />
+      <Route path="dashboard" element={<RequireChildPermission section="security" child="dashboard"><SecurityDashboardPage /></RequireChildPermission>} />
+      <Route path="activity" element={<RequireChildPermission section="security" child="activity"><ActivityPage /></RequireChildPermission>} />
+      <Route path="retention" element={<RequireChildPermission section="security" child="retention"><RetentionPage /></RequireChildPermission>} />
+      <Route path="siem" element={<RequireChildPermission section="security" child="siem"><SiemPage /></RequireChildPermission>} />
+      <Route path="policy" element={<RequireChildPermission section="security" child="policy"><SecurityPolicyPage /></RequireChildPermission>} />
       <Route path="*" element={<Navigate to="/security" replace />} />
     </Routes>
   );

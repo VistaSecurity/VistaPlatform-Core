@@ -41,8 +41,7 @@ What's intentionally **not** here yet (and why):
   clients. Next: the **Tenants** slice (table + drawer — the densest, most reused
   patterns), then the shared primitives it needs (StatusTag, StatTile, charts).
 - **Operator signatures that need the data layer** — tenant switcher, scope bar,
-  break-glass impersonation banner, live platform-status mini-card, command
-  palette, per-route primary actions. Wired during the Tenants/Overview slices
+  live platform-status mini-card, command palette, per-route primary actions. Wired during the Tenants/Overview slices
   (marked TODO in `app-shell.tsx`).
 - **Kit staging dir** — the design kit lives at `_incoming/admin-ui-v2-kit/`
   (gitignored; build-time source of truth, not shipped).

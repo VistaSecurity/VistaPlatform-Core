@@ -12,6 +12,16 @@
 -- a new tenant is onboarded. No tenant-specific data is included here.
 -- =================================================================
 
+-- This session is a SEED PASS. The seeded-content guard triggers in schema.sql
+-- ("seeded content: admin edits win", decision 4 / RC-12) read this to tell
+-- the seed from a platform admin: in a seed pass they insert only what is
+-- missing and not tombstoned, apply shipped changes only to rows nobody has
+-- edited, and turn a change to an edited row into an "update available" offer
+-- instead of an overwrite. Without it every UPSERT below would be taken for an
+-- admin edit. RESET at the end of the file, so a pooled connection that ran
+-- this file (the Go test harness) does not stay in seed mode.
+SET vista.seed_apply = 'on';
+
 -- =================================================================
 -- Platform Roles
 -- =================================================================
@@ -59,6 +69,7 @@ INSERT INTO platform_permissions (name, resource, action, description) VALUES
 ('platform.security',         'platform',           'read',   'View security dashboard and events'),
 ('platform.security.manage',  'platform',           'manage', 'Manage security settings and incidents'),
 ('platform.audit',            'platform',           'read',   'View platform audit logs'),
+('platform.audit.manage',     'platform',           'manage', 'Manage audit retention policies, SIEM export and audit alert rules'),
 ('platform.override',         'platform',           'manage', 'Override permissions in exceptional cases'),
 ('platform.notifications.manage','platform',        'manage', 'Manage platform notification channels, rules, and announcements'),
 ('platform.impersonate',      'platform',           'manage', 'Initiate and audit tenant impersonation (break-glass)'),
@@ -93,6 +104,7 @@ WHERE r.name = 'platform_admin'
     'algorithms.manage','catalogs.manage',
     'platform.settings','platform.billing','platform.analytics',
     'platform.health','platform.logs','platform.logs.read','platform.security','platform.audit',
+    'platform.audit.manage',
     'platform.notifications.manage','platform.impersonate'
   )
 ON CONFLICT (role_id, permission_id) DO NOTHING;
@@ -965,16 +977,48 @@ ON CONFLICT (code) DO NOTHING;
 -- Update existing algorithms to mark as non-PQC
 UPDATE algorithms SET is_pqc = false, pqc_standardization_status = 'none' WHERE is_pqc IS NULL;
 
--- Add PQC migration recommendations to existing algorithms
+-- Add PQC migration recommendations to existing algorithms — ONCE (catalog-9,
+-- RC-12).
+--
+-- These used to run unguarded, so every helm upgrade prepended the two PQC
+-- alternatives again and appended the "PQC Migration" paragraph again: an
+-- install upgraded ten times recommended ML-KEM-768 ten times over. First the
+-- damage is repaired (duplicate alternatives collapsed to their first
+-- occurrence, the repeated paragraph collapsed to one copy at the end), then the
+-- addition is guarded so it happens only to a row that carries NEITHER half of
+-- it. Guarding on both halves together is deliberate: a platform admin who
+-- removed the alternatives or the paragraph through Catalog ▸ Algorithms made a
+-- decision, and an upgrade putting half of it back would be the overwrite this
+-- file must not do. Every statement here is a no-op on its second run.
+UPDATE algorithms SET recommended_alternatives = ARRAY(
+        SELECT a FROM unnest(recommended_alternatives) WITH ORDINALITY AS u(a, n)
+         GROUP BY a ORDER BY min(n))
+WHERE code IN ('RSA-2048', 'RSA-4096', 'ECDHE', 'DHE', 'ECDSA-SHA256', 'ECDSA-SHA512', 'RSA-SHA256', 'RSA-SHA512')
+  AND cardinality(recommended_alternatives) > (SELECT count(DISTINCT a) FROM unnest(recommended_alternatives) AS a);
+
+UPDATE algorithms SET
+    migration_guidance = replace(migration_guidance, E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-KEM (formerly CRYSTALS-Kyber) for key exchange or ML-DSA (formerly CRYSTALS-Dilithium) for signatures per NIST PQC standards.', '') || E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-KEM (formerly CRYSTALS-Kyber) for key exchange or ML-DSA (formerly CRYSTALS-Dilithium) for signatures per NIST PQC standards.'
+WHERE code IN ('RSA-2048', 'RSA-4096', 'ECDHE', 'DHE')
+  AND length(migration_guidance) - length(replace(migration_guidance, E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-KEM (formerly CRYSTALS-Kyber) for key exchange or ML-DSA (formerly CRYSTALS-Dilithium) for signatures per NIST PQC standards.', '')) > length(E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-KEM (formerly CRYSTALS-Kyber) for key exchange or ML-DSA (formerly CRYSTALS-Dilithium) for signatures per NIST PQC standards.');
+
+UPDATE algorithms SET
+    migration_guidance = replace(migration_guidance, E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-DSA (formerly CRYSTALS-Dilithium) or SLH-DSA (formerly SPHINCS+) for digital signatures per NIST PQC standards.', '') || E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-DSA (formerly CRYSTALS-Dilithium) or SLH-DSA (formerly SPHINCS+) for digital signatures per NIST PQC standards.'
+WHERE code IN ('ECDSA-SHA256', 'ECDSA-SHA512', 'RSA-SHA256', 'RSA-SHA512')
+  AND length(migration_guidance) - length(replace(migration_guidance, E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-DSA (formerly CRYSTALS-Dilithium) or SLH-DSA (formerly SPHINCS+) for digital signatures per NIST PQC standards.', '')) > length(E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-DSA (formerly CRYSTALS-Dilithium) or SLH-DSA (formerly SPHINCS+) for digital signatures per NIST PQC standards.');
+
 UPDATE algorithms SET
     recommended_alternatives = ARRAY['ML-KEM-768', 'ML-KEM-1024'] || recommended_alternatives,
     migration_guidance = COALESCE(migration_guidance, '') || E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-KEM (formerly CRYSTALS-Kyber) for key exchange or ML-DSA (formerly CRYSTALS-Dilithium) for signatures per NIST PQC standards.'
-WHERE code IN ('RSA-2048', 'RSA-4096', 'ECDHE', 'DHE');
+WHERE code IN ('RSA-2048', 'RSA-4096', 'ECDHE', 'DHE')
+  AND NOT (COALESCE(recommended_alternatives, ARRAY[]::text[]) && ARRAY['ML-KEM-768', 'ML-KEM-1024'])
+  AND strpos(COALESCE(migration_guidance, ''), 'PQC Migration: This algorithm is not quantum-resistant') = 0;
 
 UPDATE algorithms SET
     recommended_alternatives = ARRAY['ML-DSA-65', 'ML-DSA-87'] || recommended_alternatives,
     migration_guidance = COALESCE(migration_guidance, '') || E'\n\nPQC Migration: This algorithm is not quantum-resistant. Consider migrating to ML-DSA (formerly CRYSTALS-Dilithium) or SLH-DSA (formerly SPHINCS+) for digital signatures per NIST PQC standards.'
-WHERE code IN ('ECDSA-SHA256', 'ECDSA-SHA512', 'RSA-SHA256', 'RSA-SHA512');
+WHERE code IN ('ECDSA-SHA256', 'ECDSA-SHA512', 'RSA-SHA256', 'RSA-SHA512')
+  AND NOT (COALESCE(recommended_alternatives, ARRAY[]::text[]) && ARRAY['ML-DSA-65', 'ML-DSA-87'])
+  AND strpos(COALESCE(migration_guidance, ''), 'PQC Migration: This algorithm is not quantum-resistant') = 0;
 
 -- =================================================================
 -- NIST Post-Quantum Cryptography (PQC) Algorithms
@@ -2815,9 +2859,14 @@ WHERE mt.id = cm.measurement_type_id
 -- does NOT count all published frameworks: an Enterprise install also carries
 -- the regulated content bundle, so a total count would differ by edition and
 -- could not be asserted here.
+--
+-- A framework a platform admin archived or deleted is ACCOUNTED FOR, not
+-- missing: admin edits win over the seed (decision 4, RC-12), so the seed no
+-- longer republishes it, and warning about it on every upgrade would be noise.
 DO $$
 DECLARE
     free_framework_count INTEGER;
+    unaccounted INTEGER;
 BEGIN
     SELECT COUNT(*) INTO free_framework_count
     FROM platform_frameworks
@@ -2825,9 +2874,14 @@ BEGIN
       AND code IN ('best-practices', 'pqc-readiness', 'cert-hygiene',
                    'cert-expiry-not-expired', 'cert-expiry-30-day', 'cert-expiry-90-day',
                    'inventory-hygiene', 'lifecycle');
+    SELECT public.seeded_frameworks_unaccounted(ARRAY['best-practices', 'pqc-readiness', 'cert-hygiene',
+                   'cert-expiry-not-expired', 'cert-expiry-30-day', 'cert-expiry-90-day',
+                   'inventory-hygiene', 'lifecycle']) INTO unaccounted;
 
     IF free_framework_count = 8 THEN
         RAISE NOTICE '✅ Framework seeding complete: all 8 free frameworks published';
+    ELSIF unaccounted = 0 THEN
+        RAISE NOTICE '✅ Framework seeding complete: % of 8 free frameworks published; the rest were archived or removed by a platform admin and are left that way', free_framework_count;
     ELSIF free_framework_count > 0 THEN
         RAISE WARNING '⚠️  Framework seeding incomplete: only % of 8 free frameworks published', free_framework_count;
         RAISE WARNING '   Check logs above for missing measurement_types or other errors';
@@ -3920,11 +3974,22 @@ WHERE NOT EXISTS (
 -- (1) De-duplicate platform control_measurements.
 -- Earlier releases seeded these with a bare INSERT (no ON CONFLICT, and the
 -- table has no unique key), so every re-seed appended a fresh copy. Collapse
--- each (control_id, measurement_type_id, framework_type) group to its oldest
--- row. tenant_measurement_overrides.control_measurement_id references this
--- table ON DELETE CASCADE, so first re-point any overrides onto the survivor
--- where that does not violate the per-tenant unique key; the rare conflicting
--- override is then removed by the CASCADE when its duplicate row is deleted.
+-- each group of EXACT copies to its oldest row. tenant_measurement_overrides
+-- .control_measurement_id references this table ON DELETE CASCADE, so first
+-- re-point any overrides onto the survivor where that does not violate the
+-- per-tenant unique key; the rare conflicting override is then removed by the
+-- CASCADE when its duplicate row is deleted.
+--
+-- "Exact copy" is the whole rule, not just its (control, measurement type):
+-- a re-seed copy repeats the shipped rule verbatim, while a second rule of the
+-- same measurement type is how a platform admin tightens a control (a second
+-- tls_version pattern, a key_size floor AND ceiling). Grouping by type alone
+-- deleted those on every upgrade — the admin's work, and any tenant overrides
+-- on it — which is exactly the overwrite decision 4 (RC-12) forbids. A rule an
+-- admin created (content_origin 'admin') is never a candidate at all, even as
+-- the row kept; an unmarked rule from before the marker is removed only when
+-- it is indistinguishable from the rule kept — and then deleting it changes
+-- nothing any evaluation can see.
 UPDATE tenant_measurement_overrides o
 SET control_measurement_id = k.keep_id
 FROM (
@@ -3933,7 +3998,9 @@ FROM (
            row_number()    OVER w AS rn
     FROM control_measurements
     WHERE framework_type = 'platform'
-    WINDOW w AS (PARTITION BY control_id, measurement_type_id, framework_type
+      AND content_origin IS DISTINCT FROM 'admin'
+    WINDOW w AS (PARTITION BY control_id, measurement_type_id, framework_type,
+                              rule_type, predicate, severity_override, weight
                  ORDER BY created_at, id)
 ) k
 WHERE o.control_measurement_id = k.id
@@ -3947,10 +4014,12 @@ WHERE o.control_measurement_id = k.id
 DELETE FROM control_measurements c
 USING (
     SELECT id,
-           row_number() OVER (PARTITION BY control_id, measurement_type_id, framework_type
+           row_number() OVER (PARTITION BY control_id, measurement_type_id, framework_type,
+                                           rule_type, predicate, severity_override, weight
                               ORDER BY created_at, id) AS rn
     FROM control_measurements
     WHERE framework_type = 'platform'
+      AND content_origin IS DISTINCT FROM 'admin'
 ) d
 WHERE c.id = d.id AND d.rn > 1;
 
@@ -4857,11 +4926,13 @@ ON CONFLICT (key) WHERE tenant_id IS NULL DO UPDATE SET
 -- key, and a `\i` there resolves to a path that does not exist in the
 -- container.
 --
--- The upsert reconciles a seeded rule that changed and LEAVES ALONE any rule a
+-- The upsert reconciles a shipped rule that changed and LEAVES ALONE any rule a
 -- platform admin added through Catalog ▸ Classification rules — those are not
--- in the VALUES list and nothing here deletes. An admin who wants a different
--- answer for a seeded pattern adds a more specific rule rather than editing
--- the seeded one, because the next release's seed run would overwrite the edit.
+-- in the VALUES list and nothing here deletes. Admin edits to a shipped rule
+-- win too (decision 4, RC-12): the seeded-content guard trigger in schema.sql
+-- applies this upsert only to rules nobody has edited, turns a change to an
+-- edited rule into an "update available" offer the admin can accept, and skips
+-- a shipped rule the admin deleted instead of putting it back.
 
 -- BEGIN GENERATED: classification rules — from standards/classification-rules.yaml (make generate)
 INSERT INTO public.classification_rules (
@@ -5445,3 +5516,14 @@ ON CONFLICT (rule_kind, pattern) DO UPDATE SET
     source_url = EXCLUDED.source_url,
     updated_at = now();
 -- END GENERATED: classification rules
+
+-- Measurement rules are inserted only when missing (NOT EXISTS) and never
+-- upserted, so the seed never meets a rule seeded before the origin marker
+-- existed and cannot tell it from one a platform admin added under a shipped
+-- control. classify_seeded_measurements() (schema.sql) marks the ones it can
+-- place from their timestamps, and leaves the rest unmarked rather than calling
+-- an admin's rule Vista's. A no-op once classified; changes no content. The
+-- chart runs it again after the Enterprise content bundle.
+SELECT public.classify_seeded_measurements();
+
+RESET vista.seed_apply;

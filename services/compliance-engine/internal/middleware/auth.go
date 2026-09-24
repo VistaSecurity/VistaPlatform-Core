@@ -39,8 +39,3 @@ func RequirePlatformAuth(jwtSecret string) gin.HandlerFunc {
 func StringifyUserID() gin.HandlerFunc {
 	return sharedmw.StringifyContextIDs()
 }
-
-// RequirePlatformAdmin delegates to the shared RequirePlatformAdmin middleware.
-func RequirePlatformAdmin() gin.HandlerFunc {
-	return sharedmw.RequirePlatformAdmin()
-}
