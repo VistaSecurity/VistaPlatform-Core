@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-24T09:39:45Z",
-  "generated_date": "2026-09-24",
+  "generated_at": "2026-09-25T09:56:40Z",
+  "generated_date": "2026-09-25",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/35982395918",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/36121112582",
   "scanner": "trivy",
   "scope": {
     "severities": [
