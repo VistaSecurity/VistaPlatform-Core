@@ -750,7 +750,7 @@ func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, ag
 
 	var sensorID uuid.UUID
 	if err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `SELECT id FROM sensors WHERE tenant_id=$1 AND profile='device_interrogation' AND 'system'=ANY(tags) LIMIT 1`, tenantID).Scan(&sensorID)
+		return tx.QueryRowContext(ctx, `SELECT id FROM sensors WHERE tenant_id=$1 AND profile='device_interrogation' AND platform_managed AND deleted_at IS NULL ORDER BY created_at, id LIMIT 1`, tenantID).Scan(&sensorID)
 	}); err != nil {
 		return 0, fmt.Errorf("system device-interrogation sensor: %w", err)
 	}

@@ -83,7 +83,6 @@ func main() {
 	unifiedInventoryService := services.NewUnifiedInventoryService(db)
 	cryptoImplService := services.NewCryptoImplementationService(db)
 	cryptoRisksService := services.NewCryptoRisksService(db)
-	remediationService := services.NewRemediationService(db, algorithmService)
 	assetClassService := services.NewAssetClassService(db)
 	savedViewService := services.NewSavedViewService(db)
 	mergeProposalService := services.NewMergeProposalService(db)
@@ -130,13 +129,14 @@ func main() {
 	integrationsHandler := handlers.NewIntegrationsHandler(assetService)
 	networkSpaceHandler := handlers.NewNetworkSpaceHandler(networkSpaceService)
 	networkSpaceHandler.SetNetworkSegmentService(networkSegmentService)
-	assetLifecycleHandler := handlers.NewAssetLifecycleHandler(lifecycleService, revalidationService, assetService)
+	// Confirming a scan of assets outside the registered networks needs
+	// discovery.create as well as the route's assets.update ( W5.13b).
+	assetLifecycleHandler := newAssetLifecycleHandler(lifecycleService, revalidationService, assetService, db.DB.DB)
 	certificateHandler := handlers.NewCertificateHandler(certificateService)
 	algorithmHandler := handlers.NewAlgorithmHandler(algorithmService)
 	unifiedInventoryHandler := handlers.NewUnifiedInventoryHandler(unifiedInventoryService)
 	cryptoImplHandler := handlers.NewCryptoImplementationHandler(cryptoImplService)
 	cryptoRisksHandler := handlers.NewCryptoRisksHandlers(cryptoRisksService)
-	remediationHandler := handlers.NewRemediationHandler(remediationService)
 	externalConnectionsService := services.NewExternalConnectionsService(db, algorithmService)
 	externalConnectionsService.SetServiceIdentificationService(serviceIdentificationService)
 	assetService.SetExternalConnectionsService(externalConnectionsService)
@@ -417,15 +417,12 @@ func main() {
 		// Crypto configurations endpoints
 		api.GET("/inventory-service/crypto-implementations", cryptoImplHandler.GetCryptoImplementations)
 		api.GET("/inventory-service/crypto-implementations/:id", cryptoImplHandler.GetCryptoImplementationByID)
-		api.GET("/inventory-service/crypto-implementations/:id/remediation", remediationHandler.GetRemediationForCryptoImplementation)
 		api.GET("/inventory-service/crypto-implementations/:id/components", cryptoImplHandler.GetCryptoImplementationComponents)
 		// Crypto risks endpoints
 		api.GET("/inventory-service/crypto-risks/summary", cryptoRisksHandler.GetSummary)
 		api.GET("/inventory-service/crypto-risks/export", cryptoRisksHandler.ExportRisks)
 		api.GET("/inventory-service/crypto-risks", cryptoRisksHandler.ListRisks)
 		api.GET("/inventory-service/crypto-risks/:id", cryptoRisksHandler.GetRisk)
-		// Remediation guidance endpoints
-		api.GET("/inventory-service/remediation/algorithm/:code", remediationHandler.GetRemediationByAlgorithm)
 		// Crypto assets
 		// At-rest encryption posture (Data Protection lens). Read-gated on
 		// assets.read: these rows describe managed inventory, and every
@@ -581,7 +578,7 @@ func main() {
 		api.POST("/inventory-service/assets/stale/archive", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ArchiveAssets)
 		api.POST("/inventory-service/assets/revalidate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RevalidateAssets)
 		// Active Scan (): on-demand crypto scan of selected assets.
-		api.POST("/inventory-service/assets/scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ScanAssets)
+		api.POST("/inventory-service/assets/scan", assetScanChain(rawDB, assetLifecycleHandler)...)
 		api.GET("/inventory-service/lifecycle/policy", assetLifecycleHandler.GetPolicy)
 		api.PUT("/inventory-service/lifecycle/policy", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), assetLifecycleHandler.UpdatePolicy)
 
@@ -668,7 +665,7 @@ func main() {
 		apiv2.POST("/inventory-service/infrastructure-assets/stale/archive", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ArchiveAssets)
 		apiv2.POST("/inventory-service/infrastructure-assets/revalidate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RevalidateAssets)
 		// Active Scan (): on-demand crypto scan of selected assets.
-		apiv2.POST("/inventory-service/infrastructure-assets/scan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ScanAssets)
+		apiv2.POST("/inventory-service/infrastructure-assets/scan", assetScanChain(rawDB, assetLifecycleHandler)...)
 		apiv2.POST("/inventory-service/infrastructure-assets/enrich-all", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), assetHandler.EnrichAllAssets)
 		apiv2.PUT("/inventory-service/infrastructure-assets/:id/service", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetHandler.UpdateAssetService)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id", assetHandler.GetAssetByID)
@@ -733,9 +730,10 @@ func main() {
 		// Crypto Configurations (CMDB-aligned, replaces crypto-implementations)
 		apiv2.GET("/inventory-service/crypto-configurations", cryptoImplHandler.GetCryptoImplementations)
 		apiv2.GET("/inventory-service/crypto-configurations/:id", cryptoImplHandler.GetCryptoImplementationByID)
-		apiv2.GET("/inventory-service/crypto-configurations/:id/remediation", remediationHandler.GetRemediationForCryptoImplementation)
 		// Per-component catalogue assessment behind the configuration's risk
-		// score — the "why this score" panel in the inventory drawer.
+		// score — the "why this score" panel in the inventory drawer. It also
+		// carries each component's catalogue remediation guidance, which is
+		// why there is no separate /crypto-configurations/:id/remediation.
 		apiv2.GET("/inventory-service/crypto-configurations/:id/components", cryptoImplHandler.GetCryptoImplementationComponents)
 
 		// Asset↔Certificate relationship edges (for visualizers and any feature
@@ -748,9 +746,6 @@ func main() {
 		apiv2.GET("/inventory-service/crypto-risks/export", cryptoRisksHandler.ExportRisks)
 		apiv2.GET("/inventory-service/crypto-risks", cryptoRisksHandler.ListRisks)
 		apiv2.GET("/inventory-service/crypto-risks/:id", cryptoRisksHandler.GetRisk)
-
-		// Remediation guidance
-		apiv2.GET("/inventory-service/remediation/algorithm/:code", remediationHandler.GetRemediationByAlgorithm)
 
 		// Keys and Libraries (CMDB: cmdb_ci_credential / crypto components)
 		apiv2.GET("/inventory-service/crypto-applications", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), cryptoApplicationsHandler.ListCryptoApplications)

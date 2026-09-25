@@ -18,6 +18,7 @@ import {
   originNote,
   overridesToSend,
   settingLabel,
+  settingName,
   settingUnit,
   stateNote,
   versionNote,
@@ -60,6 +61,10 @@ export function SettingsPanel({
   const [result, setResult] = useState<SaveResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ key: string; confirm: string }[] | null>(null);
+  const nameOf = (key: string) => {
+    const s = settings.find((x) => x.key === key);
+    return s ? settingName(s) : settingLabel(key);
+  };
 
   const dirty = useMemo(() => changedKeys(settings, edited), [settings, edited]);
   const note = stateNote(status);
@@ -143,7 +148,7 @@ export function SettingsPanel({
           <div key={s.key} style={{ padding: '11px 0', borderBottom: '1px solid var(--app-border)' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{settingLabel(s.key)}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{settingName(s)}</div>
                 <div style={{ fontSize: 11, color: 'var(--app-t3)', lineHeight: 1.5, marginTop: 2 }}>{s.description}</div>
                 <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 4 }}>
                   {originNote(s.origin)}
@@ -173,7 +178,7 @@ export function SettingsPanel({
           <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 6 }}>Confirm this change</div>
           {confirming.map((c) => (
             <div key={c.key} style={{ fontSize: 11.5, color: 'var(--app-t2)', lineHeight: 1.6, marginBottom: 6 }}>
-              <strong>{settingLabel(c.key)}:</strong> {c.confirm}
+              <strong>{nameOf(c.key)}:</strong> {c.confirm}
             </div>
           ))}
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
@@ -205,7 +210,7 @@ export function SettingsPanel({
           ))}
           {result.needs_restart.length > 0 && (
             <div style={{ color: 'var(--warn)' }}>
-              Takes effect on restart: {result.needs_restart.map(settingLabel).join(', ')}
+              Takes effect on restart: {result.needs_restart.map(nameOf).join(', ')}
             </div>
           )}
         </div>
@@ -248,7 +253,13 @@ function SettingControl({
   if (setting.kind === 'bool') {
     return (
       <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: disabled ? 'default' : 'pointer' }}>
-        <input type="checkbox" checked={value === true} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+        <input
+          type="checkbox"
+          aria-label={settingName(setting)}
+          checked={value === true}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+        />
         {value === true ? 'On' : 'Off'}
       </label>
     );

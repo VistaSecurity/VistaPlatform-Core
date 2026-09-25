@@ -134,6 +134,24 @@ func (jp *JobProcessor) dispatchToSensor(job *models.DiscoveryJob) error {
 		jp.failDispatch(job, fmt.Sprintf("could not read the job's targets: %v", err))
 		return nil
 	}
+	// A job carrying confirmed external targets is never handed to a tenant
+	// sensor (CreateJob refuses to create one; this catches any that exist
+	// anyway). The sensor would re-resolve names and scan without the
+	// platform's per-address re-check — including of the operator switch,
+	// which the platform path reads again at scan time ( W5.13b).
+	var hasExternal bool
+	if err := jp.withTenantTxx(ctx, job.TenantID, func(tx *sqlx.Tx) error {
+		var e error
+		hasExternal, e = jobHasConfirmedExternalTargets(tx, job.ID)
+		return e
+	}); err != nil {
+		jp.failDispatch(job, fmt.Sprintf("could not read the job's external-target record: %v", err))
+		return nil
+	}
+	if hasExternal {
+		jp.failDispatch(job, "targets outside the tenant's registered networks are only scanned from the platform sensor; nothing was dispatched")
+		return nil
+	}
 	options, err := jp.getJobOptions(job.TenantID, job.ID)
 	if err != nil {
 		return fmt.Errorf("read discovery job policy markers: %w", err)

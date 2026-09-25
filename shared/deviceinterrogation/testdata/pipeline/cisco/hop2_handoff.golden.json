@@ -1,0 +1,425 @@
+{
+  "vendor": "cisco",
+  "input_sha256": "29cc1f5a8656e8abe4e8c83a201950d532a4dbafc8ae4aa6f7edbae494153b09",
+  "imports": [
+    {
+      "asset_status": "pending_approval",
+      "findings": [
+        {
+          "asset_type": "server",
+          "cipher_suite": "",
+          "hash_algorithm": null,
+          "hostname": "192.0.2.228",
+          "ip_address": "192.0.2.228",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 500,
+          "protocol": "IKE",
+          "protocol_version": "IKEv1",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "",
+            "confidence": 0.95,
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:0}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "IKEv1"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "AES-256-CBC",
+          "hash_algorithm": "SHA256",
+          "hostname": "192.0.2.228",
+          "ip_address": "192.0.2.228",
+          "key_exchange_algorithm": "DH-MODP-2048",
+          "key_size": 2048,
+          "port": 500,
+          "protocol": "IKEv2",
+          "protocol_version": "IKEv2",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "AES-256-CBC",
+            "confidence": 0.95,
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:1}}",
+            "discovery_method": "device_interrogation",
+            "hash_algorithm": "SHA256",
+            "kex_algorithms": [
+              "DH-MODP-2048"
+            ],
+            "key_exchange_algorithm": "DH-MODP-2048",
+            "key_size": 2048,
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "IKEv2",
+            "vpn_peer_address": "203.0.113.60"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "AES-256-CBC",
+          "hash_algorithm": "SHA1",
+          "hostname": "192.0.2.228",
+          "ip_address": "192.0.2.228",
+          "key_exchange_algorithm": null,
+          "key_size": 256,
+          "port": 4500,
+          "protocol": "IPSec",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "AES-256-CBC",
+            "confidence": 0.95,
+            "config_name": "Tunnel1-head-0",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:2}}",
+            "discovery_method": "device_interrogation",
+            "hash_algorithm": "SHA1",
+            "key_size": 256,
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "",
+            "vpn_peer_address": "198.51.100.2"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "AES-256-CBC",
+          "hash_algorithm": "SHA1",
+          "hostname": "192.0.2.228",
+          "ip_address": "192.0.2.228",
+          "key_exchange_algorithm": null,
+          "key_size": 256,
+          "port": 4500,
+          "protocol": "IPSec",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "AES-256-CBC",
+            "confidence": 0.95,
+            "config_name": "Tunnel2-head-0",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:3}}",
+            "discovery_method": "device_interrogation",
+            "hash_algorithm": "SHA1",
+            "key_size": 256,
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "",
+            "vpn_peer_address": "203.0.113.2"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "AES-256-CBC",
+          "hash_algorithm": "SHA256",
+          "hostname": "192.0.2.228",
+          "ip_address": "192.0.2.228",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 500,
+          "protocol": "IPSec",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "AES-256-CBC",
+            "confidence": 0.95,
+            "config_name": "VPN-MAP",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:4}}",
+            "discovery_method": "device_interrogation",
+            "hash_algorithm": "SHA256",
+            "kex_algorithms": [
+              "DH-MODP-2048"
+            ],
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "supported_ciphers": [
+              "AES-256-CBC"
+            ],
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "",
+            "vpn_peer_address": "203.0.113.50"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "",
+          "hash_algorithm": null,
+          "hostname": "192.0.2.228",
+          "ip_address": "192.0.2.228",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 22,
+          "protocol": "SSH",
+          "protocol_version": "SSH-1.99",
+          "raw_data": {
+            "asset_type": "appliance",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "",
+            "confidence": 0.95,
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:5}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "ssh_banner": "SSH-1.99-Cisco-1.25",
+            "ssh_host_key_fingerprint": "SHA256:REJ0Ms48peH3+nubWg8Sf12BGOVw2gyg3Xqor46O8eI",
+            "ssh_host_key_type": "ssh-ed25519",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "SSH-1.99"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        }
+      ]
+    }
+  ],
+  "external_connections": [],
+  "rows": [
+    {
+      "row": 0,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 1,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 2,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 3,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 4,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 5,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    }
+  ],
+  "process_error": "",
+  "learned_segments": [],
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "core-rtr-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "core-rtr-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "REDACTEDSN5",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=ce-router,ip_address=198.51.100.2]",
+      "hostname": "ce-router",
+      "primary_address": "198.51.100.2",
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "ce-router",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.2",
+          "scope": "tenant",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
+      "hostname": "hpswitch",
+      "primary_address": "192.0.2.2",
+      "class_key": "switch",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "desktop-switch",
+          "scope": "segment:192.0.2.0/25",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "hostname",
+          "value": "hpswitch",
+          "scope": "segment:192.0.2.0/25",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.2",
+          "scope": "segment:192.0.2.0/25",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "94:f1:28:79:55:55",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=server,ip_address=203.0.113.2]",
+      "hostname": "server",
+      "primary_address": "203.0.113.2",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "server",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "203.0.113.2",
+          "scope": "tenant",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=vios-l2-1]",
+      "hostname": "vios-l2-1",
+      "primary_address": null,
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "vios-l2-1",
+          "scope": "tenant",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[ip_address=198.51.100.5,mac_address=44:48:c1:c4:dd:dd]",
+      "hostname": "",
+      "primary_address": "198.51.100.5",
+      "class_key": "access_point",
+      "identifiers": [
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.5",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "44:48:c1:c4:dd:dd",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[mac_address=7c:25:86:c9:aa:aa]",
+      "hostname": "",
+      "primary_address": null,
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "mac_address",
+          "value": "7c:25:86:c9:aa:aa",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ]
+}

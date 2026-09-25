@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -21,8 +23,11 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedinterrogation "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -42,6 +47,9 @@ type deviceStore interface {
 	// ResetSSHHostKeyPin clears the pinned SSH host key so the next
 	// interrogation enrols the key the device presents (H7).
 	ResetSSHHostKeyPin(ctx context.Context, tenantID, deviceID uuid.UUID) error
+	// PinSSHHostKeyIfUnset pins the host key Add device authenticated through
+	// ( review NB-6).
+	PinSSHHostKeyIfUnset(ctx context.Context, tenantID, deviceID uuid.UUID, fingerprint, keyType string) (bool, error)
 }
 
 type jobCreator interface {
@@ -57,6 +65,70 @@ type DeviceHandlers struct {
 	// JobQueueService (whose keyed-by-id paths need it) and for the
 	// credential-lookup helper which runs under WithTenantTx.
 	bypassDB *sql.DB
+	// discovery identifies a device for Add device and Test connection. Nil
+	// means the default (shared Registry, DefaultIdentifyTimeout); tests set a
+	// shorter timeout.
+	discovery *services.DeviceDiscoveryService
+	// probes rate-limits Add device and Test connection (device_probes.go).
+	probes *probeLimiter
+	// auditSink replaces the audit middleware in tests. Nil in production.
+	auditSink func(ctx context.Context, entry *audithelpers.ActivityLogRequest)
+
+	probeInit sync.Once
+}
+
+// initProbes fills in the probe dependencies a handler built as a struct
+// literal (the tests) did not set. Once, because two concurrent first requests
+// would otherwise race on the fields.
+func (h *DeviceHandlers) initProbes() {
+	h.probeInit.Do(func() {
+		if h.discovery == nil {
+			h.discovery = services.NewDeviceDiscoveryService()
+		}
+		if h.probes == nil {
+			h.probes = newProbeLimiter()
+		}
+	})
+}
+
+func (h *DeviceHandlers) discoveryService() *services.DeviceDiscoveryService {
+	h.initProbes()
+	return h.discovery
+}
+
+// writeDiscoveryError answers a failed identification with its typed reason.
+// The body is the code and the fixed copy for it — never the underlying error,
+// whose text can carry whatever the device answered.
+//
+// 502 for "the device could not be reached or answered with an error" (it is
+// the upstream that failed); 422 for everything the operator can correct in
+// what they submitted — the address, the credentials, the device type.
+//
+// It returns the code it answered with, for the audit record. The underlying
+// error is logged through redact.Text: an address the operator typed a
+// password into is already quoted without it (DisplayAddress), and this is the
+// backstop for the next message that is not.
+func writeDiscoveryError(c *gin.Context, err error) string {
+	var discoveryErr *services.DeviceDiscoveryError
+	if !errors.As(err, &discoveryErr) {
+		log.Printf("device discovery: unexpected error: %s", redact.Text(err.Error()))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "discovery_failed", "message": "Device discovery failed."})
+		return string(sharedinterrogation.IdentifyFailed)
+	}
+	cause := "none"
+	if discoveryErr.Err != nil {
+		cause = redact.Text(discoveryErr.Err.Error())
+	}
+	log.Printf("device discovery: %s: %s", discoveryErr.Code, cause)
+	status := http.StatusUnprocessableEntity
+	switch discoveryErr.Code {
+	case string(sharedinterrogation.IdentifyConnectionFailed),
+		string(sharedinterrogation.IdentifyTLSUntrusted),
+		string(sharedinterrogation.IdentifyFailed):
+		status = http.StatusBadGateway
+	}
+	c.JSON(status, gin.H{"error": discoveryErr.Code, "message": discoveryErr.Message})
+	return discoveryErr.Code
 }
 
 // NewDeviceHandlers creates a new device handlers instance
@@ -67,6 +139,8 @@ func NewDeviceHandlers(deviceService *services.DeviceService, db, bypassDB *sql.
 		jobQueue:      jobQueue,
 		db:            db,
 		bypassDB:      bypassDB,
+		discovery:     services.NewDeviceDiscoveryService(),
+		probes:        newProbeLimiter(),
 	}
 }
 
@@ -96,6 +170,7 @@ func (h *DeviceHandlers) CreateDevice(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_hostname", "message": "Hostname cannot contain spaces. Use the device's DNS hostname."})
 		return
 	}
+	req.TLSInsecureSkipVerify = sshSafeSkipFlag(req.DeviceType, req.TLSInsecureSkipVerify)
 
 	device, err := h.deviceService.CreateDevice(c.Request.Context(), tenantID, req)
 	if err != nil {
@@ -152,23 +227,27 @@ func hostnameHasWhitespace(hostname *string) bool {
 	return hostname != nil && strings.IndexFunc(*hostname, unicode.IsSpace) >= 0
 }
 
-// DiscoverAndCreateDevice handles POST /devices/discover-and-create
-// This endpoint connects to the device, discovers its info, and creates the device record
+// DiscoverAndCreateDevice handles POST /devices/discover-and-create — the Add
+// device probe ( slice A).
+//
+// The operator gives four fields: device type, management address, username,
+// password (plus the explicit TLS opt-in). The platform connects, identifies
+// the device through the same vendor code interrogation uses, and creates the
+// device with what it learned. A probe that cannot connect or identify creates
+// NOTHING and answers with a typed reason, so the form can say what went wrong
+// and offer the remaining fields to add the device by hand.
 func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
-	// Get tenant ID from context (set by middleware)
 	tenantIDVal, exists := c.Get("tenantID")
 	if !exists {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Tenant ID not found"})
 		return
 	}
-
 	tenantID, ok := tenantIDVal.(uuid.UUID)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
 
-	// Simplified request with just the essentials
 	var req struct {
 		DeviceType            string `json:"device_type" binding:"required"`
 		ManagementURL         string `json:"management_url" binding:"required"`
@@ -176,86 +255,79 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 		Password              string `json:"password" binding:"required"`
 		TLSInsecureSkipVerify bool   `json:"tls_insecure_skip_verify"`
 	}
-
 	if err := c.ShouldBindJSON(&req); err != nil {
-		fmt.Printf("Discover-and-create validation error: %v\n", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
+	req.ManagementURL = strings.TrimSpace(req.ManagementURL)
+	// A TLS opt-in means nothing to an SSH-managed device, and stored it would
+	// become an SSH host-key opt-out at interrogation time ( review B1).
+	req.TLSInsecureSkipVerify = services.EffectiveInsecureSkipVerify(req.DeviceType, req.TLSInsecureSkipVerify)
 
-	// Create discovery service and attempt to discover device info
-	discoveryService := services.NewDeviceDiscoveryService(req.TLSInsecureSkipVerify)
-	discoveredInfo, err := discoveryService.DiscoverDevice(req.DeviceType, req.ManagementURL, req.Username, req.Password)
-	if err != nil {
-		fmt.Printf("Device discovery failed: %v\n", err)
-		var discoveryErr *services.DeviceDiscoveryError
-		if errors.As(err, &discoveryErr) {
-			status := http.StatusUnprocessableEntity
-			if discoveryErr.Code == "connection_failed" {
-				status = http.StatusBadGateway
-			}
-			c.JSON(status, gin.H{"error": discoveryErr.Code, "message": discoveryErr.Message})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "discovery_failed", "message": "Device discovery failed."})
+	h.initProbes()
+	audit := probeAudit{event: auditEventProbe, deviceType: req.DeviceType, target: req.ManagementURL}
+	if ok, wait := h.probes.allowTenant(tenantID); !ok {
+		audit.outcome = codeRateLimited
+		h.auditProbe(c, audit)
+		writeProbeLimited(c, codeRateLimited, wait)
 		return
 	}
 
-	// Build device creation request with discovered information
-	createReq := models.CreateDeviceRequest{
+	discovered, err := h.discoveryService().DiscoverDevice(c.Request.Context(), services.DiscoveryRequest{
 		DeviceType:            req.DeviceType,
-		ManagementURL:         &req.ManagementURL,
-		Username:              &req.Username,
-		Password:              &req.Password,
+		ManagementURL:         req.ManagementURL,
+		Username:              req.Username,
+		Password:              req.Password,
+		TLSInsecureSkipVerify: req.TLSInsecureSkipVerify,
+	})
+	if err != nil {
+		audit.outcome = writeDiscoveryError(c, err)
+		h.auditProbe(c, audit)
+		return
+	}
+	audit.outcome = outcomeOK
+	h.auditProbe(c, audit)
+
+	createReq := models.CreateDeviceRequest{
+		DeviceType:    req.DeviceType,
+		ManagementURL: &req.ManagementURL,
+		Username:      &req.Username,
+		Password:      &req.Password,
+		// Persisted as given. The probe just connected under this setting, so
+		// the first interrogation must run under it too — a device probed over
+		// its self-signed certificate and saved with verification on fails on
+		// the very certificate discovery accepted.
 		TLSInsecureSkipVerify: &req.TLSInsecureSkipVerify,
 		DiscoveryMethod:       "device_interrogation",
-		Metadata:              make(map[string]interface{}),
-		Tags:                  make(map[string]interface{}),
+		Metadata:              map[string]interface{}{},
+		Tags:                  map[string]interface{}{},
 	}
-
-	// Populate discovered fields
-	if discoveredInfo.Vendor != "" {
-		createReq.Vendor = &discoveredInfo.Vendor
-	}
-	if discoveredInfo.Model != "" {
-		createReq.Model = &discoveredInfo.Model
-	}
-	if discoveredInfo.SerialNumber != "" {
-		createReq.SerialNumber = &discoveredInfo.SerialNumber
-	}
-	if discoveredInfo.Hostname != "" {
-		createReq.Hostname = &discoveredInfo.Hostname
-	}
-	if discoveredInfo.IPAddress != "" {
-		createReq.IPAddress = &discoveredInfo.IPAddress
-	}
-	if discoveredInfo.FirmwareVersion != "" {
-		createReq.FirmwareVersion = &discoveredInfo.FirmwareVersion
-	}
-
-	// Add MAC address to metadata if available
-	if discoveredInfo.MacAddress != "" {
-		createReq.Metadata["mac_address"] = discoveredInfo.MacAddress
-	}
-
-	// Mark this as auto-discovered
+	discovered.ApplyTo(&createReq, services.IsSSHManagedDeviceType(req.DeviceType))
 	createReq.Metadata["auto_discovered"] = true
 	createReq.Metadata["discovery_timestamp"] = time.Now().UTC().Format(time.RFC3339)
 
-	// Create the device
 	device, err := h.deviceService.CreateDevice(c.Request.Context(), tenantID, createReq)
 	if err != nil {
 		if writeDeviceIdentityConflict(c, err) {
 			return
 		}
-		fmt.Printf("Failed to create device after discovery: %v\n", err)
+		log.Printf("device discovery: create after identification failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create device"})
 		return
 	}
-
-	fmt.Printf("Device discovered and created successfully: %s (Model: %s, Serial: %s)\n",
-		device.ID, discoveredInfo.Model, discoveredInfo.SerialNumber)
-
+	// Pin the SSH host key the identification authenticated through, so the
+	// first interrogation COMPARES against it rather than trusting whatever
+	// answers on first use a second time ( review NB-6). Pin-if-unset:
+	// an existing pin is never replaced from here.
+	if discovered.SSHHostKeyFingerprint != "" {
+		if _, pinErr := h.deviceService.PinSSHHostKeyIfUnset(c.Request.Context(), tenantID, device.ID,
+			discovered.SSHHostKeyFingerprint, discovered.SSHHostKeyType); pinErr != nil {
+			log.Printf("device discovery: created %s but could not pin its SSH host key; the first interrogation will enrol it: %v", device.ID, pinErr)
+		} else if device.SSHHostKeyFingerprint == nil {
+			fp := discovered.SSHHostKeyFingerprint
+			device.SSHHostKeyFingerprint = &fp
+		}
+	}
 	c.JSON(http.StatusCreated, device)
 }
 
@@ -969,57 +1041,122 @@ func (h *DeviceHandlers) BulkInterrogateDevices(c *gin.Context) {
 	c.JSON(http.StatusAccepted, response)
 }
 
-// TestConnection handles POST /devices/:id/test-connection
+// TestConnection handles POST /devices/:id/test-connection.
+//
+// It logs in to the device with its stored credentials and reads its identity
+// — the same Identify step Add device runs — bounded by a timeout, and reports
+// the measured latency or the typed reason it failed. It used to make no
+// network call at all: success was `connection_status` being "connected" or
+// "unknown", with a hard-coded 42 ms, so a device that had never been
+// contacted passed ( §9, O-02).
+//
+// Because it now opens an authenticated connection with stored credentials, it
+// is gated discovery.manage, like /interrogate (router.go; addendum C).
 func (h *DeviceHandlers) TestConnection(c *gin.Context) {
-	idStr := c.Param("id")
-	deviceID, err := uuid.Parse(idStr)
+	deviceID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid device ID"})
 		return
 	}
-
-	// Get tenant ID from context
 	tenantIDVal, exists := c.Get("tenantID")
 	if !exists {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Tenant ID not found"})
 		return
 	}
-
 	tenantID, ok := tenantIDVal.(uuid.UUID)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
 
-	// Get device and verify tenant ownership
 	device, err := h.deviceService.GetDevice(c.Request.Context(), tenantID, deviceID)
+	if err != nil || device.TenantID != tenantID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+		return
+	}
+
+	masterKey := os.Getenv("ENCRYPTION_MASTER_KEY")
+	if masterKey == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Encryption master key not configured"})
+		return
+	}
+	stored, err := h.deviceService.GetStoredDeviceCredentials(c.Request.Context(), tenantID, deviceID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+		if errors.Is(err, services.ErrDeviceNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
-	if device.TenantID != tenantID {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+	h.initProbes()
+	target := stored.ManagementURL
+	if target == "" {
+		target = derefDeviceAddress(device)
+	}
+	audit := probeAudit{event: auditEventTestConnect, deviceType: device.DeviceType, target: target, deviceID: &deviceID}
+	// Per device first: a double-click should read "tested moments ago", not
+	// spend the organization's budget.
+	if ok, wait := h.probes.allowDevice(deviceID); !ok {
+		audit.outcome = codeTestThrottled
+		h.auditProbe(c, audit)
+		writeProbeLimited(c, codeTestThrottled, wait)
+		return
+	}
+	if ok, wait := h.probes.allowTenant(tenantID); !ok {
+		audit.outcome = codeRateLimited
+		h.auditProbe(c, audit)
+		writeProbeLimited(c, codeRateLimited, wait)
 		return
 	}
 
-	// For now, simulate a connection test (in production, this would actually test the connection)
-	// This could be enhanced to:
-	// 1. Try to ping the device IP/hostname
-	// 2. Try to authenticate with stored credentials
-	// 3. Verify the device is accessible over the network
-
-	// Simulate connection test based on connection status
-	connectionSuccess := device.ConnectionStatus == "connected" || device.ConnectionStatus == "unknown"
-
+	result, err := h.discoveryService().TestConnection(c.Request.Context(), device, stored, masterKey)
+	if err != nil {
+		audit.outcome = writeDiscoveryError(c, err)
+		h.auditProbe(c, audit)
+		return
+	}
+	audit.outcome = outcomeOK
+	h.auditProbe(c, audit)
 	c.JSON(http.StatusOK, gin.H{
 		"device_id":  deviceID.String(),
-		"success":    connectionSuccess,
-		"status":     device.ConnectionStatus,
-		"tested_at":  time.Now().Format(time.RFC3339),
-		"message":    "Connection test completed",
-		"latency_ms": 42, // Simulated latency
+		"success":    true,
+		"tested_at":  time.Now().UTC().Format(time.RFC3339),
+		"latency_ms": result.LatencyMs,
+		"message":    "Connected and identified the device.",
+		"identity": gin.H{
+			"vendor":           result.Info.Vendor,
+			"model":            result.Info.Model,
+			"serial_number":    result.Info.SerialNumber,
+			"firmware_version": result.Info.FirmwareVersion,
+			"hostname":         result.Info.Hostname,
+		},
 	})
+}
+
+// derefDeviceAddress is the address a stored device is reached at, for the
+// audit record, when it has no management URL.
+func derefDeviceAddress(device *models.Device) string {
+	switch {
+	case device.IPAddress != nil && *device.IPAddress != "":
+		return *device.IPAddress
+	case device.Hostname != nil:
+		return *device.Hostname
+	}
+	return ""
+}
+
+// sshSafeSkipFlag is the TLS skip flag a create request may carry for its
+// device type: forced false for an SSH-managed type ( review B1). The
+// service enforces the same on every write; this makes the handler's own
+// request honest too.
+func sshSafeSkipFlag(deviceType string, requested *bool) *bool {
+	if requested == nil || !services.IsSSHManagedDeviceType(deviceType) {
+		return requested
+	}
+	off := false
+	return &off
 }
 
 // ResetDeviceHostKeyPin unpins a device's SSH host key so the next

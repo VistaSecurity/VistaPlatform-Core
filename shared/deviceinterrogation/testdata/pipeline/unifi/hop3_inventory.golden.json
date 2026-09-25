@@ -1,0 +1,183 @@
+{
+  "vendor": "unifi",
+  "input_sha256": "8fd9985ded72547397968985739b040fd22caff415385fbf4661f9574789a48f",
+  "inventory": {
+    "assets": [
+      {
+        "asset": "asset[fqdn=core-sw-1.corp.example.test,mac_address=00:1b:17:00:00:01]",
+        "class_key": "firewall",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[hostname=linux-2,ip_address=192.0.2.68,mac_address=4c:6e:0a:87:d4:80]",
+        "class_key": "unknown_host",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
+        "class_key": "switch",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
+        "class_key": "access_point",
+        "status": "monitoring"
+      },
+      {
+        "asset": "device",
+        "class_key": "wireless_controller",
+        "status": "monitoring"
+      },
+      {
+        "asset": "new[branch-office-s2s|192.0.2.1]",
+        "class_key": "server",
+        "status": "monitoring"
+      },
+      {
+        "asset": "new[remote-access|192.0.2.1]",
+        "class_key": "server",
+        "status": "monitoring"
+      }
+    ],
+    "crypto_configurations": [
+      {
+        "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
+        "protocol": "TLS",
+        "port": 8443,
+        "protocol_version": null,
+        "cipher_suite": "",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": null,
+        "risk_level": "Unknown",
+        "risk_factors": [],
+        "algorithm_links": {},
+        "pqc_category": "unclassified",
+        "has_certificate": false
+      },
+      {
+        "asset": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
+        "protocol": "TLS",
+        "port": 8443,
+        "protocol_version": null,
+        "cipher_suite": "",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": null,
+        "risk_level": "Unknown",
+        "risk_factors": [],
+        "algorithm_links": {},
+        "pqc_category": "unclassified",
+        "has_certificate": false
+      },
+      {
+        "asset": "device",
+        "protocol": "TLS",
+        "port": 443,
+        "protocol_version": "TLS 1.3",
+        "cipher_suite": "TLS_AES_128_GCM_SHA256",
+        "key_exchange_algorithm": "X25519MLKEM768",
+        "hash_algorithm": "SHA256",
+        "key_size": 256,
+        "risk_score": 25,
+        "risk_level": "Low",
+        "risk_factors": [],
+        "algorithm_links": {
+          "cipher_suite": [
+            "TLS_AES_128_GCM_SHA256"
+          ],
+          "hash": [
+            "SHA256"
+          ],
+          "key_exchange": [
+            "X25519MLKEM768"
+          ],
+          "protocol_version": [
+            "TLS1.3"
+          ],
+          "symmetric": [
+            "AES128"
+          ]
+        },
+        "pqc_category": "pqc_ready",
+        "has_certificate": true
+      },
+      {
+        "asset": "new[branch-office-s2s|192.0.2.1]",
+        "protocol": "IPSec",
+        "port": 500,
+        "protocol_version": "IKEv2",
+        "cipher_suite": "aes256-sha256",
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "hash_algorithm": "SHA256",
+        "key_size": 2048,
+        "risk_score": 35,
+        "risk_level": "Low",
+        "risk_factors": [],
+        "algorithm_links": {
+          "hash": [
+            "SHA256"
+          ],
+          "key_exchange": [
+            "DH-MODP-2048"
+          ],
+          "symmetric": [
+            "AES256"
+          ]
+        },
+        "pqc_category": "needs_migration",
+        "has_certificate": false
+      },
+      {
+        "asset": "new[remote-access|192.0.2.1]",
+        "protocol": "VPN",
+        "port": 51820,
+        "protocol_version": null,
+        "cipher_suite": "ChaCha20-Poly1305",
+        "key_exchange_algorithm": "Curve25519",
+        "hash_algorithm": "BLAKE2s",
+        "key_size": 256,
+        "risk_score": 20,
+        "risk_level": "Low",
+        "risk_factors": [],
+        "algorithm_links": {
+          "hash": [
+            "BLAKE2S"
+          ],
+          "key_exchange": [
+            "CURVE25519"
+          ],
+          "symmetric": [
+            "ChaCha20"
+          ]
+        },
+        "pqc_category": "needs_migration",
+        "has_certificate": false
+      }
+    ],
+    "certificates": [
+      {
+        "asset": "device",
+        "fingerprint_sha256": "eeffc51722210faeecd5f43d990813b686fe105c7c9e9962010344fa4504ef96",
+        "subject_dn": "CN=appliance.example.test,O=Example Appliance Vendor"
+      }
+    ],
+    "findings": [],
+    "pqc_counts": {
+      "needs_migration": 2,
+      "pqc_ready": 1,
+      "symmetric_safe": 0,
+      "total": 5,
+      "unclassified": 2
+    },
+    "ingest_outcomes": [
+      "created",
+      "matched",
+      "matched",
+      "matched",
+      "created"
+    ]
+  }
+}

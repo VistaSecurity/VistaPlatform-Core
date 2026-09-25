@@ -130,5 +130,5 @@ func refuseCrossOriginRedirect(req *http.Request, via []*http.Request) error {
 // model, 503 means try later — and each vendor's own structured failure code is
 // reported separately by the callers that parse one.
 func httpStatusError(what string, status int) error {
-	return fmt.Errorf("%s failed with status %d", what, status)
+	return statusErrorf(status, "%s failed with status %d", what, status)
 }

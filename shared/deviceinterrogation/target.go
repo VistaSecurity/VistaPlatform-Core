@@ -85,44 +85,79 @@ func canonicalManagementURL(raw string) (string, error) {
 		// something an operator meant, and silently rewriting someone's input
 		// is how a wrong device gets interrogated with no one the wiser. A
 		// percent-encoded %23 is an ordinary path character and is unaffected.
-		return "", fmt.Errorf("management URL %q must not contain a fragment marker", s)
+		return "", fmt.Errorf("management URL %q must not contain a fragment marker", DisplayAddress(s))
 	}
 	u, err := url.Parse(s)
 	if err != nil {
-		return "", fmt.Errorf("management URL %q does not parse: %w", s, err)
+		// Not %w: a *url.Error prints the whole input, userinfo included.
+		return "", fmt.Errorf("management URL %q does not parse", DisplayAddress(s))
 	}
 	if u.Opaque != "" {
 		// `https:10.0.0.5/api` — a scheme with no authority. It parses, and it
 		// is not an address.
-		return "", fmt.Errorf("management URL %q names no host", s)
+		return "", fmt.Errorf("management URL %q names no host", DisplayAddress(s))
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && scheme != "http" {
 		// file://, gopher://, and the scheme-relative `//host/path` that parses
 		// with an empty scheme. An appliance management interface speaks HTTP.
-		return "", fmt.Errorf("management URL %q must be http or https", s)
+		return "", fmt.Errorf("management URL %q must be http or https", DisplayAddress(s))
 	}
 	if u.User != nil {
 		// `https://user:pass@host` puts a credential somewhere nothing redacts,
 		// and `https://real.host@evil.example/` is the oldest way to make a URL
 		// read as one host and resolve as another.
-		return "", fmt.Errorf("management URL %q must not carry userinfo", s)
+		return "", fmt.Errorf("management URL %q must not carry userinfo", DisplayAddress(s))
 	}
 	if u.Host == "" || u.Hostname() == "" {
-		return "", fmt.Errorf("management URL %q names no host", s)
+		return "", fmt.Errorf("management URL %q names no host", DisplayAddress(s))
 	}
 	if u.RawQuery != "" || u.ForceQuery {
-		return "", fmt.Errorf("management URL %q must not carry a query string", s)
+		return "", fmt.Errorf("management URL %q must not carry a query string", DisplayAddress(s))
 	}
 	if u.Fragment != "" {
-		return "", fmt.Errorf("management URL %q must not carry a fragment", s)
+		return "", fmt.Errorf("management URL %q must not carry a fragment", DisplayAddress(s))
 	}
 	path := strings.TrimRight(u.EscapedPath(), "/")
 	if strings.Contains(path, "..") {
 		// A path prefix is a prefix, not a traversal.
-		return "", fmt.Errorf("management URL %q must not contain a relative path segment", s)
+		return "", fmt.Errorf("management URL %q must not contain a relative path segment", DisplayAddress(s))
 	}
 	return scheme + "://" + u.Host + path, nil
+}
+
+// DisplayAddress is an operator-supplied address made safe to put in an error
+// message or a log line: any userinfo is replaced with "[redacted]", and the
+// query and fragment are dropped.
+//
+// An address is quoted back when it is rejected, and the addresses rejected
+// most often are the ones with a credential typed into them —
+// `https://admin:secret@10.0.0.1` is refused precisely BECAUSE it carries
+// userinfo, and the refusal used to quote the password into the service log
+// ( review NB-2).
+//
+// It works on the raw string rather than through url.Parse, because the input
+// is by definition one that may not parse. The userinfo boundary is the LAST
+// `@` anywhere before the query is cut: a password may itself contain `/`, `?`
+// or `#`, and cutting at those first would leave the start of it behind. An `@`
+// later in a path or query over-redacts the host, which is the safe direction.
+func DisplayAddress(raw string) string {
+	s := strings.TrimSpace(raw)
+	start := 0
+	if i := strings.Index(s, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	if at := strings.LastIndexByte(s[start:], '@'); at >= 0 {
+		s = s[:start] + "[redacted]@" + s[start+at+1:]
+	}
+	if i := strings.IndexAny(s[start:], "?#"); i >= 0 {
+		s = s[:start+i]
+	}
+	const maxDisplay = 200
+	if len(s) > maxDisplay {
+		s = s[:maxDisplay] + "…"
+	}
+	return s
 }
 
 // deviceHost resolves the bare host (no scheme, no port) for a device, applying

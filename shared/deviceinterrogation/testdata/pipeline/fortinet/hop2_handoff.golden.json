@@ -1,0 +1,143 @@
+{
+  "vendor": "fortinet",
+  "input_sha256": "f5082a7f31b5fbbef3943f1c56b8417b676f60cd0eba8663b01ac1a131629bc0",
+  "imports": [
+    {
+      "asset_status": "pending_approval",
+      "findings": [
+        {
+          "asset_type": "server",
+          "cipher_suite": "aes256-sha256 aes128-sha1",
+          "hash_algorithm": "SHA256",
+          "hostname": "to-branch-02",
+          "ip_address": "0.0.0.0",
+          "key_exchange_algorithm": "DH-MODP-2048",
+          "key_size": 2048,
+          "port": 500,
+          "protocol": "IPSec",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "aes256-sha256 aes128-sha1",
+            "confidence": 0.95,
+            "config_name": "to-branch-02",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:0}}",
+            "discovery_method": "device_interrogation",
+            "hash_algorithm": "SHA256",
+            "ike_version": "IKEv2",
+            "kex_algorithms": [
+              "DH-MODP-2048",
+              "DH-MODP-1536"
+            ],
+            "key_exchange_algorithm": "DH-MODP-2048",
+            "key_size": 2048,
+            "network_ownership": "third_party",
+            "network_type": "public",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": "",
+            "vpn_peer_address": "203.0.113.50"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "",
+          "hash_algorithm": null,
+          "hostname": null,
+          "ip_address": "0.0.0.0",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 10443,
+          "protocol": "SSL VPN",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "vpn_gateway",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "",
+            "confidence": 0.95,
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:1}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "third_party",
+            "network_type": "public",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": ""
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        }
+      ]
+    }
+  ],
+  "external_connections": [],
+  "rows": [
+    {
+      "row": 0,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 1,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    }
+  ],
+  "process_error": "",
+  "learned_segments": [
+    {
+      "value": "198.51.100.0/24",
+      "segment_type": "cidr",
+      "network_type": "public",
+      "metadata": {
+        "dhcp": "unknown",
+        "source": "interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_type": "fortinet"
+      }
+    }
+  ],
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "fw-branch-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "fw-branch-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "FGT60F0000000001",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ]
+}

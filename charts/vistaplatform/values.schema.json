@@ -594,6 +594,35 @@
         }
       }
     },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "explicitExternalTargets": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Scanning targets outside a tenant's registered networks, when a person confirms it. Rendered for cluster-sensor-service.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "false turns the capability off for the whole installation."
+            },
+            "maxAddressesPerTarget": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096,
+              "description": "Most addresses one external target (CIDR or range) may name."
+            },
+            "maxAddressesPerJob": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384,
+              "description": "Most external addresses one scan may name in total."
+            }
+          }
+        }
+      }
+    },
     "monitoring": {
       "type": "object",
       "additionalProperties": false,

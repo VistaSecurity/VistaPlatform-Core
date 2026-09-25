@@ -29,15 +29,36 @@ type TLSProber struct {
 func NewTLSProber(timeout time.Duration) *TLSProber {
 	return &TLSProber{
 		timeout: timeout,
-		prober:  shareddisc.NewProber(timeout),
+		prober:  platformProber(timeout),
 	}
+}
+
+// newTLSProberWithGuard is NewTLSProber with a different outbound address
+// guard — for a test that needs one loopback listener to stand in for a
+// public OCSP responder.
+func newTLSProberWithGuard(timeout time.Duration, guard shareddisc.AddressGuard) *TLSProber {
+	return &TLSProber{timeout: timeout, prober: platformProberWithGuard(timeout, guard)}
 }
 
 // ProbeTLS performs a TLS handshake, extracts the certificate chain, validates
 // it and returns canonical discovery metadata. When skipVersionEnum is true,
-// only the negotiated TLS version is recorded (no extra probes).
-func (tp *TLSProber) ProbeTLS(hostname string, port int, skipVersionEnum bool) (map[string]interface{}, error) {
-	res, err := tp.prober.Probe(hostname, hostname, "TLS", port)
+// only the negotiated TLS version is recorded (no extra probes) — and that
+// promise covers the key-exchange support handshakes too: the negotiated group
+// is still recorded from the one handshake, the two support flags are left
+// absent.
+//
+// It CONNECTS to ip — the address the scan was authorized for — and sends
+// hostname only as SNI and for certificate name checks. It used to dial the
+// hostname, which re-resolved it at probe time: whatever DNS answered then was
+// what got the handshake, however carefully the address had been checked a
+// moment before ( W5.13b). Pass the same value twice when there is no
+// separate name.
+func (tp *TLSProber) ProbeTLS(hostname, ip string, port int, skipVersionEnum bool) (map[string]interface{}, error) {
+	prober := tp.prober
+	if skipVersionEnum {
+		prober = prober.WithoutSupportHandshakes()
+	}
+	res, err := prober.Probe(hostname, ip, "TLS", port)
 	if err != nil {
 		return nil, fmt.Errorf("TLS probe failed: %w", err)
 	}
@@ -47,7 +68,7 @@ func (tp *TLSProber) ProbeTLS(hostname string, port int, skipVersionEnum bool) (
 
 	versions := res.TLSVersions
 	if !skipVersionEnum {
-		if accepted := tp.prober.EnumerateTLSVersions(hostname, hostname, port); len(accepted) > 0 {
+		if accepted := tp.prober.EnumerateTLSVersions(hostname, ip, port); len(accepted) > 0 {
 			versions = accepted
 		}
 	}

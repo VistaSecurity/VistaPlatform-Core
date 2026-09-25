@@ -1,0 +1,12 @@
+{
+  "vendor": "snmp",
+  "device_type": "generic_snmp",
+  "hostname": "access-sw-1.corp.example.test",
+  "transport": "snmp",
+  "management_ip": "192.0.2.229",
+  "management_port": 161,
+  "tenant_segments": [
+    {"name": "Management network", "cidr": "192.0.2.224/27"}
+  ],
+  "provenance": "HAND-WRITTEN. The MIB is snmp_ops_test.go's snmpTestMIB (a stacked Cisco switch: system group, ENTITY-MIB, IF-MIB, one LLDP neighbour, one ARP entry), served by an encoding/asn1 fake agent over UDP v2c. sysDescr carries a pasted private key the collector must scrub."
+}

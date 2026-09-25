@@ -241,7 +241,9 @@ A crypto configuration's drawer carries a **Why this score** section under its
 Assessment rows. It names the component that set the score, shows each
 component's catalogue assessment, marks whether the component was **observed in
 use** or only **offered, not observed**, and surfaces the catalogue's migration
-guidance for the offending one. When nothing resolved against the catalogue it
+guidance for the offending one. A component whose catalogue row records
+remediation guidance also gets a **How to fix** section with the fix steps,
+suggested timeline, CVE references and links. When nothing resolved against the catalogue it
 says **not assessed** — which is not the same as safe. See
 [Crypto Risks → Seeing why a configuration scored what it did](./crypto-risks.md#seeing-why-a-configuration-scored-what-it-did).
 

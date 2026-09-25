@@ -3,11 +3,13 @@ package deviceinterrogation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -119,6 +121,7 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	result := &InterrogateResult{
 		Assets:     []CryptoAsset{},
 		DeviceInfo: make(map[string]interface{}),
+		collector:  unifiCollector,
 	}
 
 	if err := c.authenticate(ctx); err != nil {
@@ -126,7 +129,7 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	}
 
 	if sysInfo, err := c.getSystemInfo(ctx); err != nil {
-		fmt.Printf("Warning: failed to get system info: %v\n", err)
+		result.warn(c.apiPrefix+"/api/self", err, "Controller session details not collected")
 	} else {
 		result.DeviceInfo = sysInfo
 	}
@@ -141,7 +144,7 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	// `native_networkconf_id` into an interface VLAN (ADR-0004 D1 item 1).
 	var networkConfs []map[string]interface{}
 	if confs, err := c.getNetworkConfs(ctx, site); err != nil {
-		fmt.Printf("Warning: failed to get network configs: %v\n", err)
+		result.warn(c.apiPrefix+"/api/s/"+site+"/rest/networkconf", err, "Networks, VLANs and VPNs not collected")
 	} else {
 		networkConfs = confs
 	}
@@ -152,7 +155,7 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	// Fetched before the device loop because the controller's display name is
 	// part of how a managed device's member_of edge names its far end.
 	if identity, err := c.getControllerIdentity(ctx, site); err != nil {
-		fmt.Printf("Warning: failed to get controller identity: %v\n", err)
+		result.warn(c.apiPrefix+"/api/s/"+site+"/list/setting", err, "Controller name not collected")
 	} else {
 		for k, v := range identity {
 			result.DeviceInfo[k] = v
@@ -160,7 +163,7 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	}
 
 	if devices, err := c.getDevices(ctx, site); err != nil {
-		fmt.Printf("Warning: failed to get devices: %v\n", err)
+		result.warn(c.apiPrefix+"/api/s/"+site+"/stat/device", err, "Managed devices and their topology not collected")
 	} else {
 		controllerPeer := unifiControllerPeer(controllerHost, result.DeviceInfo)
 		for _, device := range devices {
@@ -187,7 +190,7 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	unifiEmitNetworkFacts(result, networkConfs)
 
 	if clients, err := c.getClients(ctx, site); err != nil {
-		fmt.Printf("Warning: failed to get clients: %v\n", err)
+		result.warn(c.apiPrefix+"/api/s/"+site+"/stat/sta", err, "Connected clients not collected")
 	} else {
 		unifiEmitClientObservations(result, clients)
 	}
@@ -228,22 +231,44 @@ func (c *unifiClient) authenticate(ctx context.Context) error {
 		return fmt.Errorf("failed to marshal login payload: %w", err)
 	}
 
+	// A refusal on ANY attempt is the answer. The three endpoints are tried in
+	// turn, so a UniFi OS console that rejects the password on the first one
+	// then answers the legacy paths with a 404 — and reporting that last 404
+	// told the operator "not a UniFi controller" about a UniFi controller with
+	// a wrong password.
+	var refused error
+	noteRefusal := func(err error) {
+		var statusErr *deviceStatusError
+		if refused == nil && errors.As(err, &statusErr) &&
+			(statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden) {
+			refused = err
+		}
+	}
+
 	// 1. UDM/UDR / UniFi-OS gateway (JSON).
-	if err := c.attemptJSONLogin(ctx, "/api/auth/login", loginPayload); err == nil {
+	err = c.attemptJSONLogin(ctx, "/api/auth/login", loginPayload)
+	if err == nil {
 		c.apiPrefix = "/proxy/network"
 		return nil
 	}
+	noteRefusal(err)
 
 	// 2. Legacy software controller (JSON).
-	if err := c.attemptJSONLogin(ctx, "/api/login", loginPayload); err == nil {
+	err = c.attemptJSONLogin(ctx, "/api/login", loginPayload)
+	if err == nil {
 		c.apiPrefix = ""
 		return nil
 	}
+	noteRefusal(err)
 
 	// 3. Legacy software controller (form-encoded) — older controllers that
 	//    reject the JSON body.
 	if err := c.attemptFormLogin(ctx, "/api/login"); err != nil {
-		return fmt.Errorf("login failed with status 401: %w", err)
+		noteRefusal(err)
+		if refused != nil {
+			err = refused
+		}
+		return fmt.Errorf("login failed: %w", err)
 	}
 	c.apiPrefix = ""
 	return nil
@@ -297,9 +322,39 @@ func (c *unifiClient) doLogin(req *http.Request) error {
 	return nil
 }
 
+// unifiAPIError is the error for a response whose envelope says rc != "ok".
+// The controller answers a refused read with `api.err.NoPermission` (and an
+// expired session with `api.err.LoginRequired`), which is a permission problem
+// however the HTTP status was dressed.
+//
+// Only a message of the controller's own `api.err.<Token>` shape is kept. Any
+// other text in meta.msg is the controller's free text — it has been seen to
+// carry a password — and this error is persisted as a warning.
+func unifiAPIError(msg string) error {
+	reason := WarningError
+	if strings.Contains(msg, "NoPermission") || strings.Contains(msg, "LoginRequired") {
+		reason = WarningPermissionDenied
+	}
+	if !unifiErrorToken.MatchString(msg) {
+		msg = "unrecognised controller error"
+	}
+	return &vendorAPIError{reason: reason, msg: "API error: " + msg}
+}
+
+// unifiErrorToken is the shape of a UniFi controller error code.
+var unifiErrorToken = regexp.MustCompile(`^api\.err\.[A-Za-z0-9_.]{1,64}$`)
+
 // apiRequest makes an authenticated API request to the UniFi controller,
 // honoring apiPrefix and re-authenticating once on 401/403.
 func (c *unifiClient) apiRequest(ctx context.Context, method, endpoint string, body io.Reader) (*unifiAPIResponse, error) {
+	return c.apiRequestAttempt(ctx, method, endpoint, body, false)
+}
+
+// apiRequestAttempt is one try of apiRequest. ONCE means once: the retry used
+// to call apiRequest again, so an endpoint the account may not read (a 403 that
+// no fresh session changes) logged in and retried without end, and one
+// read-only admin profile hung the whole interrogation.
+func (c *unifiClient) apiRequestAttempt(ctx context.Context, method, endpoint string, body io.Reader, retried bool) (*unifiAPIResponse, error) {
 	reqURL := fmt.Sprintf("%s%s%s", c.baseURL, c.apiPrefix, endpoint)
 
 	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
@@ -321,12 +376,13 @@ func (c *unifiClient) apiRequest(ctx context.Context, method, endpoint string, b
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Re-authenticate once on 401/403, then retry.
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	// Re-authenticate once on 401/403, then retry. A second refusal is the
+	// answer, and falls through to the status error below.
+	if !retried && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		if err := c.authenticate(ctx); err != nil {
 			return nil, fmt.Errorf("re-authentication failed: %w", err)
 		}
-		return c.apiRequest(ctx, method, endpoint, body)
+		return c.apiRequestAttempt(ctx, method, endpoint, body, true)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -338,7 +394,7 @@ func (c *unifiClient) apiRequest(ctx context.Context, method, endpoint string, b
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	if apiResp.Meta.RC != "ok" {
-		return nil, fmt.Errorf("API error: %s", apiResp.Meta.Msg)
+		return nil, unifiAPIError(apiResp.Meta.Msg)
 	}
 	return &apiResp, nil
 }

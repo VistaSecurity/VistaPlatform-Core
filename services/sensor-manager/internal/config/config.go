@@ -54,7 +54,7 @@ type Config struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		"JWT_SECRET":            sharedconfig.JWTSecret(),
 		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 	})
 
@@ -68,7 +68,7 @@ func Load() *Config {
 		InfluxBucket: sharedconfig.GetEnv("INFLUXDB_BUCKET", "metrics"),
 		NATSURL:      sharedconfig.GetEnv("NATS_URL", ""),
 		LogLevel:     sharedconfig.GetEnv("LOG_LEVEL", "info"),
-		JWTSecret:    sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		JWTSecret:    sharedconfig.JWTSecret(),
 		// S3 Configuration
 		S3ArtifactsBucket:  sharedconfig.GetEnv("S3_ARTIFACTS_BUCKET", ""),
 		S3ArtifactsRegion:  sharedconfig.GetEnv("S3_ARTIFACTS_REGION", sharedconfig.GetEnv("AWS_REGION", "us-east-1")),

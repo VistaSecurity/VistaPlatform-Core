@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 )
 
 type RevalidationService struct {
@@ -23,6 +24,10 @@ type RevalidationService struct {
 	lifecycleService *AssetLifecycleService
 	// router decides which executor a manual Active Scan runs from.
 	router activeScanRouter
+	// resolver resolves an asset known only by name, so the "outside your
+	// registered networks" question is asked before anything changes
+	// ( W5.13b). Nil means net.DefaultResolver.
+	resolver dispatchguard.Resolver
 }
 
 func NewRevalidationService(
@@ -128,7 +133,11 @@ func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetI
 				continue // no addressable target — skip
 			}
 
-			asset := activeScanAsset{id: id, host: host, configProtocols: protocols[id]}
+			name := host
+			if hostname.Valid && hostname.String != "" {
+				name = hostname.String
+			}
+			asset := activeScanAsset{id: id, name: name, host: host, configProtocols: protocols[id]}
 			if port.Valid && port.Int64 > 0 {
 				asset.port = int(port.Int64)
 			}
@@ -201,7 +210,14 @@ func (s *RevalidationService) CreateRevalidationJob(tenantID uuid.UUID, userID u
 // discovery-processor → IngestFindings pipeline matches each asset by IP/port and catalogs
 // its certificates and cipher configs.
 // Returns the dispatched job ID and the number of assets actually scanned.
-func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string, runFrom RunFrom) (ActiveScanResult, error) {
+//
+// externalConfirmed is a person's confirmation that assets whose address is
+// outside the tenant's registered networks may be scanned ( W5.13b, owner
+// decision Q10: pressing Scan on an asset you chose is the explicit action).
+// Without it, such assets are found BEFORE anything is stamped or dispatched
+// and returned as an *ExternalConfirmationError naming them; the caller asks
+// and resends. The bulk stale-revalidation sweep never sets it.
+func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string, runFrom RunFrom, externalConfirmed bool) (ActiveScanResult, error) {
 	var result ActiveScanResult
 	if len(assetIDs) == 0 {
 		return result, fmt.Errorf("at least one asset ID is required")
@@ -228,6 +244,15 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 	assets, err := s.resolveActiveScanAssets(tenantID, assetIDs)
 	if err != nil {
 		return result, err
+	}
+	if !externalConfirmed {
+		need, err := s.externalAssets(tenantID, assets)
+		if err != nil {
+			return result, err
+		}
+		if len(need) > 0 {
+			return result, &ExternalConfirmationError{Targets: need}
+		}
 	}
 
 	// Group into homogeneous jobs (see planActiveScanBatches for why this is not
@@ -271,11 +296,18 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 				Protocols:          routed.batch.protocols,
 				Ports:              routed.batch.ports,
 				Options:            activeScanJobOptions(),
+				// Only ever true when a person confirmed it on this request.
+				ExternalTargetsConfirmed: externalConfirmed,
 			}, authHeader)
 			if e != nil {
 				// Restore the pre-scan freshness so the UI doesn't show a stuck
 				// "scanning" and the asset isn't reported as freshly scanned.
 				s.stampScanFailed(tenantID, prior)
+				// A target verdict is the caller's to act on, per asset —
+				// never folded into a generic failure ( W5.13b).
+				if s.recordTargetVerdict(&result, routed.batch, e) {
+					continue
+				}
 				failed += len(routed.batch.assetIDs)
 				lastErr = e
 				logBatchDispatchFailure(tenantID, routed.batch, e)
@@ -293,6 +325,9 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 		}
 	}
 
+	if len(result.NeedsConfirmation) > 0 {
+		return result, &ExternalConfirmationError{Targets: result.NeedsConfirmation, Partial: result}
+	}
 	if len(result.Jobs) == 0 {
 		if lastErr != nil {
 			return result, fmt.Errorf("failed to dispatch active scan: %w", lastErr)
@@ -364,7 +399,11 @@ type ActiveScanSkip struct {
 type ActiveScanResult struct {
 	Jobs    []ActiveScanDispatchedJob
 	Skipped []ActiveScanSkip
-	Scanned int
+	// NeedsConfirmation are assets cluster-sensor-service found outside the
+	// registered networks that the preflight could not see (an asset with only
+	// a hostname). Not dispatched, not stamped.
+	NeedsConfirmation []ActiveScanExternalTarget
+	Scanned           int
 }
 
 // FirstJobID keeps the pre- response shape: the first job dispatched.

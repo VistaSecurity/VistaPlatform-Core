@@ -140,7 +140,7 @@ func (c *panClient) panOpCommand(ctx context.Context, cmd string) (string, error
 		return "", fmt.Errorf("failed to decode response to %s: %w", cmd, err)
 	}
 	if resp.Status != "success" {
-		return "", fmt.Errorf("%s failed: %s", cmd, resp.Code)
+		return "", panAPIError(resp.Code, cmd)
 	}
 	return body, nil
 }
@@ -209,6 +209,28 @@ func panEmitSystemFacts(result *InterrogateResult, info panSystemInfo) {
 
 // panVendor is the manufacturer of any device answering the PAN-OS API.
 const panVendor = "Palo Alto Networks"
+
+// panAPIError builds the error for a PAN-OS response whose envelope says
+// status="error". PAN-OS refuses inside an HTTP 200, so the code in the
+// envelope is the only place the reason lives: 403 and 16 are an account the
+// device will not let do this, 1 and 17 a command this version does not have.
+//
+// Only the code is kept, and only when it is a number: the envelope's <msg>
+// is the device's free text, and this error is persisted as a warning.
+func panAPIError(code, what string) error {
+	code = strings.TrimSpace(code)
+	reason := WarningError
+	switch code {
+	case "403", "16":
+		reason = WarningPermissionDenied
+	case "1", "17":
+		reason = WarningNotSupported
+	}
+	if !isShortNumber(code) {
+		code = "unknown"
+	}
+	return &vendorAPIError{reason: reason, msg: fmt.Sprintf("%s failed: PAN-OS code %s", what, code)}
+}
 
 // panIdentity builds the structured device identity from system info.
 func panIdentity(info panSystemInfo) *DeviceIdentity {

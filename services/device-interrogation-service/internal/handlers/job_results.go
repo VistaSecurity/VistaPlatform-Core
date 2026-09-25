@@ -89,6 +89,17 @@ type JobResultResourceType struct {
 	Failures        []JobResultCollectorFailure `json:"failures,omitempty"`
 }
 
+// JobResultCollectionWarning is one thing the collector could not read during
+// the interrogation, and what the result lacks because of it (finding P-17).
+// Mirrors deviceinterrogation.CollectionWarning field for field.
+type JobResultCollectionWarning struct {
+	Collector string `json:"collector"`
+	Endpoint  string `json:"endpoint"`
+	Reason    string `json:"reason"`
+	Effect    string `json:"effect"`
+	Detail    string `json:"detail,omitempty"`
+}
+
 // JobResultsResponse is the results endpoint's payload.
 type JobResultsResponse struct {
 	JobID   string            `json:"job_id"`
@@ -113,6 +124,16 @@ type JobResultsResponse struct {
 	// did not run — switched off for the integration, or a failure. Stored
 	// since the enumeration work landed and never surfaced until now.
 	EnumerationSkipped string `json:"enumeration_skipped,omitempty"`
+
+	// CollectionWarnings are what the collector could not read — an endpoint
+	// the account was refused, a command the device lacks, a table cut at its
+	// bound — read from the processing block. Absent means none were raised.
+	CollectionWarnings []JobResultCollectionWarning `json:"collection_warnings,omitempty"`
+	// CollectionWarningsUnreadable is set when the stored processing block
+	// holds a warning list this projection could not read. Without it an
+	// unreadable list would render exactly like "no warnings", which is the
+	// one answer it must not give.
+	CollectionWarningsUnreadable bool `json:"collection_warnings_unreadable,omitempty"`
 }
 
 // JobResultsSummary is the headline count set.
@@ -197,6 +218,10 @@ func buildJobResults(jobID, status, resultsJSON string) JobResultsResponse {
 
 	out.Success = raw.Success
 	out.Processing = deviceinterrogation.RedactMap(raw.Processing)
+	out.CollectionWarnings, out.CollectionWarningsUnreadable = projectCollectionWarnings(resultsJSON)
+	// Served once, typed, as collection_warnings — not a second time untyped
+	// inside the processing map.
+	delete(out.Processing, "collection_warnings")
 	out.Outcome = raw.Metadata.Outcome
 	out.EnumerationSkipped = services.SanitizeCloudErrorMessage(raw.Metadata.EnumerationSkipped)
 	for _, t := range raw.Metadata.ResourceTypes {
@@ -270,4 +295,39 @@ func buildJobResults(jobID, status, resultsJSON string) JobResultsResponse {
 	}
 
 	return out
+}
+
+// projectCollectionWarnings reads processing.collection_warnings from the stored
+// results and re-sanitizes it on the way out, as every other free-text field in
+// this projection is: the writer scrubbed it already, and doing it again here
+// means a row written by any other path cannot leak through this endpoint.
+//
+// unreadable reports a list that is present but cannot be decoded.
+func projectCollectionWarnings(resultsJSON string) (warnings []JobResultCollectionWarning, unreadable bool) {
+	var raw struct {
+		Processing struct {
+			CollectionWarnings json.RawMessage `json:"collection_warnings"`
+		} `json:"processing"`
+	}
+	if err := json.Unmarshal([]byte(resultsJSON), &raw); err != nil {
+		return nil, false
+	}
+	stored := raw.Processing.CollectionWarnings
+	if len(stored) == 0 || string(stored) == "null" {
+		return nil, false
+	}
+	var decoded []deviceinterrogation.CollectionWarning
+	if err := json.Unmarshal(stored, &decoded); err != nil {
+		return nil, true
+	}
+	for _, w := range deviceinterrogation.SanitizeWarnings(decoded) {
+		warnings = append(warnings, JobResultCollectionWarning{
+			Collector: w.Collector,
+			Endpoint:  w.Endpoint,
+			Reason:    string(w.Reason),
+			Effect:    w.Effect,
+			Detail:    w.Detail,
+		})
+	}
+	return warnings, false
 }

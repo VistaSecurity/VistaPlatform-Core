@@ -6,11 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 )
 
 // FortinetInterrogator interrogates Fortinet FortiGate appliances over the
@@ -67,6 +67,7 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	result := &InterrogateResult{
 		Assets:     []CryptoAsset{},
 		DeviceInfo: make(map[string]interface{}),
+		collector:  fortinetCollector,
 	}
 
 	sysInfo, err := c.getSystemInfo(ctx)
@@ -81,7 +82,7 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	c.fortinetCollectOps(ctx, result, sysInfo)
 
 	if sslVPNs, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ssl/settings"); err != nil {
-		fmt.Printf("Warning: failed to get SSL VPN configs: %v\n", err)
+		result.warn("/api/v2/cmdb/vpn.ssl/settings", err, "SSL VPN settings not collected")
 	} else {
 		for _, vpn := range sslVPNs {
 			result.Assets = append(result.Assets, c.convertSSLVPNToAsset(vpn))
@@ -89,7 +90,7 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	}
 
 	if tunnels, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ipsec/phase1-interface"); err != nil {
-		fmt.Printf("Warning: failed to get IPSec tunnels: %v\n", err)
+		result.warn("/api/v2/cmdb/vpn.ipsec/phase1-interface", err, "IPsec tunnels not collected")
 	} else {
 		for _, tunnel := range tunnels {
 			result.Assets = append(result.Assets, c.convertIPSecToAsset(tunnel))
@@ -97,7 +98,7 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	}
 
 	if certs, err := c.getCertificates(ctx); err != nil {
-		fmt.Printf("Warning: failed to get certificates: %v\n", err)
+		result.warn("/api/v2/cmdb/certificate/local", err, "Local certificates not collected")
 	} else {
 		result.DeviceInfo["certificates"] = certs
 	}
@@ -171,8 +172,10 @@ func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*f
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		// The status and FortiOS's numeric error code, never the body: an
+		// error body is the device's free text, and this error is persisted
+		// as a collection warning (see vendorErrorCode).
+		return nil, statusErrorf(resp.StatusCode, "API returned status %d%s", resp.StatusCode, fortinetErrorCode(resp.Body))
 	}
 
 	var apiResp fortinetAPIResponse
@@ -180,7 +183,8 @@ func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*f
 		return nil, err
 	}
 	if apiResp.Status != "success" && apiResp.Error != 0 {
-		return nil, fmt.Errorf("API error: %s (code %d)", apiResp.ErrorMessage, apiResp.Error)
+		// The numeric code only; error_message is vendor free text.
+		return nil, fmt.Errorf("API error (FortiOS code %d)", apiResp.Error)
 	}
 	return &apiResp, nil
 }
@@ -270,7 +274,26 @@ func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) Crypto
 	if port, ok := vpn["port"].(float64); ok {
 		asset.Port = int(port)
 	}
-	if cipher, ok := vpn["cipher"].(string); ok {
+	cipherIsString := false
+	if cipher, ok := vpn["cipher"].(string); ok && cryptoparse.LooksLikeCipherString(cipher) {
+		// A custom cipher list in OpenSSL-style grammar: its `!`/`-` tokens
+		// are exclusions, not ciphers in use (P-05). Report only the suites it
+		// definitely enables, and only the components they all share; the raw
+		// value stays in metadata via the projection above.
+		cipherIsString = true
+		parsed := cryptoparse.ParseCipherString(cipher, cryptoparse.CipherStringVendor)
+		if field := cipherStringSuiteField(cipher, parsed); field != "" {
+			asset.CipherSuite = strPtr(field)
+		}
+		if c := parsed.Components(); c != nil && parsed.Complete {
+			if bits := cryptoparse.SymmetricKeyBits(c.Symmetric); bits > 0 {
+				asset.KeySize = intPtr(bits)
+			}
+			if c.Hash != "" {
+				asset.HashAlgorithm = strPtr(c.Hash)
+			}
+		}
+	} else if ok {
 		asset.CipherSuite = strPtr(cipher)
 		if keySize := fortinetKeySize(cipher); keySize > 0 {
 			asset.KeySize = intPtr(keySize)
@@ -281,7 +304,7 @@ func (c *fortinetClient) convertSSLVPNToAsset(vpn map[string]interface{}) Crypto
 	} else if minVersion, ok := vpn["min_tls_version"].(string); ok {
 		asset.ProtocolVersion = strPtr(minVersion)
 	}
-	if asset.CipherSuite != nil {
+	if asset.CipherSuite != nil && !cipherIsString {
 		if hashAlg := fortinetHashAlg(*asset.CipherSuite); hashAlg != "" {
 			asset.HashAlgorithm = strPtr(hashAlg)
 		}
@@ -336,8 +359,9 @@ func (c *fortinetClient) convertIPSecToAsset(tunnel map[string]interface{}) Cryp
 			asset.HashAlgorithm = strPtr(hashAlg)
 		}
 	}
+	// dhgrp is a space-separated list in preference order ("14 5").
 	if dhGroup, ok := tunnel["dhgrp"].(string); ok {
-		asset.Metadata["dh_group"] = dhGroup
+		applyIKEDHGroups(&asset, dhGroup, "")
 	}
 	if certName, ok := tunnel["certificate"].(string); ok && certName != "" {
 		asset.Metadata["certificate_name"] = certName

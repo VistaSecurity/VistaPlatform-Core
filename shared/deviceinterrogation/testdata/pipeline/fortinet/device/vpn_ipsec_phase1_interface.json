@@ -1,0 +1,20 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {
+      "name": "to-branch-02",
+      "interface": "wan1",
+      "ike-version": "2",
+      "remote-gw": "203.0.113.50",
+      "proposal": "aes256-sha256 aes128-sha1",
+      "dhgrp": "14 5",
+      "authmethod": "psk",
+      "psksecret": "ENC MUST-NOT-BE-COLLECTED",
+      "keylife": 86400,
+      "nattraversal": "enable",
+      "dpd": "on-idle"
+    }
+  ]
+}

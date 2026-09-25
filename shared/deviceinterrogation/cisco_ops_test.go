@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,8 @@ func ciscoIOSFixtures() map[string]string {
 		"show cdp neighbors detail":  "cisco_ios_show_cdp_neighbors_detail.txt",
 		"show lldp neighbors detail": "cisco_iosxe_show_lldp_neighbors_detail.txt",
 		"show ip arp":                "cisco_ios_show_ip_arp.txt",
+		// Synthetic, in the IOS shape: every VTY block SSH-only.
+		"show running-config | include ^line vty|transport input": "cisco_ios_show_running_config_vty.txt",
 	}
 }
 
@@ -511,12 +514,22 @@ func TestCiscoBound_CapsATableAtTheRowLimit(t *testing.T) {
 	for i := range rows {
 		rows[i] = map[string]interface{}{"name": "x"}
 	}
-	if got := ciscoBound("interfaces", rows); len(got) != ciscoMaxTableRows {
+	cut := &InterrogateResult{collector: ciscoCollector}
+	if got := ciscoBound(cut, "show interfaces", "Interface table", rows); len(got) != ciscoMaxTableRows {
 		t.Errorf("bounded table has %d rows, want %d", len(got), ciscoMaxTableRows)
 	}
+	// The cut is said out loud, on the result, naming the table and the bound.
+	if len(cut.Warnings) != 1 || cut.Warnings[0].Reason != WarningTruncated ||
+		cut.Warnings[0].Endpoint != "show interfaces" || !strings.Contains(cut.Warnings[0].Effect, strconv.Itoa(ciscoMaxTableRows)) {
+		t.Errorf("the cut table raised no truncated warning naming its bound: %+v", cut.Warnings)
+	}
 	short := rows[:3]
-	if got := ciscoBound("interfaces", short); len(got) != 3 {
+	whole := &InterrogateResult{}
+	if got := ciscoBound(whole, "show interfaces", "Interface table", short); len(got) != 3 {
 		t.Errorf("a table under the bound was truncated: %d rows", len(got))
+	}
+	if len(whole.Warnings) != 0 {
+		t.Errorf("a whole table raised a warning: %+v", whole.Warnings)
 	}
 }
 

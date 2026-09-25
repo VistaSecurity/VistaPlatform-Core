@@ -12,6 +12,18 @@ package services
 // Runs against the real schema + seed via the testdb harness (nightly
 // test-backend and `make test-integration-db`); skips when TEST_DATABASE_URL is
 // unset, so the plain unit path stays green.
+//
+// Every test here reads a database of its own (shippedCatalogue), never the
+// shared one. `algorithms` is a GLOBAL table, and the other packages running
+// concurrently against the shared database write to it: they insert fixture
+// rows (READ-<uuid> weak at score 40/1/0, a NULL-score row) and temporarily
+// rewrite seeded ones (AES256 to weak/NULL, then restore). Every one of those is
+// a legitimate fixture and a violation of an invariant below, so a whole-table
+// scan on the shared database failed whenever it happened to overlap them.
+// Excluding fixture code prefixes would not fix that. The seeded-row rewrites
+// carry real codes, and the next fixture would bring a prefix nobody listed.
+// The subject of these tests is what schema.sql + seed.sql SHIP, and a fresh
+// database holding exactly that is the only place nothing else can write.
 
 import (
 	"database/sql"
@@ -53,8 +65,7 @@ var mustClassify = []string{
 }
 
 func TestIntegration_AlgorithmCatalogue_ClassifiesEverythingItMust(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
+	db := shippedCatalogue(t)
 
 	for _, code := range mustClassify {
 		var n int
@@ -71,8 +82,7 @@ func TestIntegration_AlgorithmCatalogue_ClassifiesEverythingItMust(t *testing.T)
 // evidence audit for the committed catalogue sources; it does not authorize a
 // backfill of operator-created NULL rows, whose intended assessment is unknown.
 func TestIntegration_AlgorithmCatalogue_ShippedRowsHaveExplicitRiskScores(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
+	db := shippedCatalogue(t)
 
 	missing := queryStrings(t, db, `SELECT code FROM algorithms WHERE risk_score IS NULL ORDER BY code`)
 	if len(missing) > 0 {
@@ -84,8 +94,7 @@ func TestIntegration_AlgorithmCatalogue_ShippedRowsHaveExplicitRiskScores(t *tes
 // to be trustworthy; a violation means two columns disagree about the same
 // algorithm.
 func TestIntegration_AlgorithmCatalogue_IsInternallyConsistent(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
+	db := shippedCatalogue(t)
 
 	type check struct {
 		name  string
@@ -123,8 +132,7 @@ func TestIntegration_AlgorithmCatalogue_IsInternallyConsistent(t *testing.T) {
 // Regression guards for the specific errors corrected in this catalogue pass.
 // If any recurs, this fails with the exact reason.
 func TestIntegration_AlgorithmCatalogue_KnownErrorsStayFixed(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
+	db := shippedCatalogue(t)
 
 	// 1. ML-KEM OIDs belong on the NIST KEM arc (2.16.840.1.101.3.4.4.x), not
 	//    the AES arc (…3.4.1.x) they were mistakenly seeded on.
@@ -233,6 +241,14 @@ func TestIntegration_AlgorithmCatalogue_KnownErrorsStayFixed(t *testing.T) {
 			t.Errorf("%s (static, no forward secrecy) is rated %s/%d — too benign", code, strength, risk)
 		}
 	}
+}
+
+// shippedCatalogue returns a database holding nothing but schema.sql + seed.sql,
+// which is what these guards are about. See the file comment for why it cannot
+// be the shared database.
+func shippedCatalogue(t *testing.T) *sql.DB {
+	t.Helper()
+	return testdb.ScratchDatabase(t)
 }
 
 func queryStrings(t *testing.T, db *sql.DB, query string) []string {

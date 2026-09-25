@@ -280,7 +280,7 @@ paths:
       tags:
       - network-segments
       summary: Create a network segment
-      description: 'Creates a network segment (RBAC-gated `settings.update`). Returns the created segment. A referenced `location_id` that does not exist is rejected.'
+      description: 'Creates a network segment (RBAC-gated `settings.update`). Returns the created segment. A referenced `location_id` that does not exist is rejected. A `cidr` segment too broad to be a claim of ownership — IPv4 shorter than /8 or IPv6 shorter than /16, unless wholly private — is rejected with a 400 whose `error` names the rule.'
       requestBody:
         required: true
         content:
@@ -366,7 +366,7 @@ paths:
       tags:
       - network-segments
       summary: Update a network segment
-      description: 'Updates a network segment (RBAC-gated `settings.update`).'
+      description: 'Updates a network segment (RBAC-gated `settings.update`). A `cidr` value too broad to be a claim of ownership — IPv4 shorter than /8 or IPv6 shorter than /16, unless wholly private — is rejected with a 400 whose `error` names the rule.'
       requestBody:
         required: true
         content:
@@ -2131,61 +2131,6 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
       x-quirks:
       - An unknown or other-tenant configuration id returns 200 with an empty `components` array, not 404 — the join is RLS-scoped and simply matches nothing. Consumers cannot distinguish "no such configuration" from "not assessed" here; use GET /crypto-configurations/{id} for existence.
-  /crypto-configurations/{id}/remediation:
-    parameters:
-    - $ref: '#/components/parameters/CryptoConfigurationId'
-    get:
-      operationId: getCryptoConfigurationRemediation
-      tags:
-      - crypto-configurations
-      summary: Get remediation guidance for a crypto configuration
-      description: 'Returns a structured remediation summary aggregated from the configuration''s protocol-version / cipher-suite / hash / key-size weaknesses, plus recommended alternatives, an overall timeline, and compliance impact. Computed on demand by the RemediationService.
-
-        '
-      responses:
-        '200':
-          description: The remediation summary.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RemediationResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-      x-quirks:
-      - On retrieval failure (DB error OR no-rows on the underlying crypto_implementations row) the handler maps to 500 with `{"error":"Failed to get remediation guidance"}`, not 404 — diverges from the GET /crypto-configurations/{id} 404-on-any-error quirk for the sibling handler.
-  /remediation/algorithm/{code}:
-    parameters:
-    - name: code
-      in: path
-      required: true
-      description: Algorithm or protocol code (e.g. `RC4`, `TLS 1.0`).
-      schema:
-        type: string
-    get:
-      operationId: getRemediationByAlgorithm
-      tags:
-      - crypto-configurations
-      summary: Get remediation guidance for a specific algorithm
-      description: 'Returns the catalog remediation guidance for a single algorithm/protocol code (severity, impact, steps, alternatives, resources), wrapped under `remediation`. Not tenant-scoped — it is reference guidance. UI consumer: `web-ui/src/services/remediation-api.ts` (`getRemediationByAlgorithm`).'
-      responses:
-        '200':
-          description: The algorithm's remediation guidance.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RemediationByAlgorithmResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-      x-quirks:
-      - Any lookup error (including an unknown code) maps to 404 `{"error":"Algorithm not found"}`. The route binds `code` as a path segment, so the empty-code 400 branch in the handler is unreachable via routing.
   /asset-certificate-links:
     get:
       operationId: listAssetCertificateLinks
@@ -3085,6 +3030,14 @@ paths:
         place. Returns every job dispatched with its executor; `job_id` and
         `count` summarize the first job and the assets scanned. Invalid UUIDs
         are skipped; an all-invalid list returns 400.
+
+        An asset whose address is outside the tenant's registered networks is
+        ASKED about rather than refused (#2014 W5.13b): 422
+        `external_targets_unconfirmed` names the assets before anything is
+        stamped or dispatched, and a resend with `external_targets_confirmed`
+        scans them — which also needs `discovery.create`. Reserved and
+        platform-excluded addresses stay refused; such an asset is reported
+        under `skipped` with the reason.
       requestBody:
         required: true
         content:
@@ -3102,6 +3055,14 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: >-
+            `external_targets_confirmed` was sent without the `discovery.create`
+            permission.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '404':
           $ref: '#/components/responses/LegacyNotFound'
         '409':
@@ -3110,6 +3071,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: Some assets are outside the registered networks; confirm to scan them.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActiveScanExternalTargetsError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
@@ -5700,12 +5667,19 @@ paths:
       summary: Start a discovery job (scan targets for crypto assets)
       description: |
         Queues an active-discovery job against the supplied targets (IPs, CIDRs,
-        or hostnames) and forwards it to cluster-sensor-service for execution.
-        `targets` is required (1–1000 entries). Gated by the `discovery.create`
-        permission. Returns 202 with the created job (`{ "job": {...} }`); poll
-        `GET /discovery/jobs/{id}` for status and `GET /discovery/jobs/{id}/results`
-        for findings and their materialization split. Findings flow into
-        inventory server-side; there is nothing for the client to import.
+        ranges, hostnames or URLs) and forwards it to cluster-sensor-service for
+        execution. `targets` is required (1–1000 entries). Gated by the
+        `discovery.create` permission. Returns 202 with the created job
+        (`{ "job": {...} }`); poll `GET /discovery/jobs/{id}` for status and
+        `GET /discovery/jobs/{id}/results` for findings and their
+        materialization split. Findings flow into inventory server-side; there
+        is nothing for the client to import.
+
+        Targets outside the tenant's registered networks are scanned only with
+        `external_targets_confirmed: true` (422 without it), never when the
+        operator has switched that off (403), and never at all when reserved
+        or platform-excluded (400) — see `DiscoveryTargetVerdictError`. Each
+        such scan is audited.
       requestBody:
         required: true
         content:
@@ -5720,9 +5694,35 @@ paths:
               schema:
                 $ref: '#/components/schemas/DiscoveryJobResponse'
         '400':
-          $ref: '#/components/responses/LegacyBadRequest'
+          description: >-
+            Invalid request, or `targets_refused` — targets that can never be
+            scanned as entered (`DiscoveryTargetVerdictError`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/DiscoveryTargetVerdictError'
+                - $ref: '#/components/schemas/LegacyError'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: >-
+            `external_targets_disabled` — the operator has turned off scanning
+            outside the registered networks. Also the permission gate's refusal.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/DiscoveryTargetVerdictError'
+                - $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: >-
+            `external_targets_unconfirmed` — resend with
+            `external_targets_confirmed: true` to scan the listed targets.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryTargetVerdictError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /discovery/jobs/{id}:
@@ -10838,6 +10838,15 @@ components:
           type: string
           format: uuid
           description: The tenant sensor to run from. Required when `run_from` is `sensor`; ignored otherwise.
+        external_targets_confirmed:
+          type: boolean
+          description: >-
+            The person's confirmation that assets whose address is outside the
+            tenant's registered networks may be scanned. Without it such a scan
+            answers 422 `external_targets_unconfirmed` naming the assets, and
+            nothing is stamped or dispatched. Needs `discovery.create` in
+            addition to `assets.update` (403 otherwise). Never admits a
+            reserved or platform-excluded address.
     ActiveScanJob:
       type: object
       additionalProperties: false
@@ -10884,6 +10893,57 @@ components:
       properties:
         message:
           type: string
+        job_id:
+          type: string
+        count:
+          type: integer
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveScanJob'
+        skipped:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveScanSkip'
+    ActiveScanExternalTarget:
+      type: object
+      additionalProperties: false
+      description: An asset whose scan target is outside the tenant's registered networks.
+      required: [target, addresses, asset_id, asset_name]
+      properties:
+        target:
+          type: string
+          description: The address or name the asset would be scanned at.
+        addresses:
+          type: array
+          items:
+            type: string
+        asset_id:
+          type: string
+          format: uuid
+        asset_name:
+          type: string
+    ActiveScanExternalTargetsError:
+      type: object
+      additionalProperties: false
+      description: >
+        422 from POST /infrastructure-assets/scan: some assets are outside the
+        tenant's registered networks (#2014 W5.13b). Nothing was stamped or
+        dispatched for them; resend with `external_targets_confirmed: true` to
+        scan them. `jobs`/`skipped` report any other assets in the request that
+        were already dispatched or skipped (normally empty — the question is
+        asked before anything runs).
+      required: [error, details, external_targets, job_id, count, jobs, skipped]
+      properties:
+        error:
+          type: string
+          enum: [external_targets_unconfirmed]
+        details:
+          type: string
+        external_targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActiveScanExternalTarget'
         job_id:
           type: string
         count:
@@ -11589,6 +11649,69 @@ components:
         sets_score:
           type: boolean
           description: True on the worst numerically scored component. False for every component when the resolved catalogue rows have no numeric score.
+        hybrid_kex_available:
+          $ref: '#/components/schemas/HybridKexAvailability'
+        remediation_guidance:
+          $ref: '#/components/schemas/ComponentRemediationGuidance'
+    ComponentRemediationGuidance:
+      type: object
+      additionalProperties: false
+      description: >
+        The catalogue row's curated remediation guidance for this component
+        (algorithms.remediation_guidance): what the weakness exposes, the steps
+        to fix it, a suggested timeline, CVE references and further reading.
+        Read live from the catalogue like every other field on the component.
+        Guidance only — it changes no score, band or severity. Omitted when the
+        row records none (only weak/deprecated rows carry it). This replaced
+        the retired GET /crypto-configurations/{id}/remediation and
+        GET /remediation/algorithm/{code}; the per-algorithm form is also on
+        GET /algorithms/{code} as `remediation_guidance`.
+      required:
+      - steps
+      - cve_references
+      - resources
+      properties:
+        summary:
+          type: string
+          description: One-line statement of the weakness. Omitted when unrecorded.
+        impact:
+          type: string
+          description: What an attacker gains. Omitted when unrecorded.
+        steps:
+          type: array
+          description: Ordered remediation steps, verbatim from the catalogue (a step may carry its own "1." prefix). Empty = none recorded.
+          items: { type: string }
+        timeline:
+          type: string
+          description: The catalogue's suggested timeline, free text (e.g. "Immediate - within 7 days"). Omitted when unrecorded. Not a severity — the component's risk_level is.
+        cve_references:
+          type: array
+          description: CVE identifiers the catalogue associates with the weakness. Empty = none recorded.
+          items: { type: string }
+        resources:
+          type: array
+          description: Further-reading references, usually URLs. Catalogue-admin authored; consumers must not render a non-http(s) value as a link.
+          items: { type: string }
+    HybridKexAvailability:
+      type: object
+      additionalProperties: false
+      description: >
+        Remediation hint on a classical `key_exchange` component: a handshake
+        with this configuration's server proved it ALSO accepts a hybrid
+        post-quantum key exchange, but the session negotiated the classical
+        group — the client's offer or the server's group preference chose it.
+        Reaching post-quantum key exchange is a preference change on the server
+        (or newer clients), not a migration. Guidance only: the component's
+        risk, the configuration's score and band, and its PQC readiness
+        category are unchanged. Omitted when hybrid support is false or
+        unknown, or when the configuration already negotiates a hybrid group.
+      required:
+      - groups
+      properties:
+        groups:
+          type: array
+          description: The hybrid group(s) a handshake with the server accepted, e.g. `X25519MLKEM768`. Always present; empty when the producer did not record which.
+          items: { type: string }
     CryptoComponentAssessmentListResponse:
       type: object
       additionalProperties: false
@@ -11600,114 +11723,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CryptoComponentAssessment'
-    RemediationIssue:
-      type: object
-      additionalProperties: false
-      description: 'A single weakness contributing to the configuration''s overall risk. `type` is the dimension that triggered it (`protocol` / `cipher` / `hash` / `key_size`); `code` is the algorithm or protocol identifier the catalog matched (e.g. `TLS 1.0`, `RC4`).
-
-        '
-      required:
-      - type
-      - code
-      - name
-      - severity
-      - summary
-      - impact
-      - steps
-      - timeline
-      - alternatives
-      - resources
-      properties:
-        type:
-          type: string
-        code:
-          type: string
-        name:
-          type: string
-        severity:
-          type: string
-        summary:
-          type: string
-        impact:
-          type: string
-        steps:
-          type: array
-          items:
-            type: string
-        timeline:
-          type: string
-        alternatives:
-          type: array
-          items:
-            type: string
-        resources:
-          type: array
-          items:
-            type: string
-    RemediationSummary:
-      type: object
-      additionalProperties: false
-      description: 'Aggregated remediation guidance for a single crypto configuration — services.RemediationSummary''s JSON form. All slice/map fields are initialized empty (never null) in the service constructor, so they are required + non-null here.
-
-        '
-      required:
-      - crypto_implementation_id
-      - risk_score
-      - issues
-      - priority_actions
-      - overall_timeline
-      - recommended_alternatives
-      - compliance_impact
-      - resources
-      properties:
-        crypto_implementation_id:
-          type: string
-          format: uuid
-        risk_score:
-          type: integer
-        issues:
-          type: array
-          items:
-            $ref: '#/components/schemas/RemediationIssue'
-        priority_actions:
-          type: array
-          items:
-            type: string
-        overall_timeline:
-          type: string
-        recommended_alternatives:
-          type: array
-          items:
-            type: string
-        compliance_impact:
-          type: object
-          additionalProperties:
-            type: string
-          description: Map of framework code → impact summary.
-        resources:
-          type: array
-          items:
-            type: string
-    RemediationResponse:
-      type: object
-      additionalProperties: false
-      description: 'CURRENT envelope for GET /crypto-configurations/{id}/remediation: a single `remediation` key wrapping the summary.
-
-        '
-      required:
-      - remediation
-      properties:
-        remediation:
-          $ref: '#/components/schemas/RemediationSummary'
-    RemediationByAlgorithmResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope for GET /remediation/algorithm/{code}: a single `remediation` key wrapping one issue (the algorithm''s catalog guidance).'
-      required:
-      - remediation
-      properties:
-        remediation:
-          $ref: '#/components/schemas/RemediationIssue'
     AssetCertificateLink:
       type: object
       additionalProperties: false
@@ -12358,7 +12373,22 @@ components:
           minItems: 1
           items:
             type: string
-          description: IPs, CIDRs, or hostnames to scan (max 1000).
+          description: >-
+            What to scan (max 1000): IP addresses, CIDR blocks, `a-b` ranges,
+            hostnames, `host:port`, or URLs (`https://host[:port]/path` — the
+            host is scanned, and an explicit port is added to `ports`).
+            Hostnames are resolved once and the scan is pinned to the
+            addresses that were checked.
+        external_targets_confirmed:
+          type: boolean
+          description: >-
+            The person's explicit confirmation that they are authorized to
+            scan the targets outside the tenant's registered networks (public
+            addresses, blocks and names not inside a network segment the
+            tenant declared). Required when any target is external: without
+            it the request answers 422 `external_targets_unconfirmed` listing
+            them. It never admits a reserved or platform-excluded target, and
+            it is ignored on unattended scans.
         execution_mode:
           type: string
           description: >-
@@ -12498,6 +12528,78 @@ components:
             `auto_scan` when the #1814 automatic-scan sweep created this job;
             empty for an operator-started run (Active Scan, Discover wizard).
             Drives the "Automatic scan" kind on the unified Jobs page.
+        external_targets:
+          type: array
+          description: >-
+            Create response only: the confirmed targets outside the tenant's
+            registered networks, each with the addresses it named when the
+            job was created (a hostname's resolved — and pinned — addresses;
+            a literal's own value). Absent when nothing was external.
+          items:
+            $ref: '#/components/schemas/DiscoveryExternalTarget'
+    DiscoveryExternalTarget:
+      type: object
+      additionalProperties: false
+      description: A target outside the tenant's registered networks and the addresses it names.
+      required:
+      - target
+      - addresses
+      properties:
+        target:
+          type: string
+          description: The target as the person entered it.
+        addresses:
+          type: array
+          items:
+            type: string
+    DiscoveryRefusedTarget:
+      type: object
+      additionalProperties: false
+      description: A target that can never be scanned as entered, and why.
+      required:
+      - target
+      - reason
+      properties:
+        target:
+          type: string
+        reason:
+          type: string
+    DiscoveryTargetVerdictError:
+      type: object
+      additionalProperties: false
+      description: |
+        The answer when target authorization refuses a create-job request
+        (#2014 W5.13b). Branch on `error`:
+
+        - `targets_refused` (400) — `refused_targets` can never be scanned as
+          entered: a reserved or platform-excluded range (loopback,
+          link-local and cloud metadata, the platform's own addresses, ranges
+          the tenant excluded), a hostname resolving to one, a name that does
+          not resolve, or a block outside the registered networks that is
+          larger than the per-target bound. Confirming changes nothing.
+        - `external_targets_unconfirmed` (422) — `external_targets` are outside
+          the tenant's registered networks. Resend with
+          `external_targets_confirmed: true` to scan them.
+        - `external_targets_disabled` (403) — the same, but the installation's
+          operator has turned scanning outside the registered networks off.
+      required:
+      - error
+      - details
+      properties:
+        error:
+          type: string
+          enum: [targets_refused, external_targets_unconfirmed, external_targets_disabled]
+        details:
+          type: string
+          description: A sentence for a person. Do not branch on it.
+        external_targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveryExternalTarget'
+        refused_targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveryRefusedTarget'
     DiscoveryJobsResponse:
       type: object
       additionalProperties: true

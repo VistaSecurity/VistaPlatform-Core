@@ -5,6 +5,8 @@ import {
   componentTypeLabel,
   explainRisk,
   provenanceOf,
+  remediationGuidanceOf,
+  safeHref,
   verdictOf,
   type CryptoComponent,
 } from './risk-explanation';
@@ -168,5 +170,50 @@ describe('presentation helpers', () => {
     expect(verdictOf(comp({ strength: 'strong', deprecation_status: 'current' }))).toBe('strong');
     // Nothing recorded stays nothing. No invented assessment.
     expect(verdictOf(comp({ strength: '', deprecation_status: '' }))).toBe('');
+  });
+});
+
+// The catalogue's curated "how to fix" (algorithms.remediation_guidance), which
+// used to be reachable only through an endpoint no screen called.
+describe('remediation guidance', () => {
+  const seeded = {
+    summary: 'RC4 is broken.',
+    impact: 'Keystream biases allow plaintext recovery.',
+    steps: ['1. Remove RC4 from the cipher list', '2) Prefer AES-GCM', '10. Re-test'],
+    timeline: 'Immediate - within 7 days',
+    cve_references: ['CVE-2013-2566'],
+    resources: ['https://www.rfc-editor.org/rfc/rfc7465'],
+  };
+
+  it('is null when the catalogue records none — never an empty "how to fix"', () => {
+    expect(remediationGuidanceOf(comp())).toBeNull();
+    expect(remediationGuidanceOf(comp({ remediation_guidance: { steps: [], cve_references: [], resources: [] } }))).toBeNull();
+    expect(remediationGuidanceOf(comp({ remediation_guidance: { summary: '  ', steps: [' '], cve_references: [], resources: [] } }))).toBeNull();
+  });
+
+  it('keeps the catalogue text and strips only the step numbering the list supplies', () => {
+    const g = remediationGuidanceOf(comp({ remediation_guidance: seeded }))!;
+    expect(g.summary).toBe('RC4 is broken.');
+    expect(g.impact).toBe('Keystream biases allow plaintext recovery.');
+    expect(g.steps).toEqual(['Remove RC4 from the cipher list', 'Prefer AES-GCM', 'Re-test']);
+    expect(g.timeline).toBe('Immediate - within 7 days');
+    expect(g.cves).toEqual(['CVE-2013-2566']);
+    expect(g.resources).toEqual([{ text: 'https://www.rfc-editor.org/rfc/rfc7465', href: 'https://www.rfc-editor.org/rfc/rfc7465' }]);
+  });
+
+  it('does not strip a number that is part of the step itself', () => {
+    const g = remediationGuidanceOf(comp({ remediation_guidance: { steps: ['2048-bit keys are the minimum'], cve_references: [], resources: [] } }))!;
+    expect(g.steps).toEqual(['2048-bit keys are the minimum']);
+  });
+
+  it('links only http(s) resources — the catalogue is admin-edited free text', () => {
+    expect(safeHref('https://weakdh.org/')).toBe('https://weakdh.org/');
+    expect(safeHref('http://example.com/x')).toBe('http://example.com/x');
+    expect(safeHref('javascript:alert(1)')).toBeNull();
+    expect(safeHref('JaVaScRiPt:alert(1)')).toBeNull();
+    expect(safeHref('data:text/html,<script>alert(1)</script>')).toBeNull();
+    expect(safeHref('NIST SP 800-52r2')).toBeNull();
+    const g = remediationGuidanceOf(comp({ remediation_guidance: { steps: [], cve_references: [], resources: ['javascript:alert(1)', 'NIST SP 800-52r2'] } }))!;
+    expect(g.resources.every((r) => r.href === null)).toBe(true);
   });
 });

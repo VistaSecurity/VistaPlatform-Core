@@ -1,0 +1,49 @@
+{
+  "vendor": "paloalto",
+  "input_sha256": "bb0cf144587a6ed3692cfef8f9ce1381af5a1282a24afc822b4cbd535a4b6bb0",
+  "inventory": {
+    "assets": [
+      {
+        "asset": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+        "class_key": "firewall",
+        "status": "monitoring"
+      },
+      {
+        "asset": "device",
+        "class_key": "firewall",
+        "status": "monitoring"
+      }
+    ],
+    "crypto_configurations": [
+      {
+        "asset": "device",
+        "protocol": "TLS",
+        "port": null,
+        "protocol_version": null,
+        "cipher_suite": "",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": null,
+        "risk_level": "Unknown",
+        "risk_factors": [],
+        "algorithm_links": {},
+        "pqc_category": "unclassified",
+        "has_certificate": false
+      }
+    ],
+    "certificates": [],
+    "findings": [],
+    "pqc_counts": {
+      "needs_migration": 0,
+      "pqc_ready": 0,
+      "symmetric_safe": 0,
+      "total": 1,
+      "unclassified": 1
+    },
+    "ingest_outcomes": [
+      "matched",
+      "matched"
+    ]
+  }
+}

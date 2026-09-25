@@ -66,6 +66,7 @@ type Setting struct {
 	Origin      agentconfig.Origin `json:"origin"`
 	Kind        agentconfig.Kind   `json:"kind"`
 	Apply       agentconfig.Apply  `json:"apply"`
+	Label       string             `json:"label,omitempty"`
 	Description string             `json:"description"`
 	Confirm     string             `json:"confirm,omitempty"`
 	Min         int64              `json:"min,omitempty"`
@@ -89,7 +90,7 @@ func Describe(rs []agentconfig.Resolved) []Setting {
 		out = append(out, Setting{
 			Key: r.Key, Value: r.Value, Origin: r.Origin,
 			Kind: r.Field.Kind, Apply: r.Field.Apply,
-			Description: r.Field.Description, Confirm: r.Field.Confirm,
+			Label: r.Field.Label, Description: r.Field.Description, Confirm: r.Field.Confirm,
 			Min: r.Field.Min, Max: r.Field.Max, Allowed: r.Field.Allowed,
 		})
 	}

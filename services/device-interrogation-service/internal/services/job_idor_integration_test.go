@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -29,6 +30,29 @@ func insertDeviceAgent(t *testing.T, db *sql.DB, tenantID uuid.UUID) uuid.UUID {
 		t.Fatalf("insertDeviceAgent(tenant %s): %v", tenantID, err)
 	}
 	return id
+}
+
+// connectJobClaimRedis returns a client for REDIS_URL (default localhost:6379),
+// skipping the test when Redis is unreachable. REDIS_URL is a redis:// URL in
+// the nightly job, which is not a valid Options.Addr: passed straight through,
+// the dial failed and both job-claim tests skipped, green, on every nightly run.
+// Accept the URL form and fall back to a bare host:port for local runs.
+func connectJobClaimRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	addr := os.Getenv("REDIS_URL")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	opts, err := redis.ParseURL(addr)
+	if err != nil {
+		opts = &redis.Options{Addr: addr}
+	}
+	rdb := redis.NewClient(opts)
+	t.Cleanup(func() { _ = rdb.Close() })
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		t.Skipf("Redis unreachable at %s (%v) — skipping job-claim integration test", addr, err)
+	}
+	return rdb
 }
 
 // TestIntegration_SubmitJobResult_CrossTenantWriteBlocked proves the fix for
@@ -97,9 +121,20 @@ func TestIntegration_SubmitJobResult_CrossTenantWriteBlocked(t *testing.T) {
 		t.Fatalf("SubmitJobResult(agentA, unknown job) = %v, want ErrJobTenantMismatch", err)
 	}
 
-	// An agent in the OWNING tenant can complete the unassigned job.
+	// An agent in the OWNING tenant cannot complete a job it never claimed
+	// either: filing a result against an unclaimed job would let it choose the
+	// asset its findings are attributed to (review of).
+	if err := svc.SubmitJobResult(ctx, agentA, &models.JobResult{JobID: jobA.ID, Success: true}); !errors.Is(err, ErrJobTenantMismatch) {
+		t.Fatalf("SubmitJobResult(agentA, unclaimed jobA) = %v, want ErrJobTenantMismatch", err)
+	}
+
+	// Once agent A has claimed it and is running it — what GetNextJob does —
+	// the result is accepted.
+	if _, err := db.ExecContext(ctx, `UPDATE device_jobs SET agent_id=$1, status='in_progress' WHERE id=$2`, agentA, jobA.ID); err != nil {
+		t.Fatalf("claim jobA for agentA: %v", err)
+	}
 	if err := svc.SubmitJobResult(ctx, agentA, &models.JobResult{JobID: jobA.ID, Success: true}); err != nil {
-		t.Fatalf("SubmitJobResult(agentA, jobA) = %v, want nil", err)
+		t.Fatalf("SubmitJobResult(agentA, claimed jobA) = %v, want nil", err)
 	}
 	done, err := jobQueue.GetJobByID(ctx, jobA.ID)
 	if err != nil {
@@ -122,15 +157,7 @@ func TestIntegration_SubmitJobResult_CrossTenantWriteBlocked(t *testing.T) {
 func TestIntegration_GetNextJobForAgent_CrossTenantClaimBlocked(t *testing.T) {
 	db := testdb.Connect(t)
 
-	addr := os.Getenv("REDIS_URL")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	t.Cleanup(func() { _ = rdb.Close() })
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		t.Skipf("Redis unreachable at %s (%v) — skipping job-claim integration test", addr, err)
-	}
+	rdb := connectJobClaimRedis(t)
 
 	tenantA := testdb.NewTenant(t, db)
 	tenantB := testdb.NewTenant(t, db)
@@ -184,19 +211,19 @@ func TestIntegration_GetNextJobForAgent_CrossTenantClaimBlocked(t *testing.T) {
 // the in-cluster platform worker and a tenant agent. They use different Redis
 // locks, so the database claim itself must be atomic or both can receive the
 // same unassigned device_interrogation job.
+//
+// A free-running goroutine race almost never lands both claimers between the
+// re-select and the UPDATE (removing FOR UPDATE SKIP LOCKED failed 0/200), so
+// the afterClaimSelect seam forces that interleaving: a claimer that has
+// re-selected the job is held until the other claimer has either re-selected it
+// too or returned. With the row lock, the second claimer skips the locked row
+// and returns empty-handed; without it, both are parked holding the job and both
+// UPDATEs succeed, because the UPDATE carries no status='pending' predicate.
 func TestIntegration_GetNextJob_UnassignedJobClaimedOnce(t *testing.T) {
 	db := testdb.Connect(t)
 
-	addr := os.Getenv("REDIS_URL")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	t.Cleanup(func() { _ = rdb.Close() })
+	rdb := connectJobClaimRedis(t)
 	ctx := context.Background()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis unreachable at %s (%v) — skipping job-claim integration test", addr, err)
-	}
 
 	tenantID := testdb.NewTenant(t, db)
 	agentID := insertDeviceAgent(t, db, tenantID)
@@ -222,6 +249,37 @@ func TestIntegration_GetNextJob_UnassignedJobClaimedOnce(t *testing.T) {
 		t.Fatalf("CreateJob(unassigned) = %v, want nil", err)
 	}
 
+	// Hold every claimer that re-selected the job until each claimer has either
+	// reached this point or returned. Each goroutine contributes exactly one of
+	// those events: a parked claimer cannot return before the release.
+	var (
+		mu       sync.Mutex
+		arrived  int
+		finished int
+		once     sync.Once
+	)
+	release := make(chan struct{})
+	settle := func() { // mu held
+		if arrived+finished == 2 {
+			once.Do(func() { close(release) })
+		}
+	}
+	jobQueue.afterClaimSelect = func(ctx context.Context, jobID uuid.UUID) {
+		if jobID != unassigned.ID {
+			return
+		}
+		mu.Lock()
+		arrived++
+		settle()
+		mu.Unlock()
+		select {
+		case <-release:
+		case <-ctx.Done():
+		case <-time.After(30 * time.Second):
+			t.Errorf("claimer parked after re-select was never released")
+		}
+	}
+
 	type claimResult struct {
 		who string
 		job *models.DeviceJob
@@ -230,22 +288,30 @@ func TestIntegration_GetNextJob_UnassignedJobClaimedOnce(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan claimResult, 2)
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		got, e := jobQueue.GetNextJobForAgent(ctx, agentID)
-		results <- claimResult{who: "agent", job: got, err: e}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		got, e := jobQueue.GetNextJobForPlatform(ctx)
-		results <- claimResult{who: "platform", job: got, err: e}
-	}()
+	claim := func(who string, next func() (*models.DeviceJob, error)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			got, e := next()
+			mu.Lock()
+			finished++
+			settle()
+			mu.Unlock()
+			results <- claimResult{who: who, job: got, err: e}
+		}()
+	}
+	claim("agent", func() (*models.DeviceJob, error) { return jobQueue.GetNextJobForAgent(ctx, agentID) })
+	claim("platform", func() (*models.DeviceJob, error) { return jobQueue.GetNextJobForPlatform(ctx) })
 	close(start)
 	wg.Wait()
 	close(results)
+
+	// The seam must have fired, or the claim path no longer passes through it
+	// and this test has silently fallen back to an unforced race.
+	if arrived == 0 {
+		t.Fatalf("afterClaimSelect never saw job %s; the forced interleaving did not happen", unassigned.ID)
+	}
 
 	claims := 0
 	for res := range results {

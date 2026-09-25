@@ -56,7 +56,10 @@ Create a discovery job with target networks, protocols, and ports, OR interrogat
 **API:** `POST /api/v2/device-interrogation-service/cloud/discover` (cloud discovery)
 
 **Parameters (Network Scanning):**
-- Targets: IP addresses, CIDR ranges, or hostnames
+- Targets: IP addresses, CIDR ranges, `a-b` ranges, hostnames or URLs. Targets
+  outside your registered networks need your confirmation, and some ranges are
+  never scanned — see
+  [Scanning outside your networks](./active-scanning.md#scanning-outside-your-networks)
 - Execution mode: `async` (default) or `sync`
 - Protocols: TLS, SSH, IPSec, VPN
 - Ports: Specific ports to scan (default: common ports)

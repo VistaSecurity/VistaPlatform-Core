@@ -79,6 +79,20 @@ func TestBootstrapTrialIfApplicable_FreeTier_InsertsRow(t *testing.T) {
 	if n != 1 {
 		t.Errorf("trial row count = %d, want 1", n)
 	}
+	// payment_status 'trial' is derived from the row, in the same transaction
+	// (owner decision 6): the tenant list and the licence usage ledger read it.
+	if got := bootstrapPaymentStatus(t, db, tenant); got != "trial" {
+		t.Errorf("payment_status after bootstrapping a trial = %q, want \"trial\"", got)
+	}
+}
+
+func bootstrapPaymentStatus(t *testing.T, db *sql.DB, tenant uuid.UUID) string {
+	t.Helper()
+	var s string
+	if err := db.QueryRow(`SELECT payment_status FROM tenants WHERE id = $1`, tenant).Scan(&s); err != nil {
+		t.Fatalf("read payment_status: %v", err)
+	}
+	return s
 }
 
 func TestBootstrapTrialIfApplicable_PaidTier_NoRow(t *testing.T) {
@@ -100,6 +114,9 @@ func TestBootstrapTrialIfApplicable_PaidTier_NoRow(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("paid tenant trial row count = %d, want 0", n)
+	}
+	if got := bootstrapPaymentStatus(t, db, tenant); got != "active" {
+		t.Errorf("paid tenant payment_status = %q, want \"active\"", got)
 	}
 }
 

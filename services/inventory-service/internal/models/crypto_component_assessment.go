@@ -1,6 +1,11 @@
 package models
 
-import "github.com/google/uuid"
+import (
+	"encoding/json"
+	"strings"
+
+	"github.com/google/uuid"
+)
 
 // CryptoComponentAssessment is one catalogue-resolved component of a crypto
 // configuration, carrying the assessment that explains the configuration's risk
@@ -46,6 +51,104 @@ type CryptoComponentAssessment struct {
 
 	// SetsScore marks the worst component under worst-component-wins.
 	SetsScore bool `json:"sets_score" db:"-"`
+
+	// HybridKexAvailable is set on a classical key_exchange component when a
+	// handshake with this configuration's server proved it ALSO accepts a
+	// hybrid post-quantum key exchange ( W1.9). The server negotiated
+	// classical — because the client's offer or the server's own group
+	// preference chose it — so reaching post-quantum protection is a
+	// preference change, not a migration project.
+	//
+	// It is guidance only. The component's risk, the configuration's score and
+	// band, and its PQC readiness category are unchanged: what was negotiated
+	// is still classical and still Shor-breakable. Nil (omitted) when the
+	// server's hybrid support is false or unknown, or when the key exchange is
+	// already hybrid.
+	HybridKexAvailable *HybridKexAvailability `json:"hybrid_kex_available,omitempty" db:"-"`
+
+	// RemediationGuidance is the catalogue row's curated "how to fix this":
+	// impact, ordered steps, a suggested timeline, CVE references and further
+	// reading, from algorithms.remediation_guidance. Nil (omitted) when the row
+	// records none — only weak/deprecated rows carry it.
+	//
+	// Like everything else on this struct it is read live from the catalogue,
+	// so correcting a row corrects the advice on screen. It changes no score,
+	// band or severity: the catalogue's risk_score and strength stay the only
+	// opinion about how bad the component is.
+	RemediationGuidance *ComponentRemediationGuidance `json:"remediation_guidance,omitempty" db:"-"`
+}
+
+// ComponentRemediationGuidance is the typed projection of a catalogue row's
+// remediation_guidance JSONB. Text fields are omitted when the row records
+// none; list fields are always present (empty = none recorded).
+type ComponentRemediationGuidance struct {
+	Summary       string   `json:"summary,omitempty"`
+	Impact        string   `json:"impact,omitempty"`
+	Steps         []string `json:"steps"`
+	Timeline      string   `json:"timeline,omitempty"`
+	CVEReferences []string `json:"cve_references"`
+	Resources     []string `json:"resources"`
+}
+
+// ParseComponentRemediationGuidance projects the catalogue's
+// remediation_guidance JSONB onto ComponentRemediationGuidance.
+//
+// The column is free-form and platform admins edit it through the algorithms
+// API, so the parse is per-field and lenient: a field of the wrong type is
+// dropped on its own rather than discarding the rest of the row's advice, and
+// blank strings are treated as absent. Returns nil when nothing usable remains
+// — including the column default '{}' — so an empty object never reaches a
+// consumer as if it were guidance.
+func ParseComponentRemediationGuidance(raw []byte) *ComponentRemediationGuidance {
+	if len(raw) == 0 {
+		return nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil
+	}
+	text := func(key string) string {
+		var v string
+		if err := json.Unmarshal(fields[key], &v); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(v)
+	}
+	list := func(key string) []string {
+		var items []json.RawMessage
+		out := []string{}
+		if err := json.Unmarshal(fields[key], &items); err != nil {
+			return out
+		}
+		for _, item := range items {
+			var v string
+			if json.Unmarshal(item, &v) == nil && strings.TrimSpace(v) != "" {
+				out = append(out, strings.TrimSpace(v))
+			}
+		}
+		return out
+	}
+	g := &ComponentRemediationGuidance{
+		Summary:       text("summary"),
+		Impact:        text("impact"),
+		Steps:         list("steps"),
+		Timeline:      text("timeline"),
+		CVEReferences: list("cve_references"),
+		Resources:     list("resources"),
+	}
+	if g.Summary == "" && g.Impact == "" && g.Timeline == "" &&
+		len(g.Steps) == 0 && len(g.CVEReferences) == 0 && len(g.Resources) == 0 {
+		return nil
+	}
+	return g
+}
+
+// HybridKexAvailability is the evidence behind CryptoComponentAssessment's
+// HybridKexAvailable hint.
+type HybridKexAvailability struct {
+	// Groups names the hybrid group a handshake with the server accepted, when
+	// the producer recorded it. Always present; empty when it did not.
+	Groups []string `json:"groups"`
 }
 
 // AnnotateComponentAssessments bands each component with the canonical risk

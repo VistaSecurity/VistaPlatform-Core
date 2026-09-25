@@ -11,6 +11,7 @@ package main
 import (
 	"database/sql"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -143,28 +144,45 @@ func TestIntegration_AdminRoutes_SeededRoles(t *testing.T) {
 	}
 }
 
-// Every route under /admin is in the matrix, and a platform user holding no
-// permission at all is refused by the permission gate on every one. A route
-// mounted on the bare admin group (authentication only) fails here.
-func TestIntegration_AdminRoutes_TableIsComplete(t *testing.T) {
-	db := adminGateDB(t)
-	r := newAdminGateRouter(db)
-
-	var registered, listed []string
+// Every route under /admin is in the matrix. This part needs no database and
+// therefore runs in every PR; a route mounted without a matrix entry fails
+// even when DB integration tests are not configured.
+func TestAdminRoutes_TableIsComplete(t *testing.T) {
+	r := newAdminGateRouter(nil)
+	var registered []string
 	for _, ri := range r.Routes() {
 		if strings.HasPrefix(ri.Path, adminPrefix) {
 			registered = append(registered, ri.Method+" "+ri.Path)
 		}
 	}
+	var listed []string
 	for _, rt := range adminGateRoutes() {
-		listed = append(listed, rt.Method)
+		matches := make([]string, 0, 1)
+		for _, route := range registered {
+			method, pattern, _ := strings.Cut(route, " ")
+			if method == rt.Method && routePatternMatches(pattern, rt.Path) {
+				matches = append(matches, route)
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("gate matrix entry %s matches %d registered routes (%s)", rt, len(matches), strings.Join(matches, ", "))
+		}
+		listed = append(listed, matches[0])
 	}
-	if len(registered) != len(listed) {
-		sort.Strings(registered)
-		t.Fatalf("router mounts %d admin routes, the gate matrix lists %d — add the new route to adminGateRoutes:\n%s",
-			len(registered), len(listed), strings.Join(registered, "\n"))
+	sort.Strings(registered)
+	sort.Strings(listed)
+	if !slices.Equal(registered, listed) {
+		t.Fatalf("router and gate matrix differ — add/remove the corresponding adminGateRoutes entry.\nregistered:\n%s\n\nlisted:\n%s",
+			strings.Join(registered, "\n"), strings.Join(listed, "\n"))
 	}
+}
 
+// A platform user holding no permission at all is refused by the permission
+// gate on every matrix route. A route mounted on the bare authenticated group
+// would pass this caller if the always-on table test above did not catch it.
+func TestIntegration_AdminRoutes_EmptyRoleIsRefused(t *testing.T) {
+	db := adminGateDB(t)
+	r := newAdminGateRouter(db)
 	nobody := testdb.NewPlatformUser(t, db, testdb.NewPlatformRole(t, db))
 	token := testdb.SignPlatformToken(t, adminGateSecret, nobody, "super_admin")
 	for _, rt := range adminGateRoutes() {
@@ -173,4 +191,23 @@ func TestIntegration_AdminRoutes_TableIsComplete(t *testing.T) {
 			t.Errorf("%s: a platform user with no permissions got %d %s", rt, w.Code, w.Body.String())
 		}
 	}
+}
+
+// routePatternMatches resolves a concrete gate-matrix path against Gin's
+// registered path syntax. Matching the resolved route set (not just its
+// length) prevents one missing route from being hidden by one stale entry.
+func routePatternMatches(pattern, concrete string) bool {
+	want, got := strings.Split(strings.Trim(pattern, "/"), "/"), strings.Split(strings.Trim(concrete, "/"), "/")
+	for i := 0; i < len(want); i++ {
+		if i >= len(got) {
+			return false
+		}
+		if strings.HasPrefix(want[i], "*") {
+			return true
+		}
+		if !strings.HasPrefix(want[i], ":") && want[i] != got[i] {
+			return false
+		}
+	}
+	return len(want) == len(got)
 }

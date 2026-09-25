@@ -19,9 +19,9 @@ function childEntry(section: string, child: string) {
 /** Guards one sub-route on its nav entry's permission gate (pass-through when ungated). */
 export function RequireChildPermission({ section, child, children }: { section: string; child: string; children: ReactNode }) {
   const entry = childEntry(section, child);
-  if (!entry.permission && !entry.anyOf?.length) return <>{children}</>;
+  if (!entry.permission && !entry.anyOf?.length && !entry.allOf?.length) return <>{children}</>;
   return (
-    <RequirePlatformPermission permission={entry.permission} anyOf={entry.anyOf}>
+    <RequirePlatformPermission permission={entry.permission} anyOf={entry.anyOf} allOf={entry.allOf}>
       {children}
     </RequirePlatformPermission>
   );

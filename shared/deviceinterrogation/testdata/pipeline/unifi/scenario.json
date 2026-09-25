@@ -1,0 +1,12 @@
+{
+  "vendor": "unifi",
+  "device_type": "unifi",
+  "hostname": "unifi-gw.corp.example.test",
+  "transport": "rest",
+  "management_ip": "192.0.2.225",
+  "management_port": 443,
+  "tenant_segments": [
+    {"name": "Management network", "cidr": "192.0.2.224/27"}
+  ],
+  "provenance": "HAND-WRITTEN, the baseline. The controller answers are those of TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine (collector_edges_integration_test.go), which were modelled on the lab controller's shapes, plus a site-to-site IPsec VPN and a WireGuard server shaped like unifi_vpn_test.go's samples. x_-prefixed secrets are planted to prove they never reach a row."
+}

@@ -122,11 +122,11 @@ func (c *fortinetClient) fortinetCollectOps(ctx context.Context, result *Interro
 	// --- interfaces and VLANs --------------------------------------------
 	configured, err := c.getResults(ctx, "/api/v2/cmdb/system/interface")
 	if err != nil {
-		fmt.Printf("Warning: failed to get FortiOS interfaces: %v\n", err)
+		result.warn("/api/v2/cmdb/system/interface", err, "Configured interfaces and VLANs not collected")
 	}
 	running, err := c.getMonitorResults(ctx, "/api/v2/monitor/system/interface")
 	if err != nil {
-		fmt.Printf("Warning: failed to get FortiOS interface status: %v\n", err)
+		result.warn("/api/v2/monitor/system/interface", err, "Interface link state not collected")
 	}
 
 	if interfaces := fortinetInterfaces(configured, running); len(interfaces) > 0 {
@@ -138,8 +138,11 @@ func (c *fortinetClient) fortinetCollectOps(ctx context.Context, result *Interro
 
 	// --- routing, as one integer -----------------------------------------
 	if routes, err := c.getMonitorResults(ctx, "/api/v2/monitor/router/ipv4"); err != nil {
-		fmt.Printf("Warning: failed to get FortiOS routing summary: %v\n", err)
+		result.warn("/api/v2/monitor/router/ipv4", err, "Routing next-hop count not collected")
 	} else if count, ok := fortinetNextHopCount(routes); ok {
+		if len(routes) > fortinetMaxRouteRows {
+			result.warnTruncated("/api/v2/monitor/router/ipv4", "Routing table", fortinetMaxRouteRows)
+		}
 		result.addFact(factNetRouteNextHopCount, count, ConfidenceDerived)
 	}
 
@@ -217,7 +220,7 @@ func (c *fortinetClient) apiRequestRaw(ctx context.Context, method, url string) 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned status %d", resp.StatusCode)
+		return nil, statusErrorf(resp.StatusCode, "API returned status %d%s", resp.StatusCode, fortinetErrorCode(resp.Body))
 	}
 
 	// Bounded: `monitor/router/ipv4` on a box carrying a full BGP table is the
@@ -228,7 +231,8 @@ func (c *fortinetClient) apiRequestRaw(ctx context.Context, method, url string) 
 		return nil, err
 	}
 	if apiResp.Status != "success" && apiResp.Error != 0 {
-		return nil, fmt.Errorf("API error: %s (code %d)", apiResp.ErrorMessage, apiResp.Error)
+		// The numeric code only; error_message is vendor free text.
+		return nil, fmt.Errorf("API error (FortiOS code %d)", apiResp.Error)
 	}
 	return &apiResp, nil
 }
@@ -356,7 +360,7 @@ func fortinetNextHopCount(routes []map[string]interface{}) (int, bool) {
 		return 0, false
 	}
 	if len(routes) > fortinetMaxRouteRows {
-		fmt.Printf("Warning: FortiOS returned %d routes; counting the first %d next hops\n", len(routes), fortinetMaxRouteRows)
+		// The caller records the cut as a truncated collection warning.
 		routes = routes[:fortinetMaxRouteRows]
 	}
 	seen := map[string]bool{}

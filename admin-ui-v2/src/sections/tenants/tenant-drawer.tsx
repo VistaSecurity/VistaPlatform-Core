@@ -15,7 +15,7 @@ import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsF
 import {
   type Tenant, type TenantHealthSummary, tenantStatus, useTenantStatusMutation, agentBreakdown,
   useTenantReevaluateMutation, useTenantStats, useTenantCost, useTenantCoupons,
-  useDeleteTenant, useAdminTiers, useAdminChangePlan, planLabel,
+  useDeleteTenant, useAdminTiers, useAdminChangePlan, useTenantBillingRecords, planLabel,
 } from './queries';
 import { TenantFormModal } from './tenant-form-modal';
 import { TenantEntitlementsTab } from './tenant-entitlements-tab';
@@ -189,7 +189,28 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
 // self-serve one mid-agreement. Applied with NO proration: monthly tenants
 // bill the new price from the next period; annual-prepaid tenants get no
 // automatic refund and renew at the new rate.
+// It changes the tenant's STRIPE subscription, so it is offered only to a
+// tenant that has a live one (RC-25): shown to every tenant it always failed
+// for the rest with a generic message. Without one, the plan is assigned from
+// Plans & Pricing (owner decision 7), and the panel says so.
 function PlanChangePanel({ t }: { t: Tenant }) {
+  const billing = useTenantBillingRecords(t.id);
+  if (billing.isLoading) return null;
+  if (!billing.data?.hasLiveStripeSubscription) {
+    return (
+      <DrawerSection title="Change plan (support)">
+        <div data-testid="plan-change-unavailable" style={{ fontSize: 11.5, color: 'var(--op-t3)' }}>
+          {billing.isError
+            ? "Couldn't load this tenant's billing records."
+            : 'This tenant has no Stripe subscription, so there is no billed plan to change here. Assign a plan from Plans & Pricing → Tiers → Assign to tenant.'}
+        </div>
+      </DrawerSection>
+    );
+  }
+  return <StripePlanChangeForm t={t} />;
+}
+
+function StripePlanChangeForm({ t }: { t: Tenant }) {
   const tiers = useAdminTiers();
   const change = useAdminChangePlan();
   const [tierId, setTierId] = useState('');

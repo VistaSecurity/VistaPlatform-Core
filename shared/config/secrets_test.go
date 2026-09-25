@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestFirstInsecureDefault(t *testing.T) {
 	tests := []struct {
@@ -59,4 +62,37 @@ func TestFirstInsecureDefault(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestJWTSecretEnvironmentFallback(t *testing.T) {
+	t.Run("development keeps local fallback", func(t *testing.T) {
+		t.Setenv("ENV", "development")
+		t.Setenv("JWT_SECRET", "")
+		// Setenv marks the value explicitly present, and explicit empty means
+		// disabled. Unset it to exercise the absent-variable fallback.
+		if err := os.Unsetenv("JWT_SECRET"); err != nil {
+			t.Fatal(err)
+		}
+		if got := JWTSecret(); got != "dev-secret-key-change-in-production" {
+			t.Fatalf("JWTSecret() = %q, want development fallback", got)
+		}
+	})
+
+	t.Run("production absence disables legacy hmac", func(t *testing.T) {
+		t.Setenv("ENV", "production")
+		if err := os.Unsetenv("JWT_SECRET"); err != nil {
+			t.Fatal(err)
+		}
+		if got := JWTSecret(); got != "" {
+			t.Fatalf("JWTSecret() = %q, want empty production secret", got)
+		}
+	})
+
+	t.Run("explicit value is preserved", func(t *testing.T) {
+		t.Setenv("ENV", "production")
+		t.Setenv("JWT_SECRET", "migration-window-secret")
+		if got := JWTSecret(); got != "migration-window-secret" {
+			t.Fatalf("JWTSecret() = %q, want configured secret", got)
+		}
+	})
 }

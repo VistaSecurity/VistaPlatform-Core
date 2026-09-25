@@ -1,0 +1,19 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {
+      "version": "v7.4.4",
+      "serial": "FGT60F0000000001",
+      "model": "FGT60F",
+      "model_name": "FortiGate 60F",
+      "hostname": "fw-branch-01",
+      "admin_password": "MUST-NOT-BE-COLLECTED",
+      "private-key": "MUST-NOT-BE-COLLECTED"
+    }
+  ],
+  "serial": "FGT60F0000000001",
+  "version": "v7.4.4",
+  "build": 2662
+}

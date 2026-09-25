@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/forwardmeta"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
@@ -138,18 +140,11 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 
 	// Record what the run observed about the interrogated asset itself: its
 	// hardware identity, the ops facts, the edges, and that we reached it.
-	//
-	// The identity comes from the first asset because that is where the agent
-	// puts the DEVICE's own identity; the facts and edges are per-result and
-	// arrive whether or not any crypto asset did, which is why this is no
-	// longer gated on a non-empty asset list.
+	// None of it is gated on the asset list: a run that found no crypto
+	// assets still reached the device and still read what it is.
 	var observationsErr error
 	if deviceJob.AssetID != nil {
-		var first models.DiscoveredAsset
-		if len(result.Assets) > 0 {
-			first = result.Assets[0]
-		}
-		observationsErr = s.recordInterrogationObservations(ctx, deviceJob.TenantID, *deviceJob.AssetID, jobID, first, result)
+		observationsErr = s.recordInterrogationObservations(ctx, deviceJob.TenantID, *deviceJob.AssetID, jobID, jobResultDeviceIdentity(result), result)
 	}
 
 	// Record what actually happens to each asset so the outcome is visible in
@@ -159,7 +154,14 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 	// The in-cluster executor materializes its findings itself and hands this
 	// processor an empty asset list, so without the pre-count the log reports
 	// 0/0/0 for a run that discovered a dozen devices.
-	steps := &ProcessingLog{AssetsReceived: len(result.Assets), DiscoveryJobID: discoveryJobID.String()}
+	steps := &ProcessingLog{
+		AssetsReceived: len(result.Assets),
+		DiscoveryJobID: discoveryJobID.String(),
+		// What the collector could not read, from whichever executor ran it.
+		// Both hand the same shape here, so the job detail cannot tell — and
+		// must not be able to tell — which runtime interrogated the device.
+		Warnings: di.SanitizeWarnings(result.Warnings),
+	}
 	if reusedDiscoveryJob {
 		steps.ExistingFindings = s.countDiscoveryFindings(ctx, discoveryJobID)
 	}
@@ -217,9 +219,29 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		if targetInput == "" && asset.IPAddress != "" {
 			targetInput = asset.IPAddress
 		}
+		// An asset with no address is still a finding ABOUT the interrogated
+		// device — a decryption profile, a tunnel whose own address the
+		// device did not report — and the device owns it ( W2.2). The
+		// in-cluster executor has always written these; this path used to
+		// skip them, so which runtime happened to claim the job decided
+		// whether the finding existed. Both now write it, owned.
+		//
+		// Only when there is NO device to own it is it dropped, and then it
+		// says so in the job's processing block rather than on stdout.
+		if deviceJob.AssetID == nil && deviceJob.IntegrationID == nil && interrogatedDestIP(asset.IPAddress, asset.Hostname, nil) == unspecifiedDestIP {
+			label := targetInput
+			if label == "" {
+				label = "(unidentified)"
+			}
+			steps.skip(label, StageSensorDiscovery, "the finding has no address and the job names no interrogated device to own it, so it cannot reach inventory")
+			continue
+		}
 		if targetInput == "" {
-			steps.skip("(unidentified)", StageDiscoveryTarget, "asset has neither hostname nor IP address")
-			continue // Skip assets without hostname or IP
+			if deviceJob.AssetID == nil {
+				steps.skip("(unidentified)", StageDiscoveryTarget, "asset has neither hostname nor IP address")
+				continue
+			}
+			targetInput = ownedFindingLabel(*deviceJob.AssetID)
 		}
 
 		// Determine protocols and ports
@@ -311,7 +333,7 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 		//
 		// systemSensorID cannot be uuid.Nil here — a missing platform sensor
 		// fails the job before this loop runs.
-		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.AssetID, deviceJob.IntegrationID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
+		if err := s.writeSensorDiscovery(ctx, systemSensorID, deviceJob.TenantID, deviceJob.AssetID, deviceJob.IntegrationID, jobID, batchID, asset, certFlags, ocspStatus, ocspDetail); err != nil {
 			fmt.Printf("Warning: failed to write sensor discovery for %s: %v\n", targetInput, err)
 			steps.fail(targetInput, StageSensorDiscovery, err)
 		} else {
@@ -553,7 +575,7 @@ func (s *ResultProcessor) assetCertQualityFlags(asset models.DiscoveredAsset) (f
 	if len(pems) == 0 {
 		return nil, "", "", ""
 	}
-	v := discovery.ClassifyCertChainFromPEMs(pems, true)
+	v := discovery.ClassifyCertChainFromPEMsWith(pems, true, platformOCSPClient())
 	if v == nil {
 		return nil, "", "", ""
 	}
@@ -598,7 +620,7 @@ func (s *ResultProcessor) lookupSystemSensor(ctx context.Context, tenantID uuid.
 	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 			SELECT id FROM sensors
-			WHERE tenant_id = $1 AND profile = 'device_interrogation' AND 'system' = ANY(tags)
+			WHERE tenant_id = $1 AND profile = 'device_interrogation' AND platform_managed
 			  AND deleted_at IS NULL
 			LIMIT 1`, tenantID).Scan(&id)
 	})
@@ -628,22 +650,12 @@ func (s *ResultProcessor) writeSensorDiscovery(
 	tenantID uuid.UUID,
 	deviceID *uuid.UUID,
 	integrationID *uuid.UUID,
+	deviceJobID uuid.UUID,
 	batchID string,
 	asset models.DiscoveredAsset,
 	certFlags map[string]interface{},
 	ocspStatus, ocspDetail string,
 ) error {
-	// Resolve a destination IP: explicit IP, else DNS-resolved hostname, else a
-	// placeholder so the row is still classifiable by hostname.
-	destIP := "0.0.0.0"
-	if asset.IPAddress != "" {
-		destIP = asset.IPAddress
-	} else if asset.Hostname != "" {
-		if ips, err := net.LookupIP(asset.Hostname); err == nil && len(ips) > 0 {
-			destIP = ips[0].String()
-		}
-	}
-
 	protocol := "TLS"
 	if asset.Protocol != "" {
 		protocol = asset.Protocol
@@ -655,6 +667,26 @@ func (s *ResultProcessor) writeSensorDiscovery(
 
 	metadata := buildSensorDiscoveryMetadata(deviceID, integrationID, asset)
 	mergeCertFlags(metadata, certFlags, ocspStatus, ocspDetail)
+	// The device job this row was produced by, stamped from the SERVER's own
+	// record of the run — never from anything the collector or an agent sent.
+	// It is what binds the row's ownership claim to a real interrogation:
+	// inventory honours source_asset_id only when this job exists in the
+	// tenant, is a device interrogation, and interrogated exactly that asset.
+	// Written last, after the forwarded subset, so nothing forwarded can set it.
+	delete(metadata, "device_job_id")
+	if deviceJobID != uuid.Nil {
+		metadata["device_job_id"] = deviceJobID.String()
+	}
+
+	// The destination is the address the collector REPORTED, or the
+	// unspecified placeholder. Never a DNS answer (finding P-10): an asset
+	// with a name and no address is almost always named by a collector label —
+	// a PAN-OS rule, an F5 virtual server, a FortiOS tunnel — and resolving it
+	// here resolved it through the CLUSTER's search domain, so a rule called
+	// `postgres` became the platform's own database. The label stays in
+	// metadata (config_name) and on the row's hostname; the finding is owned
+	// by the interrogated device, which is what source_asset_id says.
+	destIP := interrogatedDestIP(asset.IPAddress, asset.Hostname, metadata)
 
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -699,6 +731,13 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 	if deviceID != nil {
 		meta["device_id"] = deviceID.String()
 		meta["source_device_id"] = deviceID.String()
+		// The interrogated device OWNS this finding ( W2.2). The key is
+		// the one host inventory already uses for the same statement. It is
+		// what lets a finding with a public address or no address at all land
+		// on the device instead of being classified third-party and dropped;
+		// inventory-service honours it only for a row written under the
+		// tenant's platform interrogation sensor (see interrogationOwner).
+		meta["source_asset_id"] = deviceID.String()
 	}
 	if integrationID != nil {
 		meta["integration_id"] = integrationID.String()
@@ -713,6 +752,7 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 	if asset.KeySize > 0 {
 		meta["key_size"] = asset.KeySize
 	}
+	applyVPNKeyExchange(meta, asset)
 	if len(asset.TLSVersions) > 0 {
 		meta["tls_versions"] = asset.TLSVersions
 	}
@@ -731,7 +771,17 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 				meta[key] = value
 			}
 		}
+		copyTLSKeyExchangeSupport(meta, asset.Metadata)
 	}
+	// The vetted posture subset ( W2.1): VPN peer, IKE version, SSH
+	// banner and host key, MAC, profile / certificate / object names — each
+	// under ONE canonical key whatever the vendor called it, validated, and
+	// nothing outside the allowlist. See shared/deviceinterrogation/forwardmeta
+	// for what is deliberately left behind (the device's own serial above all).
+	for k, v := range forwardmeta.Project(forwardSource(asset)) {
+		meta[k] = v
+	}
+	applySSHBannerVersion(meta, asset)
 	if len(asset.Certificates) > 0 {
 		certs := make([]map[string]interface{}, 0, len(asset.Certificates))
 		for _, cert := range asset.Certificates {
@@ -740,6 +790,192 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 		meta["certificates"] = certs
 	}
 	return meta
+}
+
+// unspecifiedDestIP is the sensor_discoveries placeholder for "no address was
+// reported". dest_ip is NOT NULL; every reader treats this value as absent.
+const unspecifiedDestIP = "0.0.0.0"
+
+// interrogatedDestIP is the dest_ip an interrogated asset is written with.
+//
+//   - A reported address that is a valid IP literal is used as is. Anything
+//     else — empty, a name, an IPv6 zone Postgres `inet` refuses — is not an
+//     address, and the row is written address-less rather than failing the
+//     INSERT or guessing.
+//
+//   - An address that IS the tunnel's peer is not the asset's address.
+//     FortiOS and Cisco put the peer in the asset's address field (remote-gw,
+//     `set peer`), which made the far end of every tunnel an address of the
+//     interrogated device's configuration — a public one classified
+//     third-party and dropped, a private one minted as a new "server". The
+//     peer is kept under vpn_peer_address; the configuration belongs to the
+//     device, with no endpoint, because the device's own tunnel address was
+//     not reported.
+//
+//   - When the reported address is unusable or is the peer, a hostname that is
+//     itself an IP LITERAL is the address instead. Cisco sets every row's
+//     hostname to the address it interrogated the device on, so its crypto
+//     maps land on the device's own address. That is a literal read, not a
+//     lookup: a hostname that is a name stays a label.
+//
+// Nothing here resolves a name.
+func interrogatedDestIP(reported, hostname string, metadata map[string]interface{}) string {
+	peer := net.ParseIP(stringMeta(metadata, forwardmeta.KeyVPNPeerAddress))
+	for _, candidate := range []string{reported, hostname} {
+		if ip := literalAddress(candidate); ip != nil && (peer == nil || !peer.Equal(ip)) {
+			return ip.String()
+		}
+	}
+	return unspecifiedDestIP
+}
+
+// literalAddress parses s as an IP literal usable as dest_ip: no IPv6 zone
+// (Postgres `inet` refuses one) and not the unspecified address.
+func literalAddress(s string) net.IP {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "%") {
+		return nil
+	}
+	ip := net.ParseIP(s)
+	if ip == nil || ip.IsUnspecified() {
+		return nil
+	}
+	return ip
+}
+
+func stringMeta(m map[string]interface{}, key string) string {
+	v, _ := m[key].(string)
+	return v
+}
+
+// forwardSource adapts the platform's asset struct to the forwarding
+// projection. The two runtimes both reach this through writeSensorDiscovery,
+// so there is one mapping, not one per executor.
+func forwardSource(asset models.DiscoveredAsset) forwardmeta.Source {
+	src := forwardmeta.Source{AssetType: asset.AssetType, Metadata: asset.Metadata}
+	if s := asset.SSHInfo; s != nil {
+		src.SSH = forwardmeta.SSH{
+			Banner:             s.Banner,
+			HostKeyType:        s.HostKeyType,
+			HostKeyFingerprint: s.HostKeyFingerprint,
+			KexAlgorithm:       s.KexAlgorithm,
+			EncryptionAlgC2S:   s.EncryptionAlgC2S,
+			MACAlgC2S:          s.MACAlgC2S,
+		}
+	}
+	return src
+}
+
+// applySSHBannerVersion makes an SSH configuration's protocol version the one
+// its banner states.
+//
+// The banner is the measurement: RFC 4253 §4.2 puts the protocol version in
+// it, and `SSH-1.99` is a server that still accepts the broken SSH-1 protocol
+// (catalogue risk 78). The collectors' own field is not — Cisco's collector and
+// the generic SSH prober write a constant `SSH-2.0` whatever the server said,
+// so an IOS box advertising 1.99 was linked, scored and shown as 2.0 (risk 15).
+// Inventory's SSH ingest reads the same banner and links the same code
+// (cryptoparse.SSHProtocolVersionCode); this keeps the configuration's
+// protocol_version column saying the same thing rather than the fabricated
+// constant. Done here, in the writer both runtimes share, because agents in
+// the field keep sending the constant after the collectors are fixed.
+//
+// The banner is the ONLY source. When there is none, or it states no
+// recognisable version, the version is unknown and the field is removed —
+// forwarding the collector's constant instead would be exactly the fabricated
+// `SSH-2.0` this exists to stop (unknown stays unknown; removes the
+// constant at the collectors, this is the defensive half for agents that
+// still send it).
+func applySSHBannerVersion(meta map[string]interface{}, asset models.DiscoveredAsset) {
+	if !strings.EqualFold(strings.TrimSpace(asset.Protocol), "SSH") {
+		return
+	}
+	banner, _ := meta[forwardmeta.KeySSHBanner].(string)
+	if code := cryptoparse.SSHProtocolVersionCode(banner); code != "" {
+		meta["version"] = code
+		return
+	}
+	delete(meta, "version")
+}
+
+// applyVPNKeyExchange writes an IPsec tunnel's key exchange from the DH-group
+// settings the VPN collectors keep in metadata: "dh_group" is the IKE SA's
+// group setting ("14", "14 5", "Group 19"), "pfs_dh_group" the phase-2 PFS
+// group.
+//
+//   - key_exchange_algorithm is the IKE setting's preferred (first) group as
+//     its catalogue code. When that group has no catalogue row, or only a PFS
+//     group is known, the key exchange is UNKNOWN and the key is absent: the
+//     second choice, or the PFS group, is not the one in use.
+//   - kex_algorithms is every group the catalogue can assess — IKE groups in
+//     preference order, then PFS — because a peer can steer the tunnel onto
+//     any of them: inventory links each, the tunnel is scored on its weakest,
+//     and any classical group makes it quantum-vulnerable. It is an OFFER
+//     list; the converter does not promote its head to the key exchange for
+//     an interrogation row.
+//   - key_size is the chosen key exchange's key size, or absent. Once any
+//     group parses it is never the collector's value: key_size is read against
+//     the key-exchange family (SP 800-131A floors), and the AES length a
+//     collector put there reads as a 256-bit finite-field key — Critical.
+//
+// It is done HERE, in the one writer both runtimes share, rather than trusted
+// to the collector alone, because agents in the field update later than the
+// platform: an agent built before this change still sends the group only in
+// metadata, the AES length in key_size — and, from UniFi, the IKE VERSION as
+// the key exchange. A current collector sends values this reproduces exactly.
+//
+// Nothing resolvable, nothing written: an unassigned group stays unknown.
+func applyVPNKeyExchange(meta map[string]interface{}, asset models.DiscoveredAsset) {
+	if v := legacyIKEVersionScalar(asset.KeyExchangeAlgorithm); v != "" {
+		delete(meta, "key_exchange_algorithm")
+		if asset.ProtocolVersion == "" {
+			meta["version"] = v
+		}
+	}
+
+	ike := cryptoparse.ParseIKEGroups(dhGroupSetting(asset.Metadata["dh_group"]))
+	pfs := cryptoparse.ParseIKEGroups(dhGroupSetting(asset.Metadata["pfs_dh_group"]))
+	if len(ike)+len(pfs) == 0 {
+		return
+	}
+	// A group is configured: the key exchange and its size come from the
+	// groups and from nothing else.
+	delete(meta, "key_exchange_algorithm")
+	delete(meta, "key_size")
+	if offered := cryptoparse.OfferedIKEGroupCodes(ike, pfs); len(offered) > 0 {
+		meta["kex_algorithms"] = offered
+	}
+	if g, ok := cryptoparse.PreferredIKEGroup(ike); ok {
+		meta["key_exchange_algorithm"] = g.Code
+		if g.Bits > 0 {
+			meta["key_size"] = g.Bits
+		}
+	}
+}
+
+// dhGroupSetting reads a collector's DH-group setting, which UniFi serialises
+// as a JSON number and everyone else as a string.
+func dhGroupSetting(v interface{}) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case float64:
+		return fmt.Sprint(int(t))
+	}
+	return ""
+}
+
+// legacyIKEVersionScalar recognises the IKE version an older UniFi collector
+// wrote into the key-exchange field ("IKEV2"), and returns it in the spelling
+// the protocol-version field uses.
+func legacyIKEVersionScalar(kex string) string {
+	switch strings.ToUpper(strings.TrimSpace(kex)) {
+	case "IKEV1":
+		return "IKEv1"
+	case "IKEV2":
+		return "IKEv2"
+	}
+	return ""
 }
 
 // recordInterrogationObservations writes what an agent's run observed about the
@@ -764,22 +1000,14 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 func (s *ResultProcessor) recordInterrogationObservations(
 	ctx context.Context,
 	tenantID, assetID, jobID uuid.UUID,
-	asset models.DiscoveredAsset,
+	identity *di.DeviceIdentity,
 	result *models.JobResult,
 ) error {
 	obs := InterrogationObservations{
-		ObservedAt:    result.CompletedAt,
-		Facts:         result.Facts,
-		Relationships: result.Relationships,
-	}
-	if asset.DeviceInfo != nil {
-		obs.DeviceIdentity = &di.DeviceIdentity{
-			Vendor:          asset.DeviceInfo.Vendor,
-			Model:           asset.DeviceInfo.Model,
-			FirmwareVersion: asset.DeviceInfo.FirmwareVersion,
-			SerialNumber:    asset.DeviceInfo.SerialNumber,
-			OSVersion:       asset.DeviceInfo.OSVersion,
-		}
+		ObservedAt:     result.CompletedAt,
+		Facts:          result.Facts,
+		Relationships:  result.Relationships,
+		DeviceIdentity: identity,
 	}
 	// Pin the SSH host key the AGENT was shown, when this device has none
 	// pinned. The in-cluster path does the same thing at its own call site; both
@@ -802,6 +1030,57 @@ func (s *ResultProcessor) recordInterrogationObservations(
 	}
 	s.markInterrogated(ctx, tenantID, assetID)
 	return persistErr
+}
+
+// jobResultDeviceIdentity returns what the interrogated device said it is.
+//
+// A current agent sends it once, on the result ( W2.7), exactly as the
+// in-cluster executor hands its own InterrogateResult.DeviceIdentity to the
+// observation sink. An older agent sends it only on each ASSET — which is why a
+// PAN-OS box with no decryption profiles, a run that found no crypto assets at
+// all, lost its vendor, model and serial: there was no asset to carry them.
+// The first asset's copy is still read when the result carries none, so an
+// agent built before this change keeps working.
+//
+// The result-level copy wins when both are present: it is the device's
+// identity by construction, where an asset's copy is a duplicate of it.
+func jobResultDeviceIdentity(result *models.JobResult) *di.DeviceIdentity {
+	if result == nil {
+		return nil
+	}
+	if id := result.DeviceIdentity; !deviceIdentityEmpty(id) {
+		out := *id
+		return &out
+	}
+	// Only the first asset: every asset carries the same copy, and a later one
+	// disagreeing would be a collector bug, not a second device.
+	if len(result.Assets) == 0 || result.Assets[0].DeviceInfo == nil {
+		return nil
+	}
+	d := result.Assets[0].DeviceInfo
+	out := &di.DeviceIdentity{
+		Vendor:          d.Vendor,
+		Model:           d.Model,
+		FirmwareVersion: d.FirmwareVersion,
+		SerialNumber:    d.SerialNumber,
+		OSVersion:       d.OSVersion,
+	}
+	if deviceIdentityEmpty(out) {
+		return nil
+	}
+	return out
+}
+
+func deviceIdentityEmpty(d *di.DeviceIdentity) bool {
+	return d == nil || (strings.TrimSpace(d.Vendor) == "" && strings.TrimSpace(d.Model) == "" &&
+		strings.TrimSpace(d.FirmwareVersion) == "" && strings.TrimSpace(d.SerialNumber) == "" &&
+		strings.TrimSpace(d.OSVersion) == "" && strings.TrimSpace(d.ClassHint) == "")
+}
+
+// ownedFindingLabel is the discovery-target input for a finding that has no
+// address or name of its own: the device that owns it.
+func ownedFindingLabel(deviceAssetID uuid.UUID) string {
+	return "interrogated-device:" + deviceAssetID.String()
 }
 
 // markInterrogated advances the asset's management row after a successful run:

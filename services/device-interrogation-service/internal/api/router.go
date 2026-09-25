@@ -29,6 +29,7 @@ import (
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
 
@@ -190,7 +191,11 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			devices.PUT("/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryUpdate), deviceHandlers.UpdateDevice)
 			devices.DELETE("/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.DeleteDevice)
 			devices.POST("/:id/interrogate", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.InterrogateDevice)
-			devices.POST("/:id/test-connection", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), deviceHandlers.TestConnection)
+			// test-connection logs in to the device with its stored credentials, so
+			// it is discovery.manage like /interrogate: at discovery.read a viewer
+			// could drive authenticated connections to operator-configured hosts
+			// ( addendum C).
+			devices.POST("/:id/test-connection", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.TestConnection)
 			// Clearing the pinned SSH host key accepts a NEW identity for a
 			// device, so it sits with the destructive routes at
 			// discovery.manage rather than with the reads (H7).
@@ -464,6 +469,13 @@ func registerAgentPublicHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.H
 
 		agent, err := agentService.RegisterDeviceAgentBootstrap(c.Request.Context(), req)
 		if err != nil {
+			if blocked, ok := tenantstate.AsBlocked(err); ok {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": tenantstate.Message(blocked.Code),
+					"code":  blocked.Code,
+				})
+				return
+			}
 			if errors.Is(err, services.ErrInvalidDeviceAgentRegistrationKey) {
 				log.Printf("device agent registration key rejected: %v", err)
 				c.JSON(http.StatusBadRequest, gin.H{

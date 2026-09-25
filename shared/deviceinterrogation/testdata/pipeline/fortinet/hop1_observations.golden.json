@@ -1,0 +1,240 @@
+{
+  "admission_enforce": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.firmware_version",
+        "source_kind": "measured",
+        "value": "v7.4.4"
+      },
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "FortiGate 60F"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "FGT60F0000000001"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "Fortinet"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": false
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "https"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "addresses": [
+              "203.0.113.2/29"
+            ],
+            "admin_state": "up",
+            "mac": "00:09:0f:aa:bb:01",
+            "name": "wan1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "addresses": [
+              "192.0.2.1/24"
+            ],
+            "admin_state": "up",
+            "mac": "00:09:0f:aa:bb:02",
+            "name": "internal",
+            "speed": 10000,
+            "state": "up"
+          },
+          {
+            "addresses": [
+              "198.51.100.1/24"
+            ],
+            "admin_state": "up",
+            "name": "vlan-voice",
+            "speed": 10000,
+            "state": "up",
+            "vlan": 40
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.route_next_hop_count",
+        "source_kind": "measured",
+        "value": 1
+      },
+      {
+        "asset": "device",
+        "key": "net.vlans",
+        "source_kind": "measured",
+        "value": [
+          {
+            "gateway": "198.51.100.1",
+            "id": 40,
+            "name": "vlan-voice",
+            "subnet": "198.51.100.0/24"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "os.name",
+        "source_kind": "measured",
+        "value": "FortiOS"
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "v7.4.4"
+      }
+    ],
+    "edges": [],
+    "assets": [
+      {
+        "asset": "device",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [],
+    "collection_warnings": [],
+    "processing_errors": []
+  },
+  "admission_off": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.firmware_version",
+        "source_kind": "measured",
+        "value": "v7.4.4"
+      },
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "FortiGate 60F"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "FGT60F0000000001"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "Fortinet"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": false
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "https"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "addresses": [
+              "203.0.113.2/29"
+            ],
+            "admin_state": "up",
+            "mac": "00:09:0f:aa:bb:01",
+            "name": "wan1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "addresses": [
+              "192.0.2.1/24"
+            ],
+            "admin_state": "up",
+            "mac": "00:09:0f:aa:bb:02",
+            "name": "internal",
+            "speed": 10000,
+            "state": "up"
+          },
+          {
+            "addresses": [
+              "198.51.100.1/24"
+            ],
+            "admin_state": "up",
+            "name": "vlan-voice",
+            "speed": 10000,
+            "state": "up",
+            "vlan": 40
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.route_next_hop_count",
+        "source_kind": "measured",
+        "value": 1
+      },
+      {
+        "asset": "device",
+        "key": "net.vlans",
+        "source_kind": "measured",
+        "value": [
+          {
+            "gateway": "198.51.100.1",
+            "id": 40,
+            "name": "vlan-voice",
+            "subnet": "198.51.100.0/24"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "os.name",
+        "source_kind": "measured",
+        "value": "FortiOS"
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "v7.4.4"
+      }
+    ],
+    "edges": [],
+    "assets": [
+      {
+        "asset": "device",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [],
+    "collection_warnings": [],
+    "processing_errors": []
+  }
+}

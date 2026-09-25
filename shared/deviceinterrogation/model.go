@@ -155,6 +155,15 @@ type InterrogateResult struct {
 	// uplink, an LLDP neighbour (ADR-0003). Every type is one of the canonical
 	// ten in shared/relationships.
 	Relationships []RelationshipObservation `json:"relationships,omitempty"`
+	// Warnings are the sub-failures the collector survived — an endpoint the
+	// account may not read, a command this version lacks, a table cut at its
+	// bound. The rest of the result is still returned; these say what it is
+	// missing and why (see warnings.go). Absent means none.
+	Warnings []CollectionWarning `json:"warnings,omitempty"`
+
+	// collector names the interrogator that built this result, stamped on each
+	// warning it records. Not serialised: every warning carries its own copy.
+	collector string
 }
 
 // DeviceInterrogator is implemented by every vendor/protocol client.

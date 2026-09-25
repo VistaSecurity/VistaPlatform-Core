@@ -1,0 +1,105 @@
+{
+  "vendor": "f5",
+  "input_sha256": "53019bc5ee992fd4152c44e99a739429a308c231f91faf318597cbd208bf2c0f",
+  "inventory": {
+    "assets": [
+      {
+        "asset": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+        "class_key": "load_balancer",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "class_key": "load_balancer",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[ip_address=198.51.100.20]",
+        "class_key": "unknown_host",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[ip_address=198.51.100.21]",
+        "class_key": "unknown_host",
+        "status": "monitoring"
+      },
+      {
+        "asset": "device",
+        "class_key": "load_balancer",
+        "status": "monitoring"
+      }
+    ],
+    "crypto_configurations": [
+      {
+        "asset": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+        "protocol": "TLS",
+        "port": 443,
+        "protocol_version": "TLS 1.2",
+        "cipher_suite": "ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": null,
+        "risk_level": "Unknown",
+        "risk_factors": [
+          "Partially assessed: the cipher string could not be fully resolved (ECDHE+AES-GCM); the enabled cipher set is unknown"
+        ],
+        "algorithm_links": {
+          "protocol_version": [
+            "TLS1.2"
+          ]
+        },
+        "pqc_category": "unclassified",
+        "has_certificate": false
+      },
+      {
+        "asset": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "protocol": "TLS",
+        "port": 443,
+        "protocol_version": "1.2",
+        "cipher_suite": "ECDHE-RSA-AES256-GCM-SHA384",
+        "key_exchange_algorithm": "ECDHE",
+        "hash_algorithm": "SHA384",
+        "key_size": 256,
+        "risk_score": 25,
+        "risk_level": "Low",
+        "risk_factors": [],
+        "algorithm_links": {
+          "hash": [
+            "SHA384"
+          ],
+          "key_exchange": [
+            "ECDHE"
+          ],
+          "protocol_version": [
+            "TLS1.2"
+          ],
+          "symmetric": [
+            "AES256"
+          ]
+        },
+        "pqc_category": "needs_migration",
+        "has_certificate": true
+      }
+    ],
+    "certificates": [
+      {
+        "asset": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "fingerprint_sha256": "77e478bce33a7c3f8f37eb21d82d333afeea541e80711911cc5102e19510df9c",
+        "subject_dn": "CN=www.example.com,O=Example Org"
+      }
+    ],
+    "findings": [],
+    "pqc_counts": {
+      "needs_migration": 1,
+      "pqc_ready": 0,
+      "symmetric_safe": 0,
+      "total": 2,
+      "unclassified": 1
+    },
+    "ingest_outcomes": [
+      "matched",
+      "matched"
+    ]
+  }
+}

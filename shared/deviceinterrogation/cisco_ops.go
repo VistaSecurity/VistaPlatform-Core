@@ -96,14 +96,13 @@ const ciscoManagementProtocol = "ssh"
 // losing the whole interrogation over a command the platform does not
 // implement would be worse than losing one fact.
 func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRunner, sysInfo map[string]interface{}) string {
+	osName, _ := sysInfo["os_name"].(string)
+
 	// --- identity ---------------------------------------------------------
 	result.addFact(factHWVendor, ciscoVendor, ConfidenceDerived)
 
 	chassis := ciscoChassis{}
-	if out, truncated, err := run(ctx, "show inventory"); err != nil {
-		fmt.Printf("Warning: failed to get Cisco inventory: %v\n", err)
-	} else {
-		ciscoWarnTruncated("show inventory", truncated)
+	if out, ok := ciscoRun(ctx, result, run, "show inventory", "Chassis model and serial not collected"); ok {
 		chassis = ciscoParseInventory(out)
 	}
 
@@ -141,29 +140,20 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 
 	// --- interfaces -------------------------------------------------------
 	var interfaces []map[string]interface{}
-	if out, truncated, err := run(ctx, "show interfaces"); err != nil {
-		fmt.Printf("Warning: failed to get Cisco interfaces: %v\n", err)
-	} else {
-		ciscoWarnTruncated("show interfaces", truncated)
+	if out, ok := ciscoRun(ctx, result, run, "show interfaces", "Interface state and speed not collected"); ok {
 		interfaces = ciscoParseInterfaces(out)
 	}
-	if out, truncated, err := run(ctx, "show ip interface brief"); err != nil {
-		fmt.Printf("Warning: failed to get Cisco interface summary: %v\n", err)
-	} else {
-		ciscoWarnTruncated("show ip interface brief", truncated)
+	if out, ok := ciscoRun(ctx, result, run, ciscoBriefCommand(osName), "Interface addresses not collected"); ok {
 		interfaces = ciscoMergeBriefInterfaces(interfaces, ciscoParseIPInterfaceBrief(out))
 	}
 	if len(interfaces) > 0 {
-		result.addFact(factNetInterfaces, ciscoBound("interfaces", interfaces), ConfidenceReported)
+		result.addFact(factNetInterfaces, ciscoBound(result, "show interfaces", "Interface table", interfaces), ConfidenceReported)
 	}
 
 	// --- VLANs ------------------------------------------------------------
-	if out, truncated, err := run(ctx, "show vlan brief"); err != nil {
-		fmt.Printf("Warning: failed to get Cisco VLANs: %v\n", err)
-	} else {
-		ciscoWarnTruncated("show vlan brief", truncated)
+	if out, ok := ciscoRun(ctx, result, run, "show vlan brief", "VLANs not collected"); ok {
 		if vlans := ciscoParseVlanBrief(out); len(vlans) > 0 {
-			result.addFact(factNetVlans, ciscoBound("VLANs", vlans), ConfidenceReported)
+			result.addFact(factNetVlans, ciscoBound(result, "show vlan brief", "VLAN table", vlans), ConfidenceReported)
 		}
 	}
 
@@ -175,19 +165,17 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 	var neighbors []map[string]interface{}
 
 	for _, discovery := range []struct {
-		command  string
-		protocol string
-		parse    func(string) ([]map[string]interface{}, []RelationshipObservation)
+		command string
+		effect  string
+		parse   func(string) ([]map[string]interface{}, []RelationshipObservation)
 	}{
-		{"show cdp neighbors detail", "cdp", ciscoParseCDPNeighbors},
-		{"show lldp neighbors detail", "lldp", ciscoParseLLDPNeighbors},
+		{"show cdp neighbors detail", "CDP neighbours not collected", ciscoParseCDPNeighbors},
+		{"show lldp neighbors detail", "LLDP neighbours not collected", ciscoParseLLDPNeighbors},
 	} {
-		out, truncated, err := run(ctx, discovery.command)
-		if err != nil {
-			fmt.Printf("Warning: failed to get Cisco %s neighbours: %v\n", discovery.protocol, err)
+		out, ok := ciscoRun(ctx, result, run, discovery.command, discovery.effect)
+		if !ok {
 			continue
 		}
-		ciscoWarnTruncated(discovery.command, truncated)
 		found, edges := discovery.parse(out)
 		neighbors = append(neighbors, found...)
 		for _, edge := range edges {
@@ -195,40 +183,292 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 		}
 	}
 
-	if out, truncated, err := run(ctx, "show ip arp"); err != nil {
-		fmt.Printf("Warning: failed to get Cisco ARP table: %v\n", err)
-	} else {
-		ciscoWarnTruncated("show ip arp", truncated)
+	arpCommand := ciscoARPCommand(osName)
+	if out, ok := ciscoRun(ctx, result, run, arpCommand, "ARP neighbours not collected"); ok {
 		neighbors = append(neighbors, ciscoParseARP(out)...)
 	}
 
 	if len(neighbors) > 0 {
-		result.addFact(factNetNeighbors, ciscoBound("neighbours", neighbors), ConfidenceReported)
+		result.addFact(factNetNeighbors, ciscoBound(result, arpCommand, "Neighbour table", neighbors), ConfidenceReported)
 	}
 
 	// --- management plane -------------------------------------------------
-	result.addFact(factMgmtProtocol, ciscoManagementProtocol, ConfidenceReported)
-	result.addFact(factMgmtPlaintext, false, ConfidenceReported)
+	//
+	// The collector reached the device over SSH, but that says nothing about
+	// whether the device ALSO accepts telnet, which is the plaintext
+	// management finding (P-08). The device is asked, narrowly, per platform;
+	// what it cannot answer stays unassessed rather than defaulting to "not
+	// plaintext" — an explicit false is an answer, and this collector used to
+	// give it without ever looking.
+	telnetCommand := ciscoTelnetCommand(osName)
+	enabled, known := false, false
+	if out, ok := ciscoRun(ctx, result, run, telnetCommand, "Whether the device accepts telnet was not assessed"); ok {
+		enabled, known = ciscoTelnetEnabled(osName, out)
+	}
+	switch {
+	case known && enabled:
+		result.addFact(factMgmtProtocol, ciscoTelnetProtocol, ConfidenceReported)
+		result.addFact(factMgmtPlaintext, true, ConfidenceReported)
+	case known:
+		result.addFact(factMgmtProtocol, ciscoManagementProtocol, ConfidenceReported)
+		result.addFact(factMgmtPlaintext, false, ConfidenceReported)
+	default:
+		result.addFact(factMgmtProtocol, ciscoManagementProtocol, ConfidenceReported)
+	}
 
 	return chassis.PID
 }
 
-// ciscoWarnTruncated says out loud that a command's output was cut short. A
-// partial table presented as a complete one is the silent-success failure this
-// codebase keeps paying for.
-func ciscoWarnTruncated(command string, truncated bool) {
-	if truncated {
-		fmt.Printf("Warning: Cisco %q output exceeded %d bytes and was truncated; the facts derived from it are partial\n",
-			command, ciscoMaxCommandBytes)
+// ciscoTelnetProtocol is what mgmt.protocol records when the device accepts
+// telnet: the plaintext protocol it offers, beside the SSH we used.
+const ciscoTelnetProtocol = "telnet"
+
+// ciscoARPCommand is each platform's ARP table command. IOS-XR and ASA have no
+// `show ip arp` — it is `show arp` on both — so asking every device the IOS
+// question read no ARP table from either.
+func ciscoARPCommand(osName string) string {
+	switch osName {
+	case "IOS-XR", "ASA":
+		return "show arp"
 	}
+	return "show ip arp"
 }
 
-// ciscoBound caps a parsed table at ciscoMaxTableRows, announcing the cut.
-func ciscoBound(label string, rows []map[string]interface{}) []map[string]interface{} {
+// ciscoBriefCommand is each platform's interface-address summary. ASA's word
+// order differs: `show interface ip brief`.
+func ciscoBriefCommand(osName string) string {
+	if osName == "ASA" {
+		return "show interface ip brief"
+	}
+	return "show ip interface brief"
+}
+
+// ciscoTelnetCommand is each platform's narrow question "is telnet enabled?".
+//
+// Every form is filtered to the lines that answer it. IOS keeps telnet on the
+// VTY lines' `transport input`; NX-OS behind a feature, whose state
+// `show feature` prints either way; ASA and IOS-XR in their own `telnet`
+// configuration section, which holds addresses, a timeout and a server count
+// and nothing that authenticates. The broader running-config is never read —
+// see ciscoForbiddenFragments in the tests.
+func ciscoTelnetCommand(osName string) string {
+	switch osName {
+	case "NX-OS":
+		return "show feature | include telnet"
+	case "ASA", "IOS-XR":
+		return "show running-config telnet"
+	}
+	return "show running-config | include ^line vty|transport input"
+}
+
+var (
+	ciscoXRTelnetServerRE  = regexp.MustCompile(`(?i)^telnet\s+(?:vrf\s+\S+\s+)?ipv[46]\s+server\b`)
+	ciscoXRNoConfigRE      = regexp.MustCompile(`(?i)^%\s*No such configuration item`)
+	ciscoASATelnetTimeout  = regexp.MustCompile(`(?i)^telnet\s+timeout\s+\d+`)
+	ciscoInvalidInputRE    = regexp.MustCompile(`(?im)^\s*(?:ERROR:\s*)?% ?(?:invalid|incomplete|ambiguous) (?:input|command)`)
+	ciscoRefusalLineStarts = []string{"%", "error:"}
+)
+
+// ciscoCLIRefusal reports whether any line of output is the CLI talking about
+// the command rather than answering it: IOS/NX-OS/XR print those lines with a
+// leading "%" ("% Invalid input", "% Permission denied for the role",
+// "% This command is not authorized"), ASA with "ERROR: %".
+func ciscoCLIRefusal(output string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		for _, start := range ciscoRefusalLineStarts {
+			if strings.HasPrefix(lower, start) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ciscoTelnetEnabled reads the answer to ciscoTelnetCommand. known is false
+// when the output cannot settle it.
+//
+// Every "no" needs POSITIVE evidence that the command ran and was answered —
+// an empty output is not one. A refusal ("% Permission denied for the role",
+// "ERROR: % Invalid input …"), a filter that matched nothing because the
+// account could not read the configuration, and output that belongs to some
+// other command all look empty, and reading them as "telnet off" put an
+// unfounded mgmt.plaintext=false on the device. The evidence per platform:
+//
+//   - IOS / IOS-XE: every `line vty` block carries an explicit `transport
+//     input`. A block without one takes the release's default, which has been
+//     `all` (telnet included) on some releases — unknown, unless another block
+//     already enables telnet.
+//   - NX-OS: `show feature` prints the telnet feature's state, enabled or
+//     disabled.
+//   - ASA: the telnet section always carries `telnet timeout N`; an access
+//     line (`telnet <address> <mask> <nameif>`) is telnet on.
+//   - IOS-XR: a `telnet … server` line is telnet on; XR's own
+//     "% No such configuration item(s)" is the explicit statement that nothing
+//     is configured.
+func ciscoTelnetEnabled(osName, output string) (enabled, known bool) {
+	lines := strings.Split(output, "\n")
+
+	if osName == "IOS-XR" {
+		noConfig := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case ciscoXRTelnetServerRE.MatchString(trimmed):
+				return true, true
+			case ciscoXRNoConfigRE.MatchString(trimmed):
+				noConfig = true
+			case strings.HasPrefix(trimmed, "%") || strings.HasPrefix(strings.ToLower(trimmed), "error:"):
+				return false, false
+			}
+		}
+		return false, noConfig
+	}
+
+	if ciscoCLIRefusal(output) {
+		return false, false
+	}
+
+	switch osName {
+	case "NX-OS":
+		for _, line := range lines {
+			fields := strings.Fields(strings.ToLower(line))
+			if len(fields) >= 2 && fields[0] == "telnet" {
+				state := fields[len(fields)-1]
+				switch {
+				case strings.HasPrefix(state, "enabled"):
+					return true, true
+				case strings.HasPrefix(state, "disabled"):
+					return false, true
+				}
+			}
+		}
+		return false, false
+	case "ASA":
+		timeoutSeen := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if ciscoASATelnetTimeout.MatchString(trimmed) {
+				timeoutSeen = true
+				continue
+			}
+			fields := strings.Fields(strings.ToLower(trimmed))
+			// "telnet <address> <mask> <nameif>" / "telnet <prefix> <nameif>".
+			if len(fields) >= 3 && fields[0] == "telnet" {
+				return true, true
+			}
+		}
+		return false, timeoutSeen
+	}
+
+	blocks, explicit := 0, 0
+	inVTY, blockExplicit := false, false
+	closeBlock := func() {
+		if inVTY && blockExplicit {
+			explicit++
+		}
+	}
+	for _, line := range lines {
+		trimmed := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(trimmed, "line vty"):
+			closeBlock()
+			inVTY, blockExplicit = true, false
+			blocks++
+		case strings.HasPrefix(trimmed, "transport input") && inVTY:
+			// A `transport input` before any `line vty` belongs to the
+			// console or aux line, which the filter lets through too.
+			blockExplicit = true
+			for _, proto := range strings.Fields(trimmed)[2:] {
+				if proto == "telnet" || proto == "all" {
+					return true, true
+				}
+			}
+		}
+	}
+	closeBlock()
+	return false, blocks > 0 && explicit == blocks
+}
+
+// ciscoRun runs one command and reports on result whatever stops its output
+// being complete, returning the output only when there is something to parse.
+//
+//   - an error from the session is a warning classified from the error;
+//   - an AAA command-authorization refusal is permission_denied. IOS prints it
+//     as command OUTPUT with a clean exit, so without this check the refusal
+//     was parsed as an empty table and reported as "nothing configured";
+//   - output cut at ciscoMaxCommandBytes, or stopped at a pager prompt, is
+//     still returned (the rows we read are true) and is a truncated warning,
+//     because a partial table presented as a complete one is the
+//     silent-success failure this codebase keeps paying for.
+//
+// `% Invalid input detected` is deliberately NOT reported. It means both "this
+// platform has no such command" (a switch asked for `show crypto map`) and
+// "this privilege level cannot run it", and a warning on every switch for every
+// crypto command would bury the ones that matter.
+func ciscoRun(ctx context.Context, result *InterrogateResult, run ciscoRunner, command, effect string) (string, bool) {
+	out, truncated, err := run(ctx, command)
+	if err != nil {
+		result.warn(command, err, effect)
+		return "", false
+	}
+	if ciscoAuthorizationRefused(out) {
+		// A fixed detail, never the output: the output is the device's text,
+		// and this is persisted.
+		result.warnAs(WarningPermissionDenied, command, effect, "the device refused this command to the account (command authorization)")
+		return "", false
+	}
+	if truncated {
+		result.warnAs(WarningTruncated, command,
+			fmt.Sprintf("Output cut short, at the %d-byte bound or at a pager prompt; the facts derived from it are partial", ciscoMaxCommandBytes), "")
+	}
+	return out, true
+}
+
+// ciscoRefusalLines is how many leading lines of a command's output are checked
+// for an authorization refusal. IOS prints the refusal as the whole answer, so
+// it is always within the first lines; looking further would let a matching
+// string deep inside legitimate output (a banner, a description) throw the
+// whole table away.
+const ciscoRefusalLines = 3
+
+// ciscoAuthorizationRefused reports whether the device refused the command to
+// this account. Only the first ciscoRefusalLines lines are read, each on its
+// own.
+// ciscoAuthorizationRefusals are the lines a device prints INSTEAD of a
+// command's output when the account may not run it: IOS AAA command
+// authorization, NX-OS role-based access ("% Permission denied for the role"),
+// and IOS-XR task-group authorization ("% This command is not authorized").
+var ciscoAuthorizationRefusals = []string{
+	"% authorization failed",
+	"command authorization failed",
+	"% permission denied",
+	"% this command is not authorized",
+}
+
+func ciscoAuthorizationRefused(output string) bool {
+	lines := strings.SplitN(output, "\n", ciscoRefusalLines+1)
+	if len(lines) > ciscoRefusalLines {
+		lines = lines[:ciscoRefusalLines]
+	}
+	for _, line := range lines {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		for _, refusal := range ciscoAuthorizationRefusals {
+			if strings.HasPrefix(lower, refusal) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ciscoBound caps a parsed table at ciscoMaxTableRows and records the cut on
+// result, naming the command the table came from.
+func ciscoBound(result *InterrogateResult, command, table string, rows []map[string]interface{}) []map[string]interface{} {
 	if len(rows) <= ciscoMaxTableRows {
 		return rows
 	}
-	fmt.Printf("Warning: Cisco %s table returned %d rows; keeping the first %d\n", label, len(rows), ciscoMaxTableRows)
+	result.warnTruncated(command, table, ciscoMaxTableRows)
 	return rows[:ciscoMaxTableRows]
 }
 
@@ -254,10 +494,28 @@ var (
 // ciscoSubcomponentWords name the kinds of entry `show inventory` lists BELOW
 // the chassis. They exist to stop a fan tray's serial from being reported as
 // the device's when the chassis row does not say "chassis" in so many words.
+//
+// They are matched as WORDS. A bare substring match found "sfp" inside
+// "QSFP56-DD" — the port form factor a Cisco 8200 names in its own chassis
+// description — and discarded the chassis, so a real 8200 reported no model
+// and no serial at all.
 var ciscoSubcomponentWords = []string{
-	"power supply", "fan", "transceiver", "sfp", "gbic",
-	"module", "daughter", "slot", "sensor", "uplink", "adapter", "card",
+	"power supply", "psu", "fan", "transceiver", "sfp", "gbic",
+	"module", "daughter", "slot", "sensor", "uplink", "adapter", "card", "linecard",
 }
+
+// ciscoSubcomponentREs are ciscoSubcomponentWords as whole-word patterns (a
+// plural counts: "Fans", "Modules").
+var ciscoSubcomponentREs = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, len(ciscoSubcomponentWords))
+	for _, word := range ciscoSubcomponentWords {
+		out = append(out, regexp.MustCompile(`(?:^|[^a-z0-9])`+regexp.QuoteMeta(word)+`s?(?:$|[^a-z0-9])`))
+	}
+	return out
+}()
+
+// ciscoRackNameRE is IOS-XR's name for the chassis entry: "Rack 0".
+var ciscoRackNameRE = regexp.MustCompile(`(?i)^rack\s+\d+$`)
 
 // ciscoParseInventory returns the chassis entry of `show inventory`.
 //
@@ -299,7 +557,8 @@ func ciscoParseInventory(output string) ciscoChassis {
 
 	for _, entry := range entries {
 		if strings.Contains(strings.ToLower(entry.Name), "chassis") ||
-			strings.Contains(strings.ToLower(entry.Description), "chassis") {
+			strings.Contains(strings.ToLower(entry.Description), "chassis") ||
+			ciscoRackNameRE.MatchString(strings.TrimSpace(entry.Name)) {
 			return entry
 		}
 	}
@@ -313,8 +572,8 @@ func ciscoParseInventory(output string) ciscoChassis {
 // part of a device rather than the device.
 func ciscoLooksLikeSubcomponent(entry ciscoChassis) bool {
 	text := strings.ToLower(entry.Name + " " + entry.Description)
-	for _, word := range ciscoSubcomponentWords {
-		if strings.Contains(text, word) {
+	for _, word := range ciscoSubcomponentREs {
+		if word.MatchString(text) {
 			return true
 		}
 	}
@@ -490,6 +749,15 @@ func ciscoParseIPInterfaceBrief(output string) []map[string]interface{} {
 			// IOS / IOS-XE: Interface, IP-Address, OK?, Method, Status…, Protocol
 			adminState = ciscoAdminState(strings.Join(fields[4:len(fields)-1], " "))
 			linkState = ciscoLinkState(fields[len(fields)-1])
+		case len(fields) == 5 && ciscoIsXRStatus(fields[2]) && ciscoLinkState(fields[3]) != "unknown":
+			// IOS-XR: Interface, IP-Address, Status, Protocol, Vrf-Name.
+			// Status is the interface's own state, "Shutdown" being the
+			// administrative down.
+			adminState = "up"
+			if strings.EqualFold(fields[2], "shutdown") {
+				adminState = "down"
+			}
+			linkState = ciscoLinkState(fields[3])
 		case ciscoIsNXOSStatusTriple(fields[2]):
 			adminState, linkState = ciscoNXOSInterfaceStates(fields[2])
 		default:
@@ -509,6 +777,15 @@ func ciscoParseIPInterfaceBrief(output string) []map[string]interface{} {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// ciscoIsXRStatus reports whether a column is an IOS-XR brief Status value.
+func ciscoIsXRStatus(v string) bool {
+	switch strings.ToLower(v) {
+	case "up", "down", "shutdown":
+		return true
+	}
+	return false
 }
 
 // ciscoUnassignedAddress reports whether the address column says "no address"
@@ -653,6 +930,9 @@ var (
 	ciscoCDPAddressRE   = regexp.MustCompile(`(?i)^IP(?:v4)? address:\s*(\S+)`)
 	ciscoCDPPlatformRE  = regexp.MustCompile(`(?i)^Platform:\s*([^,]+),\s*Capabilities:\s*(.*)$`)
 	ciscoCDPInterfaceRE = regexp.MustCompile(`(?i)^Interface:\s*([^,]+),\s*Port ID \(outgoing port\):\s*(.+)$`)
+	// IOS-XR prints the two halves of that line on two lines.
+	ciscoCDPLocalOnlyRE  = regexp.MustCompile(`(?i)^Interface:\s*([^,\s]+)\s*$`)
+	ciscoCDPRemoteOnlyRE = regexp.MustCompile(`(?i)^Port ID \(outgoing port\):\s*(.+)$`)
 	// The `Version :` block's FIRST line, and only when it is on the same line
 	// as the key. IOS prints the version on the line AFTER `Version :`, so this
 	// matches the one-line form some implementations use; the multi-line form
@@ -699,6 +979,10 @@ func ciscoParseCDPNeighbors(output string) ([]map[string]interface{}, []Relation
 			case local == "" && ciscoCDPInterfaceRE.MatchString(trimmed):
 				m := ciscoCDPInterfaceRE.FindStringSubmatch(trimmed)
 				local, remote = ciscoAdvertised(m[1]), ciscoAdvertised(m[2])
+			case local == "" && ciscoCDPLocalOnlyRE.MatchString(trimmed):
+				local = ciscoAdvertised(ciscoCDPLocalOnlyRE.FindStringSubmatch(trimmed)[1])
+			case remote == "" && ciscoCDPRemoteOnlyRE.MatchString(trimmed):
+				remote = ciscoAdvertised(ciscoCDPRemoteOnlyRE.FindStringSubmatch(trimmed)[1])
 			case version == "" && ciscoCDPVersionRE.MatchString(trimmed):
 				raw := strings.TrimSpace(ciscoCDPVersionRE.FindStringSubmatch(trimmed)[1])
 				if raw != "" {
@@ -750,12 +1034,15 @@ func ciscoParseCDPNeighbors(output string) ([]map[string]interface{}, []Relation
 }
 
 var (
-	ciscoLLDPLocalRE    = regexp.MustCompile(`(?i)^Local Intf:\s*(\S+)`)
+	// "Local Intf:" (IOS), "Local Port id:" (NX-OS), "Local Interface:" (IOS-XR).
+	ciscoLLDPLocalRE    = regexp.MustCompile(`(?i)^(?:Local Intf|Local Port id|Local Interface):\s*(\S+)`)
 	ciscoLLDPChassisRE  = regexp.MustCompile(`(?i)^Chassis id:\s*(.+)$`)
 	ciscoLLDPPortRE     = regexp.MustCompile(`(?i)^Port id:\s*(.+)$`)
 	ciscoLLDPPortDescRE = regexp.MustCompile(`(?i)^Port Description:\s*(.+)$`)
 	ciscoLLDPSysNameRE  = regexp.MustCompile(`(?i)^System Name:\s*(.+)$`)
-	ciscoLLDPMgmtIPRE   = regexp.MustCompile(`(?i)^IP:\s*(\S+)`)
+	// "IP:" (IOS), "Management Address:" (NX-OS), "IPv4 address:" under
+	// "Management Addresses:" (IOS-XR).
+	ciscoLLDPMgmtIPRE = regexp.MustCompile(`(?i)^(?:IP|Management Address|IPv4 address):\s*(\S+)`)
 	// `System Description:` is a multi-line banner and its value is on the
 	// FOLLOWING line in IOS's rendering, like CDP's `Version :`.
 	ciscoLLDPSysDescRE = regexp.MustCompile(`(?i)^System Description:\s*(.*)$`)
@@ -909,36 +1196,69 @@ func ciscoNeighborEdge(peer PeerRef, protocol, local, remote, remoteDescription 
 	}
 }
 
-var ciscoARPRowRE = regexp.MustCompile(`(?i)^Internet\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(\S+))?`)
-
-// ciscoParseARP projects `show ip arp` onto net.neighbors items.
+// ciscoParseARP projects an ARP table onto net.neighbors items.
+//
+// Four real layouts, one per platform, and only the first had been read:
+//
+//   - IOS/IOS-XE `show ip arp`: `Internet <addr> <age> <mac> <type> [<iface>]`
+//   - NX-OS `show ip arp`: `<addr> <age> <mac> <iface>`
+//   - IOS-XR `show arp`: `<addr> <age> <mac> <state> <type> <iface>`, per line
+//     card; state "Interface" is the router's OWN address, not a neighbour
+//   - ASA `show arp`: `<nameif> <addr> <mac> <age>`
 //
 // An "Incomplete" row is an address the device asked about and got no answer
-// to — not a neighbour it saw — and canonicalMAC rejects it, which is what
-// keeps it out.
+// to — not a neighbour it saw — and canonicalMAC rejects it (XR prints it with
+// an all-zero MAC), which is what keeps it out.
 func ciscoParseARP(output string) []map[string]interface{} {
 	var out []map[string]interface{}
 	for _, line := range strings.Split(output, "\n") {
-		m := ciscoARPRowRE.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
 			continue
 		}
-		mac, err := canonicalMAC(m[3])
+		var addrToken, macToken, iface string
+		switch {
+		case strings.EqualFold(fields[0], "Internet") && len(fields) >= 4:
+			addrToken, macToken = fields[1], fields[3]
+			if len(fields) >= 6 {
+				iface = fields[5]
+			}
+		case ciscoIsAddress(fields[0]):
+			addrToken, macToken = fields[0], fields[2]
+			switch {
+			case len(fields) >= 6:
+				if strings.EqualFold(fields[3], "Interface") {
+					continue
+				}
+				iface = fields[5]
+			case len(fields) >= 4:
+				iface = fields[3]
+			}
+		case ciscoIsAddress(fields[1]):
+			iface, addrToken, macToken = fields[0], fields[1], fields[2]
+		default:
+			continue
+		}
+		mac, err := canonicalMAC(macToken)
 		if err != nil {
 			continue
 		}
-		entry := map[string]interface{}{"protocol": "arp", "remote_mac": mac}
-		if addr, err := canonicalIP(m[1]); err == nil {
-			entry["remote_address"] = addr
-		} else {
+		addr, err := canonicalIP(addrToken)
+		if err != nil {
 			continue
 		}
-		if iface := strings.TrimSpace(m[5]); iface != "" {
+		entry := map[string]interface{}{"protocol": "arp", "remote_mac": mac, "remote_address": addr}
+		if iface = strings.TrimSpace(iface); iface != "" {
 			entry["local_port"] = iface
 		}
 		out = append(out, entry)
 	}
 	return out
+}
+
+func ciscoIsAddress(v string) bool {
+	_, err := canonicalIP(v)
+	return err == nil
 }
 
 // ciscoSplitRecords splits a `... detail` output into one chunk per neighbour.

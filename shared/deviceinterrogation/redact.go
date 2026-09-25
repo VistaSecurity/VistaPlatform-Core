@@ -79,6 +79,10 @@ func Sanitize(result *InterrogateResult) {
 		sanitizePeer(&result.Relationships[i].Peer)
 	}
 	sanitizeIdentity(result.DeviceIdentity)
+	// Warnings are free text built from whatever a device answered — a vendor
+	// error body, a Go *url.Error carrying the request URL. Their fields have
+	// innocent names, so the value-shaped rules apply (see SanitizeWarnings).
+	result.Warnings = SanitizeWarnings(result.Warnings)
 }
 
 // sanitizePeer masks PEM private-key blocks in a peer reference's free-text
@@ -164,6 +168,16 @@ type sanitizingInterrogator struct {
 
 func (s sanitizingInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
 	result, err := s.inner.Interrogate(ctx, device, creds)
+	if result != nil {
+		// A warning always names its collector. Built-in collectors stamp
+		// their own; this covers one that does not, by the device type it
+		// was dispatched for.
+		for i := range result.Warnings {
+			if result.Warnings[i].Collector == "" {
+				result.Warnings[i].Collector = device.DeviceType
+			}
+		}
+	}
 	Sanitize(result)
 	return result, err
 }

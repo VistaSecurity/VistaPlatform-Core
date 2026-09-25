@@ -1,0 +1,10 @@
+<response status="success" code="19">
+  <result total-count="1" count="1">
+    <ssl-decrypt>
+      <entry name="ssl-fwd-proxy-default">
+        <certificate><ca>forward-trust-ca</ca></certificate>
+        <notify-user>yes</notify-user>
+      </entry>
+    </ssl-decrypt>
+  </result>
+</response>

@@ -1,0 +1,294 @@
+{
+  "admission_enforce": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "PA-3220"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "013201001234"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "Palo Alto Networks"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": false
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "https"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "addresses": [
+              "198.51.100.2/24"
+            ],
+            "mac": "00:1b:17:0a:0b:0d",
+            "name": "ethernet1/1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "addresses": [
+              "203.0.113.1/24"
+            ],
+            "name": "ethernet1/2.100",
+            "vlan": 100
+          },
+          {
+            "mac": "00:1b:17:0a:0b:0f",
+            "name": "ethernet1/3",
+            "state": "down"
+          },
+          {
+            "addresses": [
+              "192.0.2.5/24"
+            ],
+            "mac": "00:1b:17:0a:0b:0c",
+            "name": "management"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.neighbors",
+        "source_kind": "measured",
+        "value": [
+          {
+            "local_port": "ethernet1/1",
+            "protocol": "arp",
+            "remote_address": "198.51.100.1",
+            "remote_mac": "00:1b:17:00:00:01"
+          },
+          {
+            "local_port": "ethernet1/2.100",
+            "protocol": "arp",
+            "remote_address": "203.0.113.20",
+            "remote_mac": "00:1b:17:00:00:22"
+          },
+          {
+            "local_port": "ethernet1/1",
+            "protocol": "lldp",
+            "remote_address": "198.51.100.1",
+            "remote_mac": "00:1b:17:00:00:01",
+            "remote_name": "core-sw-1.example.net",
+            "remote_port": "Gi1/0/24"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.uptime_seconds",
+        "source_kind": "measured",
+        "value": 706991
+      },
+      {
+        "asset": "device",
+        "key": "os.name",
+        "source_kind": "measured",
+        "value": "PAN-OS"
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "11.1.4-h7"
+      }
+    ],
+    "edges": [],
+    "assets": [
+      {
+        "asset": "device",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [
+      {
+        "admission_reasons": "{insufficient_identity_evidence}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "00:1b:17:00:00:01"
+          },
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.1"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "value": "core-sw-1.example.net"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "value": "core-sw-1.example.net"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "unresolved"
+      }
+    ],
+    "collection_warnings": [],
+    "processing_errors": []
+  },
+  "admission_off": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "PA-3220"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "013201001234"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "Palo Alto Networks"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": false
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "https"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "addresses": [
+              "198.51.100.2/24"
+            ],
+            "mac": "00:1b:17:0a:0b:0d",
+            "name": "ethernet1/1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "addresses": [
+              "203.0.113.1/24"
+            ],
+            "name": "ethernet1/2.100",
+            "vlan": 100
+          },
+          {
+            "mac": "00:1b:17:0a:0b:0f",
+            "name": "ethernet1/3",
+            "state": "down"
+          },
+          {
+            "addresses": [
+              "192.0.2.5/24"
+            ],
+            "mac": "00:1b:17:0a:0b:0c",
+            "name": "management"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.neighbors",
+        "source_kind": "measured",
+        "value": [
+          {
+            "local_port": "ethernet1/1",
+            "protocol": "arp",
+            "remote_address": "198.51.100.1",
+            "remote_mac": "00:1b:17:00:00:01"
+          },
+          {
+            "local_port": "ethernet1/2.100",
+            "protocol": "arp",
+            "remote_address": "203.0.113.20",
+            "remote_mac": "00:1b:17:00:00:22"
+          },
+          {
+            "local_port": "ethernet1/1",
+            "protocol": "lldp",
+            "remote_address": "198.51.100.1",
+            "remote_mac": "00:1b:17:00:00:01",
+            "remote_name": "core-sw-1.example.net",
+            "remote_port": "Gi1/0/24"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.uptime_seconds",
+        "source_kind": "measured",
+        "value": 706991
+      },
+      {
+        "asset": "device",
+        "key": "os.name",
+        "source_kind": "measured",
+        "value": "PAN-OS"
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "11.1.4-h7"
+      }
+    ],
+    "edges": [
+      {
+        "from": "device",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+        "type": "connects_to"
+      }
+    ],
+    "assets": [
+      {
+        "asset": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "device",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [],
+    "collection_warnings": [],
+    "processing_errors": []
+  }
+}

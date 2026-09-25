@@ -377,6 +377,110 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/billing/trials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List live trials (Billing → Trials)
+         * @description Every unconverted billing_trial_tracking row — the one trial store — on a plan the MSP marked is_trial, for an undeleted tenant, soonest to end first. A trial row left on any other plan is not a trial and is not listed. `phase`, `days_remaining` and `ends_at` come from shared/trials, the computation the trial lock and the tenant trial banner use.
+         */
+        get: operations["listTrials"];
+        put?: never;
+        /**
+         * Start a trial (Billing → Trials → Start trial)
+         * @description Writes the billing_trial_tracking row for a tenant already on a plan the MSP marked is_trial; payment_status 'trial' follows it. Refused with 409 when the tenant's plan is not a trial plan or the tenant already has a trial row, and with 400 when `duration` is shorter than the plan's full + soft trial days. Recorded in the platform audit log (billing.trial_created).
+         */
+        post: operations["startTrial"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/billing/trials/end-landing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Where an ended trial lands (Billing → Trials → End trial dialog)
+         * @description What ending a trial does right now — the same query End trial and the expiry sweep run, so the dialog states what will happen. A trial that ends moves the tenant to the MSP's Free plan: an active, public, card-billed plan called Free (name or display name) that costs nothing monthly or annually and is not a trial, custom, private or deprecated plan; with several, the one named `free`, then the lowest display order, then name. With none defined the tenant is suspended (`suspended: true`). A failed lookup is a 500, never a guess.
+         */
+        get: operations["getTrialEndLanding"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/billing/trials/tenants/{tenant_id}/extend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Extend a live trial (Billing → Trials → Extend)
+         * @description Moves the date the trial locks (`ends_at` in the list — the later of start + the plan's full and soft days and trial_end) `additional_days` later, counted from that date, or from now when the trial has already locked. A Stripe trialing subscription gets the same trial end. 404 when the tenant has no unconverted trial on a trial plan. Recorded in the platform audit log (billing.trial_extended).
+         */
+        post: operations["extendTrial"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/billing/trials/tenants/{tenant_id}/convert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mark a live trial converted to paid (Billing → Trials → Convert)
+         * @description Marks the tenant's unconverted trial converted and sets payment_status 'active'. 404 when the tenant has no unconverted trial. Recorded in the platform audit log (billing.trial_converted).
+         */
+        post: operations["convertTrial"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/billing/trials/tenants/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * End a live trial (Billing → Trials → End trial)
+         * @description Ends the tenant's live trial now, exactly as the expiry sweep ends one whose clock has run out: the tenant moves to the MSP's Free plan with payment_status 'active' (see getTrialEndLanding for which plan), or — when no Free plan is defined — is suspended, its prior status remembered for Reactivate and every session revoked. The trial row is kept, marked ended (hard_locked_at), so it reads as locked everywhere and Start trial refuses a second trial. One transaction. `landing` says where the tenant went. 404 when there is no unconverted trial on a trial plan (a tenant already moved to the Free plan has none). Recorded in the platform audit log (billing.trial_cancelled, metadata `landing_plan`: the plan's name or "suspended", and `landing_plan_id`).
+         */
+        delete: operations["cancelTrial"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/billing/coupons": {
         parameters: {
             query?: never;
@@ -524,7 +628,7 @@ export interface paths {
         post?: never;
         /**
          * Deprecate a subscription tier
-         * @description Soft deprecation — existing tenants are grandfathered. Requires an authenticated platform user; returns 401 when absent.
+         * @description Soft deprecation — existing tenants are grandfathered. Requires an authenticated platform user; returns 401 when absent and 404 when the tier does not exist.
          */
         delete: operations["deprecateTier"];
         options?: never;
@@ -563,12 +667,19 @@ export interface paths {
         put?: never;
         /**
          * Assign a plan to a tenant
-         * @description Assigns a (typically custom/enterprise) plan to a tenant. For an
-         *     invoice-billed plan this is record-only — NO Stripe subscription is
-         *     created; the tenant is marked active and entitlements take effect
-         *     immediately. For a stripe-billed plan it sets the tier only (card
-         *     collection still flows through checkout). A private custom plan may
-         *     only be assigned to its owning tenant.
+         * @description Assigns a (typically custom/enterprise) plan to a tenant (owner
+         *     decision 7). Refused with 409 "This tenant is billed through Stripe —
+         *     change plan through billing" when the tenant has a live Stripe
+         *     subscription: its plan changes through billing, so the Stripe price and
+         *     the entitlements move together. For an invoice-billed plan this is
+         *     record-only — NO Stripe subscription is created; the tenant is marked
+         *     active, a manual billing subscription records the plan, and
+         *     entitlements take effect immediately. For a stripe-billed plan it sets
+         *     the tier only (card collection still flows through checkout) and
+         *     retires any manual subscription the tenant had. One transaction. A
+         *     private custom plan may only be assigned to its owning tenant (409). A
+         *     reason is required, and the assignment — or its refusal — is recorded
+         *     in the platform audit log.
          */
         post: operations["assignTier"];
         delete?: never;
@@ -1515,8 +1626,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Monthly Recurring Revenue (time series or point)
-         * @description Without `period`, returns a 30-day MRR time series. With `period` (YYYY-MM-DD), returns the single-day MRR value.
+         * Current monthly recurring revenue
+         * @description Current MRR from billing records (billing_subscriptions with an open paid stretch — active or paid past-due, never trialing — normalised to a month, recurring coupons applied). The subscription-period ledger preserves tenure for churn/LTV, not historical prices or coupons, so a `period` query parameter is refused with 400. With no payment provider configured, `billing_configured` is false and `mrr` / `paying_tenants` are null.
          */
         get: operations["getBillingMRR"];
         put?: never;
@@ -1534,7 +1645,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Churn rate for a period */
+        /**
+         * Churn rate for a month
+         * @description Decided per tenant from append-only paid subscription periods: the tenants paying at the start of the month that had a paid stretch end in the month and are not paying at its end (for the current month: now), as a percentage of the tenants paying at its start. Scheduled cancellation ends at Stripe ended_at; unpaid/paused and tenant lifecycle exits end a stretch. A switch between invoice and card billing, or between paid plans, is not churn when another period covers the tenant; a move to a free plan is. A cancelled trial never paid and counts in neither. `churn_rate` is null when nobody was paying at the start of the month or no payment provider is configured.
+         */
         get: operations["getBillingChurn"];
         put?: never;
         post?: never;
@@ -1551,7 +1665,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Customer lifetime value */
+        /**
+         * Customer lifetime value
+         * @description MRR per paying tenant times the average paid lifetime of the tenants that stopped paying — from the tenant's first paid date to the end of its last paid subscription. Trial time is not paid lifetime, and a billing-method switch does not end one. `ltv` is null when nobody pays, no tenant has stopped paying yet, or no payment provider is configured.
+         */
         get: operations["getBillingLTV"];
         put?: never;
         post?: never;
@@ -1568,7 +1685,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Revenue breakdown by subscription tier */
+        /**
+         * Current monthly recurring revenue by plan
+         * @description Plans nobody pays for are absent (not listed at their price). Current-state only: a `period` query parameter is refused with 400. Empty when no payment provider is configured.
+         */
         get: operations["getBillingRevenueByTier"];
         put?: never;
         post?: never;
@@ -1624,23 +1744,6 @@ export interface paths {
          * @description Returned as a flat object. `top_coupons` is null when no coupon has been redeemed.
          */
         get: operations["getBillingCouponStats"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/billing/analytics/forecast": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Projected MRR forecast */
-        get: operations["getBillingForecast"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1727,6 +1830,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/tenants/{id}/billing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A tenant's billing customers and subscriptions
+         * @description The tenant's billing_customers and billing_subscriptions rows across providers (stripe, manual). The tenant drawer reads it to show the support change-plan panel only for a tenant with a live Stripe subscription. A section whose query fails is omitted.
+         */
+        get: operations["getTenantBilling"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/tenants/{id}/billing/change-plan": {
         parameters: {
             query?: never;
@@ -1738,7 +1861,7 @@ export interface paths {
         put?: never;
         /**
          * Change a tenant's plan on platform authority (support downgrade path)
-         * @description Changes the tenant's Stripe subscription to another tier with proration disabled — the support-granted DOWNGRADE path under the 12-month contract model. Nothing is credited or refunded: monthly tenants bill the new price from the next period; annual-prepaid tenants keep the paid year and renew at the new rate. Keeps the tenant's current billing interval. Requires platform.billing; the reason is recorded in the platform audit log. 400 if the tenant has no Stripe subscription or the target tier lacks a Price for the tenant's interval.
+         * @description Changes the tenant's Stripe subscription to another tier with proration disabled — the support-granted DOWNGRADE path under the 12-month contract model. Nothing is credited or refunded: monthly tenants bill the new price from the next period; annual-prepaid tenants keep the paid year and renew at the new rate. Keeps the tenant's current billing interval. Requires platform.billing; the reason is recorded in the platform audit log. 400 if the tenant has no Stripe subscription (assign the plan instead) or the target tier lacks a Price for the tenant's interval. Stripe is changed first; the local subscription row and the tenant's tier are then recorded in one checked transaction, and a failure there answers 500 (Stripe already bills the new plan; the subscription webhook reconciles) instead of reporting success.
          */
         post: operations["adminChangeTenantPlan"];
         delete?: never;
@@ -3465,6 +3588,10 @@ export interface components {
             included_value: unknown;
             overage_price_cents?: number;
             overage_unit_size?: number;
+            /** @description Set overage_price_cents back to null. Mutually exclusive with overage_price_cents. */
+            clear_overage_price_cents?: boolean;
+            /** @description Set overage_unit_size back to null. Mutually exclusive with overage_unit_size. */
+            clear_overage_unit_size?: boolean;
         };
         /**
          * @description Envelope for the tier-entitlements endpoints. `entitlements` is null when
@@ -3594,6 +3721,10 @@ export interface components {
             included_value: unknown;
             overage_price_cents?: number;
             overage_unit_size?: number;
+            /** @description Set overage_price_cents back to null. Mutually exclusive with overage_price_cents. */
+            clear_overage_price_cents?: boolean;
+            /** @description Set overage_unit_size back to null. Mutually exclusive with overage_unit_size. */
+            clear_overage_unit_size?: boolean;
         } & {
             [key: string]: unknown;
         };
@@ -4354,55 +4485,128 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** @description Flat billing dashboard metrics (admin-service AnalyticsCalculator.GetDashboardMetrics — a fixed literal map). `revenue_by_tier` maps tier name → revenue. */
+        /** @description Billing → Overview metrics (billing.DashboardMetrics), all from billing records. When `billing_configured` is false (no payment provider: no Stripe secret key and no invoice-billed plan ever assigned) every revenue figure is null and `revenue_by_tier` is empty — the console shows "Billing not configured". `churn_rate` and `ltv` are also null when there is nothing to measure them from. `trial_conversion` comes from billing_trial_tracking and is reported either way. */
         BillingDashboard: {
-            mrr: number;
-            churn_rate: number;
-            ltv: number;
-            trial_conversion: number;
-            active_tenants: number;
+            billing_configured: boolean;
+            /** @description Monthly recurring revenue: live subscriptions that have paid (active, or past-due after a successful payment; never trialing), interval-normalised, recurring coupons applied. */
+            mrr: number | null;
+            /** @description Tenants with a live subscription worth more than zero. */
+            paying_tenants: number | null;
+            /** @description Percent, this month. */
+            churn_rate: number | null;
+            ltv: number | null;
+            /** @description Plan display name → MRR. Only plans someone pays for. */
             revenue_by_tier: {
                 [key: string]: number;
             };
+            trial_conversion: number;
             /** Format: date-time */
             calculation_time: string;
         };
-        /** @description One point in the MRR time series (AnalyticsCalculator.CalculateMRRTimeSeries literal map). */
-        MRRSeriesPoint: {
-            /** @description YYYY-MM-DD. */
+        /** @description Current MRR. `mrr` and `paying_tenants` are null when `billing_configured` is false. */
+        MRRResponse: {
+            billing_configured: boolean;
+            /** @description YYYY-MM-DD (today). */
             date: string;
-            mrr: number;
-            active_tenants: number;
-        };
-        /** @description Default MRR response (no `period`) — a 30-day time series. `series` is null when the calculator yields no points. */
-        MRRSeriesResponse: {
-            /** @description YYYY-MM-DD. */
-            start_date: string;
-            /** @description YYYY-MM-DD. */
-            end_date: string;
-            series: components["schemas"]["MRRSeriesPoint"][] | null;
-        };
-        /** @description Single-day MRR response (when `period` is supplied). */
-        MRRPointResponse: {
-            /** @description YYYY-MM-DD. */
-            date: string;
-            mrr: number;
+            mrr: number | null;
+            paying_tenants: number | null;
         };
         ChurnResponse: {
+            billing_configured: boolean;
             /** @description YYYY-MM. */
             period: string;
-            churn_rate: number;
+            churn_rate: number | null;
         };
         LTVResponse: {
-            ltv: number;
+            billing_configured: boolean;
+            ltv: number | null;
         };
-        /** @description `revenue_by_tier` maps tier name → revenue. */
+        /** @description `revenue_by_tier` maps plan display name → current MRR; empty when `billing_configured` is false. */
         RevenueByTierResponse: {
-            /** @description YYYY-MM. */
-            period: string;
+            billing_configured: boolean;
             revenue_by_tier: {
                 [key: string]: number;
             };
+        };
+        TenantBillingSubscription: {
+            /** @description billing_providers.key: 'stripe' or 'manual' (invoice). */
+            provider: string;
+            subscription_id: string;
+            plan: string;
+            status: string;
+            /** Format: date-time */
+            current_period_start: string;
+            /** Format: date-time */
+            current_period_end: string;
+        };
+        TenantBillingCustomer: {
+            provider: string;
+            provider_name: string;
+            customer_id: string;
+        };
+        TenantBillingOverviewResponse: {
+            billing: {
+                customers?: components["schemas"]["TenantBillingCustomer"][];
+                subscriptions?: components["schemas"]["TenantBillingSubscription"][];
+            };
+        };
+        /** @description One live trial (billing.TrialListing). */
+        TrialListing: {
+            /** Format: uuid */
+            tenant_id: string;
+            tenant_name: string;
+            /** @description The trial plan's display name. */
+            plan_name: string;
+            /** Format: date-time */
+            trial_start: string;
+            /**
+             * Format: date-time
+             * @description When access locks — trial_start + the plan's full and soft trial days, or a later trial_end an extension set.
+             */
+            ends_at: string;
+            /** @enum {string} */
+            phase: "full" | "soft_prompt" | "locked";
+            /** @description Whole days until `ends_at` (when access locks); 0 once locked. */
+            days_remaining: number;
+            extended_count: number;
+            /** @description The tenant's payment_status; 'trial' is derived from this trial record. */
+            payment_status: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        TrialListResponse: {
+            trials: components["schemas"]["TrialListing"][];
+            count: number;
+        };
+        StartTrialRequest: {
+            /** Format: uuid */
+            tenant_id: string;
+            /** @description Trial length in days, start to lock. At least the plan's trial_days_full + trial_days_soft: the trial locks at the later of that and this length, so a shorter length is refused with 400 (the message names the minimum) rather than silently ignored. 0 or absent uses the plan's length (full + soft days; 30 when the plan sets none). A Stripe trialing subscription, when the plan has a Stripe price, gets the same length. */
+            duration?: number;
+        };
+        ExtendTrialRequest: {
+            additional_days: number;
+        };
+        /** @description Acknowledgement of a trial mutation. Start returns `duration`, the length applied in days (the plan's when none was given); extend echoes `additional_days`; end returns `landing`, where the tenant went. */
+        TrialActionResponse: {
+            message: string;
+            /** Format: uuid */
+            tenant_id: string;
+            duration?: number;
+            additional_days?: number;
+            landing?: components["schemas"]["TrialEndLanding"];
+        };
+        /** @description Where a tenant goes when its trial ends (billing.TrialLanding) — the MSP's Free plan, or suspended when none is defined. */
+        TrialEndLanding: {
+            /** @description No Free plan is defined; the tenant is suspended. */
+            suspended: boolean;
+            /**
+             * Format: uuid
+             * @description The Free plan; absent when `suspended`.
+             */
+            plan_id?: string;
+            /** @description The Free plan's display name; absent when `suspended`. */
+            plan_name?: string;
         };
         TrialConversionResponse: {
             /** @description YYYY-MM. */
@@ -4430,19 +4634,6 @@ export interface components {
             active_coupons: number;
             total_redemptions: number;
             top_coupons: components["schemas"]["CouponStatsTopCoupon"][] | null;
-        };
-        /** @description One projected MRR point (billing.MRRForecastPoint). */
-        ForecastPoint: {
-            /** @description YYYY-MM-DD. */
-            date: string;
-            projected_mrr: number;
-            lower_bound: number;
-            upper_bound: number;
-        };
-        /** @description Server also returns the echoed `months`; `forecast` is null when there is insufficient history. */
-        ForecastResponse: {
-            months: number;
-            forecast: components["schemas"]["ForecastPoint"][] | null;
         };
         /** @description Retention data for one signup cohort (billing.CohortData). */
         CohortData: {
@@ -6196,6 +6387,163 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    listTrials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The live trials. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrialListResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    startTrial: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartTrialRequest"];
+            };
+        };
+        responses: {
+            /** @description The trial was started. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrialActionResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getTrialEndLanding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The landing. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrialEndLanding"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    extendTrial: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExtendTrialRequest"];
+            };
+        };
+        responses: {
+            /** @description The trial was extended. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrialActionResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    convertTrial: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The trial was converted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrialActionResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    cancelTrial: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The trial was ended. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrialActionResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     listCoupons: {
         parameters: {
             query?: {
@@ -6544,6 +6892,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -6586,6 +6935,8 @@ export interface operations {
                 "application/json": {
                     /** Format: uuid */
                     tenant_id: string;
+                    /** @description Why the plan is being assigned; recorded in the audit log. Blank is refused. */
+                    reason: string;
                 };
             };
         };
@@ -6601,6 +6952,24 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description No such plan or (undeleted) tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The tenant is billed through Stripe, or the plan is private to another tenant. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7926,23 +8295,20 @@ export interface operations {
     };
     getBillingMRR: {
         parameters: {
-            query?: {
-                /** @description YYYY-MM-DD. Omit for the default 30-day time series. */
-                period?: string;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description MRR time series (default) or a single MRR point (with period). */
+            /** @description Current MRR. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MRRSeriesResponse"] | components["schemas"]["MRRPointResponse"];
+                    "application/json": components["schemas"]["MRRResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
@@ -7954,7 +8320,7 @@ export interface operations {
     getBillingChurn: {
         parameters: {
             query?: {
-                /** @description YYYY-MM-DD. Defaults to the first of the current month. */
+                /** @description YYYY-MM-DD; the month containing it. Defaults to the current month. */
                 period?: string;
             };
             header?: never;
@@ -8003,10 +8369,7 @@ export interface operations {
     };
     getBillingRevenueByTier: {
         parameters: {
-            query?: {
-                /** @description YYYY-MM-DD. Defaults to the first of the current month. */
-                period?: string;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
@@ -8094,32 +8457,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CouponStatsResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["BillingNotMSP"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    getBillingForecast: {
-        parameters: {
-            query?: {
-                /** @description Projection horizon (1–24); out-of-range or invalid silently clamps to 6. */
-                months?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The MRR forecast. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ForecastResponse"];
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
@@ -8260,6 +8597,31 @@ export interface operations {
             404: components["responses"]["LegacyNotFound"];
             409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getTenantBilling: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The tenant's billing records. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantBillingOverviewResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["BillingNotMSP"];
         };
     };
     adminChangeTenantPlan: {

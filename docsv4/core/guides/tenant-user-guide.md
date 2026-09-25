@@ -279,8 +279,9 @@ interrogated, Connection. Per row you can **open the asset's page**,
 **interrogate** it now, **test the connection**, **edit its management settings**,
 or **stop managing** it.
 
-Two buttons add to the list: **Add managed asset** (you know the address and have
-credentials) and **Discover & add** (find it and configure it in one step).
+**Add device** adds to the list: give the device type, management address,
+username and password, and the platform connects and fills in the rest. If it
+can't connect, the form says why and lets you add the device by hand.
 
 > **Stop managing is not delete.** It removes the management configuration and its
 > credentials. The asset stays in Inventory with everything ever discovered about

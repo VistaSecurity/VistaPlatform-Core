@@ -26,6 +26,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/confighttp"
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/store"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 )
 
 // SensorConfigHandler serves the desired-state surface for sensors.
@@ -69,6 +71,29 @@ func (h *SensorConfigHandler) GetSensorConfigHistory(c *gin.Context) { h.inner.G
 // Called from the heartbeat, which is already authenticated as that sensor.
 func (h *SensorConfigHandler) Exchange(c *gin.Context, tenantID, sensorID uuid.UUID, rep confighttp.ExchangeReport) (*confighttp.ExchangePayload, error) {
 	return confighttp.Exchange(c, h.store, tenantID, store.SensorOwner(sensorID), rep)
+}
+
+// OwnedNetworks answers the public space this tenant has claimed as its own,
+// plus what it asked never to be probed, for the sensor's TLS enricher to
+// decide locally which passively-seen destinations it may handshake with
+// ( W5.13). See dispatchguard.OwnedNetworks for what is and is not in it.
+//
+// Inside WithTenantTx: network_segments, assets, external_connections and
+// tenant_admin_settings are RLS tables, and a plain-pool read on the app role
+// would see none of the tenant's rows — which here would silently mean "this
+// tenant owns nothing" and switch off enrichment of its declared estate.
+func (h *SensorConfigHandler) OwnedNetworks(c *gin.Context, tenantID uuid.UUID) (*probeconsent.OwnedNetworks, error) {
+	//
+	// Never returns nil: on failure the answer is dispatchguard's incomplete
+	// set (no ownership, the exclusions it could read), returned WITH the
+	// error so the caller both sends it and logs why.
+	out := probeconsent.OwnedNetworks{Prefixes: []string{}, Endpoints: []string{}, Excluded: []string{}, Incomplete: true}
+	err := shareddatabase.WithTenantTx(c.Request.Context(), h.db, tenantID, func(tx *sql.Tx) error {
+		var err error
+		out, err = dispatchguard.OwnedNetworks(tx, tenantID.String())
+		return err
+	})
+	return &out, err
 }
 
 // TenantForSensor resolves the tenant a sensor belongs to.

@@ -24,6 +24,9 @@ export const PLATFORM_PERMISSIONS = {
     assign: 'platform_roles.assign',
     manage: 'platform_roles.manage',
   },
+  platformPermissions: {
+    read: 'platform_permissions.read',
+  },
   algorithms: {
     manage: 'algorithms.manage',
   },

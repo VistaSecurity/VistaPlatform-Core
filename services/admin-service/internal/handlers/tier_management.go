@@ -3,7 +3,9 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -199,6 +201,10 @@ func DeprecateTier(svc tierManager) gin.HandlerFunc {
 		}
 
 		err = svc.DeprecateTier(tierID, actor)
+		if errors.Is(err, services.ErrTierNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
@@ -220,39 +226,91 @@ func DeprecateTier(svc tierManager) gin.HandlerFunc {
 
 // AssignTier handles POST /api/v1/admin-service/admin/tiers/:id/assign
 //
-// Assigns a (typically custom/enterprise) plan to a tenant. For invoice-billed
+// Assigns a (typically custom/enterprise) plan to a tenant (owner decision 7,
+// admin-UI data review RC-25). Refused with 409 when the tenant has a live
+// Stripe subscription — its plan changes through billing. For invoice-billed
 // plans this activates the tenant record-only (no Stripe); for stripe-billed
-// plans it sets the tier and leaves checkout to the normal flow. Uses the
-// package-level tierService (initialized via InitializeTierService).
+// plans it sets the tier and leaves checkout to the normal flow. A reason is
+// required, and the assignment (or its refusal) is recorded in the platform
+// audit log. Uses the package-level tierService (initialized via
+// InitializeTierService).
 func AssignTier(c *gin.Context) {
 	if tierService == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "tier service not initialized"})
 		return
 	}
-	tierID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tier ID"})
-		return
-	}
-	var req struct {
-		TenantID string `json:"tenant_id" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id is required"})
-		return
-	}
-	tenantID, err := uuid.Parse(req.TenantID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant_id"})
-		return
-	}
+	assignTierWith(tierService)(c)
+}
 
-	res, err := tierService.AssignTierToTenant(tierID, tenantID, licenseusage.PlatformActor(c.GetString("userID")))
-	if err != nil {
-		api.ErrorResponse(c, http.StatusBadRequest, "failed to assign tier to tenant", err)
-		return
+// tierAssigner is the slice of *services.TierService AssignTier uses.
+type tierAssigner interface {
+	AssignTierToTenant(tierID, tenantID uuid.UUID, actor string) (*services.AssignTierResult, error)
+}
+
+func assignTierWith(svc tierAssigner) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tierID, err := uuid.Parse(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tier ID"})
+			return
+		}
+		var req struct {
+			TenantID string `json:"tenant_id" binding:"required"`
+			Reason   string `json:"reason" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Reason) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tenant_id and reason are required"})
+			return
+		}
+		tenantID, err := uuid.Parse(req.TenantID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid tenant_id"})
+			return
+		}
+		reason := strings.TrimSpace(req.Reason)
+
+		res, err := svc.AssignTierToTenant(tierID, tenantID, licenseusage.PlatformActor(c.GetString("userID")))
+		switch {
+		case errors.Is(err, services.ErrBilledThroughStripe):
+			recordPlatformAudit(c, PlatformAuditEntry{
+				EventType: "tenant.plan_assigned", Action: "update", EventCategory: "tenant",
+				ResourceType: "tenant", ResourceID: tenantID.String(),
+				Metadata: map[string]interface{}{"tier_id": tierID.String(), "reason": reason},
+				Failed:   true, ErrorCode: "billed_through_stripe",
+			})
+			c.JSON(http.StatusConflict, gin.H{"error": services.BilledThroughStripeMessage})
+			return
+		case errors.Is(err, services.ErrPlanPrivateToAnotherTenant):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		case errors.Is(err, services.ErrTierNotFound), errors.Is(err, services.ErrAssignTenantNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		case err != nil:
+			api.ErrorResponse(c, http.StatusInternalServerError, "failed to assign tier to tenant", err)
+			return
+		}
+
+		changed := []string{"subscription_tier_id"}
+		newValues := map[string]interface{}{"subscription_tier_id": tierID.String()}
+		if res.Activated {
+			changed = append(changed, "payment_status")
+			newValues["payment_status"] = res.PaymentStatus
+		}
+		meta := map[string]interface{}{
+			"tier_id": tierID.String(), "tier_name": res.TierName,
+			"billing_method": res.BillingMethod, "reason": reason,
+		}
+		if res.PreviousTierID != nil {
+			meta["previous_tier_id"] = res.PreviousTierID.String()
+		}
+		recordPlatformAudit(c, PlatformAuditEntry{
+			EventType: "tenant.plan_assigned", Action: "update", EventCategory: "tenant",
+			ResourceType: "tenant", ResourceID: tenantID.String(),
+			Metadata: meta, ChangedFields: changed, NewValues: newValues,
+		})
+		c.JSON(http.StatusOK, res)
 	}
-	c.JSON(http.StatusOK, res)
 }
 
 // GetTierHistory handles GET /api/v1/admin-service/admin/tiers/:id/history

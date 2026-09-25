@@ -62,8 +62,10 @@ func TestIntegration_TierImpactAnalysis_ComparesResolvedEntitlements(t *testing.
 		t.Fatalf("assign tier: %v", err)
 	}
 
-	// Usage: 3 registered sensors (plus the trigger-seeded platform collectors,
-	// which must NOT count), 1 user + 1 pending invitation (= 2 seats).
+	// Usage: 3 registered sensors (plus the trigger-seeded platform collectors
+	// and one row carrying ONLY the system tag, which must NOT count), 1 user +
+	// 1 pending invitation (= 2 seats). The tag-only row pins the second arm of
+	// the shared platform predicate; trigger rows carry both markers and cannot.
 	for i := 0; i < 3; i++ {
 		if _, err := db.Exec(`
 			INSERT INTO sensors (id, tenant_id, name, platform, version, profile, status, created_at, updated_at)
@@ -71,6 +73,12 @@ func TestIntegration_TierImpactAnalysis_ComparesResolvedEntitlements(t *testing.
 		`, uuid.New(), tenant); err != nil {
 			t.Fatalf("seed sensor: %v", err)
 		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO sensors (id, tenant_id, name, platform, version, profile, status, tags, created_at, updated_at)
+		VALUES ($1, $2, 'impact-system-tag-only', 'linux', '1.0.0', 'standard', 'active', ARRAY['system'], NOW(), NOW())
+	`, uuid.New(), tenant); err != nil {
+		t.Fatalf("seed tag-only platform sensor: %v", err)
 	}
 	var platformSeeded int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM sensors WHERE tenant_id = $1 AND platform = 'platform'`, tenant).Scan(&platformSeeded)

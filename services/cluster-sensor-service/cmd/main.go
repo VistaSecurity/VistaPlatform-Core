@@ -89,15 +89,6 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Initialize router
-	router := gin.Default()
-
-	// Request-body ceiling, FIRST. It has to run ahead of every other
-	// middleware and handler, because a cap downstream of the code that reads
-	// the body is not a cap (H10). Mounted at the router so a route added later
-	// cannot forget it.
-	router.Use(sharedmw.MaxBody(handlers.MaxRequestBytes))
-
 	// Audit logging middleware
 	auditConfig := auditmiddleware.DefaultConfig()
 	auditConfig.ServiceName = "cluster-sensor-service"
@@ -116,19 +107,9 @@ func main() {
 	auditConfig.PlatformCACertPath = cfg.PlatformCACertPath
 	auditMiddleware := auditmiddleware.NewMiddleware(auditConfig)
 
-	router.Use(func(c *gin.Context) {
-		c.Set("audit_middleware", auditMiddleware)
-		c.Next()
-	})
-	router.Use(auditMiddleware.LogRequest())
-
-	// CORS is handled by Traefik API gateway - no need for duplicate headers
-
-	// Health check
-	router.GET("/health", discoveryHandler.Health)
-
-	// API routes
-	registerDiscoveryRoutes(router, discoveryHandler, db.DB, cfg.JWTSecret)
+	// Initialize router
+	router := gin.Default()
+	buildAPIRouter(router, discoveryHandler, db.DB, cfg.JWTSecret, auditMiddleware)
 
 	// Health check server (HTTP, port 8080)
 	healthRouter := gin.New()
@@ -320,6 +301,34 @@ func main() {
 // list is fine — usage visibility without access to what the scans found.
 // Job DETAIL and RESULTS stay on discovery.read in both services, so the split
 // is summary-vs-data rather than a permission that means two things.
+// buildAPIRouter mounts everything the API server serves, in order: the body
+// ceiling, the audit middleware (on the context, for explicit audit events
+// such as a confirmed external scan, and as the per-request log), the health
+// check and the discovery routes. It is a function rather than inline in main
+// so a test can drive the router main() actually builds — audit wiring
+// included — instead of a copy of it.
+func buildAPIRouter(router *gin.Engine, discoveryHandler *handlers.DiscoveryHandler, rawDB *sql.DB, jwtSecret string, audit *auditmiddleware.Middleware) {
+	// Request-body ceiling, FIRST. It has to run ahead of every other
+	// middleware and handler, because a cap downstream of the code that reads
+	// the body is not a cap (H10). Mounted at the router so a route added later
+	// cannot forget it.
+	router.Use(sharedmw.MaxBody(handlers.MaxRequestBytes))
+
+	router.Use(func(c *gin.Context) {
+		c.Set("audit_middleware", audit)
+		c.Next()
+	})
+	router.Use(audit.LogRequest())
+
+	// CORS is handled by Traefik API gateway - no need for duplicate headers
+
+	// Health check
+	router.GET("/health", discoveryHandler.Health)
+
+	// API routes
+	registerDiscoveryRoutes(router, discoveryHandler, rawDB, jwtSecret)
+}
+
 func registerDiscoveryRoutes(router *gin.Engine, discoveryHandler *handlers.DiscoveryHandler, rawDB *sql.DB, jwtSecret string) {
 	api := router.Group("/api/v1")
 	discovery := api.Group("/discovery")

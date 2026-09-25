@@ -1,0 +1,97 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "name": "Office Switch",
+      "ip": "192.0.2.11",
+      "mac": "78:8a:20:4b:ee:41",
+      "model": "US8P150",
+      "type": "usw",
+      "version": "6.6.77.15402",
+      "serial": "788A204BEE41",
+      "adopted": true,
+      "state": 1,
+      "uptime": 1234567,
+      "x_authkey": "MUST-NOT-BE-COLLECTED",
+      "x_vwirekey": "MUST-NOT-BE-COLLECTED",
+      "syslog_key": "MUST-NOT-BE-COLLECTED",
+      "ethernet_table": [
+        {
+          "name": "eth0",
+          "mac": "78:8a:20:4b:ee:41",
+          "num_port": 8
+        }
+      ],
+      "port_table": [
+        {
+          "port_idx": 1,
+          "name": "Uplink",
+          "up": true,
+          "enable": true,
+          "speed": 1000,
+          "native_networkconf_id": "net-lan",
+          "poe_power": "6.20",
+          "x_port_key": "MUST-NOT-BE-COLLECTED"
+        },
+        {
+          "port_idx": 2,
+          "name": "Camera 1",
+          "up": false,
+          "enable": false,
+          "speed": 0,
+          "native_networkconf_id": "net-iot"
+        }
+      ],
+      "lldp_table": [
+        {
+          "chassis_id": "00:1b:17:00:00:01",
+          "system_name": "core-sw-1.corp.example.test",
+          "port_id": "Gi1/0/24",
+          "local_port_name": "Uplink",
+          "local_port_idx": 1,
+          "is_wired": true,
+          "system_desc": "Cisco IOS Software, C9300 MUST-NOT-BE-COLLECTED"
+        }
+      ],
+      "uplink": {
+        "uplink_mac": "00:1b:17:00:00:01",
+        "uplink_device_name": "core-sw-1.corp.example.test",
+        "uplink_remote_port": 24,
+        "port_idx": 1,
+        "type": "wire",
+        "x_uplink_key": "MUST-NOT-BE-COLLECTED"
+      }
+    },
+    {
+      "name": "Office AP",
+      "ip": "192.0.2.12",
+      "mac": "78:8a:20:4b:ee:52",
+      "model": "U6LR",
+      "type": "uap",
+      "version": "6.6.55.15189",
+      "serial": "788A204BEE52",
+      "adopted": true,
+      "state": 1,
+      "uptime": 7654321,
+      "x_authkey": "MUST-NOT-BE-COLLECTED",
+      "x_vwirekey": "MUST-NOT-BE-COLLECTED",
+      "ethernet_table": [
+        {
+          "name": "eth0",
+          "mac": "78:8a:20:4b:ee:52",
+          "num_port": 1
+        }
+      ],
+      "uplink": {
+        "uplink_mac": "78:8a:20:4b:ee:41",
+        "uplink_device_name": "Office Switch",
+        "uplink_remote_port": 2,
+        "port_idx": 1,
+        "type": "wire",
+        "x_uplink_key": "MUST-NOT-BE-COLLECTED"
+      }
+    }
+  ]
+}

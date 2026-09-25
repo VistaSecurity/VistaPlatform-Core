@@ -131,6 +131,9 @@ func (s *DiscoveryService) createJob(tenantID string, input models.CreateDiscove
 	if input.Options != nil {
 		requestPayload["options"] = input.Options
 	}
+	if input.ExternalTargetsConfirmed {
+		requestPayload["external_targets_confirmed"] = true
+	}
 
 	// Convert to JSON
 	jsonData, err := json.Marshal(requestPayload)
@@ -162,7 +165,9 @@ func (s *DiscoveryService) createJob(tenantID string, input models.CreateDiscove
 
 	if resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, &DownstreamError{Status: resp.StatusCode, Message: downstreamMessage(body), Body: string(body)}
+		derr := &DownstreamError{Status: resp.StatusCode, Message: downstreamMessage(body), Body: string(body)}
+		derr.parseTargetVerdict(body)
+		return nil, derr
 	}
 
 	// Parse response - cluster-sensor-service returns { "job": {...} }
@@ -184,6 +189,41 @@ type DownstreamError struct {
 	Status  int
 	Message string
 	Body    string
+	// Target-authorization verdicts ( W5.13b) carry a machine-readable
+	// code and the targets concerned, which the UI needs verbatim: the
+	// confirmation dialog lists the external targets, the refusal lists why
+	// each refused target can never be scanned. Code is "" for any other
+	// error.
+	Code            string
+	ExternalTargets json.RawMessage
+	RefusedTargets  json.RawMessage
+}
+
+// targetVerdictCodes are cluster-sensor-service's target-authorization
+// answers (dispatchguard.Code*). Spelled here rather than imported because
+// this proxy only relays them.
+var targetVerdictCodes = map[string]bool{
+	"targets_refused":              true,
+	"external_targets_unconfirmed": true,
+	"external_targets_disabled":    true,
+}
+
+func (e *DownstreamError) parseTargetVerdict(body []byte) {
+	var parsed struct {
+		Error           string          `json:"error"`
+		Message         string          `json:"message"`
+		ExternalTargets json.RawMessage `json:"external_targets"`
+		RefusedTargets  json.RawMessage `json:"refused_targets"`
+	}
+	if json.Unmarshal(body, &parsed) != nil || !targetVerdictCodes[parsed.Error] {
+		return
+	}
+	e.Code = parsed.Error
+	if parsed.Message != "" {
+		e.Message = parsed.Message
+	}
+	e.ExternalTargets = parsed.ExternalTargets
+	e.RefusedTargets = parsed.RefusedTargets
 }
 
 func (e *DownstreamError) Error() string {

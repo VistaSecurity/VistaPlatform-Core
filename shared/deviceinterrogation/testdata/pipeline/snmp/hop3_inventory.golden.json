@@ -1,0 +1,31 @@
+{
+  "vendor": "snmp",
+  "input_sha256": "da98b0a126026508af7ef5524fc9b9e709281238dc8929d9374129d30a894636",
+  "inventory": {
+    "assets": [
+      {
+        "asset": "asset[fqdn=dist-sw-1.corp.example.test,mac_address=00:1b:17:00:00:aa]",
+        "class_key": "firewall",
+        "status": "monitoring"
+      },
+      {
+        "asset": "device",
+        "class_key": "unknown_host",
+        "status": "monitoring"
+      }
+    ],
+    "crypto_configurations": [],
+    "certificates": [],
+    "findings": [],
+    "pqc_counts": {
+      "needs_migration": 0,
+      "pqc_ready": 0,
+      "symmetric_safe": 0,
+      "total": 0,
+      "unclassified": 0
+    },
+    "ingest_outcomes": [
+      "matched"
+    ]
+  }
+}

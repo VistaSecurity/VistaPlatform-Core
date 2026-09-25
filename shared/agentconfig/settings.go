@@ -39,6 +39,11 @@ const (
 	KeyHostObservationDNS    Key = "host_observation_dns"
 	KeyDedupTTLMinutes       Key = "dedup_ttl_minutes"
 	KeyReportingInterval     Key = "reporting_interval_seconds"
+	// KeyThirdPartyTLSEnrichment lets the sensor's TLS enricher actively
+	// handshake with destinations that are NOT the tenant's own ( W5.13,
+	// owner decision Q10). Off by default; see shared/probeconsent for what
+	// "the tenant's own" means.
+	KeyThirdPartyTLSEnrichment Key = "third_party_tls_enrichment"
 
 	// Both.
 	KeyLogLevel Key = "log_level"
@@ -96,12 +101,19 @@ type Field struct {
 	Allowed []string
 
 	// Confirm marks a setting an operator must confirm explicitly, with the
-	// consequence named. Only host-observation DNS carries this today: an
-	// answers-only decode still records which names a network resolved, which
-	// is a materially different collection from "these devices are here". See
-	// §1a of the feature spec — the confirmation is the condition on which
-	// this setting became remotely manageable at all.
+	// consequence named. Host-observation DNS carries one: an answers-only
+	// decode still records which names a network resolved, which is a
+	// materially different collection from "these devices are here" (§1a of
+	// the feature spec — the confirmation is the condition on which that
+	// setting became remotely manageable at all). Third-party TLS enrichment
+	// carries one because turning it on sends traffic to parties who never
+	// agreed to receive it.
 	Confirm string
+
+	// Label is the operator-facing name, for the rare setting whose key reads
+	// badly when derived into words. Empty means "derive it from the key",
+	// which is what the console does for every setting that has none.
+	Label string
 
 	// Description is operator-facing.
 	Description string
@@ -136,7 +148,8 @@ var Registry = func() map[Key]Field {
 		{
 			Key: KeyActiveProbing, Runtimes: []Runtime{RuntimeSensor},
 			Kind: KindBool, Apply: ApplyImmediate, Default: Bool(true),
-			Description: "Let the sensor probe a host it has observed, to fill in what passive capture could not see.",
+			Description: "Let the sensor probe a host it has observed, to fill in what passive capture could not see. " +
+				"Only your own addresses are probed unless third-party TLS enrichment is also on.",
 		},
 		{
 			Key: KeyNetworkDiscovery, Runtimes: []Runtime{RuntimeSensor},
@@ -183,6 +196,21 @@ var Registry = func() map[Key]Field {
 			Kind: KindInt, Apply: ApplyImmediate, Default: Int(300),
 			Min: 30, Max: 3600,
 			Description: "How often the sensor sends what it has collected.",
+		},
+		{
+			// Off by default, and a consent rather than a tuning knob: with it
+			// off the enricher handshakes only with the tenant's own address
+			// space — private addresses, declared network segments and elevated
+			// connections — and every other destination is recorded passively
+			// and left alone. The confirmation names the consequence because it
+			// is one a third party, not the tenant, experiences.
+			Key: KeyThirdPartyTLSEnrichment, Runtimes: []Runtime{RuntimeSensor},
+			Kind: KindBool, Apply: ApplyImmediate, Default: Bool(false),
+			Label: "Actively enrich third-party TLS connections",
+			Confirm: "Sensors will open their own TLS connections to external services your network talks to — " +
+				"vendors, SaaS and other third parties — to read their certificates. Those third parties may see these connections.",
+			Description: "Off by default. When on, sensors actively connect to external TLS services your network talks to, " +
+				"to read their certificates. Third parties may see these connections.",
 		},
 		{
 			Key: KeyLogLevel, Runtimes: []Runtime{RuntimeSensor, RuntimeAgent},

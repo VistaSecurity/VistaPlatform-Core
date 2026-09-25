@@ -1,0 +1,92 @@
+{
+  "vendor": "fortinet",
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "fw-branch-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "fw-branch-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "FGT60F0000000001",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ],
+  "sensor_discoveries": [
+    {
+      "protocol": "IPSec",
+      "dest_ip": "0.0.0.0",
+      "port": 500,
+      "confidence": 0.95,
+      "hostname": "to-branch-02",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "aes256-sha256 aes128-sha1",
+        "config_name": "to-branch-02",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "SHA256",
+        "ike_version": "IKEv2",
+        "kex_algorithms": [
+          "DH-MODP-2048",
+          "DH-MODP-1536"
+        ],
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "key_size": 2048,
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": "",
+        "vpn_peer_address": "203.0.113.50"
+      }
+    },
+    {
+      "protocol": "SSL VPN",
+      "dest_ip": "0.0.0.0",
+      "port": 10443,
+      "confidence": 0.95,
+      "hostname": null,
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    }
+  ],
+  "learned_segments": [
+    {
+      "value": "198.51.100.0/24",
+      "segment_type": "cidr",
+      "network_type": "public",
+      "metadata": {
+        "dhcp": "unknown",
+        "source": "interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_type": "fortinet"
+      }
+    }
+  ]
+}

@@ -8,6 +8,18 @@
 // status.  The enrichment discovery flows through the same submission pipeline
 // as passive discoveries, and the platform's COALESCE-based upsert merges the
 // cert fields into the existing external_connections row.
+//
+// # Whose endpoints it may touch
+//
+// Passive capture sees every destination the tenant's hosts talk to, vendors
+// and SaaS included, and an enrichment probe is traffic nobody asked for in the
+// moment. The owner's rule ( Q10) is that nothing probes a third party by
+// default. So the enricher handshakes only with the tenant's OWN endpoints —
+// private addresses, prefixes the tenant declared as network segments, and
+// connections it elevated to monitored assets — unless the tenant turned on
+// third_party_tls_enrichment. Everything else is still recorded passively; it
+// is only the active handshake that is withheld. See shared/probeconsent for
+// the definition, which the platform shares.
 package enrichment
 
 import (
@@ -25,6 +37,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/discovery"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 // debounceEntry tracks when an endpoint was last probed.
@@ -57,17 +70,34 @@ type TLSEnricher struct {
 	stopOnce     sync.Once
 	stopped      chan struct{}
 
+	// owned is the tenant's owned-network scope, shared with the Sensor so it
+	// survives an enricher rebuild. Never nil after construction.
+	owned *OwnedNetworks
+
+	// dial opens every TCP connection the enricher makes. A field so a test
+	// can place a destination at a documentation (RFC 5737) address — which
+	// is what exercises the third-party rules — while the connection actually
+	// lands on a loopback fixture that counts it.
+	dial func(address string, timeout time.Duration) (net.Conn, error)
+
 	// stats (accessed atomically via mu)
 	mu              sync.Mutex
 	probesAttempted int64
 	probesSucceeded int64
 	probesFailed    int64
+	// probesWithheld counts destinations not probed because they are a third
+	// party and the tenant has not opted in, or are excluded.
+	probesWithheld int64
 }
 
 // NewTLSEnricher creates a new enricher that sends enrichment discoveries to
 // the provided channel.  The config pointer is read live so runtime
 // update_config commands take effect without restart.
-func NewTLSEnricher(cfg *config.Config, sensorID string, discoveries chan<- *models.CryptoDiscovery) *TLSEnricher {
+//
+// owned is the tenant's owned-network scope, which the caller keeps across
+// enricher rebuilds and updates from the heartbeat. A required parameter so a
+// construction site cannot silently forget it; nil means "private space only".
+func NewTLSEnricher(cfg *config.Config, sensorID string, discoveries chan<- *models.CryptoDiscovery, owned *OwnedNetworks) *TLSEnricher {
 	timeout := 3 * time.Second
 	if cfg.Capture.TimeoutSeconds > 0 && cfg.Capture.TimeoutSeconds < 30 {
 		timeout = time.Duration(cfg.Capture.TimeoutSeconds) * time.Second
@@ -78,6 +108,10 @@ func NewTLSEnricher(cfg *config.Config, sensorID string, discoveries chan<- *mod
 		debounceTTL = time.Duration(cfg.Capture.DedupTTLMinutes) * time.Minute
 	}
 
+	// The workers this enricher starts read the probe switches while the main
+	// loop changes them; from here on they are atomics.
+	cfg.EnableLiveSwitches()
+
 	return &TLSEnricher{
 		config:       cfg,
 		sensorID:     sensorID,
@@ -86,7 +120,22 @@ func NewTLSEnricher(cfg *config.Config, sensorID string, discoveries chan<- *mod
 		debounceTTL:  debounceTTL,
 		probeTimeout: timeout,
 		stopped:      make(chan struct{}),
+		owned:        owned,
+		dial: func(address string, timeout time.Duration) (net.Conn, error) {
+			return net.DialTimeout("tcp", address, timeout)
+		},
 	}
+}
+
+// Permits reports whether the enricher may actively handshake with ip:port
+// right now: active probing is on, the destination is not excluded, and it is
+// either the tenant's own or the tenant opted in to enriching third parties.
+// Reads the live configuration and the current owned-network scope.
+func (e *TLSEnricher) Permits(ip string, port int) bool {
+	if !e.config.ActiveProbingEnabled() {
+		return false
+	}
+	return e.owned.Scope().MayProbe(ip, port, e.config.ThirdPartyTLSEnrichmentEnabled())
 }
 
 // Start launches the worker pool.  workers should be small (2-3) to avoid
@@ -115,8 +164,10 @@ func (e *TLSEnricher) Stop() {
 		close(e.queue)
 	})
 	e.wg.Wait()
-	log.Printf("🔬 TLS enricher stopped (attempted=%d, succeeded=%d, failed=%d)",
-		e.probesAttempted, e.probesSucceeded, e.probesFailed)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	log.Printf("🔬 TLS enricher stopped (attempted=%d, succeeded=%d, failed=%d, withheld from third parties=%d)",
+		e.probesAttempted, e.probesSucceeded, e.probesFailed, e.probesWithheld)
 }
 
 // SetDebounceTTL updates the debounce window at runtime.  The new value takes
@@ -131,10 +182,14 @@ func (e *TLSEnricher) SetDebounceTTL(ttl time.Duration) {
 	log.Printf("🔬 TLS enricher debounce TTL updated to %v", ttl)
 }
 
-// MaybeEnrich inspects a passive discovery and, if it lacks full certificate
-// enrichment data, queues an async active probe. Active probing provides the
-// full certificate chain, OCSP revocation status, certificate quality flags,
-// and a consistent data format — for both internal and external endpoints.
+// MaybeEnrich inspects a passive discovery and queues an async active probe of
+// its destination. Active probing provides the full certificate chain, OCSP
+// revocation status, certificate quality flags, and a consistent data format.
+//
+// Only for a destination the enricher is permitted to touch (see Permits): the
+// tenant's own endpoints always, a third party only when the tenant opted in.
+// A withheld destination is not marked as probed, so turning the opt-in on
+// enriches it at its next observation rather than after the debounce window.
 // This method is non-blocking and safe to call from the main event loop.
 func (e *TLSEnricher) MaybeEnrich(d *models.CryptoDiscovery) {
 	// Only enrich passive TLS discoveries
@@ -146,7 +201,15 @@ func (e *TLSEnricher) MaybeEnrich(d *models.CryptoDiscovery) {
 	}
 
 	// Check if active probing is enabled (reads live config)
-	if !e.config.Capture.ActiveProbing {
+	if !e.config.ActiveProbingEnabled() {
+		return
+	}
+	// Whose endpoint is it? A third party is not probed unless the tenant
+	// opted in; an excluded range never is.
+	if !e.Permits(d.DestIP, d.Port) {
+		e.mu.Lock()
+		e.probesWithheld++
+		e.mu.Unlock()
 		return
 	}
 
@@ -200,6 +263,15 @@ func (e *TLSEnricher) worker(id int) {
 func (e *TLSEnricher) probeAndEmit(req enrichRequest) {
 	debounceKey := tlsEnrichDebounceKey(req.destIP, req.port, req.sniHost)
 
+	// Asked again at dial time: the queue can hold a request for seconds, and
+	// an opt-in switched off, or an exclusion added, in that window must win.
+	if !e.Permits(req.destIP, req.port) {
+		e.mu.Lock()
+		e.probesWithheld++
+		e.mu.Unlock()
+		return
+	}
+
 	e.mu.Lock()
 	e.probesAttempted++
 	e.mu.Unlock()
@@ -239,7 +311,7 @@ func (e *TLSEnricher) probeAndEmit(req enrichRequest) {
 func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.DiscoveryFinding, error) {
 	address := net.JoinHostPort(ip, strconv.Itoa(port))
 
-	conn, err := net.DialTimeout("tcp", address, e.probeTimeout)
+	conn, err := e.dial(address, e.probeTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial: %w", err)
 	}
@@ -278,13 +350,14 @@ func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.Discove
 
 	state := tlsConn.ConnectionState()
 
+	// No SupportedCiphers: one negotiated suite is not the server's supported
+	// set, and SelectedCipher already carries it (E-02).
 	finding := &models.DiscoveryFinding{
-		Protocol:         "TLS",
-		Port:             port,
-		TLSVersions:      []string{getTLSVersionName(state.Version)},
-		SelectedCipher:   getCipherSuiteName(state.CipherSuite),
-		SupportedCiphers: []string{getCipherSuiteName(state.CipherSuite)},
-		Certificates:     discovery.ExtractCertificatesFromX509(state.PeerCertificates),
+		Protocol:       "TLS",
+		Port:           port,
+		TLSVersions:    []string{getTLSVersionName(state.Version)},
+		SelectedCipher: getCipherSuiteName(state.CipherSuite),
+		Certificates:   discovery.ExtractCertificatesFromX509(state.PeerCertificates),
 	}
 
 	// Resolve hostname for certificate validation. Do not pass the raw peer IP
@@ -326,6 +399,25 @@ func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.Discove
 	if serverRequestsClientCert {
 		meta["server_requests_client_cert"] = true
 	}
+	// The negotiated key-exchange group and the server's classical / hybrid
+	// support, measured by the same shared code as every other TLS probe.
+	//
+	// The group comes from the handshake above, which happens anyway. The
+	// support flags need up to two EXTRA handshakes, and this enricher probes
+	// endpoints it saw passively, and — when the tenant opted in — that
+	// includes third parties a tenant's hosts merely talked to. The opt-in is
+	// consent to read their certificates, not to question them further, so
+	// for a destination that is not the tenant's own no extra handshake is
+	// made and the two flags stay absent (unknown, not false). Otherwise the
+	// extra handshakes go to the address this probe just reached, with this
+	// probe's config, and nowhere else.
+	var redial shareddisc.TLSDialFunc
+	if e.owned.Scope().Owns(ip, port) {
+		redial = func(t time.Duration) (net.Conn, error) {
+			return e.dial(address, t)
+		}
+	}
+	shareddisc.MeasureTLSKeyExchange(state, tlsConfig, redial, e.probeTimeout).ApplyTo(meta)
 	finding.RawMetadata = meta
 
 	return finding, nil
@@ -465,57 +557,6 @@ func (e *TLSEnricher) debounceJanitor() {
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// IP classification
-// ---------------------------------------------------------------------------
-
-// IsPublicIP returns true if the IP address is routable on the public internet.
-// Returns false for RFC 1918, RFC 6598 (CGN), loopback, link-local, and
-// multicast addresses.
-func IsPublicIP(ipStr string) bool {
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() || ip.IsUnspecified() {
-		return false
-	}
-	// Check private/reserved ranges
-	for _, cidr := range privateRanges {
-		if cidr.Contains(ip) {
-			return false
-		}
-	}
-	return true
-}
-
-// privateRanges covers RFC 1918, RFC 6598 (CGN), and documentation ranges.
-var privateRanges = func() []*net.IPNet {
-	cidrs := []string{
-		"10.0.0.0/8",      // RFC 1918
-		"172.16.0.0/12",   // RFC 1918
-		"192.168.0.0/16",  // RFC 1918
-		"100.64.0.0/10",   // RFC 6598 CGN
-		"169.254.0.0/16",  // Link-local
-		"192.0.0.0/24",    // IETF Protocol Assignments
-		"192.0.2.0/24",    // TEST-NET-1
-		"198.51.100.0/24", // TEST-NET-2
-		"203.0.113.0/24",  // TEST-NET-3
-		"fc00::/7",        // IPv6 unique local
-		"fe80::/10",       // IPv6 link-local
-	}
-	nets := make([]*net.IPNet, 0, len(cidrs))
-	for _, cidr := range cidrs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			panic(fmt.Sprintf("bad CIDR %s: %v", cidr, err))
-		}
-		nets = append(nets, ipNet)
-	}
-	return nets
-}()
 
 // ---------------------------------------------------------------------------
 // Metadata helpers

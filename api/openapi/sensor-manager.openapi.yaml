@@ -1363,6 +1363,12 @@ components:
             When the device adopts a change. `restart` settings sit at
             `awaiting_restart` until the process restarts; showing them as
             applied on the next check-in would be false.
+        label:
+          type: string
+          description: |
+            Operator-facing name, present only for a setting whose key reads
+            badly when turned into words. Absent means the client derives the
+            name from `key`.
         description:
           type: string
           description: Operator-facing explanation of what the setting does.

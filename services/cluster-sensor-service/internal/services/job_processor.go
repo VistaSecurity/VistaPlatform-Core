@@ -12,7 +12,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
-	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
@@ -34,11 +33,18 @@ type JobProcessor struct {
 	discoveryService *DiscoveryService
 	rateLimiter      *RateLimiter
 	alertService     *AlertService
-	portScanner      *PortScanner
+	portScanner      targetScanner
 	natsClient       *events.NATSClient
 	subscriber       *events.Subscriber
 	ctx              context.Context
 	cancel           context.CancelFunc
+}
+
+// targetScanner is the one PortScanner method the processor drives. It is an
+// interface so a test can record WHICH address a dispatch contacts — the
+// observable that pins a hostname scan to the addresses it was authorized on.
+type targetScanner interface {
+	ScanTarget(target string, ports []int32, protocols []string, originalHostname *string, probeOpts map[string]interface{}) ([]models.DiscoveryFinding, error)
 }
 
 // NewJobProcessor creates a new job processor using the shared NATSClient.
@@ -477,6 +483,7 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 	// Update target status to running. RLS-scoped UPDATE over discovery_targets;
 	// job.TenantID scopes the tx.
 	query := `UPDATE discovery_targets SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE id = $1`
+	var grant jobTargetGrant
 	err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
 		ports := make([]int, len(target.Ports))
 		for i, p := range target.Ports {
@@ -485,17 +492,27 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 		if err := dispatchguard.AuthorizeAutomaticScan(tx, sensordispatch.Payload{TenantID: job.TenantID, Targets: []string{target.Input}, Protocols: target.Protocols, Ports: ports, Options: probeOpts}); err != nil {
 			return err
 		}
-		_, e := tx.Exec(query, target.ID)
+		g, e := loadJobTargetGrant(tx, job.ID, target.Input)
+		if e != nil {
+			return e
+		}
+		grant = g
+		_, e = tx.Exec(query, target.ID)
 		return e
 	})
 	if err != nil {
 		return fmt.Errorf("failed to update target status: %w", err)
 	}
 
-	// Expand the target input to individual IP addresses (CIDR / range /
-	// hostname) via the shared discovery expander — same logic the standalone
-	// sensor uses.
-	expandedTargets := shareddisc.ExpandTargets([]string{target.Input})
+	// Expand the target input to individual IP addresses. A hostname the job
+	// PINNED at creation is scanned at exactly the addresses that were
+	// authorized then — it is never resolved again, so a DNS answer that
+	// changed since (a rebinding to 169.254.169.254, or simply to someone
+	// else's host) cannot redirect the scan ( W5.13b). CIDRs and ranges
+	// go through the shared expander, the same logic the standalone sensor
+	// uses; an unpinned hostname (a job created before pinning) is resolved
+	// through the service's resolver and then authorized below like any other.
+	expandedTargets := jp.expandTarget(target.Input, grant.pinned)
 	if len(expandedTargets) == 0 {
 		expandedTargets = []string{target.Input}
 	}
@@ -509,8 +526,13 @@ func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.D
 	// be known at creation time. Re-checking here also means a segment the
 	// tenant withdrew, or an exclusion they added, between creation and
 	// dispatch is honoured.
+	//
+	// An address outside the registered networks passes only when it lies
+	// inside what a person confirmed at creation (the ranges and pinned
+	// addresses recorded server-side in metadata.external_targets — not the
+	// whole job) AND the operator switch is still on now.
 	if err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-		return dispatchguard.AuthorizeTargets(tx, job.TenantID, expandedTargets)
+		return dispatchguard.AuthorizeDispatchAddresses(tx, job.TenantID, expandedTargets, grant.consent)
 	}); err != nil {
 		// Settle the row rather than leaving it 'running' forever: a refused
 		// target is a terminal outcome with a reason a person can read.

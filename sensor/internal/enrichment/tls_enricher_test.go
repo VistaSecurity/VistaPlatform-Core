@@ -91,60 +91,6 @@ func TestTlsEnrichmentVerifyDNSName(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// IsPublicIP
-// ---------------------------------------------------------------------------
-
-func TestIsPublicIP(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		ip   string
-		want bool
-	}{
-		// Private ranges
-		{"10.0.0.1", false},
-		{"10.255.255.255", false},
-		{"172.16.0.1", false},
-		{"172.31.255.255", false},
-		{"192.168.0.1", false},
-		{"192.168.255.255", false},
-		// CGN (RFC 6598)
-		{"100.64.0.1", false},
-		{"100.127.255.255", false},
-		// Loopback
-		{"127.0.0.1", false},
-		// Link-local
-		{"169.254.1.1", false},
-		// Documentation ranges
-		{"192.0.2.1", false},
-		{"198.51.100.1", false},
-		{"203.0.113.1", false},
-		// Public IPs
-		{"8.8.8.8", true},
-		{"1.1.1.1", true},
-		{"104.154.89.105", true},
-		{"52.85.132.40", true},
-		// IPv6
-		{"::1", false},                 // loopback
-		{"fe80::1", false},             // link-local
-		{"fc00::1", false},             // unique local
-		{"2001:4860:4860::8888", true}, // Google DNS
-		// Invalid
-		{"not-an-ip", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.ip, func(t *testing.T) {
-			t.Parallel()
-			got := IsPublicIP(tt.ip)
-			if got != tt.want {
-				t.Errorf("IsPublicIP(%q) = %v, want %v", tt.ip, got, tt.want)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // hasCertificateHandshake
 // ---------------------------------------------------------------------------
 
@@ -216,12 +162,12 @@ func TestMaybeEnrich_ActiveProbingDisabled(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: false},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	d := &models.CryptoDiscovery{
 		DiscoveryMethod: "passive",
 		Protocol:        "TLS",
-		DestIP:          "8.8.8.8",
+		DestIP:          "10.0.0.8",
 		Port:            443,
 		RawMetadata:     map[string]interface{}{"handshake_types": []string{"ClientHello"}},
 	}
@@ -240,12 +186,12 @@ func TestMaybeEnrich_SkipsNonPassive(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	d := &models.CryptoDiscovery{
 		DiscoveryMethod: "active_enrichment", // not passive
 		Protocol:        "TLS",
-		DestIP:          "8.8.8.8",
+		DestIP:          "10.0.0.8",
 		Port:            443,
 		RawMetadata:     map[string]interface{}{"handshake_types": []string{"ClientHello"}},
 	}
@@ -263,12 +209,12 @@ func TestMaybeEnrich_SkipsNonTLS(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	d := &models.CryptoDiscovery{
 		DiscoveryMethod: "passive",
 		Protocol:        "SSH",
-		DestIP:          "8.8.8.8",
+		DestIP:          "10.0.0.8",
 		Port:            22,
 		RawMetadata:     map[string]interface{}{},
 	}
@@ -286,7 +232,7 @@ func TestMaybeEnrich_EnrichesPrivateIP(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	d := &models.CryptoDiscovery{
 		DiscoveryMethod: "passive",
@@ -309,14 +255,14 @@ func TestMaybeEnrich_EnrichesWhenCertAlreadyPresent(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	// Even when passive capture got certs (TLS < 1.3), active enrichment
 	// still runs to get full chain, OCSP, and consistent data format.
 	d := &models.CryptoDiscovery{
 		DiscoveryMethod: "passive",
 		Protocol:        "TLS",
-		DestIP:          "8.8.8.8",
+		DestIP:          "10.0.0.8",
 		Port:            443,
 		RawMetadata: map[string]interface{}{
 			"handshake_types": []string{"ClientHello", "ServerHello", "Certificate"},
@@ -336,13 +282,13 @@ func TestMaybeEnrich_QueuesEligibleDiscovery(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	d := &models.CryptoDiscovery{
 		SensorID:        "sensor-1",
 		DiscoveryMethod: "passive",
 		Protocol:        "TLS",
-		DestIP:          "104.154.89.105",
+		DestIP:          "10.0.0.40",
 		Port:            443,
 		SourceIP:        "10.0.0.5",
 		Version:         "TLS 1.3",
@@ -356,8 +302,8 @@ func TestMaybeEnrich_QueuesEligibleDiscovery(t *testing.T) {
 	}
 
 	req := <-e.queue
-	if req.destIP != "104.154.89.105" {
-		t.Errorf("expected destIP=104.154.89.105, got %s", req.destIP)
+	if req.destIP != "10.0.0.40" {
+		t.Errorf("expected destIP=10.0.0.40, got %s", req.destIP)
 	}
 	if req.port != 443 {
 		t.Errorf("expected port=443, got %d", req.port)
@@ -370,12 +316,12 @@ func TestMaybeEnrich_Debounce(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	d := &models.CryptoDiscovery{
 		DiscoveryMethod: "passive",
 		Protocol:        "TLS",
-		DestIP:          "8.8.8.8",
+		DestIP:          "10.0.0.8",
 		Port:            443,
 		RawMetadata:     map[string]interface{}{"handshake_types": []string{"ClientHello"}},
 	}
@@ -388,7 +334,7 @@ func TestMaybeEnrich_Debounce(t *testing.T) {
 	<-e.queue // drain
 
 	// Mark as recently probed
-	e.markProbed("8.8.8.8:443")
+	e.markProbed("10.0.0.8:443")
 
 	// Second call should be debounced
 	e.MaybeEnrich(d)
@@ -407,7 +353,7 @@ func TestRecentlyProbed_Expiry(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 	e.debounceTTL = 10 * time.Millisecond // very short for testing
 
 	e.markProbed("1.2.3.4:443")
@@ -433,7 +379,7 @@ func TestBuildEnrichmentDiscovery(t *testing.T) {
 		Capture: config.CaptureConfig{ActiveProbing: true},
 	}
 	ch := make(chan *models.CryptoDiscovery, 10)
-	e := NewTLSEnricher(cfg, "sensor-1", ch)
+	e := NewTLSEnricher(cfg, "sensor-1", ch, nil)
 
 	req := enrichRequest{
 		destIP:   "104.154.89.105",
@@ -596,7 +542,7 @@ func TestGetTLSVersionName(t *testing.T) {
 func TestBuildEnrichmentDiscovery_ReportsTheVersionItMeasured(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Capture: config.CaptureConfig{ActiveProbing: true}}
-	e := NewTLSEnricher(cfg, "sensor-1", make(chan *models.CryptoDiscovery, 10))
+	e := NewTLSEnricher(cfg, "sensor-1", make(chan *models.CryptoDiscovery, 10), nil)
 
 	req := enrichRequest{
 		destIP:   "192.0.2.20",
@@ -629,7 +575,7 @@ func TestBuildEnrichmentDiscovery_ReportsTheVersionItMeasured(t *testing.T) {
 func TestBuildEnrichmentDiscovery_KeepsPassiveVersionWhenProbeReportsNone(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Capture: config.CaptureConfig{ActiveProbing: true}}
-	e := NewTLSEnricher(cfg, "sensor-1", make(chan *models.CryptoDiscovery, 10))
+	e := NewTLSEnricher(cfg, "sensor-1", make(chan *models.CryptoDiscovery, 10), nil)
 
 	req := enrichRequest{
 		destIP:   "192.0.2.21",

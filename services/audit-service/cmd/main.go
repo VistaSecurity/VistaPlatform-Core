@@ -394,18 +394,18 @@ func newRouter(
 	// shared/database.WithTenantContext() at the repository level — never db.Exec().
 	{
 		// Activity log query endpoints
-		api.GET("/audit-service/activity-logs", h.activityLog.GetActivityLogs)
-		api.GET("/audit-service/activity-logs/:id", h.activityLog.GetActivityLogByID)
-		api.GET("/audit-service/activity-logs/summary", h.activityLog.GetActivityLogsSummary)
+		api.GET("/audit-service/activity-logs", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogs)
+		api.GET("/audit-service/activity-logs/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogByID)
+		api.GET("/audit-service/activity-logs/summary", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogsSummary)
 		// SECURITY: these by-id queries take a client-supplied UUID; gate on
 		// audit.read and tenant-scope in the handler so a tenant can't read another
 		// tenant's activity. Mirrors the by-resource/:.../:... trail above.
 		api.GET("/audit-service/activity-logs/by-user", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogsByUser)
 		api.GET("/audit-service/activity-logs/by-resource", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetActivityLogsByResource)
-		api.GET("/audit-service/activity-logs/by-resource/:resource_type/:resource_id", h.activityLog.GetResourceAuditTrail) // NEW
-		api.GET("/audit-service/activity-logs/by-user/:user_id", h.activityLog.GetUserActivityTimeline)                      // NEW
-		api.POST("/audit-service/activity-logs/query", h.activityLog.QueryActivityLogs)
-		api.GET("/audit-service/activity-logs/export", h.activityLog.ExportActivityLogs)
+		api.GET("/audit-service/activity-logs/by-resource/:resource_type/:resource_id", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetResourceAuditTrail)
+		api.GET("/audit-service/activity-logs/by-user/:user_id", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.GetUserActivityTimeline)
+		api.POST("/audit-service/activity-logs/query", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.QueryActivityLogs)
+		api.GET("/audit-service/activity-logs/export", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.activityLog.ExportActivityLogs)
 
 		// Job execution log query endpoint
 		api.GET("/audit-service/job-execution-logs", h.jobExecution.GetJobExecutionLogs)

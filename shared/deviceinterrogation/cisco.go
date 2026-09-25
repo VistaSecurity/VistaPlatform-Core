@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	"github.com/vistasecurity/vistaplatform/shared/sshtrust"
 	"golang.org/x/crypto/ssh"
 )
@@ -31,6 +31,36 @@ func (*CiscoInterrogator) SupportedDeviceTypes() []string {
 // (a fingerprint pinned on the device record is compared and fails closed),
 // runs the interrogation, and returns the discovered crypto assets.
 func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, creds Credentials) (*InterrogateResult, error) {
+	// One bound on the whole interrogation, whatever the caller passed: the
+	// device agent calls with context.Background(), and a device that answers
+	// every command slowly would otherwise hold the job for the sum of every
+	// per-command timeout.
+	ctx, cancel := context.WithTimeout(ctx, ciscoInterrogationTimeout)
+	defer cancel()
+
+	client, err := dialCisco(ctx, device, creds)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Close() }()
+
+	result, err := client.interrogate(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cisco interrogation failed: %w", err)
+	}
+
+	result.DeviceIdentity = ciscoDeviceIdentity(result.DeviceInfo, device.DeviceType, client.chassisPID)
+	return result, nil
+}
+
+// dialCisco is THE way this package opens an SSH session to a Cisco device —
+// interrogation and anything else that talks to one (device Identify) go
+// through it. It resolves the address, port and authentication from the
+// device and credentials, dials through the SSRF guard with the host key held
+// to the device's pin (newCiscoSSHClient), and arms a watchdog that closes the
+// connection when ctx ends — the one thing that unblocks a request the device
+// never answers, which a context alone cannot. The caller closes the client.
+func dialCisco(ctx context.Context, device DeviceInfo, creds Credentials) (*ciscoSSHClient, error) {
 	host := device.IPAddress
 	if host == "" {
 		host = device.Hostname
@@ -44,24 +74,23 @@ func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cr
 		port = 22
 	}
 
-	if creds.Username == "" || creds.Password == "" {
-		return nil, fmt.Errorf("username and password required for Cisco device")
+	if creds.Username == "" {
+		return nil, fmt.Errorf("username required for Cisco device")
+	}
+	auth, err := ciscoAuthMethods(creds)
+	if err != nil {
+		return nil, err
 	}
 
-	client, err := newCiscoSSHClient(host, port, creds.Username, creds.Password,
+	client, err := newCiscoSSHClient(ctx, host, port, creds.Username, auth,
 		creds.InsecureSkipVerify, device.SSHHostKeyFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cisco client: %w", err)
 	}
-	defer func() { _ = client.Close() }()
-
-	result, err := client.interrogate(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("cisco interrogation failed: %w", err)
-	}
-
-	result.DeviceIdentity = ciscoDeviceIdentity(result.DeviceInfo, device.DeviceType, client.chassisPID)
-	return result, nil
+	client.stopWatchdog = context.AfterFunc(ctx, func() { _ = client.client.Close() })
+	client.enableSecret = ciscoCustomString(creds, ciscoCredEnableSecret)
+	client.secrets = []string{creds.Password, client.enableSecret, ciscoCustomString(creds, ciscoCredPassphrase)}
+	return client, nil
 }
 
 // ciscoSSHClient handles a single Cisco device over SSH.
@@ -69,9 +98,25 @@ type ciscoSSHClient struct {
 	host     string
 	port     int
 	username string
-	password string
 	client   *ssh.Client
-	session  *ssh.Session
+
+	// enableSecret raises a below-15 account to privileged EXEC (see
+	// ensurePrivilege). secrets are masked in anything a shell reads back.
+	// Neither is ever written anywhere but the SSH transport.
+	enableSecret string
+	secrets      []string
+
+	// shell is the interactive session, when one is in use; nil means every
+	// command runs on its own exec channel. See cisco_ssh.go.
+	shell *ciscoShell
+
+	// osName is the OS family `show version` reported ("IOS-XE", "NX-OS",
+	// "IOS-XR", "ASA", "IOS"), or "" — it picks the per-platform commands.
+	osName string
+
+	// vpnLocals are the local tunnel endpoints the IPsec SAs named, used to
+	// tell which side of an ISAKMP SA is the peer.
+	vpnLocals map[string]bool
 
 	// hostKeyFingerprint is the SHA-256 fingerprint of the host key we
 	// connected through; hostKeyType is its algorithm. hostKeyVerified records
@@ -84,6 +129,9 @@ type ciscoSSHClient struct {
 	// chassisPID is the product id of the chassis entry of `show inventory`,
 	// captured so the device identity can propose an asset class from it.
 	chassisPID string
+
+	// stopWatchdog disarms the ctx watchdog dialCisco arms.
+	stopWatchdog func() bool
 }
 
 // newCiscoSSHClient dials the device. Host-key handling is delegated to
@@ -93,14 +141,18 @@ type ciscoSSHClient struct {
 //
 // pinnedFingerprint is what the device record stored on a previous contact.
 // When it is set, a different key aborts the handshake during key exchange and
-// the password never reaches the wire. When it is empty this is first contact:
-// the key is captured and the caller is expected to persist it, which is the
-// half that used to be missing and made the whole thing a check that could not
-// fail.
-func newCiscoSSHClient(host string, port int, username, password string, insecureSkipVerify bool, pinnedFingerprint string) (*ciscoSSHClient, error) {
-	c := &ciscoSSHClient{host: host, port: port, username: username, password: password}
+// no credential — password, keyboard-interactive answer or public-key
+// signature — reaches the wire. When it is empty this is first contact: the key
+// is captured and the caller is expected to persist it, which is the half that
+// used to be missing and made the whole thing a check that could not fail.
+//
+// The TCP connection goes through the same SSRF dial guard as every HTTP
+// collector (see ciscoDialSSH), so loopback and the cloud metadata address are
+// refused before a byte of SSH is sent.
+func newCiscoSSHClient(ctx context.Context, host string, port int, username string, auth []ssh.AuthMethod, insecureSkipVerify bool, pinnedFingerprint string) (*ciscoSSHClient, error) {
+	c := &ciscoSSHClient{host: host, port: port, username: username}
 
-	address := fmt.Sprintf("%s:%d", host, port)
+	address := ciscoDialAddress(host, port)
 	policy := &sshtrust.Policy{
 		Host:               address,
 		Pinned:             pinnedFingerprint,
@@ -110,12 +162,12 @@ func newCiscoSSHClient(host string, port int, username, password string, insecur
 
 	config := &ssh.ClientConfig{
 		User:            username,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
+		Auth:            auth,
 		HostKeyCallback: hostKeyCallback,
-		Timeout:         10 * time.Second,
+		Timeout:         ciscoHandshakeTimeout,
 	}
 
-	client, err := ssh.Dial("tcp", address, config)
+	client, err := ciscoDialSSH(ctx, address, config)
 
 	// Read the observation back whether or not the dial succeeded: on a
 	// mismatch it is the key that actually turned up, which is what the finding
@@ -131,71 +183,21 @@ func newCiscoSSHClient(host string, port int, username, password string, insecur
 	return c, nil
 }
 
-// Close closes the SSH connection.
+// Close closes the shell, if one is open, and the SSH connection.
 func (c *ciscoSSHClient) Close() error {
-	if c.session != nil {
+	if c.stopWatchdog != nil {
+		c.stopWatchdog()
+	}
+	if c.shell != nil {
 		// ssh.Session.Close returns io.EOF for a session the remote already
 		// finished, which is the normal case here — the meaningful result is
 		// the client close below.
-		_ = c.session.Close()
+		_ = c.shell.Close()
 	}
 	if c.client != nil {
 		return c.client.Close()
 	}
 	return nil
-}
-
-// executeCommand runs a single command on the device, discarding the
-// truncation flag. Callers that report on partial output use runBounded.
-func (c *ciscoSSHClient) executeCommand(ctx context.Context, command string) (string, error) {
-	output, _, err := c.runBounded(ctx, command)
-	return output, err
-}
-
-// runBounded runs a command and reads at most ciscoMaxCommandBytes of its
-// output, reporting whether the bound cut it short.
-//
-// The bound is read-side, not a post-hoc truncation: a device that answers
-// `show ip arp` with a hundred megabytes never gets to put a hundred megabytes
-// in our memory. The remote end keeps writing and we keep discarding, which is
-// why the writer swallows the overflow rather than erroring — closing the pipe
-// mid-command would surface as a command failure and lose the rows we did read.
-func (c *ciscoSSHClient) runBounded(_ context.Context, command string) (string, bool, error) {
-	session, err := c.client.NewSession()
-	if err != nil {
-		return "", false, fmt.Errorf("failed to create session: %w", err)
-	}
-	defer func() { _ = session.Close() }()
-
-	out := &boundedWriter{limit: ciscoMaxCommandBytes}
-	session.Stdout = out
-	session.Stderr = out
-	if err := session.Run(command); err != nil {
-		return "", out.truncated, fmt.Errorf("command execution failed: %w", err)
-	}
-	return out.buf.String(), out.truncated, nil
-}
-
-// boundedWriter accumulates at most limit bytes and records whether more were
-// offered. Writes always report full acceptance so the producer sees no error.
-type boundedWriter struct {
-	buf       strings.Builder
-	limit     int
-	truncated bool
-}
-
-func (w *boundedWriter) Write(p []byte) (int, error) {
-	remaining := w.limit - w.buf.Len()
-	switch {
-	case remaining <= 0:
-		w.truncated = true
-	case len(p) > remaining:
-		w.buf.Write(p[:remaining])
-		w.truncated = true
-	default:
-		w.buf.Write(p)
-	}
-	return len(p), nil
 }
 
 // interrogate collects system info, crypto configs, SSL configs, and the live
@@ -204,49 +206,31 @@ func (c *ciscoSSHClient) interrogate(ctx context.Context) (*InterrogateResult, e
 	result := &InterrogateResult{
 		Assets:     []CryptoAsset{},
 		DeviceInfo: make(map[string]interface{}),
+		collector:  ciscoCollector,
 	}
 
-	sysInfo, err := c.getSystemInfo(ctx)
-	if err != nil {
-		fmt.Printf("Warning: failed to get system info: %v\n", err)
-	} else {
+	var sysInfo map[string]interface{}
+	if output, ok := ciscoRun(ctx, result, c.runFirst, "show version", "Software version, model and serial not collected"); ok {
+		sysInfo, _ = c.parseSystemInfo(output)
 		result.DeviceInfo = sysInfo
 	}
+	c.osName, _ = sysInfo["os_name"].(string)
+	c.ensurePrivilege(ctx, result)
 
 	// Ops facts and observed topology (ADR-0004 D1 item 4) — see cisco_ops.go.
 	// Non-fatal as a whole and per command: a platform that does not implement
 	// `show vlan brief` still yields every other fact.
-	c.chassisPID = ciscoCollectOps(ctx, result, c.runBounded, sysInfo)
+	c.chassisPID = ciscoCollectOps(ctx, result, c.run, sysInfo)
 
-	cryptoConfigs, err := c.getCryptoConfigs(ctx)
-	if err != nil {
-		fmt.Printf("Warning: failed to get crypto configs: %v\n", err)
-	} else {
-		for _, config := range cryptoConfigs {
-			result.Assets = append(result.Assets, c.convertCryptoConfigToAsset(config))
-		}
+	for _, config := range c.getCryptoConfigs(ctx, result, c.run) {
+		result.Assets = append(result.Assets, c.convertCryptoConfigToAsset(config))
 	}
-
-	sslConfigs, err := c.getSSLConfigs(ctx)
-	if err != nil {
-		fmt.Printf("Warning: failed to get SSL configs: %v\n", err)
-	} else {
-		for _, config := range sslConfigs {
-			result.Assets = append(result.Assets, c.convertSSLConfigToAsset(config))
-		}
+	for _, config := range c.getSSLConfigs(ctx, result, c.run) {
+		result.Assets = append(result.Assets, c.convertSSLConfigToAsset(config))
 	}
 
 	result.Assets = append(result.Assets, c.collectSSHInfo())
 	return result, nil
-}
-
-// getSystemInfo runs `show version` and extracts version/model/serial/uptime.
-func (c *ciscoSSHClient) getSystemInfo(ctx context.Context) (map[string]interface{}, error) {
-	output, err := c.executeCommand(ctx, "show version")
-	if err != nil {
-		return nil, err
-	}
-	return c.parseSystemInfo(output)
 }
 
 // parseSystemInfo is the `show version` projection, split from the command so
@@ -275,7 +259,14 @@ func (c *ciscoSSHClient) parseSystemInfo(output string) (map[string]interface{},
 		regexp.MustCompile(`Version\s+([^\s,]+)`),
 	} {
 		if matches := pattern.FindStringSubmatch(output); len(matches) > 1 {
-			info["version"] = matches[1]
+			// IOS-XR can suffix the version with its image variant,
+			// "6.1.4[Default]"; the variant is not part of the release an
+			// advisory or the EOL catalogue names.
+			version := matches[1]
+			if i := strings.IndexByte(version, '['); i > 0 {
+				version = version[:i]
+			}
+			info["version"] = version
 			break
 		}
 	}
@@ -337,6 +328,11 @@ func (c *ciscoSSHClient) parseSystemInfo(output string) (map[string]interface{},
 func ciscoOSName(output string) string {
 	lower := strings.ToLower(output)
 	switch {
+	// IOS-XR first: "Cisco IOS XR Software" is also "ios … software" to the
+	// plain-IOS check below, and XR is a different operating system with its
+	// own advisories and end-of-life rows — not IOS.
+	case strings.Contains(lower, "ios xr") || strings.Contains(lower, "ios-xr"):
+		return "IOS-XR"
 	case strings.Contains(lower, "ios-xe") || strings.Contains(lower, "ios xe"):
 		return "IOS-XE"
 	case strings.Contains(lower, "nx-os"):
@@ -352,39 +348,74 @@ func ciscoOSName(output string) string {
 
 // ciscoCryptoConfig is a crypto configuration found on the device.
 type ciscoCryptoConfig struct {
-	Type        string
-	Name        string
-	Interface   string
-	IPAddress   string
-	PeerAddress string
-	Port        int
+	Type      string
+	Name      string
+	Interface string
+	// LocalAddress is this device's tunnel endpoint; PeerAddress is the
+	// remote peer. Neither is the asset's address: a VPN row is a property of
+	// the interrogated device (finding P-07).
+	LocalAddress string
+	PeerAddress  string
+	Port         int  // 500, or 4500 under NAT traversal
+	NATTraversal bool // the SA said UDP encapsulation / NAT-T is in use
+	Mode         string
+	// IKEVersion is "IKEv1" or "IKEv2" when the command or the entry says
+	// which, and "" when nothing did.
+	IKEVersion  string
 	Protocol    string
 	CipherSuite string
 	KeySize     int
-	KeyExchange string
 	HashAlg     string
-	DiffieGroup string
-	Metadata    map[string]interface{}
+	DiffieGroup string // the IKE SA's group, as the device spells it: the key exchange
+	PFSGroup    string // the phase-2 PFS group: offered, never the key exchange
+	// Offered is every transform set a crypto map entry lists, in preference
+	// order; the first is CipherSuite/KeySize/HashAlg.
+	Offered  []ciscoTransform
+	Metadata map[string]interface{}
 }
 
 // getCryptoConfigs gathers IPSec/IKE/IKEv2 SAs and crypto maps.
-func (c *ciscoSSHClient) getCryptoConfigs(ctx context.Context) ([]ciscoCryptoConfig, error) {
+//
+// Each command is independent, and each one that fails is recorded on result
+// as a collection warning. It used to discard the error outright — not even a
+// stdout line — so a device that refused `show crypto ipsec sa` to a
+// restricted account reported "no IPsec" and nobody could tell the difference.
+func (c *ciscoSSHClient) getCryptoConfigs(ctx context.Context, result *InterrogateResult, run ciscoRunner) []ciscoCryptoConfig {
 	var configs []ciscoCryptoConfig
 
-	if output, err := c.executeCommand(ctx, "show crypto map"); err == nil {
+	if output, ok := ciscoRun(ctx, result, run, "show crypto map", "Crypto maps not collected"); ok {
 		configs = append(configs, c.parseCryptoMap(output)...)
 	}
-	if output, err := c.executeCommand(ctx, "show crypto ipsec sa"); err == nil {
-		configs = append(configs, c.parseIPSecSA(output)...)
+	// IPsec SAs before the ISAKMP SAs: the local endpoints they name are how
+	// an IOS ISAKMP row's peer is told apart from its local side.
+	if output, ok := ciscoRun(ctx, result, run, "show crypto ipsec sa", "IPsec security associations not collected"); ok {
+		sas := c.parseIPSecSA(output)
+		c.rememberVPNLocals(sas)
+		configs = append(configs, sas...)
 	}
-	if output, err := c.executeCommand(ctx, "show crypto isakmp sa"); err == nil {
+	// ASA's `show crypto isakmp sa` lists IKEv1 and IKEv2 SAs together; its
+	// `show crypto ikev1 sa detail` lists IKEv1 only and adds the negotiated
+	// cipher and hash, so the command itself says which version every row is.
+	isakmp := "show crypto isakmp sa"
+	if c.osName == "ASA" {
+		isakmp = "show crypto ikev1 sa detail"
+	}
+	if output, ok := ciscoRun(ctx, result, run, isakmp, "ISAKMP security associations not collected"); ok {
+		if c.osName == "ASA" && ciscoInvalidInputRE.MatchString(output) {
+			// ASA releases before 8.4 have no `ikev1` keyword. Invalid input
+			// is normally left unreported (see ciscoRun), but here the
+			// command was chosen FOR this platform, so its absence is a gap
+			// in this device's result and is said so.
+			result.warnAs(WarningNotSupported, isakmp,
+				"IKEv1 security associations not collected: this ASA release has no `show crypto ikev1 sa detail` (ASA 8.4 and later)", "")
+		}
 		configs = append(configs, c.parseISAKMPSA(output)...)
 	}
-	if output, err := c.executeCommand(ctx, "show crypto ikev2 sa"); err == nil {
+	if output, ok := ciscoRun(ctx, result, run, "show crypto ikev2 sa", "IKEv2 security associations not collected"); ok {
 		configs = append(configs, c.parseIKEv2SA(output)...)
 	}
 
-	return configs, nil
+	return configs
 }
 
 // ciscoSSLConfig is an SSL/TLS configuration.
@@ -402,13 +433,14 @@ type ciscoSSLConfig struct {
 }
 
 // getSSLConfigs gathers SSL/WebVPN/running-config crypto settings.
-func (c *ciscoSSHClient) getSSLConfigs(ctx context.Context) ([]ciscoSSLConfig, error) {
+// Failures are collection warnings, as in getCryptoConfigs.
+func (c *ciscoSSHClient) getSSLConfigs(ctx context.Context, result *InterrogateResult, run ciscoRunner) []ciscoSSLConfig {
 	var configs []ciscoSSLConfig
 
-	if output, err := c.executeCommand(ctx, "show ssl"); err == nil {
+	if output, ok := ciscoRun(ctx, result, run, "show ssl", "SSL settings not collected"); ok {
 		configs = append(configs, c.parseSSLOutput(output)...)
 	}
-	if output, err := c.executeCommand(ctx, "show webvpn"); err == nil {
+	if output, ok := ciscoRun(ctx, result, run, "show webvpn", "WebVPN settings not collected"); ok {
 		configs = append(configs, c.parseWebVPNOutput(output)...)
 	}
 	// `| include ssl cipher`, NOT `| section ssl|crypto`.
@@ -418,205 +450,8 @@ func (c *ciscoSSHClient) getSSLConfigs(ctx context.Context) ([]ciscoSSLConfig, e
 	// parseRunningCryptoConfig only ever reads lines beginning `ssl cipher`, so
 	// the rest was retrieved, held in memory and discarded — a standing risk for
 	// no benefit. Ask the device for the lines we actually parse.
-	if output, err := c.executeCommand(ctx, "show running-config | include ssl cipher"); err == nil {
+	if output, ok := ciscoRun(ctx, result, run, "show running-config | include ssl cipher", "Configured SSL cipher lists not collected"); ok {
 		configs = append(configs, c.parseRunningCryptoConfig(output)...)
-	}
-
-	return configs, nil
-}
-
-// parseCryptoMap parses crypto map output with detailed extraction.
-func (c *ciscoSSHClient) parseCryptoMap(output string) []ciscoCryptoConfig {
-	var configs []ciscoCryptoConfig
-	var currentConfig *ciscoCryptoConfig
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.Contains(trimmed, "Crypto Map") && strings.Contains(trimmed, "ipsec-isakmp") {
-			if currentConfig != nil {
-				configs = append(configs, *currentConfig)
-			}
-			currentConfig = &ciscoCryptoConfig{
-				Type:     "crypto_map",
-				Protocol: "IPSec",
-				Metadata: map[string]interface{}{"raw_line": trimmed},
-			}
-			nameRegex := regexp.MustCompile(`Crypto Map\s+"(\S+)"`)
-			if matches := nameRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.Name = matches[1]
-			}
-		}
-
-		if currentConfig == nil {
-			continue
-		}
-
-		if strings.Contains(trimmed, "Peer =") || strings.Contains(trimmed, "peer =") {
-			peerRegex := regexp.MustCompile(`[Pp]eer\s*=\s*(\S+)`)
-			if matches := peerRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.PeerAddress = matches[1]
-				currentConfig.IPAddress = matches[1]
-			}
-		}
-
-		if strings.Contains(trimmed, "Transform Set") || strings.Contains(trimmed, "transform set") {
-			if strings.Contains(trimmed, "aes") || strings.Contains(trimmed, "AES") {
-				currentConfig.CipherSuite = ciscoExtractTransformCipher(trimmed)
-				currentConfig.KeySize = ciscoExtractKeySize(trimmed)
-				currentConfig.HashAlg = ciscoExtractHashAlg(trimmed)
-			}
-		}
-	}
-
-	if currentConfig != nil {
-		configs = append(configs, *currentConfig)
-	}
-
-	return configs
-}
-
-// parseIPSecSA parses IPSec SA output with cipher and peer extraction.
-func (c *ciscoSSHClient) parseIPSecSA(output string) []ciscoCryptoConfig {
-	var configs []ciscoCryptoConfig
-	var currentConfig *ciscoCryptoConfig
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.Contains(trimmed, "interface:") {
-			if currentConfig != nil {
-				configs = append(configs, *currentConfig)
-			}
-			currentConfig = &ciscoCryptoConfig{
-				Type:     "ipsec_sa",
-				Protocol: "IPSec",
-				Metadata: map[string]interface{}{},
-			}
-			ifRegex := regexp.MustCompile(`interface:\s*(\S+)`)
-			if matches := ifRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.Interface = matches[1]
-			}
-		}
-
-		if currentConfig == nil {
-			continue
-		}
-
-		if strings.Contains(trimmed, "local ident") {
-			ipRegex := regexp.MustCompile(`addr\s*=\s*(\d+\.\d+\.\d+\.\d+)`)
-			if matches := ipRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.Metadata["local_address"] = matches[1]
-			}
-		}
-		if strings.Contains(trimmed, "remote ident") {
-			ipRegex := regexp.MustCompile(`addr\s*=\s*(\d+\.\d+\.\d+\.\d+)`)
-			if matches := ipRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.PeerAddress = matches[1]
-				currentConfig.IPAddress = matches[1]
-			}
-		}
-
-		if strings.Contains(trimmed, "in use settings") || strings.Contains(trimmed, "transform:") {
-			currentConfig.CipherSuite = ciscoExtractTransformCipher(trimmed)
-			currentConfig.KeySize = ciscoExtractKeySize(trimmed)
-			currentConfig.HashAlg = ciscoExtractHashAlg(trimmed)
-		}
-	}
-
-	if currentConfig != nil {
-		configs = append(configs, *currentConfig)
-	}
-
-	return configs
-}
-
-// parseISAKMPSA parses ISAKMP SA output with state and peer extraction.
-func (c *ciscoSSHClient) parseISAKMPSA(output string) []ciscoCryptoConfig {
-	var configs []ciscoCryptoConfig
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "IPv4") || strings.HasPrefix(trimmed, "dst") {
-			continue
-		}
-
-		if strings.Contains(trimmed, "QM_IDLE") || strings.Contains(trimmed, "MM_ACTIVE") ||
-			strings.Contains(trimmed, "MM_KEY_EXCH") || strings.Contains(trimmed, "ACTIVE") {
-			fields := strings.Fields(trimmed)
-			config := ciscoCryptoConfig{
-				Type:     "isakmp_sa",
-				Protocol: "IKE",
-				Metadata: map[string]interface{}{"raw_line": trimmed},
-			}
-			if len(fields) >= 2 {
-				config.IPAddress = fields[0]
-				config.PeerAddress = fields[0]
-				config.Metadata["local_address"] = fields[1]
-			}
-			if len(fields) >= 3 {
-				config.Metadata["state"] = fields[2]
-			}
-			configs = append(configs, config)
-		}
-	}
-
-	return configs
-}
-
-// parseIKEv2SA parses IKEv2 SA output.
-func (c *ciscoSSHClient) parseIKEv2SA(output string) []ciscoCryptoConfig {
-	var configs []ciscoCryptoConfig
-	var currentConfig *ciscoCryptoConfig
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.Contains(trimmed, "Tunnel-id") || strings.Contains(trimmed, "local") {
-			if currentConfig != nil {
-				configs = append(configs, *currentConfig)
-			}
-			currentConfig = &ciscoCryptoConfig{
-				Type:     "ikev2_sa",
-				Protocol: "IKEv2",
-				Metadata: map[string]interface{}{"raw_line": trimmed},
-			}
-
-			localRegex := regexp.MustCompile(`local\s+(\d+\.\d+\.\d+\.\d+)`)
-			if matches := localRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.Metadata["local_address"] = matches[1]
-			}
-			remoteRegex := regexp.MustCompile(`remote\s+(\d+\.\d+\.\d+\.\d+)`)
-			if matches := remoteRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-				currentConfig.IPAddress = matches[1]
-				currentConfig.PeerAddress = matches[1]
-			}
-		}
-
-		if currentConfig != nil {
-			if strings.Contains(trimmed, "Encr:") || strings.Contains(trimmed, "encr:") {
-				currentConfig.CipherSuite = ciscoExtractTransformCipher(trimmed)
-				currentConfig.KeySize = ciscoExtractKeySize(trimmed)
-			}
-			if strings.Contains(trimmed, "Hash:") || strings.Contains(trimmed, "PRF:") {
-				currentConfig.HashAlg = ciscoExtractHashAlg(trimmed)
-			}
-			if strings.Contains(trimmed, "DH Grp:") || strings.Contains(trimmed, "D-H Grp:") {
-				dhRegex := regexp.MustCompile(`(?:DH|D-H)\s+Grp:\s*(\d+)`)
-				if matches := dhRegex.FindStringSubmatch(trimmed); len(matches) > 1 {
-					currentConfig.DiffieGroup = "Group " + matches[1]
-					currentConfig.KeyExchange = "DH " + currentConfig.DiffieGroup
-				}
-			}
-		}
-	}
-
-	if currentConfig != nil {
-		configs = append(configs, *currentConfig)
 	}
 
 	return configs
@@ -709,23 +544,41 @@ func (c *ciscoSSHClient) parseRunningCryptoConfig(output string) []ciscoSSLConfi
 		trimmed := strings.TrimSpace(line)
 
 		if strings.HasPrefix(trimmed, "ssl cipher") {
+			// `ssl cipher <version> {all|low|medium|fips|high|custom "<string>"}`.
+			// The custom string is an OpenSSL-style cipher STRING, whose `!`/`-`
+			// tokens are exclusions; the levels are Cisco-defined sets. Only the
+			// suites the string definitely enables are reported (P-05) — the
+			// protocol-version word used to land in the cipher list, too.
 			parts := strings.Fields(trimmed)
-			if len(parts) >= 3 {
+			if len(parts) >= 4 {
+				// The version keyword is the protocol the line configures. A
+				// keyword with no single version ("default") would leave the
+				// row to the converter's defaulted "TLS 1.2" — a version
+				// nobody read — so such a line yields no row.
+				version, ok := ciscoCipherProtocolVersion(parts[2])
+				if !ok {
+					continue
+				}
 				config := ciscoSSLConfig{
-					Name:     "ssl-cipher-config",
-					Protocol: "TLS",
-					Port:     443,
-					Metadata: map[string]interface{}{"raw_line": trimmed},
+					Name:        "ssl-cipher-config",
+					Protocol:    "TLS",
+					Port:        443,
+					TLSVersions: []string{version},
+					Metadata:    map[string]interface{}{"raw_line": trimmed, "cipher_protocol": parts[2]},
 				}
-				for _, part := range parts[2:] {
-					if part != "custom" && part != "medium" && part != "high" && part != "low" {
-						config.CipherList = append(config.CipherList, part)
-					}
+				cipherString := parts[3]
+				if strings.EqualFold(cipherString, "custom") {
+					cipherString = strings.Join(parts[4:], " ")
 				}
-				if len(config.CipherList) > 0 {
-					config.CipherSuite = config.CipherList[0]
-					configs = append(configs, config)
-				}
+				parsed := cryptoparse.ParseCipherString(cipherString, cryptoparse.CipherStringVendor)
+				recordCipherString(config.Metadata, cipherString, parsed)
+				config.CipherList = parsed.EnabledNames()
+				// A Cisco level (low/medium/high/fips/all) is a Cisco-defined,
+				// version-dependent set: it travels as the cipher string, so
+				// inventory records the row as partially assessed rather than
+				// scoring it on its protocol version alone.
+				config.CipherSuite = cipherStringSuiteField(cipherString, parsed)
+				configs = append(configs, config)
 			}
 		}
 	}
@@ -733,19 +586,48 @@ func (c *ciscoSSHClient) parseRunningCryptoConfig(output string) []ciscoSSLConfi
 	return configs
 }
 
+// ciscoCipherProtocolVersion maps the version keyword of an ASA
+// `ssl cipher <version> …` line to the protocol version it configures.
+// "default" (every version without its own line) names none.
+func ciscoCipherProtocolVersion(keyword string) (string, bool) {
+	switch strings.ToLower(keyword) {
+	case "tlsv1":
+		return "TLS 1.0", true
+	case "tlsv1.1":
+		return "TLS 1.1", true
+	case "tlsv1.2":
+		return "TLS 1.2", true
+	case "tlsv1.3":
+		return "TLS 1.3", true
+	case "dtlsv1":
+		return "DTLS 1.0", true
+	case "dtlsv1.2":
+		return "DTLS 1.2", true
+	}
+	return "", false
+}
+
 // convertCryptoConfigToAsset converts a ciscoCryptoConfig to a CryptoAsset.
 func (c *ciscoSSHClient) convertCryptoConfigToAsset(config ciscoCryptoConfig) CryptoAsset {
 	asset := CryptoAsset{
-		Hostname:  c.host,
-		IPAddress: config.IPAddress,
+		Hostname: c.host,
+		// The interrogated device, never the peer (finding P-07): this is the
+		// device's own IPsec configuration. The peer is metadata below.
+		IPAddress: ciscoDeviceAddress(c.host),
 		Port:      config.Port,
 		Protocol:  config.Protocol,
 		Metadata:  config.Metadata,
+	}
+	if asset.Metadata == nil {
+		asset.Metadata = map[string]interface{}{}
 	}
 
 	switch config.Protocol {
 	case "IPSec", "IKE", "IKEv2":
 		asset.AssetType = "vpn_gateway"
+		if asset.Port == 0 {
+			asset.Port = ciscoVPNPort(config.NATTraversal, 0)
+		}
 	default:
 		asset.AssetType = "appliance"
 	}
@@ -759,26 +641,47 @@ func (c *ciscoSSHClient) convertCryptoConfigToAsset(config ciscoCryptoConfig) Cr
 	if config.HashAlg != "" {
 		asset.HashAlgorithm = strPtr(config.HashAlg)
 	}
-	if config.KeyExchange != "" {
-		asset.KeyExchangeAlg = strPtr(config.KeyExchange)
-	}
 	if config.Name != "" {
 		asset.Metadata["config_name"] = config.Name
 	}
+	if config.Interface != "" {
+		asset.Metadata["interface"] = config.Interface
+	}
 	if config.PeerAddress != "" {
-		asset.Metadata["peer_address"] = config.PeerAddress
+		asset.Metadata[ciscoVPNPeerKey] = config.PeerAddress
 	}
-	if config.DiffieGroup != "" {
-		asset.Metadata["dh_group"] = config.DiffieGroup
+	if config.LocalAddress != "" {
+		asset.Metadata["local_address"] = config.LocalAddress
 	}
+	if config.NATTraversal {
+		asset.Metadata["nat_traversal"] = true
+	}
+	if config.Mode != "" {
+		asset.Metadata["ipsec_mode"] = config.Mode
+	}
+	if len(config.Offered) > 0 {
+		// The whole offer, so the weakest set a peer can choose is visible
+		// and scored, not only the preferred one.
+		var ciphers, hashes []string
+		for _, t := range config.Offered {
+			if t.Cipher != "" {
+				ciphers = ciscoAppendUnique(ciphers, t.Cipher)
+			}
+			if t.Hash != "" {
+				hashes = ciscoAppendUnique(hashes, t.Hash)
+			}
+		}
+		asset.SupportedCiphers = ciphers
+		if len(hashes) > 0 {
+			asset.Metadata["offered_hash_algorithms"] = hashes
+		}
+	}
+	applyIKEDHGroups(&asset, config.DiffieGroup, config.PFSGroup)
 
-	switch config.Protocol {
-	case "IPSec":
-		asset.ProtocolVersion = strPtr("IKEv2")
-	case "IKE":
-		asset.ProtocolVersion = strPtr("IKEv1")
-	case "IKEv2":
-		asset.ProtocolVersion = strPtr("IKEv2")
+	// The IKE version the command or the entry stated, or none. It used to be
+	// "IKEv2" for every crypto map and IPsec SA whatever the device said.
+	if config.IKEVersion != "" {
+		asset.ProtocolVersion = strPtr(config.IKEVersion)
 	}
 
 	return asset
@@ -832,7 +735,7 @@ func (c *ciscoSSHClient) convertSSLConfigToAsset(config ciscoSSLConfig) CryptoAs
 func (c *ciscoSSHClient) collectSSHInfo() CryptoAsset {
 	asset := CryptoAsset{
 		Hostname:  c.host,
-		IPAddress: c.host,
+		IPAddress: ciscoDeviceAddress(c.host),
 		Port:      c.port,
 		Protocol:  "SSH",
 		AssetType: "appliance",
@@ -912,70 +815,6 @@ func ciscoDeviceIdentity(sysInfo map[string]interface{}, deviceType, chassisPID 
 		identity.ClassHint = ciscoDeviceTypeClassHint(deviceType)
 	}
 	return identity
-}
-
-// Cisco CLI string-heuristic extractors.
-//
-// NOTE: like the Fortinet equivalents, these re-derive cipher/key-size/hash
-// from CLI output strings rather than normalizing against the authoritative
-// `algorithms` table (see item 1). That normalization belongs in the
-// platform ingest path — the customer-deployed agent has no DB access — so it is
-// intentionally NOT done here; this preserves the existing union behavior.
-
-func ciscoExtractTransformCipher(line string) string {
-	upper := strings.ToUpper(line)
-	switch {
-	case strings.Contains(upper, "AES-256-GCM"):
-		return "AES-256-GCM"
-	case strings.Contains(upper, "AES-256-CBC"):
-		return "AES-256-CBC"
-	case strings.Contains(upper, "AES-128-GCM"):
-		return "AES-128-GCM"
-	case strings.Contains(upper, "AES-128-CBC"):
-		return "AES-128-CBC"
-	case strings.Contains(upper, "ESP-AES 256") || strings.Contains(upper, "ESP-AES-256"):
-		return "ESP-AES-256"
-	case strings.Contains(upper, "ESP-AES") || strings.Contains(upper, "ESP-AES-128"):
-		return "ESP-AES-128"
-	case strings.Contains(upper, "3DES") || strings.Contains(upper, "ESP-3DES"):
-		return "3DES"
-	case strings.Contains(upper, "DES"):
-		return "DES"
-	default:
-		return ""
-	}
-}
-
-func ciscoExtractKeySize(line string) int {
-	upper := strings.ToUpper(line)
-	switch {
-	case strings.Contains(upper, "256"):
-		return 256
-	case strings.Contains(upper, "192"):
-		return 192
-	case strings.Contains(upper, "128"):
-		return 128
-	default:
-		return 0
-	}
-}
-
-func ciscoExtractHashAlg(line string) string {
-	upper := strings.ToUpper(line)
-	switch {
-	case strings.Contains(upper, "SHA-512") || strings.Contains(upper, "SHA512"):
-		return "SHA512"
-	case strings.Contains(upper, "SHA-384") || strings.Contains(upper, "SHA384"):
-		return "SHA384"
-	case strings.Contains(upper, "SHA-256") || strings.Contains(upper, "SHA256") || strings.Contains(upper, "SHA2"):
-		return "SHA256"
-	case strings.Contains(upper, "SHA-1") || strings.Contains(upper, "SHA1") || strings.Contains(upper, "ESP-SHA-HMAC"):
-		return "SHA1"
-	case strings.Contains(upper, "MD5"):
-		return "MD5"
-	default:
-		return ""
-	}
 }
 
 func ciscoAppendUnique(slice []string, item string) []string {

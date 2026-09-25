@@ -1,0 +1,13 @@
+{
+  "vendor": "cisco",
+  "device_type": "cisco",
+  "hostname": "core-rtr-01.corp.example.test",
+  "transport": "ssh",
+  "management_ip": "192.0.2.228",
+  "management_port": 22,
+  "tenant_segments": [
+    {"name": "Management network", "cidr": "192.0.2.224/27"},
+    {"name": "Office LAN", "cidr": "192.0.2.0/25"}
+  ],
+  "provenance": "MOSTLY REAL. show version (IOS-XE), show inventory, show interfaces, show ip interface brief, show vlan (answering `show vlan brief`), show ip arp, CDP and LLDP neighbours, and show crypto ipsec sa detail (answering `show crypto ipsec sa`) are the real captures in testdata/real/cisco/cisco_ios (ntc-templates, Apache-2.0; see its PROVENANCE.md). They come from different devices, so identity facts do not describe one coherent box. HAND-WRITTEN: show crypto map, show crypto isakmp sa and show crypto ikev2 sa (*.handwritten.txt), modelled on the IOS 15 output format in Cisco's configuration guides, because the corpus has no real capture of those commands; and the VTY `transport input` lines and `show privilege`, the evidence mgmt.plaintext and the privilege check read. The SSH server identifies as SSH-1.99-Cisco-1.25, the banner real IOS sends (P-04)."
+}

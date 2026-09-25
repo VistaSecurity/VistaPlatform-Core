@@ -16,6 +16,8 @@ import (
 	"net"
 	"strconv"
 	"time"
+
+	"github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 // TLSHandshakeService performs TLS handshakes against cloud-discovered endpoints
@@ -32,6 +34,22 @@ type TLSHandshakeResult struct {
 	ALPN         string
 	Certificates []map[string]interface{} // Pipeline-compatible certificate format
 	Error        string
+
+	// KeyExchange is the negotiated group and the endpoint's classical /
+	// hybrid post-quantum support, measured by the same shared code as every
+	// other TLS probe. applyHandshakeKeyExchange copies it onto a crypto
+	// config.
+	KeyExchange discovery.TLSKeyExchange
+}
+
+// applyHandshakeKeyExchange writes a handshake's key-exchange measurement onto
+// a cloud crypto config, under the keys WriteSensorDiscoveries forwards and
+// convertCryptoConfigToAsset reads.
+func applyHandshakeKeyExchange(cfg map[string]interface{}, r *TLSHandshakeResult) {
+	if cfg == nil || r == nil {
+		return
+	}
+	r.KeyExchange.ApplyTo(cfg)
 }
 
 // NewTLSHandshakeService creates a new TLS handshake service
@@ -52,8 +70,24 @@ func (s *TLSHandshakeService) PerformHandshake(ctx context.Context, hostname str
 	if hostname == "" {
 		return nil, fmt.Errorf("hostname is required")
 	}
+	return s.handshakeTo(ctx, hostname, net.JoinHostPort(hostname, strconv.Itoa(port)))
+}
 
-	address := net.JoinHostPort(hostname, strconv.Itoa(port))
+// cloudHandshakeTimeout bounds each cloud collector's handshake (and, as one
+// shared budget, its key-exchange support handshakes).
+const cloudHandshakeTimeout = 10 * time.Second
+
+// cloudTLSHandshake is the handshake every cloud collector site makes against
+// the tenant's own load balancer / CDN / gateway. A variable only so a test can
+// point a real collector path at a loopback fixture; production never
+// reassigns it.
+var cloudTLSHandshake = func(ctx context.Context, hostname string, port int) (*TLSHandshakeResult, error) {
+	return NewTLSHandshakeService(cloudHandshakeTimeout).PerformHandshake(ctx, hostname, port)
+}
+
+// handshakeTo is PerformHandshake with the dial address given separately from
+// the SNI name.
+func (s *TLSHandshakeService) handshakeTo(ctx context.Context, hostname, address string) (*TLSHandshakeResult, error) {
 
 	// Create a dialer with context support and timeout
 	dialer := &net.Dialer{
@@ -109,6 +143,16 @@ func (s *TLSHandshakeService) PerformHandshake(ctx context.Context, hostname str
 		ALPN:         state.NegotiatedProtocol,
 		Certificates: convertX509ToPipelineFormat(state.PeerCertificates),
 	}
+
+	// The negotiated group, plus at most two extra handshakes (classical-only,
+	// hybrid-only offers) for what it did not answer. They redial the ADDRESS
+	// this connection reached, not the hostname — a CDN or load-balancer name
+	// resolves to many addresses and a re-resolution could land on a different
+	// one — and keep the same SNI (they clone tlsConfig).
+	reached := conn.RemoteAddr().String()
+	result.KeyExchange = discovery.MeasureTLSKeyExchange(state, tlsConfig, func(t time.Duration) (net.Conn, error) {
+		return (&net.Dialer{Timeout: t}).DialContext(ctx, "tcp", reached)
+	}, s.timeout)
 
 	log.Printf("TLS handshake: successfully connected to %s -- TLS %s, cipher %s, %d certificates",
 		address, result.TLSVersion, result.CipherSuite, len(result.Certificates))

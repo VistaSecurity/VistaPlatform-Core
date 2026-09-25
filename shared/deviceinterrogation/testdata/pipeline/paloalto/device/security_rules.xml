@@ -1,0 +1,16 @@
+<response status="success" code="19">
+  <result total-count="1" count="1">
+    <rules>
+      <entry name="allow-web-outbound" uuid="0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9">
+        <to><member>untrust</member></to>
+        <from><member>trust</member></from>
+        <source><member>198.51.100.0/24</member></source>
+        <destination><member>any</member></destination>
+        <application><member>ssl</member></application>
+        <service><member>application-default</member></service>
+        <action>allow</action>
+        <ssl><decrypt>yes</decrypt></ssl>
+      </entry>
+    </rules>
+  </result>
+</response>

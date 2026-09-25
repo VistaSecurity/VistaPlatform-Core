@@ -347,19 +347,22 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 		})
 
 		var dyn sql.NullBool
-		var src sql.NullString
+		var src, srcType, srcAsset, dhcp sql.NullString
 		if err := db.QueryRow(`
-			SELECT (metadata->>'dynamic')::boolean, metadata->>'source'
+			SELECT (metadata->>'dynamic')::boolean, metadata->>'source',
+			       metadata->>'source_device_type', metadata->>'source_asset_id', metadata->>'dhcp'
 			FROM network_segments
 			WHERE tenant_id = $1 AND value = '192.0.2.0/24' AND segment_type = 'cidr'`,
-			tenant).Scan(&dyn, &src); err != nil {
+			tenant).Scan(&dyn, &src, &srcType, &srcAsset, &dhcp); err != nil {
 			t.Fatalf("DHCP LAN segment: %v", err)
 		}
-		if !dyn.Valid || !dyn.Bool {
-			t.Errorf("DHCP LAN metadata.dynamic = %v, want true so lease IPs cannot vote", dyn)
+		if !dyn.Valid || !dyn.Bool || dhcp.String != "enabled" {
+			t.Errorf("DHCP LAN metadata.dynamic = %v dhcp = %q, want true/enabled so lease IPs cannot vote", dyn, dhcp.String)
 		}
-		if src.String != "unifi" {
-			t.Errorf("DHCP LAN metadata.source = %q, want unifi", src.String)
+		// Provenance names the device, through the real in-cluster path: the
+		// controller Discovery → Devices created, not a hard-coded vendor.
+		if src.String != "interrogation" || srcType.String != "unifi" || srcAsset.String != run.controller.String() {
+			t.Errorf("DHCP LAN provenance = %q/%q/%q, want interrogation/unifi/%s", src.String, srcType.String, srcAsset.String, run.controller)
 		}
 
 		var iotDyn sql.NullBool

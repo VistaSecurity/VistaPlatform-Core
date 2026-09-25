@@ -1,0 +1,72 @@
+{
+  "vendor": "snmp",
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "access-sw-1.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "access-sw-1.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "FOC2432L0AB",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[fqdn=dist-sw-1.corp.example.test,mac_address=00:1b:17:00:00:aa]",
+      "hostname": "dist-sw-1.corp.example.test",
+      "primary_address": null,
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "dist-sw-1.corp.example.test",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:00:00:aa",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ],
+  "sensor_discoveries": [
+    {
+      "protocol": "SNMP",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": 443,
+      "confidence": 0.95,
+      "hostname": "access-sw-1.corp.example.test",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "appliance",
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    }
+  ],
+  "learned_segments": []
+}

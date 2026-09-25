@@ -91,6 +91,16 @@ type Inputs struct {
 	// trial_days_soft). Nil/zero leaves lock timing tier-only — the
 	// historical behavior before ExtendTrial lengthened trial_end alone.
 	TrialEnd *time.Time
+
+	// HardLockedAt is billing_trial_tracking.hard_locked_at: when the trial
+	// ENDED. The expiry sweep stamps it when the clock reaches the lock, and
+	// Billing → Trials → End trial stamps it at the moment the operator ends
+	// the trial, whatever the clock says; ExtendTrial clears it. A stamp
+	// earlier than the clock's lock locks the trial from that instant (an
+	// ended trial is over), so an ended trial reads the same everywhere as
+	// one that ran out. A later stamp (the sweep runs after the lock) moves
+	// nothing. Nil leaves the lock to the clock.
+	HardLockedAt *time.Time
 }
 
 // Compute returns the phase a trial is in at Inputs.Now. It is pure:
@@ -104,7 +114,8 @@ type Inputs struct {
 //  3. Past the effective hard-lock instant → PhaseLocked. That instant is
 //     trial_start + trial_days_full + trial_days_soft, extended to trial_end
 //     when TrialEnd is set and falls after that tier-derived moment
-//     (TrialManager extension).
+//     (TrialManager extension), and brought forward to HardLockedAt when the
+//     trial was ended before then (End trial).
 //  4. Past trial_start + full → PhaseSoftPrompt.
 //  5. Otherwise → PhaseFull.
 //
@@ -121,20 +132,8 @@ func Compute(in Inputs) Phase {
 		return PhaseConverted
 	}
 
-	fullDays := 0
-	if in.TrialDaysFull != nil {
-		fullDays = *in.TrialDaysFull
-	}
-	softDays := 0
-	if in.TrialDaysSoft != nil {
-		softDays = *in.TrialDaysSoft
-	}
-
-	endFull := in.TrialStart.Add(time.Duration(fullDays) * 24 * time.Hour)
-	lockAt := endFull.Add(time.Duration(softDays) * 24 * time.Hour)
-	if in.TrialEnd != nil && !in.TrialEnd.IsZero() && in.TrialEnd.After(lockAt) {
-		lockAt = *in.TrialEnd
-	}
+	endFull := fullEnd(in)
+	lockAt := LockAt(in)
 
 	switch {
 	case !in.Now.Before(lockAt):
@@ -154,32 +153,45 @@ func Compute(in Inputs) Phase {
 // the floor so the banner doesn't say "1 day left" with two hours to
 // go.
 func DaysRemaining(in Inputs) int {
-	phase := Compute(in)
-	switch phase {
+	switch Compute(in) {
 	case PhaseFull:
-		fullDays := 0
-		if in.TrialDaysFull != nil {
-			fullDays = *in.TrialDaysFull
-		}
-		endFull := in.TrialStart.Add(time.Duration(fullDays) * 24 * time.Hour)
-		return daysBetween(in.Now, endFull)
+		return daysBetween(in.Now, fullEnd(in))
 	case PhaseSoftPrompt:
-		fullDays := 0
-		if in.TrialDaysFull != nil {
-			fullDays = *in.TrialDaysFull
-		}
-		softDays := 0
-		if in.TrialDaysSoft != nil {
-			softDays = *in.TrialDaysSoft
-		}
-		lockAt := in.TrialStart.Add(time.Duration(fullDays+softDays) * 24 * time.Hour)
-		if in.TrialEnd != nil && !in.TrialEnd.IsZero() && in.TrialEnd.After(lockAt) {
-			lockAt = *in.TrialEnd
-		}
-		return daysBetween(in.Now, lockAt)
+		return daysBetween(in.Now, LockAt(in))
 	default:
 		return 0
 	}
+}
+
+// fullEnd is the end of the full-access phase: trial_start + trial_days_full.
+func fullEnd(in Inputs) time.Time {
+	fullDays := 0
+	if in.TrialDaysFull != nil {
+		fullDays = *in.TrialDaysFull
+	}
+	return in.TrialStart.Add(time.Duration(fullDays) * 24 * time.Hour)
+}
+
+// LockAt is the instant a trial's access ends and the tenant is hard-locked:
+// trial_start + trial_days_full + trial_days_soft, pushed out to trial_end
+// when an extension (TrialManager.ExtendTrial writes only trial_end) moved it
+// later, and brought forward to hard_locked_at when the trial was ended
+// before that (Billing → Trials → End trial). It is the date a person should
+// read as "the trial ends", and the one both the admin Trials list and the
+// plan block show.
+func LockAt(in Inputs) time.Time {
+	softDays := 0
+	if in.TrialDaysSoft != nil {
+		softDays = *in.TrialDaysSoft
+	}
+	lockAt := fullEnd(in).Add(time.Duration(softDays) * 24 * time.Hour)
+	if in.TrialEnd != nil && !in.TrialEnd.IsZero() && in.TrialEnd.After(lockAt) {
+		lockAt = *in.TrialEnd
+	}
+	if in.HardLockedAt != nil && !in.HardLockedAt.IsZero() && in.HardLockedAt.Before(lockAt) {
+		lockAt = *in.HardLockedAt
+	}
+	return lockAt
 }
 
 // daysBetween returns whole days from a to b, never negative. Rounds

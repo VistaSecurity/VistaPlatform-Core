@@ -1,0 +1,22 @@
+{
+  "host_key_seed": "vendor-pipeline-cisco-host-key",
+  "server_version": "SSH-1.99-Cisco-1.25",
+  "unknown": "                ^\n% Invalid input detected at '^' marker.\n\n",
+  "commands": {
+    "show version": "../../../real/cisco/cisco_ios/show_version_iosxe.txt",
+    "show inventory": "../../../real/cisco/cisco_ios/show_inventory.txt",
+    "show interfaces": "../../../real/cisco/cisco_ios/show_interfaces.txt",
+    "show ip interface brief": "../../../real/cisco/cisco_ios/show_ip_interface_brief.txt",
+    "show vlan brief": "../../../real/cisco/cisco_ios/show_vlan.txt",
+    "show ip arp": "../../../real/cisco/cisco_ios/show_ip_arp.txt",
+    "show cdp neighbors detail": "../../../real/cisco/cisco_ios/show_cdp_neighbors_detail.txt",
+    "show lldp neighbors detail": "../../../real/cisco/cisco_ios/show_lldp_neighbors_detail__1.txt",
+    "show crypto ipsec sa": "../../../real/cisco/cisco_ios/show_crypto_ipsec_sa_detail.txt",
+    "show crypto map": "show_crypto_map.handwritten.txt",
+    "show crypto isakmp sa": "show_crypto_isakmp_sa.handwritten.txt",
+    "show crypto ikev2 sa": "show_crypto_ikev2_sa.handwritten.txt",
+    "show running-config | include ssl cipher": "empty.txt",
+    "show running-config | include ^line vty|transport input": "show_running_config_vty.handwritten.txt",
+    "show privilege": "show_privilege.handwritten.txt"
+  }
+}

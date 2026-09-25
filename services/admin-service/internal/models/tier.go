@@ -49,6 +49,8 @@ type TierEntitlementInput struct {
 	IncludedValue     json.RawMessage `json:"included_value"`
 	OveragePriceCents *int            `json:"overage_price_cents,omitempty"`
 	OverageUnitSize   *int            `json:"overage_unit_size,omitempty"`
+	ClearOveragePrice bool            `json:"clear_overage_price_cents,omitempty"`
+	ClearOverageSize  bool            `json:"clear_overage_unit_size,omitempty"`
 }
 
 // TierCreateRequest represents a request to create a new tier

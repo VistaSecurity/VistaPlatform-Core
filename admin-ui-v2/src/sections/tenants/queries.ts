@@ -276,6 +276,51 @@ export function useAdminTiers(enabled = true) {
   });
 }
 
+/** The `error` string an admin-service error body carries, or `fallback`. */
+export function serverError(error: unknown, fallback: string): string {
+  const msg = (error as { error?: unknown } | undefined)?.error;
+  return typeof msg === 'string' && msg.trim() ? msg : fallback;
+}
+
+/** Stripe subscription states Stripe still bills (everything but cancelled /
+ *  expired-incomplete) — the same rule admin-service uses to refuse "Assign to
+ *  tenant" for a Stripe-billed tenant (owner decision 7). */
+const DEAD_STRIPE_STATUSES = new Set(['canceled', 'incomplete_expired']);
+
+export type TenantBillingSubscription = adminServiceComponents['schemas']['TenantBillingSubscription'];
+
+/** The support billing edit's placeholder row: intent recorded before any
+ *  Stripe subscription exists (admin-service's liveStripeSubscriptionSQL
+ *  leaves it out too). Stripe bills nothing for it. */
+const PLACEHOLDER_SUBSCRIPTION_ID = 'pending';
+
+/** Whether any of a tenant's subscriptions is a Stripe one Stripe still bills. */
+export function hasLiveStripeSubscription(subscriptions: readonly Pick<TenantBillingSubscription, 'provider' | 'status' | 'subscription_id'>[]): boolean {
+  return subscriptions.some((s) => s.provider === 'stripe' && !DEAD_STRIPE_STATUSES.has(s.status) && s.subscription_id !== PLACEHOLDER_SUBSCRIPTION_ID);
+}
+
+/** A tenant's billing records (GET /admin/tenants/{id}/billing, MSP only), and
+ *  whether it has a live Stripe subscription — the support change-plan panel
+ *  only applies to one (RC-25: it used to be shown to every tenant and always
+ *  fail for the rest). */
+export function useTenantBillingRecords(id: string, enabled = true) {
+  return useQuery({
+    queryKey: ['platform', 'tenant-billing', id],
+    enabled,
+    queryFn: async () => {
+      const { data, error } = await clients.admin.GET('/admin/tenants/{id}/billing', { params: { path: { id } } });
+      if (error || !data) throw new Error('Failed to load billing records');
+      const subscriptions = data.billing.subscriptions ?? [];
+      return {
+        subscriptions,
+        hasLiveStripeSubscription: hasLiveStripeSubscription(subscriptions),
+      };
+    },
+    staleTime: 60 * 1000,
+    retry: 0,
+  });
+}
+
 /** Support-granted plan change — POST /admin/tenants/{id}/billing/change-plan.
  *  The downgrade path tenants cannot self-serve: Stripe price change with NO
  *  proration (nothing refunded; next invoice bills the new rate). */
@@ -287,13 +332,17 @@ export function useAdminChangePlan() {
         params: { path: { id } },
         body: { tier_id: tierId, reason },
       });
-      if (error || !data) throw new Error('Failed to change the tenant plan');
+      // Surface the server's own message: "no Stripe subscription — assign
+      // the plan instead", or "changed in Stripe but recording it here
+      // failed" (RC-25) are things the operator must read, not a generic toast.
+      if (error || !data) throw new Error(serverError(error, 'Failed to change the tenant plan'));
       return data;
     },
     onSuccess: (_d, { id }) => {
       qc.invalidateQueries({ queryKey: tenantsKey });
       qc.invalidateQueries({ queryKey: ['platform', 'tenant-stats', id] });
       qc.invalidateQueries({ queryKey: ['platform', 'tenant-cost', id] });
+      void qc.invalidateQueries({ queryKey: ['platform', 'tenant-billing', id] });
     },
   });
 }

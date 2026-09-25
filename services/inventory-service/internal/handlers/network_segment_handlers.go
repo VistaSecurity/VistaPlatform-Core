@@ -89,6 +89,10 @@ func (h *NetworkSegmentHandler) CreateNetworkSegment(c *gin.Context) {
 	}
 	seg, err := h.segmentService.Create(tenantID, input)
 	if err != nil {
+		if errors.Is(err, services.ErrSegmentTooBroad) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		if err.Error() == "location not found" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
@@ -218,6 +222,10 @@ func (h *NetworkSegmentHandler) UpdateNetworkSegment(c *gin.Context) {
 	}
 	seg, err := h.segmentService.Update(tenantID, id, input)
 	if err != nil {
+		if errors.Is(err, services.ErrSegmentTooBroad) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		if err.Error() == "location not found" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return

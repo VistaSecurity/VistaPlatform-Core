@@ -114,29 +114,62 @@ given the platform credentials for, with the management address, the asset's
 class, which interrogator handles it, its firmware, when it was last
 interrogated, and its connection status.
 
-### Discovering and adding a device
+### Adding a device
 
 Give the platform four things and it asks the device for the rest.
 
-1. Go to **Discovery → Devices** and click **Discover & add**.
-2. Fill in the **device type** (F5, Palo Alto, Cisco, Fortinet, UniFi or other),
-   the **management URL**, and a **username** and **password**.
-3. Click **Discover & add**.
+1. Go to **Discovery → Devices** and click **Add device**.
+2. Fill in the **device type** (F5, Palo Alto, Cisco, Fortinet or UniFi), the
+   **management address**, and a **username** and **password**. For a web-API
+   device the address is its management URL (`https://10.0.0.1`). A Cisco
+   device is reached over SSH, so give its host, `host:port` or
+   `ssh://host:port`.
+3. Tick **Skip TLS verification** if the management interface uses a
+   self-signed certificate. It is not offered for Cisco devices, which are
+   reached over SSH: their host key is checked instead, and the key seen when
+   the device is added is pinned to it.
+4. Click **Add device**.
 
-The platform connects, authenticates, asks the device's own API what it is, and
-creates the record with the model, serial number, firmware version, host name
-and addresses it learned. Your credentials are encrypted at rest.
+The platform connects, logs in, and asks the device what it is, using the same
+calls an interrogation makes:
 
-Auto-discovery is most complete on UniFi (UDM, UDR, USG and Network
-Controllers); other vendors return the basics.
+| Device | What it reads |
+|---|---|
+| FortiGate | System status |
+| Palo Alto | `show system info` |
+| F5 BIG-IP | Software version and hardware |
+| Cisco | `show version` and `show inventory`, over SSH |
+| UniFi | The controller's device list |
 
-### Adding a device manually
+It then creates the device with the vendor, model, serial number, firmware
+version, host name and addresses it learned. Only that identity is read — not
+the device's VPN keys, certificates or other configuration. Your credentials are
+encrypted at rest.
 
-For anything without auto-discovery support, click **Add device** instead and
-fill in what you know: device type, host name, IP address, management URL,
-vendor, model, serial, firmware, and the credentials. **Skip TLS verification**
-is there for devices with self-signed management certificates. Anything you
-leave blank an interrogation can fill in later.
+**If it can't connect,** nothing is created. The form says why and shows the
+remaining fields so you can still add the device by hand:
+
+| Reason shown | What to check |
+|---|---|
+| Couldn't reach the device | The address and port, and that the device is reachable from the platform. If only a deployed agent can reach it, add it by hand. |
+| The device's certificate isn't trusted | Tick **Skip TLS verification** and click **Try connecting again**. |
+| The device rejected the credentials | The username and password, and that the account may read system information. |
+| That address isn't allowed | Loopback and link-local addresses (including cloud metadata) are never probed. |
+| That management address isn't valid | Use `https://host[:port]` with no user name, query or fragment. |
+| Something else answered at that address | The device type, and that the address is the device's management interface. |
+
+If your organization enforces identity admission, a device added this way is
+created because the platform read its serial number itself. A device whose
+serial could not be read is kept for review in **Discovery → Observations**,
+like a device added by hand.
+
+Adding and testing devices is recorded in the audit log, and an organization
+can run 20 of these connections a minute.
+
+Click **Add without connecting** to save what you entered, or **Enter the details
+by hand instead** to skip the connection altogether. For **Other** device types,
+which can't be identified automatically, the form shows every field from the
+start. Anything you leave blank an interrogation can fill in later.
 
 ### Interrogating
 
@@ -145,7 +178,7 @@ Each row carries its own actions:
 | Action | What it does |
 |---|---|
 | **Interrogate** | Queues a run against that device |
-| **Test connection** | Checks reachability and credentials, and reports the result |
+| **Test connection** | Opens a dialog; click **Test** to log in with the stored credentials and read the device's identity. Reports how long that took, or why it failed, using the same reasons as **Add device**. A device can be tested once every 10 seconds, because repeated logins with a wrong stored password can lock the device's account. Needs the same permission as **Interrogate**. |
 | **Edit management settings** | Changes the address, credentials or TLS option |
 | **Open this asset's page** | Goes to the asset in Inventory |
 | **Stop managing this asset** | Removes the management configuration and its credentials. The asset stays. |
@@ -247,6 +280,27 @@ never had its own handshake measured — so its cryptographic posture is
 *unknown*, not clean. Interrogating a controller commonly returns both kinds:
 the controller itself is measured, the devices it manages are inventoried.
 
+#### Where an interrogated configuration lands
+
+Everything an interrogation reports is read from the device's own
+configuration, so it belongs to that device unless it clearly describes
+something else on your network:
+
+| The configuration names… | It lands on |
+|---|---|
+| The device's own address as the platform has measured it (its management SSH or HTTPS service) — the address you typed in the device form does not count | The interrogated device, with an endpoint at that address and port |
+| Any other address in one of your private or registered networks (an F5 private VIP) | That address's own asset, found or proposed the usual way |
+| A public address (a public VIP, a gateway's WAN VPN) | The interrogated device, with an endpoint at that address and port |
+| No address (a PAN-OS decryption rule, a profile) | The interrogated device, with no endpoint |
+| Only a tunnel's far end (a FortiGate or Cisco IPsec peer) | The interrogated device, with no endpoint; the peer is kept as the tunnel's peer, not made into an asset or an external connection |
+
+A name the device reports without an address — a rule, a virtual server, a
+tunnel — is kept as the configuration's label. It is never looked up in DNS,
+and an interrogated address is never given a name by reverse DNS either.
+
+If a finding cannot be attributed to any device, the job's **Pipeline** counts
+it as skipped, with the reason, rather than dropping it silently.
+
 ### Cancelling a job
 
 Use the row's **Cancel** action on a running job. Some operations are not
@@ -291,8 +345,14 @@ onto an explicit list of fields the platform actually uses, so those values are
 discarded at the point of collection rather than stored and filtered later.
 A second, name-based check runs over everything a collector emits as a backstop.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
+- Past the collector, only a fixed set of posture fields travels on to
+  inventory: a VPN's peer address and IKE version, an SSH server's banner,
+  host-key type and fingerprint, a managed device's MAC address, and the names
+  of profiles, certificates and configuration objects. Each is checked again
+  when it arrives. The device's own identity (vendor, model, serial) is
+  recorded against the device only, never copied onto what it reports.
 - Where a device's configuration can be read without retrieving secrets, the
   platform asks narrowly. Cisco interrogation requests only the `ssl cipher`
   configuration lines rather than the whole crypto section, so pre-shared keys

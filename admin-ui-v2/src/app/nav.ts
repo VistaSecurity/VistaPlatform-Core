@@ -77,6 +77,8 @@ export interface NavChild {
   permission?: string;
   /** Any-of variant of `permission`. */
   anyOf?: string[];
+  /** All-of variant for views whose backend composes multiple read gates. */
+  allOf?: string[];
 }
 
 export interface NavItem {
@@ -104,6 +106,8 @@ export interface NavItem {
   permission?: string;
   /** Any-of variant of `permission`: visible if the operator holds at least one. */
   anyOf?: string[];
+  /** All-of variant of `permission`: visible only when every permission is held. */
+  allOf?: string[];
   /**
    * Licence-edition gate, independent of `edition` (which is about the BUILD):
    *   'msp' — shown only when the licence is MSP. Billing & Revenue and Plans &
@@ -143,8 +147,9 @@ export function licenseAllows(entry: { license?: LicenseGate }, license: License
  * True if the operator passes an entry's permission gate. Ungated entries
  * pass — a child without a gate inherits its section's.
  */
-export function gateAllows(entry: { permission?: string; anyOf?: string[] }, has: (p: string) => boolean): boolean {
+export function gateAllows(entry: { permission?: string; anyOf?: string[]; allOf?: string[] }, has: (p: string) => boolean): boolean {
   if (entry.permission) return has(entry.permission);
+  if (entry.allOf?.length) return entry.allOf.every(has);
   if (entry.anyOf?.length) return entry.anyOf.some(has);
   return true;
 }
@@ -347,10 +352,11 @@ export const SECTIONS: NavItem[] = [
     ] },
 
   { id: 'staff', label: 'Staff & Access', icon: 'UsersRound', group: 'Governance',
-    title: 'Staff & Access', subtitle: 'VISTA internal users and roles', source: 'users-page/roles-page', permission: P.platformUsers.read,
+    title: 'Staff & Access', subtitle: 'VISTA internal users and roles', source: 'users-page/roles-page',
+    anyOf: [P.platformUsers.read, P.platformRoles.read, P.platformPermissions.read],
     children: [
-      { id: 'staff', label: 'Staff', title: 'Staff', subtitle: 'VISTA internal users' },
-      { id: 'roles', label: 'Roles', title: 'Roles & Permissions', subtitle: 'Platform roles and their permissions' },
+      { id: 'staff', label: 'Staff', title: 'Staff', subtitle: 'VISTA internal users', permission: P.platformUsers.read },
+      { id: 'roles', label: 'Roles', title: 'Roles & Permissions', subtitle: 'Platform roles and their permissions', allOf: [P.platformRoles.read, P.platformPermissions.read] },
     ] },
   // Security & Trust — the consolidated "are we trustworthy" home (Governance). It
   // absorbed the dissolved Audit section (): Activity Log + Retention + SIEM
@@ -361,8 +367,7 @@ export const SECTIONS: NavItem[] = [
   // Each sub-view carries the permission its backend reads with; the section is
   // visible to anyone holding one of them:
   //   dashboard  admin-service /admin/security/**          platform.security
-  //   activity   audit-service /activity-logs (no permission gate for a
-  //              platform token) — kept on the section's historic pair
+  //   activity   audit-service /activity-logs             platform.audit
   //   retention  audit-service /retention-policies        platform.audit
   //   siem       audit-service /siem/integrations          platform.audit
   //              (both pages gate their writes on platform.audit.manage)
@@ -375,7 +380,7 @@ export const SECTIONS: NavItem[] = [
     anyOf: [P.platform.security, P.platform.audit, P.platform.settings],
     children: [
       { id: 'dashboard', label: 'Dashboard', title: 'Security Dashboard', subtitle: 'Security events, anomalies, and posture', permission: P.platform.security },
-      { id: 'activity', label: 'Activity Log', title: 'Activity Log', subtitle: 'Platform-wide staff and tenant activity trail', anyOf: [P.platform.security, P.platform.audit] },
+      { id: 'activity', label: 'Activity Log', title: 'Activity Log', subtitle: 'Platform-wide staff and tenant activity trail', permission: P.platform.audit },
       { id: 'retention', label: 'Retention', title: 'Retention Policies', subtitle: 'Log retention and archival', permission: P.platform.audit },
       { id: 'siem', label: 'SIEM Export', title: 'SIEM Integrations', subtitle: 'Outbound SIEM forwarding', permission: P.platform.audit },
       { id: 'policy', label: 'Policy', title: 'Security Policy', subtitle: 'Platform security and authentication settings', permission: P.platform.settings },

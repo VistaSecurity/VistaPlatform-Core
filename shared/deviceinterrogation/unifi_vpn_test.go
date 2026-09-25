@@ -94,14 +94,28 @@ func TestUnifiVPNAssets_IPsecSiteToSite(t *testing.T) {
 	if a.CipherSuite == nil || *a.CipherSuite != "aes256-sha256" {
 		t.Errorf("CipherSuite = %v, want aes256-sha256", a.CipherSuite)
 	}
-	if a.KeySize == nil || *a.KeySize != 256 {
-		t.Errorf("KeySize = %v, want 256", a.KeySize)
+	// key_size sits beside the key exchange and is read against its family
+	// (SP 800-131A floors), so it is the DH group's modulus, not the AES key
+	// length — 256 next to a finite-field group reads as critically weak. The
+	// cipher's own length stays with the cipher (encryption_algorithm, and the
+	// symmetric catalogue link).
+	if a.KeySize == nil || *a.KeySize != 2048 {
+		t.Errorf("KeySize = %v, want 2048 (DH group 14's modulus)", a.KeySize)
+	}
+	if a.Metadata["encryption_algorithm"] != "aes256" {
+		t.Errorf("encryption_algorithm = %v, want aes256", a.Metadata["encryption_algorithm"])
 	}
 	if a.HashAlgorithm == nil || *a.HashAlgorithm != "SHA256" {
 		t.Errorf("HashAlgorithm = %v, want SHA256", a.HashAlgorithm)
 	}
-	if a.KeyExchangeAlg == nil || *a.KeyExchangeAlg != "IKEV2" {
-		t.Errorf("KeyExchangeAlg = %v, want IKEV2", a.KeyExchangeAlg)
+	// The key exchange is the DH group, as the catalogue codes it. It used to
+	// be "IKEV2" — the IKE VERSION — which is not a key exchange and would
+	// have been linked (or failed to link) as one.
+	if a.KeyExchangeAlg == nil || *a.KeyExchangeAlg != "DH-MODP-2048" {
+		t.Errorf("KeyExchangeAlg = %v, want DH-MODP-2048 (group 14)", a.KeyExchangeAlg)
+	}
+	if a.ProtocolVersion == nil || *a.ProtocolVersion != "IKEv2" {
+		t.Errorf("ProtocolVersion = %v, want IKEv2 — the IKE version belongs here", a.ProtocolVersion)
 	}
 	if a.Metadata["dh_group"] != "14" {
 		t.Errorf("dh_group = %v, want 14", a.Metadata["dh_group"])

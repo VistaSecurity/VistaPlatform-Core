@@ -91,44 +91,52 @@ Extract cryptographic settings from network security devices:
 
 ## Workflow
 
-### 1. Discover and add a device (recommended)
+### 1. Add a device
 
-The quickest way to onboard a device: give the platform four things and it asks
-the device for the rest.
+Give the platform four things and it asks the device for the rest.
 
-**UI:** **Discovery → Devices → Discover & add**
+**UI:** **Discovery → Devices → Add device**
 
 **API:** `POST /api/v1/device-interrogation-service/devices/discover-and-create`
 
 **What you supply:**
-- Device type (manufacturer: UniFi, Cisco, F5, Fortinet, Palo Alto)
-- Management URL (e.g., `https://10.0.0.1`)
-- Username (device admin)
-- Password (device admin)
+- Device type: F5, Palo Alto, Cisco, Fortinet or UniFi
+- Management address: the management URL (`https://10.0.0.1`); for Cisco, the
+  SSH host, `host:port` or `ssh://host:port`
+- Username and password
+- Optionally, **Skip TLS verification** for a self-signed management certificate.
+  It is saved on the device, so interrogation uses it too. It does not apply to
+  Cisco (SSH): it is not offered and is stored as false. The SSH host key seen
+  when the device is added is pinned to it instead.
 
-**What Gets Auto-Discovered:**
-- ✅ Vendor name
-- ✅ Model number
-- ✅ Serial number
-- ✅ Hostname
-- ✅ IP address(es)
-- ✅ Firmware version
-- ✅ MAC address
+**What is identified,** by the same call an interrogation makes:
 
-**Current Support:**
-- ✅ **UniFi (Fully Functional)**: UDM, UDR, USG, UniFi Network Controllers
-- 🔧 **Other Vendors**: Framework in place, returns basic vendor info
+| Device | Call | Learns |
+|---|---|---|
+| FortiGate | `system/status` | model, serial, firmware, host name |
+| Palo Alto | keygen, `show system info` | model, serial, PAN-OS version, host name, management IP and MAC |
+| F5 BIG-IP | `sys/version`, `sys/hardware` | model, serial, TMOS version |
+| Cisco | `show version`, `show inventory` over SSH | chassis model, serial, software version, host name |
+| UniFi | login, `stat/device`, site identity | the console's model, serial, firmware, name, IP and MAC |
 
-The platform connects, authenticates, asks the device's own API what it is, and
-creates the record with everything it learned. The credentials are encrypted at
-rest.
+Only identity is read. The configuration an interrogation collects (VPN
+settings, certificate stores) is not touched when adding a device.
 
-### 2. Add a device manually (alternative)
+**When it can't connect, nothing is created.** The response names the reason:
+`connection_failed`, `tls_untrusted`, `authentication_failed`,
+`target_disallowed`, `invalid_target`, `unsupported_response`, `not_supported`
+or `discovery_failed` (and `rate_limited`, with `Retry-After`, when the
+organization has used its 20 probes for the minute). Every probe and connection
+test is audited: who, device type, address without credentials, outcome. With
+identity admission enforced, a device whose serial the probe read is created;
+one without a serial is retained for review. The form shows it and discloses the remaining fields so
+the device can still be added by hand.
 
-For devices without auto-discovery support, add them with the details you
-already have.
+### 2. Add a device by hand
 
-**UI:** **Discovery → Devices → Add device**
+For a device type that can't be identified automatically, or one only a deployed
+agent can reach, add it with the details you already have: after a failed
+connection, or with **Enter the details by hand instead**.
 
 **API:** `POST /api/v1/device-interrogation-service/devices`
 
@@ -139,7 +147,7 @@ firmware. Anything you leave blank an interrogation can fill in later.
 ### 3. Credentials
 
 **A network device carries its own credentials.** You enter the username and
-password on the device itself, in the Add device / Discover & add form, and they
+password on the device itself, in the Add device form, and they
 are encrypted at rest. There is no separate integration record to create and
 link.
 
@@ -175,6 +183,44 @@ Review discovered cryptographic configurations and assets.
 - SSH protocol details (banner, host key type, fingerprint)
 - Device identity (vendor, model, firmware version, serial number)
 - Service identification hints
+
+#### Collection warnings
+
+An interrogation reads a device endpoint by endpoint, or command by command.
+When one of them fails, the collector keeps going and still records everything
+else it read. The job therefore finishes as **completed**, but its result is
+partial. The warnings tell you which part is missing.
+
+Open the job from **Discovery → Discovery Jobs**. Any warnings appear under
+**Collection warnings** in the job detail. Each row shows:
+
+- the API path or CLI command that failed (for example
+  `/api/v2/cmdb/system/interface` or `show vlan brief`)
+- the reason
+- what the result lacks because of it (for example "VLANs not collected")
+
+| Reason | What it means |
+|---|---|
+| Permission denied | The device refused this account. |
+| Not supported on this device or version | The endpoint or command does not exist on this model or software version. |
+| Truncated | The table was larger than the collector's bound, so only the first rows were read. The warning states the bound. |
+| Timed out | The device did not answer in time. |
+| Unreachable | The connection to the device failed. |
+| Response could not be read | The device answered, but its response could not be parsed. |
+| Error | Any other failure. The detail line carries the device's own error text. |
+
+A warning means the data is incomplete, not wrong. The usual cause is an
+account with too few privileges, such as a read-only admin profile that cannot
+read interfaces, VLANs or neighbour tables. To collect the missing data, give
+that account read access to the endpoints listed, then interrogate the device
+again.
+
+The section is hidden when a job raised no warnings. If it shows **Warnings
+could not be loaded**, the job's results could not be read. This does not mean
+the job had no warnings.
+
+Warnings never contain credentials. The platform removes query strings and
+hosts from endpoints, and redacts secrets in the detail text.
 
 ### 6. Where it lands
 
@@ -212,7 +258,7 @@ Per vendor, beyond the cryptographic posture described under Device Types:
 |---|---|---|
 | **Ubiquiti UniFi** | Per managed device: vendor, model, serial, firmware, uptime, interfaces (name, MAC, link and admin state, speed, VLAN). Per site: each LAN and VLAN with its name, prefix, gateway, and whether DHCP is served — never the DHCP range or its options. | Each adopted device to its controller, each device to the switch it uplinks through (with port names on both ends), and each LLDP neighbour. |
 | **Palo Alto Networks** | Hostname, model, serial, PAN-OS version, uptime, management address and MAC, every interface (address, VLAN tag, MAC, link state, speed), and the ARP table. | Each LLDP neighbour, with the local and remote port names. |
-| **Cisco** | Chassis model and serial from `show inventory` (the chassis only — a power supply or transceiver is a part, not an asset), IOS / IOS-XE / NX-OS / ASA version, uptime, every interface (address, MAC, administrative and operational state, bandwidth), the active VLANs, and the ARP table. On **NX-OS** the interface list is the device's layer-3 interfaces only: a Nexus formats the detailed interface command differently from IOS, so the summary form is what is read there, and it reports the interfaces that carry an address. | Each CDP and each LLDP neighbour, with the local and remote port names, and a proposed class for the neighbour taken from the platform it advertises. |
+| **Cisco** | Chassis model and serial from `show inventory` (the chassis only — a power supply or transceiver is a part, not an asset), IOS / IOS-XE / IOS-XR / NX-OS / ASA version, uptime, every interface (address, MAC, administrative and operational state, bandwidth), the active VLANs, the ARP table, and whether the device accepts **telnet** on its management plane (reported as a plaintext-management finding when it does). On **NX-OS** the interface list is the device's layer-3 interfaces only: a Nexus formats the detailed interface command differently from IOS, so the summary form is what is read there, and it reports the interfaces that carry an address. | Each CDP and each LLDP neighbour, with the local and remote port names, and a proposed class for the neighbour taken from the platform it advertises. |
 | **Fortinet FortiGate** | Model, serial, FortiOS version, every interface (address, MAC, administrative status, 802.1Q tag) joined to its live link state and negotiated speed, each tagged VLAN with its prefix and the firewall's own address on it, and the routing next-hop count described above. | None — a FortiGate reports no neighbour table this integration reads. |
 | **F5 BIG-IP** | Chassis serial and platform from `sys/hardware`, TMOS version, every interface (MAC, administrative state, link state, negotiated speed), and each VLAN with its tag, prefix and self IP. | **Each virtual server to the members of the pool it forwards to**, with the pool name, the member port and the monitor's verdict. This is the dependency map a load balancer already holds and nothing else on the network states outright. A pool member is not classified from the pool: a pool states an address, a port and a monitor verdict, not whether the thing behind it is a server, another load balancer or a container ingress. |
 | **Generic SNMP** | Vendor, model, serial and firmware from the chassis entry, uptime, every interface (name, MAC, admin and operational state, speed), the ARP cache, and that the device is managed over SNMP v2c — which carries its credentials in the clear, and is reported as a finding. | Each LLDP neighbour, with the local and remote port names. |
@@ -229,6 +275,28 @@ what is it talking to" without a second tool.
 - **Method**: iControl REST API
 - **Data Collected**: VIP configurations, SSL profiles (client/server), certificate bindings, plus device identity, the operational facts listed under [What is collected](#what-is-collected), and the virtual-server → pool-member dependency map
 - **Multiple Assets**: One F5 device → multiple VIPs
+- **Cipher strings**: an SSL profile's ciphers are a cipher *string* such as
+  `ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5`, not a list of suites, and the entries
+  after `!` or `-` are ciphers the profile turns **off**. An excluded cipher is
+  never recorded or scored as in use.
+  - A string that names its suites explicitly is recorded as that list of
+    suites.
+  - Keywords whose meaning depends on the BIG-IP software version — `DEFAULT`,
+    `HIGH`, `NATIVE`, class keywords such as `ECDHE`, and cipher groups — are
+    not guessed at. A configuration whose string contains one keeps the string
+    as its cipher suite and is marked **partially assessed** (a "Partially
+    assessed" risk factor, and `cipher_assessment: partial` in its raw data).
+    Its risk score stays empty unless something that is known — its key
+    exchange, or a weak cipher the string names such as `RC4`, `EXP` or
+    `LOW` — already makes it Medium or worse. It never reads as an assessed
+    Low.
+  - The configuration's metadata keeps the raw string, what it excludes and
+    what could not be expanded (`cipher_string`, `cipher_string_excluded`,
+    `cipher_string_unexpanded`, `cipher_group`).
+
+  Cisco ASA `ssl cipher <version> …` lines and FortiOS custom lists are read the
+  same way. An ASA line records the TLS version it configures; the Cisco levels
+  (`low`, `medium`, `high`, `fips`, `all`) are partially assessed.
 - **Endpoints**: 
   - `/mgmt/tm/ltm/virtual` - Virtual servers
   - `/mgmt/tm/ltm/profile/client-ssl` - Client SSL profiles
@@ -240,10 +308,22 @@ what is it talking to" without a second tool.
 
 #### Cisco Routers/Switches/ASAs ✅ **IMPLEMENTED**
 - **Method**: SSH + CLI commands
-- **Data Collected**: Crypto maps, IPSec configurations, ISAKMP/IKE SAs, SSL proxy settings, plus device identity and the operational facts listed under [What is collected](#what-is-collected)
-- **Commands**: `show version`, `show crypto map`, `show crypto ipsec sa`, `show crypto isakmp sa`, `show crypto ikev2 sa`, `show ssl`, `show webvpn`, `show running-config | include ssl cipher`, `show inventory`, `show ip interface brief`, `show interfaces`, `show vlan brief`, `show cdp neighbors detail`, `show lldp neighbors detail`, `show ip arp`. That is the whole list — it is a closed set, and adding to it is a deliberate edit the test suite makes visible.
-- **Never run**: `show running-config` in any form broader than `| include ssl cipher` (the section form returns pre-shared keys, enable secrets, SNMP communities and tunnel-group passwords), `show startup-config`, `show ip route`, `show mac address-table`, `show snmp`, `show crypto key`. Every command output is read up to a size bound, and a reply cut short at that bound is reported as partial rather than presented as a complete table.
-- **Platform differences**: on IOS, IOS-XE and ASA the interface list comes from the detailed interface command. **NX-OS formats that command differently**, so on a Nexus the interface summary is the source instead and the list is the device's layer-3 interfaces — those carrying an address — rather than every physical port.
+- **Platforms**: IOS, IOS-XE, IOS-XR, NX-OS and ASA. The platform is read from `show version` and picks the per-platform commands below. Every parser is tested against real captured output from each platform, not only against hand-written examples.
+- **Data Collected**: Crypto maps, IPsec SAs, IKEv1 and IKEv2 SAs, SSL proxy settings, plus device identity and the operational facts listed under [What is collected](#what-is-collected)
+- **VPN tunnels are the device's configuration.** Each crypto map entry and each IPsec / IKE SA is recorded on the Cisco device itself, on UDP 500, or 4500 when the SA says NAT traversal is in use. The remote peer is recorded as the tunnel's peer address, not as a separate server. The IKE version is the one the device states: an IKEv1 or IKEv2 SA is that version, a crypto map entry is IKEv2 when it names an IKEv2 profile and IKEv1 when it names an ISAKMP profile, and it is left blank when the device does not say.
+- **Commands**: `show version`, `show crypto map`, `show crypto ipsec sa`, `show crypto isakmp sa` (on ASA: `show crypto ikev1 sa detail`), `show crypto ikev2 sa`, `show ssl`, `show webvpn`, `show running-config | include ssl cipher`, `show inventory`, `show ip interface brief` (on ASA: `show interface ip brief`), `show interfaces`, `show vlan brief`, `show cdp neighbors detail`, `show lldp neighbors detail`, `show ip arp` (on IOS-XR and ASA: `show arp`), and one narrow telnet check per platform: `show running-config | include ^line vty|transport input` (IOS / IOS-XE), `show feature | include telnet` (NX-OS), `show running-config telnet` (IOS-XR and ASA). To check the privilege level: `show privilege` (IOS / IOS-XE) or `show curpriv` (ASA). That is the whole list — it is a closed set, and adding to it is a deliberate edit the test suite makes visible.
+- **Never run**: `show running-config` in any form broader than the filtered ones above (the section form returns pre-shared keys, enable secrets, SNMP communities and tunnel-group passwords), `show startup-config`, `show ip route`, `show mac address-table`, `show snmp`, `show crypto key`, and no configuration command. Every command output is read up to a size bound and a time limit, and a reply cut short — at the bound, or at a `--More--` pager prompt — is reported as partial rather than presented as a complete table.
+- **Account and privilege**: the collector needs an account that can run the commands above, which on IOS, IOS-XE and ASA means **privilege level 15**. Two ways to get there:
+  - an account whose own level is 15 (for example `username netops privilege 15`, or a TACACS+/RADIUS profile that assigns level 15), which is the simplest; or
+  - a lower-level account plus the device's **enable secret**. The collector then opens an interactive session, runs `enable`, answers the password prompt with the secret, turns paging off (`terminal length 0`, or `terminal pager 0` on ASA) and runs the same read-only commands. The secret is sent only in answer to the `enable` password prompt.
+
+  If the account is below level 15 and no enable secret is supplied, or the enable secret is refused, the job still completes with what the account could read and shows a **permission denied** collection warning saying so. NX-OS and IOS-XR authorise by role instead: use a read-only role that can run the commands above (on NX-OS, `network-operator` is enough).
+- **Authentication**: password, keyboard-interactive (what many devices configured for TACACS+/RADIUS offer instead of password; the password is given only to a question that asks for a password, never to a one-time-code or other second-factor prompt), or an **SSH private key**. A key (OpenSSH, PKCS#1, PKCS#8 or SEC1, optionally passphrase-protected) and an enable secret are held in the device's encrypted credentials under `ssh_private_key`, `ssh_private_key_passphrase` and `enable_secret`. Today the device agent reads them from its credential set; entering them in the Add device form comes with the connection-options work. None of them is ever logged, stored in a result or repeated in an error message.
+- **Devices that refuse remote commands**: a device that does not accept SSH exec requests is read over an interactive session instead, automatically.
+- **Time limits**: each command has a time limit, and the whole interrogation of one device is limited to five minutes. When a command in an interactive session runs out of time, the session is closed rather than reused (a late answer would otherwise be read as the next command's), and the commands after it are reported as not collected.
+- **Addresses the platform will not connect to**: like every other device integration, the Cisco collector never connects to a loopback or link-local address, including the cloud metadata address. A device on your own private network is reached normally.
+- **Platform differences**: on IOS, IOS-XE, IOS-XR and ASA the interface list comes from the detailed interface command. **NX-OS formats that command differently**, so on a Nexus the interface summary is the source instead and the list is the device's layer-3 interfaces — those carrying an address — rather than every physical port.
+- **Telnet**: reported as on or off only when the device's answer proves it: on IOS, every VTY block states its `transport input`; on NX-OS, `show feature` states the telnet feature's state; on ASA, the `telnet` section is present (it always carries `telnet timeout`); on IOS-XR, a telnet server line is present, or XR says `No such configuration item(s)`. Anything else — a refused command, an empty answer, a VTY block relying on the release's default transport — leaves telnet **not assessed** for that device rather than reported as off.
 - **Supported Types**: `cisco_router`, `cisco_switch`, `cisco_asa`, `cisco`
 
 #### Fortinet FortiGate ✅ **IMPLEMENTED**

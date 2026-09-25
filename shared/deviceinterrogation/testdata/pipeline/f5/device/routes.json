@@ -1,0 +1,18 @@
+{
+  "routes": [
+    {"path_suffix": "/mgmt/shared/authn/login", "method": "POST",
+     "body": "{\"token\":{\"token\":\"FAKE-TOKEN\"}}"},
+    {"path_suffix": "/mgmt/tm/sys/version", "body_file": "sys_version.json"},
+    {"path_suffix": "/mgmt/tm/sys/hardware", "body_file": "sys_hardware.json"},
+    {"path_suffix": "/mgmt/tm/net/interface", "body_file": "net_interface.json"},
+    {"path_suffix": "/mgmt/tm/net/vlan", "body_file": "net_vlan.json"},
+    {"path_suffix": "/mgmt/tm/net/self", "body_file": "net_self.json"},
+    {"path_suffix": "/mgmt/tm/ltm/virtual", "body_file": "ltm_virtual.json"},
+    {"path_suffix": "/mgmt/tm/ltm/pool", "body_file": "ltm_pool.json"},
+    {"path_suffix": "/mgmt/tm/ltm/profile/client-ssl", "body_file": "ltm_profile_client_ssl.json"},
+    {"path_suffix": "/mgmt/tm/ltm/profile/server-ssl", "status": 403,
+     "body": "{\"code\":403,\"message\":\"Authorization failed: user=readonly resource=/mgmt/tm/ltm/profile/server-ssl verb=GET\",\"errorStack\":[],\"apiError\":1}"},
+    {"path_suffix": "/mgmt/tm/sys/crypto/cert/~Common~www.example.com.crt", "body_file": "sys_crypto_cert_www.json"}
+  ],
+  "default": {"body": "{\"items\":[]}"}
+}

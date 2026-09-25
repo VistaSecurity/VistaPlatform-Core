@@ -17,6 +17,8 @@ package services
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -75,7 +77,8 @@ const componentAssessmentsQuery = `
 	       a.risk_score,
 	       a.migration_guidance,
 	       COALESCE(a.recommended_alternatives, ARRAY[]::text[]) AS recommended_alternatives,
-	       COALESCE(a.is_pqc, false)          AS is_pqc
+	       COALESCE(a.is_pqc, false)          AS is_pqc,
+	       a.remediation_guidance
 	  FROM crypto_implementation_algorithms cia
 	  JOIN algorithms a ON a.id = cia.algorithm_id
 	  JOIN crypto_implementations ci ON ci.id = cia.crypto_implementation_id
@@ -94,6 +97,7 @@ const componentAssessmentsQuery = `
 // carries only a qualitative strength; callers must preserve that distinction.
 func (s *CryptoImplementationService) GetCryptoImplementationComponents(tenantID, implID uuid.UUID) ([]models.CryptoComponentAssessment, error) {
 	components := make([]models.CryptoComponentAssessment, 0, 8)
+	var evidence hybridKexEvidence
 
 	// RLS-scoped read over crypto_implementations (which gates the junction).
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -107,21 +111,33 @@ func (s *CryptoImplementationService) GetCryptoImplementationComponents(tenantID
 			var c models.CryptoComponentAssessment
 			var migrationGuidance *string
 			var alternatives pq.StringArray
+			var guidance []byte
 			if err := rows.Scan(
 				&c.AlgorithmType, &c.IsInferred, &c.AlgorithmID, &c.Code, &c.Name,
 				&c.Category, &c.Strength, &c.DeprecationStatus, &c.RiskScore,
-				&migrationGuidance, &alternatives, &c.IsPQC,
+				&migrationGuidance, &alternatives, &c.IsPQC, &guidance,
 			); err != nil {
 				return err
 			}
 			c.MigrationGuidance = migrationGuidance
 			c.RecommendedAlternatives = []string(alternatives)
+			c.RemediationGuidance = models.ParseComponentRemediationGuidance(guidance)
 			components = append(components, c)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		// The server's hybrid post-quantum support, as a handshake measured it
+		// (hybrid_kex_hint.go). Same transaction and tenant predicate as the
+		// join above; no row simply means no evidence.
+		if err := tx.QueryRow(hybridKexEvidenceSQL, implID, tenantID).Scan(&evidence.Supported, &evidence.Group); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("failed to get crypto configuration components: %w", err)
 	}
 
-	return models.AnnotateComponentAssessments(components), nil
+	return annotateHybridKexAvailability(models.AnnotateComponentAssessments(components), evidence), nil
 }

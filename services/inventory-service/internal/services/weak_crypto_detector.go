@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -166,9 +167,33 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 		}
 	}
 
-	// Check cipher suite
+	// Check cipher suite.
+	//
+	// The stored value may be a cipher STRING ("ECDHE+AES-GCM:!RC4:!3DES:!MD5",
+	// from an F5 profile or an ASA custom list) rather than one suite name.
+	// Substring-matching the string itself reported every EXCLUDED algorithm as
+	// in use, so a hardened profile scored Critical (P-05). The rules below run
+	// over what the value may expose instead: the value itself when it is one
+	// suite name; for a string, the suites it enables PLUS what it may enable
+	// and could not be resolved (an RC4 keyword addition, a suite outside the
+	// parser's table, a suite an unexpanded removal may or may not have taken
+	// out). Unresolved never reads as safe; excluded never reads as present.
 	if impl.CipherSuite != nil && *impl.CipherSuite != "" {
-		cipherSuite := strings.ToUpper(*impl.CipherSuite)
+		suitesInUse := cryptoparse.SuitesPossiblyInUse(*impl.CipherSuite)
+		// anyInUse reports whether a suite in use contains the algorithm token;
+		// DES only counts for a suite that is genuinely single DES.
+		anyInUse := func(algo string) bool {
+			for _, suite := range suitesInUse {
+				upper := strings.ToUpper(suite)
+				if algo == "DES" && !isSingleDES(upper) {
+					continue
+				}
+				if strings.Contains(upper, strings.ToUpper(algo)) {
+					return true
+				}
+			}
+			return false
+		}
 
 		// Critical algorithms in cipher suite.
 		//
@@ -179,10 +204,7 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 		// the high-risk list below. The sibling classifier in
 		// crypto_risks_service.go already carried this exclusion.
 		for _, criticalAlgo := range d.criticalAlgorithms {
-			if criticalAlgo == "DES" && !isSingleDES(cipherSuite) {
-				continue
-			}
-			if strings.Contains(cipherSuite, strings.ToUpper(criticalAlgo)) {
+			if anyInUse(criticalAlgo) {
 				issues = append(issues, WeakCryptoIssue{
 					ID:                     uuid.New(),
 					TenantID:               tenantID,
@@ -202,7 +224,7 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 
 		// High-risk algorithms in cipher suite
 		for _, highRiskAlgo := range d.highRiskAlgorithms {
-			if strings.Contains(cipherSuite, strings.ToUpper(highRiskAlgo)) {
+			if anyInUse(highRiskAlgo) {
 				issues = append(issues, WeakCryptoIssue{
 					ID:                     uuid.New(),
 					TenantID:               tenantID,
@@ -278,12 +300,24 @@ func (d *WeakCryptoDetector) AnalyzeCryptoImplementation(tenantID, assetID uuid.
 		// exchange is still caught by its catalogue entry (RSA-512, RSA-1024) when
 		// one is reported. The `crypto` producer measures a certificate's public
 		// key against the same call.
+		//
+		// The configuration-level call, not the bare floor: key_size on a
+		// configuration is often the SYMMETRIC key length (IPsec AES-256 → 256)
+		// sitting beside an asymmetric key-exchange name ("DH Group 14"), and the
+		// finite-field floor read that 256 as a critically weak modulus (P-06).
 		kex := ""
 		if impl.KeyExchangeAlgorithm != nil {
 			kex = *impl.KeyExchangeAlgorithm
 		}
+		cipher, symmetric := "", ""
+		if impl.CipherSuite != nil {
+			cipher = *impl.CipherSuite
+		}
+		if impl.SymmetricEncryption != nil {
+			symmetric = *impl.SymmetricEncryption
+		}
 		family := cryptoparse.KeyAlgorithmFamily(kex)
-		switch cryptoparse.WeakKeySizeSeverity(kex, keySize) {
+		switch cryptoparse.ConfigurationKeySizeSeverity(kex, symmetric, cipher, keySize) {
 		case cryptoparse.SeverityHigh:
 			issue := WeakCryptoIssue{
 				ID:                     uuid.New(),
@@ -531,6 +565,45 @@ func legacyTLSVersionsArraySQL(arrayCol string) string {
 		arrayCol, legacyProtocolVersionSQL("legacy_tls_v"))
 }
 
+// symmetricKeyLengthSQL is the SQL twin of cryptoparse.SizeIsSymmetricKeyLength
+// over a crypto_implementations row's stored columns, generated from the same
+// tables and patterns (SymmetricKeyLengths, AES192Pattern, IKEECPGroupPattern)
+// and the same family classifier. TestIntegration_ConfigurationKeySizeSQL_AgreesWithGo
+// runs one fixture set through both.
+func symmetricKeyLengthSQL(prefix string) string {
+	ks := prefix + "key_size"
+	// TRIM because the Go rule trims (strings.TrimSpace) before comparing.
+	sym := "UPPER(TRIM(COALESCE(" + prefix + "symmetric_encryption, '')))"
+	cipher := "UPPER(COALESCE(" + prefix + "cipher_suite, ''))"
+	kex := prefix + "key_exchange_algorithm"
+	codes := make([]string, 0, len(cryptoparse.SymmetricKeyLengths))
+	for code := range cryptoparse.SymmetricKeyLengths {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	parts := make([]string, 0, len(codes)+1)
+	for _, code := range codes {
+		lengths := make([]string, 0, 2)
+		for _, l := range cryptoparse.SymmetricKeyLengths[code] {
+			lengths = append(lengths, strconv.Itoa(l))
+		}
+		parts = append(parts, fmt.Sprintf("(%s = '%s' AND %s IN (%s))", sym, code, ks, strings.Join(lengths, ", ")))
+	}
+	parts = append(parts, fmt.Sprintf("(%s = 192 AND %s ~ '%s' AND %s AND UPPER(TRIM(COALESCE(%s, ''))) !~ '%s')",
+		ks, cipher, cryptoparse.AES192Pattern, kexFamilySQL(kex, kexFamilyFiniteField), kex, cryptoparse.IKEECPGroupPattern))
+	return "(" + strings.Join(parts, " OR ") + ")"
+}
+
+// configurationWeakKeySizeSQL is the SQL twin of
+// cryptoparse.ConfigurationKeySizeSeverity != "": the family-aware floor, minus
+// a size that is the configuration's own symmetric key length (P-06). For
+// CONFIGURATION rows only — a certificate's public_key_size is always an
+// asymmetric key and keeps anyWeakKeySizeSQL.
+func configurationWeakKeySizeSQL(prefix string) string {
+	return "(" + anyWeakKeySizeSQL(prefix+"key_size", prefix+"key_exchange_algorithm") +
+		" AND NOT " + symmetricKeyLengthSQL(prefix) + ")"
+}
+
 // deprecatedAlgorithmsSQL is the shared `?uses_deprecated_algorithms=true`
 // predicate. It lived inline at three call sites with two independent defects:
 // it compared protocol_version against 'TLSv1.0'/'TLSv1.1' (a spelling no
@@ -543,7 +616,7 @@ func deprecatedAlgorithmsSQL(prefix string) string {
 	return "(" +
 		legacyProtocolVersionSQL(prefix+"protocol_version") +
 		" OR UPPER(COALESCE(" + prefix + "hash_algorithm, '')) IN ('SHA1', 'SHA-1', 'MD5')" +
-		" OR " + anyWeakKeySizeSQL(prefix+"key_size", prefix+"key_exchange_algorithm") +
+		" OR " + configurationWeakKeySizeSQL(prefix) +
 		")"
 }
 

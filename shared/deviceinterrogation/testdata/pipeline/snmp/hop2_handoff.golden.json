@@ -1,0 +1,103 @@
+{
+  "vendor": "snmp",
+  "input_sha256": "91bccb5e56e143791e9c545d532db73cb3e2c40a27ad0ba7710cf4466812a6f3",
+  "imports": [
+    {
+      "asset_status": "pending_approval",
+      "findings": [
+        {
+          "asset_type": "server",
+          "cipher_suite": "",
+          "hash_algorithm": null,
+          "hostname": "access-sw-1.corp.example.test",
+          "ip_address": "192.0.2.229",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 443,
+          "protocol": "SNMP",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "appliance",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "",
+            "confidence": 0.95,
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:0}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "internal",
+            "network_type": "private",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": ""
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        }
+      ]
+    }
+  ],
+  "external_connections": [],
+  "rows": [
+    {
+      "row": 0,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    }
+  ],
+  "process_error": "",
+  "learned_segments": [],
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "access-sw-1.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "access-sw-1.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "FOC2432L0AB",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[fqdn=dist-sw-1.corp.example.test,mac_address=00:1b:17:00:00:aa]",
+      "hostname": "dist-sw-1.corp.example.test",
+      "primary_address": null,
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "dist-sw-1.corp.example.test",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:00:00:aa",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ]
+}

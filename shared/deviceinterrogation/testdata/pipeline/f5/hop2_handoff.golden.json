@@ -1,0 +1,246 @@
+{
+  "vendor": "f5",
+  "input_sha256": "a5167ab44fbfb94d55b0de50505673dda3329003ada109cc5105c18e3f2064a5",
+  "imports": [
+    {
+      "asset_status": "pending_approval",
+      "findings": [
+        {
+          "asset_type": "server",
+          "cipher_suite": "ECDHE-RSA-AES256-GCM-SHA384",
+          "hash_algorithm": "SHA384",
+          "hostname": "vs_web_443",
+          "ip_address": "198.51.100.10",
+          "key_exchange_algorithm": "ECDHE",
+          "key_size": 256,
+          "port": 443,
+          "protocol": "TLS",
+          "protocol_version": "1.2",
+          "raw_data": {
+            "asset_type": "load_balancer",
+            "batch_id": "{{BATCH_ID}}",
+            "cert_has_sct": false,
+            "cert_incomplete_chain": true,
+            "certificates": [
+              {
+                "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIDWDCCAkCgAwIBAgIEIBQAAjANBgkqhkiG9w0BAQsFADA5MRQwEgYDVQQKEwtF\neGFtcGxlIE9yZzEhMB8GA1UEAxMYRXhhbXBsZSBQaXBlbGluZSBUZXN0IENBMB4X\nDTI2MDEwMTAwMDAwMFoXDTQ2MDEwMTAwMDAwMFowMDEUMBIGA1UEChMLRXhhbXBs\nZSBPcmcxGDAWBgNVBAMTD3d3dy5leGFtcGxlLmNvbTCCASIwDQYJKoZIhvcNAQEB\nBQADggEPADCCAQoCggEBAL7hVanxKbc/ESsF5pqf8IIhMaSWSkyMx3wFmNZcHlP6\neqmuQqN6N0NAX1OuOyc+9VV+LlFzOhrWtemzhzbKV4lpRCnVPxCGssqIhfmbol6e\nELIJVhtnjoGbN48G1RjwtXlgvQp+lC4DJksv0jV8PdTq1H9gSELpqTbGzygl/pnB\n5bnOwZvZN6V0XLxd4xCmXlDrk+tfJreV7nL4seAyYkDm3x8WoD8+oGOSoZQ+f5Ds\nNkDMBVx/D5vFKH8irTPV9W+di4+2vWnl8pwl+L9DNzCI57eMwOQVHunBsMoOehy0\nk5A+UmEOjJ3OpN4wR7pDkGW2pTZ/BiyxXbjB45ewQ0UCAwEAAaNxMG8wDgYDVR0P\nAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMB8GA1UdIwQYMBaAFKFOpP0R\nDN9A06eeGm7ucHvwZGNEMCcGA1UdEQQgMB6CD3d3dy5leGFtcGxlLmNvbYILZXhh\nbXBsZS5jb20wDQYJKoZIhvcNAQELBQADggEBAGli4hiqymIZWgP6Hg1H9dQWrNiy\nIXXYSPgBUKQVIef7ubmJbUU3fawpfHEKDTdnHVnN6u15QnQ0JVmGoGwCUKKXfqwV\nAi+d44Vm4o4NEStLMRFjO8ooy18B+mguISEG3kZ+mMJ/OiPDlDcfG7vh3rhjJ4DO\niZlEhO2GvcFkMy4Uaj6zp87eAWwXJeDIMCX1njAlUcEFDsyD2rIz8+aX5YS87J25\nZzbAGQ5DlUEZDubaKBpxUwjnQjlI2PrmqGInv2vW41jfXqNhISmqC30lnuV1kbP0\nW8W/mxGO4F1TTxos63djwYGkj41H6Zxujl5GjWyvJvW3PCATLcTAXbOw3Oo=\n-----END CERTIFICATE-----\n",
+                "chain_order": 0,
+                "fingerprint_sha1": "3d96823f216fc7c80ae80f9e53927c114f3f94bb",
+                "fingerprint_sha256": "77e478bce33a7c3f8f37eb21d82d333afeea541e80711911cc5102e19510df9c",
+                "is_ca": false,
+                "issuer_dn": "CN=Example Pipeline Test CA,O=Example Org",
+                "key_algorithm": "RSA",
+                "key_size": 2048,
+                "not_after": "2046-01-01T00:00:00Z",
+                "not_before": "2026-01-01T00:00:00Z",
+                "serial_number": "538181634",
+                "signature_alg": "SHA256-RSA",
+                "subject_alternative_names": [
+                  "www.example.com",
+                  "example.com"
+                ],
+                "subject_dn": "CN=www.example.com,O=Example Org"
+              }
+            ],
+            "cipher_suite": "ECDHE-RSA-AES256-GCM-SHA384",
+            "confidence": 0.95,
+            "config_name": "vs_web_443",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:0}}",
+            "discovery_method": "device_interrogation",
+            "hash_algorithm": "SHA384",
+            "key_exchange_algorithm": "ECDHE",
+            "key_size": 256,
+            "network_ownership": "internal",
+            "network_type": "public",
+            "pqc_kex_detected": false,
+            "profile_name": "clientssl-secure",
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "supported_ciphers": [
+              "ECDHE-RSA-AES256-GCM-SHA384"
+            ],
+            "timestamp": "{{TIMESTAMP}}",
+            "tls_versions": [
+              "TLS 1.2"
+            ],
+            "version": "1.2"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5",
+          "hash_algorithm": null,
+          "hostname": "vs_legacy_443",
+          "ip_address": "198.51.100.11",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 443,
+          "protocol": "TLS",
+          "protocol_version": "TLS 1.2",
+          "raw_data": {
+            "asset_type": "load_balancer",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5",
+            "confidence": 0.95,
+            "config_name": "vs_legacy_443",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:1}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "internal",
+            "network_type": "public",
+            "pqc_kex_detected": false,
+            "profile_name": "clientssl-hardened",
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "tls_versions": [
+              "TLS 1.2"
+            ],
+            "version": "TLS 1.2"
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        }
+      ]
+    }
+  ],
+  "external_connections": [],
+  "rows": [
+    {
+      "row": 0,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 1,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    }
+  ],
+  "process_error": "",
+  "learned_segments": [
+    {
+      "value": "192.0.2.0/24",
+      "segment_type": "cidr",
+      "network_type": "public",
+      "metadata": {
+        "dhcp": "unknown",
+        "source": "interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_type": "f5"
+      }
+    },
+    {
+      "value": "198.51.100.0/24",
+      "segment_type": "cidr",
+      "network_type": "public",
+      "metadata": {
+        "dhcp": "unknown",
+        "source": "interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_type": "f5"
+      }
+    }
+  ],
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "lb-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "load_balancer",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "lb-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+      "hostname": "vs_legacy_443",
+      "primary_address": "198.51.100.11",
+      "class_key": "load_balancer",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "vs_legacy_443",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.11",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+      "hostname": "vs_web_443",
+      "primary_address": "198.51.100.10",
+      "class_key": "load_balancer",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "vs_web_443",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.10",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[ip_address=198.51.100.20]",
+      "hostname": "",
+      "primary_address": "198.51.100.20",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.20",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[ip_address=198.51.100.21]",
+      "hostname": "",
+      "primary_address": "198.51.100.21",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.21",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 )
 
 // GetCryptoImplementations retrieves crypto configurations for an asset.
@@ -98,9 +99,15 @@ func legacyTLSVersionsFromRawData(raw models.JSONB) []string {
 func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []string {
 	var riskFactors []string
 	if crypto.CipherSuite != nil {
-		cipherSuite := strings.ToUpper(*crypto.CipherSuite)
-		if strings.Contains(cipherSuite, "RC4") || strings.Contains(cipherSuite, "DES") || strings.Contains(cipherSuite, "MD5") {
-			riskFactors = append(riskFactors, "Weak cipher suite")
+		// Over what the value may expose, never the raw value: a cipher
+		// string's "!RC4:!3DES:!MD5" exclusions are not weak ciphers, and an
+		// addition it cannot resolve is not a clean bill either.
+		for _, suite := range cryptoparse.SuitesPossiblyInUse(*crypto.CipherSuite) {
+			cipherSuite := strings.ToUpper(suite)
+			if strings.Contains(cipherSuite, "RC4") || strings.Contains(cipherSuite, "DES") || strings.Contains(cipherSuite, "MD5") {
+				riskFactors = append(riskFactors, "Weak cipher suite")
+				break
+			}
 		}
 	}
 	if crypto.ProtocolVersion != nil {
@@ -128,8 +135,33 @@ func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []
 	if legacy := legacyTLSVersionsFromRawData(crypto.RawData); len(legacy) > 0 {
 		riskFactors = append(riskFactors, "Server accepts legacy TLS: "+strings.Join(legacy, ", "))
 	}
-	if crypto.KeySize != nil && *crypto.KeySize < 2048 {
-		riskFactors = append(riskFactors, "Weak key size")
+	// The key-size floor applies to asymmetric keys only, and only against the
+	// floor for their family (P-06). A bare `< 2048` flagged every AES-256
+	// tunnel and every 256-bit EC key; key_size on a configuration is often the
+	// symmetric key length, which ConfigurationKeySizeSeverity declines to
+	// measure against an asymmetric floor. Same call as the weak-crypto detector.
+	if crypto.KeySize != nil {
+		kex, symmetric, cipher := "", "", ""
+		if crypto.KeyExchangeAlgorithm != nil {
+			kex = *crypto.KeyExchangeAlgorithm
+		}
+		if crypto.SymmetricEncryption != nil {
+			symmetric = *crypto.SymmetricEncryption
+		}
+		if crypto.CipherSuite != nil {
+			cipher = *crypto.CipherSuite
+		}
+		if cryptoparse.ConfigurationKeySizeSeverity(kex, symmetric, cipher, *crypto.KeySize) != "" {
+			riskFactors = append(riskFactors, "Weak key size")
+		}
+	}
+	// A cipher string the parser could not fully resolve (DEFAULT, HIGH, a
+	// vendor keyword, a cipher group) leaves the enabled set unknown. Say so:
+	// whatever else is listed here is a lower bound, not a verdict.
+	if crypto.CipherSuite != nil {
+		if partial, unexpanded := cryptoparse.CipherStringAssessment(*crypto.CipherSuite); partial {
+			riskFactors = append(riskFactors, partialCipherAssessmentFactor(unexpanded))
+		}
 	}
 	if crypto.HashAlgorithm != nil {
 		hash := strings.ToUpper(*crypto.HashAlgorithm)
@@ -486,21 +518,59 @@ func (s *AssetService) classifyAndLinkAlgorithms(implID uuid.UUID, finding Inges
 		return *v
 	}
 	link(value(finding.ProtocolVersion), "protocol_version", false)
-	link(value(finding.CipherSuite), "cipher_suite", false)
-	if finding.CipherSuite != nil {
+	if finding.CipherSuite != nil && cryptoparse.LooksLikeCipherString(*finding.CipherSuite) {
+		// A cipher STRING names a set of suites, and some tokens in it are
+		// exclusions. Link each suite it enables, and each thing it may enable
+		// and could not be resolved (an RC4 keyword, a suite outside the
+		// parser's table) — as the suite and as its components — and nothing it
+		// excludes. Every link is inferred: the string says what is allowed,
+		// not what a client negotiated.
+		for _, suite := range cryptoparse.SuitesPossiblyInUse(*finding.CipherSuite) {
+			link(suite, "cipher_suite", true)
+			if components, err := s.algorithmService.ParseCipherSuite(suite); err == nil && components != nil {
+				if value(finding.KeyExchangeAlgorithm) == "" {
+					link(components.KeyExchange, "key_exchange", true)
+				}
+				link(components.Signature, "signature", true)
+				link(components.Symmetric, "symmetric", true)
+				link(components.Hash, "hash", true)
+			}
+		}
+	} else if finding.CipherSuite != nil {
+		link(value(finding.CipherSuite), "cipher_suite", false)
 		// An unrecognized suite is valid evidence; parsing failure does not make ingestion retryable.
 		components, err := s.algorithmService.ParseCipherSuite(*finding.CipherSuite)
 		if err == nil && components != nil {
 			if value(finding.KeyExchangeAlgorithm) == "" {
-				link(components.KeyExchange, "key_exchange", components.IsInferred)
+				// TLS 1.3 names no key exchange; the parser's ECDHE is an
+				// assumption and is linked as one.
+				link(components.KeyExchange, "key_exchange", components.IsInferred || components.KeyExchangeInferred)
 			}
 			link(components.Signature, "signature", components.IsInferred)
 			link(components.Symmetric, "symmetric", components.IsInferred)
 			link(components.Hash, "hash", components.IsInferred)
 		}
 	}
-	link(value(finding.KeyExchangeAlgorithm), "key_exchange", false)
+	// A family-label link ("ECDHE") a measured group supersedes is removed by
+	// refineCryptoKeyExchange, in the materialization transaction, for every
+	// row it refines — see crypto_kex_refine.go.
+	link(value(finding.KeyExchangeAlgorithm), "key_exchange", finding.keyExchangeInferred)
 	link(value(finding.HashAlgorithm), "hash", false)
+	// Offered key exchanges: every group an IPsec proposal is configured with
+	// (device-interrogation writes them as `kex_algorithms`, in preference
+	// order, catalogue codes). The scalar above is only the preferred one; a
+	// peer can make the tunnel use any of the others, so the configuration is
+	// scored on its weakest offer and is quantum-vulnerable if ANY is
+	// classical. Linked as inferred — offered, not observed in use — after the
+	// measured scalar, so the scalar's is_inferred=false row wins where they
+	// coincide (the link is ON CONFLICT DO NOTHING). Same treatment as SSH's
+	// offered lists.
+	for i, offered := range rawStringSlice(finding.RawData, "kex_algorithms") {
+		if i >= sshMaxOfferedPerRole {
+			break
+		}
+		link(offered, "key_exchange", true)
+	}
 	return errors.Join(errs...)
 }
 

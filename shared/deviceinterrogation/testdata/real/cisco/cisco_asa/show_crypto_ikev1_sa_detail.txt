@@ -1,0 +1,8 @@
+IKE Peer      Type  Dir   Rky  State      Encrypt Hash  Auth    Lifetime
+1 192.0.2.2 User  Resp  No   AM_Active  3des    SHA   preshrd 86400
+IKE Peer      Type  Dir   Rky  State      Encrypt Hash  Auth    Lifetime
+2 198.51.100.2 User  Resp  No   AM_ACTIVE  3des    SHA   preshrd 86400
+IKE Peer      Type  Dir   Rky  State      Encrypt Hash  Auth    Lifetime
+3 203.0.113.2 User  Resp  No   AM_ACTIVE  3des    SHA   preshrd 86400
+IKE Peer      Type  Dir   Rky  State      Encrypt Hash  Auth    Lifetime
+4 192.0.2.3 User  Resp  No   AM_ACTIVE  3des    SHA   preshrd 86400

@@ -1,0 +1,71 @@
+{
+  "vendor": "fortinet",
+  "input_sha256": "94cefdbf026c13e78a5128811fd3c68dbc1a06941f3406d8746880779bad4f21",
+  "inventory": {
+    "assets": [
+      {
+        "asset": "device",
+        "class_key": "firewall",
+        "status": "monitoring"
+      }
+    ],
+    "crypto_configurations": [
+      {
+        "asset": "device",
+        "protocol": "IPSec",
+        "port": null,
+        "protocol_version": null,
+        "cipher_suite": "aes256-sha256 aes128-sha1",
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "hash_algorithm": "SHA256",
+        "key_size": 2048,
+        "risk_score": 70,
+        "risk_level": "High",
+        "risk_factors": [],
+        "algorithm_links": {
+          "hash": [
+            "SHA256"
+          ],
+          "key_exchange": [
+            "DH-MODP-1536",
+            "DH-MODP-2048"
+          ],
+          "symmetric": [
+            "AES128"
+          ]
+        },
+        "pqc_category": "needs_migration",
+        "has_certificate": false
+      },
+      {
+        "asset": "device",
+        "protocol": "TLS",
+        "port": null,
+        "protocol_version": null,
+        "cipher_suite": "",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": null,
+        "risk_level": "Unknown",
+        "risk_factors": [],
+        "algorithm_links": {},
+        "pqc_category": "unclassified",
+        "has_certificate": false
+      }
+    ],
+    "certificates": [],
+    "findings": [],
+    "pqc_counts": {
+      "needs_migration": 1,
+      "pqc_ready": 0,
+      "symmetric_safe": 0,
+      "total": 2,
+      "unclassified": 1
+    },
+    "ingest_outcomes": [
+      "matched",
+      "matched"
+    ]
+  }
+}

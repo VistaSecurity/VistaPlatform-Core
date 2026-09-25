@@ -4,11 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq" // postgres driver, registered for sql.Open("postgres", ...)
+	"github.com/go-sql-driver/mysql"
+	"github.com/lib/pq"
 
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/internal/dialguard"
 	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
@@ -201,7 +205,20 @@ func dbBuildConnStr(device DeviceInfo, creds Credentials) (string, int, error) {
 		return fmt.Sprintf("postgres://%s:%s@%s:%d/postgres?sslmode=prefer", username, password, host, port), port, nil
 	case "mysql":
 		port := 3306
-		return fmt.Sprintf("%s:%s@tcp(%s:%d)/", username, password, host, port), port, nil
+		// Built by the driver rather than by Sprintf: FormatDSN is the one
+		// encoder guaranteed to round-trip through the driver's own parser,
+		// whatever the password contains.
+		cfg := mysql.NewConfig()
+		cfg.User = username
+		cfg.Passwd = password
+		cfg.Net = "tcp"
+		cfg.Addr = net.JoinHostPort(host, strconv.Itoa(port))
+		// "preferred" is MySQL's sslmode=prefer: TLS whenever the server
+		// offers it. The driver's default is no TLS at all, which on a
+		// caching_sha2_password account sends the password under a server
+		// public key the driver fetched unauthenticated.
+		cfg.TLSConfig = "preferred"
+		return cfg.FormatDSN(), port, nil
 	default:
 		return "", 0, fmt.Errorf("unsupported database type: %s", device.DeviceType)
 	}
@@ -209,10 +226,12 @@ func dbBuildConnStr(device DeviceInfo, creds Credentials) (string, int, error) {
 
 // dbInterrogatePostgreSQL queries a PostgreSQL instance for its encryption settings.
 func dbInterrogatePostgreSQL(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
-	targetDB, err := sql.Open("postgres", connStr)
+	connector, err := pq.NewConnector(connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PostgreSQL: %w", err)
 	}
+	connector.Dialer(guardedPostgresDialer{})
+	targetDB := sql.OpenDB(connector)
 	defer func() { _ = targetDB.Close() }()
 
 	// Set a timeout for the connection
@@ -308,14 +327,56 @@ var mysqlRetainedVariables = map[string]bool{
 	"table_encryption_privilege_check": true,
 }
 
+// mysqlConfig parses a go-sql-driver DSN (`user:pass@tcp(host:port)/`) and
+// silences the driver's logger.
+//
+// The driver's default logger writes to stderr — "packets.go: unexpected EOF"
+// and the like — and nothing in this package may report there (see
+// stdout_guard_test.go). The logger is set per connector rather than with the
+// process-wide mysql.SetLogger so importing this package changes nothing else
+// in the binary.
+func mysqlConfig(connStr string) (*mysql.Config, error) {
+	cfg, err := mysql.ParseDSN(connStr)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Logger = &mysql.NopLogger{}
+	// The driver's own resolver/dialer would bypass the appliance guard. Its
+	// context already carries Config.Timeout, so the guard needs no second
+	// timeout here; it still runs after DNS resolution on every candidate IP.
+	cfg.DialFunc = dialguard.Dial(0)
+	return cfg, nil
+}
+
+// guardedPostgresDialer adapts the shared context-aware appliance guard to
+// lib/pq's dialer seam. Implement all three methods because pq prefers
+// DialContext when available but retains the older Dial/DialTimeout paths.
+type guardedPostgresDialer struct{}
+
+func (guardedPostgresDialer) Dial(network, address string) (net.Conn, error) {
+	return dialguard.Dial(0)(context.Background(), network, address)
+}
+
+func (guardedPostgresDialer) DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
+	return dialguard.Dial(timeout)(context.Background(), network, address)
+}
+
+func (guardedPostgresDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return dialguard.Dial(0)(ctx, network, address)
+}
+
 // dbInterrogateMySQL queries a MySQL instance for its encryption settings.
 func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
-	// MySQL connections use a different driver, so we query via standard database/sql.
-	// The caller should provide a mysql:// connection string.
-	targetDB, err := sql.Open("mysql", connStr)
+	cfg, err := mysqlConfig(connStr)
+	if err != nil {
+		// ParseDSN's error does not echo the DSN, so it cannot leak the password.
+		return nil, fmt.Errorf("failed to connect to MySQL: %w", err)
+	}
+	connector, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MySQL: %w", err)
 	}
+	targetDB := sql.OpenDB(connector)
 	defer func() { _ = targetDB.Close() }()
 
 	targetDB.SetConnMaxLifetime(30 * time.Second)

@@ -1,0 +1,58 @@
+{
+  "routes": [
+    {
+      "method": "POST",
+      "query_equals": {
+        "type": "keygen"
+      },
+      "content_type": "application/xml",
+      "body_file": "keygen.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<system>"
+      },
+      "content_type": "application/xml",
+      "body_file": "../../../paloalto_system_info.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<interface>"
+      },
+      "content_type": "application/xml",
+      "body_file": "../../../paloalto_interfaces.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<arp>"
+      },
+      "content_type": "application/xml",
+      "body_file": "../../../paloalto_arp.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<lldp>"
+      },
+      "content_type": "application/xml",
+      "body_file": "../../../paloalto_lldp.xml"
+    },
+    {
+      "query_contains": {
+        "xpath": "ssl-decrypt"
+      },
+      "content_type": "application/xml",
+      "body_file": "ssl_decrypt.xml"
+    },
+    {
+      "query_contains": {
+        "xpath": "rules"
+      },
+      "content_type": "application/xml",
+      "body_file": "security_rules.xml"
+    }
+  ],
+  "default": {
+    "content_type": "application/xml",
+    "body_file": "empty.xml"
+  }
+}

@@ -1,0 +1,15 @@
+Crypto Map IPv4 "VPN-MAP" 10 ipsec-isakmp
+	Peer = 203.0.113.50
+	Extended IP access list 101
+	    access-list 101 permit ip 192.0.2.0 0.0.0.255 198.51.100.0 0.0.0.255
+	Current peer: 203.0.113.50
+	Security association lifetime: 4608000 kilobytes/3600 seconds
+	Responder-Only (Y/N): N
+	PFS (Y/N): Y
+	DH group:  group14
+	Mixed-mode : Disabled
+	Transform sets={
+		ESP-AES256-SHA256:  { esp-256-aes esp-sha256-hmac  } ,
+	}
+	Interfaces using crypto map VPN-MAP:
+		GigabitEthernet0/1

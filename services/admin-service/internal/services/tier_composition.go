@@ -25,7 +25,9 @@ package services
 //   - The write, its subscription_tier_history row and (for UpdateTier) the
 //     tier's own column changes commit in ONE transaction, holding the tier's
 //     row lock so concurrent composition writers serialise.
-//   - Omitted overage fields are left as stored (a new row gets NULL). The
+//   - Omitted overage fields are left as stored (a new row gets NULL). An
+//     explicit clear_overage_* flag sets the corresponding column to NULL;
+//     a value and its clear flag are mutually exclusive. The
 //     old replace path nulled them on every save that did not repeat them,
 //     which is every save the admin UI makes.
 
@@ -230,6 +232,12 @@ func applyTierComposition(tx *sql.Tx, tierID uuid.UUID, set []TierEntitlementInp
 		if err := validateItemValue(in.ItemKey, item.kind, in.IncludedValue); err != nil {
 			return nil, err
 		}
+		if in.OveragePriceCents != nil && in.ClearOveragePrice {
+			return nil, &OverageConflictError{Key: in.ItemKey, Field: "overage_price_cents"}
+		}
+		if in.OverageUnitSize != nil && in.ClearOverageSize {
+			return nil, &OverageConflictError{Key: in.ItemKey, Field: "overage_unit_size"}
+		}
 	}
 	for _, k := range remove {
 		if _, ok := catalog[k]; !ok {
@@ -267,15 +275,15 @@ func applyTierComposition(tx *sql.Tx, tierID uuid.UUID, set []TierEntitlementInp
 			VALUES ($1, $2, $3::jsonb, $4, $5)
 			ON CONFLICT (tier_id, item_id) DO UPDATE SET
 				included_value      = EXCLUDED.included_value,
-				overage_price_cents = COALESCE(EXCLUDED.overage_price_cents, te.overage_price_cents),
-				overage_unit_size   = COALESCE(EXCLUDED.overage_unit_size, te.overage_unit_size)
+				overage_price_cents = CASE WHEN $6 THEN NULL ELSE COALESCE(EXCLUDED.overage_price_cents, te.overage_price_cents) END,
+				overage_unit_size   = CASE WHEN $7 THEN NULL ELSE COALESCE(EXCLUDED.overage_unit_size, te.overage_unit_size) END
 			WHERE (te.included_value, te.overage_price_cents, te.overage_unit_size)
 			      IS DISTINCT FROM
 			      (EXCLUDED.included_value,
-			       COALESCE(EXCLUDED.overage_price_cents, te.overage_price_cents),
-			       COALESCE(EXCLUDED.overage_unit_size, te.overage_unit_size))
+			       CASE WHEN $6 THEN NULL ELSE COALESCE(EXCLUDED.overage_price_cents, te.overage_price_cents) END,
+			       CASE WHEN $7 THEN NULL ELSE COALESCE(EXCLUDED.overage_unit_size, te.overage_unit_size) END)
 			RETURNING te.included_value, te.overage_price_cents, te.overage_unit_size
-		`, tierID, catalog[in.ItemKey].id, []byte(in.IncludedValue), overageCents, overageSize).
+		`, tierID, catalog[in.ItemKey].id, []byte(in.IncludedValue), overageCents, overageSize, in.ClearOveragePrice, in.ClearOverageSize).
 			Scan(&afterJSON, &afterCents, &afterUnitSize)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue // identical to what is stored

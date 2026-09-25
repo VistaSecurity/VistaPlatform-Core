@@ -205,3 +205,19 @@ func externalDiscoveryEvidence(raw map[string]interface{}) (*int, []string) {
 	}
 	return size, versions
 }
+
+// appendUnique appends each item not already present in slice, preserving
+// order.
+func appendUnique(slice []string, items ...string) []string {
+	seen := make(map[string]bool)
+	for _, item := range slice {
+		seen[item] = true
+	}
+	for _, item := range items {
+		if !seen[item] {
+			slice = append(slice, item)
+			seen[item] = true
+		}
+	}
+	return slice
+}

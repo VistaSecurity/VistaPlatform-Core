@@ -11,10 +11,13 @@ const state = vi.hoisted(() => ({
   // The ee build mounts both msp and billing on every paid install; what
   // differs is the licence.
   license: 'enterprise',
+  // The billing dashboard (the only billing read on this page) plus the
+  // monitoring status's `services`, merged: the mock answers every query.
+  dash: { billing_configured: true, mrr: 12000, paying_tenants: 4 } as Record<string, unknown>,
 }));
 
 vi.mock('@tanstack/react-query', () => ({
-  useQuery: () => ({ data: { services: [], mrr: 12000, active_tenants: 4, series: [] } }),
+  useQuery: () => ({ data: { services: [], ...state.dash } }),
 }));
 
 vi.mock('../../lib/edition', () => ({
@@ -176,5 +179,35 @@ describe('OverviewPage billing surfaces by licence', () => {
     expect(html).toContain('Recurring revenue');
     expect(html).toContain('Past-due tenants');
     expect(html).toContain('Past Due Tenant');
+  });
+});
+
+// Owner decision 5: revenue comes only from billing records. No payment
+// provider → "Billing not configured", never a number; and there is no
+// "trailing" MRR series (it was today's figure projected backwards).
+describe('OverviewPage revenue hero', () => {
+  beforeEach(() => {
+    state.tenants = [];
+    state.health = new Map();
+    state.license = 'msp';
+  });
+
+  it('shows MRR, ARR and paying tenants from the billing records', () => {
+    state.dash = { billing_configured: true, mrr: 12000, paying_tenants: 4 };
+    const html = renderOverview();
+    expect(html).toContain('$12k');
+    expect(html).toContain('$144k ARR · 4 paying');
+    expect(html).not.toContain('Billing not configured');
+    expect(html).not.toContain('trailing');
+  });
+
+  it('says "Billing not configured" and shows no figure without a payment provider', () => {
+    state.dash = { billing_configured: false, mrr: null, paying_tenants: null };
+    const html = renderOverview();
+    expect(html).toContain('Recurring revenue');
+    expect(html).toContain('Billing not configured');
+    expect(html).not.toMatch(/\$\d/);
+    expect(html).not.toContain('ARR');
+    expect(html).not.toContain('trailing');
   });
 });

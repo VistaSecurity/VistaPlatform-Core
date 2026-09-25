@@ -2,8 +2,42 @@ package services
 
 import (
 	"errors"
+	"strings"
 	"testing"
+
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
+
+// Collection warnings ride in the processing block as `collection_warnings`,
+// scrubbed, absent when there are none — and they are about collection, not
+// this pipeline, so a run that landed every asset still reads fully
+// materialized with warnings beside it.
+func TestProcessingLog_CollectionWarningsAreServedAndScrubbed(t *testing.T) {
+	p := &ProcessingLog{AssetsReceived: 1, DiscoveryJobID: "job-1"}
+	p.ok("fw.example.net", StageDiscoveryFinding)
+	if _, present := p.Summary()["collection_warnings"]; present {
+		t.Fatal("a run with no warnings serialised a warning list")
+	}
+
+	p.Warnings = []di.CollectionWarning{{
+		Collector: "fortinet",
+		Endpoint:  "/api/v2/monitor/router/ipv4?access_token=should-not-escape",
+		Reason:    di.WarningPermissionDenied,
+		Effect:    "Routing next-hop count not collected",
+		Detail:    "GET https://192.0.2.1/api/v2/monitor/router/ipv4?access_token=should-not-escape: 403",
+	}}
+	s := p.Summary()
+	got, ok := s["collection_warnings"].([]di.CollectionWarning)
+	if !ok || len(got) != 1 {
+		t.Fatalf("collection_warnings = %#v, want the one warning", s["collection_warnings"])
+	}
+	if got[0].Endpoint != "/api/v2/monitor/router/ipv4" || strings.Contains(got[0].Detail, "should-not-escape") {
+		t.Errorf("the warning was not scrubbed before it was persisted: %+v", got[0])
+	}
+	if s["fully_materialized"] != true {
+		t.Error("a collection warning was counted as a pipeline failure")
+	}
+}
 
 // TestProcessingLog_ZeroAssetPayloadIsNotACleanSuccess pins the honesty rule the
 // first live fleet data broke: an interrogation that genuinely found 12 devices

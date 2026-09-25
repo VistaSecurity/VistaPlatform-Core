@@ -114,6 +114,33 @@ func TestOnPremGuardPermitsRFC1918(t *testing.T) {
 	}
 }
 
+func TestConfiguredOnPremGuardRefusesPlatformInternalCIDRs(t *testing.T) {
+	t.Setenv(PlatformInternalCIDRsEnv, "10.42.0.0/16, 10.43.0.0/16, fd00:42::/48")
+	guard := configuredOnPremDialGuard()
+
+	for _, addr := range []string{"10.42.3.4:443", "10.43.0.10:8080", "[fd00:42::10]:443"} {
+		if err := guard("tcp", addr, nil); err == nil || !strings.Contains(err.Error(), "platform-internal") {
+			t.Errorf("guard(%s) = %v; want platform-internal refusal", addr, err)
+		}
+	}
+	for _, addr := range []string{"10.44.3.4:443", "192.168.1.10:443", "[fd00:43::10]:443", "93.184.216.34:443"} {
+		if err := guard("tcp", addr, nil); err != nil {
+			t.Errorf("guard(%s) refused a non-platform target: %v", addr, err)
+		}
+	}
+	if err := guard("tcp", "127.0.0.1:443", nil); err == nil || !strings.Contains(err.Error(), "never reachable") {
+		t.Errorf("loopback must retain the base refusal, got %v", err)
+	}
+}
+
+func TestConfiguredOnPremGuardFailsClosedOnInvalidCIDR(t *testing.T) {
+	t.Setenv(PlatformInternalCIDRsEnv, "10.42.0.0/not-a-prefix")
+	err := configuredOnPremDialGuard()("tcp", "93.184.216.34:443", nil)
+	if err == nil || !strings.Contains(err.Error(), PlatformInternalCIDRsEnv) {
+		t.Fatalf("invalid platform CIDR must fail every dial with a configuration error, got %v", err)
+	}
+}
+
 func TestIsPrivateReachableWithOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		host string

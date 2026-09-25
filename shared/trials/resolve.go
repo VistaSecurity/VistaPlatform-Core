@@ -24,6 +24,9 @@ import (
 //     administratively extended trial was invisible to the lock and the tenant
 //     kept getting 423 after the extension was confirmed.
 //
+// btt.hard_locked_at is read too: a trial ended from Billing → Trials is
+// locked from the moment it ended (Inputs.HardLockedAt).
+//
 // Bind $1 = tenant id. Scan with ScanRow so the column order cannot drift from
 // the SELECT.
 const RowSelectSQL = `
@@ -33,7 +36,8 @@ const RowSelectSQL = `
 			    st.trial_days_soft,
 			    btt.trial_start,
 			    btt.trial_end,
-			    btt.converted_to_paid
+			    btt.converted_to_paid,
+			    btt.hard_locked_at
 			FROM tenants t
 			LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id
 			LEFT JOIN billing_trial_tracking btt ON btt.tenant_id = t.id
@@ -50,6 +54,7 @@ type Row struct {
 	TrialStart      sql.NullTime
 	TrialEnd        sql.NullTime
 	ConvertedToPaid sql.NullBool
+	HardLockedAt    sql.NullTime
 }
 
 // rowScanner is satisfied by *sql.Row and *sql.Rows.
@@ -61,7 +66,7 @@ type rowScanner interface {
 // the scan target list from drifting away from the SELECT list.
 func ScanRow(s rowScanner) (Row, error) {
 	var r Row
-	err := s.Scan(&r.IsTrial, &r.TrialDaysFull, &r.TrialDaysSoft, &r.TrialStart, &r.TrialEnd, &r.ConvertedToPaid)
+	err := s.Scan(&r.IsTrial, &r.TrialDaysFull, &r.TrialDaysSoft, &r.TrialStart, &r.TrialEnd, &r.ConvertedToPaid, &r.HardLockedAt)
 	return r, err
 }
 
@@ -74,6 +79,10 @@ func (r Row) Inputs(now time.Time) Inputs {
 	if r.TrialEnd.Valid {
 		te := r.TrialEnd.Time
 		in.TrialEnd = &te
+	}
+	if r.HardLockedAt.Valid {
+		hl := r.HardLockedAt.Time
+		in.HardLockedAt = &hl
 	}
 	if r.ConvertedToPaid.Valid {
 		in.ConvertedToPaid = r.ConvertedToPaid.Bool

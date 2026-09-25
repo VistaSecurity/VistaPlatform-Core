@@ -737,7 +737,7 @@ WHERE service_name = 'device-interrogation-service';
 -- Insert Platform Discovery Sensor for all existing tenants
 INSERT INTO sensors (
     id, tenant_id, name, description, platform, version, profile,
-    sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at
+    sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at, platform_managed
 )
 SELECT
     gen_random_uuid(),
@@ -753,21 +753,23 @@ SELECT
     ARRAY['system', 'platform', 'discovery']::TEXT[],
     NOW(),
     NOW(),
-    NOW()
+    NOW(),
+    true
 FROM tenants t
 WHERE t.deleted_at IS NULL
   AND NOT EXISTS (
+      -- The platform marker, not the tags: a tenant sensor could carry
+      -- those, and must not stop the real platform sensor being created.
       SELECT 1 FROM sensors s
       WHERE s.tenant_id = t.id
-        AND s.platform = 'platform'
         AND s.profile = 'discovery'
-        AND 'system' = ANY(s.tags)
+        AND s.platform_managed
   );
 
 -- Insert Platform Device Interrogation Agent for all existing tenants
 INSERT INTO sensors (
     id, tenant_id, name, description, platform, version, profile,
-    sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at
+    sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at, platform_managed
 )
 SELECT
     gen_random_uuid(),
@@ -783,15 +785,17 @@ SELECT
     ARRAY['system', 'platform', 'device_interrogation']::TEXT[],
     NOW(),
     NOW(),
-    NOW()
+    NOW(),
+    true
 FROM tenants t
 WHERE t.deleted_at IS NULL
   AND NOT EXISTS (
+      -- The platform marker, not the tags: a tenant sensor could carry
+      -- those, and must not stop the real platform sensor being created.
       SELECT 1 FROM sensors s
       WHERE s.tenant_id = t.id
-        AND s.platform = 'platform'
         AND s.profile = 'device_interrogation'
-        AND 'system' = ANY(s.tags)
+        AND s.platform_managed
   );
 
 -- =================================================================
@@ -3688,6 +3692,19 @@ INSERT INTO algorithms (code, category, name, description, strength, deprecation
     'Hybrid-KEM', 'kem', ARRAY['keygen','encapsulate','decapsulate'], 3, '{"hybrid": true, "classical_component": "P-256", "pqc_component": "ML-KEM-768", "iana_group": "0x11EB", "quantum_resistance": true}'::jsonb)
 ON CONFLICT (code) DO NOTHING;
 
+-- The third hybrid named group: P-384 ECDH with ML-KEM-1024, IANA TLS group
+-- 4589 (0x11ED) in the "TLS Supported Groups" registry, which references
+-- RFC 10024 for it and for the two groups above. Assessed like its siblings;
+-- NIST PQC category 5 is ML-KEM-1024's (FIPS 203). The active TLS probe maps
+-- this group, and without a row a handshake negotiating it linked nothing.
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
+    recommended_alternatives, migration_guidance, compliance_mappings, is_standard, is_pqc, pqc_standardization_status,
+    algorithm_family, primitive, crypto_functions, nist_quantum_security_level, metadata) VALUES
+('SecP384r1MLKEM1024', 'key_exchange', 'SecP384r1MLKEM1024', 'Hybrid key exchange: ECDH over NIST P-384 combined with ML-KEM-1024. IANA TLS group 0x11ED.', 'recommended', 'current', 5,
+    ARRAY[]::text[], 'Recommended migration target where a higher security margin is required: P-384 ECDH plus ML-KEM-1024 post-quantum protection.', '{"NIST": "hybrid", "IETF": "RFC 10024"}'::jsonb, true, true, 'candidate',
+    'Hybrid-KEM', 'kem', ARRAY['keygen','encapsulate','decapsulate'], 5, '{"hybrid": true, "classical_component": "P-384", "pqc_component": "ML-KEM-1024", "iana_group": "0x11ED", "quantum_resistance": true}'::jsonb)
+ON CONFLICT (code) DO NOTHING;
+
 -- ── Part 2: OID corrections (overwrite — these values are wrong) ─────────────
 -- ML-KEM was seeded on the AES arc (…3.4.1.x). The KEM arc is …3.4.4.x
 -- (NIST CSOR id-alg-ml-kem-512/768/1024 = …3.4.4.1/2/3).
@@ -3933,6 +3950,95 @@ BEGIN
     DELETE FROM algorithms WHERE id = retire;
 END $$;
 -- END: ed25519-dedupe
+
+-- ============================================================================
+-- ALGORITHM CATALOGUE — Part 6: IKE Diffie-Hellman groups
+-- ============================================================================
+-- Re-runnable (ON CONFLICT DO NOTHING). Every VPN collector reports the DH group
+-- of an IPsec tunnel, in its own spelling ("14", "14 5", "Group 19",
+-- "modp2048"). shared/cryptoparse/ike_groups.go maps each spelling to its IANA
+-- IKEv2 Transform Type 4 ID and to the catalogue row below that assesses it;
+-- this block adds the rows that did not exist. Groups already catalogued keep
+-- their rows: 1 -> DH-768, 2 -> DH-1024, 14 -> DH-MODP-2048, 19/20/21 ->
+-- DH-ECP-256/384/521, 31/32 -> X25519/X448, 35/36/37 -> ML-KEM-512/768/1024.
+--
+-- Until these links existed a tunnel's key exchange was never linked at all, so
+-- a VPN that linked only AES and SHA-2 was classified as symmetric-only and
+-- counted as quantum-ready. Every group below is classical key agreement
+-- (primitive 'key-agree'), which NIST IR 8547 lists as quantum-vulnerable.
+--
+-- Sources for the assessments:
+--   * Security strength: NIST SP 800-57 Part 1 Rev. 5, Table 2 (FFC L=1024 ->
+--     80 bits, L=3072 -> 128; ECC f=160-223 -> 80, f=224-255 -> 112,
+--     f=256-383 -> 128, f=384-511 -> 192, f>=512 -> 256). Moduli the table does
+--     not list use the SP 800-56B Rev. 2 Appendix D estimate, the figures the
+--     diffie-hellman-group16/18 SSH rows above already carry (4096 -> 152,
+--     8192 -> 192); 1536 uses RFC 3526 section 8's lower estimate (90).
+--   * Below 112 bits: NIST SP 800-131A Rev. 2 disallows key agreement under
+--     112 bits of security.
+--   * IKEv2 usage: RFC 8247 section 2.4 — group 5 SHOULD NOT (security margin
+--     too narrow), 22 MUST NOT, 23 and 24 SHOULD NOT (unpublished seeds, not
+--     safe primes; small-subgroup checks required).
+--   * Curves: RFC 5114 (groups 25/26, NIST P-192/P-224), RFC 6954 and
+--     RFC 5639 (Brainpool, groups 27-30).
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
+    recommended_alternatives, migration_guidance, compliance_mappings, is_standard,
+    algorithm_family, primitive, oid, crypto_functions, classical_security_level, nist_quantum_security_level,
+    parameter_set_identifier, curve, metadata) VALUES
+-- Group 5. ~90-bit strength (RFC 3526 s.8): under the SP 800-131A 112-bit floor. RFC 8247: SHOULD NOT.
+('DH-MODP-1536', 'key_exchange', 'MODP-1536 (IKE group 5)', '1536-bit MODP Diffie-Hellman group for IKE (RFC 3526, IKE group 5). Below the 112-bit security floor; RFC 8247 says it SHOULD NOT be used because it is considered breakable by a nation-state within a few years.', 'weak', 'deprecated', 70,
+    ARRAY['DH-ECP-256', 'DH-MODP-3072'], 'Remove group 5 from the IKE and PFS proposals. Use group 19 (ECP-256) or group 14 as a minimum, and plan an RFC 9370 additional ML-KEM key exchange for post-quantum protection.', '{"NIST": "disallowed", "IETF": "RFC 8247 SHOULD NOT", "PCI-DSS": "non-compliant"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 90, 0, '1536', NULL, '{"ike_transform_id": 5, "reference": "RFC 3526"}'::jsonb),
+-- Group 15. 128-bit (SP 800-57 Table 2).
+('DH-MODP-3072', 'key_exchange', 'MODP-3072 (IKE group 15)', '3072-bit MODP Diffie-Hellman group for IKE (RFC 3526, IKE group 15). 128-bit classical security.', 'strong', 'current', 25,
+    ARRAY['DH-ECP-256', 'ML-KEM-768'], 'Strong classical key agreement; not quantum-resistant. Elliptic-curve groups give the same strength far more cheaply. Plan an RFC 9370 additional ML-KEM key exchange.', '{"NIST": "approved", "PCI-DSS": "compliant"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 128, 0, '3072', NULL, '{"ike_transform_id": 15, "reference": "RFC 3526"}'::jsonb),
+-- Group 16. 152-bit (SP 800-56B Rev.2 App. D; matches diffie-hellman-group16-sha512).
+('DH-MODP-4096', 'key_exchange', 'MODP-4096 (IKE group 16)', '4096-bit MODP Diffie-Hellman group for IKE (RFC 3526, IKE group 16).', 'strong', 'current', 25,
+    ARRAY['DH-ECP-384', 'ML-KEM-768'], 'Strong classical key agreement; not quantum-resistant. Plan an RFC 9370 additional ML-KEM key exchange.', '{"NIST": "approved", "PCI-DSS": "compliant"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 152, 0, '4096', NULL, '{"ike_transform_id": 16, "reference": "RFC 3526"}'::jsonb),
+-- Group 17. 176-bit (SP 800-56B Rev.2 App. D).
+('DH-MODP-6144', 'key_exchange', 'MODP-6144 (IKE group 17)', '6144-bit MODP Diffie-Hellman group for IKE (RFC 3526, IKE group 17).', 'strong', 'current', 25,
+    ARRAY['DH-ECP-384', 'ML-KEM-1024'], 'Strong classical key agreement; not quantum-resistant, and computationally expensive. Plan an RFC 9370 additional ML-KEM key exchange.', '{"NIST": "approved", "PCI-DSS": "compliant"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 176, 0, '6144', NULL, '{"ike_transform_id": 17, "reference": "RFC 3526"}'::jsonb),
+-- Group 18. 192-bit (SP 800-57 Table 2, L>=7680; matches diffie-hellman-group18-sha512).
+('DH-MODP-8192', 'key_exchange', 'MODP-8192 (IKE group 18)', '8192-bit MODP Diffie-Hellman group for IKE (RFC 3526, IKE group 18).', 'strong', 'current', 25,
+    ARRAY['DH-ECP-521', 'ML-KEM-1024'], 'Strong classical key agreement; not quantum-resistant, and very computationally expensive. Plan an RFC 9370 additional ML-KEM key exchange.', '{"NIST": "approved", "PCI-DSS": "compliant"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 192, 0, '8192', NULL, '{"ike_transform_id": 18, "reference": "RFC 3526"}'::jsonb),
+-- Group 22. 80-bit (SP 800-57 Table 2, L=1024). RFC 8247: MUST NOT.
+('DH-RFC5114-1024-160', 'key_exchange', 'MODP-1024 with 160-bit subgroup (IKE group 22)', '1024-bit MODP group with a 160-bit prime-order subgroup (RFC 5114, IKE group 22). 80-bit security and unpublished generation seeds; RFC 8247 says it MUST NOT be used.', 'weak', 'deprecated', 80,
+    ARRAY['DH-ECP-256', 'DH-MODP-2048'], 'Remove group 22 from every IKE and PFS proposal. It is below the 112-bit floor and IKEv2 forbids it. Use group 19 or 14.', '{"NIST": "disallowed", "IETF": "RFC 8247 MUST NOT", "PCI-DSS": "non-compliant"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 80, 0, '1024-160', NULL, '{"ike_transform_id": 22, "reference": "RFC 5114"}'::jsonb),
+-- Group 23. 112-bit, but RFC 8247: SHOULD NOT (unpublished seeds, not a safe prime).
+('DH-RFC5114-2048-224', 'key_exchange', 'MODP-2048 with 224-bit subgroup (IKE group 23)', '2048-bit MODP group with a 224-bit prime-order subgroup (RFC 5114, IKE group 23). The generation seeds were never published and the modulus is not a safe prime, so peers must validate against small-subgroup attacks; RFC 8247 says it SHOULD NOT be used.', 'weak', 'deprecated', 55,
+    ARRAY['DH-MODP-2048', 'DH-ECP-256'], 'Replace group 23 with group 14 (same size, safe prime) or group 19. RFC 8247 expects it to become MUST NOT.', '{"NIST": "approved", "IETF": "RFC 8247 SHOULD NOT"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 112, 0, '2048-224', NULL, '{"ike_transform_id": 23, "reference": "RFC 5114"}'::jsonb),
+-- Group 24. 112-bit, but RFC 8247: SHOULD NOT (as group 23).
+('DH-RFC5114-2048-256', 'key_exchange', 'MODP-2048 with 256-bit subgroup (IKE group 24)', '2048-bit MODP group with a 256-bit prime-order subgroup (RFC 5114, IKE group 24). The generation seeds were never published and the modulus is not a safe prime, so peers must validate against small-subgroup attacks; RFC 8247 says it SHOULD NOT be used.', 'weak', 'deprecated', 55,
+    ARRAY['DH-MODP-2048', 'DH-ECP-256'], 'Replace group 24 with group 14 (same size, safe prime) or group 19. RFC 8247 expects it to become MUST NOT.', '{"NIST": "approved", "IETF": "RFC 8247 SHOULD NOT"}'::jsonb, true,
+    'DH', 'key-agree', NULL, ARRAY['keygen','key-agree'], 112, 0, '2048-256', NULL, '{"ike_transform_id": 24, "reference": "RFC 5114"}'::jsonb),
+-- Group 25. NIST P-192: 80-bit (SP 800-57 Table 2, f=160-223), under the 112-bit floor.
+('DH-ECP-192', 'key_exchange', 'ECP-192 (IKE group 25)', 'Elliptic-curve Diffie-Hellman over NIST P-192 (RFC 5114, IKE group 25). 80-bit security, below the 112-bit floor.', 'weak', 'deprecated', 75,
+    ARRAY['DH-ECP-256', 'X25519'], 'Remove group 25. Use group 19 (P-256) or 31 (Curve25519).', '{"NIST": "disallowed", "PCI-DSS": "non-compliant"}'::jsonb, true,
+    'ECDH', 'key-agree', '1.2.840.10045.3.1.1', ARRAY['keygen','key-agree'], 80, 0, NULL, 'P-192', '{"ike_transform_id": 25, "reference": "RFC 5114"}'::jsonb),
+-- Group 26. NIST P-224: 112-bit (SP 800-57 Table 2, f=224-255).
+('DH-ECP-224', 'key_exchange', 'ECP-224 (IKE group 26)', 'Elliptic-curve Diffie-Hellman over NIST P-224 (RFC 5114, IKE group 26). 112-bit security: the minimum SP 800-131A accepts.', 'acceptable', 'current', 35,
+    ARRAY['DH-ECP-256', 'X25519'], 'Acceptable at the 112-bit floor. Prefer group 19 (P-256) or 31 (Curve25519); not quantum-resistant.', '{"NIST": "approved"}'::jsonb, true,
+    'ECDH', 'key-agree', '1.3.132.0.33', ARRAY['keygen','key-agree'], 112, 0, NULL, 'P-224', '{"ike_transform_id": 26, "reference": "RFC 5114"}'::jsonb),
+-- Groups 27-30. Brainpool (RFC 5639 curves, RFC 6954 for IKEv2); strength per SP 800-57 Table 2 by field size.
+('ECDH-BRAINPOOLP224R1', 'key_exchange', 'brainpoolP224r1 (IKE group 27)', 'Elliptic-curve Diffie-Hellman over brainpoolP224r1 (RFC 5639; IKE group 27 per RFC 6954). 112-bit security.', 'acceptable', 'current', 35,
+    ARRAY['ECDH-BRAINPOOLP256R1', 'DH-ECP-256'], 'Acceptable at the 112-bit floor. Prefer a 256-bit curve; not quantum-resistant.', '{"RFC": "6954"}'::jsonb, true,
+    'ECDH', 'key-agree', '1.3.36.3.3.2.8.1.1.5', ARRAY['keygen','key-agree'], 112, 0, NULL, 'brainpoolP224r1', '{"ike_transform_id": 27, "reference": "RFC 6954"}'::jsonb),
+('ECDH-BRAINPOOLP256R1', 'key_exchange', 'brainpoolP256r1 (IKE group 28)', 'Elliptic-curve Diffie-Hellman over brainpoolP256r1 (RFC 5639; IKE group 28 per RFC 6954). 128-bit security.', 'strong', 'current', 15,
+    ARRAY['ML-KEM-768'], 'Strong classical key agreement; not quantum-resistant. Plan an RFC 9370 additional ML-KEM key exchange.', '{"RFC": "6954"}'::jsonb, true,
+    'ECDH', 'key-agree', '1.3.36.3.3.2.8.1.1.7', ARRAY['keygen','key-agree'], 128, 0, NULL, 'brainpoolP256r1', '{"ike_transform_id": 28, "reference": "RFC 6954"}'::jsonb),
+('ECDH-BRAINPOOLP384R1', 'key_exchange', 'brainpoolP384r1 (IKE group 29)', 'Elliptic-curve Diffie-Hellman over brainpoolP384r1 (RFC 5639; IKE group 29 per RFC 6954). 192-bit security.', 'strong', 'current', 15,
+    ARRAY['ML-KEM-1024'], 'Strong classical key agreement; not quantum-resistant. Plan an RFC 9370 additional ML-KEM key exchange.', '{"RFC": "6954"}'::jsonb, true,
+    'ECDH', 'key-agree', '1.3.36.3.3.2.8.1.1.11', ARRAY['keygen','key-agree'], 192, 0, NULL, 'brainpoolP384r1', '{"ike_transform_id": 29, "reference": "RFC 6954"}'::jsonb),
+('ECDH-BRAINPOOLP512R1', 'key_exchange', 'brainpoolP512r1 (IKE group 30)', 'Elliptic-curve Diffie-Hellman over brainpoolP512r1 (RFC 5639; IKE group 30 per RFC 6954). 256-bit security.', 'strong', 'current', 12,
+    ARRAY['ML-KEM-1024'], 'Strong classical key agreement; not quantum-resistant. Plan an RFC 9370 additional ML-KEM key exchange.', '{"RFC": "6954"}'::jsonb, true,
+    'ECDH', 'key-agree', '1.3.36.3.3.2.8.1.1.13', ARRAY['keygen','key-agree'], 256, 0, NULL, 'brainpoolP512r1', '{"ike_transform_id": 30, "reference": "RFC 6954"}'::jsonb)
+ON CONFLICT (code) DO NOTHING;
 
 
 -- =================================================================

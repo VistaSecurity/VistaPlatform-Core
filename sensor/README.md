@@ -50,6 +50,9 @@ Key fields (env var equivalents in parentheses):
 - capture.* (INTERFACES, ACTIVE_PROBING, NETWORK_DISCOVERY, MAX_CONNECTIONS, TIMEOUT_SECONDS, BUFFER_SIZE)
 - capture.dedupTTLMinutes — minimum **minutes** before re-reporting the same passive observation (same destination IP, port, protocol). Default **60**. Overrides: `DEDUP_TTL_MINUTES` env var; control-plane `capture_config.dedup_ttl_minutes` or `update_config` payload (applied live on next heartbeat without restart).
 
+- capture.thirdPartyTLSEnrichment (`THIRD_PARTY_TLS_ENRICHMENT`) — default **false**. Let the TLS enricher connect to third-party TLS services the network talks to, to read their certificates. Without it the enricher only connects to private addresses, `capture.ownedNetworks` / platform-declared segments, and elevated connections. A **local** value: it applies only while the platform has never delivered its `third_party_tls_enrichment` setting; the platform's value wins from its first delivery and is recorded in `<dataPath>/platform-probe-consent.json` so it keeps winning after a restart. Delete that file to hand control back to the local value.
+- capture.ownedNetworks (`OWNED_NETWORKS`, comma-separated) — public CIDRs this sensor may treat as the tenant's own, for an air-gapped sensor with no platform-declared network segments. IPv4 must be /8 or narrower, IPv6 /16 or narrower; wider entries are ignored. Same precedence as `thirdPartyTLSEnrichment`: replaced by the platform's owned networks from their first delivery.
+
 The dedup window is shared by the passive connection cache (TLS/SSH TCP reassembly and fallback path) and the TLS enricher debounce (active probes for TLS 1.3–style certificate gaps).
 
 ## Run

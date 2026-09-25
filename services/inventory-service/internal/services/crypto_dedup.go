@@ -346,6 +346,16 @@ const setCryptoRiskScoreSQL = `
 		       updated_at = NOW()
 		 WHERE id = $2`
 
+// clearCryptoRiskScore stores a configuration as unassessed (risk_score NULL):
+// used when the only assessment available is a partial one that found nothing
+// weak (cipher_assessment.go). Same statement, NULL bound.
+func clearCryptoRiskScore(tx *sqlx.Tx, implID uuid.UUID) error {
+	if _, err := tx.Exec(setCryptoRiskScoreSQL, nil, implID); err != nil {
+		return fmt.Errorf("clear risk score on crypto implementation %s: %w", implID, err)
+	}
+	return nil
+}
+
 // persistCryptoRiskScore writes the score of a configuration that was ASSESSED,
 // including a score of zero.
 //

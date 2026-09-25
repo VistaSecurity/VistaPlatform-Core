@@ -215,6 +215,9 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 		// later or pick another) from "that sensor does not exist" (404) from
 		// "your request was malformed" (400), because the previous behaviour
 		// was to accept the job and run the scan somewhere else entirely.
+		if writeTargetAuthorizationError(c, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, services.ErrSensorNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -226,6 +229,12 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 			sharedapi.BadRequest(c, "failed to create job")
 		}
 		return
+	}
+
+	// A person confirmed targets outside the tenant's registered networks:
+	// record who, when, what they named and what it resolved to ( W5.13b).
+	if len(job.ExternalTargets) > 0 {
+		auditExternalTargets(c, tenantID, userID, job)
 	}
 
 	// Publish job to NATS queue

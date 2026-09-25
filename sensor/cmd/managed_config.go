@@ -52,7 +52,20 @@ func (s *Sensor) registerManagedSettings(a *desiredstate.Applier) {
 	// its later contents would forget a pending change on the next revision.
 	running := s.config.Capture
 	a.Handle(agentconfig.KeyActiveProbing, desiredstate.BoolSetter(func(on bool) error {
-		s.config.Capture.ActiveProbing = on
+		s.config.SetActiveProbing(on)
+		return nil
+	}))
+
+	// Read live by the TLS enricher on every passive discovery, so it takes
+	// effect immediately in both directions — including OFF, which must stop
+	// third-party handshakes on the next observation, not at a restart.
+	//
+	// The platform's value replaces any local one and is recorded, so it keeps
+	// governing after a restart (probe_consent_state.go).
+	a.Handle(agentconfig.KeyThirdPartyTLSEnrichment, desiredstate.BoolSetter(func(on bool) error {
+		s.config.SetThirdPartyTLSEnrichment(on)
+		s.platformOptInDelivered.Store(true)
+		s.recordPlatformProbeConsent(func(st *probeConsentState) { st.ThirdPartyTLSEnrichment = &on })
 		return nil
 	}))
 

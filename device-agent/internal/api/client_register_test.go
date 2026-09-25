@@ -4,11 +4,34 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 )
+
+func TestOutboundClient_Register_BlockedTenant403DoesNotEnroll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"tenant_suspended","error":"organization suspended"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		PlatformURL:     srv.URL,
+		RegistrationKey: "REG-0123456789abcdef0123456789abcdef",
+	}
+	c := NewOutboundClient(cfg)
+	err := c.Register("9.8.7")
+	if err == nil || !strings.Contains(err.Error(), "tenant_suspended") || !strings.Contains(err.Error(), "status: 403") {
+		t.Fatalf("Register error = %v, want the 403 tenant_suspended refusal", err)
+	}
+	if cfg.AgentID != "" || cfg.Security.ClientCert != "" || cfg.Security.ClientKey != "" {
+		t.Fatalf("403 mutated enrollment state: agent=%q cert=%t key=%t", cfg.AgentID, cfg.Security.ClientCert != "", cfg.Security.ClientKey != "")
+	}
+}
 
 func TestOutboundClient_Register_setsAgentIDOnConfig(t *testing.T) {
 	agentID := uuid.New()

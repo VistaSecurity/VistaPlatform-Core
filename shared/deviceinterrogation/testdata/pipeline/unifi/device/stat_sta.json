@@ -1,0 +1,21 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "mac": "4c:6e:0a:87:d4:80",
+      "ip": "192.0.2.68",
+      "hostname": "linux-2",
+      "name": "linux-2",
+      "oui": "Intel",
+      "is_wired": true,
+      "sw_mac": "78:8a:20:4b:ee:41",
+      "network": "Default",
+      "vlan": 1,
+      "x_fingerprint": "MUST-NOT-BE-COLLECTED",
+      "fingerprint": "MUST-NOT-BE-COLLECTED",
+      "note": "operator@example.com MUST-NOT-BE-COLLECTED"
+    }
+  ]
+}

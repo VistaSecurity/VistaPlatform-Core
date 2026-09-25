@@ -201,6 +201,7 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 	result := &InterrogateResult{
 		Assets:     []CryptoAsset{},
 		DeviceInfo: make(map[string]interface{}),
+		collector:  panCollector,
 	}
 
 	// Authenticate: keygen → API key. Fatal — every subsequent call needs it.
@@ -212,7 +213,7 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 	// management interface all come from this one response.
 	var systemInfo panSystemInfo
 	if projected, info, err := c.getSystemInfo(ctx); err != nil {
-		fmt.Printf("Warning: failed to get system info: %v\n", err)
+		result.warn("show system info", err, "Model, serial, software version and uptime not collected")
 	} else {
 		result.DeviceInfo = projected
 		systemInfo = info
@@ -223,12 +224,12 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 	// Interfaces (non-fatal). The management interface is folded in from system
 	// info, so this still produces a fact when the op command is unavailable.
 	if body, err := c.getInterfaces(ctx); err != nil {
-		fmt.Printf("Warning: failed to get interfaces: %v\n", err)
+		result.warn("show interface all", err, "Interfaces not collected (management interface only)")
 		if interfaces, ifErr := panInterfaces("", systemInfo); ifErr == nil && len(interfaces) > 0 {
 			result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
 		}
 	} else if interfaces, err := panInterfaces(body, systemInfo); err != nil {
-		fmt.Printf("Warning: failed to parse interfaces: %v\n", err)
+		result.warnAs(WarningParseError, "show interface all", "Interfaces not collected", err.Error())
 	} else if len(interfaces) > 0 {
 		result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
 	}
@@ -238,17 +239,17 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 	// to, which is not the same claim as "these two are cabled together".
 	var neighbors []map[string]interface{}
 	if body, err := c.getARPTable(ctx); err != nil {
-		fmt.Printf("Warning: failed to get ARP table: %v\n", err)
+		result.warn("show arp all", err, "ARP neighbours not collected")
 	} else if arp, err := panARPNeighbors(body); err != nil {
-		fmt.Printf("Warning: failed to parse ARP table: %v\n", err)
+		result.warnAs(WarningParseError, "show arp all", "ARP neighbours not collected", err.Error())
 	} else {
 		neighbors = append(neighbors, arp...)
 	}
 
 	if body, err := c.getLLDPNeighbors(ctx); err != nil {
-		fmt.Printf("Warning: failed to get LLDP neighbours: %v\n", err)
+		result.warn("show lldp neighbors all", err, "LLDP neighbours not collected")
 	} else if lldp, edges, err := panLLDPObservations(body); err != nil {
-		fmt.Printf("Warning: failed to parse LLDP neighbours: %v\n", err)
+		result.warnAs(WarningParseError, "show lldp neighbors all", "LLDP neighbours not collected", err.Error())
 	} else {
 		neighbors = append(neighbors, lldp...)
 		for _, edge := range edges {
@@ -262,7 +263,7 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 
 	// SSL decrypt profiles (non-fatal).
 	if profiles, err := c.getSSLDecryptProfiles(ctx); err != nil {
-		fmt.Printf("Warning: failed to get SSL decrypt profiles: %v\n", err)
+		result.warn(panSSLDecryptXPath, err, "SSL decryption profiles not collected")
 	} else {
 		for _, profile := range profiles {
 			result.Assets = append(result.Assets, c.convertSSLDecryptProfileToAsset(profile))
@@ -271,7 +272,7 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 
 	// Security rules carrying an SSL-decrypt action (non-fatal).
 	if rules, err := c.getSecurityRules(ctx); err != nil {
-		fmt.Printf("Warning: failed to get security rules: %v\n", err)
+		result.warn(panSecurityRulesXPath, err, "SSL-decrypting security rules not collected")
 	} else {
 		for _, rule := range rules {
 			if rule.SSL.Decrypt != "" {
@@ -282,6 +283,13 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 
 	return result, nil
 }
+
+// The config xpaths this collector reads. Named because they are also the
+// endpoint a collection warning reports when the read fails.
+const (
+	panSSLDecryptXPath    = "/config/devices/entry/network/profiles/ssl-decrypt"
+	panSecurityRulesXPath = "/config/devices/entry/vsys/entry/rulebase/security/rules"
+)
 
 // getAPIKey authenticates via the keygen endpoint and stores the API key.
 func (c *panClient) getAPIKey(ctx context.Context) error {
@@ -314,7 +322,7 @@ func (c *panClient) getAPIKey(ctx context.Context) error {
 	}
 
 	if panosResp.Status != "success" {
-		return fmt.Errorf("API key request failed: %s", panosResp.Code)
+		return panAPIError(panosResp.Code, "API key request")
 	}
 
 	c.apiKey = panosResp.Result.Key
@@ -377,7 +385,7 @@ func (c *panClient) getLLDPNeighbors(ctx context.Context) (string, error) {
 
 // getSSLDecryptProfiles retrieves SSL-decrypt profiles.
 func (c *panClient) getSSLDecryptProfiles(ctx context.Context) ([]panSSLDecryptEntry, error) {
-	xpath := "/config/devices/entry/network/profiles/ssl-decrypt"
+	xpath := panSSLDecryptXPath
 	apiURL := fmt.Sprintf("%s/api/?type=config&action=get&xpath=%s", c.baseURL, url.QueryEscape(xpath))
 
 	resp, err := c.apiRequest(ctx, "GET", apiURL)
@@ -391,7 +399,7 @@ func (c *panClient) getSSLDecryptProfiles(ctx context.Context) ([]panSSLDecryptE
 	}
 
 	if panosResp.Status != "success" {
-		return nil, fmt.Errorf("failed to get SSL decrypt profiles: %s", panosResp.Code)
+		return nil, panAPIError(panosResp.Code, "SSL decrypt profiles request")
 	}
 
 	// PAN-OS roots the result at the last xpath node, i.e. <result><ssl-decrypt>.
@@ -409,7 +417,7 @@ func (c *panClient) getSSLDecryptProfiles(ctx context.Context) ([]panSSLDecryptE
 
 // getSecurityRules retrieves security rules with SSL settings.
 func (c *panClient) getSecurityRules(ctx context.Context) ([]panRuleEntry, error) {
-	xpath := "/config/devices/entry/vsys/entry/rulebase/security/rules"
+	xpath := panSecurityRulesXPath
 	apiURL := fmt.Sprintf("%s/api/?type=config&action=get&xpath=%s", c.baseURL, url.QueryEscape(xpath))
 
 	resp, err := c.apiRequest(ctx, "GET", apiURL)
@@ -423,7 +431,7 @@ func (c *panClient) getSecurityRules(ctx context.Context) ([]panRuleEntry, error
 	}
 
 	if panosResp.Status != "success" {
-		return nil, fmt.Errorf("failed to get security rules: %s", panosResp.Code)
+		return nil, panAPIError(panosResp.Code, "security rules request")
 	}
 
 	// PAN-OS roots the result at the last xpath node, i.e. <result><rules>.

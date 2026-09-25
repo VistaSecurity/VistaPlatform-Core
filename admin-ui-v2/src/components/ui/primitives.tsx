@@ -65,7 +65,7 @@ export const planColor = (p: string): string =>
 /* ---------------- formatters ---------------- */
 export const money = (n: number): string => '$' + Math.round(n).toLocaleString('en-US');
 export const moneyK = (n: number): string =>
-  n >= 1e6 ? '$' + (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? '$' + (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : '$' + n;
+  n >= 1e6 ? '$' + (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? '$' + (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : '$' + Math.round(n);
 export const num = (n: number): string => Number(n).toLocaleString('en-US');
 export const numK = (n: number): string => (n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n));
 

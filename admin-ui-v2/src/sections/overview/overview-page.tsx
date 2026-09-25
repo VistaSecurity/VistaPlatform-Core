@@ -8,13 +8,16 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { CircleDollarSign, Building2, Activity, AlertTriangle, ChevronRight } from 'lucide-react';
 import { clients } from '../../lib/clients';
-import { Avatar, AreaChart, MiniBar, PlanTag, StatTile, StatusTag, healthIndexPresentation, initialsFromName, moneyK, num } from '../../components/ui/primitives';
+import { Avatar, MiniBar, PlanTag, StatTile, StatusTag, healthIndexPresentation, initialsFromName, moneyK, num } from '../../components/ui/primitives';
 import { useTenants, useTenantHealthMap, tenantStatus, planLabel } from '../tenants/queries';
 import { usePlatformEdition } from '../../lib/edition';
+import { BillingNotConfigured } from '../billing/billing-not-configured';
 
 // Revenue analytics live in admin-service/ee/billingapi. On a Core build the
-// routes are absent (404), so these two stay dormant rather than firing a doomed
-// request and leaving the hero showing "loading…" forever.
+// routes are absent (404), so this stays dormant rather than firing a doomed
+// request and leaving the hero showing "loading…" forever. There is no MRR
+// series: revenue is read from billing records, which hold current state only,
+// and the old "trailing" chart was today's figure projected backwards.
 function useBillingDashboard(enabled: boolean) {
   return useQuery({
     queryKey: ['platform', 'billing', 'dashboard'],
@@ -23,18 +26,6 @@ function useBillingDashboard(enabled: boolean) {
       const { data, error } = await clients.admin.GET('/admin/billing/analytics/dashboard', {});
       if (error || !data) throw new Error('billing');
       return data;
-    },
-    staleTime: 5 * 60 * 1000, retry: 0,
-  });
-}
-function useMrrSeries(enabled: boolean) {
-  return useQuery({
-    queryKey: ['platform', 'billing', 'mrr'],
-    enabled,
-    queryFn: async () => {
-      const { data, error } = await clients.admin.GET('/admin/billing/analytics/mrr', {});
-      if (error || !data) throw new Error('mrr');
-      return 'series' in data ? (data.series ?? []) : [];
     },
     staleTime: 5 * 60 * 1000, retry: 0,
   });
@@ -64,7 +55,6 @@ export function OverviewPage() {
   const showTenants = has('msp');
   const showPastDue = showTenants && showRevenue;
   const { data: dash } = useBillingDashboard(showRevenue);
-  const { data: series } = useMrrSeries(showRevenue);
   const { data: status } = useSystemStatus();
 
   // Memoised so the fallback `[]` keeps a stable identity — otherwise every
@@ -104,18 +94,16 @@ export function OverviewPage() {
           `edition` marker in nav.ts because most of it (service health) is Core;
           the paid pieces are gated here instead of hiding the whole page. */}
       {showRevenue && (
-      <div className="op-panel" style={{ padding: '20px 22px', background: 'var(--op-hero)', display: 'grid', gridTemplateColumns: '300px 1fr', gap: 24, alignItems: 'center' }}>
-        <div>
-          <div className="op-eyebrow">Recurring revenue</div>
-          <div className="op-num accent-text" style={{ fontSize: 46, fontWeight: 700, letterSpacing: '-.02em', lineHeight: 1.1, marginTop: 6 }}>{dash ? moneyK(dash.mrr) : '—'}</div>
-          <div style={{ fontSize: 12, color: 'var(--op-t3)', marginTop: 4 }}>{dash ? `${moneyK(dash.mrr * 12)} ARR · ${num(dash.active_tenants)} active` : 'loading…'}</div>
-        </div>
-        <div style={{ minWidth: 0 }}>
-          <div className="op-eyebrow" style={{ marginBottom: 8 }}>MRR · trailing</div>
-          {series && series.length > 1
-            ? <AreaChart series={[{ data: series.map((p) => p.mrr), color: 'var(--accent)' }]} h={120} />
-            : <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-t3)', fontSize: 12 }}>No MRR history yet.</div>}
-        </div>
+      <div className="op-panel" style={{ padding: '20px 22px', background: 'var(--op-hero)' }}>
+        <div className="op-eyebrow">Recurring revenue</div>
+        {dash && !dash.billing_configured ? (
+          <div style={{ marginTop: 10 }}><BillingNotConfigured compact /></div>
+        ) : (
+          <>
+            <div className="op-num accent-text" style={{ fontSize: 46, fontWeight: 700, letterSpacing: '-.02em', lineHeight: 1.1, marginTop: 6 }}>{dash?.mrr != null ? moneyK(dash.mrr) : '—'}</div>
+            <div style={{ fontSize: 12, color: 'var(--op-t3)', marginTop: 4 }}>{dash?.mrr != null ? `${moneyK(dash.mrr * 12)} ARR · ${num(dash.paying_tenants ?? 0)} paying` : 'loading…'}</div>
+          </>
+        )}
       </div>
       )}
 

@@ -31,7 +31,7 @@ func NewPortScanner() *PortScanner {
 		timeout:   30 * time.Second,
 		tlsProber: NewTLSProber(10 * time.Second),
 		sshProber: NewSSHProber(10 * time.Second),
-		otProber:  shareddisc.NewProber(10 * time.Second),
+		otProber:  platformProber(10 * time.Second),
 	}
 }
 
@@ -404,7 +404,9 @@ func (ps *PortScanner) parseNmapOutput(output, target string, ports []int32, pro
 				if shouldProbeTLS(protocolName, reqProtocol, port) {
 					log.Printf("[PortScanner] Probing TLS for %s:%d (protocolName=%s, reqProtocol=%s, SNI=%s)", target, port, protocolName, reqProtocol, sniHostname)
 					skipVerEnum := !isProbeEnabled(probeOpts, "tls_version_enumeration")
-					if tlsData, err := ps.tlsProber.ProbeTLS(sniHostname, port, skipVerEnum); err == nil {
+					// Connect to `target` — the authorized address — never
+					// to the SNI name, which would be resolved again.
+					if tlsData, err := ps.tlsProber.ProbeTLS(sniHostname, target, port, skipVerEnum); err == nil {
 						// Merge (not replace) so anything already recorded on
 						// the finding — e.g. a resolution failure — survives.
 						for k, v := range tlsData {
@@ -675,7 +677,7 @@ func (ps *PortScanner) fallbackScan(target string, ports []int32, protocols []st
 				// or on a well-known TLS port.
 				if shouldProbeTLS(protocol, protocol, int(port)) {
 					skipVerEnum := !isProbeEnabled(probeOpts, "tls_version_enumeration")
-					if tlsData, err := ps.tlsProber.ProbeTLS(sniHostname, int(port), skipVerEnum); err == nil {
+					if tlsData, err := ps.tlsProber.ProbeTLS(sniHostname, target, int(port), skipVerEnum); err == nil {
 						for k, v := range tlsData {
 							finding.Data[k] = v
 						}

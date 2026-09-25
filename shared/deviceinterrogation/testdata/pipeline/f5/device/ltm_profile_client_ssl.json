@@ -1,0 +1,36 @@
+{
+  "kind": "tm:ltm:profile:client-ssl:client-sslcollectionstate",
+  "items": [
+    {
+      "name": "clientssl-secure",
+      "fullPath": "/Common/clientssl-secure",
+      "kind": "tm:ltm:profile:client-ssl:client-sslstate",
+      "ciphers": "ECDHE-RSA-AES256-GCM-SHA384",
+      "tlsVersion": "1.2",
+      "secureRenegotiation": "require",
+      "passphrase": "MUST-NOT-BE-COLLECTED",
+      "certKeyChain": [
+        {
+          "name": "default",
+          "cert": "/Common/www.example.com.crt",
+          "key": "/Common/www.example.com.key",
+          "passphrase": "MUST-NOT-BE-COLLECTED"
+        }
+      ]
+    },
+    {
+      "name": "clientssl-hardened",
+      "fullPath": "/Common/clientssl-hardened",
+      "kind": "tm:ltm:profile:client-ssl:client-sslstate",
+      "defaultsFrom": "/Common/clientssl",
+      "ciphers": "ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5",
+      "options": [
+        "dont-insert-empty-fragments",
+        "no-tlsv1",
+        "no-tlsv1.1",
+        "no-sslv3"
+      ],
+      "secureRenegotiation": "require"
+    }
+  ]
+}

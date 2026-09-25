@@ -125,8 +125,15 @@ func (e *JobExecutor) executeDeviceInterrogation(job *models.Job) error {
 		// in cannot be validated at all.
 		Facts:         result.Facts,
 		Relationships: result.Relationships,
-		Metadata:      result.DeviceInfo,
-		CompletedAt:   time.Now(),
+		// What the collector could not read. Without this the platform's job
+		// detail says nothing about an endpoint the account was refused — the
+		// in-cluster executor reports the same list for the same device.
+		Warnings: result.Warnings,
+		// The device's identity, once, whether or not any asset was found —
+		// the in-cluster executor hands the same value to the same sink.
+		DeviceIdentity: result.DeviceIdentity,
+		Metadata:       result.DeviceInfo,
+		CompletedAt:    time.Now(),
 	}
 
 	security.ClearCredentials(decryptedCreds)

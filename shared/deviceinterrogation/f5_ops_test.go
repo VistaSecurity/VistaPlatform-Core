@@ -332,7 +332,7 @@ func TestF5Hardware_ProjectsLeavesOntoTheAllowlist(t *testing.T) {
 	defer srv.Close()
 	c := newF5Client(srv.URL, "admin", "admin", "", true)
 
-	hardware := c.f5Hardware(context.Background())
+	hardware := c.f5Hardware(context.Background(), &InterrogateResult{})
 	assertNoPoison(t, "f5 hardware", hardware)
 
 	if hardware["bigipChassisSerialNum"] != "f5-abcd-efgh" || hardware["marketingName"] != "BIG-IP Virtual Edition" {

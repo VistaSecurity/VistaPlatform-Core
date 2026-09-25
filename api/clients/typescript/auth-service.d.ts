@@ -1106,7 +1106,7 @@ export interface paths {
         put?: never;
         /**
          * Create an SSO provider
-         * @description Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. A microsoft/azure provider may carry allowed_domains only while auth_url and token_url both name one Entra directory (not common, organizations, consumers or the personal-account directory); otherwise 400 with code allowed_domains_multi_tenant_authority. Returns the created provider (secrets not included).
+         * @description Creates an SSO provider for the tenant. provider_type + provider_name are required; OAuth2 types additionally require client_id/client_secret/auth_url/token_url, SAML types require saml_entity_id/saml_sso_url. Client secrets are encrypted at rest. allowed_domains entries are canonicalized and must be exact ASCII fully-qualified domains (punycode for IDNs), at most 50; invalid input returns 400 with code invalid_allowed_domains. A microsoft/azure provider may carry the resulting list only while auth_url and token_url both name one Entra directory (not common, organizations, consumers or the personal-account directory); otherwise 400 with code allowed_domains_multi_tenant_authority. Returns the created provider (secrets not included).
          */
         post: operations["createSSOProvider"];
         delete?: never;
@@ -1128,7 +1128,7 @@ export interface paths {
         get?: never;
         /**
          * Update an SSO provider (partial)
-         * @description Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. When the update sets allowed_domains, auth_url or token_url, the resulting row must satisfy the same Entra single-directory rule as create (400 allowed_domains_multi_tenant_authority otherwise). Returns the updated provider.
+         * @description Partial update of a provider owned by the caller's tenant — only provided fields are changed. At least one field (or group_role_mappings) is required (400 otherwise). client_secret / saml_private_key are re-encrypted at rest. A supplied allowed_domains list is canonicalized and validated exactly as on create (400 invalid_allowed_domains). When the update sets allowed_domains, auth_url or token_url, the resulting row must also satisfy the Entra single-directory rule (400 allowed_domains_multi_tenant_authority otherwise). Returns the updated provider.
          */
         put: operations["updateSSOProvider"];
         post?: never;
@@ -2102,6 +2102,7 @@ export interface components {
             auto_provision_users: boolean;
             attribute_mapping: Record<string, never> | null;
             default_role_id?: string;
+            /** @description Canonical exact ASCII fully-qualified domains that restrict sign-in; internationalized domains use punycode. */
             allowed_domains?: string[];
             groups_claim_name?: string;
             group_role_mappings?: components["schemas"]["GroupRoleMapping"][];
@@ -2134,6 +2135,7 @@ export interface components {
             auto_provision_users?: boolean;
             attribute_mapping?: Record<string, never>;
             default_role_id?: string;
+            /** @description At most 50 exact fully-qualified domains. Values are trimmed, ASCII-lowercased and de-duplicated; use punycode for internationalized domains. Wildcards, emails, URLs, single-label and trailing-dot entries are refused. */
             allowed_domains?: string[];
             groups_claim_name?: string;
             group_role_mappings?: components["schemas"]["GroupRoleMapping"][];
@@ -2156,6 +2158,7 @@ export interface components {
             auto_provision_users?: boolean;
             attribute_mapping?: Record<string, never>;
             default_role_id?: string;
+            /** @description Replacement list, validated and canonicalized with the same rules as create. An empty list clears the restriction. */
             allowed_domains?: string[];
             groups_claim_name?: string;
             group_role_mappings?: components["schemas"]["GroupRoleMapping"][];

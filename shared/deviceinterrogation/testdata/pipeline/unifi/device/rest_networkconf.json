@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "_id": "net-lan",
+      "name": "Default",
+      "purpose": "corporate",
+      "enabled": true,
+      "ip_subnet": "192.0.2.1/24",
+      "dhcpd_enabled": true,
+      "dhcpd_start": "192.0.2.100",
+      "dhcpd_stop": "192.0.2.200",
+      "x_radius_secret": "MUST-NOT-BE-COLLECTED"
+    },
+    {
+      "_id": "net-iot",
+      "name": "IoT",
+      "purpose": "corporate",
+      "enabled": true,
+      "vlan_enabled": true,
+      "vlan": 20,
+      "ip_subnet": "198.51.100.1/24",
+      "dhcpd_enabled": false,
+      "x_wpa_psk": "MUST-NOT-BE-COLLECTED"
+    },
+    {
+      "_id": "vpn-s2s",
+      "name": "branch-office-s2s",
+      "purpose": "site-vpn",
+      "vpn_type": "ipsec-vpn",
+      "ipsec_key_exchange": "ikev2",
+      "ipsec_encryption": "aes256",
+      "ipsec_hash": "sha256",
+      "ipsec_dh_group": 14,
+      "ipsec_pfs": true,
+      "ipsec_profile": "customized",
+      "ipsec_peer_ip": "203.0.113.50",
+      "ipsec_local_ip": "192.0.2.1",
+      "remote_vpn_subnets": [
+        "10.20.0.0/16"
+      ],
+      "x_ipsec_pre_shared_key": "MUST-NOT-BE-COLLECTED"
+    },
+    {
+      "_id": "vpn-wg",
+      "name": "remote-access",
+      "purpose": "remote-user-vpn",
+      "vpn_type": "wireguard-server",
+      "wireguard_port": 51820,
+      "ip_subnet": "192.0.2.129/26",
+      "wan_ip": "192.0.2.1",
+      "x_wireguard_private_key": "MUST-NOT-BE-COLLECTED"
+    }
+  ]
+}

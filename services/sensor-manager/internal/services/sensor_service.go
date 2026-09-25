@@ -21,6 +21,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // SensorService handles sensor operations
@@ -839,6 +840,8 @@ func (s *SensorService) GetWebhookConfig(sensorID string) (*models.WebhookConfig
 
 // CreatePendingSensor creates a pending sensor registration
 func (s *SensorService) CreatePendingSensor(registration *models.PendingSensorRegistration) error {
+	// Tenant-originated: never a platform marker (models.ReservedPlatformTags).
+	registration.Tags = models.StripReservedTags(registration.Tags)
 	// Use repository if available
 	if s.repo != nil {
 		return s.repo.CreatePendingSensor(context.Background(), registration)
@@ -1080,11 +1083,17 @@ func (s *SensorService) RegisterSensor(registration *models.SensorRegistration) 
 	// cross-tenant registration attacks.
 	var pendingSensor models.PendingSensorRegistration
 	verifyQuery := `
-		SELECT id, tenant_id, name, ip_address, profile, network_interfaces, tags, description, expires_at, status
-		FROM pending_sensor_registrations
-		WHERE registration_key = $1 AND expires_at > NOW() AND status = 'pending'`
+		SELECT p.id, p.tenant_id, p.name, p.ip_address, p.profile, p.network_interfaces,
+		       p.tags, p.description, p.expires_at, p.status,
+		       COALESCE(t.payment_status, ''), t.deleted_at IS NOT NULL
+		FROM pending_sensor_registrations p
+		JOIN tenants t ON t.id = p.tenant_id
+		WHERE p.registration_key = $1 AND p.expires_at > NOW() AND p.status = 'pending'
+		FOR UPDATE OF p, t`
 
 	var pendingDescription sql.NullString
+	var paymentStatus string
+	var tenantDeleted bool
 	err = tx.QueryRow(verifyQuery, registration.RegistrationKey).Scan(
 		&pendingSensor.ID,
 		&pendingSensor.TenantID,
@@ -1096,6 +1105,8 @@ func (s *SensorService) RegisterSensor(registration *models.SensorRegistration) 
 		&pendingDescription,
 		&pendingSensor.ExpiresAt,
 		&pendingSensor.Status,
+		&paymentStatus,
+		&tenantDeleted,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1121,6 +1132,10 @@ func (s *SensorService) RegisterSensor(registration *models.SensorRegistration) 
 	// Validate tenant_id is present (defensive check)
 	if pendingSensor.TenantID == uuid.Nil {
 		return nil, fmt.Errorf("registration key missing tenant association")
+	}
+	state := tenantstate.State{Found: true, PaymentStatus: paymentStatus, Deleted: tenantDeleted}
+	if code, blocked := state.Blocked(); blocked {
+		return nil, &tenantstate.BlockedError{Code: code}
 	}
 
 	// Create sensor with tenant_id from registration key
@@ -1172,6 +1187,11 @@ func (s *SensorService) RegisterSensor(registration *models.SensorRegistration) 
 	if len(tags) == 0 && len(registration.Tags) > 0 {
 		tags = registration.Tags
 	}
+	// A tenant registration never carries a platform marker (see
+	// models.ReservedPlatformTags). Stripped from BOTH sources: the pending row
+	// was written by a tenant too.
+	tags = models.StripReservedTags(tags)
+	platform = models.TenantPlatformName(platform)
 
 	ipAddress := pendingSensor.IPAddress
 	if ipAddress == "" {

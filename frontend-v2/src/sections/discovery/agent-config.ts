@@ -24,6 +24,9 @@ export interface Setting {
   origin: SettingOrigin;
   kind: SettingKind;
   apply: 'immediate' | 'restart';
+  /** The platform's own name for a setting whose key reads badly as words.
+   *  Absent for most; the name is then derived from the key. */
+  label?: string;
   description: string;
   confirm?: string;
   min?: number;
@@ -60,6 +63,12 @@ export function settingLabel(key: string): string {
     .map((w) => (ACRONYMS.has(w) ? w.toUpperCase() : w));
   const label = words.join(' ');
   return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+/** The name to show for a setting: the platform's label when it sends one,
+ *  otherwise the key turned into words. */
+export function settingName(s: Pick<Setting, 'key' | 'label'>): string {
+  return s.label?.trim() ? s.label : settingLabel(s.key);
 }
 
 /** The unit an int setting is measured in, taken from its key so the input can

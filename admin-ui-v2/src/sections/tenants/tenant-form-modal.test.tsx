@@ -54,13 +54,30 @@ describe('TenantFormModal — render by licence', () => {
     expect(html).not.toContain('Billing email');
   });
 
-  it('MSP: billing email and payment status (with trial) are offered', () => {
+  // Owner decision 6: 'trial' is derived from the trial record, not typed in.
+  it('MSP: billing email and payment status are offered, without a hand-set trial', () => {
     state.license = 'msp';
     const html = render();
     expect(html).toContain('Billing email');
     expect(html).toContain('Payment status');
-    expect(html).toContain('<option value="trial">');
+    expect(html).not.toContain('<option value="trial"');
+    expect(html).toContain('<option value="past_due">');
     expect(html).toContain('Plans &amp; Pricing');
+  });
+
+  // The server refuses only 'trial' and a trial → 'active' edit
+  // (ee/msp trial_status_edit.go); past due and cancelled overlay the trial and
+  // stay allowed, so the editor offers them (review of — the select used
+  // to be disabled outright).
+  it('MSP: a trialling tenant can be marked past due or cancelled, not active, and is pointed at Billing → Trials', () => {
+    state.license = 'msp';
+    const html = renderToStaticMarkup(createElement(TenantFormModal, { tenant: { ...tenant, payment_status: 'trial' }, onClose: () => {} }));
+    expect(html).not.toMatch(/<select[^>]*disabled/);
+    expect(html).toContain('<option value="trial"');
+    expect(html).toContain('<option value="past_due"');
+    expect(html).toContain('<option value="canceled"');
+    expect(html).not.toContain('<option value="active"');
+    expect(html).toContain('Billing → Trials');
   });
 });
 

@@ -56,12 +56,13 @@ func AuthorizeAutomaticScan(tx Queryer, payload sensordispatch.Payload) error {
 		}
 	}
 	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, payload.TenantID).Scan(&segmentRaw); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, payload.TenantID).Scan(&segmentRaw); err != nil {
 		return err
 	}
 	var segments []struct {
 		Value       string
 		NetworkType string `json:"network_type"`
+		Learned     bool
 		Blocked     bool
 	}
 	if err := json.Unmarshal(segmentRaw, &segments); err != nil {
@@ -76,7 +77,7 @@ func AuthorizeAutomaticScan(tx Queryer, payload sensordispatch.Payload) error {
 		}
 		if seg.Blocked {
 			excluded = append(excluded, prefix)
-		} else if seg.NetworkType == "private" || seg.NetworkType == "vpn" || seg.NetworkType == "cloud" {
+		} else if SegmentPrefixGrantsOwnership(prefix, seg.NetworkType, seg.Learned, true) {
 			allowed = append(allowed, prefix)
 		}
 	}

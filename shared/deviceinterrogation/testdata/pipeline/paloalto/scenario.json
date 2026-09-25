@@ -1,0 +1,13 @@
+{
+  "vendor": "paloalto",
+  "device_type": "palo_alto",
+  "hostname": "pa-edge-01.corp.example.test",
+  "transport": "rest",
+  "management_ip": "192.0.2.227",
+  "management_port": 443,
+  "tenant_segments": [
+    {"name": "Management network", "cidr": "192.0.2.224/27"},
+    {"name": "DMZ", "cidr": "198.51.100.0/24"}
+  ],
+  "provenance": "HAND-WRITTEN. No real PAN-OS XML API capture is in the corpus yet (W0.4). The op-command answers reuse the older hand-written fixtures one level up (testdata/paloalto_*.xml); the ssl-decrypt and security-rules config answers follow paloalto_test.go. PAN-OS collects no IKE gateways or crypto profiles today (K-06), so the fixture offers none."
+}

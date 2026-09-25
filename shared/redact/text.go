@@ -54,13 +54,15 @@ func TextURLSecrets(s string) string {
 }
 
 // Text is the redaction for a free-text string with no field name of its own —
-// an error message, a log line, a job's failure reason. It runs both value
-// rules: PEM private-key blocks by shape, and credential query parameters by
-// parameter name.
+// an error message, a log line, a job's failure reason. It runs every value
+// rule: credentials still wearing their name ([TextStructuredSecrets] — URL
+// userinfo, Authorization headers, Cisco secret lines, JSON members and
+// `name: value` pairs), credential query parameters by parameter name, and PEM
+// private-key blocks by shape.
 //
 // Use it wherever a string built from arbitrary runtime material is PERSISTED or
 // returned to a client. A map has keys to judge and goes through [Map]; an error
 // string has nothing but itself.
 func Text(s string) string {
-	return TextPEM(TextURLSecrets(s))
+	return TextPEM(TextURLSecrets(TextStructuredSecrets(s)))
 }

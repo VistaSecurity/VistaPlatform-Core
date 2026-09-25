@@ -666,6 +666,22 @@ Two switches sit at the bottom:
 **Import** (top right) bulk-creates segments from a spreadsheet — see
 [Spreadsheet Import](../features/spreadsheet-import.md).
 
+**Learned segments.** Interrogating a network device (Discovery → Devices) also
+adds a segment for each VLAN or interface network the device reports with a
+prefix — a UniFi site's networks, a FortiGate's VLAN subinterfaces, an F5's
+self-IP networks. Under its name the row says where it came from and what is
+known about DHCP on it, for example *Learned from Fortinet · DHCP unknown*.
+**DHCP unknown** means the device did not say whether it hands out addresses
+there, so the platform treats the network as if it does: an IP address alone
+is never used to decide that two sightings on it are the same asset. The
+network type is set from the prefix: RFC 1918 and IPv6 ULA space is *private*,
+anything else — carrier-grade NAT (100.64.0.0/10) included — is *public*. A
+learned public segment is used only to tell hosts apart; it does not make its
+range scannable, because a firewall's internet-facing network is where it
+connects, not something you own. To scan a public range you own, create the
+segment yourself. A segment you created with the same CIDR always wins, and
+interrogation never renames or retypes it.
+
 Creating, editing and deleting need the settings-update permission; the list is
 readable without it.
 

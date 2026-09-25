@@ -104,7 +104,7 @@ type SyntheticCheck struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		"JWT_SECRET":            sharedconfig.JWTSecret(),
 		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 	})
 
@@ -130,7 +130,7 @@ func Load() *Config {
 		DatabaseURL:          databaseURL,
 		RedisURL:             sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
 		InfluxDBURL:          sharedconfig.GetEnv("INFLUXDB_URL", "http://influxdb:8086"),
-		JWTSecret:            sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		JWTSecret:            sharedconfig.JWTSecret(),
 		ServiceTimeout:       time.Duration(timeout) * time.Second,
 		HealthCheckInterval:  time.Duration(interval) * time.Second,
 		S3Bucket:             sharedconfig.GetEnv("S3_LOG_BUCKET", "crypto-inventory-logs-dev"),

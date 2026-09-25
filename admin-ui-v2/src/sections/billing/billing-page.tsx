@@ -4,11 +4,14 @@
 // each a LEFT-RAIL sub-route (conforms to the v2 nav rule; no more in-page tabs).
 // Every sub-view is wired to a real admin-service endpoint; where a kit field has no
 // endpoint we render the closest real data + an honest note — no fabricated figures.
+import { useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { Repeat, TrendingUp, Building2, Activity, Wallet, Ticket, Coins, FlaskConical, AlertCircle } from 'lucide-react';
 import { clients } from '../../lib/clients';
-import { AreaChart, Donut, StatTile, StatusTag, money, moneyK, num, planColor } from '../../components/ui/primitives';
+import { Donut, StatTile, StatusTag, money, moneyK, num, planColor } from '../../components/ui/primitives';
+import { BillingNotConfigured } from './billing-not-configured';
+import { StartTrialModal, TrialRowActions } from './trial-actions';
 
 // ---- queries ---------------------------------------------------------------
 function useBillingDashboard() {
@@ -20,18 +23,6 @@ function useBillingDashboard() {
       return data;
     },
     staleTime: 5 * 60 * 1000,
-  });
-}
-function useMrrSeries() {
-  return useQuery({
-    queryKey: ['platform', 'billing', 'mrr'],
-    queryFn: async () => {
-      const { data, error } = await clients.admin.GET('/admin/billing/analytics/mrr', {});
-      if (error || !data) throw new Error('Failed to load MRR series');
-      return 'series' in data ? (data.series ?? []) : [];
-    },
-    staleTime: 5 * 60 * 1000,
-    retry: 0,
   });
 }
 function useAdminInvoices() {
@@ -70,15 +61,15 @@ function usePlatformCost() {
     retry: 0,
   });
 }
-function useTrialConversion() {
+function useTrials() {
   return useQuery({
-    queryKey: ['platform', 'billing', 'trial-conversion'],
+    queryKey: ['platform', 'billing', 'trials'],
     queryFn: async () => {
-      const { data, error } = await clients.admin.GET('/admin/billing/analytics/trial-conversion', {});
-      if (error || !data) throw new Error('Failed to load trial conversion');
-      return data as Record<string, unknown>;
+      const { data, error } = await clients.admin.GET('/admin/billing/trials', {});
+      if (error || !data) throw new Error('Failed to load trials');
+      return data;
     },
-    staleTime: 5 * 60 * 1000,
+    staleTime: 60 * 1000,
     retry: 0,
   });
 }
@@ -106,50 +97,55 @@ function SubView({ children }: { children: React.ReactNode }) {
 }
 
 // ---- sub-views -------------------------------------------------------------
+/** A revenue figure, or an em dash when there is nothing to measure it from. */
+const orDash = (v: number | null | undefined, fmt: (n: number) => string) => (v == null ? '—' : fmt(v));
+
+// Every revenue figure comes from billing records (billing_subscriptions:
+// subscriptions that have paid, active or past-due, never trialing,
+// interval-normalised, coupons applied; churn and LTV count only paid ones).
+// With no payment provider there are no records, and the tab says so rather
+// than showing a number. There is no MRR history to chart — the store is
+// current-state — so the "trailing" series that projected today backwards is
+// gone.
 function OverviewTab() {
   const { data: dash, isLoading, isError, refetch } = useBillingDashboard();
-  const { data: series } = useMrrSeries();
   const { data: invoices } = useAdminInvoices();
-  const mrr = dash?.mrr ?? 0;
-  const byTier = Object.entries(dash?.revenue_by_tier ?? {}).filter(([, v]) => Number(v) > 0);
-  const donutSegments = byTier.map(([tier, v]) => ({ value: Number(v), color: planColor(tier), label: tier }));
 
   if (isError) {
     return <div className="op-panel" style={{ padding: 40, textAlign: 'center', color: 'var(--op-t3)' }}>Couldn't load billing analytics. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => refetch()}>Retry</button></div>;
   }
+  if (dash && !dash.billing_configured) {
+    return <div className="op-panel"><BillingNotConfigured /></div>;
+  }
+  const mrr = dash?.mrr ?? null;
+  const byTier = Object.entries(dash?.revenue_by_tier ?? {}).filter(([, v]) => Number(v) > 0);
+  const donutSegments = byTier.map(([tier, v]) => ({ value: Number(v), color: planColor(tier), label: tier }));
+  const shown = (v: string) => (isLoading ? '…' : v);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12 }}>
-        <StatTile label="MRR" value={isLoading ? '…' : moneyK(mrr)} sub="recurring" icon={Repeat} brand />
-        <StatTile label="ARR" value={isLoading ? '…' : moneyK(mrr * 12)} sub="annualized" icon={TrendingUp} />
-        <StatTile label="Active tenants" value={isLoading ? '…' : num(dash?.active_tenants ?? 0)} sub="paying" icon={Building2} />
-        <StatTile label="Churn" value={isLoading ? '…' : `${(dash?.churn_rate ?? 0).toFixed(1)}%`} sub="monthly" icon={Activity} accent={(dash?.churn_rate ?? 0) > 5 ? 'var(--danger)' : undefined} />
-        <StatTile label="LTV" value={isLoading ? '…' : moneyK(dash?.ltv ?? 0)} sub="lifetime value" icon={Wallet} />
+        <StatTile label="MRR" value={shown(orDash(mrr, moneyK))} sub="recurring, from subscriptions" icon={Repeat} brand />
+        <StatTile label="ARR" value={shown(orDash(mrr == null ? null : mrr * 12, moneyK))} sub="annualized" icon={TrendingUp} />
+        <StatTile label="Paying tenants" value={shown(orDash(dash?.paying_tenants, num))} sub="live, non-trial subscription" icon={Building2} />
+        <StatTile label="Churn" value={shown(orDash(dash?.churn_rate, (n) => `${n.toFixed(1)}%`))} sub="tenants that stopped paying this month" icon={Activity} accent={(dash?.churn_rate ?? 0) > 5 ? 'var(--danger)' : undefined} />
+        <StatTile label="LTV" value={shown(orDash(dash?.ltv, moneyK))} sub={dash?.ltv == null && !isLoading ? 'not enough history yet' : 'lifetime value'} icon={Wallet} />
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: 14 }}>
-        <div className="op-panel" style={{ padding: '16px 18px' }}>
-          <div className="op-eyebrow" style={{ marginBottom: 12 }}>MRR · trailing series</div>
-          {series && series.length > 1
-            ? <AreaChart series={[{ data: series.map((p) => p.mrr), color: 'var(--accent)' }]} h={150} />
-            : <div style={{ height: 150, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-t3)', fontSize: 12 }}>{isLoading ? 'Loading…' : 'No MRR history yet.'}</div>}
-        </div>
-        <div className="op-panel" style={{ padding: '16px 18px' }}>
-          <div className="op-eyebrow" style={{ marginBottom: 12 }}>Revenue by plan</div>
-          {donutSegments.length > 0 ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-              <Donut segments={donutSegments} size={120} center={<><span className="op-num" style={{ fontSize: 18, fontWeight: 700, color: 'var(--op-t1)' }}>{byTier.length}</span><span style={{ fontSize: 9.5, color: 'var(--op-t3)' }}>plans</span></>} />
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {byTier.map(([tier, v]) => (
-                  <div key={tier} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                    <span style={{ width: 9, height: 9, borderRadius: 3, background: planColor(tier), flex: 'none' }} />
-                    <span style={{ flex: 1, color: 'var(--op-t2)' }}>{tier}</span>
-                    <span className="op-num" style={{ color: 'var(--op-t1)', fontWeight: 600 }}>{moneyK(Number(v))}</span>
-                  </div>
-                ))}
-              </div>
+      <div className="op-panel" style={{ padding: '16px 18px' }}>
+        <div className="op-eyebrow" style={{ marginBottom: 12 }}>Revenue by plan</div>
+        {donutSegments.length > 0 ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <Donut segments={donutSegments} size={120} center={<><span className="op-num" style={{ fontSize: 18, fontWeight: 700, color: 'var(--op-t1)' }}>{byTier.length}</span><span style={{ fontSize: 9.5, color: 'var(--op-t3)' }}>plans</span></>} />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 7 }}>
+              {byTier.map(([tier, v]) => (
+                <div key={tier} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                  <span style={{ width: 9, height: 9, borderRadius: 3, background: planColor(tier), flex: 'none' }} />
+                  <span style={{ flex: 1, color: 'var(--op-t2)' }}>{tier}</span>
+                  <span className="op-num" style={{ color: 'var(--op-t1)', fontWeight: 600 }}>{moneyK(Number(v))}</span>
+                </div>
+              ))}
             </div>
-          ) : <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-t3)', fontSize: 12 }}>{isLoading ? 'Loading…' : 'No revenue by plan.'}</div>}
-        </div>
+          </div>
+        ) : <div style={{ height: 120, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-t3)', fontSize: 12 }}>{isLoading ? 'Loading…' : 'No paying subscriptions yet.'}</div>}
       </div>
       <Panel title="Invoices" icon={Wallet}>
         <table className="op-table">
@@ -167,7 +163,6 @@ function OverviewTab() {
           </tbody>
         </table>
       </Panel>
-      <Note>Net-new, NRR, and past-due tiles from the kit need analytics fields the dashboard doesn't return yet; invoices carry no tenant/plan join. Tracked in BUILD_PLAN Phase 3.</Note>
     </div>
   );
 }
@@ -183,7 +178,7 @@ function CouponsTab() {
             <tr key={c.id}>
               <td className="mono" style={{ fontWeight: 600, color: 'var(--op-t1)' }}>{c.code}</td>
               <td className="t-muted">{c.name}</td>
-              <td>{c.discount_type === 'percent' ? `${c.discount_value}%` : money(c.discount_value / 100)}</td>
+              <td>{c.discount_type === 'percentage' ? `${c.discount_value}%` : money(c.discount_value / 100)}</td>
               <td className="t-muted">{c.duration}{c.duration_in_months ? ` · ${c.duration_in_months}mo` : ''}</td>
               <td className="num">{c.times_redeemed}{c.max_redemptions ? ` / ${c.max_redemptions}` : ''}</td>
               <td className="t-muted mono" style={{ fontSize: 11 }}>{c.valid_until ? new Date(c.valid_until).toLocaleDateString() : '—'}</td>
@@ -254,27 +249,68 @@ function FinOpsTab() {
   );
 }
 
+const TRIAL_PHASE_LABEL: Record<string, string> = { full: 'Full access', soft_prompt: 'Upgrade prompt', locked: 'Locked' };
+
+// One trial store (owner decision 6): the live billing_trial_tracking rows on
+// plans the MSP marked as trials, from GET /admin/billing/trials. Phase, days
+// left and the end date are the same computation the tenant's trial lock and
+// banner use. The tab used to show only a conversion rate and send the
+// operator to the tenant list, which read a different store. Start trial and
+// each row's Extend · Convert · End are where the tenant editor sends an
+// operator who tries to start or end a trial by setting a status.
 function TrialsTab() {
-  const { data, isLoading } = useTrialConversion();
-  const rows = data ? Object.entries(data).filter(([, v]) => typeof v === 'number' || typeof v === 'string') : [];
+  const { data, isLoading, isError } = useTrials();
+  const { data: dash } = useBillingDashboard();
+  const [starting, setStarting] = useState(false);
+  const trials = data?.trials ?? [];
+  const fmt = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   return (
-    <Panel title="Trial conversion" icon={FlaskConical}>
-      <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {rows.length > 0 ? rows.map(([k, v]) => (
-          <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
-            <span style={{ color: 'var(--op-t2)', textTransform: 'capitalize' }}>{k.replace(/_/g, ' ')}</span>
-            <span className="op-num" style={{ color: 'var(--op-t1)', fontWeight: 600 }}>{String(v)}</span>
-          </div>
-        )) : <Note>{isLoading ? 'Loading…' : 'No trial-conversion analytics available.'}</Note>}
-        <Note>Individual trial accounts (start/end, days remaining) are managed from <strong>Tenants</strong> filtered to trial status — there's no separate trials list endpoint. This view shows the platform conversion analytics.</Note>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+        <StatTile label="Live trials" value={isLoading ? '…' : num(data?.count ?? 0)} sub="on trial plans" icon={FlaskConical} />
+        <StatTile label="Locked" value={isLoading ? '…' : num(trials.filter((t) => t.phase === 'locked').length)} sub="awaiting upgrade" icon={AlertCircle} />
+        <StatTile label="Conversion" value={dash ? `${dash.trial_conversion.toFixed(1)}%` : '…'} sub="trials started this month that converted" icon={TrendingUp} />
       </div>
-    </Panel>
+      <Panel title="Trials" icon={FlaskConical}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '10px 16px 0' }}>
+          <button className="op-btn sm primary" onClick={() => setStarting(true)}>Start trial</button>
+        </div>
+        <table className="op-table">
+          <thead><tr><th>Tenant</th><th>Plan</th><th>Phase</th><th>Started</th><th>Ends</th><th className="num">Days left</th><th /></tr></thead>
+          <tbody>
+            {trials.map((t) => (
+              <tr key={t.tenant_id}>
+                <td style={{ fontWeight: 600, color: 'var(--op-t1)' }}>{t.tenant_name}</td>
+                <td className="t-muted">{t.plan_name}</td>
+                <td style={{ color: t.phase === 'locked' ? 'var(--danger)' : t.phase === 'soft_prompt' ? 'var(--warn)' : 'var(--op-t2)', fontWeight: 600 }}>{TRIAL_PHASE_LABEL[t.phase] ?? t.phase}</td>
+                <td className="t-muted mono" style={{ fontSize: 11 }}>{fmt(t.trial_start)}</td>
+                <td className="t-muted mono" style={{ fontSize: 11 }}>{fmt(t.ends_at)}</td>
+                <td className="num">{t.phase === 'locked' ? '—' : num(t.days_remaining)}</td>
+                <td><TrialRowActions trial={t} /></td>
+              </tr>
+            ))}
+            {trials.length === 0 && <EmptyRow cols={7} loading={isLoading} label={isError ? "Couldn't load trials." : 'No live trials. Trials run only on plans marked as trials.'} />}
+          </tbody>
+        </table>
+      </Panel>
+      {starting && <StartTrialModal onClose={() => setStarting(false)} />}
+    </div>
   );
 }
 
+/**
+ * Invoices in payment recovery. billing_invoices is written only by the Stripe
+ * webhook, which stores exactly two statuses: 'paid' (invoice.paid /
+ * payment_succeeded) and 'failed' (invoice.payment_failed). The tab used to
+ * filter on Stripe's own status names ('past_due', 'open', 'unpaid',
+ * 'uncollectible') — none of which is ever stored — so it was always empty.
+ */
+export const RECOVERY_INVOICE_STATUSES: readonly string[] = ['failed'];
+export const isInRecovery = (status: string) => RECOVERY_INVOICE_STATUSES.includes(String(status).toLowerCase());
+
 function DunningTab() {
   const { data: invoices, isLoading } = useAdminInvoices();
-  const overdue = (invoices ?? []).filter((i) => ['past_due', 'open', 'unpaid', 'uncollectible'].includes(String(i.status).toLowerCase()));
+  const overdue = (invoices ?? []).filter((i) => isInRecovery(i.status));
   return (
     <Panel title="Payment recovery" icon={AlertCircle}>
       <table className="op-table">
@@ -291,7 +327,7 @@ function DunningTab() {
           {overdue.length === 0 && <EmptyRow cols={4} loading={isLoading} label="No outstanding invoices — nothing in recovery." />}
         </tbody>
       </table>
-      <div style={{ padding: '12px 16px' }}><Note>Derived from open/past-due invoices. A dedicated dunning workflow (retry schedule, reminders, escalation state) is a follow-up — no dunning-state endpoint yet.</Note></div>
+      <div style={{ padding: '12px 16px' }}><Note>Invoices whose payment failed. Stripe runs the retry schedule.</Note></div>
     </Panel>
   );
 }

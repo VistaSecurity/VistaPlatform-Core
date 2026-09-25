@@ -69,6 +69,93 @@ export function verdictOf(c: CryptoComponent): string {
     .join(' · ');
 }
 
+/** The "supports hybrid, negotiated classical" remediation hint ( W1.9).
+ *
+ *  The backend sets `hybrid_kex_available` on a classical key-exchange
+ *  component only when a handshake proved the server ALSO accepts a hybrid
+ *  post-quantum group — it decides "classical" from the catalogue and treats
+ *  unknown support as no support, so nothing here second-guesses it beyond
+ *  refusing to show the hint on a component that is not a classical key
+ *  exchange.
+ *
+ *  The hint is guidance, not a verdict: the configuration still needs PQC
+ *  migration because what it negotiated is classical, and the copy says so, so
+ *  a reader does not take "your server supports hybrid" for "you are safe". */
+export interface HybridKexHint {
+  /** The sentence to show: what the server can do, what it did, what to change. */
+  text: string;
+  /** Why the risk score and PQC category have not moved. */
+  note: string;
+}
+
+export function hybridKexHint(c: CryptoComponent): HybridKexHint | null {
+  const avail = c.hybrid_kex_available;
+  if (!avail || c.algorithm_type !== 'key_exchange' || c.is_pqc) return null;
+  const groups = Array.isArray(avail.groups) ? avail.groups.filter((g) => typeof g === 'string' && g.trim() !== '') : [];
+  const which = groups.length > 0 ? ` (${groups.join(', ')})` : '';
+  return {
+    text:
+      `This server supports hybrid post-quantum key exchange${which}, but negotiated ${c.code}. ` +
+      "Prefer the hybrid group in the server's configuration, or update the clients that connect to it.",
+    note: 'Until a hybrid group is negotiated this configuration still counts as needing PQC migration, and its risk score is unchanged.',
+  };
+}
+
+/** The catalogue's curated "how to fix this" for one component, shaped for
+ *  display. Read from `remediation_guidance`, which the backend omits when the
+ *  catalogue row records none — so a null here means "no guidance recorded",
+ *  never "nothing to fix".
+ *
+ *  It is guidance only. Severity stays with the component's `risk_level`; the
+ *  catalogue `timeline` is shown as the catalogue's suggestion, not re-derived
+ *  into a band. */
+export interface RemediationGuidanceView {
+  summary: string | null;
+  impact: string | null;
+  /** Ordered steps with any leading "1." / "2)" the catalogue text carries
+   *  stripped, because the drawer renders them in a numbered list. */
+  steps: string[];
+  timeline: string | null;
+  cves: string[];
+  /** `href` is set only for an http(s) URL. The catalogue is admin-edited free
+   *  text, so anything else (a `javascript:` URL included) renders as text. */
+  resources: { text: string; href: string | null }[];
+}
+
+const STEP_NUMBER = /^\s*\d+\s*[.)]\s+/;
+
+function cleanList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : [];
+}
+
+function cleanText(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
+}
+
+export function safeHref(v: string): string | null {
+  try {
+    const u = new URL(v);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function remediationGuidanceOf(c: CryptoComponent): RemediationGuidanceView | null {
+  const g = c.remediation_guidance;
+  if (!g) return null;
+  const view: RemediationGuidanceView = {
+    summary: cleanText(g.summary),
+    impact: cleanText(g.impact),
+    steps: cleanList(g.steps).map((s) => s.replace(STEP_NUMBER, '')).filter((s) => s !== ''),
+    timeline: cleanText(g.timeline),
+    cves: cleanList(g.cve_references),
+    resources: cleanList(g.resources).map((text) => ({ text, href: safeHref(text) })),
+  };
+  const empty = !view.summary && !view.impact && !view.timeline && view.steps.length === 0 && view.cves.length === 0 && view.resources.length === 0;
+  return empty ? null : view;
+}
+
 export interface RiskExplanation {
   /** True only when at least one component resolved against the catalogue. */
   assessed: boolean;

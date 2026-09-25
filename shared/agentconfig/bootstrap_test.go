@@ -132,3 +132,33 @@ func TestBootstrapIsScopedToTheRuntime(t *testing.T) {
 		t.Error("a sensor acquired an override for an agent-only setting")
 	}
 }
+
+// A confirm-gated setting — a consent — is never bootstrapped from what a
+// device reports: a modified sensor must not be able to grant itself
+// third-party enrichment (or DNS decoding) by reporting it as running (
+// review). Mutation check: drop the Confirm guard and this fails.
+func TestBootstrapNeverAdoptsAConsentFromTheDevice(t *testing.T) {
+	running := agentconfig.Values{
+		agentconfig.KeyThirdPartyTLSEnrichment: agentconfig.Bool(true),
+		agentconfig.KeyHostObservationDNS:      agentconfig.Bool(true),
+		agentconfig.KeyDedupTTLMinutes:         agentconfig.Int(15),
+	}
+	got := agentconfig.BootstrapValues(agentconfig.RuntimeSensor, nil, nil, running)
+	for _, k := range []agentconfig.Key{agentconfig.KeyThirdPartyTLSEnrichment, agentconfig.KeyHostObservationDNS} {
+		if v, ok := got[k]; ok {
+			t.Errorf("bootstrap adopted the device's %s = %s; a consent needs the console's confirmation", k, v.String())
+		}
+	}
+	if v := got[agentconfig.KeyDedupTTLMinutes]; v.I == nil || *v.I != 15 {
+		t.Errorf("an ordinary setting stopped bootstrapping: dedup_ttl_minutes = %v", v)
+	}
+	// Every confirm-gated field is covered, not only the two named above.
+	for _, f := range agentconfig.FieldsFor(agentconfig.RuntimeSensor) {
+		if f.Confirm == "" || f.Kind != agentconfig.KindBool {
+			continue
+		}
+		if _, ok := agentconfig.BootstrapValues(agentconfig.RuntimeSensor, nil, nil, agentconfig.Values{f.Key: agentconfig.Bool(!*f.Default.B)})[f.Key]; ok {
+			t.Errorf("confirm-gated %s bootstrapped from the device", f.Key)
+		}
+	}
+}

@@ -1,0 +1,10 @@
+{
+  "kind": "tm:sys:crypto:cert:certcollectionstate",
+  "items": [
+    {
+      "name": "www.example.com.crt",
+      "fullPath": "/Common/www.example.com.crt",
+      "certificate": "{{PEM_JSON:_shared/leaf.pem}}"
+    }
+  ]
+}

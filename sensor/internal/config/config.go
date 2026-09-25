@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
@@ -58,6 +59,69 @@ type Config struct {
 	// `verbose:` key in the YAML (or the VERBOSE env var) turns it off or
 	// pins it on.
 	Verbose *bool `json:"verbose"`
+
+	// live mirrors the capture switches that concurrent probe workers read
+	// while the main loop changes them. See EnableLiveSwitches.
+	live *liveSwitches
+}
+
+// liveSwitches holds the capture switches the TLS enricher's workers read on
+// every observation while the heartbeat and command handlers change them. A
+// plain bool read on one goroutine and written on another is a data race
+// ( review); these are atomics, and the plain CaptureConfig fields stay
+// the value everything single-threaded reads and reports.
+type liveSwitches struct {
+	activeProbing           atomic.Bool
+	thirdPartyTLSEnrichment atomic.Bool
+}
+
+// EnableLiveSwitches starts mirroring ActiveProbing and ThirdPartyTLSEnrichment
+// into atomics, seeded from the current field values. Call it once, before
+// any concurrent reader starts — the enricher constructor does — and from then
+// on change the two switches only through SetActiveProbing and
+// SetThirdPartyTLSEnrichment.
+func (c *Config) EnableLiveSwitches() {
+	if c == nil || c.live != nil {
+		return
+	}
+	l := &liveSwitches{}
+	l.activeProbing.Store(c.Capture.ActiveProbing)
+	l.thirdPartyTLSEnrichment.Store(c.Capture.ThirdPartyTLSEnrichment)
+	c.live = l
+}
+
+// ActiveProbingEnabled is safe to call from any goroutine once live switches
+// are enabled.
+func (c *Config) ActiveProbingEnabled() bool {
+	if c.live != nil {
+		return c.live.activeProbing.Load()
+	}
+	return c.Capture.ActiveProbing
+}
+
+// ThirdPartyTLSEnrichmentEnabled is safe to call from any goroutine once live
+// switches are enabled.
+func (c *Config) ThirdPartyTLSEnrichmentEnabled() bool {
+	if c.live != nil {
+		return c.live.thirdPartyTLSEnrichment.Load()
+	}
+	return c.Capture.ThirdPartyTLSEnrichment
+}
+
+// SetActiveProbing changes the switch for every reader.
+func (c *Config) SetActiveProbing(on bool) {
+	c.Capture.ActiveProbing = on
+	if c.live != nil {
+		c.live.activeProbing.Store(on)
+	}
+}
+
+// SetThirdPartyTLSEnrichment changes the switch for every reader.
+func (c *Config) SetThirdPartyTLSEnrichment(on bool) {
+	c.Capture.ThirdPartyTLSEnrichment = on
+	if c.live != nil {
+		c.live.thirdPartyTLSEnrichment.Store(on)
+	}
 }
 
 // StorageConfig represents on-disk paths the sensor uses.
@@ -73,8 +137,25 @@ type StorageConfig struct {
 
 // CaptureConfig represents packet capture configuration
 type CaptureConfig struct {
-	Interfaces       []string `json:"interfaces"`
-	ActiveProbing    bool     `json:"active_probing"`
+	Interfaces    []string `json:"interfaces"`
+	ActiveProbing bool     `json:"active_probing"`
+	// ThirdPartyTLSEnrichment lets the TLS enricher actively handshake with
+	// passively seen destinations that are NOT the tenant's own (see
+	// shared/probeconsent). Off by default ( W5.13, owner decision Q10).
+	//
+	// The control plane's third_party_tls_enrichment setting governs it. The
+	// file key `thirdPartyTLSEnrichment` / env THIRD_PARTY_TLS_ENRICHMENT is a
+	// LOCAL value for a sensor the platform has never told — an air-gapped
+	// one, or one talking to a platform older than the setting. Once the
+	// platform delivers a value it wins, and keeps winning across restarts
+	// (see sensor/cmd/probe_consent_state.go).
+	ThirdPartyTLSEnrichment bool `json:"third_party_tls_enrichment"`
+	// OwnedNetworks is the LOCAL list of public prefixes this sensor may treat
+	// as the tenant's own, from the file key `ownedNetworks` / env
+	// OWNED_NETWORKS (comma-separated). The air-gapped equivalent of declared
+	// network segments, under the same precedence as ThirdPartyTLSEnrichment:
+	// the platform's owned networks replace it the moment they arrive.
+	OwnedNetworks    []string `json:"owned_networks,omitempty"`
 	NetworkDiscovery bool     `json:"network_discovery"`
 	MaxConnections   int      `json:"max_connections"`
 	TimeoutSeconds   int      `json:"timeout_seconds"`
@@ -229,6 +310,8 @@ type ConfigFile struct {
 	Capture struct {
 		Interfaces                   []string `yaml:"interfaces"`
 		ActiveProbing                bool     `yaml:"activeProbing"`
+		ThirdPartyTLSEnrichment      bool     `yaml:"thirdPartyTLSEnrichment"`
+		OwnedNetworks                []string `yaml:"ownedNetworks"`
 		NetworkDiscovery             bool     `yaml:"networkDiscovery"`
 		MaxConnections               int      `yaml:"maxConnections"`
 		TimeoutSeconds               int      `yaml:"timeoutSeconds"`
@@ -319,6 +402,8 @@ func LoadFromFile(filePath string) (*Config, error) {
 		Capture: CaptureConfig{
 			Interfaces:                   cfgFile.Capture.Interfaces,
 			ActiveProbing:                cfgFile.Capture.ActiveProbing,
+			ThirdPartyTLSEnrichment:      cfgFile.Capture.ThirdPartyTLSEnrichment,
+			OwnedNetworks:                cfgFile.Capture.OwnedNetworks,
 			NetworkDiscovery:             cfgFile.Capture.NetworkDiscovery,
 			MaxConnections:               cfgFile.Capture.MaxConnections,
 			TimeoutSeconds:               cfgFile.Capture.TimeoutSeconds,
@@ -514,6 +599,14 @@ func mergeEnvVars(cfg *Config) {
 	if v := os.Getenv("HOST_OBSERVATION_DNS"); v != "" {
 		cfg.Capture.HostObservationDNS = getBoolEnv("HOST_OBSERVATION_DNS", false)
 	}
+	// Local probe-consent values: in force only until the platform delivers
+	// its own (see CaptureConfig.ThirdPartyTLSEnrichment).
+	if v := os.Getenv("THIRD_PARTY_TLS_ENRICHMENT"); v != "" {
+		cfg.Capture.ThirdPartyTLSEnrichment = getBoolEnv("THIRD_PARTY_TLS_ENRICHMENT", false)
+	}
+	if owned := getStringSliceEnv("OWNED_NETWORKS", nil); len(owned) > 0 {
+		cfg.Capture.OwnedNetworks = owned
+	}
 	if dataPath := sharedconfig.GetEnv("DATA_PATH", ""); dataPath != "" {
 		if cfg.Storage.DataPath != dataPath {
 			fmt.Printf("⚠️  Environment variable DATA_PATH=%s overriding config file value\n", dataPath)
@@ -591,6 +684,8 @@ func Load() *Config {
 		Capture: CaptureConfig{
 			Interfaces:                   getStringSliceEnv("INTERFACES", []string{"eth0"}),
 			ActiveProbing:                getBoolEnv("ACTIVE_PROBING", true),
+			ThirdPartyTLSEnrichment:      getBoolEnv("THIRD_PARTY_TLS_ENRICHMENT", false),
+			OwnedNetworks:                getStringSliceEnv("OWNED_NETWORKS", nil),
 			NetworkDiscovery:             getBoolEnv("NETWORK_DISCOVERY", true),
 			MaxConnections:               getIntEnv("MAX_CONNECTIONS", 1000),
 			TimeoutSeconds:               getIntEnv("TIMEOUT_SECONDS", 30),

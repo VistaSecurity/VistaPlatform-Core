@@ -64,8 +64,9 @@ them with.
 
 ### 1. Add the FortiGate
 
-**Where:** **Discovery → Devices → Add device** (or **Discover & add**, which
-asks the FortiGate for its own model, serial and firmware).
+**Where:** **Discovery → Devices → Add device**. Give the management URL,
+username and password; the platform asks the FortiGate for its own model,
+serial, firmware and host name (`system/status` only).
 
 **Credentials belong to the device.** A FortiGate carries its own username and
 password, entered on the device form and encrypted at rest — there is no
@@ -159,15 +160,20 @@ The service extracts detailed crypto parameters from IPSec configurations:
 - Extracts from authentication algorithm fields
 
 **DH Group Information:**
-- Extracts Diffie-Hellman group information
-- Stores in metadata for key exchange analysis
+- Reads the tunnel's Diffie-Hellman groups (`dhgrp`, e.g. `14 5`, in preference order)
+- Reports the first group as the tunnel's key exchange, and links **every**
+  configured group to the algorithm catalogue, so the tunnel is scored on the
+  weakest group it offers and appears as needing post-quantum migration
+- `key_size` is the key exchange's size (the group's modulus or curve), not the
+  cipher's
 
 **Example Extracted Data:**
 ```json
 {
   "protocol": "IPSec",
   "cipher_suite": "aes256-sha256",
-  "key_size": 256,
+  "key_exchange_algorithm": "DH-MODP-2048",
+  "key_size": 2048,
   "hash_algorithm": "SHA256",
   "port": 500,
   "hostname": "tunnel-to-remote-site",

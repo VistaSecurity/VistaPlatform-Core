@@ -3,6 +3,7 @@ package models
 import (
 	"database/sql/driver"
 	"encoding/json"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"time"
 
 	"github.com/google/uuid"
@@ -104,6 +105,12 @@ type CreateDeviceRequest struct {
 	TLSInsecureSkipVerify *bool                  `json:"tls_insecure_skip_verify,omitempty"`
 	Metadata              map[string]interface{} `json:"metadata"`
 	Tags                  map[string]interface{} `json:"tags"`
+
+	// ProbeEvidence is set ONLY by Add device, after the platform itself
+	// authenticated to the device and read its identity. It is never bound from
+	// a request body (json:"-"): an operator typing a serial into the form is a
+	// declaration, not evidence, and must not be able to claim otherwise.
+	ProbeEvidence *identity.AdmissionEvidence `json:"-"`
 }
 
 // UpdateDeviceRequest represents a request to update a device

@@ -31,7 +31,7 @@ type Config struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		"JWT_SECRET":            sharedconfig.JWTSecret(),
 		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 	})
 
@@ -42,7 +42,7 @@ func Load() *Config {
 		NATSURL:                   sharedconfig.GetEnv("NATS_URL", ""),
 		RedisURL:                  sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
 		LogLevel:                  sharedconfig.GetEnv("LOG_LEVEL", "info"),
-		JWTSecret:                 sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		JWTSecret:                 sharedconfig.JWTSecret(),
 		BootstrapCertPath:         sharedconfig.GetEnv("BOOTSTRAP_CERT_PATH", "/app/bootstrap-certs/cluster-sensor-service-cert.pem"),
 		BootstrapKeyPath:          sharedconfig.GetEnv("BOOTSTRAP_KEY_PATH", "/app/bootstrap-certs/cluster-sensor-service-key.pem"),
 		BootstrapCACertPath:       sharedconfig.GetEnv("BOOTSTRAP_CA_CERT_PATH", "/app/bootstrap-certs/bootstrap-ca-cert.pem"),

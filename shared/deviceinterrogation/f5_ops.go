@@ -3,7 +3,6 @@ package deviceinterrogation
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -162,7 +161,7 @@ func (c *f5Client) f5CollectOps(ctx context.Context, result *InterrogateResult, 
 	// --- identity ---------------------------------------------------------
 	result.addFact(factHWVendor, f5Vendor, ConfidenceDerived)
 
-	hardware := c.f5Hardware(ctx)
+	hardware := c.f5Hardware(ctx, result)
 	if serial := f5FirstNonEmpty(hardware, "bigipChassisSerialNum", "hostBoardSerialNum"); serial != "" {
 		result.addFact(factHWSerial, serial, ConfidenceReported)
 	}
@@ -183,18 +182,18 @@ func (c *f5Client) f5CollectOps(ctx context.Context, result *InterrogateResult, 
 	// --- interfaces and VLANs --------------------------------------------
 	interfaces, err := f5GetCollection[f5NetInterface](ctx, c, "/mgmt/tm/net/interface")
 	if err != nil {
-		fmt.Printf("Warning: failed to get F5 interfaces: %v\n", err)
+		result.warn("/mgmt/tm/net/interface", err, "Interfaces not collected")
 	} else if projected := f5Interfaces(interfaces); len(projected) > 0 {
 		result.addFact(factNetInterfaces, projected, ConfidenceReported)
 	}
 
 	vlans, err := f5GetCollection[f5NetVLAN](ctx, c, "/mgmt/tm/net/vlan")
 	if err != nil {
-		fmt.Printf("Warning: failed to get F5 VLANs: %v\n", err)
+		result.warn("/mgmt/tm/net/vlan", err, "VLANs not collected")
 	}
 	selfIPs, err := f5GetCollection[f5SelfIP](ctx, c, "/mgmt/tm/net/self")
 	if err != nil {
-		fmt.Printf("Warning: failed to get F5 self IPs: %v\n", err)
+		result.warn("/mgmt/tm/net/self", err, "Self IPs not collected; VLANs lack their subnets")
 	}
 	if projected := f5VLANs(vlans, selfIPs); len(projected) > 0 {
 		result.addFact(factNetVlans, projected, ConfidenceReported)
@@ -203,7 +202,7 @@ func (c *f5Client) f5CollectOps(ctx context.Context, result *InterrogateResult, 
 	// --- pool membership → depends_on ------------------------------------
 	pools, err := f5GetCollection[f5Pool](ctx, c, "/mgmt/tm/ltm/pool?expandSubcollections=true")
 	if err != nil {
-		fmt.Printf("Warning: failed to get F5 pools: %v\n", err)
+		result.warn("/mgmt/tm/ltm/pool", err, "Pool members not collected; virtual-server dependencies not drawn")
 	} else {
 		for _, edge := range f5PoolDependencies(virtualServers, pools) {
 			result.addRelationship(edge)
@@ -217,10 +216,10 @@ func (c *f5Client) f5CollectOps(ctx context.Context, result *InterrogateResult, 
 }
 
 // f5Hardware reads `sys/hardware` and returns the allowlisted leaves.
-func (c *f5Client) f5Hardware(ctx context.Context) map[string]string {
+func (c *f5Client) f5Hardware(ctx context.Context, result *InterrogateResult) map[string]string {
 	stats, err := f5GetJSON[f5HardwareStats](ctx, c, "/mgmt/tm/sys/hardware")
 	if err != nil {
-		fmt.Printf("Warning: failed to get F5 hardware info: %v\n", err)
+		result.warn("/mgmt/tm/sys/hardware", err, "Hardware model and serial not collected")
 		return nil
 	}
 	leaves := map[string]string{}
@@ -567,8 +566,7 @@ func f5GetJSON[T any](ctx context.Context, c *f5Client, path string) (T, error) 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return out, fmt.Errorf("API returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return out, statusErrorf(resp.StatusCode, "API returned status %d%s", resp.StatusCode, f5ErrorCode(resp.Body))
 	}
 	// Bounded: `ltm/pool?expandSubcollections=true` is the largest response this
 	// collector asks for and its size is the device's to choose.

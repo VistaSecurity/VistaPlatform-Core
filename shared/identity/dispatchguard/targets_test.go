@@ -123,8 +123,10 @@ func TestTargetInterval(t *testing.T) {
 		{in: "10.0.0.5/30", lo: "10.0.0.4", hi: "10.0.0.7", ok: true}, // non-masked input
 		{in: "10.0.0.1-10.0.0.9", lo: "10.0.0.1", hi: "10.0.0.9", ok: true},
 		{in: "fd00::/126", lo: "fd00::", hi: "fd00::3", ok: true},
-		{in: "10.0.0.9-10.0.0.1", ok: false}, // reversed
-		{in: "10.0.0.1-fd00::1", ok: false},  // mixed family
+		{in: "::ffff:10.0.0.0/120", lo: "10.0.0.0", hi: "10.0.0.255", ok: true}, // mapped prefix judged as IPv4
+		{in: "::ffff:0:0/95", ok: false},                                        // straddles the mapped block
+		{in: "10.0.0.9-10.0.0.1", ok: false},                                    // reversed
+		{in: "10.0.0.1-fd00::1", ok: false},                                     // mixed family
 		{in: "example.com", ok: false},
 		{in: "", ok: false},
 	} {

@@ -35,8 +35,19 @@ import (
 // `dynamic` comes from the segment's `metadata->>'dynamic'`. There is no column
 // for it yet (ADR-0002 D3's follow-up "decide the dynamic-segment flag
 // semantics" is still open), so this reads the one place an operator can set it
-// today and defaults to FALSE — the safe direction, because a segment wrongly
-// marked dynamic silently stops ip_address deciding anything in it.
+// today and defaults to FALSE — the safe direction for a segment nobody said
+// anything about, because a segment wrongly marked dynamic silently stops
+// ip_address deciding anything in it.
+//
+// One exception, and it is a statement rather than a silence: a segment LEARNED
+// from a device that reported the network but not its DHCP posture carries
+// `metadata->>'dhcp' = 'unknown'` (device-interrogation's net.vlans intake). For
+// identity that counts as dynamic. The device told us a network exists and that
+// it did not measure whether leases are handed out on it; letting a bare
+// address vote there is how two devices that held the same lease become one
+// asset — in every later run and every other intake, not only the run that
+// learned the segment. The STORED value stays `unknown`: this is how the
+// identity layer reads an unknown, not a claim that DHCP was observed.
 //
 // The containment test runs in Go rather than as `$1::inet <<= value::inet`
 // because `value` is free text: one malformed row would abort the whole query
@@ -54,7 +65,8 @@ func (r *Repository) ScopeForAddress(ctx context.Context, tenantID string, addr 
 	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
 		rs, err := tx.QueryContext(ctx, `
 			SELECT id::text, segment_type, value,
-			       coalesce((metadata->>'dynamic')::boolean, false),
+			       coalesce((metadata->>'dynamic')::boolean, false)
+			           OR coalesce(metadata->>'dhcp', '') = 'unknown',
 			       coalesce(cloud_network_ref, '')
 			FROM public.network_segments
 			WHERE tenant_id = $1 AND is_active = true

@@ -117,9 +117,17 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 	if strings.Contains(class, "industrial") || strings.Contains(class, "medical") || assetclass.IsAncestor(assetclass.KeyOtDevice, class) || strings.HasPrefix(class, "ot_") {
 		return denied("sensitive device requires review")
 	}
-	var cidr string
-	if err := tx.QueryRow(`SELECT value FROM network_segments WHERE tenant_id=$1 AND id=$2 AND is_active AND segment_type='cidr' AND COALESCE(cloud_network_ref,'')='' AND COALESCE(metadata->>'sensitive','false')<>'true' AND COALESCE(metadata->>'active_probes_disabled','false')<>'true'`, payload.TenantID, segment).Scan(&cidr); err != nil {
+	var cidr, networkType string
+	var learned bool
+	if err := tx.QueryRow(`SELECT value,network_type,`+learnedSegmentSQL+` FROM network_segments WHERE tenant_id=$1 AND id=$2 AND is_active AND segment_type='cidr' AND COALESCE(cloud_network_ref,'')='' AND COALESCE(metadata->>'sensitive','false')<>'true' AND COALESCE(metadata->>'active_probes_disabled','false')<>'true'`, payload.TenantID, segment).Scan(&cidr, &networkType, &learned); err != nil {
 		return err
+	}
+	if networkType == "public" && learned {
+		// A public network learned from a device's VLAN data is where that
+		// device is connected — an ISP transit link, a carrier-NAT WAN — not an
+		// estate the tenant declared. It scopes identities; it never scopes a
+		// probe. See SegmentGrantsOwnership.
+		return denied("probe network scope is a learned public network")
 	}
 	prefix, err := netip.ParsePrefix(cidr)
 	if err != nil || prefix.Bits() == 0 {

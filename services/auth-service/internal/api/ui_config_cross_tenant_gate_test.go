@@ -1,6 +1,6 @@
 package api
 
-// The /tenant/:tenantId group takes the target tenant from the PATH, so a
+// The /admin/tenants/:tenantId group takes the target tenant from the PATH, so a
 // caller who clears its gate reads and writes ANY tenant's data. Before the
 // platform-identity invariant landed, the group's only role check was
 // RequireAnyRole("platform_admin", "super_admin") — a comparison against the
@@ -67,7 +67,7 @@ func crossTenantUIConfigRequest(t *testing.T, method, roleClaim string) *httptes
 	}
 
 	req := httptest.NewRequest(method,
-		"/api/v1/auth-service/tenant/"+victimTenant.String()+"/ui-config",
+		"/api/v1/auth-service/admin/tenants/"+victimTenant.String()+"/ui-config",
 		strings.NewReader(`{"primary_color":"#000000"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+access)
@@ -85,7 +85,7 @@ func TestTenantUIConfigByID_RejectsTenantTokenClaimingPlatformRole(t *testing.T)
 			// 401 would also block the attack, but the identity check is what
 			// must do it — the token itself is validly signed and unexpired.
 			if w.Code != http.StatusForbidden {
-				t.Fatalf("tenant token with role=%q reached %s /tenant/:tenantId/ui-config with status %d, want 403.\n"+
+				t.Fatalf("tenant token with role=%q reached %s /admin/tenants/:tenantId/ui-config with status %d, want 403.\n"+
 					"A tenant identity must never satisfy a platform gate, however its role string reads.\nbody: %s",
 					"platform_admin", method, w.Code, w.Body.String())
 			}
@@ -98,7 +98,7 @@ func TestTenantUIConfigByID_RejectsTenantTokenClaimingSuperAdmin(t *testing.T) {
 	// fix closes one door and leaves the other open.
 	w := crossTenantUIConfigRequest(t, http.MethodPut, "super_admin")
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("tenant token with role=\"super_admin\" reached PUT /tenant/:tenantId/ui-config with status %d, want 403.\nbody: %s",
+		t.Fatalf("tenant token with role=\"super_admin\" reached PUT /admin/tenants/:tenantId/ui-config with status %d, want 403.\nbody: %s",
 			w.Code, w.Body.String())
 	}
 }
@@ -135,13 +135,13 @@ func TestTenantUIConfigByID_AllowsGenuinePlatformIdentity(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/auth-service/tenant/"+uuid.New().String()+"/ui-config", nil)
+		"/api/v1/auth-service/admin/tenants/"+uuid.New().String()+"/ui-config", nil)
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
 	if w.Code == http.StatusForbidden || w.Code == http.StatusUnauthorized {
-		t.Fatalf("genuine platform identity was rejected at the gate with %d — the invariant is over-strict and locks platform admins out of /tenant/:tenantId.\nbody: %s",
+		t.Fatalf("genuine platform identity was rejected at the gate with %d — the invariant is over-strict and locks platform admins out of /admin/tenants/:tenantId.\nbody: %s",
 			w.Code, w.Body.String())
 	}
 }

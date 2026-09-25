@@ -514,7 +514,7 @@ func (r *InterrogateResult) addFact(key string, value any, confidence float64) {
 // interrogated device — a switch a controller manages, for instance.
 func (r *InterrogateResult) addSubjectFact(subject PeerRef, key string, value any, confidence float64) {
 	if err := r.AddFact(FactObservation{Key: key, Value: value, Confidence: confidence, Subject: subject}); err != nil {
-		fmt.Printf("Warning: dropping fact %s: %v\n", key, err)
+		r.warnAs(WarningError, "fact "+key, "An observed "+key+" value was not recorded", err.Error())
 	}
 }
 
@@ -522,7 +522,7 @@ func (r *InterrogateResult) addSubjectFact(subject PeerRef, key string, value an
 // one. Same reasoning as addFact.
 func (r *InterrogateResult) addRelationship(rel RelationshipObservation) {
 	if err := r.AddRelationship(rel); err != nil {
-		fmt.Printf("Warning: dropping relationship %s: %v\n", rel.Type, err)
+		r.warnAs(WarningError, "relationship "+rel.Type, "An observed "+rel.Type+" relationship was not recorded", err.Error())
 	}
 }
 

@@ -31,12 +31,19 @@ func auditPlatformRoutes() []testdb.GatedRoute {
 	read, manage := rbac.PermissionPlatformAudit, rbac.PermissionPlatformAuditManage
 	p := func(s string) string { return "/api/v1/audit-service" + s }
 	return []testdb.GatedRoute{
+		{Method: http.MethodGet, Path: p("/activity-logs"), Permission: read},
+		{Method: http.MethodGet, Path: p("/activity-logs/" + id), Permission: read},
+		{Method: http.MethodGet, Path: p("/activity-logs/summary"), Permission: read},
 		{Method: http.MethodGet, Path: p("/retention-policies"), Permission: read},
 		{Method: http.MethodGet, Path: p("/retention-policies/" + id), Permission: read},
 		{Method: http.MethodPost, Path: p("/retention-policies"), Permission: manage},
 		{Method: http.MethodPut, Path: p("/retention-policies/" + id), Permission: manage},
 		{Method: http.MethodGet, Path: p("/activity-logs/by-user"), Permission: read},
 		{Method: http.MethodGet, Path: p("/activity-logs/by-resource"), Permission: read},
+		{Method: http.MethodGet, Path: p("/activity-logs/by-resource/device/" + id), Permission: read},
+		{Method: http.MethodGet, Path: p("/activity-logs/by-user/" + id), Permission: read},
+		{Method: http.MethodPost, Path: p("/activity-logs/query"), Permission: read},
+		{Method: http.MethodGet, Path: p("/activity-logs/export"), Permission: read},
 		{Method: http.MethodPost, Path: p("/alert-rules"), Permission: manage},
 		{Method: http.MethodPut, Path: p("/alert-rules/" + id), Permission: manage},
 		{Method: http.MethodDelete, Path: p("/alert-rules/" + id), Permission: manage},

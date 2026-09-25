@@ -246,7 +246,13 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
       const res = isEdit
         ? await clients.inventory.PUT('/network-segments/{id}', { params: { path: { id: segment.id } }, body })
         : await clients.inventory.POST('/network-segments', { body });
-      if (!res.response.ok || res.error) throw new Error('Failed to save network segment');
+      if (!res.response.ok || res.error) {
+        // A 400 carries a message written for the person at this form — for
+        // example a CIDR too broad to be anybody's network ( W5.13), which
+        // they can only fix if they are told the rule.
+        const msg = res.response.status === 400 ? (res.error as { error?: unknown } | undefined)?.error : undefined;
+        throw new Error(typeof msg === 'string' && msg ? msg : 'Failed to save network segment');
+      }
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] }); onClose(); },
   });

@@ -68,8 +68,8 @@ export default function App() {
             // Gate the route on the section's view permission so a deep link can't
             // bypass the nav filter. Sections without a permission are open to any
             // authenticated operator (e.g. Mission Control).
-            const guarded = s.permission || s.anyOf?.length
-              ? <RequirePlatformPermission permission={s.permission} anyOf={s.anyOf}>{el}</RequirePlatformPermission>
+            const guarded = s.permission || s.anyOf?.length || s.allOf?.length
+              ? <RequirePlatformPermission permission={s.permission} anyOf={s.anyOf} allOf={s.allOf}>{el}</RequirePlatformPermission>
               : el;
             // Second, independent gate: does this BUILD ship the section's
             // backend? A Core operator holds `tenants.read`, so the permission

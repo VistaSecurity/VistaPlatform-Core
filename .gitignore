@@ -90,6 +90,12 @@ tmp/
 # be committed, so the blanket *.pem rule above is negated for this one file.
 !services/compliance-engine/ee/content/verify-key.pem
 
+# Exception: the W0.2 pipeline test fixtures' PUBLIC test certificates (a
+# self-signed "Example Pipeline Test CA" and an example.com leaf). Certificates
+# only — no private key is ever committed here.
+!shared/deviceinterrogation/testdata/pipeline/_shared/ca.pem
+!shared/deviceinterrogation/testdata/pipeline/_shared/leaf.pem
+
 
 config/rke2/values.env
 # RKE2 generated api-gateway Traefik ConfigMap (regenerated each deploy)

@@ -38,6 +38,17 @@ func (e *DuplicateItemKeyError) Error() string {
 	return "billable_item key appears more than once in the composition: " + e.Key
 }
 
+// OverageConflictError refuses an ambiguous request that both supplies an
+// overage value and asks to clear that same column.
+type OverageConflictError struct {
+	Key   string
+	Field string
+}
+
+func (e *OverageConflictError) Error() string {
+	return fmt.Sprintf("%s: %s and clear_%s are mutually exclusive", e.Key, e.Field, e.Field)
+}
+
 // validateItemValue is the write-side gate for every entitlement value column.
 // It wraps entitlements.ValidateValue so the failure names the item the
 // operator was editing — the shared error carries the kind, and a composer
@@ -244,12 +255,15 @@ func queryTierEntitlements(q sqlRunner, tierID uuid.UUID) ([]TierEntitlement, er
 // TierEntitlementInput is one item of a composition write (see
 // tier_composition.go). Item is identified by key (stable) rather than UUID so
 // admin UIs can build the payload without a UUID round-trip. Omitted overage
-// fields leave the stored values as they are.
+// fields leave the stored values as they are; clear flags explicitly set them
+// back to NULL.
 type TierEntitlementInput struct {
 	ItemKey           string          `json:"item_key"`
 	IncludedValue     json.RawMessage `json:"included_value"`
 	OveragePriceCents *int            `json:"overage_price_cents,omitempty"`
 	OverageUnitSize   *int            `json:"overage_unit_size,omitempty"`
+	ClearOveragePrice bool            `json:"clear_overage_price_cents,omitempty"`
+	ClearOverageSize  bool            `json:"clear_overage_unit_size,omitempty"`
 }
 
 // BillableItemInput captures the writeable fields for create + update.

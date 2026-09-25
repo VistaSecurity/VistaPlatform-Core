@@ -225,10 +225,12 @@ func (r *onboardingRepository) SetTenantOnboardingRequired(ctx context.Context, 
 }
 
 // TenantOnboardingEvidence checks whether the tenant has segments, locations,
-// and at least one agent (a sensor OR a discovery agent — "agents" is the
-// collective term). Existence is the evidence: the step asked the user to add
-// the thing, so any live row completes it. sensors/device_agents honor soft
-// delete; segments/locations have none.
+// and at least one customer-deployed agent (a sensor OR a discovery agent —
+// "agents" is the collective term). The platform-managed sensor rows created
+// with every tenant are not user action and cannot complete onboarding. A row
+// is platform-managed when either marker is present: platform='platform' OR a
+// 'system' tag. sensors/device_agents honor soft delete; segments/locations
+// have none.
 // RLS-scoped: all four tables carry tenant_isolation policies; tenant known.
 func (r *onboardingRepository) TenantOnboardingEvidence(ctx context.Context, tenantID uuid.UUID) (segments, locations, agents bool, err error) {
 	err = shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
@@ -236,7 +238,8 @@ func (r *onboardingRepository) TenantOnboardingEvidence(ctx context.Context, ten
 			SELECT
 				EXISTS (SELECT 1 FROM network_segments WHERE tenant_id = $1),
 				EXISTS (SELECT 1 FROM locations        WHERE tenant_id = $1),
-				EXISTS (SELECT 1 FROM sensors          WHERE tenant_id = $1 AND deleted_at IS NULL)
+				EXISTS (SELECT 1 FROM sensors s WHERE s.tenant_id = $1 AND s.deleted_at IS NULL
+					AND NOT (s.platform = 'platform' OR 'system' = ANY(COALESCE(s.tags, '{}'::text[]))))
 					OR EXISTS (SELECT 1 FROM device_agents WHERE tenant_id = $1 AND deleted_at IS NULL)
 		`, tenantID).Scan(&segments, &locations, &agents)
 	})

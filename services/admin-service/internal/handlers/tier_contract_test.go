@@ -316,6 +316,16 @@ func TestContract_DeprecateTier_401(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
+func TestContract_DeprecateTier_404(t *testing.T) {
+	sv := loadSpec(t)
+	eng := tierEngine(&stubTierManager{deprecateErr: services.ErrTierNotFound}, true)
+	w := doRequest(eng, http.MethodDelete, tierBase+"/"+uuid.New().String(), nil)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
 // --- history ----------------------------------------------------------------
 
 func TestContract_GetTierHistory_200(t *testing.T) {

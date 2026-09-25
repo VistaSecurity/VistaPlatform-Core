@@ -315,3 +315,39 @@ func TestEveryDefaultMatchesItsKind(t *testing.T) {
 		}
 	}
 }
+
+// Third-party TLS enrichment is a consent, not a tuning knob ( W5.13, Q10):
+// the owner's rule is that nothing probes a third party by default. So it must
+// default OFF on the platform — the same value the sensor binary defaults to —
+// apply to sensors only, and need an explicit confirmation to turn on.
+func TestThirdPartyTLSEnrichmentIsAnOffByDefaultConsent(t *testing.T) {
+	f, ok := Registry[KeyThirdPartyTLSEnrichment]
+	if !ok {
+		t.Fatal("third_party_tls_enrichment is not in the registry")
+	}
+	if f.Kind != KindBool || f.Default.B == nil || *f.Default.B {
+		t.Errorf("default = %v (%s), want an explicit false: third parties are never probed unless the tenant opts in", f.Default, f.Kind)
+	}
+	if !AppliesTo(KeyThirdPartyTLSEnrichment, RuntimeSensor) || AppliesTo(KeyThirdPartyTLSEnrichment, RuntimeAgent) {
+		t.Errorf("runtimes = %v, want sensor only", f.Runtimes)
+	}
+	if f.Apply != ApplyImmediate {
+		t.Errorf("apply = %s: the enricher reads its config live, so the change is immediate", f.Apply)
+	}
+	// The wording is the owner-approved explanation ( W5.13); the console
+	// renders it verbatim, and its jsdom test stubs these same strings.
+	if f.Label != "Actively enrich third-party TLS connections" {
+		t.Errorf("label = %q", f.Label)
+	}
+	if f.Description != "Off by default. When on, sensors actively connect to external TLS services your network talks to, "+
+		"to read their certificates. Third parties may see these connections." {
+		t.Errorf("description = %q", f.Description)
+	}
+	on := NeedsConfirmation(RuntimeSensor, Values{}, Values{KeyThirdPartyTLSEnrichment: Bool(true)})
+	if len(on) != 1 || on[0].Key != KeyThirdPartyTLSEnrichment || on[0].Confirm == "" {
+		t.Errorf("turning third-party enrichment on must require a named confirmation, got %v", on)
+	}
+	if got := Effective(RuntimeSensor, nil, nil)[KeyThirdPartyTLSEnrichment]; !got.Equal(Bool(false)) {
+		t.Errorf("an unconfigured sensor is told %v, want false", got)
+	}
+}

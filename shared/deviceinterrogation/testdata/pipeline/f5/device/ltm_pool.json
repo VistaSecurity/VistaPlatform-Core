@@ -1,0 +1,34 @@
+{
+  "kind": "tm:ltm:pool:poolcollectionstate",
+  "items": [
+    {
+      "name": "web-pool",
+      "fullPath": "/Common/web-pool",
+      "monitor": "MUST-NOT-BE-COLLECTED",
+      "description": "MUST-NOT-BE-COLLECTED",
+      "membersReference": {
+        "items": [
+          {
+            "name": "198.51.100.20:8080",
+            "fullPath": "/Common/198.51.100.20:8080",
+            "address": "198.51.100.20",
+            "state": "up",
+            "session": "monitor-enabled",
+            "fqdn": {
+              "autopopulate": "disabled"
+            }
+          },
+          {
+            "name": "198.51.100.21:8080",
+            "fullPath": "/Common/198.51.100.21:8080",
+            "address": "198.51.100.21",
+            "state": "up",
+            "fqdn": {
+              "autopopulate": "disabled"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

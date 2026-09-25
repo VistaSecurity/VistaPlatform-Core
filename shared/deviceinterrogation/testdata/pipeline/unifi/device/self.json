@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "site_name": "default",
+      "email": "MUST-NOT-BE-COLLECTED",
+      "name": "MUST-NOT-BE-COLLECTED"
+    }
+  ]
+}

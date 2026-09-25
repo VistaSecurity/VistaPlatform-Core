@@ -60,15 +60,17 @@ type stubRevalidationStore struct {
 	// scan is returned by CreateActiveScanJob when set; otherwise a single
 	// platform job is synthesized from jobID/scanned. gotRunFrom records what
 	// the handler asked for.
-	scan       *services.ActiveScanResult
-	gotRunFrom services.RunFrom
+	scan         *services.ActiveScanResult
+	gotRunFrom   services.RunFrom
+	gotConfirmed bool
 }
 
 func (s *stubRevalidationStore) CreateRevalidationJob(_, _ uuid.UUID, _ []uuid.UUID, _ string) (string, error) {
 	return s.jobID, s.err
 }
 
-func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, _ []uuid.UUID, _ string, runFrom services.RunFrom) (services.ActiveScanResult, error) {
+func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, _ []uuid.UUID, _ string, runFrom services.RunFrom, externalConfirmed bool) (services.ActiveScanResult, error) {
+	s.gotConfirmed = externalConfirmed
 	s.gotRunFrom = runFrom
 	if s.err != nil {
 		return services.ActiveScanResult{}, s.err

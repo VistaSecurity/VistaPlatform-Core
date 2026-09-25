@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   settingLabel,
+  settingName,
   settingUnit,
   originNote,
   stateNote,
@@ -36,6 +37,14 @@ describe('labels', () => {
     expect(settingUnit('poll_interval_seconds')).toBe('seconds');
     expect(settingUnit('dedup_ttl_minutes')).toBe('minutes');
     expect(settingUnit('host_observation')).toBeNull();
+  });
+
+  it('prefers the label the platform sends', () => {
+    expect(settingName({ key: 'third_party_tls_enrichment', label: 'Actively enrich third-party TLS connections' }))
+      .toBe('Actively enrich third-party TLS connections');
+    // Absent or blank falls back to the derived name, never to nothing.
+    expect(settingName({ key: 'third_party_tls_enrichment' })).toBe('Third party TLS enrichment');
+    expect(settingName({ key: 'host_observation_dns', label: '  ' })).toBe('Host observation DNS');
   });
 
   it('names where a value came from', () => {

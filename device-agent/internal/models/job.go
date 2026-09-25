@@ -61,6 +61,21 @@ type JobResult struct {
 	// platform; an older control plane ignores them.
 	Facts         []di.FactObservation         `json:"facts,omitempty"`
 	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
+
+	// Warnings are the collection warnings the shared collector raised: what
+	// it could not read (a refused endpoint, a missing command, a table cut at
+	// its bound) and what the result lacks because of it. Forwarded verbatim —
+	// they are already sanitized, and the platform sanitizes them again on
+	// receipt. An older control plane ignores the field.
+	Warnings []di.CollectionWarning `json:"warnings,omitempty"`
+
+	// DeviceIdentity is the interrogated device's own identity, sent once
+	// beside the assets rather than only on each of them. Without it a run
+	// that found no crypto assets — a PAN-OS box with no decryption profiles —
+	// told the platform nothing about what the device is. Each asset still
+	// carries its DeviceInfo copy too, for a control plane older than this
+	// field, which ignores it.
+	DeviceIdentity *di.DeviceIdentity `json:"device_identity,omitempty"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

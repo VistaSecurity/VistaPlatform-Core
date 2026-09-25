@@ -50,6 +50,10 @@ type DiscoveryJob struct {
 	CreatedAt         time.Time              `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time              `json:"updated_at" db:"updated_at"`
 	DeletedAt         *time.Time             `json:"deleted_at" db:"deleted_at"`
+	// ExternalTargets is set on the create response only: the confirmed
+	// targets outside the tenant's registered networks, for the UI and the
+	// audit record. Not a column.
+	ExternalTargets []ExternalScanTarget `json:"external_targets,omitempty" db:"-"`
 	// Origin is the auto-scan marker (autoscan.Origin = "auto_scan" in
 	// inventory-service) an automatic-scan job carries in
 	// `metadata.options.origin`, surfaced here read-only so a listing can tell
@@ -75,6 +79,20 @@ type CreateDiscoveryJobRequest struct {
 	// tenants without the flag are dropped server-side. Empty / omitted =
 	// no OT active probing for this job.
 	OTProbeProtocols []string `json:"ot_probe_protocols,omitempty"`
+	// ExternalTargetsConfirmed is a person's explicit consent to scan targets
+	// outside the tenant's registered networks ( W5.13b). Without it a
+	// request naming such a target is refused with the list of them, so a
+	// stray or scripted call never scans a third party silently. It is
+	// meaningless — and ignored — on the automatic and service paths.
+	ExternalTargetsConfirmed bool `json:"external_targets_confirmed,omitempty"`
+}
+
+// ExternalScanTarget is a confirmed target outside the tenant's registered
+// networks and the addresses it named when the job was created: what the
+// create response and the audit event carry.
+type ExternalScanTarget struct {
+	Target    string   `json:"target"`
+	Addresses []string `json:"addresses"`
 }
 
 // DiscoveryMaterialization reports what became of a job's findings AFTER they

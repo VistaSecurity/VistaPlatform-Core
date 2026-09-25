@@ -646,7 +646,7 @@ backends:
       digest: ""
   cluster-sensor-service:
     needs: {postgres: true, redis: true, nats: true}
-    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey:
         true, redisUrl: true}
     resources:
       requests: {cpu: 100m, memory: 128Mi}
@@ -1047,6 +1047,29 @@ monitoring:
   #   - name: edge-admin
   #     url: https://admin.vistaplatform.example.com/api/v1/auth-service/health
 
+# Explicit external scan targets (cluster-sensor-service). A person starting a
+# scan may name public addresses, blocks and hostnames outside their registered
+# network segments once they confirm it. Nothing unattended ever scans them, and
+# loopback, link-local/cloud metadata and the platform's own ranges stay refused
+# whatever is confirmed.
+#
+# Rendered by the deployment template for cluster-sensor-service, NOT through
+# its extraEnv: a customer who sets their own extraEnv list replaces the chart's
+# list wholesale, and the service reads a missing variable as OFF (fail
+# closed). Keeping it here means overriding extraEnv cannot silently change it.
+discovery:
+  explicitExternalTargets:
+    # false turns the capability off for the whole installation (e.g. a hosted
+    # operator); such targets are then refused, as before it existed.
+    enabled: true
+    # Most addresses one such target (CIDR or range) may name: 4096 = IPv4 /20
+    # or IPv6 /116. 1-4096: it can be lowered, not raised — the scanner expands
+    # at most 4096 hosts per target.
+    maxAddressesPerTarget: 4096
+    # Most such addresses one scan may name in total, across all its targets.
+    # 1-16384; lower only.
+    maxAddressesPerJob: 16384
+
 # Catalogue mirror feeds (admin-service → Catalog → End-of-life / Vulnerability
 # feed). The OSV feed downloads each ecosystem's bulk archive and reads it one
 # entry at a time from disk, never from memory. Ubuntu's archive was ~705 MiB in
@@ -1188,6 +1211,9 @@ networkPolicy:
   # customer's device networks. Those device networks are almost always
   # RFC1918, which is why this list must be your cluster's OWN ranges and not
   # a blanket 10/8 + 172.16/12 + 192.168/16 exclusion.
+  # The same list is injected into device-interrogation-service's dial guard,
+  # even when egressEnabled is false, so its deliberate customer-RFC1918
+  # access can never be used to reach pod or ClusterIP addresses.
   #
   # 169.254.0.0/16 (link-local, including the cloud instance-metadata endpoint
   # at 169.254.169.254) is always excluded by the template and does not need

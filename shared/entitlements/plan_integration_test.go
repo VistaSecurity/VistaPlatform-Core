@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -41,7 +42,11 @@ func TestIntegration_ResolvePlan_FollowsTheLicence(t *testing.T) {
 		VALUES ($1, 'Starter Trial', true, true) RETURNING id`, "it-trial-"+uuid.NewString()[:8]).Scan(&trialTier); err != nil {
 		t.Fatal(err)
 	}
-	mustExec(t, db, `UPDATE tenants SET subscription_tier_id = $1, trial_ends_at = now() + interval '5 days' WHERE id = $2`, trialTier, tenant)
+	// The trial is the billing_trial_tracking row (the one trial store, owner
+	// decision 6); tenants.trial_ends_at is deliberately set to a different
+	// date that must NOT surface.
+	mustExec(t, db, `UPDATE tenants SET subscription_tier_id = $1, trial_ends_at = now() + interval '90 days' WHERE id = $2`, trialTier, tenant)
+	mustExec(t, db, `INSERT INTO billing_trial_tracking (tenant_id, trial_start, trial_end) VALUES ($1, now(), now() + interval '5 days')`, tenant)
 
 	for _, tc := range []struct {
 		edition, display string
@@ -62,6 +67,31 @@ func TestIntegration_ResolvePlan_FollowsTheLicence(t *testing.T) {
 		if tc.edition != "" && (p.Licensee == nil || *p.Licensee != "Acme Corp") {
 			t.Errorf("licence %q: licensee = %v, want Acme Corp", tc.edition, p.Licensee)
 		}
+	}
+
+	// MSP: the trial end is the trial row's, read through RLS on the
+	// application role (auth-service resolves plans on that pool), not the
+	// tenants.trial_ends_at column.
+	writeLicence(t, db, "msp")
+	app := testdb.ConnectScratchAsAppRole(t, db)
+	p, err := entitlements.ResolvePlan(ctx, app, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Trial == nil || time.Until(p.Trial.EndsAt) > 6*24*time.Hour || time.Until(p.Trial.EndsAt) < 4*24*time.Hour {
+		t.Fatalf("msp plan trial on the app role = %+v, want ends_at ≈ now+5d from billing_trial_tracking", p.Trial)
+	}
+
+	// A converted trial is over, and a trial row on a plan that is not a trial
+	// plan is not a trial at all.
+	mustExec(t, db, `UPDATE billing_trial_tracking SET converted_to_paid = true WHERE tenant_id = $1`, tenant)
+	if p, _ := entitlements.ResolvePlan(ctx, app, tenant); p.Trial != nil {
+		t.Errorf("converted trial still shown: %+v", p.Trial)
+	}
+	mustExec(t, db, `UPDATE billing_trial_tracking SET converted_to_paid = false WHERE tenant_id = $1`, tenant)
+	mustExec(t, db, `UPDATE subscription_tiers SET is_trial = false WHERE id = $1`, trialTier)
+	if p, _ := entitlements.ResolvePlan(ctx, app, tenant); p.Trial != nil {
+		t.Errorf("trial shown on a plan that is not a trial plan: %+v", p.Trial)
 	}
 }
 

@@ -315,6 +315,30 @@ func TestContract_GetJobResults_200_cloudResourceTypes(t *testing.T) {
 	}
 }
 
+// Collection warnings (finding P-17) are served typed. `additionalProperties:
+// false` on JobResultsResponse and on JobResultCollectionWarning means a field
+// the spec does not name fails this outright; the reason enum is checked too.
+func TestContract_GetJobResults_200_collectionWarnings(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newJobEngine(&stubJobStore{resultFound: true, resultsJSON: storedWithWarnings})
+	w := do(eng, http.MethodGet, base+"/jobs/"+aUUID+"/results", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "JobResultsResponse", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), `"collection_warnings"`) {
+		t.Fatalf("the warnings never reached the response: %s", w.Body.String())
+	}
+
+	unreadable := `{"success":true,"assets":[],"processing":{"collection_warnings":"not-a-list"}}`
+	eng = newJobEngine(&stubJobStore{resultFound: true, resultsJSON: unreadable})
+	w = do(eng, http.MethodGet, base+"/jobs/"+aUUID+"/results", nil)
+	sv.assertConforms(t, "JobResultsResponse", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), `"collection_warnings_unreadable":true`) {
+		t.Fatalf("an unreadable warning list was not flagged: %s", w.Body.String())
+	}
+}
+
 func TestContract_RetryJob_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newJobEngine(&stubJobStore{mutStatus: "failed", mutFound: true})

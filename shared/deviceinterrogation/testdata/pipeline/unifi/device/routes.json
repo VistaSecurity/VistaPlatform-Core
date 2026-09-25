@@ -1,0 +1,37 @@
+{
+  "routes": [
+    {
+      "path": "/api/auth/login",
+      "status": 404,
+      "body": "{}"
+    },
+    {
+      "path": "/api/login",
+      "set_cookie": "unifises=session",
+      "body": "{\"meta\": {\"rc\": \"ok\"}, \"data\": []}"
+    },
+    {
+      "path": "/api/self",
+      "body_file": "self.json"
+    },
+    {
+      "path_suffix": "/list/setting",
+      "body_file": "list_setting.json"
+    },
+    {
+      "path_suffix": "/rest/networkconf",
+      "body_file": "rest_networkconf.json"
+    },
+    {
+      "path_suffix": "/stat/sta",
+      "body_file": "stat_sta.json"
+    },
+    {
+      "path_suffix": "/stat/device",
+      "body_file": "stat_device.json"
+    }
+  ],
+  "default": {
+    "body": "{\"meta\": {\"rc\": \"ok\"}, \"data\": []}"
+  }
+}

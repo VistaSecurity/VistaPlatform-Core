@@ -1,0 +1,152 @@
+{
+  "vendor": "cisco",
+  "input_sha256": "6ad0e06a9c16ff361f44712a67a1ef49ceba565d8a2bbe407d0e30edce9066e3",
+  "inventory": {
+    "assets": [
+      {
+        "asset": "asset[hostname=ce-router,ip_address=198.51.100.2]",
+        "class_key": "network_device",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
+        "class_key": "switch",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[hostname=server,ip_address=203.0.113.2]",
+        "class_key": "unknown_host",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[hostname=vios-l2-1]",
+        "class_key": "network_device",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[ip_address=198.51.100.5,mac_address=44:48:c1:c4:dd:dd]",
+        "class_key": "access_point",
+        "status": "monitoring"
+      },
+      {
+        "asset": "asset[mac_address=7c:25:86:c9:aa:aa]",
+        "class_key": "network_device",
+        "status": "monitoring"
+      },
+      {
+        "asset": "device",
+        "class_key": "network_device",
+        "status": "monitoring"
+      }
+    ],
+    "crypto_configurations": [
+      {
+        "asset": "device",
+        "protocol": "IPSec",
+        "port": 4500,
+        "protocol_version": null,
+        "cipher_suite": "AES-256-CBC",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": "SHA1",
+        "key_size": 256,
+        "risk_score": 75,
+        "risk_level": "High",
+        "risk_factors": [
+          "Weak hash algorithm"
+        ],
+        "algorithm_links": {
+          "hash": [
+            "SHA1"
+          ],
+          "symmetric": [
+            "AES256"
+          ]
+        },
+        "pqc_category": "symmetric_safe",
+        "has_certificate": false
+      },
+      {
+        "asset": "device",
+        "protocol": "IPSec",
+        "port": 500,
+        "protocol_version": "IKEv1",
+        "cipher_suite": "",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": null,
+        "risk_level": "Unknown",
+        "risk_factors": [],
+        "algorithm_links": {},
+        "pqc_category": "unclassified",
+        "has_certificate": false
+      },
+      {
+        "asset": "device",
+        "protocol": "IPSec",
+        "port": 500,
+        "protocol_version": "IKEv2",
+        "cipher_suite": "AES-256-CBC",
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "hash_algorithm": "SHA256",
+        "key_size": 2048,
+        "risk_score": 35,
+        "risk_level": "Low",
+        "risk_factors": [],
+        "algorithm_links": {
+          "hash": [
+            "SHA256"
+          ],
+          "key_exchange": [
+            "DH-MODP-2048"
+          ],
+          "symmetric": [
+            "AES256"
+          ]
+        },
+        "pqc_category": "needs_migration",
+        "has_certificate": false
+      },
+      {
+        "asset": "device",
+        "protocol": "SSH",
+        "port": 22,
+        "protocol_version": "SSH-1.99",
+        "cipher_suite": "",
+        "key_exchange_algorithm": null,
+        "hash_algorithm": null,
+        "key_size": null,
+        "risk_score": 78,
+        "risk_level": "High",
+        "risk_factors": [],
+        "algorithm_links": {
+          "protocol_version": [
+            "SSH-1.99"
+          ],
+          "signature": [
+            "ssh-ed25519"
+          ]
+        },
+        "pqc_category": "needs_migration",
+        "has_certificate": false
+      }
+    ],
+    "certificates": [],
+    "findings": [],
+    "pqc_counts": {
+      "needs_migration": 2,
+      "pqc_ready": 0,
+      "symmetric_safe": 1,
+      "total": 4,
+      "unclassified": 1
+    },
+    "ingest_outcomes": [
+      "matched",
+      "matched",
+      "matched",
+      "matched",
+      "matched",
+      "matched"
+    ]
+  }
+}

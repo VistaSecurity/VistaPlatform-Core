@@ -1,0 +1,24 @@
+{
+  "meta": {
+    "rc": "ok"
+  },
+  "data": [
+    {
+      "key": "super_identity",
+      "name": "unifi-gw.corp.example.test",
+      "hostname": "unifi-gw.corp.example.test"
+    },
+    {
+      "key": "super_mgmt",
+      "x_mesh_psk": "MUST-NOT-BE-COLLECTED"
+    },
+    {
+      "key": "super_smtp",
+      "x_password": "MUST-NOT-BE-COLLECTED"
+    },
+    {
+      "key": "radius",
+      "x_secret": "MUST-NOT-BE-COLLECTED"
+    }
+  ]
+}

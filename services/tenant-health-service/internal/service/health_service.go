@@ -286,7 +286,7 @@ type SecurityMetrics struct {
 
 // getSecurityMetrics retrieves security metrics from auth-service
 func (s *HealthService) getSecurityMetrics(tenantID uuid.UUID) (*SecurityMetrics, error) {
-	url := fmt.Sprintf("%s/api/v1/auth-service/tenant/%s/security-summary", s.authServiceURL, tenantID.String())
+	url := fmt.Sprintf("%s/api/v1/auth-service/admin/tenants/%s/security-summary", s.authServiceURL, tenantID.String())
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)

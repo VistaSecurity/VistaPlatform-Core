@@ -26,6 +26,25 @@ var insecureDefaultValues = map[string]bool{
 	"change-this-master-key-in-production":           true,
 }
 
+// JWTSecret resolves a verifier's legacy HS256 secret. Development keeps
+// the historical fallback so a local stack can start without extra setup. In
+// production, absence is intentional: after the ES256 migration window closes
+// an empty value disables HS256, and substituting the public dev literal would
+// both re-enable a forgery key and trip RejectInsecureDefaults. Token issuers
+// do not use this helper: the chart deliberately retains the secret in those
+// two pods during and after the verifier cutover, and an issuer without either
+// a signing key or an HMAC secret must continue to fail closed.
+//
+// GetEnvIfPresent preserves an explicitly empty JWT_SECRET in every
+// environment. That is useful in tests and makes the disable switch explicit.
+func JWTSecret() string {
+	fallback := "dev-secret-key-change-in-production"
+	if GetEnv("ENV", "development") == "production" {
+		fallback = ""
+	}
+	return GetEnvIfPresent("JWT_SECRET", fallback)
+}
+
 // firstInsecureDefault returns the name of the first secret in secrets whose
 // value is a well-known insecure default, or "" when none are (or env is not
 // "production"). It is pure — no logging, no process exit — so it can be unit

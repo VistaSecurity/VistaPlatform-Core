@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -12,9 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
-	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
-	"github.com/vistasecurity/vistaplatform/shared/licenseusage"
 )
 
 // Billable-item keys for the numeric caps surfaced by GetEffectiveLimits.
@@ -567,6 +566,8 @@ func toServiceEntitlementInputs(in []models.TierEntitlementInput) []TierEntitlem
 			IncludedValue:     e.IncludedValue,
 			OveragePriceCents: e.OveragePriceCents,
 			OverageUnitSize:   e.OverageUnitSize,
+			ClearOveragePrice: e.ClearOveragePrice,
+			ClearOverageSize:  e.ClearOverageSize,
 		})
 	}
 	return out
@@ -845,9 +846,11 @@ func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest,
 	// just switched to stripe billing, or it has no Stripe Price yet. Prices
 	// are immutable so this mints new ones; best-effort (non-fatal on error).
 	if s.pricer != nil && updated.BillingMethod == "stripe" && updated.PriceCents > 0 {
-		priceChanged := req.PriceCents != nil || req.AnnualPriceCents != nil
+		priceChanged := req.PriceCents != nil && *req.PriceCents != existing.PriceCents
+		annualPriceChanged := req.AnnualPriceCents != nil &&
+			(existing.AnnualPriceCents == nil || *req.AnnualPriceCents != *existing.AnnualPriceCents)
 		switchedToStripe := req.BillingMethod != nil && existing.BillingMethod != "stripe"
-		if priceChanged || switchedToStripe || updated.StripePriceID == nil {
+		if priceChanged || annualPriceChanged || switchedToStripe || updated.StripePriceID == nil {
 			if perr := s.provisionStripePricing(updated); perr != nil {
 				log.Printf("update tier %s: stripe pricing provision failed (non-fatal): %v", tierID, perr)
 			} else if refreshed, rerr := s.GetTier(tierID); rerr == nil {
@@ -858,144 +861,20 @@ func (s *TierService) UpdateTier(tierID uuid.UUID, req models.TierUpdateRequest,
 	return &TierUpdateResult{Tier: updated, ChangedFields: changedFields, EntitlementChanges: entChanges}, nil
 }
 
-// AssignTierResult summarizes assigning a plan to a tenant.
-type AssignTierResult struct {
-	TenantID      uuid.UUID `json:"tenant_id"`
-	TierID        uuid.UUID `json:"tier_id"`
-	TierName      string    `json:"tier_name"`
-	BillingMethod string    `json:"billing_method"`
-	PaymentStatus string    `json:"payment_status,omitempty"`
-	Activated     bool      `json:"activated"`
-}
-
-// AssignTierToTenant assigns a (typically custom/enterprise) plan to a tenant.
-//
-// For an invoice-billed plan this is "record-only": NO Stripe subscription is
-// created. The tenant is pointed at the plan, marked active, and a manual
-// billing_subscriptions row is recorded so the admin billing view reflects it.
-// Entitlements take effect immediately because the resolver reads the tenant's
-// tier from tier_entitlements. Sales invoices the customer out-of-band.
-//
-// For a stripe-billed plan this only sets the tier; card collection still flows
-// through the normal checkout (HandleCreateSubscription), so payment_status is
-// left untouched.
-//
-// Marking a SUSPENDED tenant active is a reactivation, and is recorded in the
-// licence usage ledger as one (shared/licenseusage), attributed to actor.
-func (s *TierService) AssignTierToTenant(tierID, tenantID uuid.UUID, actor string) (*AssignTierResult, error) {
-	tier, err := s.GetTier(tierID)
-	if err != nil {
-		return nil, fmt.Errorf("tier not found: %w", err)
-	}
-
-	// A private custom plan may only be assigned to its owning tenant.
-	if tier.OwnerTenantID != nil && *tier.OwnerTenantID != tenantID {
-		return nil, fmt.Errorf("plan %q is private to another tenant", tier.Name)
-	}
-
-	var exists bool
-	if err := s.db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)`, tenantID,
-	).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("check tenant: %w", err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("tenant not found")
-	}
-
-	// A custom plan assigned without a prior owner claims that tenant as owner,
-	// so it stays private going forward.
-	if tier.IsCustom && tier.OwnerTenantID == nil {
-		if _, err := s.db.Exec(
-			`UPDATE subscription_tiers SET owner_tenant_id = $1, updated_at = NOW() WHERE id = $2`,
-			tenantID, tierID,
-		); err != nil {
-			return nil, fmt.Errorf("claim plan ownership: %w", err)
-		}
-	}
-
-	res := &AssignTierResult{TenantID: tenantID, TierID: tierID, TierName: tier.Name, BillingMethod: tier.BillingMethod}
-
-	if tier.BillingMethod == "invoice" {
-		// The prior payment_status comes back from the same statement (the
-		// subquery locks the row), so the reactivation below is judged on the
-		// state this UPDATE actually replaced.
-		var prev sql.NullString
-		if err := s.db.QueryRow(
-			`UPDATE tenants t SET subscription_tier_id = $1, payment_status = 'active', updated_at = NOW()
-			   FROM (SELECT payment_status FROM tenants WHERE id = $2 FOR UPDATE) old
-			  WHERE t.id = $2
-			  RETURNING old.payment_status`,
-			tierID, tenantID,
-		).Scan(&prev); err != nil {
-			return nil, fmt.Errorf("assign invoice plan: %w", err)
-		}
-		res.PaymentStatus = "active"
-		res.Activated = true
-		// The ledger is written on the bypass pool (read-only for the app role),
-		// after the change has committed: best effort, like every call site
-		// whose change commits on another pool.
-		if licenseusage.StateOf(prev.String) == licenseusage.StateSuspended {
-			licenseusage.RecordBestEffort(context.Background(), s.bypassDB, tenantID, licenseusage.Reactivated, actor)
-		}
-		// Best-effort: the plan is already assigned + enforced even if the
-		// billing-view mirror fails.
-		if err := s.recordManualSubscription(tenantID, tier); err != nil {
-			log.Printf("assign tier %s to tenant %s: manual subscription mirror failed (non-fatal): %v", tierID, tenantID, err)
-		}
-		return res, nil
-	}
-
-	if _, err := s.db.Exec(
-		`UPDATE tenants SET subscription_tier_id = $1, updated_at = NOW() WHERE id = $2`,
-		tierID, tenantID,
-	); err != nil {
-		return nil, fmt.Errorf("assign plan: %w", err)
-	}
-	return res, nil
-}
-
-// recordManualSubscription writes a billing_subscriptions row under a synthetic
-// "manual" provider so invoice-billed tenants surface in the admin billing view.
-func (s *TierService) recordManualSubscription(tenantID uuid.UUID, tier *models.SubscriptionTier) error {
-	var providerID uuid.UUID
-	if err := s.db.QueryRow(`
-		INSERT INTO billing_providers (key, display_name, is_active)
-		VALUES ('manual', 'Manual / Invoice', true)
-		ON CONFLICT (key) DO UPDATE SET is_active = true
-		RETURNING id
-	`).Scan(&providerID); err != nil {
-		return fmt.Errorf("ensure manual provider: %w", err)
-	}
-	// billing_subscriptions is RLS-scoped and tenantID is an INPUT here, so the
-	// write runs inside a tenant-scoped transaction. Unwrapped on the crypto_app
-	// handle the INSERT trips the policy's WITH CHECK and the whole invoice-plan
-	// assignment fails. (billing_providers above carries no policy.)
-	if err := shareddatabase.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`
-		INSERT INTO billing_subscriptions (tenant_id, provider_id, external_subscription_id, plan_key, status)
-		VALUES ($1, $2, $3, $4, 'active')
-		ON CONFLICT (tenant_id, provider_id) DO UPDATE
-		SET external_subscription_id = EXCLUDED.external_subscription_id,
-		    plan_key = EXCLUDED.plan_key,
-		    status = 'active',
-		    updated_at = NOW()
-	`, tenantID, providerID, "invoice:"+tier.ID.String(), tier.Name)
-		return e
-	}); err != nil {
-		return fmt.Errorf("write manual subscription: %w", err)
-	}
-	return nil
-}
-
 // DeprecateTier marks a tier as deprecated (grandfathers existing tenants)
 func (s *TierService) DeprecateTier(tierID uuid.UUID, changedBy uuid.UUID) error {
 	// Fetch the tier first so we have its Stripe ids to archive after deprecating.
-	tier, terr := s.GetTier(tierID)
+	tier, err := s.GetTier(tierID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTierNotFound
+	}
+	if err != nil {
+		return err
+	}
 
 	// Check if any tenants are using this tier
 	var tenantCount int
-	err := s.db.QueryRow("SELECT COUNT(*) FROM tenants WHERE subscription_tier_id = $1 AND deleted_at IS NULL", tierID).Scan(&tenantCount)
+	err = s.db.QueryRow("SELECT COUNT(*) FROM tenants WHERE subscription_tier_id = $1 AND deleted_at IS NULL", tierID).Scan(&tenantCount)
 	if err != nil {
 		return fmt.Errorf("failed to check tenant usage: %w", err)
 	}
@@ -1026,7 +905,7 @@ func (s *TierService) DeprecateTier(tierID uuid.UUID, changedBy uuid.UUID) error
 	// billing unaffected. Archive Prices first, then the Product. Best-effort
 	// and non-fatal: deprecation already succeeded above. No-op for invoice
 	// plans (no Stripe ids).
-	if s.pricer != nil && terr == nil {
+	if s.pricer != nil {
 		if tier.StripePriceID != nil {
 			if aerr := s.pricer.ArchivePrice(*tier.StripePriceID); aerr != nil {
 				log.Printf("deprecate tier %s: archive price failed (non-fatal): %v", tierID, aerr)

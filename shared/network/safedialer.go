@@ -5,9 +5,18 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"os"
+	"strings"
 	"syscall"
 	"time"
 )
+
+// PlatformInternalCIDRsEnv is a comma-separated list of this installation's
+// pod and Service CIDRs. On-premises dialers allow customer RFC1918 networks,
+// so this explicit list is what keeps that narrow exception from also opening
+// the platform's own cluster network.
+const PlatformInternalCIDRsEnv = "VISTA_PLATFORM_INTERNAL_CIDRS"
 
 // SSRF-hardened dialing. ValidateWebhookURL checks a URL up-front, but
 // a pre-flight check has a TOCTOU gap: DNS can resolve to a public IP at
@@ -126,7 +135,7 @@ func onPremDialGuard(_, address string, _ syscall.RawConn) error {
 // on-premises connector; pointing us at 127.0.0.1 or 169.254.169.254 reaches
 // OUR cluster, which is never the point.
 func SafeHTTPClientAllowingPrivate(timeout time.Duration) *http.Client {
-	return clientWithGuard(timeout, onPremDialGuard)
+	return clientWithGuard(timeout, configuredOnPremDialGuard())
 }
 
 // OnPremDialContext is [SafeHTTPClientAllowingPrivate]'s guard as a bare
@@ -143,7 +152,50 @@ func SafeHTTPClientAllowingPrivate(timeout time.Duration) *http.Client {
 // all: reaching 10.0.0.5 IS the job, reaching 127.0.0.1 or 169.254.169.254
 // never is.
 func OnPremDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return (&net.Dialer{Timeout: timeout, Control: onPremDialGuard}).DialContext
+	return (&net.Dialer{Timeout: timeout, Control: configuredOnPremDialGuard()}).DialContext
+}
+
+func configuredOnPremDialGuard() func(string, string, syscall.RawConn) error {
+	prefixes, configErr := platformInternalPrefixes(os.Getenv(PlatformInternalCIDRsEnv))
+	return func(network, address string, rawConn syscall.RawConn) error {
+		if configErr != nil {
+			return configErr
+		}
+		if err := onPremDialGuard(network, address, rawConn); err != nil {
+			return err
+		}
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return fmt.Errorf("ssrf guard: unparseable address %q: %w", address, err)
+		}
+		addr, err := netip.ParseAddr(host)
+		if err != nil {
+			return fmt.Errorf("ssrf guard: %q did not resolve to an IP", host)
+		}
+		addr = addr.Unmap()
+		for _, prefix := range prefixes {
+			if prefix.Contains(addr) {
+				return fmt.Errorf("ssrf guard: refusing to connect to platform-internal address %s (matched %s)", addr, prefix)
+			}
+		}
+		return nil
+	}
+}
+
+func platformInternalPrefixes(value string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for _, raw := range strings.Split(value, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("ssrf guard: invalid %s entry %q: %w", PlatformInternalCIDRsEnv, raw, err)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 func clientWithGuard(timeout time.Duration, guard func(string, string, syscall.RawConn) error) *http.Client {

@@ -1,0 +1,38 @@
+{
+  "kind": "tm:sys:hardware:hardwarestats",
+  "entries": {
+    "https://localhost/mgmt/tm/sys/hardware/system-info": {
+      "nestedStats": {
+        "entries": {
+          "https://localhost/mgmt/tm/sys/hardware/system-info/0": {
+            "nestedStats": {
+              "entries": {
+                "bigipChassisSerialNum": {
+                  "description": "f5-abcd-efgh"
+                },
+                "hostBoardSerialNum": {
+                  "description": "hb-1234"
+                },
+                "platform": {
+                  "description": "Z100"
+                },
+                "marketingName": {
+                  "description": "BIG-IP Virtual Edition"
+                },
+                "cpuCount": {
+                  "description": "4"
+                },
+                "passphrase": {
+                  "description": "MUST-NOT-BE-COLLECTED"
+                },
+                "privateKey": {
+                  "description": "MUST-NOT-BE-COLLECTED"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

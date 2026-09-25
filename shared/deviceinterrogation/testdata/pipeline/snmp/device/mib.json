@@ -1,0 +1,194 @@
+{
+  "values": [
+    {
+      "oid": "1.3.6.1.2.1.1.1.0",
+      "type": "octet",
+      "value": "Cisco IOS Software, C9300 Software, Version 17.09.04a\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAMUST-NOT-BE-COLLECTED\n-----END RSA PRIVATE KEY-----"
+    },
+    {
+      "oid": "1.3.6.1.2.1.1.2.0",
+      "type": "oid",
+      "value": "1.3.6.1.4.1.9.1.2494"
+    },
+    {
+      "oid": "1.3.6.1.2.1.1.3.0",
+      "type": "timeticks",
+      "value": "123456789"
+    },
+    {
+      "oid": "1.3.6.1.2.1.1.4.0",
+      "type": "octet",
+      "value": "netops@example.net"
+    },
+    {
+      "oid": "1.3.6.1.2.1.1.5.0",
+      "type": "octet",
+      "value": "access-sw-1.corp.example.test"
+    },
+    {
+      "oid": "1.3.6.1.2.1.1.6.0",
+      "type": "octet",
+      "value": "HQ Rack 4"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.5.1",
+      "type": "integer",
+      "value": "3"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.5.2",
+      "type": "integer",
+      "value": "9"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.9.1",
+      "type": "octet",
+      "value": "17.09.04a"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.11.1",
+      "type": "octet",
+      "value": "FOC2432L0AB"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.11.2",
+      "type": "octet",
+      "value": "MODULE-SERIAL-NOT-THE-CHASSIS"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.12.1",
+      "type": "octet",
+      "value": "Cisco Systems"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.13.1",
+      "type": "octet",
+      "value": "C9300-48P"
+    },
+    {
+      "oid": "1.3.6.1.2.1.47.1.1.1.1.13.2",
+      "type": "octet",
+      "value": "C9300-NM-8X"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.2.1",
+      "type": "octet",
+      "value": "GigabitEthernet1/0/1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.2.2",
+      "type": "octet",
+      "value": "GigabitEthernet1/0/2"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.2.10",
+      "type": "octet",
+      "value": "Vlan1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.5.2",
+      "type": "gauge32",
+      "value": "100000000"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.6.1",
+      "type": "hex",
+      "value": "00:1b:17:00:00:01"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.6.2",
+      "type": "hex",
+      "value": "00:00:00:00:00:00"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.7.1",
+      "type": "integer",
+      "value": "1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.7.2",
+      "type": "integer",
+      "value": "2"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.7.10",
+      "type": "integer",
+      "value": "1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.8.1",
+      "type": "integer",
+      "value": "1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.8.2",
+      "type": "integer",
+      "value": "2"
+    },
+    {
+      "oid": "1.3.6.1.2.1.2.2.1.8.10",
+      "type": "integer",
+      "value": "1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.31.1.1.1.1.1",
+      "type": "octet",
+      "value": "Gi1/0/1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.31.1.1.1.1.2",
+      "type": "octet",
+      "value": "Gi1/0/2"
+    },
+    {
+      "oid": "1.3.6.1.2.1.31.1.1.1.1.10",
+      "type": "octet",
+      "value": "Vl1"
+    },
+    {
+      "oid": "1.3.6.1.2.1.31.1.1.1.15.1",
+      "type": "gauge32",
+      "value": "1000"
+    },
+    {
+      "oid": "1.3.6.1.2.1.31.1.1.1.15.2",
+      "type": "gauge32",
+      "value": "0"
+    },
+    {
+      "oid": "1.0.8802.1.1.2.1.3.7.1.3.1",
+      "type": "octet",
+      "value": "Gi1/0/1"
+    },
+    {
+      "oid": "1.0.8802.1.1.2.1.4.1.1.5.0.1.1",
+      "type": "hex",
+      "value": "00:1b:17:00:00:aa"
+    },
+    {
+      "oid": "1.0.8802.1.1.2.1.4.1.1.7.0.1.1",
+      "type": "octet",
+      "value": "Gi1/0/24"
+    },
+    {
+      "oid": "1.0.8802.1.1.2.1.4.1.1.8.0.1.1",
+      "type": "octet",
+      "value": "uplink to core"
+    },
+    {
+      "oid": "1.0.8802.1.1.2.1.4.1.1.9.0.1.1",
+      "type": "octet",
+      "value": "dist-sw-1.corp.example.test"
+    },
+    {
+      "oid": "1.3.6.1.2.1.4.22.1.2.1.192.0.2.1",
+      "type": "hex",
+      "value": "00:1b:17:00:00:bb"
+    },
+    {
+      "oid": "1.3.6.1.2.1.4.22.1.3.1.192.0.2.1",
+      "type": "ipaddress",
+      "value": "192.0.2.1"
+    }
+  ]
+}

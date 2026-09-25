@@ -573,6 +573,20 @@ func TestIntegration_TierComposition_UpdateTierAtomic(t *testing.T) {
 		f.expect("rename", code, body, http.StatusOK)
 	})
 
+	t.Run("remove entitlement through the unified tier update", func(t *testing.T) {
+		before, v := f.composition(f.tier)
+		if _, ok := before["max_assets"]; !ok {
+			t.Fatal("fixture has no max_assets row to remove")
+		}
+		code, body := f.do(f.admin, http.MethodPut, path,
+			`{"remove_entitlements":["max_assets"],"entitlements_version":"`+v+`"}`)
+		f.expect("remove entitlement", code, body, http.StatusOK)
+		after, _ := f.composition(f.tier)
+		if _, ok := after["max_assets"]; ok {
+			t.Fatal("remove_entitlements did not remove max_assets")
+		}
+	})
+
 	t.Run("create writes the tier, its composition and history atomically", func(t *testing.T) {
 		code, body := f.do(f.admin, http.MethodPost, "/tiers",
 			`{"name":"p7-new","display_name":"P7 New","billing_interval":"month","billing_method":"invoice","entitlements":[{"item_key":"max_sensors","included_value":{"quantity":9}},{"item_key":"max_assets","included_value":{}}]}`)
@@ -604,4 +618,50 @@ func TestIntegration_TierComposition_UpdateTierAtomic(t *testing.T) {
 		f.expect("deprecate", code, body, http.StatusOK)
 		f.awaitAudit("subscription_tier.deprecated")
 	})
+}
+
+func TestIntegration_UpdateTierWaitsForTierLock(t *testing.T) {
+	f := newTierCompFixture(t)
+	tx, err := f.owner.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	if _, err := tx.Exec(`SELECT 1 FROM subscription_tiers WHERE id = $1 FOR UPDATE`, f.tier); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		code int
+		body map[string]interface{}
+	}
+	done := make(chan result, 1)
+	req := f.request(f.admin, http.MethodPut, "/tiers/"+f.tier.String(), `{"display_name":"Waited for lock"}`)
+	go func() {
+		w := httptest.NewRecorder()
+		f.srv.Router().ServeHTTP(w, req)
+		var body map[string]interface{}
+		_ = json.Unmarshal(w.Body.Bytes(), &body)
+		done <- result{w.Code, body}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("UpdateTier bypassed the tier lock: status %d body %v", r.code, r.body)
+	case <-time.After(750 * time.Millisecond):
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-done:
+		f.expect("update after lock release", r.code, r.body, http.StatusOK)
+	case <-time.After(10 * time.Second):
+		t.Fatal("UpdateTier did not finish after the tier lock was released")
+	}
+}
+
+func TestIntegration_DeprecateUnknownTierIsNotAcknowledged(t *testing.T) {
+	f := newTierCompFixture(t)
+	code, body := f.do(f.admin, http.MethodDelete, "/tiers/"+uuid.NewString(), "")
+	f.expect("deprecate unknown tier", code, body, http.StatusNotFound)
 }

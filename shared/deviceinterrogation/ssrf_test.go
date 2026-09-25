@@ -87,6 +87,46 @@ func TestEveryVendorClientRefusesLoopback(t *testing.T) {
 	}
 }
 
+// The appliance guard is one shared egress boundary, not an HTTP-only policy.
+// Every raw transport and database driver must use it too; otherwise a tenant
+// target can reach the interrogator's loopback or cloud metadata service by
+// choosing SNMP, a handshake probe, PostgreSQL, or MySQL (E-09).
+func TestEveryRawProbeAndDatabaseRefusesLoopback(t *testing.T) {
+	withRealDialGuard(t)
+
+	assertGuarded := func(name string, run func() error) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			err := run()
+			if err == nil || !strings.Contains(err.Error(), "ssrf guard") {
+				t.Fatalf("got %v, want an ssrf guard refusal before dialing", err)
+			}
+		})
+	}
+
+	assertGuarded("snmp", func() error {
+		_, err := (&SNMPInterrogator{Timeout: 100 * time.Millisecond}).Interrogate(context.Background(),
+			DeviceInfo{DeviceType: "generic_snmp", IPAddress: "127.0.0.1", Port: 161}, Credentials{})
+		return err
+	})
+	assertGuarded("tls", func() error {
+		_, err := (&TLSProber{timeout: 100 * time.Millisecond}).ProbeTLS("127.0.0.1", 443)
+		return err
+	})
+	assertGuarded("ssh", func() error {
+		_, err := (&TLSProber{timeout: 100 * time.Millisecond}).ProbeSSH("127.0.0.1", 22)
+		return err
+	})
+	assertGuarded("postgres", func() error {
+		_, err := InterrogatePostgreSQLConn(context.Background(), "postgres://audit:redacted@127.0.0.1:5432/postgres?sslmode=disable")
+		return err
+	})
+	assertGuarded("mysql", func() error {
+		_, err := InterrogateMySQLConn(context.Background(), "audit:redacted@tcp(127.0.0.1:3306)/")
+		return err
+	})
+}
+
 // The OTHER polarity, and the one this product cannot live without: an
 // appliance on the customer's own RFC1918 network must still be dialled.
 //

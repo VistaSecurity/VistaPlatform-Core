@@ -517,6 +517,54 @@ spec:
                   name: {{ include "vistaplatform.billingSecretName" $ctx }}
                   key: stripe-webhook-secret
             {{- end }}
+            {{- if eq $name "cluster-sensor-service" }}
+            {{/*
+              Explicit external scan targets (#2014 W5.13b). Rendered here, not
+              via extraEnv, so a customer extraEnv list cannot drop it; the
+              service reads a missing or unrecognised value as OFF. hasKey, not
+              `default`: `false | default true` is true.
+            */}}
+            {{- $ext := (($ctx.Values.discovery | default dict).explicitExternalTargets) | default dict }}
+            {{- $extEnabled := false }}
+            {{- if hasKey $ext "enabled" }}{{- $extEnabled = $ext.enabled }}{{- end }}
+            - name: DISCOVERY_EXPLICIT_EXTERNAL_TARGETS_ENABLED
+              value: {{ ternary "true" "false" (eq (toString $extEnabled) "true") | quote }}
+            - name: DISCOVERY_EXTERNAL_TARGET_MAX_ADDRESSES
+              value: {{ $ext.maxAddressesPerTarget | default 4096 | int | toString | quote }}
+            - name: DISCOVERY_EXTERNAL_JOB_MAX_ADDRESSES
+              value: {{ $ext.maxAddressesPerJob | default 16384 | int | toString | quote }}
+            {{- end }}
+            {{- if eq $name "device-interrogation-service" }}
+            {{/*
+              Device interrogation intentionally reaches customer RFC1918
+              networks. Give its application-level dial guard the same
+              installation-specific pod/Service exclusions as NetworkPolicy,
+              so that permission cannot be used to reach this cluster.
+            */}}
+            {{- $networkPolicy := $ctx.Values.networkPolicy | default dict }}
+            {{- $internalCIDRs := $networkPolicy.clusterInternalCIDRs | default (list) }}
+            {{- if empty $internalCIDRs }}
+            {{- fail "networkPolicy.clusterInternalCIDRs must contain this cluster's pod and Service CIDRs; device interrogation uses it to block application-level access to platform-internal addresses" }}
+            {{- end }}
+            - name: VISTA_PLATFORM_INTERNAL_CIDRS
+              value: {{ join "," $internalCIDRs | quote }}
+            {{- end }}
+            {{- /*
+              The external-targets variables come ONLY from
+              discovery.explicitExternalTargets. An extraEnv entry would be
+              rendered after the chart's and win (the last duplicate wins), so
+              `enabled: false` could be silently undone by extraEnv — refuse
+              the render instead (#2014 W5.13b review N1).
+            */}}
+            {{- range $svc.extraEnv }}
+            {{- $envName := toString (.name | default "") }}
+            {{- if or (hasPrefix "DISCOVERY_EXTERNAL_" $envName) (hasPrefix "DISCOVERY_EXPLICIT_EXTERNAL_" $envName) }}
+            {{- fail (printf "backends.%s.extraEnv sets %s: the explicit external scan target settings are configured only under discovery.explicitExternalTargets (enabled, maxAddressesPerTarget, maxAddressesPerJob) — an extraEnv entry would silently override them. Remove it and set the value there." $name $envName) }}
+            {{- end }}
+            {{- if and (eq $name "device-interrogation-service") (eq $envName "VISTA_PLATFORM_INTERNAL_CIDRS") }}
+            {{- fail "backends.device-interrogation-service.extraEnv must not set VISTA_PLATFORM_INTERNAL_CIDRS; configure networkPolicy.clusterInternalCIDRs so the application and NetworkPolicy use the same source of truth" }}
+            {{- end }}
+            {{- end }}
             {{- with $svc.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

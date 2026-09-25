@@ -1,0 +1,22 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {
+      "ip_version": 4,
+      "type": "static",
+      "ip_mask": "0.0.0.0/0",
+      "gateway": "203.0.113.1",
+      "interface": "wan1",
+      "distance": 5
+    },
+    {
+      "ip_version": 4,
+      "type": "connected",
+      "ip_mask": "192.0.2.0/24",
+      "gateway": "0.0.0.0",
+      "interface": "internal"
+    }
+  ]
+}

@@ -28,7 +28,10 @@
 // is NULL, which NOT keeps NULL — so an untagged customer sensor would drop out
 // of BOTH buckets without the COALESCE.
 //
-// All counts are LIVE rows (deleted_at IS NULL).
+// All counts are LIVE rows (deleted_at IS NULL) belonging to LIVE tenants.
+// A tenant soft-delete does not cascade into sensors/device_agents, so every
+// platform-wide arm must join tenants explicitly or retired organizations keep
+// inflating the fleet totals forever.
 package agentcounts
 
 import (
@@ -63,11 +66,13 @@ func perTenant(tenantFilter string) string {
 		       0::bigint AS device_agents,
 		       COUNT(*) FILTER (WHERE ` + PlatformManagedSQL + `) AS platform_managed
 		FROM sensors s
+		JOIN tenants t ON t.id = s.tenant_id AND t.deleted_at IS NULL
 		WHERE s.deleted_at IS NULL{{S}}
 		GROUP BY s.tenant_id
 		UNION ALL
 		SELECT d.tenant_id, 0::bigint, COUNT(*), 0::bigint
 		FROM device_agents d
+		JOIN tenants t ON t.id = d.tenant_id AND t.deleted_at IS NULL
 		WHERE d.deleted_at IS NULL{{D}}
 		GROUP BY d.tenant_id
 	) k

@@ -97,7 +97,7 @@ func TestIntegration_Interrogation_ReachesInventorySink(t *testing.T) {
 	}
 
 	ok := svc.materializeInterrogatedAsset(
-		ctx, tenantID, deviceID, jobID, targetID, systemSensorID, jobID.String(),
+		ctx, tenantID, deviceID, uuid.Nil, jobID, targetID, systemSensorID, jobID.String(),
 		interrogatedAsset(), &di.InterrogateResult{},
 	)
 	if !ok {

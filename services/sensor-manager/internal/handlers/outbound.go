@@ -128,6 +128,23 @@ func (h *Handler) Heartbeat(c *gin.Context) {
 			} else {
 				response.Config = payload
 			}
+
+			// What the tenant owns, beyond private space, and what it asked
+			// never to be probed — the sensor's TLS enricher decides against
+			// it which passively seen destinations it may handshake with
+			// ( W5.13).
+			//
+			// A failure is NOT silence. Leaving the field out would let the
+			// sensor keep its last owned set indefinitely ( review), so a
+			// set that cannot be built is sent as an explicit, incomplete one:
+			// no ownership, and whatever exclusions could be read, which the
+			// sensor adds to the ones it already had.
+			owned, err := h.sensorConfig.OwnedNetworks(c, tenantID)
+			if err != nil {
+				h.log.WithError(err).WithField("sensor_id", sensorID).
+					Warn("Building the sensor's owned networks failed; sending no ownership")
+			}
+			response.OwnedNetworks = owned
 		}
 	}
 

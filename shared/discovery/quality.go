@@ -274,6 +274,13 @@ func CheckOCSPStaple(staple []byte, leaf, issuer *x509.Certificate) (status, det
 // trying each responder URL in order. Returns ("", "") if no check could be
 // completed (no responder URLs, network failure, etc.).
 func CheckOCSPRevocation(leaf, issuer *x509.Certificate) (status, detail string) {
+	return CheckOCSPRevocationWith(nil, leaf, issuer)
+}
+
+// CheckOCSPRevocationWith queries through client (nil = a default client).
+// The responder URL is taken from the leaf — data the scanned server chose —
+// so a platform runtime passes a GuardedHTTPClient (outbound.go).
+func CheckOCSPRevocationWith(client *http.Client, leaf, issuer *x509.Certificate) (status, detail string) {
 	if leaf == nil || issuer == nil {
 		return "", ""
 	}
@@ -284,7 +291,9 @@ func CheckOCSPRevocation(leaf, issuer *x509.Certificate) (status, detail string)
 	if err != nil {
 		return "", ""
 	}
-	client := &http.Client{Timeout: ocspTimeout}
+	if client == nil {
+		client = &http.Client{Timeout: ocspTimeout}
+	}
 	for _, responderURL := range leaf.OCSPServer {
 		s, d := queryOCSPResponder(client, responderURL, ocspReq, issuer)
 		if s != "" {

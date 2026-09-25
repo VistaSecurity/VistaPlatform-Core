@@ -88,6 +88,7 @@ func planStampRestore(prior []scanStamp) (nullIDs []uuid.UUID, tsIDs []string, t
 // activeScanAsset is one asset resolved into probe coordinates.
 type activeScanAsset struct {
 	id   uuid.UUID
+	name string // what a person calls it: the hostname, else the host
 	host string // BARE host — an IP or hostname, never "host:port"
 	port int    // 0 when the asset records no port
 	// configProtocols are the protocol values already recorded against this

@@ -22,6 +22,7 @@ package agentcounts
 //   - drop `OR 'system' = ANY(...)` → the tag-only row turns customer.
 //   - drop the COALESCE → the NULL-tags customer row drops out of both buckets.
 //   - drop `s.deleted_at IS NULL` / `d.deleted_at IS NULL` → deleted rows count.
+//   - drop either tenants join → a soft-deleted tenant's live rows count.
 //   - drop the `AND s.tenant_id = $1` narrowing → ForTenant counts the other
 //     tenant's rows.
 //
@@ -77,7 +78,12 @@ func TestIntegration_AgentCounts_PredicateArms(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
 	other := testdb.NewTenant(t, db) // keeps its 2 trigger rows: must not leak into tenant's counts
+	deletedTenant := testdb.NewTenant(t, db)
 	seedPredicateArms(t, db, tenant)
+	seedPredicateArms(t, db, deletedTenant)
+	if _, err := db.Exec(`UPDATE tenants SET deleted_at = NOW() WHERE id = $1`, deletedTenant); err != nil {
+		t.Fatalf("soft-delete tenant: %v", err)
+	}
 	ctx := context.Background()
 
 	want := Counts{CustomerSensors: 2, DeviceAgents: 1, PlatformManaged: 2}
@@ -99,6 +105,13 @@ func TestIntegration_AgentCounts_PredicateArms(t *testing.T) {
 	if otherWant := (Counts{PlatformManaged: 2}); otherGot != otherWant {
 		t.Fatalf("ForTenant(other) = %+v, want %+v", otherGot, otherWant)
 	}
+	deletedGot, err := ForTenant(ctx, db, deletedTenant.String())
+	if err != nil {
+		t.Fatalf("ForTenant(deleted): %v", err)
+	}
+	if deletedGot != (Counts{}) {
+		t.Fatalf("ForTenant(deleted) = %+v, want zero; live agent rows of a soft-deleted tenant must not count", deletedGot)
+	}
 
 	// The derived table the rollups LEFT JOIN agrees with ForTenant.
 	var viaJoin Counts
@@ -116,11 +129,14 @@ func TestIntegration_AgentCounts_PredicateArms(t *testing.T) {
 	// independent longhand count rather than a literal.
 	var longhand Counts
 	if err := db.QueryRowContext(ctx, `SELECT
-		(SELECT COUNT(*) FROM sensors WHERE deleted_at IS NULL AND platform <> 'platform'
-		   AND NOT ('system' = ANY(COALESCE(tags, '{}'::text[])))),
-		(SELECT COUNT(*) FROM device_agents WHERE deleted_at IS NULL),
-		(SELECT COUNT(*) FROM sensors WHERE deleted_at IS NULL AND (platform = 'platform'
-		   OR 'system' = ANY(COALESCE(tags, '{}'::text[]))))`).
+		(SELECT COUNT(*) FROM sensors s JOIN tenants t ON t.id = s.tenant_id AND t.deleted_at IS NULL
+		 WHERE s.deleted_at IS NULL AND s.platform <> 'platform'
+		   AND NOT ('system' = ANY(COALESCE(s.tags, '{}'::text[])))),
+		(SELECT COUNT(*) FROM device_agents d JOIN tenants t ON t.id = d.tenant_id AND t.deleted_at IS NULL
+		 WHERE d.deleted_at IS NULL),
+		(SELECT COUNT(*) FROM sensors s JOIN tenants t ON t.id = s.tenant_id AND t.deleted_at IS NULL
+		 WHERE s.deleted_at IS NULL AND (s.platform = 'platform'
+		   OR 'system' = ANY(COALESCE(s.tags, '{}'::text[]))))`).
 		Scan(&longhand.CustomerSensors, &longhand.DeviceAgents, &longhand.PlatformManaged); err != nil {
 		t.Fatalf("longhand: %v", err)
 	}
@@ -131,11 +147,14 @@ func TestIntegration_AgentCounts_PredicateArms(t *testing.T) {
 	if totals != longhand {
 		// A concurrent binary can insert between the two reads; re-read once.
 		if err := db.QueryRowContext(ctx, `SELECT
-			(SELECT COUNT(*) FROM sensors WHERE deleted_at IS NULL AND platform <> 'platform'
-			   AND NOT ('system' = ANY(COALESCE(tags, '{}'::text[])))),
-			(SELECT COUNT(*) FROM device_agents WHERE deleted_at IS NULL),
-			(SELECT COUNT(*) FROM sensors WHERE deleted_at IS NULL AND (platform = 'platform'
-			   OR 'system' = ANY(COALESCE(tags, '{}'::text[]))))`).
+			(SELECT COUNT(*) FROM sensors s JOIN tenants t ON t.id = s.tenant_id AND t.deleted_at IS NULL
+			 WHERE s.deleted_at IS NULL AND s.platform <> 'platform'
+			   AND NOT ('system' = ANY(COALESCE(s.tags, '{}'::text[])))),
+			(SELECT COUNT(*) FROM device_agents d JOIN tenants t ON t.id = d.tenant_id AND t.deleted_at IS NULL
+			 WHERE d.deleted_at IS NULL),
+			(SELECT COUNT(*) FROM sensors s JOIN tenants t ON t.id = s.tenant_id AND t.deleted_at IS NULL
+			 WHERE s.deleted_at IS NULL AND (s.platform = 'platform'
+			   OR 'system' = ANY(COALESCE(s.tags, '{}'::text[]))))`).
 			Scan(&longhand.CustomerSensors, &longhand.DeviceAgents, &longhand.PlatformManaged); err != nil {
 			t.Fatalf("longhand: %v", err)
 		}

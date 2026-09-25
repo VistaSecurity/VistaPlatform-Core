@@ -378,6 +378,7 @@ func (s *DeviceService) CreateDevice(ctx context.Context, tenantID uuid.UUID, re
 		DiscoveryMethod: discoveryMethod,
 		Source:          declaredSource(),
 		ObservedAt:      now,
+		Admission:       probeEvidence(req.ProbeEvidence),
 	})
 	if err != nil {
 		return nil, err
@@ -391,7 +392,7 @@ func (s *DeviceService) CreateDevice(ctx context.Context, tenantID uuid.UUID, re
 		Vendor:                req.Vendor,
 		Model:                 req.Model,
 		FirmwareVersion:       req.FirmwareVersion,
-		TLSInsecureSkipVerify: req.TLSInsecureSkipVerify,
+		TLSInsecureSkipVerify: sshSafeSkipFlag(req.DeviceType, req.TLSInsecureSkipVerify),
 		CredentialID:          req.CredentialID,
 		Username:              req.Username,
 		Password:              req.Password,
@@ -668,7 +669,7 @@ func (s *DeviceService) UpdateDevice(ctx context.Context, tenantID, assetID uuid
 		Model:                 req.Model,
 		FirmwareVersion:       req.FirmwareVersion,
 		SerialNumber:          req.SerialNumber,
-		TLSInsecureSkipVerify: req.TLSInsecureSkipVerify,
+		TLSInsecureSkipVerify: sshSafeSkipFlag(existing.DeviceType, req.TLSInsecureSkipVerify),
 		ConnectionStatus:      req.ConnectionStatus,
 		CredentialID:          req.CredentialID,
 		Username:              req.Username,
@@ -892,6 +893,36 @@ func derefStr(p *string) string {
 // identity.CloudResourceIDKeys.
 func cloudResourceIDFromMetadata(meta map[string]interface{}) string {
 	return identity.CloudResourceIDFromMetadata(meta)
+}
+
+// probeEvidence is the admission evidence a create carries: none for a device
+// typed in by hand, and what Add device's own authenticated identification
+// established otherwise (see DiscoveredDeviceInfo.ApplyTo).
+func probeEvidence(e *identity.AdmissionEvidence) identity.AdmissionEvidence {
+	if e == nil {
+		return identity.AdmissionEvidence{}
+	}
+	return *e
+}
+
+// sshSafeSkipFlag is the TLS skip flag as it may be STORED for deviceType. For
+// an SSH-managed type it is always an explicit false — including when the
+// request did not mention it, so any edit of a Cisco device stored with the
+// flag set clears it ( review B1/NB-7).
+func sshSafeSkipFlag(deviceType string, requested *bool) *bool {
+	if !IsSSHManagedDeviceType(deviceType) {
+		return requested
+	}
+	off := false
+	return &off
+}
+
+// PinSSHHostKeyIfUnset pins the SSH host key an Add-device identification
+// authenticated through, unless the device already has one pinned (
+// review NB-6). Without it the first interrogation trusted whatever answered
+// on first use a second time.
+func (s *DeviceService) PinSSHHostKeyIfUnset(ctx context.Context, tenantID, assetID uuid.UUID, fingerprint, keyType string) (bool, error) {
+	return pinSSHHostKeyIfUnset(ctx, s.db, tenantID, assetID, fingerprint, keyType)
 }
 
 // ResetSSHHostKeyPin clears the SSH host key pinned to a managed asset, so the

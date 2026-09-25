@@ -12,9 +12,12 @@ import {
   PROVENANCE_TITLE,
   componentTypeLabel,
   explainRisk,
+  hybridKexHint,
   provenanceOf,
+  remediationGuidanceOf,
   verdictOf,
   type CryptoComponent,
+  type RemediationGuidanceView,
 } from './risk-explanation';
 import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
 
@@ -202,6 +205,8 @@ function ComponentCard({ c }: { c: CryptoComponent }) {
   const prov = provenanceOf(c);
   const offered = prov === 'offered';
   const verdict = verdictOf(c);
+  const hint = hybridKexHint(c);
+  const guidance = remediationGuidanceOf(c);
   const alts = Array.isArray(c.recommended_alternatives) ? c.recommended_alternatives : [];
   return (
     <div
@@ -250,6 +255,26 @@ function ComponentCard({ c }: { c: CryptoComponent }) {
         <Icon name={offered ? 'circle-dashed' : 'eye'} size={11} />
         {PROVENANCE_LABEL[prov]}
       </div>
+      {hint && (
+        // Shown whether or not this component sets the score: the fix it
+        // describes is a configuration change, which matters even when a
+        // different component is the worst. Informational accent, not a
+        // severity colour — it changes no score.
+        <div
+          data-testid="hybrid-kex-hint"
+          style={{
+            display: 'flex', gap: 7, marginTop: 8, padding: '7px 9px', borderRadius: 7,
+            background: 'color-mix(in srgb, var(--accent) 9%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
+          }}
+        >
+          <Icon name="sliders-horizontal" size={12} style={{ color: 'var(--accent)', flex: 'none', marginTop: 2 }} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 11.5, color: 'var(--app-t1)', lineHeight: 1.45 }}>{hint.text}</div>
+            <div style={{ fontSize: 10.5, color: 'var(--app-t3)', lineHeight: 1.4, marginTop: 3 }}>{hint.note}</div>
+          </div>
+        </div>
+      )}
       {c.sets_score && c.migration_guidance && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginTop: 7, lineHeight: 1.45 }}>{c.migration_guidance}</div>
       )}
@@ -261,7 +286,49 @@ function ComponentCard({ c }: { c: CryptoComponent }) {
           ))}
         </div>
       )}
+      {/* Shown for offered-only components too: turning off a weak option the
+          server merely accepts is exactly what the steps describe. Open by
+          default only on the score-setter, so a long list stays scannable. */}
+      {guidance && <RemediationGuidanceBlock g={guidance} defaultOpen={c.sets_score} />}
     </div>
+  );
+}
+
+// The catalogue's curated "how to fix" for one component. Informational tone,
+// like the hybrid hint: severity is carried by the card's dot and left edge,
+// and the catalogue's timeline is labelled as its suggestion, not a band.
+function RemediationGuidanceBlock({ g, defaultOpen }: { g: RemediationGuidanceView; defaultOpen: boolean }) {
+  const meta = { fontSize: 10.5, color: 'var(--app-t3)', lineHeight: 1.4 } as const;
+  return (
+    <details data-testid="remediation-guidance" open={defaultOpen} style={{ marginTop: 8, borderTop: '1px solid var(--app-border)', paddingTop: 7 }}>
+      <summary style={{ cursor: 'pointer', fontSize: 11.5, fontWeight: 600, color: 'var(--app-t1)', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Icon name="wrench" size={12} style={{ color: 'var(--accent)', flex: 'none' }} />
+        How to fix
+      </summary>
+      <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {g.summary && <div style={{ fontSize: 11.5, color: 'var(--app-t2)', lineHeight: 1.45 }}>{g.summary}</div>}
+        {g.impact && <div style={{ fontSize: 11.5, color: 'var(--app-t2)', lineHeight: 1.45 }}><strong style={{ color: 'var(--app-t1)' }}>Impact:</strong> {g.impact}</div>}
+        {g.steps.length > 0 && (
+          <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, color: 'var(--app-t2)', lineHeight: 1.5 }}>
+            {g.steps.map((step, i) => <li key={i}>{step}</li>)}
+          </ol>
+        )}
+        {g.timeline && <div style={meta}>Suggested timeline (catalogue): {g.timeline}</div>}
+        {g.cves.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+            <span style={meta}>references</span>
+            {g.cves.map((cve, i) => <span key={i} className="mono" style={{ fontSize: 10.5, color: 'var(--app-t2)' }}>{cve}</span>)}
+          </div>
+        )}
+        {g.resources.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {g.resources.map((r, i) => r.href
+              ? <a key={i} href={r.href} target="_blank" rel="noopener noreferrer" className="mono" style={{ fontSize: 10.5, color: 'var(--info)', wordBreak: 'break-all' }}>{r.text}</a>
+              : <span key={i} className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', wordBreak: 'break-all' }}>{r.text}</span>)}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 

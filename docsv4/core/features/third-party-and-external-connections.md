@@ -99,10 +99,11 @@ This matters more over time — HTTP/3 is enabled by default in current browsers
 typical desktop generates a substantial share of its traffic over QUIC.
 
 **Why we don't simply probe those destinations.** Recovering the cipher suite and
-certificate requires opening a connection to the server. The platform does **not**
-send traffic to third-party hosts merely because one of your systems happened to
-connect to them. Probing is reserved for infrastructure you own or have explicitly
-chosen to monitor.
+certificate requires opening a connection to the server. By default the platform
+does **not** send traffic to third-party hosts merely because one of your systems
+happened to connect to them. Probing is reserved for infrastructure you own or have
+explicitly chosen to monitor — unless you opt in, as described under
+[Certificates of third-party TLS connections](#certificates-of-third-party-tls-connections).
 
 **How to get full crypto detail for a vendor that matters.** Use **Elevate** (below).
 An elevated connection becomes a monitored asset and is actively probed like any
@@ -113,6 +114,120 @@ elevate is what authorizes the platform to talk to that host.
 > large majority of them (servers offering HTTP/3 on port 443 almost always serve
 > TLS over TCP on the same port). Native HTTP/3 interrogation — probing the QUIC
 > endpoint directly and recording its QUIC-specific cryptography — is planned.
+
+## Certificates of third-party TLS connections
+
+A sensor watching TLS traffic reads the server's certificate straight off the wire
+for **TLS 1.2 and older**. **TLS 1.3 encrypts the certificate** as part of the
+handshake, so a passively observed TLS 1.3 connection — which is now most of them —
+arrives with its version and cipher suite but **no certificate**. To fill that in,
+a sensor can open its own connection to the same server and read the certificate
+it presents. We call that *enrichment*.
+
+**What a sensor enriches by default.** Only endpoints that are yours:
+
+- **private addresses** — RFC 1918 (10/8, 172.16/12, 192.168/16), IPv6 unique-local
+  (fc00::/7), loopback and link-local;
+- addresses inside a **network segment you registered** under **Settings →
+  Infrastructure → Network Segments**, whatever its type, public included.
+  Segments the platform *learned* from a firewall's or switch's VLAN table do not
+  count: a device reporting its internet-facing network is telling us where it is
+  connected, not what you own;
+- connections you **elevated** to monitored (below) — that one endpoint, not every
+  port on the vendor's host.
+
+Carrier-grade NAT space (100.64.0.0/10) is **not** treated as yours by default: it
+is your provider's space, with other customers on the far side.
+
+> **Tailscale and other CGNAT overlays: register your range.** Tailscale gives
+> every device an address in 100.64.0.0/10. Until you register that space under
+> **Settings → Infrastructure → Network Segments** — either all of
+> `100.64.0.0/10` or just your tailnet's range — your sensors treat your own
+> tailnet peers as third parties and **do not read their certificates**. The same
+> applies to any other overlay or provider network that hands out 100.64.0.0/10
+> addresses.
+
+A registered segment must be a range you could plausibly own: an IPv4 segment must
+be **/8 or narrower** and an IPv6 segment **/16 or narrower**. Saving anything wider
+— `0.0.0.0/0` above all — is refused with a message saying so, because registering
+"the whole internet" as yours would amount to switching on the opt-in below without
+saying so. (Ranges wholly inside private space, such as `fd00::/8`, are exempt:
+they are yours already.) A segment that wide saved before this rule existed is
+kept, but it does not count as yours for enrichment; narrow it to the ranges you
+own.
+
+Everything else — vendors, SaaS, CDNs, anything your hosts merely talked to — is
+recorded exactly as the sensor saw it and **not** contacted. For a TLS 1.3
+connection that means the row under **Inventory → 3rd Party** shows the version
+and cipher suite with **no certificate**. That is not a fault; it is the sensor
+declining to connect to someone else's server without being asked. When the opt-in
+below is off, the row's **Cert expires** cell says so: hover the dash to read
+*Certificate not collected: active enrichment of third parties is off*.
+
+**How long a sensor trusts what it was told.** The platform re-sends your
+registered ranges and elevated connections to every sensor on every check-in. A
+sensor that has not heard from the platform for **24 hours** stops treating them as
+yours and enriches private addresses only, until the platform answers again.
+Exclusions are never forgotten that way. If the platform cannot work out your
+ranges on a check-in — for example because a scan-exclusion setting is malformed —
+it tells the sensor so explicitly: no ranges count as yours until it can, and the
+exclusions it could read are added to the ones the sensor already had.
+
+A network segment marked **sensitive** or with **active probes disabled**, and any
+range on your automatic-scan exclusion list, is never enriched — not even with the
+opt-in below.
+
+**Opting in.** If you want the certificates of every external TLS service your
+network talks to, turn on **Actively enrich third-party TLS connections**:
+
+1. Open **Discovery → Sensors & Agents** and click **Sensor defaults**.
+2. Turn on **Actively enrich third-party TLS connections**, click **Save**, and
+   confirm. The confirmation is recorded with your account.
+
+It is off by default. When on, sensors actively connect to external TLS services
+your network talks to, to read their certificates — **third parties may see these
+connections** in their own logs. Each destination is contacted at most once per
+observation rest period (the sensor's *Dedup TTL* setting), with a single
+handshake; the extra handshakes a sensor uses to test which key exchanges a
+server supports are only ever sent to your own endpoints. The setting can also be
+overridden per sensor from that sensor's **Settings** tab, like any other sensor
+setting (see [Agent and sensor settings](./agent-and-sensor-settings.md)).
+Changing fleet defaults needs the **Update sensors** permission.
+
+A sensor running a build older than this setting reports it as unsupported on its
+**Settings** tab — and such a sensor still enriches third parties, because it
+predates the rule. Upgrade it.
+
+**Air-gapped sensors.** A sensor that never talks to the platform can be given the
+same two decisions in its own configuration file (`sensor-config.yaml`) or
+environment:
+
+```yaml
+capture:
+  # Local third-party opt-in. Default false.
+  thirdPartyTLSEnrichment: true          # env: THIRD_PARTY_TLS_ENRICHMENT=true
+  # Public ranges this sensor may treat as yours, like registered segments.
+  ownedNetworks:                         # env: OWNED_NETWORKS=203.0.113.0/24,2001:db8::/32
+    - 203.0.113.0/24
+```
+
+These apply **only while the platform has never delivered a value**. The first time
+the platform delivers the setting or its list of your networks, the platform's
+value replaces the local one. The sensor records what it was given, so the
+platform's value still wins after a restart — a sensor does not fall back to its
+file just because it was restarted. The local opt-in is never reported to the
+platform either, so a value written on one host cannot become the platform's
+setting without the console's confirmation. To hand a sensor back to its local
+file for good, stop it and delete `platform-probe-consent.json` from its data
+directory. The record names the sensor it was written for: a data directory reused
+for a sensor enrolled again — into another organization, say — ignores the old
+record rather than inheriting its answers. Local `ownedNetworks` follow the same
+/8 and /16 rule as segments.
+
+Consent is never adopted from a sensor. When a sensor first reports the settings
+it is running, the platform normally records them as that sensor's own starting
+point; settings that need a confirmation in the console — third-party enrichment
+and DNS decoding — are left out of that, so a sensor cannot grant itself either.
 
 ## Elevating a vendor connection to monitored
 
@@ -137,7 +252,9 @@ Once elevated, the vendor:
 
 Connections you don't elevate stay in the 3rd Party list and never clutter your
 managed inventory. Re-discovery of an elevated vendor keeps its monitored asset
-current — it is refreshed in place, not re-listed as noise.
+current — it is refreshed in place, not re-listed as noise. Elevating also tells
+your sensors that endpoint is yours to enrich, so a TLS 1.3 vendor connection gets
+its certificate read on the next observation without any opt-in.
 
 ### "Are my vendors using good crypto?"
 

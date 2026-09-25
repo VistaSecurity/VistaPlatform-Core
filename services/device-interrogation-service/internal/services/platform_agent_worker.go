@@ -412,8 +412,8 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	// Interrogate device using device interrogation service. This creates its own
 	// discovery job and materializes the targets, findings AND sensor_discoveries
 	// rows there.
-	var observationsErr error
-	discoveryJobID, materialized, err := w.deviceInterrogation.interrogateDevice(ctx, job.TenantID, systemUserID, *job.AssetID, &observationsErr)
+	report := interrogationReport{DeviceJobID: job.ID}
+	discoveryJobID, materialized, err := w.deviceInterrogation.interrogateDevice(ctx, job.TenantID, systemUserID, *job.AssetID, &report)
 	if err != nil {
 		return nil, fmt.Errorf("failed to interrogate device: %w", err)
 	}
@@ -441,7 +441,11 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 		CompletedAt: time.Now(),
 		// What the in-cluster sink dropped of the facts and edges it wrote,
 		// so the processing block reports it (see ProcessJobResults).
-		ObservationsErr: observationsErr,
+		ObservationsErr: report.ObservationsErr,
+		// What the collector could not read. The agent path posts the same
+		// list in its payload; both reach the processing block through
+		// ProcessJobResults.
+		Warnings: report.Warnings,
 		Metadata: map[string]interface{}{
 			"asset_id": device.ID.String(),
 			// Deprecated alias, emitted for one release: the value IS the asset id.
@@ -504,6 +508,14 @@ func (w *PlatformAgentWorker) convertCryptoConfigToAsset(device *models.Device, 
 	if cipher, ok := cfg["cipher_suite"].(string); ok {
 		asset.CipherSuite = cipher
 	}
+
+	// Key exchange: the group a live handshake negotiated.
+	if kex, ok := cfg["key_exchange_algorithm"].(string); ok && kex != "" {
+		asset.KeyExchangeAlgorithm = kex
+	}
+	// And whether the endpoint also accepts a classical-only / hybrid-only
+	// offer, which buildSensorDiscoveryMetadata forwards from Metadata.
+	copyTLSKeyExchangeSupport(asset.Metadata, cfg)
 
 	// Extract key size
 	if keySize, ok := cfg["key_size"].(float64); ok {

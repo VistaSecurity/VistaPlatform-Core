@@ -34,7 +34,7 @@ type Config struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		"JWT_SECRET":            sharedconfig.JWTSecret(),
 		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 	})
 
@@ -50,7 +50,7 @@ func Load() *Config {
 		Environment:         sharedconfig.GetEnv("ENV", "development"),
 		LogLevel:            sharedconfig.GetEnv("LOG_LEVEL", "info"),
 		DatabaseURL:         sharedconfig.GetEnv("DATABASE_URL", "postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=prefer"),
-		JWTSecret:           sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		JWTSecret:           sharedconfig.JWTSecret(),
 		EncryptionMasterKey: sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 		ServiceTimeout:      time.Duration(timeout) * time.Second,
 		RetryMaxAttempts:    retryMax,

@@ -46,7 +46,9 @@ into your inventory.
    agent*.
 3. Fill in the few fields there are: a **name** (an *agent label* for an agent),
    the **IP address** the thing will register from, and optionally **tags** and
-   a **description**.
+   a **description**. The tags `system` and `platform` are reserved for the
+   platform's own sensors and are dropped if you enter them, here and on the
+   sensor's configuration later.
 4. Click **Register sensor** / **Register agent**.
 
 The confirmation screen gives you:

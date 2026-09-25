@@ -42,9 +42,22 @@ type stubDeviceStore struct {
 	createErr          error
 	updated            *models.Device
 	stored             services.StoredDeviceCredentials
+	// createCalls / lastCreate record what reached CreateDevice, so a test can
+	// assert that a failed probe created nothing.
+	createCalls int
+	lastCreate  models.CreateDeviceRequest
+	// pins records PinSSHHostKeyIfUnset calls.
+	pins []string
 }
 
-func (s *stubDeviceStore) CreateDevice(context.Context, uuid.UUID, models.CreateDeviceRequest) (*models.Device, error) {
+func (s *stubDeviceStore) PinSSHHostKeyIfUnset(_ context.Context, _, _ uuid.UUID, fingerprint, keyType string) (bool, error) {
+	s.pins = append(s.pins, fingerprint+" "+keyType)
+	return true, nil
+}
+
+func (s *stubDeviceStore) CreateDevice(_ context.Context, _ uuid.UUID, req models.CreateDeviceRequest) (*models.Device, error) {
+	s.createCalls++
+	s.lastCreate = req
 	return s.created, s.createErr
 }
 func (s *stubDeviceStore) GetDevice(context.Context, uuid.UUID, uuid.UUID) (*models.Device, error) {

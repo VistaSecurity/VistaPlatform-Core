@@ -3,6 +3,7 @@ package discovery
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"net/http"
 )
 
 // ClassifyCertChainFromPEMs parses an ordered (leaf-first) set of PEM-encoded
@@ -22,6 +23,13 @@ import (
 // certificates, or that fail to parse, are skipped. Returns nil when no
 // certificate parses, so callers can simply skip merging on a nil result.
 func ClassifyCertChainFromPEMs(pems []string, withOCSP bool) *CertChainValidation {
+	return ClassifyCertChainFromPEMsWith(pems, withOCSP, nil)
+}
+
+// ClassifyCertChainFromPEMsWith makes the OCSP query through ocspClient. The
+// responder URL is in the certificate a device or cloud API reported, so an
+// in-cluster caller passes a GuardedHTTPClient (outbound.go).
+func ClassifyCertChainFromPEMsWith(pems []string, withOCSP bool, ocspClient *http.Client) *CertChainValidation {
 	var certs []*x509.Certificate
 	for _, p := range pems {
 		rest := []byte(p)
@@ -50,7 +58,7 @@ func ClassifyCertChainFromPEMs(pems []string, withOCSP bool) *CertChainValidatio
 	// worse than no opinion. OCSP is gated by the caller because some paths run
 	// inside a synchronous request and cannot afford the responder round-trip.
 	if withOCSP {
-		return ValidateAndClassifyCertChain(certs, "", nil)
+		return ValidateAndClassifyCertChainWith(certs, "", nil, ocspClient)
 	}
 	return ValidateAndClassifyCertChainPassive(certs, "")
 }

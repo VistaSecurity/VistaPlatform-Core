@@ -26,6 +26,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/certificates"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // platformServerCACert returns the platform/mesh CA PEM to advertise to
@@ -280,6 +281,27 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 		return
 	}
 
+	// Registration is unauthenticated bootstrap, so the registration key is the
+	// first point at which the owning tenant is known. Refuse blocked tenants
+	// before limits or certificate work, then re-check under a tenant-row lock in
+	// RegisterSensor so a concurrent suspension cannot race the insert.
+	if db := h.sensorService.GetBypassDB(); db != nil {
+		if err := tenantstate.Gate(db)(c.Request.Context(), pendingSensor.TenantID); err != nil {
+			if blocked, ok := tenantstate.AsBlocked(err); ok {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": tenantstate.Message(blocked.Code),
+					"code":  blocked.Code,
+				})
+				return
+			}
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": tenantstate.Message(tenantstate.CodeUnavailable),
+				"code":  tenantstate.CodeUnavailable,
+			})
+			return
+		}
+	}
+
 	// Check if key has expired
 	if time.Now().After(pendingSensor.ExpiresAt) {
 		c.JSON(400, gin.H{"error": "Registration key has expired"})
@@ -394,6 +416,13 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 	// The sensor record must exist before storing the certificate due to foreign key constraint
 	sensor, err := h.sensorService.RegisterSensor(sensorRegistration)
 	if err != nil {
+		if blocked, ok := tenantstate.AsBlocked(err); ok {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": tenantstate.Message(blocked.Code),
+				"code":  blocked.Code,
+			})
+			return
+		}
 		h.log.WithError(err).Error("Failed to register sensor in database")
 		c.JSON(500, gin.H{
 			"error": "Failed to register sensor",

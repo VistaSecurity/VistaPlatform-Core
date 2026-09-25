@@ -1,0 +1,12 @@
+{
+  "vendor": "f5",
+  "device_type": "f5",
+  "hostname": "lb-01.corp.example.test",
+  "transport": "rest",
+  "management_ip": "192.0.2.230",
+  "management_port": 443,
+  "tenant_segments": [
+    {"name": "Management network", "cidr": "192.0.2.224/27"}
+  ],
+  "provenance": "HAND-WRITTEN. No real iControl REST capture is in the corpus yet (W0.4). Shapes follow the existing F5 unit-test fixtures (f5_ops_test.go, f5_test.go), which follow the iControl REST reference. The clientssl-hardened profile carries an OpenSSL cipher string with exclusions and TLS versions expressed as `options`, the way BIG-IP stores them, to exercise P-04 and P-05. The account is refused server-ssl profiles (a 403, as an iControl role without that resource answers), so the job carries a collection warning (P-17)."
+}

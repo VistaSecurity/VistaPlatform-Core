@@ -85,6 +85,25 @@ func TestRegister_RejectedKeyIsPermanent(t *testing.T) {
 	}
 }
 
+func TestRegister_BlockedTenant403IsPermanent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"tenant_suspended","error":"organization suspended"}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{ControlPlaneURL: server.URL, RegistrationKey: "REG-blocked"}
+	_, err := NewSensorManagerClient(cfg).Register()
+	var rejected *RegistrationRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("Register error = %v, want permanent *RegistrationRejectedError", err)
+	}
+	if rejected.StatusCode != http.StatusForbidden || rejected.Body == "" {
+		t.Fatalf("blocked rejection = status %d body %q, want 403 with operator-facing reason", rejected.StatusCode, rejected.Body)
+	}
+}
+
 // TestRegister_ServerErrorIsRetryable is the other polarity, and the one that
 // matters most: a control plane that is merely down must NOT look like a
 // rejection, or a restart during install would permanently disable the sensor.

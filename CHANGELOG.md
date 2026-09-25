@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.5] - 2026-09-24
+## [1.1.0-rc.6] - 2026-09-24
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -104,9 +104,150 @@ reports. See **Upgrading** for what an existing install needs to do.
   upgrade leaves the unique index unbuilt and logs a warning. Sign-in refuses
   that identity until an operator resolves it.
 
+- **Sensors stop enriching third-party TLS endpoints on upgrade.** They now
+  open their own handshake only to private addresses, registered network
+  segments and elevated connections, unless the organization opts in. Tailscale
+  users must register `100.64.0.0/10` (or their tailnet's range) as a network
+  segment to keep enriching their own peers. Segments wider than /8 (IPv4) or
+  /16 (IPv6) saved earlier are kept but no longer count as yours.
+- **Test connection needs `discovery.manage`** (was `discovery.read`), because
+  it now really logs in to the device with its stored credentials.
+- **The `system` and `platform` sensor tags are reserved.** Tenant sensors can
+  no longer set them; existing platform sensors are marked on upgrade.
+- **Suspended, canceled or deleted tenants cannot enrol sensors or agents.**
+- **`jwtSigning.acceptLegacyHmac: false` is now safe to set** once every
+  session was issued after the ES256 cutover. Before this release it made most
+  services crash-loop at startup.
+- **MSP installs:** paid subscription periods are backfilled from the data that
+  survives, so churn and LTV can shift once after upgrading.
+
 <!-- release-notes-end -->
 
 ### Added
+
+- **Scan an address, block or hostname outside your registered networks —
+  when you say so.** The Discover wizard (Discovery → Command Center →
+  Discover assets, and now also **Discovery → Active Scan → Scan addresses or
+  hostnames**) accepts public IP addresses, CIDR blocks, ranges, hostnames and
+  URLs that are not inside a network segment you registered, and **Scan** on an
+  inventoried asset whose address is outside them now asks instead of failing.
+  Either way you are asked first — "N targets are outside your registered
+  networks. Only scan systems you are authorized to test." — and nothing is
+  scanned or changed until you confirm. The APIs need
+  `external_targets_confirmed: true` and otherwise answer 422 listing those
+  targets (assets by name), so a stray or scripted call never scans a third
+  party; confirming an asset scan also needs `discovery.create`. Nothing
+  unattended ever does: automatic scanning and the stale-asset revalidation
+  sweep still never touch public addresses. Loopback, link-local and cloud
+  metadata, the platform's own addresses, IPv6 forms that carry such an IPv4
+  address, the platform's own DNS names and ranges you excluded are refused
+  whatever is confirmed, including through a hostname that resolves to one. A
+  hostname is resolved once and the scan is pinned to the addresses that were
+  checked, and consent covers only what was confirmed. A registered segment
+  wider than /8 (IPv4) or /16 (IPv6) outside private space never counts as
+  yours — nor does 6to4 `2002::/16` or all of Teredo, which carry every IPv4
+  address — so a legacy `0.0.0.0/0` cannot skip the question. Lowering a limit
+  stops a scan still waiting to run. Such targets run from
+  the platform sensor only. One target may name at most 4,096 addresses and one
+  scan 16,384. Each confirmed scan is audited with who, when, the targets and
+  the addresses they resolved to. Operators set
+  `discovery.explicitExternalTargets` in the chart to lower the bounds or turn
+  the capability off; the switch fails closed, and an `extraEnv` entry that
+  would override these settings fails the install. Refusals now name every refused
+  target and why, instead of "failed to create job". ( W5.13b)
+
+- **TLS endpoints now report their negotiated key-exchange group** (for example
+  `X25519MLKEM768`, `X25519`, P-256) **and whether they support hybrid
+  post-quantum key exchange.** Every TLS probe — the sensor's active scans and
+  TLS enrichment, the Platform Sensor, device interrogation (including UniFi's
+  management port) and the cloud collectors' load-balancer handshakes — records
+  the group as the configuration's key exchange, and makes at most two extra
+  handshakes to the same endpoint to learn whether it also accepts a
+  classical-only and a hybrid-only offer. Those extra handshakes are
+  never sent to a third-party address the sensor merely saw traffic to, and a
+  scan that turns off TLS version enumeration turns them off too. An existing
+  configuration is refined in place when its first measured group arrives —
+  passive and active observations of one endpoint stay one configuration.
+- **A hint when a server supports hybrid post-quantum key exchange but
+  negotiated a classical group.** **Inventory → a crypto configuration → Why
+  this score** now marks the key-exchange component when a probe proved that
+  the server also accepts a hybrid group (for example `X25519MLKEM768`) but
+  negotiated `X25519` or P-256. Preferring the hybrid group in the server's
+  configuration, or updating the clients that connect to it, fixes this. It does
+  not need a migration project. The configuration's risk score, band and PQC
+  readiness category do not change. The probes now also record which hybrid
+  group the server accepted. The device-interrogation management probe and
+  scheduled cloud discovery used to drop the hybrid-support flags before
+  inventory. They now keep them. `GET /crypto-configurations/{id}/components`
+  returns the hint as `hybrid_kex_available`. (, W1.9)
+- **One Add device flow.** **Discovery → Devices → Add device** asks for four
+  things: device type, management address, username and password. The
+  platform fills in the vendor, model, serial number, firmware, host name, IP
+  and MAC itself. The **Discover & add** button is gone. If the device can't
+  be reached, the form says why and shows the remaining fields so you can add
+  it by hand. The reasons are: unreachable, untrusted certificate, rejected
+  credentials, address not allowed, invalid address, or a different kind of
+  device answered. **Skip TLS verification** is saved on the device, so the
+  first interrogation uses the same setting as the probe. A Cisco device is
+  added by its SSH address (`host`, `host:port` or `ssh://host:port`).
+  `POST /devices/discover-and-create` and `POST /devices/{id}/test-connection`
+  return these reasons as typed `error` codes. With identity admission set to
+  *enforce*, a device added this way is created — the platform read its serial
+  itself — while one whose serial could not be read is kept for review in
+  Discovery → Observations, like a device typed in by hand. ( slice A)
+
+- **Cisco: SSH key and keyboard-interactive login, enable, and paging.**
+  The Cisco collector can log in with an SSH private key (optionally
+  passphrase-protected) and with keyboard-interactive authentication, which
+  devices using TACACS+ or RADIUS often offer instead of a password. An account
+  below privilege level 15 is raised with the device's enable secret over an
+  interactive session; without one, or if the secret is refused, the job
+  completes with a **permission denied** collection warning instead of quietly
+  missing data. The key, its passphrase and the enable secret are read from
+  the device's encrypted credentials (`ssh_private_key`,
+  `ssh_private_key_passphrase`, `enable_secret`; the device agent passes them
+  today, and the Add device form gains fields for them with the
+  connection-options work). None is ever logged or stored. Paging is turned
+  off in interactive sessions, and output that stops at a `--More--` prompt is
+  reported as truncated. A device that refuses SSH exec requests is read over
+  an interactive session instead. Each command and the whole interrogation
+  (five minutes per device) are time-limited, and a session is closed rather
+  than reused after a command runs out of time. ( W3.2)
+- **"How to fix" for weak crypto components.** **Inventory → a crypto
+  configuration → Why this score** now shows the algorithm catalogue's own
+  remediation guidance on each component whose catalogue row records it: what
+  the weakness exposes, numbered fix steps, the catalogue's suggested timeline,
+  CVE references and further-reading links. It is open on the component that
+  set the score and collapsed on the rest, including offered-only components,
+  because turning off a weak option the server merely accepts is the fix. The
+  guidance is read live from the catalogue, so correcting a row corrects the
+  advice. It changes no score, band or severity. `GET
+  /crypto-configurations/{id}/components` returns it as `remediation_guidance`.
+  This guidance was curated in the catalogue but reachable only through two
+  endpoints that no screen called after the legacy web UI was retired:
+  `GET /crypto-configurations/{id}/remediation` (and its v1
+  `/crypto-implementations/{id}/remediation` alias) and
+  `GET /remediation/algorithm/{code}`. **Both are removed.** The first also
+  re-matched the stored cipher string against its own hard-coded lists of weak
+  ciphers, hashes and protocols, with its own severities, instead of using the
+  catalogue. Its protocol lookups never matched a catalogue code, so it always
+  fell back to generic text. It also reported an unassessed risk score as 0.
+  Use `/components` for per-configuration guidance and `GET /algorithms/{code}`
+  (`remediation_guidance`) for per-algorithm guidance.
+- **Collection warnings on interrogation jobs.** A device collector that fails
+  on one endpoint or command still returns everything else it read. Until now
+  that partial result reported as a clean success, and the failure appeared
+  only in a process log. The failure is now a collection warning on the job,
+  whichever executor ran it. **Discovery → Discovery Jobs → a job** lists the
+  warnings under **Collection warnings**: the API path or CLI command, the
+  reason (permission denied, not supported, truncated, timed out, unreachable,
+  unreadable response, other error), and what the result lacks because of it.
+  This covers Fortinet, PAN-OS, F5, UniFi, Cisco and SNMP. A warning usually
+  means an under-privileged device account. `GET /jobs/{id}/results` returns
+  the warnings as `collection_warnings`. Cisco's crypto and SSL commands now
+  report failures instead of dropping them, and a Cisco AAA command
+  authorization refusal is reported as permission denied rather than as an
+  empty table. (, W0.1)
 
 - **Automatic delivery of MSP usage reports.** Set the new chart value
   `licensing.reporting.endpoint` to the https:// receiver URL Vista Security
@@ -249,6 +390,131 @@ reports. See **Upgrading** for what an existing install needs to do.
 
 ### Security
 
+- **A tenant sensor can no longer pass as a platform sensor, and an
+  interrogation finding can only land on the device its job interrogated.**
+  The `system` and `platform` tags and the `platform` platform value are now
+  reserved: sensor registration, registration keys and the sensor
+  configuration form drop them, so a customer-deployed sensor cannot give
+  itself the platform's markers (and cannot remove them from the platform's
+  own sensors). Platform sensors carry a new marker no tenant path can write,
+  and every check that trusts a platform sensor's findings reads it. Each
+  device-interrogation finding now names the job that produced it, and is
+  attached to a device only when that job is a real interrogation of exactly
+  that device in the same tenant; anything else is rejected, not routed
+  elsewhere. A device agent can file results only for the job it claimed and
+  is running. Existing platform sensors are marked on upgrade. (,
+  review of W2.2)
+- **A scanned server can no longer steer the platform's revocation check at
+  internal addresses.** Certificate validation queries the OCSP responder named
+  in the server's own certificate. The in-cluster Platform Sensor and device
+  interrogation did so with a default HTTP client — any address, redirects
+  followed — so a host being scanned could make the platform send a request to
+  the cloud instance-metadata service, loopback or an in-cluster Service,
+  directly or through a redirect. These fetches now connect only to public
+  addresses, checked on the address actually connected to (so DNS answers and
+  rebinding are covered), and never follow redirects. The standalone sensor, on
+  your own network, is unchanged. ( W5.13b)
+- **Test connection now requires `discovery.manage`,** the same permission as
+  Interrogate. It was `discovery.read`, which was harmless only because the
+  button never connected to anything. Now that it logs in with the device's
+  stored credentials, a read-only role could otherwise make the platform open
+  authenticated connections to devices. The button is hidden for roles
+  without the permission.
+- **Adding a Cisco device goes through the device address guard.** The
+  identification's SSH connection refuses loopback and link-local (cloud
+  metadata) addresses, like the HTTP collectors, and fails closed on a changed
+  host key before sending the password. The host key it connected through is
+  pinned on the new device, so the first interrogation checks it instead of
+  trusting whatever answers first a second time.
+- **"Skip TLS verification" no longer turns off SSH host-key checking on Cisco
+  devices.** On a Cisco device the stored flag reached the SSH client, where it
+  disabled `known_hosts` verification. A tick left over from another device
+  type was sent with a Cisco device, too. The form no longer offers or sends
+  it for Cisco; the platform stores it as false for Cisco on every create and
+  edit, and ignores a value stored by an earlier release when it builds a
+  Cisco device's credentials, in the cluster and for agents.
+- **A password typed into a management address is no longer written to the
+  service log.** Rejected addresses are quoted without their user name,
+  password, query or fragment.
+- **Adding and testing devices is audited and rate limited.** Every Add device
+  probe and every connection test records who ran it, the device type, the
+  address (without credentials) and the outcome. An organization can run 20
+  probes a minute, and a device can be tested once every 10 seconds.
+- **The Cisco collector no longer connects to loopback or link-local
+  addresses.** It opened its SSH connection directly, bypassing the dial guard
+  every other device integration uses, so a device record pointing at
+  127.0.0.1 or the cloud metadata address was connected to. It now goes
+  through the same guard; private customer addresses are unaffected. Secrets
+  are no longer masked inside command output either: masking every
+  occurrence of a short enable secret corrupted real data (a chassis model
+  read back as `[REDACTED]-48P`) and revealed the secret through it. The
+  secret is only ever typed at a `Password:` prompt, and only a line that
+  repeats it exactly is dropped. ( W3.2)
+
+- **Vendor error bodies are no longer copied into interrogation errors.** When
+  an F5, FortiOS or UniFi call failed, the collector used to include up to
+  512 bytes of the device's response body, or its free-text message, in the
+  error. Those bodies have been seen to echo auth tokens, passwords and PSKs.
+  The error now keeps the HTTP status and the vendor's numeric error code (or
+  the controller's `api.err.*` token) and nothing else. PAN-OS keeps only a
+  numeric envelope code. (, W0.1)
+- **The free-text redactor masks more credential shapes.** The platform
+  applies it to job failure messages and collection warnings. It now also
+  masks JSON `"name": "value"` members and `name: value` lines whose name is a
+  secret, `Authorization` headers, Cisco secret configuration lines (`enable
+  secret`, `username … secret|password`, `crypto isakmp key`,
+  `pre-shared-key`, `snmp-server community`, `key-string`, TACACS/RADIUS
+  `key`), and URL credentials whose password contains `@` or `/`. Posture
+  fields such as `key_size` and `public_key` are left alone.
+- **Behaviour change: sensors no longer connect to third parties to enrich TLS
+  connections unless you opt in.** A sensor that saw a TLS connection without
+  a certificate (every TLS 1.3 connection) used to open its own handshake to
+  that server whenever active probing was on — vendors, SaaS and CDNs
+  included. It now does that only for endpoints that are yours: private
+  addresses (RFC 1918, IPv6 ULA, loopback, link-local), addresses inside a
+  network segment you registered (any type; segments learned from device VLAN
+  tables do not count), and connections you elevated. Carrier-grade NAT
+  (100.64.0.0/10) counts only if you registered it — **Tailscale users must
+  register 100.64.0.0/10, or their tailnet's range, as a network segment to
+  keep enriching their own peers**. Segments marked sensitive
+  or active-probes-disabled, and your automatic-scan exclusions, are never
+  enriched. **Existing organizations stop enriching third parties on upgrade**:
+  their external TLS 1.3 connections under **Inventory → 3rd Party** keep the
+  certificate already captured but get no new one until you opt in or elevate
+  the connection. To opt in, turn on **Actively enrich third-party TLS
+  connections** under **Discovery → Sensors & Agents → Sensor defaults** (off
+  by default, confirmation required; can be overridden per sensor). Sensors
+  built before this release report the setting as unsupported and keep
+  enriching third parties until upgraded. An air-gapped sensor can set the
+  opt-in and its owned public ranges in its own configuration
+  (`capture.thirdPartyTLSEnrichment` / `THIRD_PARTY_TLS_ENRICHMENT`,
+  `capture.ownedNetworks` / `OWNED_NETWORKS`); those apply only until the
+  platform delivers its own values, which then win — across restarts too.
+  (, W5.13)
+- **Network segments too broad to be anybody's are refused.** Creating,
+  updating or importing a CIDR segment wider than /8 (IPv4) or /16 (IPv6) —
+  `0.0.0.0/0` above all — now fails with a 400 that states the rule, and the
+  segment form shows it. A registered segment tells sensors the range is yours
+  to enrich, so a segment that wide would have been a silent third-party
+  opt-in. Ranges wholly inside private space (`fd00::/8`) are exempt. A segment
+  that wide saved earlier is kept but no longer counts as yours for
+  enrichment. NetBox imports and cloud integrations report and skip such a
+  range, and migrating legacy network spaces skips it. (, W5.13)
+- **A sensor stops trusting stale ownership, and consent is never adopted
+  from a sensor.** Registered ranges and elevated connections delivered to a
+  sensor now count for 24 hours after the last delivery; a sensor cut off from
+  the platform for longer enriches private addresses only until it hears back
+  (exclusions never lapse). If the platform cannot build a tenant's ranges on
+  a check-in, it now sends an explicit "no ranges, these exclusions" answer
+  instead of nothing. The sensor's record of platform-delivered consent is
+  bound to the sensor it was written for, so a reused data directory does not
+  carry another enrolment's answers. A setting that needs confirming in the
+  console — third-party TLS enrichment and host-observation DNS — is no longer
+  adopted from what a sensor reports on its first check-in, so a sensor cannot
+  grant itself either; such a sensor starts from the fleet default. The
+  Connections lens explains a missing certificate when enrichment of third
+  parties is off. (, W5.13)
+
 - **Returning social sign-in is bound to the IdP account, not its email
   (nOAuth).** "Continue with Google/Microsoft" through Vista's shared sign-up
   app used to find the tenant user by the email the IdP reported, with no
@@ -287,14 +553,21 @@ reports. See **Upgrading** for what an existing install needs to do.
   SSO emails were lower-cased with Unicode folding, which maps the Kelvin
   sign (U+212A) onto `k`. An IdP could verify a lookalike mailbox and have it
   treated as an existing ASCII address. Only ASCII letters are folded now,
-  and allowed-domain matching is exact. **Behaviour change for tenant SSO:**
-  the same stricter matcher governs a tenant SSO provider's
-  `allowed_domains`, which Microsoft/Azure just-in-time provisioning uses when
-  the IdP omits `email_verified`. Those entries are not yet validated on save
- . An entry that would now be refused, such as a Unicode domain name
-  not in punycode (`xn--…`) form, a single-label name, a wildcard or a
-  trailing dot, silently stops matching. Provisioning under it fails closed
-  until the entry is re-entered in its exact ASCII form.
+  and allowed-domain matching is exact.
+- **Tenant SSO refuses unusable allowed-domain entries when the provider is
+  saved.** The stricter matcher above governs a tenant SSO provider's
+  `allowed_domains`, including the Microsoft/Azure JIT rule used when Entra
+  omits `email_verified`. Create and update now return 400
+  `invalid_allowed_domains`, naming the bad entry, instead of storing a value
+  that can never match. Entries must be exact ASCII fully-qualified domains;
+  Unicode names use punycode (`xn--…`), and single-label names, wildcards,
+  trailing dots, email addresses and URLs are refused. Lists are trimmed,
+  ASCII-lowercased, de-duplicated and capped at 50. The tenant form applies the
+  same rule before save and explains the punycode fix. **Upgrade note:** an
+  invalid entry saved by an older version already fails closed at sign-in. The
+  next form save requires it to be corrected or removed and stores the
+  canonical list; unrelated API updates that omit `allowed_domains` remain
+  possible.
 - **Tenant SSO: a Microsoft provider's allowed domains need a single-directory
   endpoint (, nOAuth).** Automatic account creation accepted an address
   on a Microsoft/Azure provider's allowed domains in place of the
@@ -551,6 +824,332 @@ reports. See **Upgrading** for what an existing install needs to do.
   on the most CVE-prone module family in the tree.
 
 ### Fixed
+
+- **Every tenant-lifecycle action now preserves the state it interrupts.** A
+  dunning suspension remembers the tenant's prior status and revokes all of
+  its sessions in the same transaction; dunning resume restores that status
+  and is a no-op for an already-live tenant. The MSP Activate action likewise
+  no longer rewrites a live trial or past-due tenant to active. Canceling
+  offboarding now restores the immediate pre-offboarding status, so a tenant
+  that was already suspended remains suspended (with its earlier restore
+  target intact) instead of being brought online.
+- **The algorithm-risk schema upgrade guard no longer deadlocks parallel test
+  legs.** Its two deliberate `schema.sql` re-applies now use the shared test
+  harness's forced-apply path, including the repository advisory lock and
+  transient catalog-race retry, instead of executing the file without
+  coordination.
+- **A blocked-tenant sign-in refusal no longer disables session-expiry handling
+  for the page.** The API client does not invoke the one-shot blocked-session
+  handler for login endpoints, where no session exists to end. A subsequent
+  refusal from a protected endpoint still clears and redirects the real
+  session; refresh remains covered because it operates on an existing session.
+- **The ES256 migration can now safely disable legacy HMAC verification.** In production verifier services, an absent `JWT_SECRET` now remains absent instead of each service substituting a well-known development literal and then crash-looping on its own secret guard. Development keeps its zero-setup fallback, explicitly configured migration secrets are preserved, and a production-startup regression proves a verifier with no HMAC secret fetches JWKS and accepts ES256 tokens. The two token issuers retain their existing fail-closed fallback and chart-owned secret.
+- **Suspended, canceled, and deleted tenants cannot enroll new sensors or
+  device agents.** Registration-key bootstrap now checks the owning tenant
+  inside the enrollment transaction, locks that tenant row against a racing
+  lifecycle change, and answers the same `tenant_suspended` / `tenant_deleted`
+  403 contract as authenticated agent traffic. A refusal creates no device and
+  leaves the single-use registration key unconsumed.
+- **Agent totals and onboarding no longer count retired organizations or the
+  platform's own collectors.** Platform-wide sensor and discovery-agent totals
+  now exclude rows left behind by soft-deleted tenants. The tenant onboarding
+  wizard's "add an agent" step now completes only for a customer-deployed
+  sensor or discovery agent, not the two platform-managed rows created with
+  every tenant. Platform onboarding counts also fail visibly on a database
+  error instead of returning a plausible all-zero checklist.
+- **Device interrogation applies its egress guard to every transport (E-09).** SNMP, raw TLS/SSH probes, PostgreSQL, and MySQL used their libraries' default dialers, so a tenant-supplied target could reach the interrogator's loopback, link-local, or cloud metadata address even though HTTP collectors and Cisco SSH refused them. Every collector now shares the post-DNS appliance guard: customer RFC1918/ULA devices remain reachable, while loopback, link-local, metadata, and the installation's configured pod/Service CIDRs are refused before a packet is sent. The Helm chart feeds the application guard and NetworkPolicy from the same `networkPolicy.clusterInternalCIDRs` value.
+- **MSP churn and LTV now survive subscription changes.** Paid stretches are
+  retained in an append-only subscription-period ledger instead of rebuilt
+  from the one mutable Stripe/manual subscription row. Scheduled Stripe
+  cancellations use the effective end date; resubscribe attempts can no
+  longer erase an earlier churn; `unpaid`/`paused`, offboarding, suspension
+  and soft deletion end paid tenure; and paid `past_due` remains revenue.
+  Checkout also commits its local subscription and tenant billing state in one
+  transaction, with immediate Stripe cancellation if that local commit fails.
+  Existing installations backfill only periods their surviving data proves.
+ 
+- **Plan edits no longer mint needless Stripe prices or acknowledge missing
+  plans.** The plan builder and tier service now re-price only when a price
+  actually changes; deprecating an unknown tier returns 404 without a success
+  audit. Tier composition writes can explicitly clear stored overage values,
+  while omitted values remain unchanged.
+- **Core final-release RC verification now recognizes the real tag namespace.**
+  The public-tree publish workflow queried `core-vvX.Y.Z-rc.*`, so its positive
+  verification path was unreachable and every final release warned even when
+  it shared a commit with an RC. Release-tag resolution now uses the actual
+  `core-vX.Y.Z-rc.*` namespace from a directly tested helper, with regression
+  coverage for both the matching-RC notice and the no-match warning.
+- **Platform access now follows permissions consistently across service and UI gates.** Cross-tenant security summaries and UI configuration moved from the tenant-facing `/auth-service/tenant/{id}` namespace to the declared `/auth-service/admin/tenants/{id}` plane and no longer trust platform role names; they require `platform.security` or `platform.settings` after verifying a platform identity. Every user-facing activity-log query now requires `audit.read` (`platform.audit` for operators), and the admin console hides Activity Log and Staff & Access sub-pages unless their complete backend read gates are satisfied. The compliance admin-route coverage test now compares the actual route set rather than route counts, so one missing route cannot be masked by one stale entry.
+- **Ending a trial from Billing → Trials does what an expired trial does
+  (MSP).** **End trial** used to delete the trial record and leave the tenant
+  active on its trial plan with no trial behind it. It now ends the trial
+  exactly as the expiry sweep does, through one shared definition: the tenant
+  moves to the MSP's Free plan (an active, public, card-billed plan called
+  Free that costs nothing, chosen the same way every time), or — when no Free
+  plan is defined, as on a stock install — is suspended, with its prior status
+  remembered for reactivation and every session revoked. The End trial dialog
+  says which before you confirm (new `GET /admin/billing/trials/end-landing`),
+  the response and the `billing.trial_cancelled` audit record carry the
+  landing plan or "suspended", and the whole change is one transaction. The
+  trial record is kept and marked ended, so an ended trial reads as locked
+  everywhere from the moment it ended (it is listed as **Locked** while the
+  tenant is suspended, and ending it again once a Free plan exists moves the
+  tenant there), and the tenant cannot be given a second trial. An expired
+  trial with no Free plan now also has its sessions revoked, and the expiry
+  sweep retries on any database error instead of marking the trial handled.
+- **MSP revenue figures come from billing records (admin console, Overview
+  and Billing & Revenue).** MRR, ARR, paying tenants, churn, LTV and revenue
+  by plan are now computed from the billing subscriptions that have paid —
+  active, or past due after a successful payment, never trialing, normalised
+  to a month, recurring coupons applied — instead of each tier's list price
+  times the tenants marked "active" or "trial". Revenue by plan lists only
+  plans someone pays for. Churn and LTV count only paid subscriptions (new
+  `billing_subscriptions.canceled_at` and `first_paid_at`; the latter is
+  stamped by a trigger the first time a subscription is active, and
+  backfilled on upgrade from paid invoices or a currently active
+  subscription), so a cancelled trial is not churn and does not shorten LTV.
+  Both are decided per tenant: a tenant churns when it stops paying, so a
+  switch between invoice and card billing (either way) or between invoice
+  plans is not churn and does not end its lifetime, while a move to a free
+  plan is churn; LTV takes one lifetime per tenant that stopped paying, from
+  its first payment to the end of its last paid subscription. With no payment provider configured, the console shows
+  **Billing not configured** instead of a number. The "trailing" MRR chart
+  and the forecast endpoint are removed: they projected today's figure
+  backwards. The analytics dashboard response now carries
+  `billing_configured` and `paying_tenants` (was `active_tenants`); revenue
+  figures are null when there is nothing to measure. An invoice-billed
+  tenant's subscription now ends when the tenant is offboarded, set to
+  "canceled" in the tenant editor, or deleted — it stops counting as revenue
+  and counts as churn that month — and comes back if the offboarding is
+  cancelled or the tenant is edited back to active while still on its invoice
+  plan. A tenant cancelled before this release no longer counts as revenue.
+  An invoice-billed tenant that moves to another plan by any route — its own
+  checkout, a Stripe webhook, the trial sweep, a support plan change or
+  choosing a plan itself — ends its invoice subscription in the same write,
+  so it is counted once, at its new price: after a card checkout MRR used to
+  show both the old invoice price and the new card price. An invoice
+  subscription also stops counting while the tenant has a live Stripe
+  subscription (a plan switched from invoice to card billing and checked out
+  by a tenant still invoiced for it), and is priced by the plan it records.
+  Invoice subscriptions left running by an earlier release after the tenant
+  changed plan are ended on upgrade. A Stripe customer that cancelled and
+  checks out again counts as revenue at once, not only after the next
+  webhook. (Owner decision 5.)
+- **One trial record.** A tenant is on a trial only when it has an
+  unconverted trial record on a plan marked as a trial. Billing → Trials now
+  lists those trials, with phase, end date and days left, and has **Start
+  trial** plus **Extend**, **Convert** and **End trial** on each row — the
+  controls the tenant editor now points to. Payment status
+  "trial" follows the trial record: starting, cancelling or converting a
+  trial updates it, and the tenant editor no longer sets it by hand. A
+  tenant still labelled "trial" with no trial behind it (a trial cancelled
+  before this release) is set back to active on upgrade. Converting a
+  tenant with no live trial is now refused (404) instead of marking it
+  active. Assigning an invoice-billed plan converts the tenant's trial, and
+  the trial expiry sweep only acts on trials on a trial plan, so it cannot
+  downgrade a tenant that has moved to a paid plan.
+  Starting a trial on a plan that is not a trial plan is refused. The
+  tenant list's trial end date comes from the trial record. The old
+  `set_tenant_trial_end` trigger, which kept a separate 30-day date, is
+  dropped. **Start trial**'s length is the trial's length: left empty it is
+  the plan's full-access plus upgrade-prompt days, and a shorter length is
+  refused with the minimum (it used to be accepted and ignored). **Extend**
+  moves the date shown in **Ends** (it used to add days to an internal date
+  and report success while the end stayed put) — from today for a trial that
+  has already locked — and moves a Stripe trial's end with it. **Days left**
+  counts to that end date. A paid invoice, reactivating a suspended tenant
+  and editing a tenant's status all re-check the trial record, so a live
+  trial is never relabelled active and an ended one never reads "trial" (a
+  paid invoice now does it in the same write, after moving the tenant's
+  plan). The trial-created audit record and the Start trial response carry
+  the length applied (the plan's, when none was given) instead of 0. An
+  expired trial falls back only to a real free plan — active, public,
+  card-billed, called Free, costing nothing, not a trial, custom or
+  deprecated plan — and is suspended when there is none: it used to take any
+  price-0 plan, which on a stock install meant the Enterprise plan. The
+  seeded `free` plan is the trial, so a stock install suspends expired
+  trials; a database error during the lookup no longer suspends anyone. The tenant
+  editor lets a trialling tenant be marked past due or cancelled, as the
+  server already allowed. (Owner decision 6.)
+- **Assign to tenant is refused for a tenant billed through Stripe** (409,
+  "change plan through billing"), and now requires a reason, is recorded in
+  the audit log, and runs in one transaction. Moving an invoice-billed tenant
+  to a card plan retires its invoice subscription. The placeholder a support
+  billing edit records before any Stripe subscription exists no longer
+  counts as one. The support Change plan
+  panel is shown only to tenants with a Stripe subscription, and a failure
+  to record a plan change Stripe already made is reported instead of
+  swallowed. (Owner decision 7.)
+- **Billing → Dunning and Coupons read the values actually stored:** failed
+  invoices (it looked for Stripe status names that are never stored, so it
+  was always empty), and percentage coupons (it compared against
+  `percent`, so they showed as dollar amounts).
+- **"Discover & add" no longer reports success for devices it never
+  contacted.** For Cisco, F5, FortiGate and Palo Alto it returned a device
+  with model "Unknown (discovery not yet implemented)" without connecting, so
+  a wrong password or an unreachable address looked like success. Adding a
+  device now connects and identifies it for every vendor, using the same
+  calls interrogation makes: FortiOS system status, PAN-OS `show system info`,
+  F5 version and hardware, Cisco `show version` and `show inventory` over SSH,
+  and UniFi's device list. Only identity is read, never configuration. If the
+  probe fails, nothing is created. (, W1.8)
+- **Test connection makes a real connection.** It used to make no network
+  call and reported success, with a fixed 42 ms, for any device whose status
+  was *connected* or *unknown*. That included every device that had never
+  been contacted. It now logs in with the device's stored credentials and
+  reads its identity, within a time limit. It reports the measured latency,
+  or why it failed. It runs only when you click **Test** — not when the
+  dialog opens — and a device can be tested once every 10 seconds, so a
+  stale password retried in a hurry cannot lock the device's admin account.
+  (, W1.8)
+- A wrong password on a UniFi OS console now reads as rejected credentials.
+  Before, it was reported as the 404 from the legacy login path tried after
+  it.
+
+- **Network segments are now learned from any interrogated device's VLANs**
+  (Fortinet, F5 …), not only UniFi. A `net.vlans` entry with a usable prefix
+  creates a segment whatever the vendor, labelled with the device it came from
+  (`source: interrogation`, `source_device_type`, `source_asset_id`) instead of
+  a hard-coded `unifi`. Its network type comes from the prefix instead of
+  always *private*: RFC 1918 and IPv6 ULA are *private*; everything else —
+  including carrier-grade NAT (100.64.0.0/10) — is *public*. A learned public
+  segment scopes identities only: it never puts its range in scope for a scan,
+  manual or automatic (a firewall's ISP transit or WAN network is where it is
+  connected, not the tenant's estate); a public segment an operator declares
+  still does, for a scan a person asks for. A network whose DHCP posture the
+  device did not report is recorded as **DHCP unknown** — shown as such in
+  Settings → Network Segments — and the identity engine treats it as dynamic
+  everywhere, so an address alone on it can never join two devices, in any
+  later run or intake. Declared segments still win; rows labelled `unifi` by
+  earlier releases keep refreshing. ( W2.6)
+- **VPN configurations were counted as quantum-safe because their key exchange
+  was dropped.** Device interrogation reported a tunnel's key exchange under a
+  name the discovery pipeline never read, and the IKE Diffie-Hellman group of
+  UniFi, Cisco and FortiGate IPsec tunnels was never linked to the algorithm
+  catalogue at all. A tunnel therefore showed only its AES and SHA-2
+  components and was classified as needing no post-quantum migration. VPN
+  configurations now show their real key exchange — the DH group (every
+  configured group, not just the first), or Curve25519 for WireGuard — and
+  **most will move to "needs migration" in PQC readiness, with their risk
+  scored on the weakest group they offer.** This is a correction, not a
+  regression: those tunnels were never quantum-safe. UniFi's IKE version now
+  appears as the protocol version rather than as a key exchange. The algorithm
+  catalogue gains the IKE groups it lacked (MODP 1536–8192, the RFC 5114
+  groups, P-192/P-224 and Brainpool), each assessed from NIST SP 800-57 /
+  SP 800-131A and RFC 8247, and the hybrid TLS group `SecP384r1MLKEM1024`.
+ 
+- **TLS 1.3 endpoints already using hybrid ML-KEM key exchange are no longer
+  reported as needing post-quantum migration.** A TLS 1.3 cipher suite names no
+  key exchange, so the platform assumed classical ECDHE for every TLS 1.3
+  endpoint. The measured group now decides it.
+- TLS probes no longer present the single negotiated cipher suite as the
+  endpoint's list of supported suites.
+
+- **Device interrogation no longer drops findings with a public address or no
+  address, and no longer resolves collector labels through DNS.** A FortiGate
+  tunnel to a public peer, a public F5 virtual server, a UniFi gateway's WAN
+  VPN, or a PAN-OS decryption rule that names no address used to be
+  classified as a third party and silently discarded while the job reported
+  success. They now land on the device that was interrogated: its crypto
+  configuration gains an endpoint at that address and port when there is one,
+  and none when there is not. A tunnel's far end is recorded as its peer, never
+  as an asset or an external connection. An asset reported with a name but no
+  address (a rule called `postgres`, a virtual server's name) is no longer
+  looked up in the cluster's DNS, where it could resolve to a platform service;
+  the name is kept as the configuration's label, and no reverse-DNS name is
+  attached to an interrogated address either. A finding at the device's own
+  address (its management SSH or HTTPS service) also lands on the device
+  instead of becoming a second asset when no registered network covers that
+  address. Other private-address findings (for example an F5 private VIP) are
+  routed exactly as before. The agent and
+  in-cluster executors now write identical results for an address-less
+  finding (the agent used to skip it), and a finding with no device to own it
+  is reported in the job's processing block instead of vanishing. ( W2.2)
+- **Interrogation now carries the posture it collects past the collector.**
+  A vetted subset reaches inventory under one name per concept whatever the
+  vendor called it: the VPN peer (`peer_ip`, `peer_address`, `remote-gw`),
+  IKE version, SSH banner, host-key type and fingerprint, a managed device's
+  MAC, and profile, certificate and configuration names. Nothing outside that
+  allowlist is forwarded, and each value is validated again on receipt.
+  **An SSH server's protocol version now comes from its banner**, so a Cisco
+  IOS device advertising `SSH-1.99` (it still accepts the broken SSH-1
+  protocol) is scored as SSH-1.99 instead of the `SSH-2.0` the collector
+  assumed — expect its risk to rise. When there is no banner, or it states no
+  version, the version is recorded as unknown rather than as `SSH-2.0`.
+  ( W2.1)
+- **An agent-run interrogation that finds no crypto assets keeps the device's
+  vendor, model and serial.** The agent now sends the device's identity with
+  the job result rather than only on each asset; older agents keep working.
+  ( W2.7)
+
+- **UniFi interrogation no longer hangs on an endpoint the account may not
+  read.** The client re-authenticated and retried after every 401/403, so a
+  persistent refusal looped forever. It now retries once, then reports the
+  refusal as a collection warning. (, W0.1)
+- **Cisco VPN configurations are recorded on the Cisco device, not on the
+  remote peer.** Every IPsec and IKE row a Cisco router or ASA reported was
+  filed under the tunnel's remote peer address, on TCP 443, so each peer
+  turned up as a new "server" and the device itself showed no VPN
+  configuration. The rows are now the device's own, on UDP 500 (4500 when the
+  SA says NAT traversal is in use), with the peer recorded as the tunnel's
+  `vpn_peer_address`. The IKE version is the one the device states — an IKEv1
+  or IKEv2 SA is that version, a crypto map entry takes its IKE or ISAKMP
+  profile — instead of "IKEv2" on every crypto map and IPsec SA. Peer assets
+  created by earlier runs are not removed automatically. ( W1.5)
+- **Cisco output from real IOS, IOS-XE, IOS-XR, NX-OS and ASA devices is now
+  read.** Tested against captured device output, the collector had been
+  missing most of it: IPsec SAs reported no peer and a key size of 0, and never
+  recognised the `esp-256-aes` transform IOS prints; ASA IKEv1 sessions
+  reported the row number as the peer and dropped sessions in `AM_Active`
+  state; IOS-XR was not recognised as an operating system, reported no chassis
+  model or serial on an 8000-series router, and returned no interfaces, no ARP
+  table (it was sent `show ip arp`, which XR does not have) and no CDP port
+  names; NX-OS and ASA ARP tables and NX-OS / IOS-XR LLDP port names and
+  management addresses were not read. An AES key size is now read from the
+  cipher itself, so `esp-aes esp-sha256-hmac` is AES-128, not AES-256, and
+  cipher names match the algorithm catalogue. ASA is asked
+  `show interface ip brief`, `show arp` and `show crypto ikev1 sa detail`. A
+  device that closes a command without an exit status no longer loses its
+  output. ( W3.2)
+- **Telnet on a Cisco device's management plane is reported.** The collector
+  said "no plaintext management" for every Cisco device without looking. It
+  now reads the VTY lines' `transport input` (IOS / IOS-XE), the telnet
+  feature's state (NX-OS) or the `telnet` configuration (IOS-XR, ASA), and
+  reports telnet as plaintext management when it is on. "Off" is reported only
+  when the device's answer proves it; a refused command, an empty answer or an
+  IOS VTY block relying on the release's default transport is reported as
+  **not assessed** rather than as safe. NX-OS and IOS-XR role refusals
+  (`% Permission denied for the role`, `% This command is not authorized`) are
+  now permission-denied collection warnings.
+- **F5 profiles no longer report excluded ciphers as enabled.** An F5 SSL
+  profile, a Cisco ASA custom cipher list or a FortiOS custom list is an
+  OpenSSL-style cipher *string* such as `ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5`,
+  and the ciphers after `!` are the ones it turns *off*. They were read as
+  ciphers in use, so a hardened virtual server showed RC4, 3DES and MD5 and
+  scored Critical. Cipher strings are now evaluated. An excluded cipher is never
+  scored. A cipher the string enables — or may enable and cannot be resolved,
+  such as an `RC4` keyword or a suite the parser does not know — is still
+  reported. A string whose meaning depends on the device's software version
+  (`DEFAULT`, `HIGH`, F5's `NATIVE`, cipher groups, Cisco's `low`/`medium`/`high`
+  levels) is marked **partially assessed**. Its score stays empty rather than
+  showing an assessed Low, unless a component it does resolve — the key
+  exchange, a named weak cipher — already makes it Medium or worse. `EXP`,
+  `EXPORT` and `LOW` are read as the export and single-DES suites they name,
+  bare or inside a string.
+- **Symmetric key sizes are no longer flagged as weak keys.** An AES-256 VPN
+  tunnel or WireGuard interface showed "Weak key size", and an IPsec tunnel
+  using a Diffie-Hellman group was scored Critical as a "key below 1024 bits",
+  because its 256-bit cipher key was measured against the 2048-bit RSA floor.
+  The floor now applies only to RSA, DSA and Diffie-Hellman keys, in the
+  configuration views and in the "uses deprecated algorithms" filter and count
+  alike. RSA-1024 is still flagged, and so is a 192-bit key beside an
+  elliptic-curve key exchange (it may be a P-192 key).
+- **Cisco ASA `ssl cipher` lines report the TLS version they configure**
+  instead of a default TLS 1.2.
+
+These are corrections: **expect risk scores on F5, ASA, FortiOS and VPN
+configurations to drop** after the next discovery run. Nothing was less secure
+than it was before; it was being reported as worse than it is.
 
 - **Social sign-up works again for a person whose earlier account was
   deleted.** The one-account-per-IdP-identity rule from the social sign-in

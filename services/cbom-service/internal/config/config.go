@@ -36,7 +36,7 @@ type DatabaseConfig struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET": sharedconfig.GetEnv("JWT_SECRET", "your-secret-key-change-in-production"),
+		"JWT_SECRET": sharedconfig.JWTSecret(),
 	})
 
 	// Primary configuration uses DATABASE_URL for consistency
@@ -56,7 +56,7 @@ func Load() *Config {
 	}
 
 	return &Config{
-		JWTSecret:   sharedconfig.GetEnv("JWT_SECRET", "your-secret-key-change-in-production"),
+		JWTSecret:   sharedconfig.JWTSecret(),
 		Environment: sharedconfig.GetEnv("ENV", "development"),
 		Port:        sharedconfig.GetEnv("PORT", "8080"),
 		Database:    dbConfig,

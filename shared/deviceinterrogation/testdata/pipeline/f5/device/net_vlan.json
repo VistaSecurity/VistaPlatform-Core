@@ -1,0 +1,16 @@
+{
+  "kind": "tm:net:vlan:vlancollectionstate",
+  "items": [
+    {
+      "name": "internal",
+      "fullPath": "/Common/internal",
+      "tag": 20,
+      "mtu": 1500
+    },
+    {
+      "name": "external",
+      "fullPath": "/Common/external",
+      "tag": 10
+    }
+  ]
+}

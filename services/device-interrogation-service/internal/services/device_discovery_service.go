@@ -1,74 +1,110 @@
 package services
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
-	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
-	sharedinterrogation "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
-// DeviceDiscoveryService handles connecting to devices and discovering their information
+// DeviceDiscoveryService answers "what is this device, and can we reach it" for
+// the Add device flow and the Test connection button ( slice A,
+// W1.8).
+//
+// It owns no vendor code. Both questions go through the shared Registry's
+// Identify step, which runs each vendor collector's own system-info call over
+// the collector's own guarded client — so onboarding and interrogation cannot
+// disagree about what a device is, and the dial guard, redirect policy and
+// redaction backstop are the ones interrogation already has. The previous
+// version kept a UniFi-only HTTP client here and four stubs that returned
+// "Unknown (discovery not yet implemented)" as a successful discovery for
+// Cisco, F5, Fortinet and PAN-OS without dialling anything.
 type DeviceDiscoveryService struct {
-	httpClient *http.Client
+	registry *di.Registry
+	// timeout bounds one identification end to end. A synchronous request is
+	// waiting on it.
+	timeout time.Duration
 }
 
-// NewDeviceDiscoveryService creates a discovery service with the same guarded
-// transport used for recurring appliance interrogation. Private customer
-// networks are reachable; loopback, link-local, metadata, and unsafe redirects
-// remain blocked. TLS verification is disabled only when explicitly requested.
-func NewDeviceDiscoveryService(insecureSkipVerify bool) *DeviceDiscoveryService {
-	return &DeviceDiscoveryService{
-		httpClient: sharedinterrogation.NewDeviceHTTPClient(insecureSkipVerify, 30*time.Second),
-	}
+// DefaultIdentifyTimeout bounds Add device and Test connection. Long enough for
+// a slow appliance's login (PAN-OS keygen can take seconds), short enough that
+// an unreachable address fails while the operator is still looking.
+const DefaultIdentifyTimeout = 20 * time.Second
+
+// NewDeviceDiscoveryService builds the service over the shared Registry.
+func NewDeviceDiscoveryService() *DeviceDiscoveryService {
+	return &DeviceDiscoveryService{registry: di.NewRegistry(), timeout: DefaultIdentifyTimeout}
 }
 
-func newDeviceDiscoveryServiceWithClient(client *http.Client) *DeviceDiscoveryService {
-	return &DeviceDiscoveryService{httpClient: client}
+// WithTimeout returns a copy bounded by timeout instead of the default.
+func (s *DeviceDiscoveryService) WithTimeout(timeout time.Duration) *DeviceDiscoveryService {
+	cp := *s
+	cp.timeout = timeout
+	return &cp
 }
 
-// DeviceDiscoveryError is safe to return to a tenant. Err is retained for
-// internal diagnostics but its target-controlled text is never copied into the
-// HTTP response.
+// DeviceDiscoveryError is safe to return to a tenant. Code is one of the shared
+// di.IdentifyFailure values (or credentials_missing); Message is fixed copy
+// chosen by Code. Err is retained for logs only: its text can carry whatever a
+// device answered, so it is never copied into a response.
 type DeviceDiscoveryError struct {
 	Code    string
 	Message string
 	Err     error
 }
 
-func (e *DeviceDiscoveryError) Error() string { return e.Message + ": " + e.Err.Error() }
+func (e *DeviceDiscoveryError) Error() string {
+	if e.Err == nil {
+		return e.Message
+	}
+	return e.Message + ": " + e.Err.Error()
+}
+
 func (e *DeviceDiscoveryError) Unwrap() error { return e.Err }
 
-type discoveryHTTPStatusError struct{ status int }
+// CodeCredentialsMissing is Test connection's answer for a device that has no
+// stored username and password of its own. It is not a shared identify
+// failure: nothing was dialled.
+const CodeCredentialsMissing = "credentials_missing"
 
-func (e *discoveryHTTPStatusError) Error() string {
-	return fmt.Sprintf("device returned HTTP status %d", e.status)
+// discoveryMessages is the tenant-facing copy for each failure.
+var discoveryMessages = map[di.IdentifyFailure]string{
+	di.IdentifyNotSupported:         "This device type can't be identified automatically. Enter its details by hand.",
+	di.IdentifyInvalidTarget:        "The management address isn't usable. Use https://host[:port] for a web API, or the host (or ssh://host:port) for a Cisco device, with no credentials, query or fragment.",
+	di.IdentifyTargetDisallowed:     "That management address isn't allowed. Loopback and link-local (including cloud metadata) addresses can't be probed, and a device may not redirect to another host.",
+	di.IdentifyConnectionFailed:     "Couldn't connect to the management address. Check the address and port, and that it is reachable from the platform.",
+	di.IdentifyTLSUntrusted:         "Connected, but the device's management certificate isn't trusted. If it is self-signed, turn on Skip TLS verification.",
+	di.IdentifyAuthenticationFailed: "The device rejected the credentials, or the account can't read the device's system information.",
+	di.IdentifyHostKeyMismatch:      "The device's SSH host key doesn't match the key pinned for it. No password was sent. If the device was replaced, clear the pinned key first.",
+	di.IdentifyUnsupportedResponse:  "Something answered at that address, but not as this device type. Check the device type and the management address.",
+	di.IdentifyFailed:               "The device answered, but its identity could not be read.",
 }
 
-func classifyDeviceDiscoveryError(err error) *DeviceDiscoveryError {
-	if strings.Contains(err.Error(), "ssrf guard") || strings.Contains(err.Error(), "refusing to follow a redirect") {
-		return &DeviceDiscoveryError{Code: "target_disallowed", Message: "That management address is not allowed. Loopback, link-local, metadata, and cross-host redirect targets cannot be probed.", Err: err}
-	}
-	var statusErr *discoveryHTTPStatusError
-	if errors.As(err, &statusErr) {
-		if statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden {
-			return &DeviceDiscoveryError{Code: "authentication_failed", Message: "The device rejected the credentials. Check the username and password.", Err: err}
-		}
-		return &DeviceDiscoveryError{Code: "unsupported_response", Message: "The endpoint responded, but it did not expose a supported discovery API.", Err: err}
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) || strings.Contains(err.Error(), "certificate") {
-		return &DeviceDiscoveryError{Code: "connection_failed", Message: "Could not connect to the management endpoint. Check its URL and reachability; for a self-signed certificate, enable Skip TLS verification.", Err: err}
-	}
-	return &DeviceDiscoveryError{Code: "discovery_failed", Message: "The endpoint responded, but Vista could not discover supported device information.", Err: err}
+// DiscoveryMessage is the fixed tenant-facing copy for an identify failure
+// code, or "" for a code with none. Exported so a handler test can assert that
+// a response carries exactly this and nothing the device said.
+func DiscoveryMessage(code string) string {
+	return discoveryMessages[di.IdentifyFailure(code)]
 }
 
-// DiscoveredDeviceInfo contains information discovered from a device
+// discoveryError converts an Identify failure into the tenant-safe error.
+func discoveryError(err error) *DeviceDiscoveryError {
+	identifyErr := di.ClassifyIdentifyError(err)
+	message, ok := discoveryMessages[identifyErr.Code]
+	if !ok {
+		message = discoveryMessages[di.IdentifyFailed]
+	}
+	return &DeviceDiscoveryError{Code: string(identifyErr.Code), Message: message, Err: err}
+}
+
+// DiscoveredDeviceInfo is what identification learned, shaped for a device
+// record.
 type DiscoveredDeviceInfo struct {
 	Vendor          string
 	Model           string
@@ -77,289 +113,196 @@ type DiscoveredDeviceInfo struct {
 	IPAddress       string
 	FirmwareVersion string
 	MacAddress      string
+	// TargetHost and TargetPort are where the identification connected — the
+	// operator's address, resolved. Used to record how an SSH-managed device
+	// is reached; never reported as something the device said.
+	TargetHost string
+	TargetPort int
+	// SSHHostKeyFingerprint / SSHHostKeyType are the key an SSH identification
+	// authenticated through, for the created device to pin.
+	SSHHostKeyFingerprint string
+	SSHHostKeyType        string
 }
 
-// DiscoverDevice connects to a device and retrieves its information
-func (s *DeviceDiscoveryService) DiscoverDevice(deviceType, managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
-	var info *DiscoveredDeviceInfo
-	var err error
-	switch deviceType {
-	case "unifi":
-		info, err = s.discoverUniFiDevice(managementURL, username, password)
-	case "cisco":
-		info, err = s.discoverCiscoDevice(managementURL, username, password)
-	case "f5":
-		info, err = s.discoverF5Device(managementURL, username, password)
-	case "fortinet":
-		info, err = s.discoverFortinetDevice(managementURL, username, password)
-	case "palo_alto":
-		info, err = s.discoverPaloAltoDevice(managementURL, username, password)
-	default:
-		err = fmt.Errorf("unsupported device type: %s", deviceType)
-	}
-	if err != nil {
-		return nil, classifyDeviceDiscoveryError(err)
-	}
-	return info, nil
+// DiscoveryRequest is the Add device probe's input: the four fields plus the
+// explicit TLS opt-in.
+type DiscoveryRequest struct {
+	DeviceType            string
+	ManagementURL         string
+	Username              string
+	Password              string
+	TLSInsecureSkipVerify bool
 }
 
-// unifiLogin attempts to login to a UniFi device and returns session cookies
-// Tries both UDM/UDR endpoint (/api/auth/login) and legacy controller endpoint (/api/login)
-func (s *DeviceDiscoveryService) unifiLogin(managementURL, username, password string) ([]*http.Cookie, error) {
-	loginPayload := map[string]string{
-		"username": username,
-		"password": password,
-	}
-
-	loginData, err := json.Marshal(loginPayload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal login payload: %w", err)
-	}
-
-	// Try UDM/UDR endpoint first (/api/auth/login)
-	loginURL := strings.TrimRight(managementURL, "/") + "/api/auth/login"
-	cookies, err := s.attemptUnifiLogin(loginURL, loginData)
-	if err == nil {
-		fmt.Printf("UniFi login successful using /api/auth/login\n")
-		return cookies, nil
-	}
-	firstErr := err
-
-	fmt.Printf("Failed to login with /api/auth/login: %v, trying /api/login\n", err)
-
-	// Fallback to legacy controller endpoint (/api/login)
-	loginURL = strings.TrimRight(managementURL, "/") + "/api/login"
-	cookies, err = s.attemptUnifiLogin(loginURL, loginData)
-	if err == nil {
-		fmt.Printf("UniFi login successful using /api/login\n")
-		return cookies, nil
-	}
-	var firstStatus *discoveryHTTPStatusError
-	if errors.As(firstErr, &firstStatus) && (firstStatus.status == http.StatusUnauthorized || firstStatus.status == http.StatusForbidden) {
-		return nil, fmt.Errorf("failed to login to UniFi device: %w", firstErr)
-	}
-
-	return nil, fmt.Errorf("failed to login to UniFi device using both endpoints: %w", err)
+// DiscoverDevice identifies the device at req.ManagementURL. Every failure is a
+// *DeviceDiscoveryError.
+func (s *DeviceDiscoveryService) DiscoverDevice(ctx context.Context, req DiscoveryRequest) (*DiscoveredDeviceInfo, error) {
+	info, _, err := s.identify(ctx,
+		di.DeviceInfo{DeviceType: req.DeviceType, ManagementURL: req.ManagementURL},
+		di.Credentials{Username: req.Username, Password: req.Password, InsecureSkipVerify: req.TLSInsecureSkipVerify})
+	return info, err
 }
 
-// attemptUnifiLogin attempts a single login request to the given URL
-func (s *DeviceDiscoveryService) attemptUnifiLogin(loginURL string, loginData []byte) ([]*http.Cookie, error) {
-	req, err := http.NewRequest("POST", loginURL, strings.NewReader(string(loginData)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create login request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute login request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, &discoveryHTTPStatusError{status: resp.StatusCode}
-	}
-
-	return resp.Cookies(), nil
+// ConnectionTestResult is a Test connection that reached the device and read
+// its identity. LatencyMs is measured, end to end, for that identification.
+type ConnectionTestResult struct {
+	LatencyMs int64
+	Info      *DiscoveredDeviceInfo
 }
 
-// discoverUniFiDevice discovers information from a UniFi device
-func (s *DeviceDiscoveryService) discoverUniFiDevice(managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
-	// Step 1: Login to UniFi API
-	// UDM/UDR devices use /api/auth/login, older controllers use /api/login
-	// Try both endpoints
-	cookies, err := s.unifiLogin(managementURL, username, password)
+// TestConnection identifies a stored device with its stored credentials.
+//
+// It is the same Identify step Add device runs — a real login and the vendor's
+// system-info call — not a ping, and not a read of the device's last known
+// status: the button used to report success from `connection_status` with a
+// hard-coded 42 ms, so a device that had never been contacted "passed".
+func (s *DeviceDiscoveryService) TestConnection(ctx context.Context, device *models.Device, stored StoredDeviceCredentials, masterKey string) (*ConnectionTestResult, error) {
+	if !stored.HasCredentials() {
+		return nil, &DeviceDiscoveryError{
+			Code:    CodeCredentialsMissing,
+			Message: "This device has no stored username and password to test with. Edit the device to add them.",
+			Err:     errors.New("no embedded credentials"),
+		}
+	}
+	password, err := openStoredCredential(masterKey, stored.EncryptedPassword)
 	if err != nil {
 		return nil, err
 	}
-
-	// Step 2: Get system information
-	// Try to get device info from the status endpoint
-	statusURL := strings.TrimRight(managementURL, "/") + "/api/s/default/stat/device"
-
-	req, err := http.NewRequest("GET", statusURL, nil)
+	coreDevice := buildCoreDeviceInfo(device, stored.ManagementURL)
+	coreDevice.DeviceType = device.DeviceType
+	info, latency, err := s.identify(ctx, coreDevice, di.Credentials{
+		Username: stored.Username, Password: password,
+		InsecureSkipVerify: EffectiveInsecureSkipVerify(device.DeviceType, stored.InsecureSkipVerify),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create status request: %w", err)
+		return nil, err
 	}
+	return &ConnectionTestResult{LatencyMs: latency.Milliseconds(), Info: info}, nil
+}
 
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
+func (s *DeviceDiscoveryService) identify(ctx context.Context, device di.DeviceInfo, creds di.Credentials) (*DiscoveredDeviceInfo, time.Duration, error) {
+	timeout := s.timeout
+	if timeout <= 0 {
+		timeout = DefaultIdentifyTimeout
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	resp, err := s.httpClient.Do(req)
+	start := time.Now()
+	identification, err := s.registry.Identify(ctx, device, creds)
+	elapsed := time.Since(start)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get device status: %w", err)
+		return nil, elapsed, discoveryError(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		// If stat/device fails, try the sysinfo endpoint (for UDM/UDR)
-		return s.getUniFiSystemInfo(managementURL, cookies)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	var statusResp struct {
-		Data []struct {
-			Model   string `json:"model"`
-			Serial  string `json:"serial"`
-			Version string `json:"version"`
-			Name    string `json:"name"`
-			IP      string `json:"ip"`
-			Mac     string `json:"mac"`
-			Type    string `json:"type"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(body, &statusResp); err != nil {
-		return nil, fmt.Errorf("failed to parse device status: %w", err)
-	}
-
-	// Find the controller/gateway device
-	for _, device := range statusResp.Data {
-		if device.Type == "ugw" || device.Type == "udm" || device.Type == "udr" {
-			return &DiscoveredDeviceInfo{
-				Vendor:          "Ubiquiti",
-				Model:           device.Model,
-				SerialNumber:    device.Serial,
-				Hostname:        device.Name,
-				IPAddress:       device.IP,
-				FirmwareVersion: device.Version,
-				MacAddress:      device.Mac,
-			}, nil
-		}
-	}
-
-	// If no gateway found, return first device
-	if len(statusResp.Data) > 0 {
-		device := statusResp.Data[0]
-		return &DiscoveredDeviceInfo{
-			Vendor:          "Ubiquiti",
-			Model:           device.Model,
-			SerialNumber:    device.Serial,
-			Hostname:        device.Name,
-			IPAddress:       device.IP,
-			FirmwareVersion: device.Version,
-			MacAddress:      device.Mac,
-		}, nil
-	}
-
-	return nil, fmt.Errorf("no devices found in UniFi controller")
-}
-
-// getUniFiSystemInfo gets system information for UDM/UDR devices
-// Tries multiple endpoint patterns as UDM/UDR use different API structure
-func (s *DeviceDiscoveryService) getUniFiSystemInfo(managementURL string, cookies []*http.Cookie) (*DiscoveredDeviceInfo, error) {
-	// Try different sysinfo endpoints
-	endpoints := []string{
-		"/proxy/network/api/s/default/stat/sysinfo", // UDM/UDR proxy endpoint
-		"/api/s/default/stat/sysinfo",               // Standard controller endpoint
-		"/api/system",                               // Alternative UDM endpoint
-	}
-
-	for _, endpoint := range endpoints {
-		sysinfoURL := strings.TrimRight(managementURL, "/") + endpoint
-		fmt.Printf("Trying sysinfo endpoint: %s\n", endpoint)
-
-		req, err := http.NewRequest("GET", sysinfoURL, nil)
-		if err != nil {
-			continue
-		}
-
-		for _, cookie := range cookies {
-			req.AddCookie(cookie)
-		}
-
-		resp, err := s.httpClient.Do(req)
-		if err != nil {
-			fmt.Printf("Failed to fetch %s: %v\n", endpoint, err)
-			continue
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != http.StatusOK {
-			fmt.Printf("Endpoint %s returned status %d\n", endpoint, resp.StatusCode)
-			continue
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			continue
-		}
-
-		// Try parsing as standard sysinfo response
-		var sysinfoResp struct {
-			Data []struct {
-				Hostname string `json:"hostname"`
-				Version  string `json:"version"`
-				Model    string `json:"console_display_version"`
-			} `json:"data"`
-		}
-
-		if err := json.Unmarshal(body, &sysinfoResp); err == nil && len(sysinfoResp.Data) > 0 {
-			info := sysinfoResp.Data[0]
-			fmt.Printf("Successfully parsed sysinfo from %s\n", endpoint)
-			return &DiscoveredDeviceInfo{
-				Vendor:          "Ubiquiti",
-				Model:           info.Model,
-				Hostname:        info.Hostname,
-				FirmwareVersion: info.Version,
-			}, nil
-		}
-
-		// Try parsing as system info response (UDM format)
-		var systemResp struct {
-			Hostname string `json:"hostname"`
-			Version  string `json:"version"`
-			Name     string `json:"name"`
-		}
-
-		if err := json.Unmarshal(body, &systemResp); err == nil && systemResp.Hostname != "" {
-			fmt.Printf("Successfully parsed system info from %s\n", endpoint)
-			return &DiscoveredDeviceInfo{
-				Vendor:          "Ubiquiti",
-				Model:           systemResp.Name,
-				Hostname:        systemResp.Hostname,
-				FirmwareVersion: systemResp.Version,
-			}, nil
-		}
-	}
-
-	return nil, fmt.Errorf("failed to get system info from any endpoint")
-}
-
-// Placeholder implementations for other device types
-func (s *DeviceDiscoveryService) discoverCiscoDevice(managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
-	// TODO: Implement Cisco device discovery via SSH or REST API
 	return &DiscoveredDeviceInfo{
-		Vendor: "Cisco",
-		Model:  "Unknown (discovery not yet implemented)",
-	}, nil
+		Vendor:          identification.Vendor,
+		Model:           identification.Model,
+		SerialNumber:    identification.SerialNumber,
+		Hostname:        identification.Hostname,
+		IPAddress:       identification.IPAddress,
+		FirmwareVersion: identification.FirmwareVersion,
+		MacAddress:      identification.MACAddress,
+		TargetHost:      identification.TargetHost,
+		TargetPort:      identification.TargetPort,
+
+		SSHHostKeyFingerprint: identification.SSHHostKeyFingerprint,
+		SSHHostKeyType:        identification.SSHHostKeyType,
+	}, elapsed, nil
 }
 
-func (s *DeviceDiscoveryService) discoverF5Device(managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
-	// TODO: Implement F5 device discovery via iControl REST API
-	return &DiscoveredDeviceInfo{
-		Vendor: "F5 Networks",
-		Model:  "Unknown (discovery not yet implemented)",
-	}, nil
+// ApplyTo fills a create request from what identification learned, without
+// overwriting anything the request already carries.
+//
+// Two addressing rules make the created device interrogable afterwards:
+//
+//   - the IP a device reports for itself wins; failing that, the address we
+//     dialled is recorded when it is an IP literal;
+//   - a device's reported name becomes its hostname only when it is usable as
+//     one (no whitespace — a UniFi display name like "HQ Console" is not), and
+//     an SSH-managed device dialled by DNS name keeps that name, because the
+//     Cisco collector reaches a device by its record's IP or hostname, not by
+//     its management URL.
+func (d *DiscoveredDeviceInfo) ApplyTo(req *models.CreateDeviceRequest, sshManaged bool) {
+	set := func(dst **string, v string) {
+		if *dst == nil && strings.TrimSpace(v) != "" {
+			value := strings.TrimSpace(v)
+			*dst = &value
+		}
+	}
+	set(&req.Vendor, d.Vendor)
+	set(&req.Model, d.Model)
+	set(&req.SerialNumber, d.SerialNumber)
+	set(&req.FirmwareVersion, d.FirmwareVersion)
+
+	ip := d.IPAddress
+	if net.ParseIP(ip) == nil {
+		ip = ""
+	}
+	targetIsIP := net.ParseIP(d.TargetHost) != nil
+	if ip == "" && targetIsIP {
+		ip = d.TargetHost
+	}
+	set(&req.IPAddress, ip)
+
+	if req.Metadata == nil {
+		req.Metadata = map[string]interface{}{}
+	}
+	switch {
+	case sshManaged && !targetIsIP && d.TargetHost != "":
+		set(&req.Hostname, d.TargetHost)
+	case d.Hostname != "" && !strings.ContainsFunc(d.Hostname, unicode.IsSpace):
+		set(&req.Hostname, d.Hostname)
+	}
+	if d.Hostname != "" && (req.Hostname == nil || *req.Hostname != d.Hostname) {
+		// The device's own name, kept where a display name can live when it
+		// could not become the record's hostname.
+		req.Metadata["reported_name"] = d.Hostname
+	}
+	if d.MacAddress != "" {
+		req.Metadata["mac_address"] = d.MacAddress
+	}
+	if sshManaged && d.TargetPort != 0 && d.TargetPort != 22 {
+		// The Cisco collector reads a non-default SSH port from here.
+		req.Metadata["ssh_port"] = float64(d.TargetPort)
+	}
+
+	// Admission evidence. The platform itself logged in to this device and read
+	// its serial number from the device's own API or CLI — the same standing a
+	// host-inventory agent's reading of its own host has. Under
+	// identity_admission=enforce that is what lets Add device CREATE the asset
+	// rather than retain it for review. Without a serial there is nothing
+	// authoritative to admit on, and enforce retains the observation, as it
+	// does for a device typed in by hand.
+	if strings.TrimSpace(d.SerialNumber) != "" && req.SerialNumber != nil && *req.SerialNumber == strings.TrimSpace(d.SerialNumber) {
+		req.ProbeEvidence = &identity.AdmissionEvidence{
+			Direct:        true,
+			Authoritative: true,
+			ReceiptID:     "device_probe",
+		}
+	}
 }
 
-func (s *DeviceDiscoveryService) discoverFortinetDevice(managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
-	// TODO: Implement Fortinet device discovery via FortiGate API
-	return &DiscoveredDeviceInfo{
-		Vendor: "Fortinet",
-		Model:  "Unknown (discovery not yet implemented)",
-	}, nil
+// EffectiveInsecureSkipVerify is the TLS opt-in as it may be applied to a
+// device of deviceType: never for an SSH-managed type.
+//
+// The flag is set from a form labelled "Skip TLS verification". An SSH device
+// has no TLS to skip, and the shared collector passes the same flag to
+// sshtrust, where it switches off host-key verification — so a checkbox that
+// was ticked for an F5 and carried across a type change, or set on a Cisco
+// device before the form hid it, silently disabled the one check that keeps a
+// device password off an impostor ( review B1/NB-7). Every place that
+// turns a stored device into credentials goes through this.
+func EffectiveInsecureSkipVerify(deviceType string, stored bool) bool {
+	return stored && !IsSSHManagedDeviceType(deviceType)
 }
 
-func (s *DeviceDiscoveryService) discoverPaloAltoDevice(managementURL, username, password string) (*DiscoveredDeviceInfo, error) {
-	// TODO: Implement Palo Alto device discovery via PAN-OS XML API
-	return &DiscoveredDeviceInfo{
-		Vendor: "Palo Alto Networks",
-		Model:  "Unknown (discovery not yet implemented)",
-	}, nil
+// IsSSHManagedDeviceType reports whether a device type is reached over SSH by
+// its record's IP or hostname (the Cisco collector) rather than by its
+// management URL.
+func IsSSHManagedDeviceType(deviceType string) bool {
+	switch deviceType {
+	case "cisco", "cisco_router", "cisco_switch", "cisco_asa":
+		return true
+	}
+	return false
 }

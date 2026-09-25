@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,16 +22,30 @@ import (
 // security-load-bearing string in the package, and widening it is a one-word
 // edit in a file no test was reading.
 //
-// The scan is the package source, not a live device, because the crypto
-// commands are issued from a method that needs an SSH session and cannot be
-// driven from a fixture. A CLI command has to be written down as a string
-// literal somewhere, so parsing both files for literals finds every one of
-// them. TestCiscoCommands_OpsSetIsWired below drives the ops half dynamically
-// as well, so the static list is checked against something that actually runs.
-const (
-	ciscoSourceFile    = "cisco.go"
-	ciscoOpsSourceFile = "cisco_ops.go"
-)
+// The scan is the package source, not a live device. A CLI command has to be
+// written down as a string literal somewhere, so parsing EVERY non-test
+// cisco*.go file for literals finds every one of them — including in a file
+// added later (the session layer, cisco_ssh.go, was the first; a fixed pair of
+// file names would have skipped it). TestCiscoCommands_EveryPlatformIsWired
+// below drives the collection dynamically for every OS family as well, so the
+// static list is checked against something that actually runs.
+func ciscoSourceFiles(t *testing.T) []string {
+	t.Helper()
+	matches, err := filepath.Glob("cisco*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	var out []string
+	for _, m := range matches {
+		if !strings.HasSuffix(m, "_test.go") {
+			out = append(out, m)
+		}
+	}
+	if len(out) < 4 {
+		t.Fatalf("found only %v; the scan has stopped seeing the collector's source", out)
+	}
+	return out
+}
 
 // ciscoAllowedCommands is every CLI command this package may run, spelled out.
 //
@@ -42,6 +57,7 @@ var ciscoAllowedCommands = []string{
 	"show crypto ikev2 sa",
 	"show crypto ipsec sa",
 	"show crypto isakmp sa",
+	"show crypto ikev1 sa detail", // ASA: IKEv1 only, with the negotiated cipher and hash
 	"show crypto map",
 	"show running-config | include ssl cipher",
 	"show ssl",
@@ -52,9 +68,34 @@ var ciscoAllowedCommands = []string{
 	"show interfaces",
 	"show inventory",
 	"show ip arp",
+	"show arp", // IOS-XR and ASA
 	"show ip interface brief",
+	"show interface ip brief", // ASA
 	"show lldp neighbors detail",
 	"show vlan brief",
+	// telnet on the management plane (cisco_ops.go). Each is filtered to the
+	// lines that answer the question and none carries a secret: VTY
+	// `transport input` lines, the NX-OS telnet feature's state, and the
+	// ASA / IOS-XR `telnet` section (addresses, a timeout, a server count).
+	"show running-config | include ^line vty|transport input",
+	"show feature | include telnet",
+	"show running-config telnet",
+	// privilege (cisco_ssh.go): the level the account is at, IOS and ASA
+	"show privilege",
+	"show curpriv",
+}
+
+// ciscoAllowedSessionCommands are the non-`show` lines the session layer
+// writes: raising privilege, turning the pager off, leaving. `enable`'s secret
+// is written only at the password prompt enable asks for, and is not a
+// command. "configure", "write", "copy", "reload" and every other mode or
+// state change are absent, and TestCiscoCommands_SessionWritesOnlyTheseLines
+// holds the shell to this list on the wire.
+var ciscoAllowedSessionCommands = []string{
+	"enable",
+	"terminal length 0",
+	"terminal pager 0",
+	"exit",
 }
 
 // ciscoForbiddenFragments must not appear in ANY string literal in either file.
@@ -80,7 +121,7 @@ var ciscoForbiddenFragments = []string{
 }
 
 func TestCiscoCommands_TheWholeInterrogatorRunsAClosedList(t *testing.T) {
-	found := ciscoCommandLiterals(t, ciscoSourceFile, ciscoOpsSourceFile)
+	found := ciscoCommandLiterals(t, ciscoSourceFiles(t)...)
 
 	if len(found) == 0 {
 		t.Fatal("the source scan found no commands at all; it has stopped testing what it claims to")
@@ -107,11 +148,17 @@ func TestCiscoCommands_TheWholeInterrogatorRunsAClosedList(t *testing.T) {
 // caught too.
 func TestCiscoCommands_NeverAskForAWiderRunningConfig(t *testing.T) {
 	allowed := map[string]bool{}
-	for _, command := range ciscoAllowedCommands {
+	for _, command := range append(append([]string{}, ciscoAllowedCommands...), ciscoAllowedSessionCommands...) {
 		allowed[command] = true
 	}
 
-	literals := ciscoStringLiterals(t, ciscoSourceFile, ciscoOpsSourceFile)
+	// The pager prompts are text the device PRINTS, matched in its output —
+	// ASA's "<--- More --->" contains "more " without being the `more` command.
+	for _, marker := range ciscoPagerMarkers {
+		allowed[marker] = true
+	}
+
+	literals := ciscoStringLiterals(t, ciscoSourceFiles(t)...)
 	if len(literals) < 20 {
 		t.Fatalf("the source scan found only %d string literals; it has stopped walking the files", len(literals))
 	}
@@ -129,22 +176,41 @@ func TestCiscoCommands_NeverAskForAWiderRunningConfig(t *testing.T) {
 	}
 }
 
-// The ops half, driven dynamically: the static list above is only worth
-// something if the commands it names are the ones that actually go out.
-func TestCiscoCommands_OpsSetIsWired(t *testing.T) {
-	var asked []string
+// Driven dynamically, for every OS family: the static list above is only worth
+// something if the commands it names are the ones that actually go out — and
+// the per-platform choices (XR's `show arp`, ASA's `show interface ip brief`
+// and `show crypto ikev1 sa detail`, each OS's telnet question) are exactly the
+// commands a single-platform run would never reach.
+func TestCiscoCommands_EveryPlatformIsWired(t *testing.T) {
+	asked := map[string]bool{}
 	run := func(_ context.Context, command string) (string, bool, error) {
-		asked = append(asked, command)
+		asked[command] = true
 		return "", false, os.ErrNotExist
 	}
-	ciscoCollectOps(context.Background(), &InterrogateResult{}, run, map[string]interface{}{})
-
-	if len(asked) == 0 {
-		t.Fatal("the ops collection ran no commands at all")
+	for _, osName := range []string{"", "IOS", "IOS-XE", "NX-OS", "IOS-XR", "ASA"} {
+		ciscoCollectOps(context.Background(), &InterrogateResult{}, run, map[string]interface{}{"os_name": osName})
+		c := &ciscoSSHClient{osName: osName}
+		c.getCryptoConfigs(context.Background(), &InterrogateResult{}, run)
+		c.getSSLConfigs(context.Background(), &InterrogateResult{}, run)
 	}
-	for _, command := range asked {
+	if len(asked) == 0 {
+		t.Fatal("the collection ran no commands at all")
+	}
+	for command := range asked {
 		if !contains(ciscoAllowedCommands, command) {
-			t.Errorf("the ops collection asked for %q, which is not on the allowlist", command)
+			t.Errorf("the collection asked for %q, which is not on the allowlist", command)
+		}
+	}
+	// Every allowlisted command is reached by some platform, except the
+	// session layer's own (`show version` goes through runFirst and the
+	// privilege queries through ensurePrivilege, both driven by the SSH tests).
+	for _, command := range ciscoAllowedCommands {
+		switch command {
+		case "show version", "show privilege", "show curpriv":
+			continue
+		}
+		if !asked[command] {
+			t.Errorf("ciscoAllowedCommands lists %q but no platform's collection asks for it", command)
 		}
 	}
 }

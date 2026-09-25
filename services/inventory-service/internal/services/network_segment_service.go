@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"strings"
 
 	"github.com/google/uuid"
@@ -15,6 +17,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 )
 
 type NetworkSegmentService struct {
@@ -213,6 +216,9 @@ func (s *NetworkSegmentService) GetByID(tenantID, id uuid.UUID) (*models.Network
 
 // Create creates a new network segment.
 func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkSegmentInput) (*models.NetworkSegment, error) {
+	if err := validateSegmentBreadth(input.SegmentType, input.Value); err != nil {
+		return nil, err
+	}
 	// Location is optional. When provided, verify it belongs to the tenant.
 	if input.LocationID != nil {
 		var locID uuid.UUID
@@ -270,6 +276,35 @@ func (s *NetworkSegmentService) segmentExists(tenantID uuid.UUID, value string) 
 	return exists, err
 }
 
+// ErrSegmentTooBroad refuses a CIDR segment too wide to be anybody's network.
+// Registering a segment is the tenant's statement that a range is theirs, and
+// sensors actively enrich TLS services inside a registered range without the
+// third-party opt-in ( W5.13). A /0 — or any IPv4 prefix shorter than /8,
+// or IPv6 shorter than /16 — would turn that statement into a silent opt-in to
+// probing every third party. Owner decision on.
+var ErrSegmentTooBroad = errors.New("segment too broad")
+
+// validateSegmentBreadth refuses a CIDR segment that is too broad to be a claim
+// of ownership (see probeconsent.TooBroadToClaim). Ranges wholly inside private
+// address space — fd00::/8, fc00::/7 — are exempt: they claim nothing a private
+// address does not already carry. The message is written for the person at the
+// form, and names the rule so they can fix the value rather than guess.
+func validateSegmentBreadth(segmentType, value string) error {
+	if segmentType != "cidr" {
+		return nil
+	}
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+	if err != nil {
+		// Malformed values are validateSegmentValue's to report.
+		return nil
+	}
+	if probeconsent.TooBroadToClaim(prefix) {
+		return fmt.Errorf("%w: %s is too broad to register as one of your networks — IPv4 ranges must be /%d or narrower and IPv6 ranges /%d or narrower; register the specific ranges you own",
+			ErrSegmentTooBroad, strings.TrimSpace(value), probeconsent.MinClaimBitsIPv4, probeconsent.MinClaimBitsIPv6)
+	}
+	return nil
+}
+
 // validateSegmentValue checks that a segment's value is well-formed for its
 // type, so a malformed CIDR/range produces a clear per-row error on import
 // instead of a silently broken segment that never matches a scan.
@@ -278,6 +313,9 @@ func validateSegmentValue(segmentType, value string) error {
 	case "cidr":
 		if _, _, err := net.ParseCIDR(value); err != nil {
 			return fmt.Errorf("invalid CIDR %q", value)
+		}
+		if err := validateSegmentBreadth(segmentType, value); err != nil {
+			return err
 		}
 	case "ip_range":
 		if _, _, err := network.ParseIPRange(value); err != nil {
@@ -332,6 +370,9 @@ func (s *NetworkSegmentService) BulkCreate(tenantID uuid.UUID, inputs []models.N
 
 // Update updates a network segment.
 func (s *NetworkSegmentService) Update(tenantID, id uuid.UUID, input models.NetworkSegmentInput) (*models.NetworkSegment, error) {
+	if err := validateSegmentBreadth(input.SegmentType, input.Value); err != nil {
+		return nil, err
+	}
 	seg, err := s.GetByID(tenantID, id)
 	if err != nil {
 		return nil, err
@@ -883,6 +924,13 @@ func (s *NetworkSegmentService) MigrateFromNetworkSpaces(tenantID uuid.UUID) (in
 			networkType := sp.NetworkType
 			if networkType == "" {
 				networkType = "private"
+			}
+			// Held to the rule every segment write is ( W5.13): a legacy
+			// network space too broad to be anybody's is not migrated into a
+			// segment, which would claim ownership of it.
+			if err := validateSegmentBreadth(segmentType, sp.Value); err != nil {
+				log.Printf("[NetworkSegmentService] MigrateFromNetworkSpaces: tenant %s: not migrating %q: %v", tenantID, sp.Value, err)
+				continue
 			}
 			result, e := tx.Exec(`
 			INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, location_id, description, is_active, auto_approve_discoveries, tags, metadata, created_at, updated_at)

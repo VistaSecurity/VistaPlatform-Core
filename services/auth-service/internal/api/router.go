@@ -556,18 +556,19 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			adminImpersonation.GET("/impersonations/audit", ListImpersonationAudit)
 		}
 
-		// Tenant security endpoints - For tenant health service (platform admin only)
-		tenantSecurity := authServiceGroup.Group("/tenant/:tenantId")
+		// Cross-tenant security/configuration endpoints live on the declared
+		// admin plane. Keeping them below /tenant/:tenantId made host-based plane
+		// separation impossible without also hiding tenant-facing role/user APIs.
+		tenantSecurity := authServiceGroup.Group("/admin/tenants/:tenantId")
 		// Platform-admin only, so the same shared-domain cookie hazard applies —
 		// see PlatformCookiesFirst on the /admin group above.
 		tenantSecurity.Use(middleware.RequireAuth(cfg, jwtService, middleware.PlatformCookiesFirst()))
 		tenantSecurity.Use(middleware.RequirePlatformIdentity())
-		tenantSecurity.Use(middleware.RequireAnyRole("platform_admin", "super_admin"))
 		{
-			tenantSecurity.GET("/security-summary", getTenantSecuritySummaryHandler(authService))
+			tenantSecurity.GET("/security-summary", middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSecurity), getTenantSecuritySummaryHandler(authService))
 			// UI config endpoints for platform admins (tenant ID in path)
-			tenantSecurity.GET("/ui-config", GetTenantUIConfigByID(db))
-			tenantSecurity.PUT("/ui-config", UpdateTenantUIConfigByID(db))
+			tenantSecurity.GET("/ui-config", middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), GetTenantUIConfigByID(db))
+			tenantSecurity.PUT("/ui-config", middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), UpdateTenantUIConfigByID(db))
 		}
 
 		// Onboarding workflow routes

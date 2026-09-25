@@ -29,14 +29,32 @@ type lifecycleStore interface {
 
 type revalidationStore interface {
 	CreateRevalidationJob(tenantID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string) (string, error)
-	CreateActiveScanJob(tenantID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string, runFrom services.RunFrom) (services.ActiveScanResult, error)
+	CreateActiveScanJob(tenantID, userID uuid.UUID, assetIDs []uuid.UUID, authHeader string, runFrom services.RunFrom, externalConfirmed bool) (services.ActiveScanResult, error)
+}
+
+// PermissionChecker is the slice of rbac.RBACService the scan handler needs.
+type PermissionChecker interface {
+	CheckPermission(userID, tenantID uuid.UUID, permission string) (bool, error)
 }
 
 type AssetLifecycleHandler struct {
 	lifecycleService    lifecycleStore
 	revalidationService revalidationStore
 	assetService        *services.AssetService
+	// permissions checks the ADDITIONAL permission confirming an external
+	// scan needs (discovery.create, on top of the route's assets.update).
+	// Nil fails closed: the confirmation is refused.
+	permissions PermissionChecker
 }
+
+// SetPermissionChecker wires the check confirming an external scan needs.
+func (h *AssetLifecycleHandler) SetPermissionChecker(p PermissionChecker) { h.permissions = p }
+
+// permissionExternalScan is what confirming an asset outside the registered
+// networks needs besides assets.update: the same permission that starts a
+// discovery scan against any target, because that is what the confirmation
+// turns this into.
+const permissionExternalScan = "discovery.create"
 
 func NewAssetLifecycleHandler(
 	lifecycleService *services.AssetLifecycleService,
@@ -223,6 +241,9 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 		AssetIDs []string `json:"asset_ids" binding:"required"`
 		RunFrom  string   `json:"run_from"`
 		SensorID string   `json:"sensor_id"`
+		// ExternalTargetsConfirmed is the person's answer to "N assets are
+		// outside your registered networks" ( W5.13b).
+		ExternalTargetsConfirmed bool `json:"external_targets_confirmed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
@@ -250,8 +271,42 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 		runFrom.SensorID = id
 	}
 
+	if req.ExternalTargetsConfirmed {
+		allowed := false
+		if h.permissions != nil {
+			ok, err := h.permissions.CheckPermission(userUUID, tenantUUID, permissionExternalScan)
+			if err != nil {
+				log.Printf("[ERROR] ScanAssets - permission check %s failed: %v", permissionExternalScan, err)
+			}
+			allowed = err == nil && ok
+		}
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":               "insufficient_permissions",
+				"details":             "Scanning assets outside your registered networks also needs the " + permissionExternalScan + " permission",
+				"required_permission": permissionExternalScan,
+			})
+			return
+		}
+	}
+
 	authHeader := s2sAuthHeader(c)
-	result, err := h.revalidationService.CreateActiveScanJob(tenantUUID, userUUID, assetIDs, authHeader, runFrom)
+	result, err := h.revalidationService.CreateActiveScanJob(tenantUUID, userUUID, assetIDs, authHeader, runFrom, req.ExternalTargetsConfirmed)
+	var needs *services.ExternalConfirmationError
+	if errors.As(err, &needs) {
+		// Nothing was stamped or dispatched for these assets. Ask.
+		body := activeScanResponse(needs.Partial)
+		targets := make([]gin.H, 0, len(needs.Targets))
+		for _, t := range needs.Targets {
+			targets = append(targets, gin.H{"target": t.Target, "addresses": t.Addresses, "asset_id": t.AssetID.String(), "asset_name": t.AssetName})
+		}
+		body["error"] = "external_targets_unconfirmed"
+		body["details"] = needs.Error()
+		body["external_targets"] = targets
+		delete(body, "message")
+		c.JSON(http.StatusUnprocessableEntity, body)
+		return
+	}
 	if err != nil {
 		// The executor refusals are the caller's to act on — pick another
 		// sensor, wait for it, or run from the platform — so they keep their

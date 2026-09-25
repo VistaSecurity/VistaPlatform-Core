@@ -44,6 +44,14 @@ one and **Import** brings a batch in from a spreadsheet. Each segment carries an
 optional description, business unit, owner email, tags, and an **auto-approve**
 switch.
 
+A CIDR segment must be a range you could plausibly own: IPv4 **/8 or narrower**,
+IPv6 **/16 or narrower** (ranges wholly inside private space, such as `fd00::/8`,
+are exempt). Saving or importing anything wider — `0.0.0.0/0` above all — is
+refused with a message saying so (a NetBox import or a cloud integration reports
+and skips such a range, and migrating legacy network spaces skips it), because a registered segment tells your sensors
+the range is yours to probe (see
+[Certificates of third-party TLS connections](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections)).
+
 Same permission rule as Locations: anyone with settings access can look; changing
 anything needs **update settings**.
 

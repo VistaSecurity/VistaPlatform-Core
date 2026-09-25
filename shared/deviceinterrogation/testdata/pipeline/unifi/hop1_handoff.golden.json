@@ -1,0 +1,288 @@
+{
+  "vendor": "unifi",
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "unifi-gw.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "wireless_controller",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "unifi-gw.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        }
+      ]
+    },
+    {
+      "label": "asset[fqdn=core-sw-1.corp.example.test,mac_address=00:1b:17:00:00:01]",
+      "hostname": "core-sw-1.corp.example.test",
+      "primary_address": null,
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "core-sw-1.corp.example.test",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:00:00:01",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=linux-2,ip_address=192.0.2.68,mac_address=4c:6e:0a:87:d4:80]",
+      "hostname": "linux-2",
+      "primary_address": "192.0.2.68",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "linux-2",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.68",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "4c:6e:0a:87:d4:80",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
+      "hostname": "",
+      "primary_address": "192.0.2.11",
+      "class_key": "switch",
+      "identifiers": [
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.11",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "78:8a:20:4b:ee:41",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "serial_number",
+          "value": "788A204BEE41",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
+      "hostname": "",
+      "primary_address": "192.0.2.12",
+      "class_key": "access_point",
+      "identifiers": [
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.12",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "78:8a:20:4b:ee:52",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "serial_number",
+          "value": "788A204BEE52",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ],
+  "sensor_discoveries": [
+    {
+      "protocol": "IPSec",
+      "dest_ip": "192.0.2.1",
+      "port": 500,
+      "confidence": 0.95,
+      "hostname": "branch-office-s2s",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "aes256-sha256",
+        "config_name": "branch-office-s2s",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "SHA256",
+        "ike_version": "IKEv2",
+        "kex_algorithms": [
+          "DH-MODP-2048"
+        ],
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "key_size": 2048,
+        "profile_name": "customized",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": "IKEv2",
+        "vpn_peer_address": "203.0.113.50"
+      }
+    },
+    {
+      "protocol": "TLS",
+      "dest_ip": "192.0.2.11",
+      "port": 8443,
+      "confidence": 0.95,
+      "hostname": null,
+      "source_ip": null,
+      "metadata": {
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "mac_address": "78:8a:20:4b:ee:41",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    },
+    {
+      "protocol": "TLS",
+      "dest_ip": "192.0.2.12",
+      "port": 8443,
+      "confidence": 0.95,
+      "hostname": null,
+      "source_ip": null,
+      "metadata": {
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "mac_address": "78:8a:20:4b:ee:52",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    },
+    {
+      "protocol": "TLS",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": "{{APPLIANCE_PORT}}",
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "appliance",
+        "cert_has_sct": false,
+        "cert_validation_status": "self_signed",
+        "certificates": [
+          {
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIBzjCCAYCgAwIBAgIEATNP4jAFBgMrZXAwRDEhMB8GA1UEChMYRXhhbXBsZSBB\ncHBsaWFuY2UgVmVuZG9yMR8wHQYDVQQDExZhcHBsaWFuY2UuZXhhbXBsZS50ZXN0\nMB4XDTI2MDEwMTAwMDAwMFoXDTQ2MDEwMTAwMDAwMFowRDEhMB8GA1UEChMYRXhh\nbXBsZSBBcHBsaWFuY2UgVmVuZG9yMR8wHQYDVQQDExZhcHBsaWFuY2UuZXhhbXBs\nZS50ZXN0MCowBQYDK2VwAyEA8NDzPIytdANW+HgkZdY52cqO1ytDrP30/Pj+6Jfd\nlmujgZMwgZAwDgYDVR0PAQH/BAQDAgKEMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA8G\nA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFB1coCtpgsOxX5pHB3zfnPSFK1OCMDkG\nA1UdEQQyMDCCFmFwcGxpYW5jZS5leGFtcGxlLnRlc3SHBH8AAAGHEAAAAAAAAAAA\nAAAAAAAAAAEwBQYDK2VwA0EAw0uDVvPb86VTHNW3EvHP/kroX4XnQFKxLm9qyCcG\nQ1J7hZsi/mc7uAcwMVUMhggQeQJEr7DkyHmVNMumo3lHCg==\n-----END CERTIFICATE-----\n",
+            "chain_order": 0,
+            "fingerprint_sha1": "b1d3957c1e344a6c0cba1bc5192effca4ad8a5a9",
+            "fingerprint_sha256": "eeffc51722210faeecd5f43d990813b686fe105c7c9e9962010344fa4504ef96",
+            "is_ca": true,
+            "issuer_dn": "CN=appliance.example.test,O=Example Appliance Vendor",
+            "key_algorithm": "Ed25519",
+            "key_size": 256,
+            "not_after": "2046-01-01T00:00:00Z",
+            "not_before": "2026-01-01T00:00:00Z",
+            "serial_number": "20140002",
+            "signature_alg": "Ed25519",
+            "subject_alternative_names": [
+              "appliance.example.test",
+              "{{APPLIANCE_IP}}",
+              "::1"
+            ],
+            "subject_dn": "CN=appliance.example.test,O=Example Appliance Vendor"
+          }
+        ],
+        "cipher_suite": "TLS_AES_128_GCM_SHA256",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "key_exchange_algorithm": "X25519MLKEM768",
+        "key_size": 256,
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "tls_pqc_hybrid_kex_group": "X25519MLKEM768",
+        "tls_supports_classical_kex": true,
+        "tls_supports_pqc_hybrid_kex": true,
+        "tls_versions": [
+          "TLS 1.3",
+          "TLS 1.2"
+        ],
+        "version": "TLS 1.3"
+      }
+    },
+    {
+      "protocol": "WireGuard",
+      "dest_ip": "192.0.2.1",
+      "port": 51820,
+      "confidence": 0.95,
+      "hostname": "remote-access",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "ChaCha20-Poly1305",
+        "config_name": "remote-access",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "BLAKE2s",
+        "key_exchange_algorithm": "Curve25519",
+        "key_size": 256,
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    }
+  ],
+  "learned_segments": [
+    {
+      "value": "192.0.2.0/24",
+      "segment_type": "cidr",
+      "network_type": "public",
+      "metadata": {
+        "dhcp": "enabled",
+        "dynamic": true,
+        "source": "interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_type": "unifi"
+      }
+    },
+    {
+      "value": "198.51.100.0/24",
+      "segment_type": "cidr",
+      "network_type": "public",
+      "metadata": {
+        "dhcp": "disabled",
+        "dynamic": false,
+        "source": "interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_type": "unifi"
+      }
+    }
+  ]
+}

@@ -1,0 +1,289 @@
+{
+  "vendor": "cisco",
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "core-rtr-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "core-rtr-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "REDACTEDSN5",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=ce-router,ip_address=198.51.100.2]",
+      "hostname": "ce-router",
+      "primary_address": "198.51.100.2",
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "ce-router",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.2",
+          "scope": "tenant",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
+      "hostname": "hpswitch",
+      "primary_address": "192.0.2.2",
+      "class_key": "switch",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "desktop-switch",
+          "scope": "segment:192.0.2.0/25",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "hostname",
+          "value": "hpswitch",
+          "scope": "segment:192.0.2.0/25",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.2",
+          "scope": "segment:192.0.2.0/25",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "94:f1:28:79:55:55",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=server,ip_address=203.0.113.2]",
+      "hostname": "server",
+      "primary_address": "203.0.113.2",
+      "class_key": "unknown_host",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "server",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "203.0.113.2",
+          "scope": "tenant",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=vios-l2-1]",
+      "hostname": "vios-l2-1",
+      "primary_address": null,
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "hostname",
+          "value": "vios-l2-1",
+          "scope": "tenant",
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[ip_address=198.51.100.5,mac_address=44:48:c1:c4:dd:dd]",
+      "hostname": "",
+      "primary_address": "198.51.100.5",
+      "class_key": "access_point",
+      "identifiers": [
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.5",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "44:48:c1:c4:dd:dd",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[mac_address=7c:25:86:c9:aa:aa]",
+      "hostname": "",
+      "primary_address": null,
+      "class_key": "network_device",
+      "identifiers": [
+        {
+          "kind": "mac_address",
+          "value": "7c:25:86:c9:aa:aa",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ],
+  "sensor_discoveries": [
+    {
+      "protocol": "IKE",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": 500,
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": "IKEv1"
+      }
+    },
+    {
+      "protocol": "IKEv2",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": 500,
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "AES-256-CBC",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "SHA256",
+        "kex_algorithms": [
+          "DH-MODP-2048"
+        ],
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "key_size": 2048,
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": "IKEv2",
+        "vpn_peer_address": "203.0.113.60"
+      }
+    },
+    {
+      "protocol": "IPSec",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": 4500,
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "AES-256-CBC",
+        "config_name": "Tunnel1-head-0",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "SHA1",
+        "key_size": 256,
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": "",
+        "vpn_peer_address": "198.51.100.2"
+      }
+    },
+    {
+      "protocol": "IPSec",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": 4500,
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "AES-256-CBC",
+        "config_name": "Tunnel2-head-0",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "SHA1",
+        "key_size": 256,
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": "",
+        "vpn_peer_address": "203.0.113.2"
+      }
+    },
+    {
+      "protocol": "IPSec",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": 500,
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "vpn_gateway",
+        "cipher_suite": "AES-256-CBC",
+        "config_name": "VPN-MAP",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "hash_algorithm": "SHA256",
+        "kex_algorithms": [
+          "DH-MODP-2048"
+        ],
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "supported_ciphers": [
+          "AES-256-CBC"
+        ],
+        "version": "",
+        "vpn_peer_address": "203.0.113.50"
+      }
+    },
+    {
+      "protocol": "SSH",
+      "dest_ip": "{{APPLIANCE_IP}}",
+      "port": "{{APPLIANCE_PORT}}",
+      "confidence": 0.95,
+      "hostname": "{{APPLIANCE_IP}}",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "appliance",
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "ssh_banner": "SSH-1.99-Cisco-1.25",
+        "ssh_host_key_fingerprint": "SHA256:REJ0Ms48peH3+nubWg8Sf12BGOVw2gyg3Xqor46O8eI",
+        "ssh_host_key_type": "ssh-ed25519",
+        "version": "SSH-1.99"
+      }
+    }
+  ],
+  "learned_segments": []
+}

@@ -161,7 +161,10 @@ func (h *Handler) UpdateSensorConfig(c *gin.Context) {
 		sensor.Description = req.Description
 	}
 	if req.Tags != nil {
-		sensor.Tags = req.Tags
+		// A tenant may retag its sensor, but not add or remove a platform
+		// marker (models.ReservedPlatformTags) — that is how a tenant sensor
+		// used to pass as the platform's own.
+		sensor.Tags = models.ReplaceTenantTags(sensor.Tags, req.Tags)
 	}
 
 	sensor.UpdatedAt = time.Now()

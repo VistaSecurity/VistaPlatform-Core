@@ -26,6 +26,11 @@ type JobQueueService struct {
 	bypassDB   *sql.DB
 	redis      *redis.Client
 	natsClient *events.NATSClient
+	// afterClaimSelect is a test-only seam: when set, claimAuthorizedJob calls it
+	// with the job id after the in-transaction re-select has returned the row and
+	// before the claim UPDATE, so a test can park two claimers at exactly the
+	// point where a missing row lock lets both succeed. Always nil in production.
+	afterClaimSelect func(ctx context.Context, jobID uuid.UUID)
 }
 
 // NewJobQueueService creates a new job queue service. db is the RLS-scoped

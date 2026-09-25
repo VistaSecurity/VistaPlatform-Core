@@ -226,8 +226,8 @@ func TestDiscoveryRoutes_OriginIsServerDerived(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec(`set_tenant_context`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`FROM tenants t`).
-		WillReturnRows(sqlmock.NewRows([]string{"is_trial", "trial_days_full", "trial_days_soft", "trial_start", "trial_end", "converted_to_paid"}).
-			AddRow(false, nil, nil, nil, nil, nil))
+		WillReturnRows(sqlmock.NewRows([]string{"is_trial", "trial_days_full", "trial_days_soft", "trial_start", "trial_end", "converted_to_paid", "hard_locked_at"}).
+			AddRow(false, nil, nil, nil, nil, nil, nil))
 	mock.ExpectCommit()
 
 	// RateLimiter.CheckRateLimit — one tenant-scoped tx for the limit row, one

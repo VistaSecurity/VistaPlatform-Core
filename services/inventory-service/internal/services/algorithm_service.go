@@ -780,7 +780,7 @@ func (s *AlgorithmService) ClassifyAlgorithm(algorithmString string, category st
 		}
 	}
 
-	matches := cat.substringMatches(normalized, category)
+	matches := withoutUnnamedHybrids(cat.substringMatches(normalized, category), normalized)
 	if len(matches) == 1 {
 		return matches[0], nil
 	}
@@ -797,6 +797,53 @@ func (s *AlgorithmService) ClassifyAlgorithm(algorithmString string, category st
 	log.Printf("[AlgorithmService] %q is not in the algorithm catalogue (category %q) — leaving it unassessed",
 		algorithmString, category)
 	return nil, nil
+}
+
+// Hybrid key-exchange rows (a classical group combined with a post-quantum
+// KEM) must never be reached by a PARTIAL name that states only one half.
+//
+// The substring fallback accepts a single match, and a hybrid's code contains
+// both halves' names: once SecP384r1MLKEM1024 was the only key-exchange code
+// containing "secp384r1", a bare classical "secp384r1" resolved to the hybrid
+// row — is_pqc, primitive kem — and a purely classical P-384 exchange read as
+// post-quantum ready. The same held for "MLKEM1024" (a KEM with no classical
+// half named) and, before it, for "secp256r1" against SecP256r1MLKEM768. A
+// partial match can land on a hybrid row only when the input itself names
+// BOTH a post-quantum and a classical component; otherwise the row is not a
+// candidate, and a name nothing else matches stays unassessed.
+var (
+	hybridPQCNameTokens       = []string{"MLKEM", "ML-KEM", "KYBER", "NTRU", "HQC", "FRODO", "MCELIECE"}
+	hybridClassicalNameTokens = []string{"X25519", "X448", "CURVE25519", "CURVE448", "SECP", "NISTP", "P256", "P384", "P521", "P-256", "P-384", "P-521", "ECDH", "ECP"}
+)
+
+func isHybridKeyExchangeRow(a *Algorithm) bool {
+	if h, ok := a.Metadata["hybrid"].(bool); ok && h {
+		return true
+	}
+	code := strings.ToUpper(a.Code)
+	return a.IsPQC && cryptoparse.ContainsAnyToken(code, hybridPQCNameTokens) &&
+		cryptoparse.ContainsAnyToken(code, hybridClassicalNameTokens)
+}
+
+func namesBothHybridHalves(input string) bool {
+	in := strings.ToUpper(input)
+	return cryptoparse.ContainsAnyToken(in, hybridPQCNameTokens) &&
+		cryptoparse.ContainsAnyToken(in, hybridClassicalNameTokens)
+}
+
+// withoutUnnamedHybrids drops hybrid rows from a partial-match candidate list
+// unless the input names both of their halves.
+func withoutUnnamedHybrids(matches []*Algorithm, input string) []*Algorithm {
+	if namesBothHybridHalves(input) {
+		return matches
+	}
+	out := matches[:0:0]
+	for _, m := range matches {
+		if !isHybridKeyExchangeRow(m) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // LinkAlgorithmToImplementation links an algorithm to a crypto implementation

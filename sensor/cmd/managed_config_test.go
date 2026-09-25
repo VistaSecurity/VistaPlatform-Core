@@ -116,13 +116,14 @@ func TestEachSettingWritesItsOwnField(t *testing.T) {
 	s.registerManagedSettings(a)
 
 	a.Apply("rev-1", agentconfig.Values{
-		agentconfig.KeyActiveProbing:         agentconfig.Bool(false),
-		agentconfig.KeyNetworkDiscovery:      agentconfig.Bool(false),
-		agentconfig.KeyHostObservation:       agentconfig.Bool(false),
-		agentconfig.KeyHostObservationDNS:    agentconfig.Bool(true),
-		agentconfig.KeyHostObservationWindow: agentconfig.Int(120),
-		agentconfig.KeyDedupTTLMinutes:       agentconfig.Int(15),
-		agentconfig.KeyReportingInterval:     agentconfig.Int(120),
+		agentconfig.KeyActiveProbing:           agentconfig.Bool(false),
+		agentconfig.KeyThirdPartyTLSEnrichment: agentconfig.Bool(true),
+		agentconfig.KeyNetworkDiscovery:        agentconfig.Bool(false),
+		agentconfig.KeyHostObservation:         agentconfig.Bool(false),
+		agentconfig.KeyHostObservationDNS:      agentconfig.Bool(true),
+		agentconfig.KeyHostObservationWindow:   agentconfig.Int(120),
+		agentconfig.KeyDedupTTLMinutes:         agentconfig.Int(15),
+		agentconfig.KeyReportingInterval:       agentconfig.Int(120),
 	})
 
 	c := s.config.Capture
@@ -132,6 +133,7 @@ func TestEachSettingWritesItsOwnField(t *testing.T) {
 		want any
 	}{
 		{"active_probing", c.ActiveProbing, false},
+		{"third_party_tls_enrichment", c.ThirdPartyTLSEnrichment, true},
 		{"network_discovery", c.NetworkDiscovery, false},
 		{"host_observation", c.HostObservation, false},
 		{"host_observation_dns", c.HostObservationDNS, true},

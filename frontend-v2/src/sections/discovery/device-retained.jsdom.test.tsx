@@ -3,7 +3,12 @@ import { act, type ReactNode, type InputHTMLAttributes, type SelectHTMLAttribute
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { DeviceFormModal, DiscoverDeviceModal } from './device-modals';
+import { DeviceFormModal } from './device-modals';
+
+// Retained identity evidence: when the backend keeps the management settings
+// with an observation (202) instead of creating the device, both ways of
+// adding a device — the probe and the by-hand fallback — take the operator to
+// that observation.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({ post: vi.fn(), navigate: vi.fn(), close: vi.fn(), toastSuccess: vi.fn() }));
@@ -29,43 +34,25 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); cache.clear(); host.remove(); });
 
-async function input(placeholder: string, value: string) {
-  const field = [...host.querySelectorAll('input')].find((node) => node.placeholder === placeholder)!;
+async function input(name: string, value: string) {
+  const field = host.querySelector(`[name="${name}"]`) as HTMLInputElement;
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, value);
     field.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
 
-it.each(['manual', 'probe'])('opens retained evidence after %s device creation', async (mode) => {
-  await act(async () => { root.render(<QueryClientProvider client={cache}>{mode === 'manual' ? <DeviceFormModal open onClose={mocks.close} /> : <DiscoverDeviceModal open onClose={mocks.close} />}</QueryClientProvider>); });
-  await input('https://10.0.0.1', 'https://device.example.test');
-  if (mode === 'probe') { await input('admin', 'configured-user'); await input('••••••••', 'configured-password'); }
-  await act(async () => { host.querySelector('button')!.click(); });
+it.each(['by hand', 'probe'])('opens retained evidence after %s device creation', async (mode) => {
+  await act(async () => { root.render(<QueryClientProvider client={cache}><DeviceFormModal open onClose={mocks.close} /></QueryClientProvider>); });
+  if (mode === 'by hand') {
+    await act(async () => { (host.querySelector('[data-testid="device-form-mode-toggle"]') as HTMLButtonElement).click(); });
+  }
+  await input('management_url', 'https://device.example.test');
+  await input('username', 'configured-user');
+  await input('password', 'configured-password');
+  await act(async () => { (host.querySelector('[data-testid="device-form-primary"]') as HTMLButtonElement).click(); });
   await vi.waitFor(() => { expect(mocks.navigate).toHaveBeenCalledWith('/discovery/observations?observation_id=retained-1'); });
   expect(mocks.close).toHaveBeenCalledOnce();
   expect(mocks.toastSuccess).toHaveBeenCalledWith('Management settings were saved.');
-  expect(mocks.post.mock.calls[0][0]).toBe(mode === 'manual' ? '/devices' : '/devices/discover-and-create');
-});
-
-it('sends the explicit TLS override from discover and add', async () => {
-  await act(async () => { root.render(<QueryClientProvider client={cache}><DiscoverDeviceModal open onClose={mocks.close} /></QueryClientProvider>); });
-  await input('https://10.0.0.1', 'https://device.example.test');
-  await input('admin', 'configured-user'); await input('••••••••', 'configured-password');
-  const checkbox = host.querySelector('input[type="checkbox"]') as HTMLInputElement;
-  await act(async () => { checkbox.click(); });
-  await act(async () => { host.querySelector('button')!.click(); });
-  await vi.waitFor(() => expect(mocks.post).toHaveBeenCalled());
-  const [path, init] = mocks.post.mock.calls[0] as [string, { body: { tls_insecure_skip_verify?: boolean } }];
-  expect(path).toBe('/devices/discover-and-create');
-  expect(init.body.tls_insecure_skip_verify).toBe(true);
-});
-
-it('shows the safe backend discovery message', async () => {
-  mocks.post.mockResolvedValueOnce({ error: { error: 'authentication_failed', message: 'The device rejected the credentials.' }, response: { ok: false, status: 422 } });
-  await act(async () => { root.render(<QueryClientProvider client={cache}><DiscoverDeviceModal open onClose={mocks.close} /></QueryClientProvider>); });
-  await input('https://10.0.0.1', 'https://device.example.test');
-  await input('admin', 'configured-user'); await input('••••••••', 'wrong-password');
-  await act(async () => { host.querySelector('button')!.click(); });
-  await vi.waitFor(() => expect(host.textContent).toContain('The device rejected the credentials.'));
+  expect(mocks.post.mock.calls[0][0]).toBe(mode === 'by hand' ? '/devices' : '/devices/discover-and-create');
 });

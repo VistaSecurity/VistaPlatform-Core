@@ -1000,6 +1000,12 @@ func TestIntegration_SubmitJobResult_PersistsObservationsWithoutCryptoAssets(t *
 		t.Fatalf("CreateJob: %v", err)
 	}
 
+	// The agent picked the job up (GetNextJob marks it in_progress); only a
+	// running job this agent claimed accepts a result.
+	if err := jobQueue.UpdateJobStatus(ctx, job.ID, models.JobStatusInProgress, nil, nil); err != nil {
+		t.Fatalf("start job: %v", err)
+	}
+
 	peer := di.PeerRef{DisplayName: "neighbour-sw2"}
 	peer.AddIdentifier(di.IdentifierMACAddress, "aa:bb:cc:dd:ee:07")
 

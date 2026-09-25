@@ -304,16 +304,9 @@ func GetPublicPlatformUIConfigWithStore(store tenantUIConfigStore) gin.HandlerFu
 	}
 }
 
-// GetTenantUIConfigByID handles GET /tenant/:tenantId/ui-config - Get tenant UI config by tenant ID (platform admin)
+// GetTenantUIConfigByID handles GET /admin/tenants/:tenantId/ui-config.
 func GetTenantUIConfigByID(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Check for platform_admin role
-		userRole, exists := c.Get("role")
-		if !exists || userRole != "platform_admin" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions. Platform admin role required."})
-			return
-		}
-
 		// Get tenant ID from URL path
 		tenantIDStr := c.Param("tenantId")
 		if tenantIDStr == "" {
@@ -391,16 +384,9 @@ func GetTenantUIConfigByID(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
-// UpdateTenantUIConfigByID handles PUT /tenant/:tenantId/ui-config - Update tenant UI config by tenant ID (platform admin)
+// UpdateTenantUIConfigByID handles PUT /admin/tenants/:tenantId/ui-config.
 func UpdateTenantUIConfigByID(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Check for platform_admin role
-		userRole, exists := c.Get("role")
-		if !exists || userRole != "platform_admin" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions. Platform admin role required."})
-			return
-		}
-
 		// Get tenant ID from URL path
 		tenantIDStr := c.Param("tenantId")
 		if tenantIDStr == "" {

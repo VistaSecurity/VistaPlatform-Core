@@ -1,0 +1,21 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {
+      "status": "enable",
+      "ssl-min-proto-ver": "tls1-2",
+      "ssl-max-proto-ver": "tls1-3",
+      "algorithm": "high",
+      "servercert": "Fortinet_Factory",
+      "port": 10443,
+      "source-interface": [
+        {
+          "name": "wan1"
+        }
+      ],
+      "reqclientcert": "disable"
+    }
+  ]
+}

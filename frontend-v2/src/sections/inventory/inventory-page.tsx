@@ -33,6 +33,8 @@ import {
   stripInetMask, stripEmptyParens, keyAlgorithmLabel, keyCustodyLabel, keyCustodyDetail,
 } from './lens-helpers';
 import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
+import { certNotCollectedHint, thirdPartyEnrichmentOff } from './cert-not-collected-hint';
+import { useSensorFleetDefaults } from '../discovery/sensor-config-queries';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
 // lens comes from the URL (`?lens=`); the switcher lives in the LEFT SIDEBAR.
@@ -345,6 +347,11 @@ export function InventoryPage() {
   };
 
   const isConn = lens === 'connections';
+  // Whether sensors actively read third parties' certificates ( W5.13):
+  // when they do not, a TLS 1.3 connection's missing certificate is expected,
+  // and the lens says so instead of showing a bare dash.
+  const sensorDefaults = useSensorFleetDefaults(isConn);
+  const enrichmentOff = thirdPartyEnrichmentOff(sensorDefaults.data?.settings);
   const isCert = def.anchor === 'cert';
   const isKey = def.anchor === 'key';
   const isData = def.anchor === 'data';
@@ -533,7 +540,16 @@ export function InventoryPage() {
                     </span>
                   )}
                 </span>
-                <Mono v={certDays == null ? '—' : cn.cert_is_expired ? 'expired' : `${certDays}d`} />
+                {(() => {
+                  const notCollected = certNotCollectedHint(cn, enrichmentOff);
+                  return notCollected ? (
+                    <span title={notCollected} aria-label={notCollected} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--app-t3)', cursor: 'help' }}>
+                      <Mono v="—" /><Icon name="info" size={10} />
+                    </span>
+                  ) : (
+                    <Mono v={certDays == null ? '—' : cn.cert_is_expired ? 'expired' : `${certDays}d`} />
+                  );
+                })()}
                 <Mono v={daysAgo(cn.last_seen_at)} small />
                 <div style={{ justifySelf: 'end' }}>
                   {cn.elevated_asset_id ? (

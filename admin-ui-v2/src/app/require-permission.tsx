@@ -14,10 +14,12 @@ import { usePlatformPermissions } from '@vistasecurity/primitives/platform-auth'
 export function RequirePlatformPermission({
   permission,
   anyOf,
+  allOf,
   children,
 }: {
   permission?: string;
   anyOf?: string[];
+  allOf?: string[];
   children: ReactNode;
 }) {
   const { hasPermission, hasAnyPermission, isLoading } = usePlatformPermissions();
@@ -32,9 +34,11 @@ export function RequirePlatformPermission({
 
   const ok = permission
     ? hasPermission(permission)
-    : anyOf && anyOf.length > 0
-      ? hasAnyPermission(anyOf)
-      : false; // fail closed when no predicate is supplied
+    : allOf && allOf.length > 0
+      ? allOf.every((candidate) => hasPermission(candidate))
+      : anyOf && anyOf.length > 0
+        ? hasAnyPermission(anyOf)
+        : false; // fail closed when no predicate is supplied
 
   if (!ok) return <NoAccess />;
   return <>{children}</>;

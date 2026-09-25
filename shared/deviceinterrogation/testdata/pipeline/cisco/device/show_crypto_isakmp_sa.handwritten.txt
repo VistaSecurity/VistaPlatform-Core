@@ -1,0 +1,6 @@
+IPv4 Crypto ISAKMP SA
+dst             src             state          conn-id status
+203.0.113.50    192.0.2.1       QM_IDLE           1001 ACTIVE
+
+IPv6 Crypto ISAKMP SA
+

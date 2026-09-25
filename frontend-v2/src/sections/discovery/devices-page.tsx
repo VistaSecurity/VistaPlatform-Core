@@ -9,7 +9,7 @@ import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, isCloudSourced
 import { Icon } from '../../components/ui';
 import { useDevices } from './queries';
 import { classLabel } from '../inventory/asset-shape';
-import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal, DiscoverDeviceModal } from './device-modals';
+import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal } from './device-modals';
 
 // Discovery → Devices — now "assets with management configured".
 //
@@ -74,7 +74,6 @@ export function DevicesPage() {
   const [editing, setEditing] = useState<Device | null>(null);
   const [deleting, setDeleting] = useState<Device | null>(null);
   const [testing, setTesting] = useState<Device | null>(null);
-  const [discoverOpen, setDiscoverOpen] = useState(false);
 
   // Interrogate creates a job, so invalidate both the devices and jobs caches.
   // Track the in-flight device ID so only that row's button shows pending.
@@ -128,7 +127,7 @@ export function DevicesPage() {
   const note = queryNote(q, devices.length === 0, {
     thing: 'managed assets',
     emptyTitle: 'Nothing is managed yet',
-    emptyMessage: 'These are the assets you have given the platform credentials for, so it can log in and read their cryptographic configuration. Add one here, or discover and add it in a single step.',
+    emptyMessage: 'These are the assets you have given the platform credentials for, so it can log in and read their cryptographic configuration. Add one with its management address and credentials, and the platform identifies it for you.',
   });
 
   return (
@@ -139,16 +138,17 @@ export function DevicesPage() {
       {/* Gates below name the permission each route enforces
           (device-interrogation-service/internal/api/router.go): POST /devices and
           /devices/discover-and-create are DiscoveryCreate; PUT /devices/:id is
-          DiscoveryUpdate; POST /devices/:id/test-connection is DiscoveryRead;
+          DiscoveryUpdate; POST /devices/:id/test-connection,
           /devices/:id/interrogate, DELETE /devices/:id/ssh-host-key and
-          DELETE /devices/:id are DiscoveryManage. */}
+          DELETE /devices/:id are DiscoveryManage. Test connection logs in with
+          the stored credentials, so it sits with interrogate (#1492). */}
       <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
         <div style={{ display: 'flex', gap: 9, marginBottom: 14 }}>
+          {/* One way to add a device (#1492): four fields, and the platform
+              connects and identifies it. The form falls back to the full field
+              set by itself when it cannot connect. */}
           <button className="ui-btn accent" onClick={() => { setEditing(null); setFormOpen(true); }}>
-            <Icon name="plus" size={13} />Add managed asset
-          </button>
-          <button className="ui-btn" onClick={() => setDiscoverOpen(true)}>
-            <Icon name="radar" size={13} />Discover & add
+            <Icon name="plus" size={13} />Add device
           </button>
         </div>
       </PermissionGate>
@@ -207,7 +207,7 @@ export function DevicesPage() {
                       disabled={interrogatingId === d.id || cloud}
                     />
                   </PermissionGate>
-                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.read}>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
                     <RowBtn
                       icon="plug"
                       title={cloud ? 'Not applicable — discovered via cloud API' : 'Test connection'}
@@ -249,7 +249,6 @@ export function DevicesPage() {
       <DeviceFormModal open={formOpen} device={editing} onClose={() => { setFormOpen(false); setEditing(null); }} />
       <DeviceDeleteModal open={!!deleting} device={deleting} onClose={() => setDeleting(null)} />
       <TestConnectionModal open={!!testing} device={testing} onClose={() => setTesting(null)} />
-      <DiscoverDeviceModal open={discoverOpen} onClose={() => setDiscoverOpen(false)} />
     </PageWrap>
   );
 }

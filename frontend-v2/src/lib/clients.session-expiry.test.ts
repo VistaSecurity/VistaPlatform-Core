@@ -316,6 +316,32 @@ describe('session-expiry middleware (403 tenant_suspended / tenant_deleted)', ()
     expect(onTenantBlocked).toHaveBeenCalledWith('tenant_suspended');
   });
 
+  it.each(['/auth/login', '/admin/auth/login'])(
+    'a refused sign-in at %s does not trip the page session-expiry latch',
+    async (loginPath) => {
+      const onSessionExpired = vi.fn();
+      const handler = createSessionExpiryHandler({
+        hasSession: () => false,
+        refresh: vi.fn(async () => ({})),
+        onSessionExpired,
+      });
+      contract.setSessionExpiredHandler(handler);
+      const client = contract.createAuthServiceClient({
+        baseUrl: 'http://api.test',
+        fetch: coded(403, { code: 'tenant_suspended', error: 'x' }),
+      });
+
+      await fire(client, 'POST', loginPath);
+      expect(onSessionExpired).not.toHaveBeenCalled();
+
+      // The ignored sign-in refusal must not consume the handler's one-shot
+      // latch: a later protected refusal still ends a real session.
+      await fire(client, 'GET', '/auth/me');
+      expect(onSessionExpired).toHaveBeenCalledTimes(1);
+      expect(onSessionExpired).toHaveBeenCalledWith('tenant_suspended');
+    },
+  );
+
   it('a plain permission 403 (no tenant code) is left alone', async () => {
     const onTenantBlocked = vi.fn();
     const onAuthFailure = vi.fn(async () => false);

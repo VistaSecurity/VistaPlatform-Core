@@ -150,8 +150,17 @@ For each component you get:
   plus the independently recorded strength and deprecation status;
 - whether it was **observed in use** or only **offered, not observed** (see the
   SSH section below — offered algorithms still count);
-- and, on the component that set the score, the catalogue's **migration
-  guidance** and **recommended alternatives**.
+- on the component that set the score, the catalogue's **migration
+  guidance** and **recommended alternatives**;
+- on any component whose catalogue row records it, a **How to fix** section:
+  what the weakness exposes, the steps to fix it, the catalogue's suggested
+  timeline, CVE references and further reading. It is open on the component
+  that set the score and collapsed on the others. Offered-only components get
+  it too, because disabling a weak option the server merely accepts is the fix.
+  It is guidance only and does not change the score or its severity;
+- and, on a classical key exchange whose server also accepts a hybrid
+  post-quantum group, a **configuration hint** — see
+  [Supports hybrid, negotiated classical](#supports-hybrid-negotiated-classical).
 
 The component that set the score is marked **sets the score**. Because the panel
 reads the catalogue live, correcting an assessment in the catalogue changes the
@@ -184,6 +193,53 @@ risky that key is *today*, not whether it eventually has to move off classical
 asymmetric cryptography. This applies to certificates and to standalone keys
 (**Inventory → Keys**) alike, and the framework that scores it is
 [Post-Quantum Readiness](./compliance-frameworks.md#post-quantum-readiness).
+
+### Supports hybrid, negotiated classical
+
+When an active TLS probe measures a server, it records the key-exchange group
+the handshake negotiated (for example `X25519`). It also makes one short extra
+handshake that offers **only** hybrid post-quantum groups (`X25519MLKEM768`,
+`SecP256r1MLKEM768`, `SecP384r1MLKEM1024`) to find out whether the server
+accepts them.
+
+Sometimes the answer is yes, even though the main handshake negotiated a
+classical group. The server can do post-quantum key exchange, but either its own
+group preference puts the classical group first or the connecting client did
+not offer a hybrid group. When that happens, the key-exchange card in **Why this
+score** shows a hint:
+
+> This server supports hybrid post-quantum key exchange (X25519MLKEM768), but
+> negotiated X25519. Prefer the hybrid group in the server's configuration, or
+> update the clients that connect to it.
+
+The fix is usually a one-line change to the server's TLS group list, putting the
+hybrid group ahead of the classical one. You do not need a migration project.
+When the probe did not record which hybrid group the server accepted, the hint
+leaves the name out.
+
+**The configuration still needs PQC migration.** The hint does not change the
+configuration's risk score, its severity band or its post-quantum readiness
+category. What the server negotiated is classical, and classical key exchange is
+what a quantum computer breaks. The hint shows you how quickly you can fix it.
+It does not mean the configuration is already safe. After you change the server,
+the next probe records the hybrid group, and the configuration moves to
+PQC-ready by itself.
+
+The hint appears only when a handshake **proved** that the server accepts a
+hybrid group. It does not appear in these cases:
+
+- The server refused the hybrid-only offer.
+- The probe could not ask. For example, the handshake timed out, the server
+  speaks only TLS 1.2 (hybrid groups need TLS 1.3), or the scan turned off
+  extra probes by disabling TLS version enumeration.
+- The configuration already negotiates a hybrid group.
+- The observation came only from passive capture. A passive sensor sees the
+  handshake that happened. It cannot ask the server what else it would accept.
+
+The sensor never makes the extra check against a third-party destination on the
+public internet. It uses only the one handshake it was already making, so
+hybrid support for those destinations stays unknown and the hint does not
+appear.
 
 ### How SSH services are scored
 
@@ -241,8 +297,9 @@ ciphers, weak hashes and undersized keys are all recognised on the way in.
 | SHA-1 | Weak hash | Migrate to SHA-256 or SHA-512 for hashing and signatures |
 | RSA-1024 | Weak key | Re-key at 2048 bits minimum, 3072 or 4096 preferred |
 
-The inspector shows the catalogue's own guidance for whatever it found, which is
-always more specific than this table.
+The catalogue's own guidance for whatever was found is always more specific than
+this table: open the configuration in **Inventory** and expand **How to fix**
+under **Why this score**.
 
 ## API
 
@@ -250,8 +307,8 @@ always more specific than this table.
 |---|---|
 | `GET /api/v1/inventory-service/crypto-risks` | The risk list, filterable by `severity` and `category`, paginated |
 | `GET /api/v1/inventory-service/crypto-risks/summary` | Counts by severity, and how many assets are affected |
-| `GET /api/v1/inventory-service/crypto-implementations/{id}/remediation` | The guidance for one crypto configuration |
-| `GET /api/v1/inventory-service/remediation/algorithm/{code}` | The guidance for one algorithm |
+| `GET /api/v2/inventory-service/crypto-configurations/{id}/components` | Each component of one crypto configuration with its catalogue assessment and, where recorded, its `remediation_guidance` |
+| `GET /api/v1/inventory-service/algorithms/{code}` | One catalogue row, including its `remediation_guidance` |
 
 ## Related
 

@@ -1,0 +1,35 @@
+{
+  "routes": [
+    {
+      "path_suffix": "/api/v2/cmdb/system/status",
+      "body_file": "system_status.json"
+    },
+    {
+      "path_suffix": "/api/v2/cmdb/system/interface",
+      "body_file": "system_interface.json"
+    },
+    {
+      "path_suffix": "/api/v2/monitor/system/interface",
+      "body_file": "monitor_system_interface.json"
+    },
+    {
+      "path_suffix": "/api/v2/monitor/router/ipv4",
+      "body_file": "monitor_router_ipv4.json"
+    },
+    {
+      "path_suffix": "/api/v2/cmdb/vpn.ssl/settings",
+      "body_file": "vpn_ssl_settings.json"
+    },
+    {
+      "path_suffix": "/api/v2/cmdb/vpn.ipsec/phase1-interface",
+      "body_file": "vpn_ipsec_phase1_interface.json"
+    },
+    {
+      "path_suffix": "/api/v2/cmdb/certificate/local",
+      "body_file": "certificate_local.json"
+    }
+  ],
+  "default": {
+    "body": "{\"http_method\": \"GET\", \"status\": \"success\", \"vdom\": \"root\", \"results\": []}"
+  }
+}

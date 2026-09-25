@@ -14,7 +14,6 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
-	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 
 	"github.com/google/uuid"
@@ -151,11 +150,26 @@ type DiscoveryService struct {
 	// by job id with no tenant threaded. Under crypto_app these queries FAIL
 	// CLOSED; on the bypass handle they run cross-tenant as intended.
 	bypassDB *sqlx.DB
+	// resolver turns a hostname target into the addresses that are
+	// authorized and then PINNED on the job ( W5.13b). The job processor
+	// uses the same resolver for a hostname that was not pinned (a job created
+	// before pinning existed), so one seam covers both lookups.
+	resolver dispatchguard.Resolver
 }
 
 func NewDiscoveryService(db, bypassDB *sqlx.DB) *DiscoveryService {
-	return &DiscoveryService{db: db, bypassDB: bypassDB}
+	return &DiscoveryService{db: db, bypassDB: bypassDB, resolver: net.DefaultResolver}
 }
+
+// WithResolver swaps the DNS resolver — for tests that stage a rebinding.
+func (s *DiscoveryService) WithResolver(r dispatchguard.Resolver) *DiscoveryService {
+	s.resolver = r
+	return s
+}
+
+// resolveTimeout bounds the DNS lookups a job creation makes before its
+// transaction opens.
+const resolveTimeout = 10 * time.Second
 
 // Tenant-sensor dispatch rules (which sensor a `sensors` job may be handed to,
 // and why a request is refused) live in sensor_dispatch.go.
@@ -217,13 +231,35 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 		return nil, fmt.Errorf("too many targets; limit is 1000 per job")
 	}
 
-	// Resolve hostname targets to the addresses they name, so target
-	// authorization inside the transaction below has addresses to judge. A
-	// name that cannot be resolved is refused rather than accepted unchecked —
-	// an unauthorizable target is not an authorized one.
-	authTargets, err := targetsForAuthorization(req.Targets)
+	// Normalise every target (a URL becomes its host, an explicit port joins
+	// the job's ports) and resolve each hostname ONCE, outside the
+	// transaction below — a DNS lookup must not be held inside one. The
+	// addresses a name resolved to are what authorization judges AND what the
+	// scanner is pinned to (metadata.pinned_addresses), so a second DNS answer
+	// cannot redirect a checked scan. A name that cannot be resolved is refused
+	// rather than accepted unchecked — an unauthorizable target is not an
+	// authorized one.
+	parsedTargets, err := dispatchguard.ParseManualTargets(req.Targets)
 	if err != nil {
 		return nil, err
+	}
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), resolveTimeout)
+	resolvedTargets, err := dispatchguard.ResolveManualTargets(resolveCtx, s.resolver, parsedTargets)
+	cancelResolve()
+	if err != nil {
+		return nil, err
+	}
+	req.Targets, req.Ports = normalisedScanShape(resolvedTargets, req.Ports)
+	pinned := pinnedAddresses(resolvedTargets)
+
+	// Explicit external targets are a PERSON's to confirm. The automatic
+	// sweep, identity enrichment and service callers (no user behind them)
+	// never scan outside the registered networks, whatever flag they send.
+	personInitiated := createdByOrNull(userID) != nil && requestID == "" && !dispatchguard.IsAutomaticScan(req.Options)
+	manualOpts := dispatchguard.ManualOptions{
+		Policy:          dispatchguard.ExternalPolicyFromEnv(),
+		Confirmed:       req.ExternalTargetsConfirmed,
+		PersonInitiated: personInitiated,
 	}
 
 	// OT active probes are an independent per-target cross-product:
@@ -301,9 +337,10 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 	if req.Options != nil {
 		metadata["options"] = req.Options
 	}
-	metadataJSON, err := json.Marshal(metadata)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+	// Server-written, beside `options` rather than inside it: `options` is
+	// caller-supplied, and the addresses a scan is pinned to must never be.
+	if len(pinned) > 0 {
+		metadata["pinned_addresses"] = pinned
 	}
 
 	// RLS-scoped writes: discovery_jobs and discovery_targets both carry a
@@ -363,8 +400,48 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 		// It runs inside the job-creation transaction so a segment withdrawn a
 		// moment ago wins the race, and it is repeated at dispatch time in
 		// job_processor.processTarget against the EXPANDED addresses.
-		if err := dispatchguard.AuthorizeTargets(tx, tenantID, authTargets); err != nil {
+		//
+		// Since W5.13b a person may also name targets OUTSIDE the
+		// registered networks, confirmed in this request; reserved and
+		// platform-excluded ranges stay refused whatever is confirmed.
+		external, err := dispatchguard.AuthorizeManualTargets(tx, tenantID, resolvedTargets, manualOpts)
+		if err != nil {
 			return err
+		}
+		// A tenant sensor is handed the TARGETS, not the addresses they were
+		// authorized on: it would resolve a name again on its own network
+		// (defeating the pin) and it scans without the platform's per-address
+		// re-check or a fresh read of the operator switch. Until the sensor
+		// payload carries pinned addresses, confirmed external targets run
+		// from the platform sensor only ( W5.13b review, item 2).
+		if len(external) > 0 && isSensorExecutionMode(req.ExecutionMode) {
+			refused := make([]dispatchguard.RefusedTarget, 0, len(external))
+			for _, e := range external {
+				refused = append(refused, dispatchguard.RefusedTarget{Target: e.Target,
+					Reason: "targets outside your registered networks can only be scanned from the platform sensor, not a tenant sensor; run this scan from the platform"})
+			}
+			return &dispatchguard.RefusedTargetsError{Targets: refused}
+		}
+		if len(external) > 0 {
+			// The job's record of the consent. The processor reads
+			// `confirmed` at scan time; the rest is provenance.
+			metadata["external_targets"] = map[string]interface{}{
+				"confirmed":    true,
+				"confirmed_by": userID,
+				"confirmed_at": time.Now().UTC().Format(time.RFC3339),
+				"targets":      external,
+				// Re-checked against the operator's CURRENT job bound at
+				// scan time (review N2).
+				"total_addresses": dispatchguard.ExternalAddressTotal(external),
+			}
+			job.ExternalTargets = make([]models.ExternalScanTarget, 0, len(external))
+			for _, e := range external {
+				job.ExternalTargets = append(job.ExternalTargets, models.ExternalScanTarget{Target: e.Target, Addresses: e.Addresses})
+			}
+		}
+		metadataJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal metadata: %w", err)
 		}
 		if dispatchguard.IsAutomaticScan(req.Options) {
 			if len(req.OTProbeProtocols) > 0 {
@@ -872,32 +949,36 @@ func (s *DiscoveryService) withTenantTxx(ctx context.Context, tenantID uuid.UUID
 	return tx.Commit()
 }
 
-// targetsForAuthorization reduces a job's requested targets to literal address
-// forms (address, CIDR, a-b range) that dispatchguard.TargetScope can judge.
-//
-// Hostnames are resolved HERE, outside the transaction, because a DNS lookup
-// must not be held inside one — and because the guard deliberately refuses to
-// guess what a name means. The addresses a name resolves to are re-checked at
-// dispatch time after expansion, so a rebind between creation and scan is
-// caught there rather than trusted here.
-func targetsForAuthorization(targets []string) ([]string, error) {
-	out := make([]string, 0, len(targets))
-	for _, raw := range targets {
-		target := strings.TrimSpace(raw)
-		if target == "" {
-			return nil, fmt.Errorf("empty scan target")
-		}
-		if strings.Contains(target, "/") || net.ParseIP(target) != nil || shareddisc.IsNetworkRange(target) {
-			out = append(out, target)
-			continue
-		}
-		ips, err := net.LookupIP(target)
-		if err != nil || len(ips) == 0 {
-			return nil, fmt.Errorf("scan target %q could not be resolved for authorization", target)
-		}
-		for _, ip := range ips {
-			out = append(out, ip.String())
+// normalisedScanShape is what the job stores once its targets are parsed: each
+// target's literal or hostname (a URL reduced to its host), and the requested
+// ports plus any port a URL or host:port named explicitly — a person who typed
+// https://host:8443/ expects 8443 scanned.
+func normalisedScanShape(targets []dispatchguard.ResolvedTarget, ports []int) ([]string, []int) {
+	inputs := make([]string, 0, len(targets))
+	seen := make(map[int]bool, len(ports))
+	outPorts := append([]int{}, ports...)
+	for _, p := range ports {
+		seen[p] = true
+	}
+	for _, t := range targets {
+		inputs = append(inputs, t.Input)
+		if t.Port > 0 && !seen[t.Port] {
+			seen[t.Port] = true
+			outPorts = append(outPorts, t.Port)
 		}
 	}
-	return out, nil
+	return inputs, outPorts
+}
+
+// pinnedAddresses maps each hostname target to the addresses it resolved to
+// when it was authorized — the only addresses the scanner may connect to for
+// it. Literal targets need no pin: an address cannot rebind.
+func pinnedAddresses(targets []dispatchguard.ResolvedTarget) map[string][]string {
+	out := map[string][]string{}
+	for _, t := range targets {
+		if addrs := t.ScanAddresses(); len(addrs) > 0 {
+			out[t.Input] = addrs
+		}
+	}
+	return out
 }

@@ -74,3 +74,20 @@ it('leaves a `common` provider with no allowed domains alone', async () => {
   expect(alertText()).toBe('');
   expect(saveButton().disabled).toBe(false);
 });
+
+it('blocks an invalid allowed domain and explains the punycode fix', async () => {
+  await render(provider(pinned('authorize'), pinned('token'), ['bücher.example']));
+  expect(saveButton().disabled).toBe(true);
+  expect(alertText()).toContain('bücher.example');
+  expect(alertText()).toContain('punycode (xn--)');
+  expect(api.PUT).not.toHaveBeenCalled();
+});
+
+it('sends the canonical de-duplicated domain list', async () => {
+  await render(provider(pinned('authorize'), pinned('token'), [' Example.COM ', 'example.com', 'xn--bcher-kva.example']));
+  expect(saveButton().disabled).toBe(false);
+  await act(async () => saveButton().click());
+  expect(api.PUT).toHaveBeenCalledWith('/tenant/sso/providers/{id}', expect.objectContaining({
+    body: expect.objectContaining({ allowed_domains: ['example.com', 'xn--bcher-kva.example'] }),
+  }));
+});

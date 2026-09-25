@@ -26,6 +26,14 @@ storage:
 capture:
   interfaces: ["eth0"]
   activeProbing: true
+  # thirdPartyTLSEnrichment: let the TLS enricher connect to THIRD-PARTY TLS
+  # services this network talks to, to read their certificates. Default false.
+  # Local value: applies only until the platform delivers its own setting,
+  # which then wins (recorded in <dataPath>/platform-probe-consent.json).
+  # thirdPartyTLSEnrichment: false
+  # ownedNetworks: public CIDRs to treat as yours (air-gapped equivalent of
+  # registered network segments; IPv4 /8 or narrower, IPv6 /16 or narrower).
+  # ownedNetworks: ["203.0.113.0/24"]
   networkDiscovery: true
   maxConnections: 1000
   timeoutSeconds: 30

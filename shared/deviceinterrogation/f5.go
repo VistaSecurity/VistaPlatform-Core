@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 )
 
 // F5Interrogator interrogates F5 BIG-IP appliances over the iControl REST API
@@ -119,6 +120,7 @@ type f5SSLProfile struct {
 	Name                string
 	Kind                string
 	Ciphers             string
+	CipherGroup         string
 	CipherList          []string
 	CertKeyChain        []map[string]interface{}
 	DefaultProfile      string
@@ -130,6 +132,7 @@ func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) 
 	result := &InterrogateResult{
 		Assets:     []CryptoAsset{},
 		DeviceInfo: make(map[string]interface{}),
+		collector:  f5Collector,
 	}
 
 	if err := c.authenticate(ctx); err != nil {
@@ -137,7 +140,7 @@ func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) 
 	}
 
 	if sysInfo, err := c.getSystemInfo(ctx); err != nil {
-		fmt.Printf("Warning: failed to get system info: %v\n", err)
+		result.warn("/mgmt/tm/sys/version", err, "Software version not collected")
 	} else {
 		result.DeviceInfo = sysInfo
 	}
@@ -154,11 +157,11 @@ func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) 
 
 	clientSSLProfiles, err := c.getClientSSLProfiles(ctx)
 	if err != nil {
-		fmt.Printf("Warning: failed to get client SSL profiles: %v\n", err)
+		result.warn("/mgmt/tm/ltm/profile/client-ssl", err, "Client SSL profiles not collected; virtual servers lack their TLS settings")
 	}
 	serverSSLProfiles, err := c.getServerSSLProfiles(ctx)
 	if err != nil {
-		fmt.Printf("Warning: failed to get server SSL profiles: %v\n", err)
+		result.warn("/mgmt/tm/ltm/profile/server-ssl", err, "Server SSL profiles not collected")
 	}
 
 	// Build a profile lookup keyed by profile name.
@@ -335,6 +338,9 @@ func (c *f5Client) getSSLProfiles(ctx context.Context, path string, withCertKeyC
 			Name:    f5GetString(item, "name"),
 			Kind:    f5GetString(item, "kind"),
 			Ciphers: f5GetString(item, "ciphers"),
+			// A profile can take its ciphers from a cipher group (TMOS 13+)
+			// instead of the string; `ciphers` is then "none".
+			CipherGroup: f5GetString(item, "cipherGroup"),
 		}
 		if cipherList, ok := item["cipherList"].([]interface{}); ok {
 			for _, cl := range cipherList {
@@ -381,8 +387,9 @@ func (c *f5Client) apiRequest(ctx context.Context, method, url string, body io.R
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		// The status and iControl's numeric code, never the body: a 401 body
+		// has been seen to echo the auth token back (see vendorErrorCode).
+		return nil, statusErrorf(resp.StatusCode, "API returned status %d%s", resp.StatusCode, f5ErrorCode(resp.Body))
 	}
 
 	var apiResp f5APIResponse
@@ -426,26 +433,33 @@ func (c *f5Client) convertVIPToAsset(ctx context.Context, vs f5VirtualServer, pr
 		asset.TLSVersions = []string{"TLS 1.2"}
 	}
 
-	// Cipher suites: populate both the selected and supported list.
+	// Cipher suites. A profile's `ciphers` is an OpenSSL-style cipher STRING
+	// ("ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5", "DEFAULT"), not a suite list:
+	// storing it whole as the cipher suite and substring-matching it reported
+	// every EXCLUDED algorithm as in use (P-05). Only suites the string
+	// definitely enables are reported; the string itself, what it excludes and
+	// what could not be expanded (DEFAULT, F5 keywords, cipher groups) stay in
+	// metadata. Nothing resolved means the fields stay unset — unknown.
+	var components *cryptoparse.CipherSuiteComponents
 	if len(profile.CipherList) > 0 {
 		asset.SupportedCiphers = profile.CipherList
 		asset.CipherSuite = strPtr(profile.CipherList[0])
-	} else if profile.Ciphers != "" {
-		// F5 stores ciphers as a colon-separated string.
-		asset.SupportedCiphers = strings.Split(profile.Ciphers, ":")
-		asset.CipherSuite = strPtr(profile.Ciphers)
+		components, _ = cryptoparse.ParseCipherSuite(profile.CipherList[0])
+	} else if profile.Ciphers != "" && !strings.EqualFold(profile.Ciphers, "none") {
+		components = f5ApplyCipherString(&asset, profile.Ciphers)
 	}
-
-	// Derive key size / hash / key exchange from the cipher string heuristically.
-	if asset.CipherSuite != nil {
-		if keySize := f5ExtractKeySizeFromCipher(*asset.CipherSuite); keySize > 0 {
-			asset.KeySize = intPtr(keySize)
+	if profile.CipherGroup != "" && !strings.EqualFold(profile.CipherGroup, "none") {
+		asset.Metadata["cipher_group"] = profile.CipherGroup
+	}
+	if components != nil {
+		if bits := cryptoparse.SymmetricKeyBits(components.Symmetric); bits > 0 {
+			asset.KeySize = intPtr(bits)
 		}
-		if hashAlg := f5ExtractHashAlgorithm(*asset.CipherSuite); hashAlg != "" {
-			asset.HashAlgorithm = strPtr(hashAlg)
+		if components.Hash != "" {
+			asset.HashAlgorithm = strPtr(components.Hash)
 		}
-		if kex := f5ExtractKeyExchangeFromCipher(*asset.CipherSuite); kex != "" {
-			asset.KeyExchangeAlg = strPtr(kex)
+		if components.KeyExchange != "" {
+			asset.KeyExchangeAlg = strPtr(components.KeyExchange)
 		}
 	}
 
@@ -654,57 +668,25 @@ func f5TLSMinorVersionLabel(minor int) string {
 	}
 }
 
-// f5ExtractKeyExchangeFromCipher derives the key exchange algorithm from a
-// cipher suite name. TLS 1.3 suites use ECDHE by default.
-func f5ExtractKeyExchangeFromCipher(cipher string) string {
-	upper := strings.ToUpper(cipher)
-	switch {
-	case strings.Contains(upper, "ECDHE"):
-		return "ECDHE"
-	case strings.Contains(upper, "DHE") || strings.Contains(upper, "EDH"):
-		return "DHE"
-	case strings.HasPrefix(upper, "TLS_AES") || strings.HasPrefix(upper, "TLS_CHACHA"):
-		return "ECDHE"
-	case strings.Contains(upper, "RSA"):
-		return "RSA"
-	default:
-		return ""
+// f5ApplyCipherString evaluates a profile's cipher string and records what it
+// provably enables (see cipherStringSuiteField for what CipherSuite carries).
+// SupportedCiphers is only the suites the string definitely enables. It
+// returns the components every enabled suite shares, and only when the string
+// resolved completely: a hash or key exchange read off part of an unknown set
+// would be a guess about the rest.
+func f5ApplyCipherString(asset *CryptoAsset, cipherString string) *cryptoparse.CipherSuiteComponents {
+	parsed := cryptoparse.ParseCipherString(cipherString, cryptoparse.CipherStringVendor)
+	recordCipherString(asset.Metadata, cipherString, parsed)
+	if names := parsed.EnabledNames(); len(names) > 0 {
+		asset.SupportedCiphers = names
 	}
-}
-
-// f5ExtractKeySizeFromCipher / f5ExtractHashAlgorithm are string-heuristic
-// extractors carried over verbatim from both copies. NOTE: these re-derive key
-// size and hash from cipher strings rather than normalizing against the
-// authoritative `algorithms` table — see. That normalization belongs
-// in the platform ingest path (the customer-deployed agent has no DB access),
-// so it is intentionally NOT done here; this preserves the existing union
-// behavior.
-func f5ExtractKeySizeFromCipher(cipher string) int {
-	cipherUpper := strings.ToUpper(cipher)
-	if strings.Contains(cipherUpper, "AES256") || strings.Contains(cipherUpper, "_256") {
-		return 256
+	if field := cipherStringSuiteField(cipherString, parsed); field != "" {
+		asset.CipherSuite = strPtr(field)
 	}
-	if strings.Contains(cipherUpper, "AES128") || strings.Contains(cipherUpper, "_128") {
-		return 128
+	if !parsed.Complete {
+		return nil
 	}
-	return 0
-}
-
-func f5ExtractHashAlgorithm(input string) string {
-	inputUpper := strings.ToUpper(input)
-	switch {
-	case strings.Contains(inputUpper, "SHA256"), strings.Contains(inputUpper, "SHA-256"):
-		return "SHA256"
-	case strings.Contains(inputUpper, "SHA384"), strings.Contains(inputUpper, "SHA-384"):
-		return "SHA384"
-	case strings.Contains(inputUpper, "SHA512"), strings.Contains(inputUpper, "SHA-512"):
-		return "SHA512"
-	case strings.Contains(inputUpper, "SHA1"), strings.Contains(inputUpper, "SHA-1"):
-		return "SHA1"
-	case strings.Contains(inputUpper, "MD5"):
-		return "MD5"
-	}
-	return ""
+	return parsed.Components()
 }
 
 // f5CertName encodes an F5 object name for use in an iControl REST URL path.

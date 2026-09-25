@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -20,6 +21,15 @@ import (
 // trial-bootstrap suites elsewhere in the tree.
 
 const skip = "TEST_DATABASE_URL not set; skipping DB-backed entitlements-service tests"
+
+type countingTierPricer struct{ provisions int }
+
+func (p *countingTierPricer) ProvisionTierPricing(uuid.UUID, string, string, string, int, *int) (string, string, string, error) {
+	p.provisions++
+	return "prod_test", "price_monthly_test", "price_annual_test", nil
+}
+func (*countingTierPricer) ArchivePrice(string) error   { return nil }
+func (*countingTierPricer) ArchiveProduct(string) error { return nil }
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -451,9 +461,68 @@ func TestUpdateTierComposition_OverageFieldsPersist(t *testing.T) {
 		if e.OverageUnitSize == nil || *e.OverageUnitSize != 1 {
 			t.Errorf("OverageUnitSize = %v, want 1 (kept)", e.OverageUnitSize)
 		}
+		if _, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{
+			ItemKey: "storage_gb", IncludedValue: json.RawMessage(`{"quantity": 300}`),
+			ClearOveragePrice: true, ClearOverageSize: true,
+		}, uuid.Nil); err != nil {
+			t.Fatalf("clear overage: %v", err)
+		}
+		cleared, err := svc.GetTierEntitlements(pro)
+		if err != nil {
+			t.Fatalf("GetTierEntitlements after clear: %v", err)
+		}
+		for _, row := range cleared {
+			if row.ItemKey == "storage_gb" && (row.OveragePriceCents != nil || row.OverageUnitSize != nil) {
+				t.Errorf("cleared overage = %v/%v, want NULL/NULL", row.OveragePriceCents, row.OverageUnitSize)
+			}
+		}
 		return
 	}
 	t.Fatal("storage_gb row missing")
+}
+
+func TestUpdateTierComposition_OverageValueAndClearConflict(t *testing.T) {
+	svc, db := setup(t)
+	pro := tierID(t, db, "pro")
+	restoreTierEntitlements(t, db, pro)
+	cents := 25
+	_, err := svc.UpsertTierEntitlement(pro, TierEntitlementInput{
+		ItemKey: "storage_gb", IncludedValue: json.RawMessage(`{"quantity": 300}`),
+		OveragePriceCents: &cents, ClearOveragePrice: true,
+	}, uuid.Nil)
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("value + clear error = %v, want mutually exclusive refusal", err)
+	}
+}
+
+func TestUpdateTier_DoesNotRepriceUnchangedPrices(t *testing.T) {
+	_, db := setup(t)
+	pro := tierID(t, db, "pro")
+	if _, err := db.Exec(`UPDATE subscription_tiers SET stripe_price_id = 'price_existing' WHERE id = $1`, pro); err != nil {
+		t.Fatal(err)
+	}
+	tierSvc := NewTierService(db, db)
+	pricer := &countingTierPricer{}
+	tierSvc.SetPricer(pricer)
+	existing, err := tierSvc.GetTier(pro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tierSvc.UpdateTier(pro, models.TierUpdateRequest{
+		PriceCents: &existing.PriceCents, AnnualPriceCents: existing.AnnualPriceCents,
+	}, uuid.Nil); err != nil {
+		t.Fatalf("unchanged price update: %v", err)
+	}
+	if pricer.provisions != 0 {
+		t.Fatalf("unchanged price caused %d Stripe provisions, want 0", pricer.provisions)
+	}
+	changed := existing.PriceCents + 1
+	if _, err := tierSvc.UpdateTier(pro, models.TierUpdateRequest{PriceCents: &changed}, uuid.Nil); err != nil {
+		t.Fatalf("changed price update: %v", err)
+	}
+	if pricer.provisions != 1 {
+		t.Fatalf("changed price caused %d Stripe provisions, want 1", pricer.provisions)
+	}
 }
 
 // Only `remove` deletes, and only the keys it names.

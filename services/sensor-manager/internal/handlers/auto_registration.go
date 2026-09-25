@@ -248,6 +248,18 @@ func (h *Handler) AutoRegisterSensor(c *gin.Context) {
 		}
 	}
 
+	// This path is the platform's own provisioning: the caller authenticated
+	// with the bootstrap service certificate, not a tenant registration key. It
+	// is one of the three writers of sensors.platform_managed (with the
+	// tenant-creation trigger and seed.sql), the marker trust checks read
+	// because a tenant can set every other attribute of a sensor row.
+	if _, err := h.sensorService.GetDB().Exec(
+		`UPDATE sensors SET platform_managed = true WHERE id = $1 AND tenant_id = $2`, sensorID, tenantID,
+	); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark platform sensor"})
+		return
+	}
+
 	// Return response
 	response := AutoRegisterSensorResponse{
 		SensorID:             sensorID.String(),

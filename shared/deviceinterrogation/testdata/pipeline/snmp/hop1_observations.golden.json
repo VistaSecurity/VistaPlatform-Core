@@ -1,0 +1,254 @@
+{
+  "admission_enforce": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.firmware_version",
+        "source_kind": "measured",
+        "value": "17.09.04a"
+      },
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "C9300-48P"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "FOC2432L0AB"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "Cisco Systems"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": true
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "snmpv2c"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "admin_state": "up",
+            "mac": "00:1b:17:00:00:01",
+            "name": "Gi1/0/1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "admin_state": "down",
+            "name": "Gi1/0/2",
+            "speed": 100,
+            "state": "down"
+          },
+          {
+            "admin_state": "up",
+            "name": "Vl1",
+            "state": "up"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.neighbors",
+        "source_kind": "measured",
+        "value": [
+          {
+            "local_port": "Gi1/0/1",
+            "protocol": "lldp",
+            "remote_mac": "00:1b:17:00:00:aa",
+            "remote_name": "dist-sw-1.corp.example.test",
+            "remote_port": "Gi1/0/24"
+          },
+          {
+            "local_port": "ifIndex 1",
+            "protocol": "arp",
+            "remote_address": "192.0.2.1",
+            "remote_mac": "00:1b:17:00:00:bb"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.uptime_seconds",
+        "source_kind": "measured",
+        "value": 1234567
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "Cisco IOS Software, C9300 Software, Version 17.09.04a\n[redacted]"
+      }
+    ],
+    "edges": [],
+    "assets": [
+      {
+        "asset": "device",
+        "class_key": "unknown_host",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "00:1b:17:00:00:aa"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "value": "dist-sw-1.corp.example.test"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "value": "dist-sw-1.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "unresolved"
+      }
+    ],
+    "collection_warnings": [],
+    "processing_errors": []
+  },
+  "admission_off": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.firmware_version",
+        "source_kind": "measured",
+        "value": "17.09.04a"
+      },
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "C9300-48P"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "FOC2432L0AB"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "Cisco Systems"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": true
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "snmpv2c"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "admin_state": "up",
+            "mac": "00:1b:17:00:00:01",
+            "name": "Gi1/0/1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "admin_state": "down",
+            "name": "Gi1/0/2",
+            "speed": 100,
+            "state": "down"
+          },
+          {
+            "admin_state": "up",
+            "name": "Vl1",
+            "state": "up"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.neighbors",
+        "source_kind": "measured",
+        "value": [
+          {
+            "local_port": "Gi1/0/1",
+            "protocol": "lldp",
+            "remote_mac": "00:1b:17:00:00:aa",
+            "remote_name": "dist-sw-1.corp.example.test",
+            "remote_port": "Gi1/0/24"
+          },
+          {
+            "local_port": "ifIndex 1",
+            "protocol": "arp",
+            "remote_address": "192.0.2.1",
+            "remote_mac": "00:1b:17:00:00:bb"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.uptime_seconds",
+        "source_kind": "measured",
+        "value": 1234567
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "Cisco IOS Software, C9300 Software, Version 17.09.04a\n[redacted]"
+      }
+    ],
+    "edges": [
+      {
+        "from": "device",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[fqdn=dist-sw-1.corp.example.test,mac_address=00:1b:17:00:00:aa]",
+        "type": "connects_to"
+      }
+    ],
+    "assets": [
+      {
+        "asset": "asset[fqdn=dist-sw-1.corp.example.test,mac_address=00:1b:17:00:00:aa]",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "device",
+        "class_key": "unknown_host",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [],
+    "collection_warnings": [],
+    "processing_errors": []
+  }
+}

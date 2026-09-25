@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
 // The processing log records what happened to each discovered asset AFTER the
@@ -79,7 +81,13 @@ type ProcessingLog struct {
 	// answers: nil means this was not a host inventory, a zeroed block means
 	// one ran and landed nothing.
 	HostInventory *HostInventoryCounts
-	steps         []ProcessingStep
+	// Warnings are the collection warnings the interrogation raised: what the
+	// collector could not read, and what the result lacks because of it. They
+	// are about COLLECTION, not about this pipeline, so they do not touch
+	// fully_materialized — a run can land every asset it found and still have
+	// been refused half the device's API. Served as `collection_warnings`.
+	Warnings []di.CollectionWarning
+	steps    []ProcessingStep
 }
 
 func (p *ProcessingLog) record(target, stage, status, detail string) {
@@ -202,6 +210,12 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 	}
 	if p.Fatal != "" {
 		summary["fatal"] = p.Fatal
+	}
+	// Absent means none, the same convention the result payload uses. Sanitized
+	// here as well as at every intake, because this is the last step before the
+	// row that the job detail reads.
+	if warnings := di.SanitizeWarnings(p.Warnings); len(warnings) > 0 {
+		summary["collection_warnings"] = warnings
 	}
 	if p.HostInventory != nil {
 		summary["host_inventory"] = p.HostInventory

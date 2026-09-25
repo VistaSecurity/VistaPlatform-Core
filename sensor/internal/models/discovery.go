@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 )
 
 // HostIdentity is what the sensor knows about the machine it runs ON, as
@@ -237,6 +238,12 @@ type SensorCommands struct {
 	// as "no change" rather than as an instruction to revert — silence is not
 	// an instruction.
 	Config *agentconfig.ExchangePayload `json:"config,omitempty"`
+	// OwnedNetworks is the tenant's declared public space, elevated endpoints
+	// and probe exclusions ( W5.13), which the TLS enricher decides
+	// against. Absent from an older platform's reply, and from one that could
+	// not build it: the sensor keeps what it last had, and one that never had
+	// any treats only private space as the tenant's own.
+	OwnedNetworks *probeconsent.OwnedNetworks `json:"owned_networks,omitempty"`
 }
 
 // Command represents a command sent to a sensor

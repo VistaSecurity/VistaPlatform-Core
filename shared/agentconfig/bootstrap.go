@@ -31,6 +31,8 @@ package agentconfig
 //     registry's own rules. A device is not a trusted source of configuration:
 //     it is reporting, not asking, and a reported value that would be refused
 //     from an operator is refused from a device too.
+//   - The setting does not need confirming (Field.Confirm). A consent is given
+//     by an operator in the console, never adopted from a device's report.
 //   - The value DIFFERS from the built-in default. This is the condition that
 //     keeps bootstrapping from quietly disabling fleet defaults: seeding a
 //     device-level override for every setting would pin each device above the
@@ -56,6 +58,15 @@ func BootstrapValues(rt Runtime, fleet, device, running Values) Values {
 
 	candidates := make(Values)
 	for _, f := range FieldsFor(rt) {
+		// A setting that needs an operator's confirmation to turn on is never
+		// taken from the device: that would let a device grant itself what the
+		// console only grants past a named, audited confirmation — a modified
+		// sensor reporting third_party_tls_enrichment=true would otherwise
+		// become the platform's record of the tenant's consent ( review).
+		// Such a setting starts from the fleet default like any undecided one.
+		if f.Confirm != "" {
+			continue
+		}
 		if v, ok := fleet[f.Key]; ok && !v.IsZero() {
 			continue
 		}

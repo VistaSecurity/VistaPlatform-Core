@@ -135,7 +135,7 @@ func TestProbeTLSEmitsCanonicalMetadata(t *testing.T) {
 	port := startTestTLSServer(t)
 
 	// Dial by IP — the common case for scan job targets.
-	data, err := NewTLSProber(5*time.Second).ProbeTLS("127.0.0.1", port, true)
+	data, err := NewTLSProber(5*time.Second).ProbeTLS("127.0.0.1", "127.0.0.1", port, true)
 	if err != nil {
 		t.Fatalf("ProbeTLS: %v", err)
 	}
@@ -196,7 +196,39 @@ func TestProbeTLSEmitsCanonicalMetadata(t *testing.T) {
 
 func TestProbeTLSUnreachable(t *testing.T) {
 	// Port 1 on loopback: nothing listens there.
-	if _, err := NewTLSProber(2*time.Second).ProbeTLS("127.0.0.1", 1, true); err == nil {
+	if _, err := NewTLSProber(2*time.Second).ProbeTLS("127.0.0.1", "127.0.0.1", 1, true); err == nil {
 		t.Error("expected an error probing a closed port")
+	}
+}
+
+// TestProbeTLSConnectsToThePinnedAddressNotTheName ( W5.13b): the probe
+// must connect to the address the scan was authorized for and carry the
+// hostname only as SNI. "probe.cluster.test" is in the reserved .test TLD
+// (RFC 2606), so it can never resolve: the probe succeeds only if it dialed
+// the address. And the leaf is DNS-SAN-only for that name, so a verdict of
+// self_signed (not hostname_mismatch) proves the name reached the handshake.
+// Before the fix ProbeTLS dialed the name — re-resolving it at probe time,
+// which is the DNS-rebinding window the pin exists to close.
+func TestProbeTLSConnectsToThePinnedAddressNotTheName(t *testing.T) {
+	port := startTestTLSServer(t)
+
+	data, err := NewTLSProber(5*time.Second).ProbeTLS("probe.cluster.test", "127.0.0.1", port, false)
+	if err != nil {
+		t.Fatalf("ProbeTLS dialed something other than the pinned address: %v", err)
+	}
+	if status, _ := data["cert_validation_status"].(string); status != "self_signed" {
+		t.Errorf("cert_validation_status = %q, want self_signed — the SNI name did not reach the handshake", status)
+	}
+	// The server accepts TLS 1.2 and 1.3 and negotiates 1.3, so "TLS 1.2" in
+	// the list can only come from version ENUMERATION — which must dial the
+	// pinned address too. Without it the list falls back to the negotiated
+	// version alone.
+	versions, _ := data["tls_versions"].([]string)
+	has12 := false
+	for _, v := range versions {
+		has12 = has12 || v == "TLS 1.2"
+	}
+	if !has12 {
+		t.Errorf("tls_versions = %v, want TLS 1.2 found by enumeration — it too must dial the pinned address", versions)
 	}
 }

@@ -10,6 +10,7 @@ import { useAuth } from '@vistasecurity/primitives/auth';
 import { usePermissions, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
+import { normalizeAllowedDomains } from './allowed-domains';
 import { entraDomainsNeedDirectory, isEntraProviderType } from './entra-authority';
 import type { authServiceComponents as AuthC } from '@vistasecurity/api-contract';
 
@@ -193,10 +194,12 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
   });
   const roles = (rolesQ.data?.roles ?? []).map((r) => ({ id: r.id, name: r.name }));
 
-  const domainList = domains.split(',').map((s) => s.trim()).filter(Boolean);
+  const normalizedDomains = normalizeAllowedDomains(domains);
+  const domainList = normalizedDomains.domains;
+  const domainsInvalid = normalizedDomains.error !== null;
   const domainsNeedDirectory = family === 'oauth' && entraDomainsNeedDirectory(type, domainList, authUrl, tokenUrl);
 
-  const valid = !domainsNeedDirectory && name.trim().length > 0 && (
+  const valid = !domainsInvalid && !domainsNeedDirectory && name.trim().length > 0 && (
     family === 'saml'
       ? entityId.trim().length > 0 && ssoUrl.trim().length > 0
       : clientId.trim().length > 0 && authUrl.trim().length > 0 && tokenUrl.trim().length > 0 && (isEdit || clientSecret.trim().length > 0)
@@ -361,10 +364,15 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
         </>
       )}
 
-      <ModalField label="Allowed email domains" hint={domainsNeedDirectory ? undefined : isEntraProviderType(type)
-        ? 'Comma-separated; empty allows any domain. With domains, both URLs must name your Entra directory (login.microsoftonline.com/<tenant-id>/…).'
-        : 'Comma-separated; empty allows any domain.'}>
+      <ModalField label="Allowed email domains" hint={domainsInvalid || domainsNeedDirectory ? undefined : isEntraProviderType(type)
+        ? 'Comma-separated exact domains; empty allows any domain. Use punycode (xn--…) for internationalized domains. With domains, both URLs must name your Entra directory (login.microsoftonline.com/<tenant-id>/…).'
+        : 'Comma-separated exact domains; empty allows any domain. Use punycode (xn--…) for internationalized domains.'}>
         <ModalInput value={domains} placeholder="globexcorp.com" onChange={(e) => setDomains(e.target.value)} />
+        {domainsInvalid && (
+          <div role="alert" style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 5 }}>
+            {normalizedDomains.error}
+          </div>
+        )}
         {domainsNeedDirectory && (
           <div role="alert" style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 5 }}>
             Allowed domains need the Authorization and Token URLs to name your Entra directory — replace common, organizations, consumers or the personal-account directory with your tenant ID (login.microsoftonline.com/&lt;tenant-id&gt;/…), or clear the domains. Entra does not verify email addresses, so through a multi-tenant endpoint any directory could claim your domain.

@@ -106,7 +106,20 @@ type Component struct {
 }
 
 func (c Configuration) Judge() Judgment {
-	j := Judgment{Rules: Rules(c.KeyAlgorithm, c.KeyBits, c.Hash, c.Signature)}
+	// A configuration's key_size is often its SYMMETRIC key length (IPsec
+	// AES-256 → 256) beside an asymmetric key-exchange name ("DH Group 14"); the
+	// asymmetric floor does not apply to it (P-06), so the size rule sees no size.
+	ruleBits := c.KeyBits
+	if cryptoparse.SizeIsSymmetricKeyLength(c.KeyAlgorithm, c.Symmetric, c.Suite, ruleBits) {
+		ruleBits = 0
+	}
+	j := Judgment{Rules: Rules(c.KeyAlgorithm, ruleBits, c.Hash, c.Signature)}
+	// A cipher string whose enabled set could not be fully resolved is a
+	// partial assessment: what was found is a lower bound, never a clean bill.
+	if partial, unexpanded := cryptoparse.CipherStringAssessment(c.Suite); partial {
+		j.Limitations = append(j.Limitations, fmt.Sprintf(
+			"cipher string %q is only partially assessed: %s could not be expanded", c.Suite, strings.Join(unexpanded, ", ")))
+	}
 	var components []Component
 	if len(c.Components) > 0 {
 		if err := json.Unmarshal(c.Components, &components); err != nil {

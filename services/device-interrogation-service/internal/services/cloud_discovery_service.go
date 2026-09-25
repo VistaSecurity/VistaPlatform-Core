@@ -223,14 +223,14 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 
 						// Perform TLS handshake for each HTTPS listener port
 						if lbHostname != "" && (cfg.Protocol == "HTTPS" || cfg.Protocol == "TLS") {
-							tlsService := NewTLSHandshakeService(10 * time.Second)
-							handshakeResult, hsErr := tlsService.PerformHandshake(ctx, lbHostname, cfg.Port)
+							handshakeResult, hsErr := cloudTLSHandshake(ctx, lbHostname, cfg.Port)
 							if hsErr != nil {
 								log.Printf("Warning: TLS handshake error for %s:%d: %v", lbHostname, cfg.Port, hsErr)
 							} else if handshakeResult != nil && handshakeResult.Success {
 								// The negotiated cipher is a real measurement
 								// from this endpoint — prefer it.
 								configMap["cipher_suite"] = &handshakeResult.CipherSuite
+								applyHandshakeKeyExchange(configMap, handshakeResult)
 								configMap["negotiated_protocol_version"] = handshakeResult.TLSVersion
 
 								// protocol_version must stay the WEAKEST
@@ -421,8 +421,7 @@ func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantI
 
 				// Perform TLS handshake against the API Gateway endpoint
 				if hostname != "" {
-					tlsService := NewTLSHandshakeService(10 * time.Second)
-					handshakeResult, hsErr := tlsService.PerformHandshake(ctx, hostname, 443)
+					handshakeResult, hsErr := cloudTLSHandshake(ctx, hostname, 443)
 					if hsErr != nil {
 						log.Printf("Warning: TLS handshake error for API Gateway %s: %v", hostname, hsErr)
 					} else if handshakeResult != nil && handshakeResult.Success {
@@ -435,6 +434,7 @@ func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantI
 							"certificates":       handshakeResult.Certificates,
 							"handshake_verified": true,
 						}
+						applyHandshakeKeyExchange(cryptoConfig, handshakeResult)
 						cryptoConfigs = append(cryptoConfigs, cryptoConfig)
 					} else if handshakeResult != nil {
 						log.Printf("TLS handshake skipped for API Gateway %s: %s", hostname, handshakeResult.Error)
@@ -544,8 +544,7 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 
 			// Perform TLS handshake against the CloudFront distribution domain
 			if hostname != "" {
-				tlsService := NewTLSHandshakeService(10 * time.Second)
-				handshakeResult, hsErr := tlsService.PerformHandshake(ctx, hostname, 443)
+				handshakeResult, hsErr := cloudTLSHandshake(ctx, hostname, 443)
 				if hsErr != nil {
 					log.Printf("Warning: TLS handshake error for CloudFront %s: %v", hostname, hsErr)
 				} else if handshakeResult != nil && handshakeResult.Success {
@@ -558,6 +557,7 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 						"certificates":       handshakeResult.Certificates,
 						"handshake_verified": true,
 					}
+					applyHandshakeKeyExchange(cryptoConfig, handshakeResult)
 					cryptoConfigs = append(cryptoConfigs, cryptoConfig)
 				} else if handshakeResult != nil {
 					log.Printf("TLS handshake skipped for CloudFront %s: %s", hostname, handshakeResult.Error)
@@ -624,7 +624,9 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 	var systemSensorID uuid.UUID
 	sensorQuery := `
 		SELECT id FROM sensors
-		WHERE tenant_id = $1 AND profile = 'device_interrogation' AND 'system' = ANY(tags)
+		WHERE tenant_id = $1 AND profile = 'device_interrogation' AND platform_managed
+		  AND deleted_at IS NULL
+		ORDER BY created_at, id
 		LIMIT 1
 	`
 	if err := tx.QueryRowContext(ctx, sensorQuery, tenantID).Scan(&systemSensorID); err != nil {
@@ -748,7 +750,7 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 					// from the metadata but never computes them; the ACM/handshake
 					// path never produced them, so they were silently empty.
 					if pems := canonicalCertPEMs(certs); len(pems) > 0 {
-						if v := discovery.ClassifyCertChainFromPEMs(pems, resolveDNS); v != nil {
+						if v := discovery.ClassifyCertChainFromPEMsWith(pems, resolveDNS, platformOCSPClient()); v != nil {
 							for k, val := range v.QualityFlags {
 								metadata[k] = val
 							}
@@ -763,6 +765,15 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 				}
 				if verified, ok := cfg["handshake_verified"]; ok {
 					metadata["handshake_verified"] = verified
+				}
+
+				// The handshake's negotiated key-exchange group and the
+				// endpoint's classical / hybrid support. For a TLS 1.3
+				// listener the group is the only key exchange there is.
+				for _, key := range []string{discovery.MetaKeyExchangeAlgorithm, discovery.MetaKeyExchangeGroupRaw, discovery.MetaTLSSupportsClassicalKex, discovery.MetaTLSSupportsPQCHybridKex, discovery.MetaTLSPQCHybridKexGroup} {
+					if v, ok := cfg[key]; ok && v != nil {
+						metadata[key] = v
+					}
 				}
 
 				// The full set of protocol versions the endpoint permits.
@@ -1495,14 +1506,14 @@ func (s *CloudDiscoveryService) discoverApplicationGateways(ctx context.Context,
 
 			// Perform TLS handshake against the Application Gateway if it has a public IP
 			if hostname != "" && len(tlsConfigs) > 0 {
-				tlsService := NewTLSHandshakeService(10 * time.Second)
-				handshakeResult, hsErr := tlsService.PerformHandshake(ctx, hostname, 443)
+				handshakeResult, hsErr := cloudTLSHandshake(ctx, hostname, 443)
 				if hsErr != nil {
 					log.Printf("Warning: TLS handshake error for Azure App Gateway %s: %v", hostname, hsErr)
 				} else if handshakeResult != nil && handshakeResult.Success {
 					// Enrich the first TLS config with handshake data
 					tlsConfigs[0]["protocol_version"] = handshakeResult.TLSVersion
 					tlsConfigs[0]["cipher_suite"] = handshakeResult.CipherSuite
+					applyHandshakeKeyExchange(tlsConfigs[0], handshakeResult)
 					tlsConfigs[0]["certificates"] = handshakeResult.Certificates
 					tlsConfigs[0]["handshake_verified"] = true
 				} else if handshakeResult != nil {
@@ -1957,13 +1968,13 @@ func (s *CloudDiscoveryService) processGCPHTTPSProxy(
 
 	// Perform TLS handshake if we have a reachable IP
 	if ipAddress != "" && len(tlsConfigs) > 0 {
-		tlsService := NewTLSHandshakeService(10 * time.Second)
-		handshakeResult, hsErr := tlsService.PerformHandshake(ctx, ipAddress, 443)
+		handshakeResult, hsErr := cloudTLSHandshake(ctx, ipAddress, 443)
 		if hsErr != nil {
 			log.Printf("Warning: TLS handshake error for GCP LB %s (%s): %v", proxy.Name, ipAddress, hsErr)
 		} else if handshakeResult != nil && handshakeResult.Success {
 			tlsConfigs[0]["protocol_version"] = handshakeResult.TLSVersion
 			tlsConfigs[0]["cipher_suite"] = handshakeResult.CipherSuite
+			applyHandshakeKeyExchange(tlsConfigs[0], handshakeResult)
 			tlsConfigs[0]["certificates"] = handshakeResult.Certificates
 			tlsConfigs[0]["handshake_verified"] = true
 		} else if handshakeResult != nil {
@@ -2057,13 +2068,13 @@ func (s *CloudDiscoveryService) processGCPSSLProxy(
 	}
 
 	if ipAddress != "" && len(tlsConfigs) > 0 {
-		tlsService := NewTLSHandshakeService(10 * time.Second)
-		handshakeResult, hsErr := tlsService.PerformHandshake(ctx, ipAddress, 443)
+		handshakeResult, hsErr := cloudTLSHandshake(ctx, ipAddress, 443)
 		if hsErr != nil {
 			log.Printf("Warning: TLS handshake error for GCP SSL Proxy %s (%s): %v", proxy.Name, ipAddress, hsErr)
 		} else if handshakeResult != nil && handshakeResult.Success {
 			tlsConfigs[0]["protocol_version"] = handshakeResult.TLSVersion
 			tlsConfigs[0]["cipher_suite"] = handshakeResult.CipherSuite
+			applyHandshakeKeyExchange(tlsConfigs[0], handshakeResult)
 			tlsConfigs[0]["certificates"] = handshakeResult.Certificates
 			tlsConfigs[0]["handshake_verified"] = true
 		} else if handshakeResult != nil {

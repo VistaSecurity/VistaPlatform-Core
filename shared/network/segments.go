@@ -2,6 +2,7 @@ package network
 
 import (
 	"net"
+	"net/netip"
 	"sort"
 )
 
@@ -115,4 +116,59 @@ func cidrPrefixLen(cidr string) int {
 	}
 	ones, _ := n.Mask.Size()
 	return ones
+}
+
+// PrefixNetworkType answers a LEARNED segment's `network_type` from the prefix
+// alone: "private" when every address in it is RFC 1918 or RFC 4193 (ULA)
+// space — exactly [netip.Addr.IsPrivate] — and "public" otherwise.
+//
+// RFC 6598 carrier-grade NAT (100.64.0.0/10) is deliberately PUBLIC here. It
+// is carrier space: a FortiGate's ISP-facing VLAN sits in it, and on the far
+// side of it are other operators' customers. shared/autoscan refuses it unless
+// the tenant DECLARES a segment over it, and a `private` segment is exactly
+// that declaration to the scan gates — so a learned CGNAT prefix labelled
+// private would authorise unattended scans the tenant never asked for. (The
+// SSRF guard's isRFC1918OrULA counts CGNAT as private for the opposite
+// reason: there "private" means "refuse to dial", and the safe direction
+// flips.)
+//
+// Both ends are checked, because a prefix WIDER than the private block it
+// starts in (10.0.0.0/7) also covers public space.
+func PrefixNetworkType(p netip.Prefix) string {
+	if !p.IsValid() {
+		return "public"
+	}
+	p, ok := UnmapPrefix(p)
+	if !ok {
+		return "public"
+	}
+	if p.Addr().IsPrivate() && lastAddr(p).IsPrivate() {
+		return "private"
+	}
+	return "public"
+}
+
+// UnmapPrefix rewrites an IPv4-mapped IPv6 prefix (::ffff:10.0.0.0/104) as the
+// IPv4 prefix it denotes (10.0.0.0/8), masked. Addresses are unmapped before
+// any segment lookup, so a segment stored in the mapped form would contain
+// nothing. ok is false for a mapped prefix shorter than /96, which reaches
+// outside the mapped space and has no IPv4 equivalent.
+func UnmapPrefix(p netip.Prefix) (netip.Prefix, bool) {
+	if !p.Addr().Is4In6() {
+		return p.Masked(), true
+	}
+	if p.Bits() < 96 {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96).Masked(), true
+}
+
+// lastAddr is the highest address in a masked prefix.
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().AsSlice()
+	for i := p.Bits(); i < len(b)*8; i++ {
+		b[i/8] |= 0x80 >> (i % 8)
+	}
+	a, _ := netip.AddrFromSlice(b)
+	return a
 }

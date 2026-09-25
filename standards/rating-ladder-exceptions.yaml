@@ -45,11 +45,6 @@ services/compliance-engine/internal/services/findings_service.go#GetFindingsByCo
   reason: Projects per-severity counts and paginates; comparisons are counts, not
     score thresholds.
   fingerprint: bbbc6b8f4f35f9b8aaa3c70641ef15661bb14e44685ef6e4802fb8bfbe0b300e
-services/inventory-service/internal/services/remediation_service.go#getKeySizeRemediation:
-  concept: key_size_remediation
-  reason: Key-size remediation urgency uses bits by algorithm family, not risk
-    score bands.
-  fingerprint: eb99c6e6fbcaca7aecc62700536b13cc5e9eca0d1b857df81d43ffb6d9c135f5
 services/resource-tracker-service/internal/service/resource_service.go#generateOptimizationSuggestions:
   concept: resource_optimization
   reason: CPU/memory utilization policies choose workflow priority; backend-only
@@ -70,11 +65,6 @@ shared/cryptoparse/keysize.go#WeakCryptoSeverityScore:
   reason: Published existing detector contributions 90/70/50/20 are representative
     scores, not band minima.
   fingerprint: b20657d9beaac39a00dc22a468adcf0a50f3565573930bc589c10f6d60b1bd6d
-shared/deviceinterrogation/cisco.go#parseRunningCryptoConfig:
-  concept: cisco_rule_policy
-  reason: Vendor configuration rules report protocol/algorithm weakness; they do
-    not convert a platform score.
-  fingerprint: 0f20aa208b740a8112c1e0b1ce2b3358c6b713fe7213fc5f5ed249ea0ce9fb65
 shared/findings/producer/validate.go#validate:
   concept: finding_validation
   reason: Validates registry constraints, score range, subjects and severity
@@ -115,7 +105,7 @@ frontend-v2/src/sections/inventory/inventory-page.tsx#InventoryPage:
   concept: inventory_counts
   reason: Displays grade groups and asset counts; risk conversion delegates to
     shared helpers.
-  fingerprint: 639288af4baf97b423a43a7942b1a0e713903107623892264ae78fcb82bd7ca9
+  fingerprint: 7b8381f5992f942abfdddf6d0ac45387fb6f39c3c2fab18a75254c0da32f0bf5
 frontend-v2/src/sections/posture/algorithm-reference.tsx#AlgorithmReference:
   concept: catalogue_display
   reason: Strength filter values, row counts and column alignment coexist; score

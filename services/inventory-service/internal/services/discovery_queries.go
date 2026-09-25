@@ -33,4 +33,10 @@ type IngestFinding struct {
 	OperatingSystem      *string                `json:"operating_system"`
 	SourceSensorID       *string                `json:"source_sensor_id"`
 	RawData              map[string]interface{} `json:"raw_data"`
+
+	// keyExchangeInferred marks KeyExchangeAlgorithm as ADOPTED from a
+	// configuration already held rather than measured by this observation
+	// (refineCryptoKeyExchange), so it is linked is_inferred=true. Set in
+	// process only, just before linking; never on the wire.
+	keyExchangeInferred bool
 }

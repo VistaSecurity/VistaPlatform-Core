@@ -23,7 +23,7 @@ func TestIntegration_UniFiExistingDHCPAndPreparationFailure(t *testing.T) {
 	sink := NewObservationSink(db)
 	ctx := context.Background()
 	vlans := []map[string]any{{"subnet": "192.0.2.1/24", "name": "Controller LAN", "dhcp_enabled": true}}
-	if err := sink.ensureVLANSegments(ctx, tenant, vlans); err != nil {
+	if err := sink.ensureVLANSegments(ctx, tenant, uuid.New(), vlans); err != nil {
 		t.Fatal(err)
 	}
 	var name, metadata string

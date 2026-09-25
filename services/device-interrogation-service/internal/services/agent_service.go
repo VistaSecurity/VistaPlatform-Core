@@ -14,7 +14,9 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // ErrInvalidDeviceAgentRegistrationKey means the key cannot be used for device agent bootstrap
@@ -77,16 +79,23 @@ func (s *AgentService) RegisterDeviceAgentBootstrap(ctx context.Context, req mod
 
 	var tenantID uuid.UUID
 	var profile string
+	var paymentStatus string
+	var tenantDeleted bool
 	// Carry the operator-supplied name/description forward from the pending
 	// registration so the enrolled agent is identifiable in the fleet list —
 	// otherwise device_agents.name/profile stay NULL and the UI has nothing to
 	// label the row with.
 	var pendingName, pendingDescription sql.NullString
 	pendingQuery := `
-		SELECT tenant_id, profile, name, description FROM pending_sensor_registrations
-		WHERE registration_key = $1 AND status = 'pending' AND expires_at > NOW()
-		FOR UPDATE`
-	err = tx.QueryRowContext(ctx, pendingQuery, req.RegistrationKey).Scan(&tenantID, &profile, &pendingName, &pendingDescription)
+		SELECT p.tenant_id, p.profile, p.name, p.description,
+		       COALESCE(t.payment_status, ''), t.deleted_at IS NOT NULL
+		FROM pending_sensor_registrations p
+		JOIN tenants t ON t.id = p.tenant_id
+		WHERE p.registration_key = $1 AND p.status = 'pending' AND p.expires_at > NOW()
+		FOR UPDATE OF p, t`
+	err = tx.QueryRowContext(ctx, pendingQuery, req.RegistrationKey).Scan(
+		&tenantID, &profile, &pendingName, &pendingDescription, &paymentStatus, &tenantDeleted,
+	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("%w", ErrInvalidDeviceAgentRegistrationKey)
 	}
@@ -98,6 +107,10 @@ func (s *AgentService) RegisterDeviceAgentBootstrap(ctx context.Context, req mod
 	}
 	if tenantID == uuid.Nil {
 		return nil, fmt.Errorf("%w: missing tenant", ErrInvalidDeviceAgentRegistrationKey)
+	}
+	state := tenantstate.State{Found: true, PaymentStatus: paymentStatus, Deleted: tenantDeleted}
+	if code, blocked := state.Blocked(); blocked {
+		return nil, &tenantstate.BlockedError{Code: code}
 	}
 
 	// Global uniqueness check — runs on the bypass handle, not `tx` (see the
@@ -743,11 +756,31 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 	if job.TenantID != agentTenant {
 		return ErrJobTenantMismatch
 	}
-	// A job explicitly assigned to a different agent (same tenant) is not this
-	// agent's to complete.
-	if job.AgentID != nil && *job.AgentID != agentID {
+	// Only the job THIS agent claimed and is running ( review of).
+	// This used to accept any job in the agent's tenant that no other agent had
+	// claimed — any status, any type — so an agent could choose which job, and
+	// therefore which asset_id, its result was filed against. The result
+	// processor stamps that asset as the owner of every finding, and inventory
+	// honours the claim when the job is a running or completed interrogation of
+	// it; picking the job would pick the asset. Now: claimed by this agent
+	// (GetNextJob sets agent_id), in progress (GetNextJob marks it so), and an
+	// agent job type. Every refusal reports the same as a cross-tenant attempt,
+	// so a caller cannot probe which jobs exist or what state they are in.
+	if job.AgentID == nil || *job.AgentID != agentID {
 		return ErrJobTenantMismatch
 	}
+	if job.Status != models.JobStatusInProgress {
+		return ErrJobTenantMismatch
+	}
+	if job.JobType != models.JobTypeDeviceInterrogation && job.JobType != models.JobTypeHostInventory {
+		return ErrJobTenantMismatch
+	}
+
+	// Collection warnings are free text a device wrote and an agent relayed.
+	// The agent's own copy of the shared core sanitized them, but an agent
+	// binary is not a boundary we own, so they are scrubbed again BEFORE the
+	// payload is stored — the same rule as the observations below.
+	result.Warnings = di.SanitizeWarnings(result.Warnings)
 
 	// Update job status and store results
 	status := models.JobStatusCompleted
@@ -775,9 +808,13 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 	// path — which share ObservationSink precisely so they cannot diverge —
 	// persist different things from the same interrogation.
 	//
-	// A result with none of the three is still skipped: there is nothing to
+	// Collection warnings count too: a run that read nothing BECAUSE the
+	// account was refused everything is exactly the run whose job detail has
+	// to say so.
+	//
+	// A result with none of the four is still skipped: there is nothing to
 	// process, and creating a discovery job for it would be noise.
-	if result.Success && (len(result.Assets) > 0 || len(result.Facts) > 0 || len(result.Relationships) > 0) {
+	if result.Success && (len(result.Assets) > 0 || len(result.Facts) > 0 || len(result.Relationships) > 0 || len(result.Warnings) > 0) {
 		err = s.resultProcessor.ProcessJobResults(ctx, result.JobID, result)
 		if err != nil {
 			// Log error but don't fail the submission

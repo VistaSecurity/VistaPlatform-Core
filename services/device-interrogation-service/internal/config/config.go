@@ -49,7 +49,7 @@ func Load() (*Config, error) {
 		RedisURL:            sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
 		NATSURL:             sharedconfig.GetEnv("NATS_URL", ""),
 		LogLevel:            sharedconfig.GetEnv("LOG_LEVEL", "info"),
-		JWTSecret:           sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		JWTSecret:           sharedconfig.JWTSecret(),
 		EncryptionMasterKey: sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 		// mTLS Configuration
 		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),

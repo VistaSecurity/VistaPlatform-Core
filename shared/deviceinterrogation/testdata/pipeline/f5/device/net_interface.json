@@ -1,0 +1,25 @@
+{
+  "kind": "tm:net:interface:interfacecollectionstate",
+  "items": [
+    {
+      "name": "1.1",
+      "macAddress": "00:23:e9:aa:bb:01",
+      "enabled": true,
+      "mediaActive": "1000T-FD",
+      "description": "MUST-NOT-BE-COLLECTED",
+      "lldpAdmin": "txrx"
+    },
+    {
+      "name": "1.2",
+      "macAddress": "00:23:e9:aa:bb:02",
+      "disabled": true,
+      "mediaActive": "none"
+    },
+    {
+      "name": "mgmt",
+      "macAddress": "00:23:e9:aa:bb:00",
+      "enabled": true,
+      "mediaActive": "100TX-FD"
+    }
+  ]
+}

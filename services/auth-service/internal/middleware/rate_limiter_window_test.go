@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +80,16 @@ func (f *fakeRedis) pttl(key string) time.Duration {
 	default:
 		return e.expireAt.Sub(f.now)
 	}
+}
+
+func (f *fakeRedis) value(key string) (int64, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := f.lookup(key)
+	if e == nil {
+		return 0, false
+	}
+	return e.val, true
 }
 
 // lookup returns the live entry for key, expiring it first if due. Caller
@@ -324,6 +335,63 @@ func TestRateLimiter_OverLimitRetriesDoNotExtendWindow(t *testing.T) {
 	}
 }
 
+// TestRateLimiter_ConcurrentHitsShareOneFixedWindow verifies that concurrent
+// first requests cannot create independent counters or lose increments. The
+// current policy counts rejected requests too; that decision is pinned here so
+// the counter and the number of allowed requests remain deterministic.
+func TestRateLimiter_ConcurrentHitsShareOneFixedWindow(t *testing.T) {
+	const (
+		window     = time.Minute
+		loginLimit = 5
+		attempts   = 64
+	)
+	ctx := context.Background()
+	fake, client := newFakeRedis(t)
+	limiter := NewRateLimiter(client, 100, window, loginLimit)
+	const email = "concurrent@example.com"
+	const key = "rate_limit:email:" + email
+
+	start := make(chan struct{})
+	results := make(chan bool, attempts)
+	errs := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			allowed, _, err := limiter.AllowByEmail(ctx, email)
+			results <- allowed
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent hit: %v", err)
+		}
+	}
+	allowed := 0
+	for result := range results {
+		if result {
+			allowed++
+		}
+	}
+	if allowed != loginLimit {
+		t.Fatalf("allowed %d concurrent requests, want exactly %d", allowed, loginLimit)
+	}
+	if got, ok := fake.value(key); !ok || got != attempts {
+		t.Fatalf("counter after concurrent hits = %d (exists=%v), want %d", got, ok, attempts)
+	}
+	if got := fake.pttl(key); got != window {
+		t.Fatalf("TTL after concurrent hits = %v, want one fixed window %v", got, window)
+	}
+}
+
 // TestRateLimiter_RedisErrorSemantics pins the failure modes the fixed-window
 // rewrite must keep: login endpoints fail CLOSED, other endpoints fail open,
 // and the per-email limiter always fails closed.
@@ -363,7 +431,16 @@ func TestRateLimiter_RedisErrorSemantics(t *testing.T) {
 // assumptions (SET NX leaves an existing TTL alone, INCR preserves it)
 // against a real server. Skips when no Redis is reachable.
 func TestRateLimiter_FixedWindowAgainstRealRedis(t *testing.T) {
-	client := redis.NewClient(&redis.Options{Addr: "localhost:6379", DialTimeout: 500 * time.Millisecond})
+	options := &redis.Options{Addr: "localhost:6379", DialTimeout: 500 * time.Millisecond}
+	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+		parsed, err := redis.ParseURL(redisURL)
+		if err != nil {
+			t.Fatalf("parse REDIS_URL: %v", err)
+		}
+		options = parsed
+		options.DialTimeout = 500 * time.Millisecond
+	}
+	client := redis.NewClient(options)
 	t.Cleanup(func() { _ = client.Close() })
 	ctx := context.Background()
 	if err := client.Ping(ctx).Err(); err != nil {

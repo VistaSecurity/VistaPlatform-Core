@@ -944,20 +944,47 @@ paths:
       - devices
       summary: Test connectivity to a device
       description: |
-        Tests connectivity to the device. The success path performs live device
-        I/O, so it is integration-tested; the contract test pins the
-        request-validation paths (400 bad id / 404 device not found).
+        Logs in to the device with its stored credentials and reads its identity
+        (the same identification step Add device runs), bounded by a timeout.
+        Returns the measured latency, or a typed failure reason. Requires
+        `discovery.manage`, like interrogation: it opens an authenticated
+        connection with stored credentials.
       responses:
         '200':
-          description: Connectivity result (live; not contract-pinned).
+          description: The device was reached and identified.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeviceActionAccepted'
+                $ref: '#/components/schemas/DeviceConnectionTestResult'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '404':
           $ref: '#/components/responses/LegacyNotFound'
+        '422':
+          description: >
+            The test ran and failed for a reason the operator can correct — rejected
+            credentials, a disallowed or invalid address, the wrong device type, a
+            changed SSH host key — or the device has no stored credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDiscoveryError'
+        '502':
+          description: The device could not be reached, its certificate is not trusted, or it answered with an error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDiscoveryError'
+        '429':
+          description: >
+            Nothing was dialled. `test_throttled`: this device was tested less than
+            10 seconds ago (repeated logins with a stale password can lock the
+            device's account). `rate_limited`: the organization has used its
+            device-probe budget for the minute. `Retry-After` says when to retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDiscoveryError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /devices/{id}/ssh-host-key:
@@ -1029,11 +1056,19 @@ paths:
       operationId: discoverAndCreateDevice
       tags:
       - devices
-      summary: Discover a device and create it
+      summary: Identify a device and create it (Add device)
       description: |
-        Probes the target (live device I/O), then creates the device record.
-        Integration-tested on success; the contract test pins the bad-body 400.
-        Returns the created Device on success.
+        The Add device probe. Connects to the management address with the given
+        credentials, identifies the device through the same vendor code
+        interrogation uses (FortiOS system/status, PAN-OS show system info, F5
+        sys/version + sys/hardware, Cisco show version + show inventory over SSH,
+        UniFi stat/device), and creates the device with the vendor, model, serial,
+        firmware, hostname, IP and MAC it learned. `tls_insecure_skip_verify` is
+        persisted on the created device (always false for Cisco). For a device
+        identified over SSH, the host key it authenticated through is pinned on
+        the created device. A probe that fails creates nothing and answers with a
+        typed reason. Every probe is audited, and probes are rate limited per
+        organization.
       requestBody:
         required: true
         content:
@@ -1056,13 +1091,22 @@ paths:
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '422':
-          description: The target was disallowed, rejected authentication, or did not expose a supported discovery API.
+          description: >
+            Nothing was created. The address was invalid or disallowed, the
+            credentials were rejected, the device type cannot be identified
+            automatically, or something other than the declared device type answered.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeviceDiscoveryError'
         '502':
-          description: The management endpoint could not be reached securely.
+          description: Nothing was created. The device could not be reached, its certificate is not trusted, or it answered with an error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceDiscoveryError'
+        '429':
+          description: Nothing was dialled or created. `rate_limited` — the organization has used its device-probe budget for the minute; `Retry-After` says when to retry.
           content:
             application/json:
               schema:
@@ -1727,6 +1771,12 @@ components:
             When the device adopts a change. `restart` settings sit at
             `awaiting_restart` until the process restarts; showing them as
             applied on the next check-in would be false.
+        label:
+          type: string
+          description: |
+            Operator-facing name, present only for a setting whose key reads
+            badly when turned into words. Absent means the client derives the
+            name from `key`.
         description:
           type: string
           description: Operator-facing explanation of what the setting does.
@@ -1968,24 +2018,81 @@ components:
           enum: [f5, palo_alto, cisco, fortinet, unifi]
         management_url:
           type: string
-          format: uri
+          description: >
+            https://host[:port] for the web-API vendors. For Cisco, the SSH address:
+            a host, host:port or ssh://host[:port] (an https:// URL is accepted and
+            SSH is then tried on port 22).
         username:
           type: string
         password:
           type: string
         tls_insecure_skip_verify:
           type: boolean
-          description: Explicit opt-in for appliances with a self-signed management certificate. Defaults to false.
+          description: >
+            Explicit opt-in for appliances with a self-signed management
+            certificate. Defaults to false. Persisted on the created device.
+            Ignored and stored as false for an SSH-managed type (Cisco), where it
+            would otherwise disable SSH host-key verification.
     DeviceDiscoveryError:
       type: object
       additionalProperties: false
       required: [error, message]
+      description: >
+        A typed identification failure. `message` is fixed copy chosen by `error`;
+        it never carries text the device returned.
       properties:
         error:
           type: string
-          enum: [target_disallowed, authentication_failed, connection_failed, unsupported_response, discovery_failed]
+          enum:
+          - not_supported
+          - invalid_target
+          - target_disallowed
+          - connection_failed
+          - tls_untrusted
+          - authentication_failed
+          - host_key_mismatch
+          - unsupported_response
+          - discovery_failed
+          - credentials_missing
+          - rate_limited
+          - test_throttled
         message:
           type: string
+    DeviceConnectionTestResult:
+      type: object
+      additionalProperties: false
+      required: [device_id, success, tested_at, latency_ms, message, identity]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        success:
+          type: boolean
+          enum: [true]
+        tested_at:
+          type: string
+          format: date-time
+        latency_ms:
+          type: integer
+          minimum: 0
+          description: Measured time to connect, authenticate and read the device's identity.
+        message:
+          type: string
+        identity:
+          type: object
+          additionalProperties: false
+          required: [vendor, model, serial_number, firmware_version, hostname]
+          properties:
+            vendor:
+              type: string
+            model:
+              type: string
+            serial_number:
+              type: string
+            firmware_version:
+              type: string
+            hostname:
+              type: string
     CreateDeviceRequest:
       type: object
       additionalProperties: false
@@ -2508,10 +2615,10 @@ components:
       additionalProperties: true
       description: >
         Open envelope for the device action endpoints (interrogate /
-        test-connection / bulk-interrogate). The concrete shape (queued-job id or
-        live connectivity result) depends on live device I/O and is integration-
-        tested, not contract-pinned — hence additionalProperties:true with no
-        required fields.
+        bulk-interrogate). The concrete shape (queued-job id) depends on live
+        device I/O and is integration-tested, not contract-pinned — hence
+        additionalProperties:true with no required fields. test-connection has
+        its own shape, DeviceConnectionTestResult.
     MessageResponse:
       type: object
       additionalProperties: false
@@ -3519,6 +3626,57 @@ components:
           description: |
             Why account-wide compute/network enumeration did not run — switched
             off for the integration, or the failure that stopped it.
+        collection_warnings:
+          type: array
+          description: |
+            What the collector could not read during the interrogation — an
+            endpoint the device account was refused, a command this model or
+            version lacks, a table cut at its bound — and what the result lacks
+            because of it. The rest of the result was still collected. Absent
+            when the run raised none. At most 50 are listed; when more were
+            raised, a final entry with endpoint `(further warnings)` and reason
+            `truncated` says how many were not shown.
+          items:
+            $ref: '#/components/schemas/JobResultCollectionWarning'
+        collection_warnings_unreadable:
+          type: boolean
+          description: |
+            True when the job stored a warning list that could not be read.
+            Distinguishes "could not load the warnings" from "there were none".
+    JobResultCollectionWarning:
+      type: object
+      additionalProperties: false
+      description: |
+        One collection warning. Endpoints never carry a host or a query string,
+        and `detail` is bounded and redacted.
+      required:
+      - collector
+      - endpoint
+      - reason
+      - effect
+      properties:
+        collector:
+          type: string
+          description: The interrogator that raised it, e.g. `fortinet`, `cisco`.
+        endpoint:
+          type: string
+          description: The API path or CLI command that could not be read.
+        reason:
+          type: string
+          enum: [permission_denied, not_supported, truncated, timeout, unreachable, parse_error, error]
+          description: |
+            `permission_denied` — the account may not read it (usually a
+            read-only profile without that scope). `not_supported` — the
+            endpoint or command does not exist on this model or version.
+            `truncated` — read up to the collector's bound; the rest was not
+            collected. `timeout`, `unreachable`, `parse_error`, `error` — as
+            named.
+        effect:
+          type: string
+          description: What the result lacks because of it, e.g. "VLANs not collected".
+        detail:
+          type: string
+          description: The underlying error, bounded and redacted. Diagnostic only.
     JobResultResourceType:
       type: object
       additionalProperties: false

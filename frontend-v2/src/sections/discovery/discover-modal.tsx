@@ -15,6 +15,14 @@ import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { describeMaterialization, type Materialization } from './discover-summary';
+import {
+  DISABLED_EXPLANATION,
+  TargetVerdictError,
+  describeExternal,
+  externalConfirmTitle,
+  targetVerdict,
+  type TargetVerdict,
+} from './discover-targets';
 
 // ─── Finding detail helpers ───────────────────────────────────────────────────
 
@@ -368,7 +376,12 @@ function MaterializationSummary({ count, m }: { count: number; m?: Materializati
 
 const TERMINAL = ['completed', 'success', 'failed', 'error', 'cancelled'];
 
-type Phase = 'configure' | 'running' | 'results';
+// 'confirm-external' is the "outside your registered networks" question: the
+// API answered 422 external_targets_unconfirmed and listed the targets.
+type Phase = 'configure' | 'confirm-external' | 'running' | 'results';
+
+// How many external targets the confirmation lists before summarising.
+const CONFIRM_LIST_MAX = 20;
 
 export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient();
@@ -389,6 +402,10 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
   const [protocols, setProtocols] = useState<string[]>(['TLS']);
   const [ports, setPorts] = useState('443, 22');
   const [execMode, setExecMode] = useState('auto');
+  // The API's last target verdict ( W5.13b): which targets need
+  // confirming, which can never be scanned, or that the operator turned
+  // external targets off. Cleared whenever the targets change.
+  const [verdict, setVerdict] = useState<TargetVerdict | null>(null);
 
   // Reset to a clean wizard whenever it (re)opens.
   useEffect(() => {
@@ -400,6 +417,7 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
       setProtocols(['TLS']);
       setPorts('443, 22');
       setExecMode('auto');
+      setVerdict(null);
     }
   }, [open]);
 
@@ -407,18 +425,34 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
   const portList = ports.split(',').map((p) => parseInt(p.trim(), 10)).filter((n) => Number.isInteger(n) && n >= 1 && n <= 65535);
   const canStart = targetList.length > 0 && targetList.length <= 1000 && protocols.length > 0;
 
+  // `confirmed` is the person's answer to "N targets are outside your
+  // registered networks". It is only ever sent true from the confirmation's
+  // "Scan anyway" — never pre-set — so a first submission always lets the
+  // API decide whether anything needs confirming.
   const create = useMutation({
-    mutationFn: async () => {
-      const { data, error } = await clients.inventory.POST('/discovery/jobs', {
-        body: { targets: targetList, protocols, ports: portList, execution_mode: execMode },
+    mutationFn: async (confirmed: boolean) => {
+      const { data, error, response } = await clients.inventory.POST('/discovery/jobs', {
+        body: {
+          targets: targetList,
+          protocols,
+          ports: portList,
+          execution_mode: execMode,
+          ...(confirmed ? { external_targets_confirmed: true } : {}),
+        },
       });
-      if (error || !data) throw new Error('Failed to start discovery');
+      if (error || !data) throw new TargetVerdictError(targetVerdict(response.status, error));
       return data.job;
     },
+    onMutate: () => setVerdict(null),
     onSuccess: (job) => {
       setJobId(job.id);
       setPhase('running');
       qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
+    },
+    onError: (e) => {
+      const v: TargetVerdict = e instanceof TargetVerdictError ? e.verdict : { kind: 'error', message: e instanceof Error ? e.message : 'Failed to start discovery' };
+      setVerdict(v);
+      setPhase(v.kind === 'unconfirmed' ? 'confirm-external' : 'configure');
     },
   });
 
@@ -470,8 +504,10 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
   });
 
   const busy = create.isPending || cancelM.isPending;
+  // Refusals and the operator switch are explained in the body, target by
+  // target; only an unclassified failure is a one-line footer note.
   const err =
-    (create.error as Error | undefined)?.message ||
+    (verdict?.kind === 'error' ? verdict.message : null) ||
     (jobQ.error as Error | undefined)?.message ||
     (resultsQ.error as Error | undefined)?.message ||
     null;
@@ -481,11 +517,22 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
   let secondary: React.ReactNode = null;
   if (phase === 'configure') {
     primary = (
-      <button className="ui-btn accent" disabled={!canStart || create.isPending} onClick={() => create.mutate()}>
+      <button className="ui-btn accent" disabled={!canStart || create.isPending} onClick={() => create.mutate(false)}>
         {create.isPending ? 'Starting…' : 'Start discovery'}
       </button>
     );
     secondary = <button className="ui-btn" onClick={onClose} disabled={busy}>Cancel</button>;
+  } else if (phase === 'confirm-external') {
+    primary = (
+      <button className="ui-btn accent" disabled={create.isPending} onClick={() => create.mutate(true)}>
+        {create.isPending ? 'Starting…' : 'Scan anyway'}
+      </button>
+    );
+    secondary = (
+      <button className="ui-btn" disabled={create.isPending} onClick={() => { setVerdict(null); setPhase('configure'); }}>
+        Cancel
+      </button>
+    );
   } else if (phase === 'running') {
     secondary = (
       <button className="ui-btn" onClick={() => cancelM.mutate()} disabled={cancelM.isPending}>
@@ -522,18 +569,47 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
     >
       {phase === 'configure' && (
         <>
-          <ModalField label="Targets" hint="One per line or comma-separated. IPs, CIDRs, or hostnames (max 1000).">
+          <ModalField label="Targets" hint="One per line or comma-separated. IPs, CIDRs, ranges, hostnames or URLs (max 1000). Targets outside your registered networks ask for confirmation.">
             <textarea
               data-autofocus
+              aria-label="Targets"
               value={targets}
-              onChange={(e) => setTargets(e.target.value)}
+              onChange={(e) => { setTargets(e.target.value); setVerdict(null); }}
               rows={4}
               spellCheck={false}
               className="mono"
-              placeholder={'10.0.0.0/24\nweb-prod-01.example.com\n192.0.2.10'}
+              placeholder={'10.0.0.0/24\nweb-prod-01.example.com\nhttps://portal.example.com/'}
               style={{ width: '100%', padding: '10px 12px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12, outline: 'none', resize: 'vertical' }}
             />
           </ModalField>
+
+          {verdict?.kind === 'refused' && (
+            <div role="alert" style={{ marginBottom: 15, padding: '10px 12px', borderRadius: 9, border: '1px solid var(--danger)', fontSize: 12.5 }}>
+              <div style={{ fontWeight: 600, color: 'var(--danger-text)', marginBottom: 6 }}>
+                {verdict.refused.length === 1 ? 'This target can never be scanned:' : `These ${verdict.refused.length} targets can never be scanned:`}
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--app-t2)' }}>
+                {verdict.refused.map((r) => (
+                  <li key={r.target}><span className="mono">{r.target}</span> — {r.reason}</li>
+                ))}
+              </ul>
+              <div style={{ marginTop: 6, color: 'var(--app-t3)' }}>Remove them to scan the rest.</div>
+            </div>
+          )}
+
+          {verdict?.kind === 'disabled' && (
+            <div role="alert" style={{ marginBottom: 15, padding: '10px 12px', borderRadius: 9, border: '1px solid var(--warn)', fontSize: 12.5 }}>
+              <div style={{ fontWeight: 600, color: 'var(--app-t1)', marginBottom: 6 }}>
+                {verdict.targets.length === 1 ? '1 target is' : `${verdict.targets.length} targets are`} outside your registered networks.
+              </div>
+              <div style={{ color: 'var(--app-t2)' }}>{DISABLED_EXPLANATION}</div>
+              {verdict.targets.length > 0 && (
+                <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: 'var(--app-t2)' }}>
+                  {verdict.targets.slice(0, CONFIRM_LIST_MAX).map((t) => <li key={t.target} className="mono">{t.target}</li>)}
+                </ul>
+              )}
+            </div>
+          )}
 
           <div style={{ marginBottom: 15 }}>
             <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 8 }}>Protocols</div>
@@ -562,6 +638,28 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
             </ModalField>
           </div>
         </>
+      )}
+
+      {phase === 'confirm-external' && verdict?.kind === 'unconfirmed' && (
+        <div role="alertdialog" aria-labelledby="discover-external-title" aria-describedby="discover-external-body">
+          <div id="discover-external-title" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 10 }}>
+            {externalConfirmTitle(verdict.targets.length)}
+          </div>
+          <div id="discover-external-body">
+            <ul className="mono" style={{ margin: '0 0 10px', paddingLeft: 18, fontSize: 12, color: 'var(--app-t2)', maxHeight: 220, overflowY: 'auto' }}>
+              {verdict.targets.slice(0, CONFIRM_LIST_MAX).map((t) => <li key={t.target}>{describeExternal(t)}</li>)}
+            </ul>
+            {verdict.targets.length > CONFIRM_LIST_MAX && (
+              <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginBottom: 10 }}>
+                and {verdict.targets.length - CONFIRM_LIST_MAX} more
+              </div>
+            )}
+            <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
+              Nothing outside your registered networks is ever scanned automatically — only when you confirm it here.
+              The scan runs against the addresses listed, and is recorded in your organization&apos;s audit log.
+            </div>
+          </div>
+        </div>
       )}
 
       {phase === 'running' && (

@@ -1647,27 +1647,6 @@ bindings:
       type: boolean
       nullable: false
       required: true
-  inventory-service.openapi.yaml#/components/schemas/RemediationIssue/properties/severity:
-    concept: severity
-    delivery: implement
-    contract:
-      type: string
-      nullable: false
-      required: true
-    schema_exception: Existing inventory-service.openapi.yaml contract omits enum
-      constraints; preserve current wire compatibility. The severity concept
-      declares the intended scale; this audit does not prove runtime validation.
-  inventory-service.openapi.yaml#/components/schemas/RemediationSummary/properties/risk_score:
-    concept: risk
-    delivery: implement
-    contract:
-      type: integer
-      nullable: false
-      required: true
-    schema_exception: Existing inventory-service.openapi.yaml contract omits
-      minimum/maximum constraints; preserve current wire compatibility. The risk
-      concept declares the intended scale; this audit does not prove runtime
-      validation.
   inventory-service.openapi.yaml#/components/schemas/AssetCertificateLink/properties/risk_score:
     concept: risk
     delivery: implement

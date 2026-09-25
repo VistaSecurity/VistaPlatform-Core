@@ -1,0 +1,27 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "results": {
+    "wan1": {
+      "id": "wan1",
+      "name": "wan1",
+      "link": true,
+      "speed": 1000.0,
+      "duplex": 1,
+      "mac": "00:09:0f:aa:bb:01"
+    },
+    "internal": {
+      "id": "internal",
+      "name": "internal",
+      "link": true,
+      "speed": 10000.0,
+      "duplex": 1
+    },
+    "vlan-voice": {
+      "id": "vlan-voice",
+      "name": "vlan-voice",
+      "link": true,
+      "speed": 10000.0
+    }
+  }
+}

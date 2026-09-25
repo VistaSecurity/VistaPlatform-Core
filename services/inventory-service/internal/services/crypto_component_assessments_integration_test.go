@@ -13,6 +13,7 @@ package services
 // test-integration-db).
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -82,6 +83,43 @@ func TestIntegration_CryptoComponents_WorstFirstAndSetsScore(t *testing.T) {
 	if !ok || score != *got[0].RiskScore {
 		t.Errorf("worst component risk %d != ingest score %d (ok=%v) — explanation and score disagree",
 			*got[0].RiskScore, score, ok)
+	}
+}
+
+// Each component carries its catalogue row's curated remediation guidance —
+// the "How to fix" the drawer shows — and a row that records none carries
+// none. Compared against the row itself rather than a hardcoded string, so a
+// seed edit to RC4's advice does not break the test while a read path that
+// dropped or invented guidance does.
+func TestIntegration_CryptoComponents_CarryCatalogueRemediationGuidance(t *testing.T) {
+	f := newCatRiskFixture(t)
+	impl := f.implWith(t, map[string]string{"symmetric": "RC4", "hash": "SHA256"})
+
+	catalogue := func(code string) *models.ComponentRemediationGuidance {
+		t.Helper()
+		var raw []byte
+		if err := f.db.QueryRow(`SELECT remediation_guidance FROM algorithms WHERE code = $1`, code).Scan(&raw); err != nil {
+			t.Fatalf("catalogue %s: %v", code, err)
+		}
+		return models.ParseComponentRemediationGuidance(raw)
+	}
+	wantRC4 := catalogue("RC4")
+	if wantRC4 == nil || len(wantRC4.Steps) == 0 {
+		t.Fatalf("fixture: the seeded RC4 row records no remediation steps — the case would prove nothing: %+v", wantRC4)
+	}
+	if catalogue("SHA256") != nil {
+		t.Fatal("fixture: SHA256 now records remediation guidance — pick a row that does not")
+	}
+
+	byCode := map[string]models.CryptoComponentAssessment{}
+	for _, c := range f.componentsOf(t, impl) {
+		byCode[c.Code] = c
+	}
+	if !reflect.DeepEqual(byCode["RC4"].RemediationGuidance, wantRC4) {
+		t.Errorf("RC4 guidance = %+v, want the catalogue row's %+v", byCode["RC4"].RemediationGuidance, wantRC4)
+	}
+	if g := byCode["SHA256"].RemediationGuidance; g != nil {
+		t.Errorf("SHA256 records no guidance but the read invented %+v", g)
 	}
 }
 
@@ -155,10 +193,14 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 	}
 
 	baseline := before[0]
+	var baselineGuidance []byte
+	if err := f.db.QueryRow(`SELECT remediation_guidance FROM algorithms WHERE code = 'AES256'`).Scan(&baselineGuidance); err != nil {
+		t.Fatalf("read baseline remediation_guidance: %v", err)
+	}
 	t.Cleanup(func() {
 		if _, err := f.db.Exec(
-			`UPDATE algorithms SET risk_score = $1, strength = $2, deprecation_status = $3 WHERE code = 'AES256'`,
-			*baseline.RiskScore, baseline.Strength, baseline.DeprecationStatus,
+			`UPDATE algorithms SET risk_score = $1, strength = $2, deprecation_status = $3, remediation_guidance = $4 WHERE code = 'AES256'`,
+			*baseline.RiskScore, baseline.Strength, baseline.DeprecationStatus, baselineGuidance,
 		); err != nil {
 			t.Errorf("restore catalogue row: %v", err)
 		}
@@ -169,7 +211,8 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 		UPDATE algorithms
 		   SET risk_score = $1, strength = 'weak', deprecation_status = 'deprecated',
 		       migration_guidance = 'Move to AES-256-GCM with a rotated key.',
-		       recommended_alternatives = ARRAY['AES256-GCM']
+		       recommended_alternatives = ARRAY['AES256-GCM'],
+		       remediation_guidance = '{"summary":"Re-key onto AES-256-GCM.","steps":["Rotate the key"]}'::jsonb
 		 WHERE code = 'AES256'`, target); err != nil {
 		t.Fatalf("update catalogue: %v", err)
 	}
@@ -190,6 +233,9 @@ func TestIntegration_CryptoComponents_FollowTheCatalogue(t *testing.T) {
 	}
 	if len(after[0].RecommendedAlternatives) != 1 {
 		t.Errorf("recommended_alternatives = %v, want the catalogue's single entry", after[0].RecommendedAlternatives)
+	}
+	if g := after[0].RemediationGuidance; g == nil || g.Summary != "Re-key onto AES-256-GCM." || !reflect.DeepEqual(g.Steps, []string{"Rotate the key"}) {
+		t.Errorf("remediation guidance = %+v, want the edited catalogue row's", g)
 	}
 }
 

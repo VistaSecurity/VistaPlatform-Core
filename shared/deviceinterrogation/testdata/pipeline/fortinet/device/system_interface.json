@@ -1,0 +1,41 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {
+      "name": "wan1",
+      "ip": "203.0.113.2 255.255.255.248",
+      "macaddr": "00:09:0f:aa:bb:01",
+      "status": "up",
+      "vlanid": 0,
+      "type": "physical",
+      "role": "wan",
+      "vdom": "root",
+      "password": "MUST-NOT-BE-COLLECTED",
+      "psksecret": "MUST-NOT-BE-COLLECTED",
+      "auth-cert": "MUST-NOT-BE-COLLECTED"
+    },
+    {
+      "name": "internal",
+      "ip": "192.0.2.1 255.255.255.0",
+      "macaddr": "00:09:0f:aa:bb:02",
+      "status": "up",
+      "vlanid": 0,
+      "type": "physical",
+      "role": "lan",
+      "vdom": "root"
+    },
+    {
+      "name": "vlan-voice",
+      "ip": "198.51.100.1 255.255.255.0",
+      "status": "up",
+      "vlanid": 40,
+      "type": "vlan",
+      "interface": "internal",
+      "role": "lan",
+      "vdom": "root",
+      "ppp-echo-request": "MUST-NOT-BE-COLLECTED"
+    }
+  ]
+}

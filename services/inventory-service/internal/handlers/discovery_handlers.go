@@ -102,6 +102,22 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 		// the generic line: a 5xx body is not a reason a caller can act on.
 		var downstream *services.DownstreamError
 		if errors.As(err, &downstream) && downstream.Status >= 400 && downstream.Status < 500 {
+			// A target-authorization verdict keeps its code and its target
+			// lists ( W5.13b): the UI branches on the code — ask for
+			// confirmation, explain the operator switch, show why each
+			// refused target can never be scanned — and needs the lists
+			// verbatim to do it.
+			if downstream.Code != "" {
+				resp := gin.H{"error": downstream.Code, "details": downstream.Message}
+				if len(downstream.ExternalTargets) > 0 {
+					resp["external_targets"] = downstream.ExternalTargets
+				}
+				if len(downstream.RefusedTargets) > 0 {
+					resp["refused_targets"] = downstream.RefusedTargets
+				}
+				c.JSON(downstream.Status, resp)
+				return
+			}
 			c.JSON(downstream.Status, gin.H{"error": "validation_error", "details": downstream.Message})
 			return
 		}
@@ -117,11 +133,21 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 			"target_count":   len(input.Targets),
 			"status":         job.Status,
 		}, []string{}, map[string]interface{}{
-			"protocols": input.Protocols,
-			"ports":     input.Ports,
+			"protocols":        input.Protocols,
+			"ports":            input.Ports,
+			"external_targets": job.ExternalTargets,
 		})
 	}
 
+	// cluster-sensor-service's create response carries neither list, and a
+	// nil slice re-marshals as null — which DiscoveryJob in the spec does not
+	// allow. Found by the create-response contract test ( W5.13b).
+	if job.Targets == nil {
+		job.Targets = input.Targets
+	}
+	if job.RequestedSensorIDs == nil {
+		job.RequestedSensorIDs = []string{}
+	}
 	c.JSON(http.StatusAccepted, gin.H{"job": job})
 }
 

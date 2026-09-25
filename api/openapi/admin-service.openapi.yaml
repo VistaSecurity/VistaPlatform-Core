@@ -634,6 +634,174 @@ paths:
           $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /admin/billing/trials:
+    get:
+      operationId: listTrials
+      x-edition: enterprise
+      tags:
+      - trials
+      summary: List live trials (Billing → Trials)
+      description: 'Every unconverted billing_trial_tracking row — the one trial store — on a plan the MSP marked is_trial, for an undeleted tenant, soonest to end first. A trial row left on any other plan is not a trial and is not listed. `phase`, `days_remaining` and `ends_at` come from shared/trials, the computation the trial lock and the tenant trial banner use.'
+      responses:
+        '200':
+          description: The live trials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialListResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    post:
+      operationId: startTrial
+      x-edition: enterprise
+      tags:
+      - trials
+      summary: Start a trial (Billing → Trials → Start trial)
+      description: 'Writes the billing_trial_tracking row for a tenant already on a plan the MSP marked is_trial; payment_status ''trial'' follows it. Refused with 409 when the tenant''s plan is not a trial plan or the tenant already has a trial row, and with 400 when `duration` is shorter than the plan''s full + soft trial days. Recorded in the platform audit log (billing.trial_created).'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartTrialRequest'
+      responses:
+        '200':
+          description: The trial was started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialActionResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/billing/trials/end-landing:
+    get:
+      operationId: getTrialEndLanding
+      x-edition: enterprise
+      tags:
+      - trials
+      summary: Where an ended trial lands (Billing → Trials → End trial dialog)
+      description: 'What ending a trial does right now — the same query End trial and the expiry sweep run, so the dialog states what will happen. A trial that ends moves the tenant to the MSP''s Free plan: an active, public, card-billed plan called Free (name or display name) that costs nothing monthly or annually and is not a trial, custom, private or deprecated plan; with several, the one named `free`, then the lowest display order, then name. With none defined the tenant is suspended (`suspended: true`). A failed lookup is a 500, never a guess.'
+      responses:
+        '200':
+          description: The landing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialEndLanding'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/billing/trials/tenants/{tenant_id}/extend:
+    post:
+      operationId: extendTrial
+      x-edition: enterprise
+      tags:
+      - trials
+      summary: Extend a live trial (Billing → Trials → Extend)
+      description: 'Moves the date the trial locks (`ends_at` in the list — the later of start + the plan''s full and soft days and trial_end) `additional_days` later, counted from that date, or from now when the trial has already locked. A Stripe trialing subscription gets the same trial end. 404 when the tenant has no unconverted trial on a trial plan. Recorded in the platform audit log (billing.trial_extended).'
+      parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtendTrialRequest'
+      responses:
+        '200':
+          description: The trial was extended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialActionResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/billing/trials/tenants/{tenant_id}/convert:
+    post:
+      operationId: convertTrial
+      x-edition: enterprise
+      tags:
+      - trials
+      summary: Mark a live trial converted to paid (Billing → Trials → Convert)
+      description: 'Marks the tenant''s unconverted trial converted and sets payment_status ''active''. 404 when the tenant has no unconverted trial. Recorded in the platform audit log (billing.trial_converted).'
+      parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The trial was converted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialActionResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/billing/trials/tenants/{tenant_id}:
+    delete:
+      operationId: cancelTrial
+      x-edition: enterprise
+      tags:
+      - trials
+      summary: End a live trial (Billing → Trials → End trial)
+      description: 'Ends the tenant''s live trial now, exactly as the expiry sweep ends one whose clock has run out: the tenant moves to the MSP''s Free plan with payment_status ''active'' (see getTrialEndLanding for which plan), or — when no Free plan is defined — is suspended, its prior status remembered for Reactivate and every session revoked. The trial row is kept, marked ended (hard_locked_at), so it reads as locked everywhere and Start trial refuses a second trial. One transaction. `landing` says where the tenant went. 404 when there is no unconverted trial on a trial plan (a tenant already moved to the Free plan has none). Recorded in the platform audit log (billing.trial_cancelled, metadata `landing_plan`: the plan''s name or "suspended", and `landing_plan_id`).'
+      parameters:
+      - name: tenant_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The trial was ended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialActionResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /admin/billing/coupons:
     get:
       operationId: listCoupons
@@ -991,7 +1159,7 @@ paths:
       tags:
       - tiers
       summary: Deprecate a subscription tier
-      description: 'Soft deprecation — existing tenants are grandfathered. Requires an authenticated platform user; returns 401 when absent.'
+      description: 'Soft deprecation — existing tenants are grandfathered. Requires an authenticated platform user; returns 401 when absent and 404 when the tier does not exist.'
       parameters:
       - name: id
         in: path
@@ -1010,6 +1178,8 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /admin/tiers/{id}/history:
@@ -1046,12 +1216,19 @@ paths:
       - tiers
       summary: Assign a plan to a tenant
       description: |
-        Assigns a (typically custom/enterprise) plan to a tenant. For an
-        invoice-billed plan this is record-only — NO Stripe subscription is
-        created; the tenant is marked active and entitlements take effect
-        immediately. For a stripe-billed plan it sets the tier only (card
-        collection still flows through checkout). A private custom plan may
-        only be assigned to its owning tenant.
+        Assigns a (typically custom/enterprise) plan to a tenant (owner
+        decision 7). Refused with 409 "This tenant is billed through Stripe —
+        change plan through billing" when the tenant has a live Stripe
+        subscription: its plan changes through billing, so the Stripe price and
+        the entitlements move together. For an invoice-billed plan this is
+        record-only — NO Stripe subscription is created; the tenant is marked
+        active, a manual billing subscription records the plan, and
+        entitlements take effect immediately. For a stripe-billed plan it sets
+        the tier only (card collection still flows through checkout) and
+        retires any manual subscription the tenant had. One transaction. A
+        private custom plan may only be assigned to its owning tenant (409). A
+        reason is required, and the assignment — or its refusal — is recorded
+        in the platform audit log.
       parameters:
       - name: id
         in: path
@@ -1068,10 +1245,15 @@ paths:
               additionalProperties: false
               required:
               - tenant_id
+              - reason
               properties:
                 tenant_id:
                   type: string
                   format: uuid
+                reason:
+                  type: string
+                  minLength: 1
+                  description: Why the plan is being assigned; recorded in the audit log. Blank is refused.
       responses:
         '200':
           description: The plan was assigned.
@@ -1083,6 +1265,18 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          description: No such plan or (undeleted) tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '409':
+          description: The tenant is billed through Stripe, or the plan is private to another tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /admin/security/events:
@@ -2753,24 +2947,15 @@ paths:
       x-edition: enterprise
       tags:
       - billing-analytics
-      summary: Monthly Recurring Revenue (time series or point)
-      description: 'Without `period`, returns a 30-day MRR time series. With `period` (YYYY-MM-DD), returns the single-day MRR value.'
-      parameters:
-      - name: period
-        in: query
-        required: false
-        description: "YYYY-MM-DD. Omit for the default 30-day time series."
-        schema:
-          type: string
+      summary: Current monthly recurring revenue
+      description: 'Current MRR from billing records (billing_subscriptions with an open paid stretch — active or paid past-due, never trialing — normalised to a month, recurring coupons applied). The subscription-period ledger preserves tenure for churn/LTV, not historical prices or coupons, so a `period` query parameter is refused with 400. With no payment provider configured, `billing_configured` is false and `mrr` / `paying_tenants` are null.'
       responses:
         '200':
-          description: MRR time series (default) or a single MRR point (with period).
+          description: Current MRR.
           content:
             application/json:
               schema:
-                oneOf:
-                - $ref: '#/components/schemas/MRRSeriesResponse'
-                - $ref: '#/components/schemas/MRRPointResponse'
+                $ref: '#/components/schemas/MRRResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
@@ -2785,12 +2970,13 @@ paths:
       x-edition: enterprise
       tags:
       - billing-analytics
-      summary: Churn rate for a period
+      summary: Churn rate for a month
+      description: 'Decided per tenant from append-only paid subscription periods: the tenants paying at the start of the month that had a paid stretch end in the month and are not paying at its end (for the current month: now), as a percentage of the tenants paying at its start. Scheduled cancellation ends at Stripe ended_at; unpaid/paused and tenant lifecycle exits end a stretch. A switch between invoice and card billing, or between paid plans, is not churn when another period covers the tenant; a move to a free plan is. A cancelled trial never paid and counts in neither. `churn_rate` is null when nobody was paying at the start of the month or no payment provider is configured.'
       parameters:
       - name: period
         in: query
         required: false
-        description: "YYYY-MM-DD. Defaults to the first of the current month."
+        description: "YYYY-MM-DD; the month containing it. Defaults to the current month."
         schema:
           type: string
       responses:
@@ -2815,6 +3001,7 @@ paths:
       tags:
       - billing-analytics
       summary: Customer lifetime value
+      description: 'MRR per paying tenant times the average paid lifetime of the tenants that stopped paying — from the tenant''s first paid date to the end of its last paid subscription. Trial time is not paid lifetime, and a billing-method switch does not end one. `ltv` is null when nobody pays, no tenant has stopped paying yet, or no payment provider is configured.'
       responses:
         '200':
           description: The LTV.
@@ -2834,14 +3021,8 @@ paths:
       x-edition: enterprise
       tags:
       - billing-analytics
-      summary: Revenue breakdown by subscription tier
-      parameters:
-      - name: period
-        in: query
-        required: false
-        description: "YYYY-MM-DD. Defaults to the first of the current month."
-        schema:
-          type: string
+      summary: Current monthly recurring revenue by plan
+      description: 'Plans nobody pays for are absent (not listed at their price). Current-state only: a `period` query parameter is refused with 400. Empty when no payment provider is configured.'
       responses:
         '200':
           description: Revenue by tier.
@@ -2921,33 +3102,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CouponStatsResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/BillingNotMSP'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /admin/billing/analytics/forecast:
-    get:
-      operationId: getBillingForecast
-      x-edition: enterprise
-      tags:
-      - billing-analytics
-      summary: Projected MRR forecast
-      parameters:
-      - name: months
-        in: query
-        required: false
-        description: "Projection horizon (1–24); out-of-range or invalid silently clamps to 6."
-        schema:
-          type: integer
-      responses:
-        '200':
-          description: The MRR forecast.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ForecastResponse'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '404':
@@ -3099,6 +3253,34 @@ paths:
           $ref: '#/components/responses/LegacyConflict'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /admin/tenants/{id}/billing:
+    get:
+      operationId: getTenantBilling
+      x-edition: enterprise
+      tags:
+      - tenant-billing
+      summary: A tenant's billing customers and subscriptions
+      description: 'The tenant''s billing_customers and billing_subscriptions rows across providers (stripe, manual). The tenant drawer reads it to show the support change-plan panel only for a tenant with a live Stripe subscription. A section whose query fails is omitted.'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The tenant's billing records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantBillingOverviewResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/BillingNotMSP'
   /admin/tenants/{id}/billing/change-plan:
     post:
       operationId: adminChangeTenantPlan
@@ -3106,7 +3288,7 @@ paths:
       tags:
       - tenant-billing-admin
       summary: Change a tenant's plan on platform authority (support downgrade path)
-      description: 'Changes the tenant''s Stripe subscription to another tier with proration disabled — the support-granted DOWNGRADE path under the 12-month contract model (#1002). Nothing is credited or refunded: monthly tenants bill the new price from the next period; annual-prepaid tenants keep the paid year and renew at the new rate. Keeps the tenant''s current billing interval. Requires platform.billing; the reason is recorded in the platform audit log. 400 if the tenant has no Stripe subscription or the target tier lacks a Price for the tenant''s interval.'
+      description: 'Changes the tenant''s Stripe subscription to another tier with proration disabled — the support-granted DOWNGRADE path under the 12-month contract model (#1002). Nothing is credited or refunded: monthly tenants bill the new price from the next period; annual-prepaid tenants keep the paid year and renew at the new rate. Keeps the tenant''s current billing interval. Requires platform.billing; the reason is recorded in the platform audit log. 400 if the tenant has no Stripe subscription (assign the plan instead) or the target tier lacks a Price for the tenant''s interval. Stripe is changed first; the local subscription row and the tenant''s tier are then recorded in one checked transaction, and a failure there answers 500 (Stripe already bills the new plan; the subscription webhook reconciles) instead of reporting success.'
       parameters:
       - name: id
         in: path
@@ -6329,6 +6511,12 @@ components:
           type: integer
         overage_unit_size:
           type: integer
+        clear_overage_price_cents:
+          type: boolean
+          description: 'Set overage_price_cents back to null. Mutually exclusive with overage_price_cents.'
+        clear_overage_unit_size:
+          type: boolean
+          description: 'Set overage_unit_size back to null. Mutually exclusive with overage_unit_size.'
     TierEntitlementsResponse:
       type: object
       additionalProperties: false
@@ -6570,6 +6758,12 @@ components:
           type: integer
         overage_unit_size:
           type: integer
+        clear_overage_price_cents:
+          type: boolean
+          description: 'Set overage_price_cents back to null. Mutually exclusive with overage_price_cents.'
+        clear_overage_unit_size:
+          type: boolean
+          description: 'Set overage_unit_size back to null. Mutually exclusive with overage_unit_size.'
     UpdateTierEntitlementsRequest:
       type: object
       additionalProperties: true
@@ -8130,116 +8324,273 @@ components:
     BillingDashboard:
       type: object
       additionalProperties: false
-      description: 'Flat billing dashboard metrics (admin-service AnalyticsCalculator.GetDashboardMetrics — a fixed literal map). `revenue_by_tier` maps tier name → revenue.'
+      description: 'Billing → Overview metrics (billing.DashboardMetrics), all from billing records. When `billing_configured` is false (no payment provider: no Stripe secret key and no invoice-billed plan ever assigned) every revenue figure is null and `revenue_by_tier` is empty — the console shows "Billing not configured". `churn_rate` and `ltv` are also null when there is nothing to measure them from. `trial_conversion` comes from billing_trial_tracking and is reported either way.'
       required:
+      - billing_configured
       - mrr
+      - paying_tenants
       - churn_rate
       - ltv
-      - trial_conversion
-      - active_tenants
       - revenue_by_tier
+      - trial_conversion
       - calculation_time
       properties:
+        billing_configured:
+          type: boolean
         mrr:
-          type: number
+          type: [number, 'null']
+          description: 'Monthly recurring revenue: live subscriptions that have paid (active, or past-due after a successful payment; never trialing), interval-normalised, recurring coupons applied.'
+        paying_tenants:
+          type: [integer, 'null']
+          description: 'Tenants with a live subscription worth more than zero.'
         churn_rate:
-          type: number
+          type: [number, 'null']
+          description: 'Percent, this month.'
         ltv:
-          type: number
-        trial_conversion:
-          type: number
-        active_tenants:
-          type: integer
+          type: [number, 'null']
         revenue_by_tier:
           type: object
+          description: 'Plan display name → MRR. Only plans someone pays for.'
           additionalProperties:
             type: number
+        trial_conversion:
+          type: number
         calculation_time:
           type: string
           format: date-time
-    MRRSeriesPoint:
+    MRRResponse:
       type: object
       additionalProperties: false
-      description: 'One point in the MRR time series (AnalyticsCalculator.CalculateMRRTimeSeries literal map).'
+      description: 'Current MRR. `mrr` and `paying_tenants` are null when `billing_configured` is false.'
       required:
+      - billing_configured
       - date
       - mrr
-      - active_tenants
+      - paying_tenants
       properties:
+        billing_configured:
+          type: boolean
         date:
           type: string
-          description: "YYYY-MM-DD."
+          description: "YYYY-MM-DD (today)."
         mrr:
-          type: number
-        active_tenants:
-          type: integer
-    MRRSeriesResponse:
-      type: object
-      additionalProperties: false
-      description: 'Default MRR response (no `period`) — a 30-day time series. `series` is null when the calculator yields no points.'
-      required:
-      - start_date
-      - end_date
-      - series
-      properties:
-        start_date:
-          type: string
-          description: "YYYY-MM-DD."
-        end_date:
-          type: string
-          description: "YYYY-MM-DD."
-        series:
-          type: [array, 'null']
-          items:
-            $ref: '#/components/schemas/MRRSeriesPoint'
-    MRRPointResponse:
-      type: object
-      additionalProperties: false
-      description: 'Single-day MRR response (when `period` is supplied).'
-      required:
-      - date
-      - mrr
-      properties:
-        date:
-          type: string
-          description: "YYYY-MM-DD."
-        mrr:
-          type: number
+          type: [number, 'null']
+        paying_tenants:
+          type: [integer, 'null']
     ChurnResponse:
       type: object
       additionalProperties: false
       required:
+      - billing_configured
       - period
       - churn_rate
       properties:
+        billing_configured:
+          type: boolean
         period:
           type: string
           description: "YYYY-MM."
         churn_rate:
-          type: number
+          type: [number, 'null']
     LTVResponse:
       type: object
       additionalProperties: false
       required:
+      - billing_configured
       - ltv
       properties:
+        billing_configured:
+          type: boolean
         ltv:
-          type: number
+          type: [number, 'null']
     RevenueByTierResponse:
       type: object
       additionalProperties: false
-      description: '`revenue_by_tier` maps tier name → revenue.'
+      description: '`revenue_by_tier` maps plan display name → current MRR; empty when `billing_configured` is false.'
       required:
-      - period
+      - billing_configured
       - revenue_by_tier
       properties:
-        period:
-          type: string
-          description: "YYYY-MM."
+        billing_configured:
+          type: boolean
         revenue_by_tier:
           type: object
           additionalProperties:
             type: number
+    TenantBillingSubscription:
+      type: object
+      additionalProperties: false
+      required:
+      - provider
+      - subscription_id
+      - plan
+      - status
+      - current_period_start
+      - current_period_end
+      properties:
+        provider:
+          type: string
+          description: "billing_providers.key: 'stripe' or 'manual' (invoice)."
+        subscription_id:
+          type: string
+        plan:
+          type: string
+        status:
+          type: string
+        current_period_start:
+          type: string
+          format: date-time
+        current_period_end:
+          type: string
+          format: date-time
+    TenantBillingCustomer:
+      type: object
+      additionalProperties: false
+      required:
+      - provider
+      - provider_name
+      - customer_id
+      properties:
+        provider:
+          type: string
+        provider_name:
+          type: string
+        customer_id:
+          type: string
+    TenantBillingOverviewResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - billing
+      properties:
+        billing:
+          type: object
+          additionalProperties: false
+          properties:
+            customers:
+              type: array
+              items:
+                $ref: '#/components/schemas/TenantBillingCustomer'
+            subscriptions:
+              type: array
+              items:
+                $ref: '#/components/schemas/TenantBillingSubscription'
+    TrialListing:
+      type: object
+      additionalProperties: false
+      description: 'One live trial (billing.TrialListing).'
+      required:
+      - tenant_id
+      - tenant_name
+      - plan_name
+      - trial_start
+      - ends_at
+      - phase
+      - days_remaining
+      - extended_count
+      - payment_status
+      - created_at
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        tenant_name:
+          type: string
+        plan_name:
+          type: string
+          description: The trial plan's display name.
+        trial_start:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+          description: When access locks — trial_start + the plan's full and soft trial days, or a later trial_end an extension set.
+        phase:
+          type: string
+          enum: [full, soft_prompt, locked]
+        days_remaining:
+          type: integer
+          description: Whole days until `ends_at` (when access locks); 0 once locked.
+        extended_count:
+          type: integer
+        payment_status:
+          type: string
+          description: "The tenant's payment_status; 'trial' is derived from this trial record."
+        created_at:
+          type: string
+          format: date-time
+    TrialListResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - trials
+      - count
+      properties:
+        trials:
+          type: array
+          items:
+            $ref: '#/components/schemas/TrialListing'
+        count:
+          type: integer
+    StartTrialRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - tenant_id
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        duration:
+          type: integer
+          minimum: 0
+          description: "Trial length in days, start to lock. At least the plan's trial_days_full + trial_days_soft: the trial locks at the later of that and this length, so a shorter length is refused with 400 (the message names the minimum) rather than silently ignored. 0 or absent uses the plan's length (full + soft days; 30 when the plan sets none). A Stripe trialing subscription, when the plan has a Stripe price, gets the same length."
+    ExtendTrialRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - additional_days
+      properties:
+        additional_days:
+          type: integer
+          minimum: 1
+    TrialActionResponse:
+      type: object
+      additionalProperties: false
+      description: Acknowledgement of a trial mutation. Start returns `duration`, the length applied in days (the plan's when none was given); extend echoes `additional_days`; end returns `landing`, where the tenant went.
+      required:
+      - message
+      - tenant_id
+      properties:
+        message:
+          type: string
+        tenant_id:
+          type: string
+          format: uuid
+        duration:
+          type: integer
+        additional_days:
+          type: integer
+        landing:
+          $ref: '#/components/schemas/TrialEndLanding'
+    TrialEndLanding:
+      type: object
+      additionalProperties: false
+      description: Where a tenant goes when its trial ends (billing.TrialLanding) — the MSP's Free plan, or suspended when none is defined.
+      required:
+      - suspended
+      properties:
+        suspended:
+          type: boolean
+          description: No Free plan is defined; the tenant is suspended.
+        plan_id:
+          type: string
+          format: uuid
+          description: The Free plan; absent when `suspended`.
+        plan_name:
+          type: string
+          description: The Free plan's display name; absent when `suspended`.
     TrialConversionResponse:
       type: object
       additionalProperties: false
@@ -8312,39 +8663,6 @@ components:
           type: [array, 'null']
           items:
             $ref: '#/components/schemas/CouponStatsTopCoupon'
-    ForecastPoint:
-      type: object
-      additionalProperties: false
-      description: 'One projected MRR point (billing.MRRForecastPoint).'
-      required:
-      - date
-      - projected_mrr
-      - lower_bound
-      - upper_bound
-      properties:
-        date:
-          type: string
-          description: "YYYY-MM-DD."
-        projected_mrr:
-          type: number
-        lower_bound:
-          type: number
-        upper_bound:
-          type: number
-    ForecastResponse:
-      type: object
-      additionalProperties: false
-      description: 'Server also returns the echoed `months`; `forecast` is null when there is insufficient history.'
-      required:
-      - months
-      - forecast
-      properties:
-        months:
-          type: integer
-        forecast:
-          type: [array, 'null']
-          items:
-            $ref: '#/components/schemas/ForecastPoint'
     CohortData:
       type: object
       additionalProperties: false

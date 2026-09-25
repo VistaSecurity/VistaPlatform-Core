@@ -290,6 +290,8 @@ func TestContract_UpsertTierEntitlement_errors(t *testing.T) {
 		{"bad body", tierEntsBase + "/max_sensors", `{"included_value":`, nil, http.StatusBadRequest, "LegacyError"},
 		{"unknown tier", tierEntsBase + "/max_sensors", validUpsertBody, services.ErrTierNotFound, http.StatusNotFound, "LegacyError"},
 		{"inactive item", tierEntsBase + "/retired", validUpsertBody, &services.UnknownItemKeyError{Key: "retired"}, http.StatusBadRequest, "LegacyError"},
+		{"conflicting overage fields", tierEntsBase + "/storage_gb", validUpsertBody,
+			&services.OverageConflictError{Key: "storage_gb", Field: "overage_price_cents"}, http.StatusBadRequest, "LegacyError"},
 		{"bad value", tierEntsBase + "/max_sensors", `{"included_value":{}}`,
 			fmt.Errorf("item max_sensors: %w", &entitlements.InvalidValueError{Kind: entitlements.KindNumericCap, Reason: `missing "quantity"`}),
 			http.StatusBadRequest, "LegacyError"},

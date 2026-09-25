@@ -199,12 +199,25 @@ func SealCredentialsForAgent(stored map[string]interface{}, jobID, agentSecret, 
 	if agentcreds.IsSealed(plain) {
 		return plain, nil
 	}
+	neutralizeSSHSkipFlag(plain)
 	sealed, err := agentcreds.Seal(plain, jobID, agentSecret)
 	agentcreds.Clear(plain)
 	if err != nil {
 		return nil, err
 	}
 	return sealed, nil
+}
+
+// neutralizeSSHSkipFlag clears the TLS skip flag on an SSH-managed device's
+// credentials before an agent receives them — the agent-side twin of
+// EffectiveInsecureSkipVerify. A device stored with the flag set before the
+// form stopped offering it for Cisco would otherwise still skip host-key
+// verification on every agent-run interrogation.
+func neutralizeSSHSkipFlag(creds map[string]interface{}) {
+	deviceType, _ := creds["device_type"].(string)
+	if _, set := creds["insecure_skip_verify"]; set && IsSSHManagedDeviceType(deviceType) {
+		creds["insecure_skip_verify"] = false
+	}
 }
 
 func hasString(m map[string]interface{}, key string) bool {

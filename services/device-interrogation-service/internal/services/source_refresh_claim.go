@@ -58,6 +58,9 @@ func (s *JobQueueService) claimAuthorizedJob(ctx context.Context, agent, tenant 
 			if err != nil {
 				return err
 			}
+			if s.afterClaimSelect != nil {
+				s.afterClaimSelect(ctx, job.ID)
+			}
 			if agent != nil {
 				job.AgentID = agent
 			}

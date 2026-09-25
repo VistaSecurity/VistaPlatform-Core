@@ -4,41 +4,18 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
-// TestRateLimiter_Allow tests the rate limiter with a mock Redis client
+// TestRateLimiter_Allow covers the basic limit selection and error semantics
+// against the deterministic in-process Redis double. These checks must run in
+// every PR job; they must not depend on a Redis service being reachable.
 func TestRateLimiter_Allow(t *testing.T) {
-	// Create a mock Redis client using a real Redis instance for integration testing
-	// In a real test environment, you'd use a test Redis instance
-	// For unit tests, you'd mock the Redis client
-
-	// Skip if Redis is not available
-	client := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
-	})
-
 	ctx := context.Background()
-	err := client.Ping(ctx).Err()
-	if err != nil {
-		t.Skip("Redis not available, skipping integration test")
-	}
-
-	// Clean up test keys
-	defer func() {
-		client.Del(ctx, "rate_limit:test-tenant:/test")
-		client.Del(ctx, "rate_limit:test-tenant:/auth/login")
-	}()
-
-	// Create rate limiter with low limits for testing
-	limiter := NewRateLimiter(client, 5, 1*time.Minute, 2)
 
 	t.Run("allows requests within limit", func(t *testing.T) {
-		// Reset counter
-		client.Del(ctx, "rate_limit:test-tenant:/test")
+		_, client := newFakeRedis(t)
+		limiter := NewRateLimiter(client, 5, time.Minute, 2)
 
-		// Make 5 requests (within limit of 5)
 		for i := 0; i < 5; i++ {
 			allowed, _, err := limiter.Allow(ctx, "test-tenant", "/test")
 			if err != nil {
@@ -51,15 +28,13 @@ func TestRateLimiter_Allow(t *testing.T) {
 	})
 
 	t.Run("blocks requests exceeding limit", func(t *testing.T) {
-		// Reset counter
-		client.Del(ctx, "rate_limit:test-tenant:/test")
+		_, client := newFakeRedis(t)
+		limiter := NewRateLimiter(client, 5, time.Minute, 2)
 
-		// Make 5 requests (at limit)
 		for i := 0; i < 5; i++ {
 			_, _, _ = limiter.Allow(ctx, "test-tenant", "/test")
 		}
 
-		// 6th request should be blocked
 		allowed, retryAfter, err := limiter.Allow(ctx, "test-tenant", "/test")
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -73,10 +48,9 @@ func TestRateLimiter_Allow(t *testing.T) {
 	})
 
 	t.Run("uses login limit for login endpoints", func(t *testing.T) {
-		// Reset counter
-		client.Del(ctx, "rate_limit:test-tenant:/auth/login")
+		_, client := newFakeRedis(t)
+		limiter := NewRateLimiter(client, 5, time.Minute, 2)
 
-		// Make 2 requests (at login limit of 2)
 		for i := 0; i < 2; i++ {
 			allowed, _, err := limiter.Allow(ctx, "test-tenant", "/auth/login")
 			if err != nil {
@@ -87,7 +61,6 @@ func TestRateLimiter_Allow(t *testing.T) {
 			}
 		}
 
-		// 3rd request should be blocked
 		allowed, _, err := limiter.Allow(ctx, "test-tenant", "/auth/login")
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -98,14 +71,11 @@ func TestRateLimiter_Allow(t *testing.T) {
 	})
 
 	t.Run("fails open on Redis error", func(t *testing.T) {
-		// Create a limiter with invalid Redis client
-		invalidClient := redis.NewClient(&redis.Options{
-			Addr: "localhost:9999", // Invalid address
-		})
-		invalidLimiter := NewRateLimiter(invalidClient, 5, 1*time.Minute, 2)
+		fake, client := newFakeRedis(t)
+		fake.failWith = context.DeadlineExceeded
+		limiter := NewRateLimiter(client, 5, time.Minute, 2)
 
-		// Should return error but not crash
-		allowed, _, err := invalidLimiter.Allow(ctx, "test-tenant", "/test")
+		allowed, _, err := limiter.Allow(ctx, "test-tenant", "/test")
 		if err == nil {
 			t.Error("Expected error from invalid Redis connection")
 		}

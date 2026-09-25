@@ -78,6 +78,15 @@ function fmtCard(kind: string, draft: string): string {
 
 const INFRA_PER_CUSTOMER = 28; // cost-model assumption (100-customer scale); see Vista Cost Model
 
+// Stripe prices are immutable, so presence of either price field tells the
+// server to provision a new Price. Keep untouched prices out of an edit patch.
+export function changedPriceFields(tier: SubscriptionTier, monthly: number, annual?: number) {
+  const patch: { price_cents?: number; annual_price_cents?: number } = {};
+  if (monthly !== tier.price_cents) patch.price_cents = monthly;
+  if (annual !== undefined && annual !== tier.annual_price_cents) patch.annual_price_cents = annual;
+  return patch;
+}
+
 export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: SubscriptionTier; items: BillableItem[]; onClose: () => void }) {
   const isEdit = !!tier;
   const qc = useQueryClient();
@@ -143,7 +152,7 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
         const res = await clients.admin.PUT('/admin/tiers/{id}', {
           params: { path: { id: tier!.id } },
           body: {
-            display_name: displayName.trim(), price_cents, annual_price_cents, billing_method: billingMethod, is_custom: isCustom,
+            display_name: displayName.trim(), ...changedPriceFields(tier!, price_cents, annual_price_cents), billing_method: billingMethod, is_custom: isCustom,
             ...(changed.length ? { entitlements: changed, entitlements_version: entQ.data.version } : {}),
           },
         });

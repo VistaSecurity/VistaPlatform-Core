@@ -856,6 +856,12 @@ export interface components {
              * @enum {string}
              */
             apply: "immediate" | "restart";
+            /**
+             * @description Operator-facing name, present only for a setting whose key reads
+             *     badly when turned into words. Absent means the client derives the
+             *     name from `key`.
+             */
+            label?: string;
             /** @description Operator-facing explanation of what the setting does. */
             description: string;
             /**

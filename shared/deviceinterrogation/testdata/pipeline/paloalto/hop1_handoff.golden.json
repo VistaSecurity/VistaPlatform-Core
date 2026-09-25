@@ -1,0 +1,99 @@
+{
+  "vendor": "paloalto",
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "pa-edge-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "pa-edge-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "013201001234",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+      "hostname": "core-sw-1.example.net",
+      "primary_address": "198.51.100.1",
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "core-sw-1.example.net",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.1",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:00:00:01",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ],
+  "sensor_discoveries": [
+    {
+      "protocol": "TLS",
+      "dest_ip": "0.0.0.0",
+      "port": 443,
+      "confidence": 0.95,
+      "hostname": "allow-web-outbound",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "firewall",
+        "cipher_suite": "",
+        "config_name": "allow-web-outbound",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    },
+    {
+      "protocol": "TLS",
+      "dest_ip": "0.0.0.0",
+      "port": 443,
+      "confidence": 0.95,
+      "hostname": "ssl-fwd-proxy-default",
+      "source_ip": null,
+      "metadata": {
+        "asset_type": "firewall",
+        "ca_certificate_name": "forward-trust-ca",
+        "cipher_suite": "",
+        "device_id": "{{DEVICE_ASSET_ID}}",
+        "device_job_id": "{{DEVICE_JOB_ID}}",
+        "discovery_method": "device_interrogation",
+        "profile_name": "ssl-fwd-proxy-default",
+        "source_asset_id": "{{DEVICE_ASSET_ID}}",
+        "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "version": ""
+      }
+    }
+  ],
+  "learned_segments": []
+}

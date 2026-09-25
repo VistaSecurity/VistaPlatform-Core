@@ -1,0 +1,12 @@
+{
+  "vendor": "fortinet",
+  "device_type": "fortinet",
+  "hostname": "fw-branch-01.corp.example.test",
+  "transport": "rest",
+  "management_ip": "192.0.2.226",
+  "management_port": 443,
+  "tenant_segments": [
+    {"name": "Management network", "cidr": "192.0.2.224/27"}
+  ],
+  "provenance": "HAND-WRITTEN. No real FortiOS REST capture is in the corpus yet (W0.4). system/status, system/interface, monitor/system/interface and monitor/router/ipv4 follow the existing unit-test fixtures (fortinet_ops_test.go). vpn.ssl/settings uses the hyphenated field names FortiOS 7.x documents (ssl-min-proto-ver, servercert), which the collector does not read (C-04); vpn.ipsec/phase1-interface carries a two-proposal list and two DH groups (P-03, P-14); certificate/local carries a public certificate the collector keeps only as device metadata (P-13)."
+}

@@ -42,7 +42,7 @@ type JWTConfig struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "your-secret-key"),
+		"JWT_SECRET":            sharedconfig.JWTSecret(),
 		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 	})
 
@@ -75,7 +75,7 @@ func Load() *Config {
 		DatabaseURL: databaseURL,
 		RedisURL:    sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
 		JWT: JWTConfig{
-			Secret: sharedconfig.GetEnv("JWT_SECRET", "your-secret-key"),
+			Secret: sharedconfig.JWTSecret(),
 		},
 		// mTLS Configuration
 		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),

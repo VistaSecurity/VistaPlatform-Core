@@ -206,6 +206,15 @@ describe('Devices (Discovery → Devices)', () => {
     expect(src).toContain('TENANT_PERMISSIONS.discovery.update');
     expect(src).toContain('TENANT_PERMISSIONS.discovery.manage');
   });
+
+  it('gates Test connection on manage, like interrogate — it logs in with stored credentials (#1492)', () => {
+    const go = 'services/device-interrogation-service/internal/api/router.go';
+    routeRequires(go, 'devices.POST("/:id/test-connection"', 'PermissionDiscoveryManage');
+    const src = read(`${FE}sections/discovery/devices-page.tsx`);
+    // The plug button sits inside a discovery.manage gate, so a viewer is not
+    // offered an action the route would refuse.
+    expect(src).toMatch(/TENANT_PERMISSIONS\.discovery\.manage\}>\s*<RowBtn\s+icon="plug"/);
+  });
 });
 
 describe('Spreadsheet import', () => {

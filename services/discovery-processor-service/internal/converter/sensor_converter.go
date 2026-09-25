@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/forwardmeta"
 )
 
 // SensorDiscoveryConverter converts sensor_discoveries to IngestFinding
@@ -74,7 +75,13 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 
 	// Extract key exchange algorithm from SSH kex_algorithms array or negotiated_kex scalar.
 	// Prefer the negotiated/agreed algorithm; fall back to first offered.
-	if negotiated, ok := metadata["negotiated_kex"].(string); ok && negotiated != "" {
+	//
+	// An interrogation row states its key exchange itself, and only that
+	// counts: its kex_algorithms is an OFFER list, and its head is not the
+	// exchange in use (see interrogatedKeyExchange).
+	if isInterrogationRow(metadata) {
+		keyExchangeAlgorithm = interrogatedKeyExchange(metadata)
+	} else if negotiated, ok := metadata["negotiated_kex"].(string); ok && negotiated != "" {
 		keyExchangeAlgorithm = &negotiated
 	} else if kexAlgos, ok := metadata["kex_algorithms"].([]interface{}); ok && len(kexAlgos) > 0 {
 		if first, ok := kexAlgos[0].(string); ok && first != "" {
@@ -86,6 +93,9 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 		if kex, ok := metadata["key_exchange"].(string); ok && kex != "" {
 			keyExchangeAlgorithm = &kex
 		}
+	}
+	if keyExchangeAlgorithm == nil {
+		keyExchangeAlgorithm = measuredTLSGroup(metadata)
 	}
 
 	// Detect PQC key exchange and record a flag in raw_data for quick frontend filtering.
@@ -124,6 +134,21 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 		}
 		rawData[k] = v
 	}
+	// The posture subset device-interrogation-service forwards ( W2.1) is
+	// checked again on receipt: sensor_discoveries is a table many producers
+	// write, and the canonical keys are ones inventory reads as identity
+	// (mac_address, ssh_host_key_fingerprint) and as measured SSH posture. A
+	// value that does not validate is removed, not passed on.
+	//
+	// Every row, not only one that says it came from device interrogation: the
+	// claim is in the same sensor-controlled envelope, and a row that simply
+	// omits it would otherwise carry an unchecked mac_address or host-key
+	// fingerprint straight into the identity builder. Sanitize touches only the
+	// canonical keys, so a row with none of them is unchanged.
+	if removed := forwardmeta.Sanitize(rawData); len(removed) > 0 {
+		fmt.Printf("Warning: discovery %s: dropped invalid forwarded metadata %v\n", sd.ID, removed)
+	}
+
 	// Add source information
 	rawData["sensor_id"] = sd.SensorID.String()
 	rawData["discovery_id"] = sd.ID.String()

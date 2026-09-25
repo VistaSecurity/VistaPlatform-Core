@@ -1,0 +1,151 @@
+{
+  "vendor": "paloalto",
+  "input_sha256": "7b168abb96c73b0b7f68e5f2fa772b8a8fbbae9e107014675dbf9ceda2ab858e",
+  "imports": [
+    {
+      "asset_status": "pending_approval",
+      "findings": [
+        {
+          "asset_type": "server",
+          "cipher_suite": "",
+          "hash_algorithm": null,
+          "hostname": "allow-web-outbound",
+          "ip_address": "0.0.0.0",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 443,
+          "protocol": "TLS",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "firewall",
+            "batch_id": "{{BATCH_ID}}",
+            "cipher_suite": "",
+            "confidence": 0.95,
+            "config_name": "allow-web-outbound",
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:0}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "third_party",
+            "network_type": "public",
+            "pqc_kex_detected": false,
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": ""
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        },
+        {
+          "asset_type": "server",
+          "cipher_suite": "",
+          "hash_algorithm": null,
+          "hostname": "ssl-fwd-proxy-default",
+          "ip_address": "0.0.0.0",
+          "key_exchange_algorithm": null,
+          "key_size": null,
+          "port": 443,
+          "protocol": "TLS",
+          "protocol_version": "",
+          "raw_data": {
+            "asset_type": "firewall",
+            "batch_id": "{{BATCH_ID}}",
+            "ca_certificate_name": "forward-trust-ca",
+            "cipher_suite": "",
+            "confidence": 0.95,
+            "dest_hostname_source_kind": "measured",
+            "device_id": "{{DEVICE_ASSET_ID}}",
+            "device_job_id": "{{DEVICE_JOB_ID}}",
+            "discovery_id": "{{DISCOVERY_ID:1}}",
+            "discovery_method": "device_interrogation",
+            "network_ownership": "third_party",
+            "network_type": "public",
+            "pqc_kex_detected": false,
+            "profile_name": "ssl-fwd-proxy-default",
+            "sensor_id": "{{SENSOR_ID}}",
+            "source": "sensor_discovery",
+            "source_asset_id": "{{DEVICE_ASSET_ID}}",
+            "source_device_id": "{{DEVICE_ASSET_ID}}",
+            "timestamp": "{{TIMESTAMP}}",
+            "version": ""
+          },
+          "source_sensor_id": "{{SENSOR_ID}}"
+        }
+      ]
+    }
+  ],
+  "external_connections": [],
+  "rows": [
+    {
+      "row": 0,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    },
+    {
+      "row": 1,
+      "approval_status": "pending",
+      "processed": true,
+      "forwarded": "import"
+    }
+  ],
+  "process_error": "",
+  "learned_segments": [],
+  "assets": [
+    {
+      "label": "device",
+      "hostname": "pa-edge-01.corp.example.test",
+      "primary_address": "{{APPLIANCE_IP}}",
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "pa-edge-01.corp.example.test",
+          "scope": null,
+          "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "{{APPLIANCE_IP}}",
+          "scope": "tenant",
+          "source_kind": "declared"
+        },
+        {
+          "kind": "serial_number",
+          "value": "013201001234",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    },
+    {
+      "label": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+      "hostname": "core-sw-1.example.net",
+      "primary_address": "198.51.100.1",
+      "class_key": "firewall",
+      "identifiers": [
+        {
+          "kind": "fqdn",
+          "value": "core-sw-1.example.net",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.1",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:00:00:01",
+          "scope": null,
+          "source_kind": "measured"
+        }
+      ]
+    }
+  ]
+}

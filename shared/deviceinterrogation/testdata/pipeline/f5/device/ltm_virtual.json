@@ -1,0 +1,44 @@
+{
+  "kind": "tm:ltm:virtual:virtualcollectionstate",
+  "items": [
+    {
+      "name": "vs_web_443",
+      "fullPath": "/Common/vs_web_443",
+      "destination": "/Common/198.51.100.10:443",
+      "enabled": true,
+      "pool": "/Common/web-pool",
+      "profiles": [
+        {
+          "name": "clientssl-secure"
+        }
+      ],
+      "rules": [
+        "MUST-NOT-BE-COLLECTED"
+      ]
+    },
+    {
+      "name": "vs_legacy_443",
+      "fullPath": "/Common/vs_legacy_443",
+      "destination": "/Common/198.51.100.11:443",
+      "enabled": true,
+      "pool": "/Common/web-pool",
+      "profiles": [
+        {
+          "name": "clientssl-hardened"
+        }
+      ]
+    },
+    {
+      "name": "vs_retired",
+      "fullPath": "/Common/vs_retired",
+      "destination": "/Common/198.51.100.12:443",
+      "disabled": true,
+      "pool": "/Common/web-pool",
+      "profiles": [
+        {
+          "name": "clientssl-secure"
+        }
+      ]
+    }
+  ]
+}

@@ -203,6 +203,23 @@ type JobResult struct {
 	Facts         []di.FactObservation         `json:"facts,omitempty"`
 	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
 
+	// Warnings are the collection warnings the shared collector raised — an
+	// endpoint the account may not read, a command the device lacks, a table
+	// cut at its bound (finding P-17). Same shape on both executors. An agent
+	// build that predates them sends no field, which decodes as none; the
+	// service re-sanitizes whatever an agent does send.
+	Warnings []di.CollectionWarning `json:"warnings,omitempty"`
+
+	// DeviceIdentity is what the interrogated device said it is — vendor,
+	// model, firmware, serial, OS version, class hint — carried ONCE, beside
+	// the assets rather than on them ( W2.7). The in-cluster executor
+	// has always handed its own copy straight to the observation sink; an
+	// agent used to send it only on each asset, so a run that found no crypto
+	// assets lost it. An older agent still sends it that way and sends no
+	// field here, which decodes as nil — the result processor then falls back
+	// to the first asset's copy.
+	DeviceIdentity *di.DeviceIdentity `json:"device_identity,omitempty"`
+
 	// ObservationsErr is what the in-cluster executor could not persist of the
 	// Facts/Relationships it wrote itself, handed to the result processor so it
 	// lands in the job's processing block. Never serialised: an agent cannot

@@ -140,6 +140,44 @@ func TestCompute(t *testing.T) {
 			},
 			want: PhaseLocked,
 		},
+		{
+			// End trial on day 3: over from that moment, not at day 28.
+			name: "ended early (hard_locked_at before the clock's lock) → locked",
+			in: Inputs{
+				TrialStart:    trialStart,
+				TrialDaysFull: ptr(14),
+				TrialDaysSoft: ptr(14),
+				HardLockedAt:  ptrTime(trialStart.Add(3 * 24 * time.Hour)),
+				Now:           trialStart.Add(3*24*time.Hour + time.Minute),
+			},
+			want: PhaseLocked,
+		},
+		{
+			// ...and even an extended trial_end does not outlive an end.
+			name: "ended early beats an extended trial_end",
+			in: Inputs{
+				TrialStart:    trialStart,
+				TrialDaysFull: ptr(14),
+				TrialDaysSoft: ptr(14),
+				TrialEnd:      ptrTime(trialStart.Add(60 * 24 * time.Hour)),
+				HardLockedAt:  ptrTime(trialStart.Add(3 * 24 * time.Hour)),
+				Now:           trialStart.Add(4 * 24 * time.Hour),
+			},
+			want: PhaseLocked,
+		},
+		{
+			// Before the stamp nothing changes (a stamp is only ever written
+			// at or before now, but the rule is ordering, not wall time).
+			name: "before hard_locked_at the clock still decides",
+			in: Inputs{
+				TrialStart:    trialStart,
+				TrialDaysFull: ptr(14),
+				TrialDaysSoft: ptr(14),
+				HardLockedAt:  ptrTime(trialStart.Add(3 * 24 * time.Hour)),
+				Now:           trialStart.Add(2 * 24 * time.Hour),
+			},
+			want: PhaseFull,
+		},
 	}
 
 	for _, tc := range cases {
@@ -233,5 +271,26 @@ func TestDaysRemaining(t *testing.T) {
 				t.Errorf("DaysRemaining = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// hard_locked_at only ever brings the lock FORWARD: the sweep stamps it after
+// the clock's lock (it runs periodically), and that stamp must not move the
+// end date the Trials list and the plan block show.
+func TestLockAt_HardLockedAt(t *testing.T) {
+	clockLock := trialStart.Add(28 * 24 * time.Hour)
+	base := Inputs{TrialStart: trialStart, TrialDaysFull: ptr(14), TrialDaysSoft: ptr(14)}
+
+	late := base
+	late.HardLockedAt = ptrTime(clockLock.Add(3 * time.Hour))
+	if got := LockAt(late); !got.Equal(clockLock) {
+		t.Errorf("sweep stamp after the lock: LockAt = %s, want the clock's %s", got, clockLock)
+	}
+
+	early := base
+	ended := trialStart.Add(5 * 24 * time.Hour)
+	early.HardLockedAt = ptrTime(ended)
+	if got := LockAt(early); !got.Equal(ended) {
+		t.Errorf("ended on day 5: LockAt = %s, want %s", got, ended)
 	}
 }

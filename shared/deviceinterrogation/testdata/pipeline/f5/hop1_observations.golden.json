@@ -1,0 +1,310 @@
+{
+  "admission_enforce": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.firmware_version",
+        "source_kind": "measured",
+        "value": "17.1.1.3"
+      },
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "BIG-IP Virtual Edition"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "f5-abcd-efgh"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "F5 Networks"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": false
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "https"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "admin_state": "up",
+            "mac": "00:23:e9:aa:bb:01",
+            "name": "1.1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "admin_state": "down",
+            "mac": "00:23:e9:aa:bb:02",
+            "name": "1.2",
+            "state": "down"
+          },
+          {
+            "admin_state": "up",
+            "mac": "00:23:e9:aa:bb:00",
+            "name": "mgmt",
+            "speed": 100,
+            "state": "up"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.vlans",
+        "source_kind": "measured",
+        "value": [
+          {
+            "gateway": "192.0.2.5",
+            "id": 20,
+            "name": "internal",
+            "subnet": "192.0.2.0/24"
+          },
+          {
+            "gateway": "198.51.100.5",
+            "id": 10,
+            "name": "external",
+            "subnet": "198.51.100.0/24"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "os.name",
+        "source_kind": "measured",
+        "value": "TMOS"
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "17.1.1.3"
+      }
+    ],
+    "edges": [],
+    "assets": [
+      {
+        "asset": "device",
+        "class_key": "load_balancer",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.10"
+          },
+          {
+            "confidence": 1,
+            "kind": "hostname",
+            "scope": "segment:198.51.100.0/24",
+            "value": "vs_web_443"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "unresolved"
+      },
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.11"
+          },
+          {
+            "confidence": 1,
+            "kind": "hostname",
+            "scope": "segment:198.51.100.0/24",
+            "value": "vs_legacy_443"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "unresolved"
+      }
+    ],
+    "collection_warnings": [
+      {
+        "collector": "f5",
+        "detail": "API returned status 403 (F5 code 403)",
+        "effect": "Server SSL profiles not collected",
+        "endpoint": "/mgmt/tm/ltm/profile/server-ssl",
+        "reason": "permission_denied"
+      }
+    ],
+    "processing_errors": []
+  },
+  "admission_off": {
+    "facts": [
+      {
+        "asset": "device",
+        "key": "hw.firmware_version",
+        "source_kind": "measured",
+        "value": "17.1.1.3"
+      },
+      {
+        "asset": "device",
+        "key": "hw.model",
+        "source_kind": "measured",
+        "value": "BIG-IP Virtual Edition"
+      },
+      {
+        "asset": "device",
+        "key": "hw.serial",
+        "source_kind": "measured",
+        "value": "f5-abcd-efgh"
+      },
+      {
+        "asset": "device",
+        "key": "hw.vendor",
+        "source_kind": "measured",
+        "value": "F5 Networks"
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.plaintext",
+        "source_kind": "measured",
+        "value": false
+      },
+      {
+        "asset": "device",
+        "key": "mgmt.protocol",
+        "source_kind": "measured",
+        "value": "https"
+      },
+      {
+        "asset": "device",
+        "key": "net.interfaces",
+        "source_kind": "measured",
+        "value": [
+          {
+            "admin_state": "up",
+            "mac": "00:23:e9:aa:bb:01",
+            "name": "1.1",
+            "speed": 1000,
+            "state": "up"
+          },
+          {
+            "admin_state": "down",
+            "mac": "00:23:e9:aa:bb:02",
+            "name": "1.2",
+            "state": "down"
+          },
+          {
+            "admin_state": "up",
+            "mac": "00:23:e9:aa:bb:00",
+            "name": "mgmt",
+            "speed": 100,
+            "state": "up"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "net.vlans",
+        "source_kind": "measured",
+        "value": [
+          {
+            "gateway": "192.0.2.5",
+            "id": 20,
+            "name": "internal",
+            "subnet": "192.0.2.0/24"
+          },
+          {
+            "gateway": "198.51.100.5",
+            "id": 10,
+            "name": "external",
+            "subnet": "198.51.100.0/24"
+          }
+        ]
+      },
+      {
+        "asset": "device",
+        "key": "os.name",
+        "source_kind": "measured",
+        "value": "TMOS"
+      },
+      {
+        "asset": "device",
+        "key": "os.version",
+        "source_kind": "measured",
+        "value": "17.1.1.3"
+      }
+    ],
+    "edges": [
+      {
+        "from": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[ip_address=198.51.100.20]",
+        "type": "depends_on"
+      },
+      {
+        "from": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[ip_address=198.51.100.21]",
+        "type": "depends_on"
+      }
+    ],
+    "assets": [
+      {
+        "asset": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+        "class_key": "load_balancer",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "class_key": "load_balancer",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "asset[ip_address=198.51.100.20]",
+        "class_key": "unknown_host",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "asset[ip_address=198.51.100.21]",
+        "class_key": "unknown_host",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "device",
+        "class_key": "load_balancer",
+        "status": "pending_approval"
+      }
+    ],
+    "retained_observations": [],
+    "collection_warnings": [
+      {
+        "collector": "f5",
+        "detail": "API returned status 403 (F5 code 403)",
+        "effect": "Server SSL profiles not collected",
+        "endpoint": "/mgmt/tm/ltm/profile/server-ssl",
+        "reason": "permission_denied"
+      }
+    ],
+    "processing_errors": []
+  }
+}

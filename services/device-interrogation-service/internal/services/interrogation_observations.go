@@ -54,6 +54,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/identity/identityaudit"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // InterrogationObservations is what an interrogation observed beyond its crypto
@@ -229,14 +230,15 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 	self := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	var errs []error
 
-	// DHCP-backed VLANs must exist as cidr segments BEFORE peers are resolved,
-	// so ScopeForAddress can mark lease IPs dynamic and they cannot vote.
+	// The device's networks must exist as cidr segments BEFORE peers are
+	// resolved, so a peer's address resolves into its segment, and an address
+	// on a network that hands out (or may hand out) leases cannot vote.
 	for _, f := range wrapped.Facts {
 		if f.Key != facts.KeyNetVlans {
 			continue
 		}
 		ctx = context.WithValue(ctx, observedDHCPKey{}, append(observedDHCP(ctx), vlanSegmentSpecs(f.Value)...))
-		if err := s.ensureVLANSegments(ctx, tenantID, f.Value); err != nil {
+		if err := s.ensureVLANSegments(ctx, tenantID, assetID, f.Value); err != nil {
 			return fmt.Errorf("vlan segments: %w", err)
 		}
 	}
@@ -730,7 +732,7 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 	if addr, err := netip.ParseAddr(peer.Identifier(di.IdentifierIPAddress)); err == nil {
 		for _, segment := range observedDHCP(ctx) {
 			prefix, err := netip.ParsePrefix(segment.CIDR)
-			if err == nil && segment.Dynamic && prefix.Contains(addr.Unmap()) {
+			if err == nil && segment.leaseScope() && prefix.Contains(addr.Unmap()) {
 				dynamicScope = true
 			}
 		}
@@ -925,15 +927,61 @@ func observedDHCP(ctx context.Context) []vlanSegmentSpec {
 	return specs
 }
 
+// dhcpPosture is what an interrogated device said about DHCP on one of its
+// networks. It is three-valued because the fact contract is: `dhcp_enabled` is
+// optional on a net.vlans item, and only UniFi reports it today. A FortiGate
+// subinterface or an F5 self-IP describes a network without saying whether
+// anything hands out leases on it, and "unknown stays unknown" — absent is not
+// false.
+type dhcpPosture string
+
+const (
+	dhcpEnabled  dhcpPosture = "enabled"
+	dhcpDisabled dhcpPosture = "disabled"
+	dhcpUnknown  dhcpPosture = "unknown"
+)
+
+// segmentSourceInterrogation is the provenance a learned segment carries in
+// `metadata.source`. The producing device is named beside it
+// (`source_device_type`, `source_asset_id`) rather than in it, so the value a
+// reader matches on does not change with the vendor.
+const segmentSourceInterrogation = "interrogation"
+
+// segmentSourceLegacyUniFi is what learned segments were labelled before any
+// vendor but UniFi could produce one. Rows carrying it are still ours to
+// refresh; no backfill rewrites them, the next interrogation of the same
+// network relabels them.
+const segmentSourceLegacyUniFi = "unifi"
+
 type vlanSegmentSpec struct {
-	CIDR    string
-	Name    string
-	Dynamic bool
+	CIDR        string
+	Name        string
+	DHCP        dhcpPosture
+	NetworkType string
 }
 
-// vlanSegmentSpecs extracts cidr segments from a net.vlans fact. Only entries
-// that declare dhcp_enabled are UniFi-style networks with DHCP posture; a
-// Cisco VLAN id with no prefix is not a scope.
+// leaseScope reports whether an address on this network must be treated as a
+// possibly-reused lease: it may be recorded, but it cannot vote on identity.
+//
+// Unknown answers yes. That is the conservative direction for the one decision
+// it feeds — the cost of being wrong is that a bare address on a static network
+// cannot join two observations by itself (a MAC, serial or agent id still
+// can), while the cost of the other answer is two devices that held the same
+// lease merged into one asset.
+//
+// This is the in-run half. It matters where the network's persisted segment
+// does not carry the posture — an operator declared the same CIDR first, and
+// declared segments win. The persistent half is ScopeForAddress, which reads a
+// stored `dhcp: unknown` as dynamic for every later run and intake.
+func (s vlanSegmentSpec) leaseScope() bool { return s.DHCP != dhcpDisabled }
+
+// vlanSegmentSpecs extracts cidr segments from a net.vlans fact.
+//
+// Any entry with a usable prefix is a segment, whichever vendor emitted it: a
+// UniFi network, a FortiGate VLAN subinterface and an F5 self-IP all describe
+// the same thing, a network the device has an address on. An entry without a
+// prefix (a Cisco VLAN database row: id and name) is not a scope, and neither
+// is a prefix that describes no network of hosts — see [segmentablePrefix].
 func vlanSegmentSpecs(value any) []vlanSegmentSpec {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -945,29 +993,87 @@ func vlanSegmentSpecs(value any) []vlanSegmentSpec {
 	}
 	var out []vlanSegmentSpec
 	for _, e := range entries {
-		dhcp, hasDHCP := e["dhcp_enabled"].(bool)
-		if !hasDHCP {
-			continue
-		}
 		subnet, _ := e["subnet"].(string)
 		prefix, err := netip.ParsePrefix(strings.TrimSpace(subnet))
 		if err != nil {
 			continue
 		}
+		// Stored in the form ScopeForAddress compares against: it unmaps every
+		// address, so a segment kept as ::ffff:10.0.0.0/120 would contain none.
+		prefix, ok := sharednetwork.UnmapPrefix(prefix)
+		if !ok || !segmentablePrefix(prefix) {
+			continue
+		}
+		posture := dhcpUnknown
+		if dhcp, ok := e["dhcp_enabled"].(bool); ok {
+			posture = dhcpDisabled
+			if dhcp {
+				posture = dhcpEnabled
+			}
+		}
 		name, _ := e["name"].(string)
 		if strings.TrimSpace(name) == "" {
-			name = prefix.Masked().String()
+			name = prefix.String()
 		}
 		out = append(out, vlanSegmentSpec{
-			CIDR:    prefix.Masked().String(),
-			Name:    name,
-			Dynamic: dhcp,
+			CIDR:        prefix.String(),
+			Name:        name,
+			DHCP:        posture,
+			NetworkType: sharednetwork.PrefixNetworkType(prefix),
 		})
 	}
 	return out
 }
 
-func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID uuid.UUID, value any) error {
+// segmentablePrefix reports whether a masked, unmapped prefix describes a network of
+// hosts. A host route (/32, /128) is one address, a default route is every
+// address, and loopback, link-local and multicast space are not networks a
+// tenant's devices are placed in — a segment over any of them would scope
+// identities by something that is not where the host was standing.
+func segmentablePrefix(p netip.Prefix) bool {
+	a := p.Addr()
+	if p.Bits() == 0 || p.Bits() >= a.BitLen() {
+		return false
+	}
+	return !a.IsUnspecified() && !a.IsLoopback() && !a.IsLinkLocalUnicast() &&
+		!a.IsMulticast() && !a.IsLinkLocalMulticast() && !a.IsInterfaceLocalMulticast()
+}
+
+// vlanSegmentMetadata is what a learned segment records about itself.
+//
+// `dynamic` is written only when the device ANSWERED: it is a measured
+// statement, and the Network Segments page reports it as one. An unknown
+// posture is recorded as `dhcp: unknown` and nothing else. How identity treats
+// an unknown is the reader's decision, and it is the conservative one in both
+// places that read it: [vlanSegmentSpec.leaseScope] for this run, and
+// ScopeForAddress (shared/identity/postgres) for every run after it.
+func vlanSegmentMetadata(spec vlanSegmentSpec, deviceType, assetID string) map[string]any {
+	meta := map[string]any{
+		"source":          segmentSourceInterrogation,
+		"source_asset_id": assetID,
+		"dhcp":            string(spec.DHCP),
+	}
+	if deviceType != "" {
+		meta["source_device_type"] = deviceType
+	}
+	if spec.DHCP != dhcpUnknown {
+		meta["dynamic"] = spec.DHCP == dhcpEnabled
+	}
+	return meta
+}
+
+// ensureVLANSegments creates, or refreshes, the cidr segments a device's
+// net.vlans fact declares.
+//
+// It only ever writes rows it owns. The INSERT does nothing on a CIDR that
+// already exists, so an operator-declared segment keeps its name, type and
+// metadata; the UPDATE refreshes only rows a previous interrogation created —
+// under the current label or the legacy `unifi` one.
+//
+// An unknown posture never overwrites a known one: a UniFi controller that
+// measured DHCP on a network and a firewall that routes the same network
+// without knowing are not in disagreement, and the row keeps the answer.
+func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID, assetID uuid.UUID, value any) error {
 	if s.db == nil {
 		return nil
 	}
@@ -976,20 +1082,27 @@ func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID uuid.
 		return nil
 	}
 	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		// The device the networks were learned from. Both interrogation paths
+		// (in-cluster and agent) hand the sink the interrogated asset, so this
+		// is read here once rather than threaded through each of them.
+		var deviceType string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT coalesce(metadata->>'device_type', '')
+			FROM public.assets WHERE tenant_id = $1 AND id = $2`,
+			tenantID, assetID).Scan(&deviceType); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read source device type: %w", err)
+		}
 		for _, spec := range specs {
-			metadata, err := json.Marshal(map[string]any{
-				"dynamic": spec.Dynamic,
-				"source":  "unifi",
-			})
+			metadata, err := json.Marshal(vlanSegmentMetadata(spec, deviceType, assetID.String()))
 			if err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO public.network_segments
 					(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-				VALUES ($1, $2, 'cidr', $3, 'private', 'production'::public.environment_type, true, $4::jsonb)
+				VALUES ($1, $2, 'cidr', $3, $4, 'production'::public.environment_type, true, $5::jsonb)
 				ON CONFLICT (tenant_id, value, coalesce(cloud_network_ref, ''::text)) DO NOTHING`,
-				tenantID, spec.Name, spec.CIDR, string(metadata)); err != nil {
+				tenantID, spec.Name, spec.CIDR, spec.NetworkType, string(metadata)); err != nil {
 				return fmt.Errorf("insert vlan segment %s: %w", spec.CIDR, err)
 			}
 			if _, err := tx.ExecContext(ctx, `
@@ -997,8 +1110,12 @@ func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID uuid.
 				SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
 				    updated_at = now()
 				WHERE tenant_id = $1 AND value = $2 AND segment_type = 'cidr'
-				  AND metadata->>'source' = 'unifi' AND coalesce(cloud_network_ref, '') = ''`,
-				tenantID, spec.CIDR, string(metadata)); err != nil {
+				  AND metadata->>'source' IN ($4, $5)
+				  AND coalesce(cloud_network_ref, '') = ''
+				  AND NOT ($6::boolean AND metadata ? 'dynamic')`,
+				tenantID, spec.CIDR, string(metadata),
+				segmentSourceInterrogation, segmentSourceLegacyUniFi,
+				spec.DHCP == dhcpUnknown); err != nil {
 				return fmt.Errorf("update vlan segment %s: %w", spec.CIDR, err)
 			}
 		}

@@ -264,11 +264,11 @@ If no platform notification channels are configured yet, the Notification Delive
 
 ### Staff
 
-The list of platform (internal) admin users. From here you **invite/create** a platform admin, assign them a **role**, **update** their details and role, and **deactivate/remove** access when someone leaves. Creating, inviting, and changing a role all need `platform_roles.assign` — without it the Role field and the Invite/Create buttons are disabled (see [Who can assign a role](#who-can-assign-a-role)). Invited staff receive an email to set up their account. Treat this list as a privileged-access inventory — review it periodically and remove stale accounts.
+The list of platform (internal) admin users. Viewing it requires `platform_users.read`. From here you **invite/create** a platform admin, assign them a **role**, **update** their details and role, and **deactivate/remove** access when someone leaves. Creating, inviting, and changing a role all need `platform_roles.assign` — without it the Role field and the Invite/Create buttons are disabled (see [Who can assign a role](#who-can-assign-a-role)). Invited staff receive an email to set up their account. Treat this list as a privileged-access inventory — review it periodically and remove stale accounts.
 
 ### Roles
 
-The platform **roles and their permissions**. Create, edit, and delete roles, and tune exactly which permissions each role grants. Because every section and action in this console is permission-gated, Roles is where you implement least-privilege for your team — e.g., a support role that can scope-to-tenant and read the activity trail but can't touch packaging or billing.
+The platform **roles and their permissions**. Viewing this page requires both `platform_roles.read` and `platform_permissions.read`. Create, edit, and delete roles, and tune exactly which permissions each role grants. Because every section and action in this console is permission-gated, Roles is where you implement least-privilege for your team — e.g., a support role that can scope-to-tenant and read the activity trail but can't touch packaging or billing.
 
 **Key tasks:** onboard/offboard platform staff, assign least-privilege roles, and adjust role definitions as your team's responsibilities change.
 
@@ -279,7 +279,7 @@ The platform **roles and their permissions**. Create, edit, and delete roles, an
 **What it's for:** the consolidated "are we trustworthy" home — posture, the platform-wide activity trail, and the outbound integrations and retention controls around it. Five sub-pages:
 
 - **Dashboard** — security events, anomalies, and overall posture across the platform.
-- **Activity Log** — the full platform-wide activity trail: user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Tenant suspensions, deletions, role changes and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
+- **Activity Log** — the full platform-wide activity trail (requires `platform.audit`): user and system actions across platform and tenants. Filter by tenant, user, event type, status, and date range to investigate an incident or answer a "who changed this?" question. Tenant suspensions, deletions, role changes and other sensitive operator actions land here. Export the filtered set to CSV or JSON.
 - **Retention** — log **retention and archival** policies: how long activity is kept hot vs. archived. Set these to match the compliance regimes you operate under; longer retention typically means tiered/archived storage rather than indefinite hot storage.
 - **SIEM Export** — outbound **SIEM forwarding**: stream the activity trail to your external security tooling (Splunk, Datadog, Elasticsearch, etc.) for correlation and long-term analysis. Configure and verify the forwarding integration here.
 - **Policy** — platform security and authentication settings (the policy that governs how the platform itself is secured): registration toggles, email-verification requirement, password policy, and session/lockout controls. Editing it needs Security management; see [Settings that need Security management](#settings-that-need-security-management).

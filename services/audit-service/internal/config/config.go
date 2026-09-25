@@ -70,7 +70,7 @@ type TelemetryConfig struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+		"JWT_SECRET":            sharedconfig.JWTSecret(),
 		"INTERNAL_AUTH_SECRET":  sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", ""),
 		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
 	})
@@ -124,7 +124,7 @@ func Load() *Config {
 		Database:    dbConfig,
 		DatabaseURL: databaseURL,
 		JWT: JWTConfig{
-			Secret: sharedconfig.GetEnv("JWT_SECRET", "dev-secret-key-change-in-production"),
+			Secret: sharedconfig.JWTSecret(),
 		},
 		S3:                 s3Config,
 		Telemetry:          telemetryConfig,

@@ -23,7 +23,7 @@ type SSHProber struct {
 // NewSSHProber creates a new SSH prober instance
 func NewSSHProber(timeout time.Duration) *SSHProber {
 	return &SSHProber{
-		prober: shareddisc.NewProber(timeout),
+		prober: platformProber(timeout),
 	}
 }
 

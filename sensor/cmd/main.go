@@ -36,6 +36,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
@@ -107,6 +108,70 @@ type Sensor struct {
 	// on every 30s beat. Zero values mean "never sent", which always sends.
 	lastHostHash   string
 	lastHostSentAt time.Time
+
+	// ownedNetworks is the tenant's owned-network scope, delivered on the
+	// heartbeat ( W5.13), that the TLS enricher decides against. Held
+	// here rather than on the enricher so it survives a capture rebuild.
+	// Always reached through owned(), which creates it on first use.
+	ownedNetworks     *enrichment.OwnedNetworks
+	ownedNetworksOnce sync.Once
+	// consentStateMu serialises writes of the platform's recorded probe
+	// consent; platformOptInDelivered is set once the platform has delivered
+	// third_party_tls_enrichment this run. See probe_consent_state.go.
+	consentStateMu         sync.Mutex
+	platformOptInDelivered atomic.Bool
+}
+
+// owned returns the sensor's owned-network scope. On first use it also settles
+// which probe consent is in force before the platform answers this run — what
+// the platform last delivered, else the local configuration — so that has
+// happened before any enricher is built.
+func (s *Sensor) owned() *enrichment.OwnedNetworks {
+	s.ownedNetworksOnce.Do(func() {
+		if s.ownedNetworks == nil {
+			s.ownedNetworks = enrichment.NewOwnedNetworks()
+		}
+		s.restoreProbeConsent(s.ownedNetworks)
+	})
+	return s.ownedNetworks
+}
+
+// newTLSEnricher is the ONE way the sensor builds its TLS enricher, used at
+// startup and on every capture rebuild, so both get the same owned-network
+// scope the heartbeat keeps current. A second construction site that forgot it
+// would enrich with "private space only" until the next restart.
+func (s *Sensor) newTLSEnricher(discoveries chan<- *models.CryptoDiscovery) *enrichment.TLSEnricher {
+	return enrichment.NewTLSEnricher(s.config, s.config.SensorID, discoveries, s.owned())
+}
+
+// applyHeartbeatReply takes what the platform answered a heartbeat with.
+func (s *Sensor) applyHeartbeatReply(commands *models.SensorCommands) {
+	if commands == nil {
+		return
+	}
+	// What the platform says this sensor should be running. A reply without
+	// a config block is an older platform, and its silence is not an
+	// instruction to revert.
+	if s.applier != nil && commands.Config != nil {
+		s.applier.Apply(commands.Config.Revision, commands.Config.Values)
+	}
+	// Likewise the owned networks: absent means "keep what you have". Present,
+	// they replace whatever was in force — the local list included — and are
+	// recorded so a restart keeps the platform's answer.
+	if commands.OwnedNetworks != nil {
+		at := time.Now()
+		s.owned().UpdateAt(commands.OwnedNetworks, at)
+		delivered := *commands.OwnedNetworks
+		if delivered.Incomplete {
+			// Record what is now in force: no ownership, and the exclusions
+			// the sensor holds after merging — not only the partial list the
+			// platform could read.
+			delivered = probeconsent.OwnedNetworks{Prefixes: []string{}, Endpoints: []string{}, Excluded: s.owned().Scope().ExcludedStrings(), Incomplete: true}
+		}
+		s.recordPlatformProbeConsent(func(st *probeConsentState) {
+			st.OwnedNetworks, st.OwnedNetworksDeliveredAt = &delivered, at
+		})
+	}
 }
 
 // hostReportInterval is the minimum time between two sends of an UNCHANGED
@@ -599,7 +664,7 @@ func (s *Sensor) initialize() error {
 
 	// Initialize TLS enricher — uses the packet capture discoveries channel
 	// so enrichment results flow through the same submission pipeline.
-	tlsEnricher := enrichment.NewTLSEnricher(s.config, s.config.SensorID, packetCapture.GetDiscoveriesWritable())
+	tlsEnricher := s.newTLSEnricher(packetCapture.GetDiscoveriesWritable())
 	s.tlsEnricher = tlsEnricher
 
 	// Initialize test logger if in test mode
@@ -1161,12 +1226,7 @@ func (s *Sensor) sendHeartbeat() {
 			if reportHost {
 				s.commitHostReport(hostHash, health.Timestamp)
 			}
-			// What the platform says this sensor should be running. A reply
-			// without a config block is an older platform, and its silence is
-			// not an instruction to revert.
-			if s.applier != nil && commands != nil && commands.Config != nil {
-				s.applier.Apply(commands.Config.Revision, commands.Config.Values)
-			}
+			s.applyHeartbeatReply(commands)
 			// Process received commands
 			s.processCommands(commands)
 		}
@@ -1194,7 +1254,7 @@ func (s *Sensor) updateConfig(config *models.SensorConfig) {
 	}
 
 	// Update capture config
-	s.config.Capture.ActiveProbing = config.CaptureConfig.ActiveProbing
+	s.config.SetActiveProbing(config.CaptureConfig.ActiveProbing)
 	s.config.Capture.NetworkDiscovery = config.CaptureConfig.NetworkDiscovery
 	// Only when the platform actually stated a value — see the field comment.
 	if config.CaptureConfig.HostObservation != nil {
@@ -1446,7 +1506,7 @@ func (s *Sensor) handleUpdateConfig(command models.Command) *models.CommandRespo
 
 	if captureRaw, ok := configData["capture_config"].(map[string]interface{}); ok {
 		if ap, ok := captureRaw["active_probing"].(bool); ok {
-			s.config.Capture.ActiveProbing = ap
+			s.config.SetActiveProbing(ap)
 			updatesApplied++
 			log.Printf("📝 Active probing set to: %v", ap)
 		}
@@ -1670,7 +1730,7 @@ func (s *Sensor) reinitCapture() error {
 	}
 	s.packetCapture = pc
 
-	enr := enrichment.NewTLSEnricher(s.config, s.config.SensorID, pc.GetDiscoveriesWritable())
+	enr := s.newTLSEnricher(pc.GetDiscoveriesWritable())
 	enr.Start(3)
 	s.tlsEnricher = enr
 	// The rebuilt capture now uses the recorded settings. Seed a fresh

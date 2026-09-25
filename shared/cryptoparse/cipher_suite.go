@@ -75,7 +75,12 @@ type CipherSuiteComponents struct {
 	Symmetric   string
 	Hash        string
 	IsInferred  bool
-	Confidence  float64
+	// KeyExchangeInferred is true when KeyExchange was ASSUMED rather than
+	// read from the suite name — every TLS 1.3 suite, whose name carries no
+	// key exchange. The symmetric cipher and hash of a TLS 1.3 suite are still
+	// read from its name, which is why this is separate from IsInferred.
+	KeyExchangeInferred bool
+	Confidence          float64
 }
 
 // ParseCipherSuite parses a cipher suite name and extracts its components.
@@ -87,6 +92,23 @@ func ParseCipherSuite(cipherSuite string) (*CipherSuiteComponents, error) {
 	components := &CipherSuiteComponents{
 		Confidence: 1.0,
 		IsInferred: false,
+	}
+
+	// A cipher STRING ("ECDHE+AES-GCM:!RC4:!3DES", "DEFAULT", "LOW") is not a suite
+	// name, and reading it as one turns every exclusion into a component: the
+	// substring patterns below found 3DES in "!3DES". Evaluate the grammar and
+	// report only what every enabled suite shares — and only when the string
+	// resolved completely: a component read off part of an unknown set is a
+	// guess about the rest, and these components fill single-valued columns.
+	if LooksLikeCipherString(cipherSuite) {
+		parsed := ParseCipherString(cipherSuite, CipherStringVendor)
+		if !parsed.Complete {
+			return nil, fmt.Errorf("cipher string %q is only partially resolved", cipherSuite)
+		}
+		if c := parsed.Components(); c != nil {
+			return c, nil
+		}
+		return nil, fmt.Errorf("cipher string %q enables no suite that can be resolved", cipherSuite)
 	}
 
 	// Normalize cipher suite name
@@ -197,7 +219,8 @@ func parseTLS13CipherSuite(cipherSuite string, components *CipherSuiteComponents
 	// TLS 1.3 cipher suites don't have explicit key exchange or signature
 	// They use ephemeral key exchange (ECDHE) and authentication is separate
 	components.KeyExchange = KexECDHE
-	components.Signature = "" // TLS 1.3 uses separate authentication
+	components.KeyExchangeInferred = true // assumed: the suite name names no key exchange
+	components.Signature = ""             // TLS 1.3 uses separate authentication
 
 	// Extract symmetric encryption and hash.
 	//

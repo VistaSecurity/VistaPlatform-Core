@@ -93,7 +93,10 @@ type CryptoConfigurationAddedPayload struct {
 	CryptoImplementationID uuid.UUID `json:"crypto_implementation_id"`
 	Protocol               string    `json:"protocol"`
 	ProtocolVersion        *string   `json:"protocol_version,omitempty"`
-	RiskScore              int       `json:"risk_score"`
+	// RiskScore is the configuration's stored score; null when it is
+	// unassessed (risk_score NULL), which a consumer decoding into an int
+	// reads as 0, exactly as before for an unscored configuration.
+	RiskScore *int `json:"risk_score"`
 }
 
 // CertificateExpiringPayload is the payload for certificate.expiring (within 30 days).

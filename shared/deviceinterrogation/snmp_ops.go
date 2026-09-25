@@ -123,7 +123,7 @@ func snmpCollectOps(ctx context.Context, conn net.Conn, community string, result
 	}
 
 	// --- hardware identity ------------------------------------------------
-	chassis := snmpReadChassis(ctx, conn, community, timeout, deadline)
+	chassis := snmpReadChassis(ctx, result, conn, community, timeout, deadline)
 	if chassis.Vendor != "" {
 		result.addFact(factHWVendor, chassis.Vendor, ConfidenceReported)
 	}
@@ -138,13 +138,13 @@ func snmpCollectOps(ctx context.Context, conn net.Conn, community string, result
 	}
 
 	// --- interfaces -------------------------------------------------------
-	if interfaces := snmpInterfaces(ctx, conn, community, timeout, deadline); len(interfaces) > 0 {
+	if interfaces := snmpInterfaces(ctx, result, conn, community, timeout, deadline); len(interfaces) > 0 {
 		result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
 	}
 
 	// --- neighbours and edges --------------------------------------------
-	neighbors, edges := snmpLLDPObservations(ctx, conn, community, timeout, deadline)
-	neighbors = append(neighbors, snmpARPNeighbors(ctx, conn, community, timeout, deadline)...)
+	neighbors, edges := snmpLLDPObservations(ctx, result, conn, community, timeout, deadline)
+	neighbors = append(neighbors, snmpARPNeighbors(ctx, result, conn, community, timeout, deadline)...)
 	if len(neighbors) > 0 {
 		result.addFact(factNetNeighbors, neighbors, ConfidenceReported)
 	}
@@ -167,8 +167,8 @@ func snmpCollectOps(ctx context.Context, conn net.Conn, community string, result
 // flattening them into one asset's identity would invent a device that does not
 // exist. Modelling stack members properly is a class question, not a projection
 // one.
-func snmpReadChassis(ctx context.Context, conn net.Conn, community string, timeout time.Duration, deadline time.Time) snmpChassis {
-	classes, _ := snmpWalkColumn(ctx, conn, community, snmpOIDEntPhysicalClass, timeout, deadline)
+func snmpReadChassis(ctx context.Context, result *InterrogateResult, conn net.Conn, community string, timeout time.Duration, deadline time.Time) snmpChassis {
+	classes, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDEntPhysicalClass, timeout, deadline)
 	if len(classes) == 0 {
 		return snmpChassis{}
 	}
@@ -187,10 +187,10 @@ func snmpReadChassis(ctx context.Context, conn net.Conn, community string, timeo
 	})
 	index := chassisIndexes[0]
 
-	vendors, _ := snmpWalkColumn(ctx, conn, community, snmpOIDEntPhysicalMfgName, timeout, deadline)
-	models, _ := snmpWalkColumn(ctx, conn, community, snmpOIDEntPhysicalModelName, timeout, deadline)
-	serials, _ := snmpWalkColumn(ctx, conn, community, snmpOIDEntPhysicalSerialNum, timeout, deadline)
-	firmware, _ := snmpWalkColumn(ctx, conn, community, snmpOIDEntPhysicalFirmwareRev, timeout, deadline)
+	vendors, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDEntPhysicalMfgName, timeout, deadline)
+	models, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDEntPhysicalModelName, timeout, deadline)
+	serials, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDEntPhysicalSerialNum, timeout, deadline)
+	firmware, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDEntPhysicalFirmwareRev, timeout, deadline)
 
 	return snmpChassis{
 		Vendor:   strings.TrimSpace(vendors[index].Text()),
@@ -201,17 +201,17 @@ func snmpReadChassis(ctx context.Context, conn net.Conn, community string, timeo
 }
 
 // snmpInterfaces builds the net.interfaces value from ifTable and ifXTable.
-func snmpInterfaces(ctx context.Context, conn net.Conn, community string, timeout time.Duration, deadline time.Time) []map[string]interface{} {
-	descrs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfDescr, timeout, deadline)
-	names, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfName, timeout, deadline)
+func snmpInterfaces(ctx context.Context, result *InterrogateResult, conn net.Conn, community string, timeout time.Duration, deadline time.Time) []map[string]interface{} {
+	descrs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfDescr, timeout, deadline)
+	names, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfName, timeout, deadline)
 	if len(descrs) == 0 && len(names) == 0 {
 		return nil
 	}
-	macs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfPhysAddress, timeout, deadline)
-	admin, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfAdminStatus, timeout, deadline)
-	oper, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfOperStatus, timeout, deadline)
-	highSpeed, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfHighSpeed, timeout, deadline)
-	speed, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIfSpeed, timeout, deadline)
+	macs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfPhysAddress, timeout, deadline)
+	admin, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfAdminStatus, timeout, deadline)
+	oper, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfOperStatus, timeout, deadline)
+	highSpeed, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfHighSpeed, timeout, deadline)
+	speed, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfSpeed, timeout, deadline)
 
 	indexes := make([]string, 0, len(descrs)+len(names))
 	seen := map[string]bool{}
@@ -288,15 +288,15 @@ func snmpAdminStatus(v int64) string {
 
 // snmpLLDPObservations walks lldpRemTable and returns the neighbour facts and
 // the connects_to edges built from them.
-func snmpLLDPObservations(ctx context.Context, conn net.Conn, community string, timeout time.Duration, deadline time.Time) ([]map[string]interface{}, []RelationshipObservation) {
-	chassisIDs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDLLDPRemChassisID, timeout, deadline)
+func snmpLLDPObservations(ctx context.Context, result *InterrogateResult, conn net.Conn, community string, timeout time.Duration, deadline time.Time) ([]map[string]interface{}, []RelationshipObservation) {
+	chassisIDs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDLLDPRemChassisID, timeout, deadline)
 	if len(chassisIDs) == 0 {
 		return nil, nil
 	}
-	portIDs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDLLDPRemPortID, timeout, deadline)
-	portDescs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDLLDPRemPortDesc, timeout, deadline)
-	sysNames, _ := snmpWalkColumn(ctx, conn, community, snmpOIDLLDPRemSysName, timeout, deadline)
-	localPorts, _ := snmpWalkColumn(ctx, conn, community, snmpOIDLLDPLocPortID, timeout, deadline)
+	portIDs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDLLDPRemPortID, timeout, deadline)
+	portDescs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDLLDPRemPortDesc, timeout, deadline)
+	sysNames, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDLLDPRemSysName, timeout, deadline)
+	localPorts, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDLLDPLocPortID, timeout, deadline)
 
 	indexes := make([]string, 0, len(chassisIDs))
 	for index := range chassisIDs {
@@ -393,12 +393,12 @@ func snmpLLDPLocalPort(remIndex string, localPorts map[string]snmpVarBind) strin
 
 // snmpARPNeighbors walks ipNetToMediaTable and projects it onto net.neighbors
 // items with protocol "arp".
-func snmpARPNeighbors(ctx context.Context, conn net.Conn, community string, timeout time.Duration, deadline time.Time) []map[string]interface{} {
-	physAddrs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIPNetToMediaPhysAddress, timeout, deadline)
+func snmpARPNeighbors(ctx context.Context, result *InterrogateResult, conn net.Conn, community string, timeout time.Duration, deadline time.Time) []map[string]interface{} {
+	physAddrs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIPNetToMediaPhysAddress, timeout, deadline)
 	if len(physAddrs) == 0 {
 		return nil
 	}
-	netAddrs, _ := snmpWalkColumn(ctx, conn, community, snmpOIDIPNetToMediaNetAddress, timeout, deadline)
+	netAddrs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIPNetToMediaNetAddress, timeout, deadline)
 
 	indexes := make([]string, 0, len(physAddrs))
 	for index := range physAddrs {

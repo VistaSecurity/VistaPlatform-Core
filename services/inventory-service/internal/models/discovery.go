@@ -17,6 +17,10 @@ type CreateDiscoveryJobInput struct {
 	Tags               map[string]interface{} `json:"tags,omitempty"`
 	Owner              *string                `json:"owner,omitempty"`
 	Environment        *string                `json:"environment,omitempty"`
+	// ExternalTargetsConfirmed is a person's consent to scan targets outside
+	// the tenant's registered networks ( W5.13b). Forwarded verbatim;
+	// cluster-sensor-service decides what it permits.
+	ExternalTargetsConfirmed bool `json:"external_targets_confirmed,omitempty"`
 }
 
 // DiscoveryJob represents a discovery job
@@ -40,4 +44,14 @@ type DiscoveryJob struct {
 	AssignedSensorID   *string    `json:"assigned_sensor_id,omitempty"`
 	AssignedSensorName *string    `json:"assigned_sensor_name,omitempty"`
 	DispatchedAt       *time.Time `json:"dispatched_at,omitempty"`
+	// ExternalTargets are the confirmed targets outside the tenant's
+	// registered networks and the addresses each named ( W5.13b), set
+	// on the create response only.
+	ExternalTargets []ExternalScanTarget `json:"external_targets,omitempty"`
+}
+
+// ExternalScanTarget mirrors cluster-sensor-service's shape.
+type ExternalScanTarget struct {
+	Target    string   `json:"target"`
+	Addresses []string `json:"addresses"`
 }

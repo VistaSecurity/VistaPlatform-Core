@@ -219,6 +219,8 @@ type upsertTierEntitlementRequest struct {
 	IncludedValue     json.RawMessage `json:"included_value"`
 	OveragePriceCents *int            `json:"overage_price_cents,omitempty"`
 	OverageUnitSize   *int            `json:"overage_unit_size,omitempty"`
+	ClearOveragePrice bool            `json:"clear_overage_price_cents,omitempty"`
+	ClearOverageSize  bool            `json:"clear_overage_unit_size,omitempty"`
 }
 
 // UpsertTierEntitlement handles PUT /api/v1/admin-service/admin/tiers/:id/entitlements/:key
@@ -247,6 +249,8 @@ func upsertTierEntitlementWithService(c *gin.Context, svc tierEntitlementsProvid
 		IncludedValue:     req.IncludedValue,
 		OveragePriceCents: req.OveragePriceCents,
 		OverageUnitSize:   req.OverageUnitSize,
+		ClearOveragePrice: req.ClearOveragePrice,
+		ClearOverageSize:  req.ClearOverageSize,
 	}, platformActor(c))
 	if err != nil {
 		if respondCompositionError(c, err) {
@@ -337,6 +341,11 @@ func respondCompositionError(c *gin.Context, err error) bool {
 	var dup *services.DuplicateItemKeyError
 	if errors.As(err, &dup) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "billable_item key appears more than once", "item_key": dup.Key, "detail": dup.Error()})
+		return true
+	}
+	var overageConflict *services.OverageConflictError
+	if errors.As(err, &overageConflict) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "conflicting overage fields", "item_key": overageConflict.Key, "detail": overageConflict.Error()})
 		return true
 	}
 	return respondInvalidValue(c, err)

@@ -346,11 +346,19 @@ export function makeSessionExpiryMiddleware(
 ): Middleware {
   return {
     async onResponse({ request, response }) {
+      const pathname = new URL(request.url).pathname;
       // A suspended/deleted organization: end the session with the reason,
-      // on any endpoint (including refresh, which is how a session that
-      // outlived its access token learns about it). The 403 still reaches the
-      // caller; the app navigates to sign-in.
-      if (response.status === 403 && sessionExpiredHandler?.onTenantBlocked) {
+      // on protected endpoints and refresh (which is how a session that
+      // outlived its access token learns about it). A refused sign-in is
+      // deliberately exempt: there is no session to expire, and tripping the
+      // app handler's one-shot latch there would suppress a later, real
+      // session-expiry redirect for the rest of the page lifetime.
+      const isRefresh = pathname.endsWith("/auth/refresh");
+      if (
+        response.status === 403 &&
+        sessionExpiredHandler?.onTenantBlocked &&
+        (!isAuthFlowPath(pathname) || isRefresh)
+      ) {
         const code = await tenantBlockedCode(response);
         if (code) {
           await sessionExpiredHandler.onTenantBlocked(code);
@@ -358,7 +366,7 @@ export function makeSessionExpiryMiddleware(
         }
       }
       if (response.status !== 401 || !sessionExpiredHandler) return undefined;
-      if (isAuthFlowPath(new URL(request.url).pathname)) return undefined;
+      if (isAuthFlowPath(pathname)) return undefined;
       const handler = sessionExpiredHandler;
       const recovered = await handler.onAuthFailure(request);
       if (recovered && (request.method === "GET" || request.method === "HEAD")) {

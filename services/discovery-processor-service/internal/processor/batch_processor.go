@@ -258,10 +258,17 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		// StoreDiscoveries), or the SNI alone (pcap-processor). None of them
 		// resolves anything. The only inference in this pipeline is the PTR
 		// lookup below, and it is the only thing labelled `inferred`.
+		//
+		// Nor for a device-interrogation row ( W2.2). It was read from a
+		// device's configuration: its name is the collector's label or the
+		// device's own, and when it has none it has none. A PTR answer for a
+		// public VIP or a tunnel's far end is somebody's DNS naming an address
+		// the device merely CONFIGURES — and a borrowed sibling SNI describes
+		// a different observation altogether.
 		hostnameSourceKind := ""
 		if discovery.Hostname != nil && strings.TrimSpace(*discovery.Hostname) != "" {
 			hostnameSourceKind = string(identity.SourceMeasured)
-		} else if !hostObservation {
+		} else if !hostObservation && !isInterrogationDiscovery(discovery) {
 			if resolved := resolveMissingHostname(discovery.Metadata, discovery.DestIP, sniIndex.lookup(discovery), lookupPTR); resolved.Name != "" {
 				name := resolved.Name
 				discovery.Hostname = &name
@@ -306,7 +313,19 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		// guard an observation of a host with a public address would be routed
 		// there and then dropped for having no source IP, logging a warning
 		// about a row that was never a connection.
-		if !hostObservation && classification.Ownership == "third_party" {
+		//
+		// Nor is a finding an interrogated device reported about ITSELF — a
+		// tunnel whose far end is public, a public VIP, a decryption profile
+		// that names no address. It describes the device's configuration, not
+		// a flow out of the tenant, and it has no source IP, so this branch
+		// used to drop it with a stdout warning while the interrogation job
+		// reported success (finding P-11). It goes to inventory on the
+		// managed path instead, where it lands on the device the row names
+		// (inventory-service verifies that claim; see
+		// interrogation_owned_ingest.go there). The classification is left
+		// as it is: it is a true statement about the address, and inventory
+		// reads it to decide the finding is the device's.
+		if !hostObservation && classification.Ownership == "third_party" && !claimsInterrogatedDevice(discovery) {
 			if discovery.SourceIP != nil && *discovery.SourceIP != "" {
 				externalEntries = append(externalEntries, externalEntry{
 					Discovery:          discovery,
@@ -314,6 +333,9 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 					HostnameSourceKind: hostnameSourceKind,
 				})
 			} else {
+				// Counted, not only printed: a batch that dropped findings
+				// must say how many in its audit record.
+				ba.counts["third_party_dropped_no_source_ip"]++
 				fmt.Printf("Warning: skipping third-party discovery %s (no source IP)\n", discovery.ID)
 			}
 			continue
@@ -591,6 +613,49 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	}
 
 	return nil
+}
+
+// claimsInterrogatedDevice reports whether a discovery row is a device
+// interrogation finding that names the device it was read from.
+//
+// This is a ROUTING hint, not a trust decision: it only keeps the row out of
+// the external-connections branch, which could not record it anyway (it has no
+// source IP). Whether the claim is honoured — whether the finding really lands
+// on that device — is decided by inventory-service against the database: the
+// row must have been written under the tenant's platform interrogation sensor
+// and the asset must exist. A row that fails that check takes inventory's
+// ordinary route.
+func claimsInterrogatedDevice(d *models.SensorDiscovery) bool {
+	metadata, ok := interrogationMetadata(d)
+	if !ok {
+		return false
+	}
+	value, _ := metadata["source_asset_id"].(string)
+	id, err := uuid.Parse(strings.TrimSpace(value))
+	return err == nil && id != uuid.Nil
+}
+
+// isInterrogationDiscovery reports whether a row was written by device
+// interrogation.
+func isInterrogationDiscovery(d *models.SensorDiscovery) bool {
+	_, ok := interrogationMetadata(d)
+	return ok
+}
+
+// interrogationMetadata decodes a row's metadata when it is a device
+// interrogation row, and reports false for every other row.
+func interrogationMetadata(d *models.SensorDiscovery) (map[string]any, bool) {
+	if d == nil || len(d.Metadata) == 0 {
+		return nil, false
+	}
+	var metadata map[string]any
+	if json.Unmarshal(d.Metadata, &metadata) != nil {
+		return nil, false
+	}
+	if metadata["discovery_method"] != "device_interrogation" {
+		return nil, false
+	}
+	return metadata, true
 }
 
 func sourceAssetIDFromMetadata(raw []byte) *uuid.UUID {

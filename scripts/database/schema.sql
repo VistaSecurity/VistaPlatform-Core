@@ -497,7 +497,7 @@ BEGIN
     -- Insert Platform Discovery Sensor for the new tenant
     INSERT INTO sensors (
         id, tenant_id, name, description, platform, version, profile,
-        sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at
+        sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at, platform_managed
     ) VALUES (
         gen_random_uuid(),
         NEW.id,
@@ -512,7 +512,8 @@ BEGIN
         ARRAY['system', 'platform', 'discovery']::TEXT[],
         NOW(),
         NOW(),
-        NOW()
+        NOW(),
+        true
     )
     ON CONFLICT DO NOTHING;
 
@@ -520,7 +521,7 @@ BEGIN
     -- Insert Platform Device Interrogation Agent for the new tenant
     INSERT INTO sensors (
         id, tenant_id, name, description, platform, version, profile,
-        sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at
+        sensor_type, status, network_interfaces, tags, last_heartbeat, created_at, updated_at, platform_managed
     ) VALUES (
         gen_random_uuid(),
         NEW.id,
@@ -535,7 +536,8 @@ BEGIN
         ARRAY['system', 'platform', 'device_interrogation']::TEXT[],
         NOW(),
         NOW(),
-        NOW()
+        NOW(),
+        true
     )
     ON CONFLICT DO NOTHING;
 
@@ -894,27 +896,9 @@ END;
 $$;
 
 
--- FUNCTION: set_trial_end_date()
---
--- Stamps a 30-day trial end ONLY on a tenant created on a trial tier
--- (subscription_tiers.is_trial). It used to stamp every new tenant, and the
--- column carried the same 30-day default, so every tenant on every install —
--- Enterprise ones included — read "Trial · ends <date>" in both UIs for a plan
--- that was never a trial (edition-licensing spec, background item 5). Trials
--- are an MSP choice now: a tier the MSP marks is_trial.
-CREATE OR REPLACE FUNCTION public.set_trial_end_date() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF NEW.trial_ends_at IS NULL
-       AND NEW.subscription_tier_id IS NOT NULL
-       AND EXISTS (SELECT 1 FROM public.subscription_tiers st
-                   WHERE st.id = NEW.subscription_tier_id AND st.is_trial) THEN
-        NEW.trial_ends_at = NOW() + INTERVAL '30 days';
-    END IF;
-    RETURN NEW;
-END;
-$$;
+-- FUNCTION: set_trial_end_date() — retired; dropped in POST-MIGRATIONS
+-- ("one trial store"). It stamped tenants.trial_ends_at with its own 30-day
+-- clock, a second trial store that disagreed with billing_trial_tracking.
 
 
 -- FUNCTION: update_algorithms_updated_at()
@@ -1805,11 +1789,52 @@ CREATE TABLE IF NOT EXISTS public.billing_subscriptions (
     -- forward by the invoice.paid webhook.
     contract_start timestamp with time zone,
     contract_end timestamp with time zone,
+    -- When the subscription stopped: Stripe's canceled_at/ended_at, stamped by
+    -- the subscription webhook when the status becomes 'canceled', or the moment
+    -- a plan assignment retired a manual (invoice) subscription. Revenue churn
+    -- counts these; it used to guess a churn date from tenants.updated_at.
+    -- NULL = live, or cancelled before this column existed (date unknown).
+    canceled_at timestamp with time zone,
+    -- When the subscription first became a paying one: stamped by the
+    -- billing_subscriptions_first_paid trigger the first time status reaches
+    -- 'active' (Stripe reports 'active' once the first invoice is paid; an
+    -- invoice-billed plan is 'active' from assignment). A trial that was
+    -- cancelled, or a subscription whose first payment never succeeded, keeps
+    -- NULL — revenue churn and LTV count only subscriptions that paid.
+    first_paid_at timestamp with time zone,
+    -- Why a cancelled subscription ended, when it was not the tenant's
+    -- lifecycle: 'plan_change' = this manual (invoice) row was retired because
+    -- the tenant moved off the plan it records, by any route (the
+    -- tenants_plan_change_retires_manual_subscription trigger); such a row is
+    -- never revived by cancelling an offboarding. Churn is not read from it:
+    -- revenue decides churn per tenant (did the tenant stop paying?). NULL
+    -- otherwise; cleared by the trigger whenever the row is live again.
+    end_reason character varying(50),
     -- HandleCreateSubscription upserts ON CONFLICT (tenant_id, provider_id).
     -- Without this the insert silently failed, so the local subscription cache
     -- was never written and the webhook sync could never flip a tenant to active.
     -- Current-state only; history lives in billing_invoices / billing_events.
     CONSTRAINT billing_subscriptions_tenant_provider_key UNIQUE (tenant_id, provider_id)
+);
+
+
+-- TABLE: billing_subscription_periods
+-- Immutable paid-stretch history for churn and LTV. billing_subscriptions is
+-- intentionally one mutable row per (tenant, provider); each time that row
+-- becomes revenue a new period opens here; its start can be corrected while
+-- open, and ending it fills ended_at without replacing the row.
+CREATE TABLE IF NOT EXISTS public.billing_subscription_periods (
+    id uuid DEFAULT public.uuid_generate_v4() PRIMARY KEY,
+    subscription_id uuid NOT NULL,
+    tenant_id uuid NOT NULL,
+    provider_id uuid NOT NULL,
+    external_subscription_id character varying(255) NOT NULL,
+    plan_key character varying(100) NOT NULL,
+    started_at timestamp with time zone NOT NULL,
+    ended_at timestamp with time zone,
+    end_reason character varying(50),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT billing_subscription_periods_dates CHECK (ended_at IS NULL OR ended_at >= started_at)
 );
 
 
@@ -5172,6 +5197,10 @@ CREATE TABLE IF NOT EXISTS public.sensors (
     -- discoveries; the platform still shows it registered and imports its
     -- findings out-of-band.
     air_gapped boolean DEFAULT false NOT NULL,
+    -- Set only by the platform's own provisioning (tenant-creation trigger,
+    -- seed backfill, bootstrap-mTLS auto-registration); no tenant path writes
+    -- it. See the POST-MIGRATIONS block that adds it to existing databases.
+    platform_managed boolean DEFAULT false NOT NULL,
     -- The sensor's actual data-send cadence (seconds), reported up at
     -- registration/heartbeat and operator-changeable via an update_config
     -- command. NULL when the sensor does not report one.
@@ -10232,6 +10261,11 @@ CREATE INDEX IF NOT EXISTS idx_billing_invoices_tenant_status ON public.billing_
 -- INDEX: idx_billing_subscriptions_tenant
 CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_tenant ON public.billing_subscriptions USING btree (tenant_id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_subscription_periods_open
+    ON public.billing_subscription_periods (subscription_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_billing_subscription_periods_tenant_dates
+    ON public.billing_subscription_periods (tenant_id, started_at, ended_at);
+
 
 -- INDEX: idx_cert_extensions_cert_id
 CREATE INDEX IF NOT EXISTS idx_cert_extensions_cert_id ON public.certificate_extensions USING btree (certificate_id);
@@ -12744,10 +12778,6 @@ CREATE OR REPLACE TRIGGER auto_license_iec62351_for_enterprise_on_tenant_create 
 CREATE OR REPLACE TRIGGER create_system_sensors_on_tenant_create AFTER INSERT ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.create_system_sensors_for_tenant();
 
 
--- TRIGGER: tenants set_tenant_trial_end
-CREATE OR REPLACE TRIGGER set_tenant_trial_end BEFORE INSERT ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.set_trial_end_date();
-
-
 -- TRIGGER: subscription_tiers subscription_tiers_change_log
 CREATE OR REPLACE TRIGGER subscription_tiers_change_log AFTER INSERT OR DELETE OR UPDATE ON public.subscription_tiers FOR EACH ROW EXECUTE FUNCTION public.log_tier_change();
 
@@ -13321,6 +13351,20 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.billing_invoices
         ADD CONSTRAINT billing_invoices_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+
+-- FK CONSTRAINTS: billing_subscription_periods
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_subscription_periods_subscription_id_fkey' AND conrelid = to_regclass('public.billing_subscription_periods')) THEN
+    ALTER TABLE ONLY public.billing_subscription_periods ADD CONSTRAINT billing_subscription_periods_subscription_id_fkey FOREIGN KEY (subscription_id) REFERENCES public.billing_subscriptions(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_subscription_periods_tenant_id_fkey' AND conrelid = to_regclass('public.billing_subscription_periods')) THEN
+    ALTER TABLE ONLY public.billing_subscription_periods ADD CONSTRAINT billing_subscription_periods_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'billing_subscription_periods_provider_id_fkey' AND conrelid = to_regclass('public.billing_subscription_periods')) THEN
+    ALTER TABLE ONLY public.billing_subscription_periods ADD CONSTRAINT billing_subscription_periods_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES public.billing_providers(id) ON DELETE RESTRICT;
   END IF;
 END $$;
 
@@ -16792,6 +16836,11 @@ CREATE POLICY billing_invoices_tenant_isolation ON public.billing_invoices
 ALTER TABLE public.billing_subscriptions ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS billing_subscriptions_tenant_isolation ON public.billing_subscriptions;
 CREATE POLICY billing_subscriptions_tenant_isolation ON public.billing_subscriptions
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+ALTER TABLE public.billing_subscription_periods ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS billing_subscription_periods_tenant_isolation ON public.billing_subscription_periods;
+CREATE POLICY billing_subscription_periods_tenant_isolation ON public.billing_subscription_periods
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.billing_trial_tracking ENABLE ROW LEVEL SECURITY;
@@ -22667,6 +22716,40 @@ ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_hash text;
 ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS self_observation_at timestamp with time zone;
 CREATE INDEX IF NOT EXISTS idx_sensors_asset_id ON public.sensors (asset_id) WHERE asset_id IS NOT NULL;
 
+-- Platform-managed sensors ( W2.2, review B1). A platform sensor was
+-- recognised by `platform = 'platform'` / the `system` tag / its profile, and
+-- every one of those is something a TENANT can set: registration copies the
+-- platform, profile and tags from the sensor's request, and PUT
+-- /sensors/:id/config sets any tags. A tenant sensor could therefore pass as
+-- the platform's own device-interrogation sensor, whose rows inventory trusts
+-- to name the device they belong to. This column is the marker no tenant path
+-- writes: only create_system_sensors_for_tenant(), seed.sql's backfill of the
+-- same two rows, and the platform services' bootstrap-mTLS auto-registration
+-- set it. Trust checks read it; the tags stay for display.
+--
+-- Backfill for existing databases: per tenant and platform profile, the
+-- OLDEST row that looks like the provisioned platform sensor — the one the
+-- tenant-creation trigger (or the seed backfill) created before any tenant
+-- could register a look-alike — and only when that tenant+profile has no
+-- marked row yet, so a re-run on every helm upgrade marks nothing new.
+ALTER TABLE public.sensors ADD COLUMN IF NOT EXISTS platform_managed boolean NOT NULL DEFAULT false;
+UPDATE public.sensors s
+   SET platform_managed = true
+  FROM (
+        SELECT DISTINCT ON (tenant_id, profile) id, tenant_id, profile
+          FROM public.sensors
+         WHERE platform = 'platform'
+           AND 'system' = ANY(COALESCE(tags, '{}'::text[]))
+           AND profile IN ('discovery', 'device_interrogation')
+           AND name IN ('Platform Discovery Sensor', 'Platform Device Interrogation Agent')
+           AND deleted_at IS NULL
+         ORDER BY tenant_id, profile, created_at, id
+       ) first
+ WHERE s.id = first.id
+   AND NOT s.platform_managed
+   AND NOT EXISTS (SELECT 1 FROM public.sensors m
+                    WHERE m.tenant_id = first.tenant_id AND m.profile = first.profile AND m.platform_managed);
+
 -- Sensor and device-agent installation IDs are separate host identifiers.
 -- Preserve ownership, provenance and sighting clocks. Only IDs attributed to
 -- their issuing sensor in the same tenant qualify; never relabel an imported
@@ -22991,6 +23074,264 @@ ALTER TABLE public.tenants ALTER COLUMN trial_ends_at DROP DEFAULT;
 -- 'trial' explicitly (ee/billing's trial manager does). Existing rows are left
 -- alone for the same reason as trial_ends_at above. SET DEFAULT is idempotent.
 ALTER TABLE public.tenants ALTER COLUMN payment_status SET DEFAULT 'active';
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: one trial store; revenue churn from real cancellations
+-- ----------------------------------------------------------------------------
+-- Owner decision 6 (admin-UI data review 2026-09): billing_trial_tracking is
+-- the only trial store. The set_tenant_trial_end trigger stamped
+-- tenants.trial_ends_at with a 30-day clock of its own that disagreed with the
+-- trial row (whose end is the tier's trial_days_full + trial_days_soft), and
+-- the Tenants list read the trigger's date. Nothing reads trial_ends_at for a
+-- trial any more; the column is kept, unwritten, for existing rows.
+DROP TRIGGER IF EXISTS set_tenant_trial_end ON public.tenants;
+DROP FUNCTION IF EXISTS public.set_trial_end_date();
+
+-- Owner decision 5: revenue churn counts subscription cancellations. The CREATE
+-- TABLE above carries the column for a fresh install; this reaches an existing
+-- one. Nullable, no default — a metadata-only add. Rows cancelled before it
+-- existed keep NULL (date unknown) and are left out of churn rather than given
+-- a guessed date.
+ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS canceled_at timestamp with time zone;
+
+-- Churn and LTV count only subscriptions that PAID (review of): a Stripe
+-- trial that was cancelled, or a subscription whose first payment never
+-- succeeded, is not a churned customer and has no paid lifetime. first_paid_at
+-- records the first time a subscription reached 'active' (the trigger below
+-- stamps it from now on). Backfill for rows written before it existed, on
+-- evidence of payment only: a paid invoice (its first paid_at), or — for a row
+-- that is 'active' now, which Stripe reports only once paid — its created_at.
+-- A trialing, never-paid past-due or cancelled-trial row stays NULL. Every row
+-- the UPDATE touches gets a value that re-running it would give again, so it
+-- converges on every helm upgrade and touches nothing once converged.
+ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS first_paid_at timestamp with time zone;
+UPDATE public.billing_subscriptions bs
+   SET first_paid_at = COALESCE(
+         (SELECT min(i.paid_at) FROM public.billing_invoices i
+           WHERE i.tenant_id = bs.tenant_id AND i.provider_id = bs.provider_id
+             AND i.status = 'paid' AND i.paid_at IS NOT NULL AND i.amount_cents > 0),
+         CASE WHEN bs.status = 'active' THEN bs.created_at END)
+ WHERE bs.first_paid_at IS NULL
+   AND (bs.status = 'active'
+        OR EXISTS (SELECT 1 FROM public.billing_invoices i
+                    WHERE i.tenant_id = bs.tenant_id AND i.provider_id = bs.provider_id
+                      AND i.status = 'paid' AND i.paid_at IS NOT NULL AND i.amount_cents > 0));
+
+-- Why a manual row ended: see end_reason in CREATE TABLE above.
+ALTER TABLE public.billing_subscriptions ADD COLUMN IF NOT EXISTS end_reason character varying(50);
+
+-- Every writer of billing_subscriptions (Stripe webhooks, invoice-plan
+-- assignment, support billing edits, trial and contract managers) sets status;
+-- stamping first_paid_at here means none of them can forget it.
+CREATE OR REPLACE FUNCTION public.billing_subscriptions_stamp_first_paid() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.status = 'active' AND NEW.first_paid_at IS NULL THEN
+        NEW.first_paid_at := NOW();
+    END IF;
+    IF NEW.status IS DISTINCT FROM 'canceled' THEN
+        NEW.end_reason := NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE OR REPLACE TRIGGER billing_subscriptions_first_paid BEFORE INSERT OR UPDATE ON public.billing_subscriptions FOR EACH ROW EXECUTE FUNCTION public.billing_subscriptions_stamp_first_paid();
+
+-- billing_subscriptions is a current-state cache and is deliberately reused
+-- when a tenant subscribes again. Preserve each paid stretch separately so a
+-- later upsert cannot erase a prior churn event or paid lifetime.
+CREATE OR REPLACE FUNCTION public.billing_subscriptions_sync_period() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    old_live boolean := false;
+    new_live boolean := false;
+    period_start timestamp with time zone;
+    period_end timestamp with time zone;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        old_live := OLD.status IN ('active', 'past_due')
+                    AND OLD.first_paid_at IS NOT NULL
+                    AND OLD.canceled_at IS NULL
+                    AND EXISTS (SELECT 1 FROM public.billing_subscription_periods p
+                                WHERE p.subscription_id = OLD.id AND p.ended_at IS NULL);
+    END IF;
+    new_live := NEW.status IN ('active', 'past_due')
+                AND NEW.first_paid_at IS NOT NULL
+                AND NEW.canceled_at IS NULL
+                AND EXISTS (SELECT 1 FROM public.tenants t
+                            WHERE t.id = NEW.tenant_id AND t.deleted_at IS NULL);
+
+    IF TG_OP = 'UPDATE' AND old_live
+       AND (NOT new_live OR OLD.external_subscription_id IS DISTINCT FROM NEW.external_subscription_id) THEN
+        period_end := COALESCE(NEW.canceled_at, NOW());
+        UPDATE public.billing_subscription_periods
+           SET ended_at = GREATEST(started_at, period_end),
+               end_reason = COALESCE(NEW.end_reason,
+                   CASE WHEN NEW.status NOT IN ('active', 'past_due') THEN NEW.status END)
+         WHERE subscription_id = OLD.id AND ended_at IS NULL;
+    END IF;
+
+    IF new_live AND (TG_OP = 'INSERT' OR NOT old_live
+                     OR OLD.external_subscription_id IS DISTINCT FROM NEW.external_subscription_id) THEN
+        period_start := CASE
+            WHEN TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND OLD.first_paid_at IS NULL)
+                THEN NEW.first_paid_at
+            ELSE NOW()
+        END;
+        INSERT INTO public.billing_subscription_periods (
+            subscription_id, tenant_id, provider_id,
+            external_subscription_id, plan_key, started_at)
+        VALUES (NEW.id, NEW.tenant_id, NEW.provider_id,
+                NEW.external_subscription_id, NEW.plan_key, period_start)
+        ON CONFLICT (subscription_id) WHERE ended_at IS NULL DO NOTHING;
+    ELSIF TG_OP = 'UPDATE' AND old_live AND new_live
+          AND NEW.first_paid_at IS DISTINCT FROM OLD.first_paid_at THEN
+        -- first_paid_at can be corrected from invoice evidence while the
+        -- stretch is still open. Once closed, its start is immutable.
+        UPDATE public.billing_subscription_periods
+           SET started_at = LEAST(started_at, NEW.first_paid_at)
+         WHERE subscription_id = NEW.id AND ended_at IS NULL;
+    ELSIF TG_OP = 'INSERT' AND NEW.first_paid_at IS NOT NULL AND NEW.canceled_at IS NOT NULL THEN
+        INSERT INTO public.billing_subscription_periods (
+            subscription_id, tenant_id, provider_id,
+            external_subscription_id, plan_key, started_at, ended_at, end_reason)
+        VALUES (NEW.id, NEW.tenant_id, NEW.provider_id,
+                NEW.external_subscription_id, NEW.plan_key, NEW.first_paid_at,
+                GREATEST(NEW.first_paid_at, NEW.canceled_at), NEW.end_reason);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE TRIGGER billing_subscriptions_period_history
+AFTER INSERT OR UPDATE ON public.billing_subscriptions
+FOR EACH ROW EXECUTE FUNCTION public.billing_subscriptions_sync_period();
+
+-- Upgrade/backfill: the mutable row can reveal at most its surviving current
+-- or most-recent stretch. Never invent an end date for older unpaid/paused
+-- rows; future transitions are recorded precisely by the trigger above.
+INSERT INTO public.billing_subscription_periods (
+    subscription_id, tenant_id, provider_id,
+    external_subscription_id, plan_key, started_at, ended_at, end_reason)
+SELECT bs.id, bs.tenant_id, bs.provider_id,
+       bs.external_subscription_id, bs.plan_key, bs.first_paid_at,
+       CASE WHEN bs.canceled_at IS NOT NULL
+            THEN GREATEST(bs.first_paid_at, bs.canceled_at) END,
+       bs.end_reason
+  FROM public.billing_subscriptions bs
+  JOIN public.tenants t ON t.id = bs.tenant_id
+ WHERE bs.first_paid_at IS NOT NULL
+   AND NOT EXISTS (
+        SELECT 1 FROM public.billing_providers bp
+        WHERE bp.id = bs.provider_id AND bp.key = 'manual'
+          AND bs.external_subscription_id IS DISTINCT FROM
+              'invoice:' || t.subscription_tier_id::text)
+   AND (bs.canceled_at IS NOT NULL
+        OR (bs.status IN ('active', 'past_due')
+            AND t.deleted_at IS NULL
+            AND t.payment_status NOT IN ('canceled', 'suspended')))
+   AND NOT EXISTS (SELECT 1 FROM public.billing_subscription_periods p
+                   WHERE p.subscription_id = bs.id);
+
+-- Card subscriptions remain active at Stripe when an MSP operator offboards
+-- or soft-deletes a tenant. End the local paid stretch at that lifecycle
+-- event. Reactivation does not silently resurrect stale card billing; manual
+-- rows are explicitly revived by SyncManualSubscription when appropriate.
+CREATE OR REPLACE FUNCTION public.tenants_end_subscription_periods() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF (NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL)
+       OR (NEW.payment_status IN ('canceled', 'suspended')
+           AND OLD.payment_status NOT IN ('canceled', 'suspended')) THEN
+        UPDATE public.billing_subscription_periods
+           SET ended_at = GREATEST(started_at, NOW()),
+               end_reason = 'tenant_lifecycle'
+         WHERE tenant_id = NEW.id AND ended_at IS NULL;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE TRIGGER tenants_end_subscription_periods
+AFTER UPDATE OF deleted_at, payment_status ON public.tenants
+FOR EACH ROW EXECUTE FUNCTION public.tenants_end_subscription_periods();
+
+-- A manual (invoice) subscription records ONE plan: external_subscription_id
+-- 'invoice:<tier id>'. It has no payment provider to end it, so when the
+-- tenant moves to any other plan (the trigger fires only when the tier
+-- actually changes) the row has to end with it, or revenue keeps counting a
+-- plan the tenant is no longer on (review of). Plan-changing
+-- writes live in several services — Assign to tenant, the tenant's own
+-- checkout, the Stripe subscription/invoice webhooks, the trial sweep's
+-- downgrade, support billing edits, and auth-service's self-service tier
+-- selection — so the retirement is here, on the column they all write, in the
+-- same transaction as the write: none of them can forget it, and a new one
+-- cannot either. end_reason 'plan_change' records why it ended (whether the
+-- tenant churned is revenue's per-tenant question). A row already ended is
+-- left as it is. Assign to tenant re-records the row when the new plan is
+-- itself invoice-billed (recordManualSubscription).
+--
+-- SECURITY DEFINER: billing_subscriptions is RLS-policied, and some of those
+-- writers run on the application role with no app.tenant_id (auth-service's
+-- tier selection), where the row is invisible and the UPDATE would silently
+-- match nothing. As the owner the UPDATE sees the row; it touches only the
+-- tenant whose tier just changed. search_path pinned per SECURITY DEFINER
+-- practice.
+CREATE OR REPLACE FUNCTION public.tenants_retire_manual_subscription() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    UPDATE public.billing_subscriptions bs
+       SET status = 'canceled', canceled_at = NOW(), end_reason = 'plan_change', updated_at = NOW()
+      FROM public.billing_providers bp
+     WHERE bp.id = bs.provider_id
+       AND bp.key = 'manual'
+       AND bs.tenant_id = NEW.id
+       AND bs.status <> 'canceled';
+    RETURN NULL;
+END;
+$$;
+CREATE OR REPLACE TRIGGER tenants_plan_change_retires_manual_subscription AFTER UPDATE OF subscription_tier_id ON public.tenants FOR EACH ROW WHEN (OLD.subscription_tier_id IS DISTINCT FROM NEW.subscription_tier_id) EXECUTE FUNCTION public.tenants_retire_manual_subscription();
+
+-- The same for a row an earlier release left live after its tenant moved off
+-- the plan (nothing retired it then). Its end date is unknown, so canceled_at
+-- stays NULL — it is neither revenue nor churn. Touches nothing once
+-- converged.
+UPDATE public.billing_subscriptions bs
+   SET status = 'canceled', end_reason = 'plan_change', updated_at = NOW()
+  FROM public.billing_providers bp, public.tenants t
+ WHERE bp.id = bs.provider_id
+   AND bp.key = 'manual'
+   AND t.id = bs.tenant_id
+   AND bs.status <> 'canceled'
+   AND bs.external_subscription_id IS DISTINCT FROM 'invoice:' || t.subscription_tier_id::text;
+
+-- payment_status 'trial' is derived from the trial store (decision 6,
+-- shared/trials.SyncPaymentStatusSQL). A tenant whose trial was cancelled
+-- before that derivation existed kept 'trial' forever, and the tenant editor
+-- now refuses to set it back by hand. Apply the same derivation here, in the
+-- one direction that only removes a label with no trial behind it: 'trial'
+-- with no unconverted trial row on an is_trial plan becomes 'active'. That is
+-- not a licence-usage lifecycle event (only suspension and reactivation are),
+-- but the usage snapshot classes the two differently (licenseusage.StateOf:
+-- 'trial' is StateTrial, 'active' is StateActive), so from here on those
+-- tenants' days count as active — what they are, with no trial behind the
+-- label. Re-running it on every upgrade converges on the same answer.
+UPDATE public.tenants t
+   SET payment_status = 'active', updated_at = NOW()
+ WHERE t.payment_status = 'trial'
+   AND NOT EXISTS (
+         SELECT 1
+         FROM public.billing_trial_tracking btt
+         JOIN public.subscription_tiers st ON st.id = t.subscription_tier_id
+         WHERE btt.tenant_id = t.id
+           AND NOT COALESCE(btt.converted_to_paid, false)
+           AND st.is_trial);
 
 -- ----------------------------------------------------------------------------
 -- POST-MIGRATIONS: record who last wrote each platform identity provider

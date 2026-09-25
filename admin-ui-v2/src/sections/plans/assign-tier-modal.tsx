@@ -8,6 +8,12 @@
 // Sales invoices out-of-band. Stripe-billed plans still need the tenant to
 // complete checkout separately — this only points the assignment.
 //
+// Owner decision 7 (RC-25): a tenant billed through Stripe is refused (409,
+// "change plan through billing") — its plan changes through the tenant
+// drawer's Billing tab so Stripe's price and the entitlements move together.
+// A reason is required and recorded in the platform audit log, and the
+// server's own message is shown when the assignment is refused.
+//
 // TENANT PICKER. /admin/tenants (the directory) is ee/msp — a Core build has
 // no console-visible list of tenants, just the one organization running it
 // (see tenant-switcher.tsx and nav.ts's `overrides` entry for the same
@@ -23,7 +29,7 @@ import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { usePlatformEdition } from '../../lib/edition';
-import { useTenants } from '../tenants/queries';
+import { serverError, useTenants } from '../tenants/queries';
 
 type SubscriptionTier = adminServiceComponents['schemas']['SubscriptionTier'];
 
@@ -42,6 +48,7 @@ export function AssignTierModal({ tier, onClose }: { tier: SubscriptionTier; onC
   const [tenantId, setTenantId] = useState('');
   const [q, setQ] = useState('');
   const [manualId, setManualId] = useState('');
+  const [reason, setReason] = useState('');
 
   const ql = q.trim().toLowerCase();
   const matches = useMemo(
@@ -55,19 +62,22 @@ export function AssignTierModal({ tier, onClose }: { tier: SubscriptionTier; onC
     ? 'Pick a tenant'
     : !UUID_RE.test(effectiveTenantId)
       ? 'Not a valid tenant id'
-      : null;
+      : !reason.trim()
+        ? 'Give a reason — it is recorded in the audit log'
+        : null;
 
   const assign = useMutation({
     mutationFn: async () => {
       const { error: apiError } = await clients.admin.POST('/admin/tiers/{id}/assign', {
         params: { path: { id: tier.id } },
-        body: { tenant_id: effectiveTenantId },
+        body: { tenant_id: effectiveTenantId, reason: reason.trim() },
       });
-      if (apiError) throw new Error('Failed to assign plan');
+      if (apiError) throw new Error(serverError(apiError, 'Failed to assign plan'));
     },
     onSuccess: () => {
       toast.success(`Assigned ${tier.display_name || tier.name}${selected ? ` to ${selected.name}` : ''}`);
       void qc.invalidateQueries({ queryKey: ['platform', 'tenants'] });
+      void qc.invalidateQueries({ queryKey: ['platform', 'billing'] });
       onClose();
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Assign failed'),
@@ -78,7 +88,7 @@ export function AssignTierModal({ tier, onClose }: { tier: SubscriptionTier; onC
       open
       onClose={onClose}
       title={`Assign ${tier.display_name || tier.name}`}
-      description="Points the tenant's plan at this tier. Invoice-billed plans take effect immediately; Stripe-billed plans still require the tenant to complete checkout."
+      description="Points the tenant's plan at this tier. Invoice-billed plans take effect immediately; Stripe-billed plans still require the tenant to complete checkout. A tenant already billed through Stripe changes plan from its Billing tab instead."
       size="md"
       primaryLabel="Assign"
       onPrimary={() => { if (error) { toast.error(error); return; } assign.mutate(); }}
@@ -122,6 +132,15 @@ export function AssignTierModal({ tier, onClose }: { tier: SubscriptionTier; onC
           </div>
         </ModalField>
       )}
+      <ModalField label="Reason">
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          rows={2}
+          placeholder="Why this tenant is moving to this plan (recorded in the audit log)"
+          style={{ ...modalInputStyle, resize: 'vertical' }}
+        />
+      </ModalField>
     </Modal>
   );
 }

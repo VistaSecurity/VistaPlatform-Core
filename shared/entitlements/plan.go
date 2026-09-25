@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/trials"
 )
 
 // The plan block: what a tenant is on, as a person should read it.
@@ -27,7 +29,8 @@ import (
 //	Enterprise  "Vista Platform Enterprise"; licensee + licence expiry. Never
 //	            a tier name, never a trial — Enterprise has neither.
 //	MSP         the tier's display_name (the MSP's own plan), plus a trial when
-//	            the MSP marked that plan is_trial and the tenant has an end date.
+//	            the MSP marked that plan is_trial and the tenant has a live
+//	            (unconverted) billing_trial_tracking row.
 //
 // An expired licence is Core here exactly as it is in the resolver.
 
@@ -137,34 +140,78 @@ func (p Plan) HidesTierDetail() bool {
 	return p.Edition == EditionEnterprise
 }
 
-// selectTenantPlanFactsSQL reads the tier facts for one tenant. tenants and
-// subscription_tiers are global tables (no RLS), so this answers identically
-// on the application pool and the bypass pool.
-const selectTenantPlanFactsSQL = `
-SELECT COALESCE(st.display_name, st.name, ''), COALESCE(st.is_trial, false), t.trial_ends_at
+// PlanFactsSelectSQL reads a tenant's tier facts and its live trial, less the
+// WHERE clause: the one-tenant read below appends `WHERE t.id = $1`,
+// admin-service's tenant directory `WHERE t.id = ANY($1)`. One SELECT, so the
+// two surfaces cannot disagree on what a trial is. Scan with ScanPlanFacts.
+//
+// The trial comes from billing_trial_tracking — the one trial store (owner
+// decision 6) — not from tenants.trial_ends_at, which a since-removed trigger
+// stamped with its own 30-day clock that disagreed with the trial row. A trial
+// is shown only on a tier the MSP marked is_trial, and it ends when it locks
+// (trials.LockAt), which honours an administrative extension and an
+// administrative end (Billing → Trials → End trial stamps hard_locked_at).
+//
+// billing_trial_tracking carries a tenant_isolation RLS policy: read this on
+// the bypass pool or in a tenant-scoped transaction (LoadTenantPlanFacts does
+// the latter).
+const PlanFactsSelectSQL = `
+SELECT t.id, COALESCE(st.display_name, st.name, ''), st.is_trial,
+       st.trial_days_full, st.trial_days_soft, btt.trial_start, btt.trial_end,
+       btt.hard_locked_at
 FROM tenants t
 LEFT JOIN subscription_tiers st ON st.id = t.subscription_tier_id
-WHERE t.id = $1`
+LEFT JOIN LATERAL (
+    SELECT b.trial_start, b.trial_end, b.hard_locked_at
+    FROM billing_trial_tracking b
+    WHERE b.tenant_id = t.id AND NOT COALESCE(b.converted_to_paid, false)
+    ORDER BY b.created_at DESC
+    LIMIT 1
+) btt ON true`
+
+// planFactsScanner is satisfied by *sql.Row and *sql.Rows.
+type planFactsScanner interface {
+	Scan(dest ...any) error
+}
+
+// ScanPlanFacts reads one PlanFactsSelectSQL row.
+func ScanPlanFacts(s planFactsScanner) (uuid.UUID, TenantPlanFacts, error) {
+	var (
+		id  uuid.UUID
+		f   TenantPlanFacts
+		row trials.Row
+	)
+	if err := s.Scan(&id, &f.TierDisplayName, &row.IsTrial,
+		&row.TrialDaysFull, &row.TrialDaysSoft, &row.TrialStart, &row.TrialEnd, &row.HardLockedAt); err != nil {
+		return id, f, err
+	}
+	f.TierIsTrial = row.OnTrialTier()
+	if f.TierIsTrial && row.TrialStart.Valid {
+		ends := trials.LockAt(row.Inputs(time.Time{}))
+		f.TrialEndsAt = &ends
+	}
+	return id, f, nil
+}
 
 // ErrPlanTenantNotFound is returned by ResolvePlan for an unknown tenant.
 var ErrPlanTenantNotFound = errors.New("entitlements: plan for unknown tenant")
 
-// LoadTenantPlanFacts reads one tenant's tier facts.
+// LoadTenantPlanFacts reads one tenant's tier facts. It runs in a transaction
+// scoped to the tenant, so the trial row is visible on the application pool;
+// on the bypass pool the scoping is harmless.
 func LoadTenantPlanFacts(ctx context.Context, db *sql.DB, tenantID uuid.UUID) (TenantPlanFacts, error) {
-	var (
-		f     TenantPlanFacts
-		trial sql.NullTime
-	)
-	err := db.QueryRowContext(ctx, selectTenantPlanFactsSQL, tenantID).Scan(&f.TierDisplayName, &f.TierIsTrial, &trial)
+	var f TenantPlanFacts
+	err := shareddatabase.WithTenantTx(ctx, db, tenantID, func(tx *sql.Tx) error {
+		var e error
+		_, f, e = ScanPlanFacts(tx.QueryRowContext(ctx, PlanFactsSelectSQL+`
+WHERE t.id = $1`, tenantID))
+		return e
+	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return f, ErrPlanTenantNotFound
 	}
 	if err != nil {
 		return f, fmt.Errorf("entitlements: read plan facts for tenant %s: %w", tenantID, err)
-	}
-	if trial.Valid {
-		t := trial.Time
-		f.TrialEndsAt = &t
 	}
 	return f, nil
 }

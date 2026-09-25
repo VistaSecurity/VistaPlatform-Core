@@ -82,14 +82,27 @@ func (s *DeviceInterrogationService) InterrogateDevice(
 	return s.interrogateDevice(ctx, tenantID, userID, deviceID, nil)
 }
 
-// interrogateDevice is InterrogateDevice that also reports, through
-// observationsErr when it is non-nil, what the observation sink could not
-// persist. The platform worker hands that to the result processor so it lands
+// interrogationReport is what an in-cluster interrogation hands the platform
+// worker beside its counts, for the job's processing block: what the
+// observation sink could not persist, and the collection warnings the collector
+// raised. The agent path carries the same two things in its result payload.
+type interrogationReport struct {
+	// DeviceJobID is an INPUT: the device job this run executes, stamped on
+	// every sensor_discoveries row so inventory can bind the row's ownership
+	// claim to a real interrogation of that asset. uuid.Nil (no job) leaves the
+	// rows unbound, and inventory will not attach an owned finding from them.
+	DeviceJobID     uuid.UUID
+	ObservationsErr error
+	Warnings        []di.CollectionWarning
+}
+
+// interrogateDevice is InterrogateDevice that also fills report, when it is
+// non-nil. The platform worker hands that to the result processor so it lands
 // in the job's processing block rather than only in this process's log.
 func (s *DeviceInterrogationService) interrogateDevice(
 	ctx context.Context,
 	tenantID, userID, deviceID uuid.UUID,
-	observationsErr *error,
+	report *interrogationReport,
 ) (uuid.UUID, int, error) {
 	device, err := s.getDevice(ctx, tenantID, deviceID)
 	if err != nil {
@@ -141,7 +154,7 @@ func (s *DeviceInterrogationService) interrogateDevice(
 		return uuid.Nil, 0, fmt.Errorf("failed to get credentials: %w", err)
 	}
 	coreDevice := buildCoreDeviceInfo(device, baseURL)
-	coreCreds := di.Credentials{Username: username, Password: password, InsecureSkipVerify: insecureSkipVerify}
+	coreCreds := interrogationCredentials(device.DeviceType, username, password, insecureSkipVerify)
 
 	// Databases keep the special persistence path (database_encryption_states).
 	switch device.DeviceType {
@@ -205,6 +218,10 @@ func (s *DeviceInterrogationService) interrogateDevice(
 	// as ProcessJobResults keys its own — so a job's rows are identifiable and
 	// one run can never merge into another's batch.
 	batchID := jobID.String()
+	deviceJobID := uuid.Nil
+	if report != nil {
+		deviceJobID = report.DeviceJobID
+	}
 
 	// materialized counts assets that reached sensor_discoveries — the sink that
 	// reaches Inventory. It is deliberately not len(result.Assets): a count of
@@ -213,7 +230,7 @@ func (s *DeviceInterrogationService) interrogateDevice(
 	materialized := 0
 
 	for i := range result.Assets {
-		if s.materializeInterrogatedAsset(ctx, tenantID, deviceID, jobID, targetID, systemSensorID, batchID, &result.Assets[i], result) {
+		if s.materializeInterrogatedAsset(ctx, tenantID, deviceID, deviceJobID, jobID, targetID, systemSensorID, batchID, &result.Assets[i], result) {
 			materialized++
 		}
 	}
@@ -224,8 +241,13 @@ func (s *DeviceInterrogationService) interrogateDevice(
 	// half the finding carries it (see "device_identity" above) but the Devices
 	// page keeps showing "—" for firmware forever, even after a successful
 	// interrogation that plainly reported one (L-7).
-	if err := s.persistObservations(ctx, tenantID, deviceID, jobID, result); err != nil && observationsErr != nil {
-		*observationsErr = err
+	if err := s.persistObservations(ctx, tenantID, deviceID, jobID, result); err != nil && report != nil {
+		report.ObservationsErr = err
+	}
+	// The collection warnings, exactly as the collector raised them (the
+	// Registry has sanitized them already). The agent path posts the same list.
+	if report != nil {
+		report.Warnings = result.Warnings
 	}
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, deviceID)
@@ -260,7 +282,7 @@ func (s *DeviceInterrogationService) interrogateDevice(
 // outage.
 func (s *DeviceInterrogationService) materializeInterrogatedAsset(
 	ctx context.Context,
-	tenantID, deviceID, jobID, targetID, systemSensorID uuid.UUID,
+	tenantID, deviceID, deviceJobID, jobID, targetID, systemSensorID uuid.UUID,
 	batchID string,
 	asset *di.CryptoAsset,
 	result *di.InterrogateResult,
@@ -316,7 +338,7 @@ func (s *DeviceInterrogationService) materializeInterrogatedAsset(
 	}
 
 	if err := s.resultProcessor.writeSensorDiscovery(
-		ctx, systemSensorID, tenantID, &deviceID, nil, batchID,
+		ctx, systemSensorID, tenantID, &deviceID, nil, deviceJobID, batchID,
 		discovered, certFlags, ocspStatus, ocspDetail,
 	); err != nil {
 		fmt.Printf("Warning: failed to write sensor discovery for device %s: %v\n", deviceID, err)
@@ -354,6 +376,18 @@ func buildCoreDeviceInfo(device *models.Device, baseURL string) di.DeviceInfo {
 		}
 	}
 	return d
+}
+
+// interrogationCredentials builds the shared core's credentials for a stored
+// device. The TLS skip flag goes through EffectiveInsecureSkipVerify, so a
+// Cisco device stored with it set before the form stopped offering it no
+// longer turns off SSH host-key verification here ( review NB-7).
+func interrogationCredentials(deviceType, username, password string, insecureSkipVerify bool) di.Credentials {
+	return di.Credentials{
+		Username:           username,
+		Password:           password,
+		InsecureSkipVerify: EffectiveInsecureSkipVerify(deviceType, insecureSkipVerify),
+	}
 }
 
 // toDiscoveredAsset maps the shared core's CryptoAsset onto the platform's

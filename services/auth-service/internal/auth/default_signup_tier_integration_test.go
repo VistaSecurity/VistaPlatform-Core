@@ -228,9 +228,12 @@ func TestIntegration_SelfSignupTenant_IsNotOnATrial(t *testing.T) {
 	}
 }
 
-// The other polarity: a tier the operator marks is_trial still gets its trial
-// end stamped. Without this the test above would pass if the trigger were
-// simply deleted, and an MSP's trial plans would silently never end.
+// The other polarity: a tier the operator marks is_trial still gets a trial —
+// recorded in billing_trial_tracking, the one trial store (owner decision 6),
+// with payment_status derived from it — and NOT a second, disagreeing end date
+// in tenants.trial_ends_at (the retired set_tenant_trial_end trigger's 30-day
+// clock). Without the first half the test above would pass if trials were
+// simply never recorded.
 func TestIntegration_SelfSignupTenant_OnATrialTierGetsATrialEnd(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
@@ -245,8 +248,19 @@ func TestIntegration_SelfSignupTenant_OnATrialTierGetsATrialEnd(t *testing.T) {
 
 	t.Setenv("DEFAULT_SIGNUP_TIER", "free")
 	tenantID := newSignupTenant(t, db)
-	if _, ends := trialStateOf(t, db, tenantID); !ends.Valid {
-		t.Error("tenant created on the is_trial 'free' tier has no trial_ends_at — the trigger no longer stamps trial tiers")
+	if _, ends := trialStateOf(t, db, tenantID); ends.Valid {
+		t.Errorf("tenant created on the is_trial 'free' tier has trial_ends_at %s — a second trial store; want NULL", ends.Time)
+	}
+	// Registration completes by bootstrapping the trial (handlers.go).
+	if err := makeAuthForTest(db).BootstrapTrialIfApplicable(tenantID); err != nil {
+		t.Fatalf("BootstrapTrialIfApplicable: %v", err)
+	}
+	var trialEnd sql.NullTime
+	if err := db.QueryRow(`SELECT trial_end FROM billing_trial_tracking WHERE tenant_id = $1`, tenantID).Scan(&trialEnd); err != nil || !trialEnd.Valid {
+		t.Fatalf("no billing_trial_tracking row for a trial-tier signup (err=%v) — trial plans would never end", err)
+	}
+	if status, _ := trialStateOf(t, db, tenantID); status != "trial" {
+		t.Errorf("payment_status = %q after the trial was recorded, want \"trial\" (derived)", status)
 	}
 }
 

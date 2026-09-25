@@ -159,12 +159,16 @@ func unifiFillIPsecCrypto(asset *CryptoAsset, conf map[string]interface{}) {
 		asset.HashAlgorithm = strPtr(strings.ToUpper(hash))
 		asset.Metadata["authentication_algorithm"] = hash
 	}
+	// The IKE version is the protocol's version, not a key exchange. It used to
+	// be written into KeyExchangeAlg as "IKEV2", where it would have been
+	// linked (or failed to link) as one.
 	if ikeVersion != "" {
-		asset.KeyExchangeAlg = strPtr(strings.ToUpper(ikeVersion))
+		asset.Metadata["ike_version"] = ikeVersion
+		if v := canonicalIKEVersion(ikeVersion); v != "" {
+			asset.ProtocolVersion = strPtr(v)
+		}
 	}
-	if dhGroup != "" {
-		asset.Metadata["dh_group"] = dhGroup
-	}
+	applyIKEDHGroups(asset, dhGroup, "")
 	if pfs, ok := conf["ipsec_pfs"].(bool); ok {
 		asset.Metadata["pfs_enabled"] = pfs
 	}

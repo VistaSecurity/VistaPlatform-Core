@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
+	"github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // Target authorization — the check that applies to EVERY dispatch, not just the
@@ -64,6 +65,77 @@ var reservedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("ff00::/8"),        // multicast
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
 	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64 — a prefix onto arbitrary IPv4
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // local-use NAT64 (RFC 8215) — the same, locally
+	netip.MustParsePrefix("::/96"),           // IPv4-compatible (deprecated): ::a9fe:a9fe is 169.254.169.254
+	netip.MustParsePrefix("::ffff:0:0:0/96"), // SIIT IPv4-translated (RFC 2765): the same, translated
+}
+
+// 6to4 (RFC 3056) and Teredo (RFC 4380) addresses carry an IPv4 address inside
+// them, which a relay may deliver to. They are not refused wholesale — they are
+// real, if rare, addresses — but the embedded IPv4 is judged against the same
+// exclusions (embeddedIPv4Interval). The extraction itself is
+// network.EmbeddedIPv4, the one definition probe consent uses too.
+var (
+	sixToFourPrefix = netip.MustParsePrefix("2002::/16")
+	teredoPrefix    = netip.MustParsePrefix("2001::/32")
+)
+
+// embeddedIPv4Interval returns the IPv4 interval an IPv6 interval embeds.
+// For 6to4 the IPv4 address is the top bits after the prefix, so an interval
+// maps to an interval. A Teredo address's IPv4 is bit-inverted in the low bits,
+// so only a single address can be judged; a Teredo RANGE, or any interval that
+// straddles the edge of either prefix, is reported unjudgeable. ok=false when
+// nothing is embedded. (The forms reserved outright — NAT64, IPv4-compatible,
+// SIIT — never get here; IPv4-mapped is unmapped by targetInterval.)
+func embeddedIPv4Interval(lo, hi netip.Addr) (addrs [][2]netip.Addr, judgeable, ok bool) {
+	if !lo.Is6() {
+		return nil, true, false
+	}
+	inLo := sixToFourPrefix.Contains(lo) || teredoPrefix.Contains(lo)
+	inHi := sixToFourPrefix.Contains(hi) || teredoPrefix.Contains(hi)
+	if !inLo && !inHi {
+		return nil, true, false
+	}
+	sameScheme := (sixToFourPrefix.Contains(lo) && sixToFourPrefix.Contains(hi)) || (lo == hi)
+	if !sameScheme {
+		return nil, false, true
+	}
+	loV4, okLo := network.EmbeddedIPv4(lo)
+	hiV4, okHi := network.EmbeddedIPv4(hi)
+	if !okLo || !okHi {
+		return nil, false, true
+	}
+	return [][2]netip.Addr{{loV4, hiV4}}, true, true
+}
+
+// reservedReason says, in words a person can act on, why an address in a
+// reserved prefix can never be scanned. The explicit-external-targets path
+// (external.go) shows it beside each refused target: "refused" alone reads as
+// "try again with the box ticked", and for these ranges no box exists.
+func reservedReason(p netip.Prefix) (string, bool) {
+	switch p.String() {
+	case "0.0.0.0/8", "::/128":
+		return "the unspecified address is not a host", true
+	case "127.0.0.0/8", "::1/128":
+		return "loopback addresses are the scanner itself", true
+	case "169.254.0.0/16":
+		return "link-local addresses include the cloud instance-metadata service (169.254.169.254)", true
+	case "fe80::/10", "fec0::/10":
+		return "link-local addresses are never scanned", true
+	case "100.64.0.0/10":
+		return "carrier-grade NAT space is shared between operators; register it as a network segment if it really is yours", true
+	case "192.0.0.0/24":
+		return "IETF protocol-assignment space is not a host range", true
+	case "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32":
+		return "documentation address space is not routable", true
+	case "224.0.0.0/4", "ff00::/8":
+		return "multicast addresses are not hosts", true
+	case "240.0.0.0/4":
+		return "reserved address space (including broadcast) is not a host range", true
+	case "64:ff9b::/96", "64:ff9b:1::/48", "::/96", "::ffff:0:0:0/96":
+		return "these IPv6 forms carry an IPv4 address and can reach reserved ones; name the IPv4 address instead", true
+	}
+	return "", false
 }
 
 // privatePrefixes is the address-class allowance: RFC 1918 and RFC 4193. A
@@ -109,12 +181,13 @@ func LoadTargetScope(tx Queryer, tenantID string) (TargetScope, error) {
 	}
 
 	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
 		return scope, err
 	}
 	var segments []struct {
 		Value       string
 		NetworkType string `json:"network_type"`
+		Learned     bool
 		Blocked     bool
 	}
 	if err := json.Unmarshal(segmentRaw, &segments); err != nil {
@@ -130,16 +203,57 @@ func LoadTargetScope(tx Queryer, tenantID string) (TargetScope, error) {
 			scope.excluded = append(scope.excluded, prefix)
 			continue
 		}
-		switch seg.NetworkType {
-		case "private", "vpn", "cloud", "public":
-			// A segment the tenant registered is a claim of ownership. The
-			// automatic sweep additionally refuses "public" segments; a person
-			// pressing scan on their own registered public estate is the case
-			// the segment registry exists to permit.
+		// A segment the tenant registered is a claim of ownership. The
+		// automatic sweep additionally refuses "public" segments; a person
+		// pressing scan on their own registered public estate is the case the
+		// segment registry exists to permit — but only one the tenant
+		// DECLARED. See [SegmentGrantsOwnership].
+		if SegmentPrefixGrantsOwnership(prefix, seg.NetworkType, seg.Learned, false) {
 			scope.allowed = append(scope.allowed, prefix)
 		}
 	}
 	return scope, nil
+}
+
+// learnedSegmentSQL is true for a network segment the platform LEARNED from an
+// interrogated device's VLAN data rather than one an operator declared.
+// `unifi` is the label such segments carried before every vendor could
+// produce one.
+const learnedSegmentSQL = `COALESCE(metadata->>'source','') IN ('interrogation','unifi')`
+
+// SegmentGrantsOwnership decides whether a registered segment puts its range
+// in scope for a scan.
+//
+// Private, VPN and cloud segments do, for manual and automatic scans alike.
+// A PUBLIC segment is ownership only when an operator declared it, and only
+// for a scan a person asked for:
+//
+//   - automatic scans never treat public space as the tenant's — the Active
+//     Scanning page promises public addresses are never probed unattended;
+//   - a LEARNED public segment is not a claim of ownership at all. A firewall
+//     reporting its ISP transit /30 or its carrier-NAT WAN VLAN is telling us
+//     where it is connected, not that the far end is the tenant's. Learned
+//     public segments exist to scope identities, and nothing else.
+func SegmentGrantsOwnership(networkType string, learned, automatic bool) bool {
+	switch networkType {
+	case "private", "vpn", "cloud":
+		return true
+	case "public":
+		return !automatic && !learned
+	}
+	return false
+}
+
+// SegmentPrefixGrantsOwnership is SegmentGrantsOwnership for a concrete
+// prefix, and what every scope loader calls: a segment wider than /8 (IPv4)
+// or /16 (IPv6) is never a claim of ownership, whatever its type, unless it
+// lies wholly inside private space (network.TooBroadToClaim — the one
+// definition the segment API and probe consent use too). The segment API
+// refuses new saves of such prefixes; this keeps a PRE-EXISTING 0.0.0.0/0 from
+// making every public address "registered" — which would skip the
+// explicit-external-target confirmation and its size bounds.
+func SegmentPrefixGrantsOwnership(prefix netip.Prefix, networkType string, learned, automatic bool) bool {
+	return SegmentGrantsOwnership(networkType, learned, automatic) && !network.TooBroadToClaim(prefix)
 }
 
 // Authorize accepts a single literal target: an address, a CIDR, or an
@@ -151,15 +265,13 @@ func (s TargetScope) Authorize(target string) error {
 	if !ok {
 		return denied(fmt.Sprintf("scan target %q is not an IP address, CIDR or range", target))
 	}
-	for _, p := range s.excluded {
-		if intervalsOverlap(lo, hi, p) {
-			return denied(fmt.Sprintf("scan target %q is excluded from scanning", target))
-		}
-	}
-	for _, p := range append(append([]netip.Prefix{}, s.allowed...), privatePrefixes...) {
-		if p.Contains(lo) && p.Contains(hi) {
-			return nil
-		}
+	// One classifier for every path (external.go), so an exclusion added for
+	// the manual path — embedded IPv4, the mapped block — holds here too.
+	switch class, _ := s.classify(lo, hi); class {
+	case classExcluded:
+		return denied(fmt.Sprintf("scan target %q is excluded from scanning", target))
+	case classInScope:
+		return nil
 	}
 	return denied(fmt.Sprintf("scan target %q is outside the network segments this tenant has registered", target))
 }
@@ -196,6 +308,19 @@ func targetInterval(target string) (netip.Addr, netip.Addr, bool) {
 		prefix, err := netip.ParsePrefix(s)
 		if err != nil {
 			return netip.Addr{}, netip.Addr{}, false
+		}
+		// An IPv4-mapped IPv6 prefix (::ffff:a.b.c.d/n) names IPv4 addresses —
+		// the dialer connects to ::ffff:169.254.169.254 as 169.254.169.254.
+		// Judge it as the IPv4 prefix it is, the way a single mapped address
+		// and a mapped range are unmapped below; left as IPv6 it would compare
+		// against none of the IPv4 exclusions. A mapped prefix shorter than
+		// /96 is not a mapped prefix at all but one that straddles the mapped
+		// block, and no scan needs that.
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < 96 {
+				return netip.Addr{}, netip.Addr{}, false
+			}
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
 		}
 		prefix = prefix.Masked()
 		return prefix.Addr(), lastAddr(prefix), true

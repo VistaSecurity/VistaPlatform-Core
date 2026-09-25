@@ -378,12 +378,12 @@ func snmpExchange(conn net.Conn, community string, pduTag byte, oid string, time
 			// A late answer to an earlier request. Keep reading while there is
 			// time left rather than accepting it.
 			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("no SNMP response with request id %d before the deadline", requestID)
+				return nil, reasonErrorf(WarningTimeout, "no SNMP response with request id %d before the deadline", requestID)
 			}
 			continue
 		}
 		if status != 0 {
-			return nil, fmt.Errorf("SNMP agent returned error-status %d", status)
+			return nil, snmpStatusError(status)
 		}
 		return binds, nil
 	}
@@ -457,22 +457,59 @@ func snmpIndex(column, oid string) string {
 	return strings.TrimPrefix(oid, column+".")
 }
 
+// snmpColumnNames gives the columns this collector walks their MIB names, so a
+// collection warning says which table was cut rather than quoting an OID.
+var snmpColumnNames = map[string]string{
+	snmpOIDEntPhysicalClass:        "ENTITY-MIB::entPhysicalClass",
+	snmpOIDEntPhysicalFirmwareRev:  "ENTITY-MIB::entPhysicalFirmwareRev",
+	snmpOIDEntPhysicalSerialNum:    "ENTITY-MIB::entPhysicalSerialNum",
+	snmpOIDEntPhysicalMfgName:      "ENTITY-MIB::entPhysicalMfgName",
+	snmpOIDEntPhysicalModelName:    "ENTITY-MIB::entPhysicalModelName",
+	snmpOIDIfDescr:                 "IF-MIB::ifDescr",
+	snmpOIDIfSpeed:                 "IF-MIB::ifSpeed",
+	snmpOIDIfPhysAddress:           "IF-MIB::ifPhysAddress",
+	snmpOIDIfAdminStatus:           "IF-MIB::ifAdminStatus",
+	snmpOIDIfOperStatus:            "IF-MIB::ifOperStatus",
+	snmpOIDIfName:                  "IF-MIB::ifName",
+	snmpOIDIfHighSpeed:             "IF-MIB::ifHighSpeed",
+	snmpOIDLLDPRemChassisID:        "LLDP-MIB::lldpRemChassisId",
+	snmpOIDLLDPRemPortID:           "LLDP-MIB::lldpRemPortId",
+	snmpOIDLLDPRemPortDesc:         "LLDP-MIB::lldpRemPortDesc",
+	snmpOIDLLDPRemSysName:          "LLDP-MIB::lldpRemSysName",
+	snmpOIDLLDPLocPortID:           "LLDP-MIB::lldpLocPortId",
+	snmpOIDIPNetToMediaPhysAddress: "IP-MIB::ipNetToMediaPhysAddress",
+	snmpOIDIPNetToMediaNetAddress:  "IP-MIB::ipNetToMediaNetAddress",
+}
+
+// snmpColumnEndpoint is the endpoint a warning about column reports.
+func snmpColumnEndpoint(column string) string {
+	if name, ok := snmpColumnNames[column]; ok {
+		return name + " (" + column + ")"
+	}
+	return column
+}
+
 // snmpWalkColumn walks one table column and returns its rows keyed by index,
 // together with whether the walk was cut short.
 //
-// A truncated walk is SAID out loud here. The bounds above exist so a device
-// cannot hold a job open; the cost of them firing is that the table the caller
-// builds is partial, and a partial interface list presented as a complete one
-// is the quiet half-answer this file's header warns about. Callers that do not
-// use the flag at least leave a trace.
-func snmpWalkColumn(ctx context.Context, conn net.Conn, community, column string, timeout time.Duration, deadline time.Time) (map[string]snmpVarBind, bool) {
+// A cut walk is SAID out loud here, as a collection warning on result. The
+// bounds above exist so a device cannot hold a job open; the cost of them
+// firing is that the table the caller builds is partial, and a partial
+// interface list presented as a complete one is the quiet half-answer this
+// file's header warns about. The rows that were read are still returned.
+func snmpWalkColumn(ctx context.Context, result *InterrogateResult, conn net.Conn, community, column string, timeout time.Duration, deadline time.Time) (map[string]snmpVarBind, bool) {
 	binds, truncated, err := snmpWalk(ctx, conn, community, column, timeout, deadline)
+	endpoint := snmpColumnEndpoint(column)
 	switch {
 	case err != nil:
-		fmt.Printf("Warning: SNMP walk of %s stopped early after %d row(s): %v\n", column, len(binds), err)
+		result.warn(endpoint, err, fmt.Sprintf("Walk stopped after %d rows; the table built from it is partial", len(binds)))
+	case truncated && len(binds) >= snmpMaxWalkRows:
+		result.warnTruncated(endpoint, "Table", snmpMaxWalkRows)
 	case truncated:
-		fmt.Printf("Warning: SNMP walk of %s was cut short at %d row(s) by the row cap (%d) or the collection deadline; the table built from it is partial\n",
-			column, len(binds), snmpMaxWalkRows)
+		// Cut by the collection deadline, not the row cap: the device was
+		// too slow to walk everything in the time one interrogation has.
+		result.warnAs(WarningTimeout, endpoint,
+			fmt.Sprintf("Walk stopped at the collection deadline after %d rows; the table built from it is partial", len(binds)), "")
 	}
 	out := make(map[string]snmpVarBind, len(binds))
 	for _, bind := range binds {
@@ -502,4 +539,22 @@ func snmpDecodeLength(data []byte) (int, int) {
 		length = length<<8 | int(data[i])
 	}
 	return length, 1 + numBytes
+}
+
+// SNMP PDU error-status values that mean the agent refused this community.
+const (
+	snmpErrNoAccess           = 6  // noAccess
+	snmpErrAuthorizationError = 16 // authorizationError
+)
+
+// snmpStatusError is the error for a response whose error-status is non-zero,
+// classified so a community without access to a view reads as
+// permission_denied rather than as a generic failure.
+func snmpStatusError(status int64) error {
+	reason := WarningError
+	switch status {
+	case snmpErrNoAccess, snmpErrAuthorizationError:
+		reason = WarningPermissionDenied
+	}
+	return reasonErrorf(reason, "SNMP agent returned error-status %d", status)
 }

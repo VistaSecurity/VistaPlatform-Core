@@ -6,8 +6,6 @@ package services
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/google/uuid"
@@ -44,12 +42,6 @@ func TestIntegration_Schema_RemovesAlgorithmRiskDefaultWithoutRegradingRows(t *t
 	// schema applies, not against DML.
 	db := testdb.ScratchDatabase(t)
 
-	schemaPath := filepath.Join(testdb.RepoRoot(t), "scripts", "database", "schema.sql")
-	schema, err := os.ReadFile(schemaPath)
-	if err != nil {
-		t.Fatalf("read schema: %v", err)
-	}
-
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -80,9 +72,10 @@ func TestIntegration_Schema_RemovesAlgorithmRiskDefaultWithoutRegradingRows(t *t
 	}
 
 	for pass := 1; pass <= 2; pass++ {
-		if _, err := conn.ExecContext(ctx, string(schema)); err != nil {
-			t.Fatalf("schema apply %d: %v", pass, err)
-		}
+		// FORCE: re-applying the file is the assertion. This also takes the
+		// shared testdb advisory lock and transient-race retry; a raw Exec of
+		// schema.sql bypasses both and can deadlock concurrent integration legs.
+		testdb.ForceApplySchema(t, db)
 		assertAlgorithmRiskDefaultAndRows(t, conn, ctx, prefix)
 	}
 }

@@ -19,7 +19,22 @@ import { usePlatformEdition } from '../../lib/edition';
 
 type Props = { tenant: Tenant; onClose: () => void };
 
-const PAYMENT_STATUSES = ['active', 'trial', 'past_due', 'canceled'] as const;
+// No 'trial': that status is derived from the trial record (owner decision 6)
+// and admin-service refuses it here with 409 — trials start, convert and end
+// from Billing → Trials.
+const PAYMENT_STATUSES = ['active', 'past_due', 'canceled'] as const;
+export const TRIAL_STATUS_HINT = 'On a trial — start, convert or end trials from Billing → Trials.';
+
+/**
+ * The payment statuses the editor offers. A trialling tenant keeps 'trial' as
+ * its current value and may be moved to any status admin-service accepts for
+ * it (ee/msp trial_status_edit.go): past due or cancelled overlay the trial.
+ * Not 'active' — that is ending the trial, which Billing → Trials does so the
+ * trial record agrees.
+ */
+export function paymentStatusOptions(current: string | null | undefined): readonly string[] {
+  return current === 'trial' ? ['trial', 'past_due', 'canceled'] : PAYMENT_STATUSES;
+}
 const isEmail = (s: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
 
 export interface TenantFormValues {
@@ -56,7 +71,8 @@ export function TenantFormModal({ tenant: editing, onClose }: Props) {
   const [name, setName] = useState(editing.name);
   const [domain, setDomain] = useState(editing.domain ?? '');
   const [billingEmail, setBillingEmail] = useState(editing.billing_email ?? '');
-  const [paymentStatus, setPaymentStatus] = useState(editing.payment_status ?? 'trial');
+  const [paymentStatus, setPaymentStatus] = useState(editing.payment_status ?? 'active');
+  const onTrial = editing.payment_status === 'trial';
 
   const error = useMemo(
     () => tenantFormError({ name, domain, billingEmail, paymentStatus }, isMsp),
@@ -109,8 +125,9 @@ export function TenantFormModal({ tenant: editing, onClose }: Props) {
       {isMsp && (
         <ModalField label="Payment status">
           <select value={paymentStatus} onChange={(e) => setPaymentStatus(e.target.value)} style={modalInputStyle}>
-            {PAYMENT_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            {paymentStatusOptions(editing.payment_status).map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
+          {onTrial && <div style={{ fontSize: 11, color: 'var(--op-t3)', marginTop: 4 }}>{TRIAL_STATUS_HINT}</div>}
         </ModalField>
       )}
     </Modal>

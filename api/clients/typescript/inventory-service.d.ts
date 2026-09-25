@@ -129,7 +129,7 @@ export interface paths {
         put?: never;
         /**
          * Create a network segment
-         * @description Creates a network segment (RBAC-gated `settings.update`). Returns the created segment. A referenced `location_id` that does not exist is rejected.
+         * @description Creates a network segment (RBAC-gated `settings.update`). Returns the created segment. A referenced `location_id` that does not exist is rejected. A `cidr` segment too broad to be a claim of ownership — IPv4 shorter than /8 or IPv6 shorter than /16, unless wholly private — is rejected with a 400 whose `error` names the rule.
          */
         post: operations["createNetworkSegment"];
         delete?: never;
@@ -172,7 +172,7 @@ export interface paths {
         get: operations["getNetworkSegment"];
         /**
          * Update a network segment
-         * @description Updates a network segment (RBAC-gated `settings.update`).
+         * @description Updates a network segment (RBAC-gated `settings.update`). A `cidr` value too broad to be a claim of ownership — IPv4 shorter than /8 or IPv6 shorter than /16, unless wholly private — is rejected with a 400 whose `error` names the rule.
          */
         put: operations["updateNetworkSegment"];
         post?: never;
@@ -1087,52 +1087,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/crypto-configurations/{id}/remediation": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Crypto configuration UUID (`crypto_implementations.id` in storage). */
-                id: components["parameters"]["CryptoConfigurationId"];
-            };
-            cookie?: never;
-        };
-        /**
-         * Get remediation guidance for a crypto configuration
-         * @description Returns a structured remediation summary aggregated from the configuration's protocol-version / cipher-suite / hash / key-size weaknesses, plus recommended alternatives, an overall timeline, and compliance impact. Computed on demand by the RemediationService.
-         */
-        get: operations["getCryptoConfigurationRemediation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/remediation/algorithm/{code}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Algorithm or protocol code (e.g. `RC4`, `TLS 1.0`). */
-                code: string;
-            };
-            cookie?: never;
-        };
-        /**
-         * Get remediation guidance for a specific algorithm
-         * @description Returns the catalog remediation guidance for a single algorithm/protocol code (severity, impact, steps, alternatives, resources), wrapped under `remediation`. Not tenant-scoped — it is reference guidance. UI consumer: `web-ui/src/services/remediation-api.ts` (`getRemediationByAlgorithm`).
-         */
-        get: operations["getRemediationByAlgorithm"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/asset-certificate-links": {
         parameters: {
             query?: never;
@@ -1664,6 +1618,7 @@ export interface paths {
          * Run an Active Scan (on-demand crypto scan) for assets
          * @description Active Scan (). Approves the targeted assets (so the discovery pipeline catalogs their crypto rather than deferring it), stamps scan freshness, and dispatches an active probe whose results flow back through the discovery pipeline. RBAC-gated `assets.update` — the permission follows the action, not the executor, so running from a tenant sensor needs nothing more than running from the platform.
          *     `run_from` chooses the executor: `auto` (default) routes each asset to the tenant sensor that most recently observed it, else one bound to its network segment, else the platform sensor; `platform` runs everything from the platform sensor; `sensor` runs everything from the one tenant sensor named by `sensor_id`. A named sensor that is not the tenant's answers 404, the platform's own sensor or an air-gapped one 400, and one that is offline 409 — nothing is scanned in those cases. Under `auto`, an asset whose observing sensor is offline is reported under `skipped` and left unscanned rather than scanned from the wrong place. Returns every job dispatched with its executor; `job_id` and `count` summarize the first job and the assets scanned. Invalid UUIDs are skipped; an all-invalid list returns 400.
+         * An asset whose address is outside the tenant's registered networks is ASKED about rather than refused ( W5.13b): 422 `external_targets_unconfirmed` names the assets before anything is stamped or dispatched, and a resend with `external_targets_confirmed` scans them — which also needs `discovery.create`. Reserved and platform-excluded addresses stay refused; such an asset is reported under `skipped` with the reason.
          */
         post: operations["scanAssets"];
         delete?: never;
@@ -3006,12 +2961,19 @@ export interface paths {
         /**
          * Start a discovery job (scan targets for crypto assets)
          * @description Queues an active-discovery job against the supplied targets (IPs, CIDRs,
-         *     or hostnames) and forwards it to cluster-sensor-service for execution.
-         *     `targets` is required (1–1000 entries). Gated by the `discovery.create`
-         *     permission. Returns 202 with the created job (`{ "job": {...} }`); poll
-         *     `GET /discovery/jobs/{id}` for status and `GET /discovery/jobs/{id}/results`
-         *     for findings and their materialization split. Findings flow into
-         *     inventory server-side; there is nothing for the client to import.
+         *     ranges, hostnames or URLs) and forwards it to cluster-sensor-service for
+         *     execution. `targets` is required (1–1000 entries). Gated by the
+         *     `discovery.create` permission. Returns 202 with the created job
+         *     (`{ "job": {...} }`); poll `GET /discovery/jobs/{id}` for status and
+         *     `GET /discovery/jobs/{id}/results` for findings and their
+         *     materialization split. Findings flow into inventory server-side; there
+         *     is nothing for the client to import.
+         *
+         *     Targets outside the tenant's registered networks are scanned only with
+         *     `external_targets_confirmed: true` (422 without it), never when the
+         *     operator has switched that off (403), and never at all when reserved
+         *     or platform-excluded (400) — see `DiscoveryTargetVerdictError`. Each
+         *     such scan is audited.
          */
         post: operations["createDiscoveryJob"];
         delete?: never;
@@ -5594,6 +5556,8 @@ export interface components {
              * @description The tenant sensor to run from. Required when `run_from` is `sensor`; ignored otherwise.
              */
             sensor_id?: string;
+            /** @description The person's confirmation that assets whose address is outside the tenant's registered networks may be scanned. Without it such a scan answers 422 `external_targets_unconfirmed` naming the assets, and nothing is stamped or dispatched. Needs `discovery.create` in addition to `assets.update` (403 otherwise). Never admits a reserved or platform-excluded address. */
+            external_targets_confirmed?: boolean;
         };
         /** @description One discovery job an Active Scan dispatched. */
         ActiveScanJob: {
@@ -5614,6 +5578,26 @@ export interface components {
         /** @description Result of an Active Scan. `job_id` and `count` keep the original shape (the first job and every asset scanned); `jobs` lists each dispatched job with its executor; `skipped` lists assets left unscanned because their observing sensor is offline. */
         ActiveScanResponse: {
             message: string;
+            job_id: string;
+            count: number;
+            jobs: components["schemas"]["ActiveScanJob"][];
+            skipped: components["schemas"]["ActiveScanSkip"][];
+        };
+        /** @description An asset whose scan target is outside the tenant's registered networks. */
+        ActiveScanExternalTarget: {
+            /** @description The address or name the asset would be scanned at. */
+            target: string;
+            addresses: string[];
+            /** Format: uuid */
+            asset_id: string;
+            asset_name: string;
+        };
+        /** @description 422 from POST /infrastructure-assets/scan: some assets are outside the tenant's registered networks ( W5.13b). Nothing was stamped or dispatched for them; resend with `external_targets_confirmed: true` to scan them. `jobs`/`skipped` report any other assets in the request that were already dispatched or skipped (normally empty — the question is asked before anything runs). */
+        ActiveScanExternalTargetsError: {
+            /** @enum {string} */
+            error: "external_targets_unconfirmed";
+            details: string;
+            external_targets: components["schemas"]["ActiveScanExternalTarget"][];
             job_id: string;
             count: number;
             jobs: components["schemas"]["ActiveScanJob"][];
@@ -6004,46 +5988,32 @@ export interface components {
             is_pqc: boolean;
             /** @description True on the worst numerically scored component. False for every component when the resolved catalogue rows have no numeric score. */
             sets_score: boolean;
+            hybrid_kex_available?: components["schemas"]["HybridKexAvailability"];
+            remediation_guidance?: components["schemas"]["ComponentRemediationGuidance"];
+        };
+        /** @description The catalogue row's curated remediation guidance for this component (algorithms.remediation_guidance): what the weakness exposes, the steps to fix it, a suggested timeline, CVE references and further reading. Read live from the catalogue like every other field on the component. Guidance only — it changes no score, band or severity. Omitted when the row records none (only weak/deprecated rows carry it). This replaced the retired GET /crypto-configurations/{id}/remediation and GET /remediation/algorithm/{code}; the per-algorithm form is also on GET /algorithms/{code} as `remediation_guidance`. */
+        ComponentRemediationGuidance: {
+            /** @description One-line statement of the weakness. Omitted when unrecorded. */
+            summary?: string;
+            /** @description What an attacker gains. Omitted when unrecorded. */
+            impact?: string;
+            /** @description Ordered remediation steps, verbatim from the catalogue (a step may carry its own "1." prefix). Empty = none recorded. */
+            steps: string[];
+            /** @description The catalogue's suggested timeline, free text (e.g. "Immediate - within 7 days"). Omitted when unrecorded. Not a severity — the component's risk_level is. */
+            timeline?: string;
+            /** @description CVE identifiers the catalogue associates with the weakness. Empty = none recorded. */
+            cve_references: string[];
+            /** @description Further-reading references, usually URLs. Catalogue-admin authored; consumers must not render a non-http(s) value as a link. */
+            resources: string[];
+        };
+        /** @description Remediation hint on a classical `key_exchange` component: a handshake with this configuration's server proved it ALSO accepts a hybrid post-quantum key exchange, but the session negotiated the classical group — the client's offer or the server's group preference chose it. Reaching post-quantum key exchange is a preference change on the server (or newer clients), not a migration. Guidance only: the component's risk, the configuration's score and band, and its PQC readiness category are unchanged. Omitted when hybrid support is false or unknown, or when the configuration already negotiates a hybrid group. */
+        HybridKexAvailability: {
+            /** @description The hybrid group(s) a handshake with the server accepted, e.g. `X25519MLKEM768`. Always present; empty when the producer did not record which. */
+            groups: string[];
         };
         /** @description List envelope for GET /crypto-configurations/{id}/components — `{ "components": [...] }`. An EMPTY array means NOT ASSESSED, never "assessed clean". */
         CryptoComponentAssessmentListResponse: {
             components: components["schemas"]["CryptoComponentAssessment"][];
-        };
-        /** @description A single weakness contributing to the configuration's overall risk. `type` is the dimension that triggered it (`protocol` / `cipher` / `hash` / `key_size`); `code` is the algorithm or protocol identifier the catalog matched (e.g. `TLS 1.0`, `RC4`). */
-        RemediationIssue: {
-            type: string;
-            code: string;
-            name: string;
-            severity: string;
-            summary: string;
-            impact: string;
-            steps: string[];
-            timeline: string;
-            alternatives: string[];
-            resources: string[];
-        };
-        /** @description Aggregated remediation guidance for a single crypto configuration — services.RemediationSummary's JSON form. All slice/map fields are initialized empty (never null) in the service constructor, so they are required + non-null here. */
-        RemediationSummary: {
-            /** Format: uuid */
-            crypto_implementation_id: string;
-            risk_score: number;
-            issues: components["schemas"]["RemediationIssue"][];
-            priority_actions: string[];
-            overall_timeline: string;
-            recommended_alternatives: string[];
-            /** @description Map of framework code → impact summary. */
-            compliance_impact: {
-                [key: string]: string;
-            };
-            resources: string[];
-        };
-        /** @description CURRENT envelope for GET /crypto-configurations/{id}/remediation: a single `remediation` key wrapping the summary. */
-        RemediationResponse: {
-            remediation: components["schemas"]["RemediationSummary"];
-        };
-        /** @description Envelope for GET /remediation/algorithm/{code}: a single `remediation` key wrapping one issue (the algorithm's catalog guidance). */
-        RemediationByAlgorithmResponse: {
-            remediation: components["schemas"]["RemediationIssue"];
         };
         /** @description One asset↔certificate edge derived from a crypto configuration. The same (asset_id, certificate_id) pair may appear more than once when bound through multiple configurations. */
         AssetCertificateLink: {
@@ -6370,8 +6340,10 @@ export interface components {
          *     `targets` is required (binding:"required"); 1–1000 entries.
          */
         CreateDiscoveryJobRequest: {
-            /** @description IPs, CIDRs, or hostnames to scan (max 1000). */
+            /** @description What to scan (max 1000): IP addresses, CIDR blocks, `a-b` ranges, hostnames, `host:port`, or URLs (`https://host[:port]/path` — the host is scanned, and an explicit port is added to `ports`). Hostnames are resolved once and the scan is pinned to the addresses that were checked. */
             targets: string[];
+            /** @description The person's explicit confirmation that they are authorized to scan the targets outside the tenant's registered networks (public addresses, blocks and names not inside a network segment the tenant declared). Required when any target is external: without it the request answers 422 `external_targets_unconfirmed` listing them. It never admits a reserved or platform-excluded target, and it is ignored on unattended scans. */
+            external_targets_confirmed?: boolean;
             /** @description How the scan is dispatched: `auto` (platform decides), `cloud` (platform sensor), or `sensors` — run from the one tenant sensor named in `preferred_sensor_ids`, which must be live; an unknown sensor answers 404, the platform's own or an air-gapped one 400, an offline one 409, and the job is not created. A `sensors` job is never run from the platform instead. */
             execution_mode?: string;
             /** @description With `execution_mode: sensors`, exactly one tenant sensor id. Not accepted with any other mode. */
@@ -6445,8 +6417,45 @@ export interface components {
             updated_at?: string;
             /** @description `auto_scan` when the automatic-scan sweep created this job; empty for an operator-started run (Active Scan, Discover wizard). Drives the "Automatic scan" kind on the unified Jobs page. */
             origin?: string;
+            /** @description Create response only: the confirmed targets outside the tenant's registered networks, each with the addresses it named when the job was created (a hostname's resolved — and pinned — addresses; a literal's own value). Absent when nothing was external. */
+            external_targets?: components["schemas"]["DiscoveryExternalTarget"][];
         } & {
             [key: string]: unknown;
+        };
+        /** @description A target outside the tenant's registered networks and the addresses it names. */
+        DiscoveryExternalTarget: {
+            /** @description The target as the person entered it. */
+            target: string;
+            addresses: string[];
+        };
+        /** @description A target that can never be scanned as entered, and why. */
+        DiscoveryRefusedTarget: {
+            target: string;
+            reason: string;
+        };
+        /**
+         * @description The answer when target authorization refuses a create-job request
+         * ( W5.13b). Branch on `error`:
+         *
+         *     - `targets_refused` (400) — `refused_targets` can never be scanned as
+         *       entered: a reserved or platform-excluded range (loopback,
+         *       link-local and cloud metadata, the platform's own addresses, ranges
+         *       the tenant excluded), a hostname resolving to one, a name that does
+         *       not resolve, or a block outside the registered networks that is
+         *       larger than the per-target bound. Confirming changes nothing.
+         *     - `external_targets_unconfirmed` (422) — `external_targets` are outside
+         *       the tenant's registered networks. Resend with
+         *       `external_targets_confirmed: true` to scan them.
+         *     - `external_targets_disabled` (403) — the same, but the installation's
+         *       operator has turned scanning outside the registered networks off.
+         */
+        DiscoveryTargetVerdictError: {
+            /** @enum {string} */
+            error: "targets_refused" | "external_targets_unconfirmed" | "external_targets_disabled";
+            /** @description A sentence for a person. Do not branch on it. */
+            details: string;
+            external_targets?: components["schemas"]["DiscoveryExternalTarget"][];
+            refused_targets?: components["schemas"]["DiscoveryRefusedTarget"][];
         };
         /** @description GET /discovery/jobs — a page of the tenant's discovery jobs, newest first. */
         DiscoveryJobsResponse: {
@@ -8541,58 +8550,6 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
-    getCryptoConfigurationRemediation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Crypto configuration UUID (`crypto_implementations.id` in storage). */
-                id: components["parameters"]["CryptoConfigurationId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The remediation summary. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RemediationResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    getRemediationByAlgorithm: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Algorithm or protocol code (e.g. `RC4`, `TLS 1.0`). */
-                code: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The algorithm's remediation guidance. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RemediationByAlgorithmResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
     listAssetCertificateLinks: {
         parameters: {
             query?: {
@@ -9469,6 +9426,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description `external_targets_confirmed` was sent without the `discovery.create` permission. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             404: components["responses"]["LegacyNotFound"];
             /** @description The named sensor is offline; nothing was scanned. */
             409: {
@@ -9477,6 +9443,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description Some assets are outside the registered networks; confirm to scan them. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActiveScanExternalTargetsError"];
                 };
             };
             500: components["responses"]["LegacyServerError"];
@@ -11801,8 +11776,34 @@ export interface operations {
                     "application/json": components["schemas"]["DiscoveryJobResponse"];
                 };
             };
-            400: components["responses"]["LegacyBadRequest"];
+            /** @description Invalid request, or `targets_refused` — targets that can never be scanned as entered (`DiscoveryTargetVerdictError`). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryTargetVerdictError"] | components["schemas"]["LegacyError"];
+                };
+            };
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description `external_targets_disabled` — the operator has turned off scanning outside the registered networks. Also the permission gate's refusal. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryTargetVerdictError"] | components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description `external_targets_unconfirmed` — resend with `external_targets_confirmed: true` to scan the listed targets. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryTargetVerdictError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };

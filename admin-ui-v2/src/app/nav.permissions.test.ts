@@ -34,8 +34,8 @@ const ROUTE_GATES: Record<string, string | string[]> = {
   plans: 'platform.settings',
   // admin-service /admin/security → platform.security
   'security/dashboard': 'platform.security',
-  // audit-service /activity-logs: no permission gate for a platform token
-  'security/activity': ['platform.security', 'platform.audit'],
+  // audit-service RequirePermission(audit.read) → platform.audit for operators
+  'security/activity': 'platform.audit',
   // audit-service RequirePermission(audit.read) → platform.audit for operators
   'security/retention': 'platform.audit',
   'security/siem': 'platform.audit',
@@ -49,6 +49,8 @@ const ROUTE_GATES: Record<string, string | string[]> = {
   'catalog/classification-rules': 'catalogs.manage',
   // notification-service /platform/** → platform.notifications.manage
   'settings/notifications': 'platform.notifications.manage',
+  // admin-service /admin/roles + /admin/permissions compose both read gates
+  'staff/roles': ['platform_roles.read', 'platform_permissions.read'],
 };
 
 /** The gate the nav applies to a section or `section/child` path. */
@@ -58,8 +60,8 @@ function navGate(path: string): string | string[] | undefined {
   if (!section) throw new Error(`no section ${sid}`);
   const child = cid ? section.children?.find((c) => c.id === cid) : undefined;
   if (cid && !child) throw new Error(`no sub-view ${path}`);
-  const entry = child && (child.permission || child.anyOf?.length) ? child : section;
-  return entry.permission ?? entry.anyOf;
+  const entry = child && (child.permission || child.anyOf?.length || child.allOf?.length) ? child : section;
+  return entry.permission ?? entry.anyOf ?? entry.allOf;
 }
 
 describe('nav gate equals route gate', () => {
@@ -74,8 +76,8 @@ describe('nav gate equals route gate', () => {
     const s = SECTION_BY_ID[id];
     const union = new Set<string>();
     for (const c of s.children ?? []) {
-      if (!c.permission && !c.anyOf?.length) throw new Error(`${id}/${c.id} is ungated`);
-      for (const p of c.permission ? [c.permission] : c.anyOf!) union.add(p);
+      if (!c.permission && !c.anyOf?.length && !c.allOf?.length) throw new Error(`${id}/${c.id} is ungated`);
+      for (const p of c.permission ? [c.permission] : c.anyOf ?? c.allOf!) union.add(p);
     }
     expect(new Set(s.permission ? [s.permission] : s.anyOf)).toEqual(union);
   });
@@ -130,7 +132,7 @@ describe('seeded roles', () => {
       'fleet',
       'jobs',
       'system', 'system/services', 'system/gateway', 'system/alerts',
-      'staff', 'staff/staff', 'staff/roles',
+      'staff', 'staff/staff',
       'security', 'security/activity', 'security/retention', 'security/siem',
     ]);
   });
@@ -164,5 +166,11 @@ describe('custom roles', () => {
 
   it('gateAllows passes an ungated entry', () => {
     expect(gateAllows({}, () => false)).toBe(true);
+  });
+
+  it('gateAllows requires every allOf permission', () => {
+    const gate = { allOf: ['platform_roles.read', 'platform_permissions.read'] };
+    expect(gateAllows(gate, (p) => p === 'platform_roles.read')).toBe(false);
+    expect(gateAllows(gate, () => true)).toBe(true);
   });
 });

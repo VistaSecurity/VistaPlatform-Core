@@ -63,6 +63,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
+	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
 
@@ -683,10 +684,20 @@ func (s *CloudDiscoveryService) ensureSubnetSegments(ctx context.Context, tenant
 		if cidr == "" {
 			continue
 		}
-		if _, err := netip.ParsePrefix(cidr); err != nil {
+		prefix, err := netip.ParsePrefix(cidr)
+		if err != nil {
 			// A value ScopeForAddress could not parse would match nothing and
 			// sit in the table forever. Not stored.
 			log.Printf("[cloud enumeration] subnet %s: %q is not a CIDR prefix; no segment created", subnet.ResourceID, cidr)
+			continue
+		}
+		// A cloud-discovered segment is a segment like any other to scan scope
+		// and probe consent, so it is held to the rule every segment write is:
+		// nothing too broad to be anybody's (probeconsent.TooBroadToClaim —
+		// /0, IPv4 shorter than /8, IPv6 shorter than /16). A provider reporting
+		// one is logged and skipped, not stored.
+		if probeconsent.TooBroadToClaim(prefix) {
+			log.Printf("[cloud enumeration] subnet %s: %s is too broad to record as a network segment; skipped", subnet.ResourceID, cidr)
 			continue
 		}
 		name := subnet.DisplayName

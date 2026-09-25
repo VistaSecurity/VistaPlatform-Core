@@ -34,6 +34,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/licenseusage"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
+	"github.com/vistasecurity/vistaplatform/shared/trials"
 )
 
 var (
@@ -1307,16 +1308,17 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 		// of anything. The old 'trial' made both UIs label every tenant on
 		// every install — Enterprise ones included — "Trial". Whether a tenant
 		// is on a trial is its tier's business (subscription_tiers.is_trial,
-		// an MSP's choice): the set_tenant_trial_end trigger stamps
-		// trial_ends_at for a trial tier and leaves it NULL otherwise.
+		// an MSP's choice) and the trial store's: BootstrapTrialIfApplicable
+		// writes the billing_trial_tracking row for a trial tier and derives
+		// 'trial' from it (owner decision 6 — one trial store).
 		PaymentStatus: "active",
 		Settings:      make(map[string]interface{}),
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
 
-	// trial_ends_at is left to the set_tenant_trial_end trigger, which sets it
-	// only when the tier is a trial tier.
+	// trial_ends_at is not written: billing_trial_tracking is the only trial
+	// store (the trigger that stamped this column is retired).
 	// onboarding_status is left at its 'pending' default: the tier here is a
 	// system-assigned floor, not a choice the user made, and the MSP onboarding
 	// funnel reads that column as "has this tenant been through onboarding".
@@ -1532,7 +1534,9 @@ func (a *AuthService) BootstrapTrialIfApplicable(tenantID uuid.UUID) error {
 			return fmt.Errorf("insert trial tracking row: %w", e)
 		}
 		bootstrapped = true
-		return nil
+		// payment_status 'trial' is derived from the trial row just written,
+		// in the same transaction (shared/trials, owner decision 6).
+		return trials.SyncPaymentStatus(context.Background(), tx, tenantID)
 	})
 	if wrapErr != nil {
 		return wrapErr

@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/internal/dialguard"
+	"github.com/vistasecurity/vistaplatform/shared/discovery"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -95,7 +97,7 @@ func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, c
 
 	timeout := s.snmpTimeout()
 
-	conn, err := net.DialTimeout("udp", target, timeout)
+	conn, err := dialguard.Dial(timeout)(ctx, "udp", target)
 	if err != nil {
 		return nil, fmt.Errorf("SNMP interrogation failed: %w", err)
 	}
@@ -119,6 +121,7 @@ func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, c
 	result := &InterrogateResult{
 		Assets:     make([]CryptoAsset, 0),
 		DeviceInfo: deviceInfo,
+		collector:  snmpCollector,
 	}
 
 	// Emit a basic discovered asset representing the device itself.
@@ -286,7 +289,7 @@ func (p *TLSProber) ProbeTLS(hostname string, port int) (*CryptoAsset, error) {
 	timeout := p.tlsprobeTimeout()
 	address := net.JoinHostPort(hostname, strconv.Itoa(port))
 
-	conn, err := net.DialTimeout("tcp", address, timeout)
+	conn, err := dialguard.Dial(timeout)(context.Background(), "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("TCP connect failed: %w", err)
 	}
@@ -314,15 +317,31 @@ func (p *TLSProber) ProbeTLS(hostname string, port int) (*CryptoAsset, error) {
 	tlsVersion := tlsprobeVersionName(state.Version)
 	kex := tlsprobeKeyExchangeFromCipher(selectedCipher)
 
+	// No SupportedCiphers: one negotiated suite is not the supported set, and
+	// CipherSuite already carries it (E-02).
 	asset := &CryptoAsset{
-		Hostname:         hostname,
-		Port:             port,
-		Protocol:         "TLS",
-		SupportedCiphers: []string{selectedCipher},
-		TLSVersions:      []string{tlsVersion},
+		Hostname:    hostname,
+		Port:        port,
+		Protocol:    "TLS",
+		TLSVersions: []string{tlsVersion},
 		Metadata: map[string]interface{}{
 			"negotiated_protocol": state.NegotiatedProtocol,
 		},
+	}
+
+	// The negotiated group, measured the same way as the shared prober; it is
+	// a more precise key exchange than the suite's label, and for TLS 1.3 the
+	// only one there is.
+	// The support handshakes redial the ADDRESS the main one reached, not the
+	// hostname, so a name that resolves elsewhere cannot send them to a
+	// different host; SNI is unchanged (they clone tlsConfig).
+	reached := conn.RemoteAddr().String()
+	kx := discovery.MeasureTLSKeyExchange(state, tlsConfig, func(t time.Duration) (net.Conn, error) {
+		return dialguard.Dial(t)(context.Background(), "tcp", reached)
+	}, timeout)
+	kx.ApplyTo(asset.Metadata)
+	if kx.Group != "" {
+		kex = kx.Group
 	}
 
 	asset.CipherSuite = strPtr(selectedCipher)
@@ -373,7 +392,7 @@ func (p *TLSProber) EnumerateTLSVersions(hostname string, port int) []string {
 	var accepted []string
 
 	for _, ver := range versions {
-		conn, err := net.DialTimeout("tcp", address, timeout)
+		conn, err := dialguard.Dial(timeout)(context.Background(), "tcp", address)
 		if err != nil {
 			continue
 		}
@@ -412,7 +431,7 @@ func (p *TLSProber) ProbeSSH(hostname string, port int) (*CryptoAsset, error) {
 	timeout := p.tlsprobeTimeout()
 	address := net.JoinHostPort(hostname, strconv.Itoa(port))
 
-	conn, err := net.DialTimeout("tcp", address, timeout)
+	conn, err := dialguard.Dial(timeout)(context.Background(), "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("TCP connect failed: %w", err)
 	}

@@ -11,6 +11,7 @@ import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SInput, SToggle, STable, STableRow, STag, StateNote, GREEN, AMBER } from './kit';
 import { LocationModal, NetworkSegmentModal, DeleteInfraModal } from './infra-modals';
 import { ImportSpreadsheetModal } from '../discovery/import-modal';
+import { segmentProvenance, SEGMENT_DHCP_LABEL } from './segment-provenance';
 import type { SettingsNavItem } from './nav';
 
 type Location = inventoryComponents['schemas']['Location'];
@@ -93,6 +94,20 @@ export function LocationsPage({ meta }: { meta: SettingsNavItem }) {
 // ---- Network Segments -----------------------------------------------------
 const SEGMENT_TYPE_LABEL: Record<string, string> = { cidr: 'CIDR', ip_range: 'IP range', domain: 'Domain', cloud_vpc: 'Cloud VPC' };
 
+// A learned segment says which device it came from and what is known about
+// DHCP on it; a declared one shows its name alone.
+function SegmentName({ segment }: { segment: NetworkSegment }) {
+  const learned = segmentProvenance(segment.metadata);
+  return (
+    <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+      <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{segment.name}</span>
+      {learned && (
+        <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{learned.label} · {SEGMENT_DHCP_LABEL[learned.dhcp]}</span>
+      )}
+    </span>
+  );
+}
+
 export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -136,7 +151,7 @@ export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
         <STable cols={cols}>
           {segments.map((s: NetworkSegment, i) => (
             <STableRow key={s.id} first={i === 0} cols={cols} cells={[
-              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{s.name}</span>,
+              <SegmentName segment={s} />,
               <STag>{SEGMENT_TYPE_LABEL[s.segment_type] || s.segment_type}</STag>,
               <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)' }}>{s.value}</span>,
               <span style={{ fontSize: 12, color: 'var(--app-t2)', textTransform: 'capitalize' }}>{s.environment || '—'}</span>,

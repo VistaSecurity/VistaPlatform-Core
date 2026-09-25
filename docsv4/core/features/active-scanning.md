@@ -43,6 +43,15 @@ is still a host on your network, and the inventory you make the approval
 decision from should be the fuller one. Its findings are held until you approve
 the asset, exactly as they are for any other discovery.
 
+This page governs the scheduled sweep. A sensor also makes one narrower kind of
+active connection on its own: when it sees a TLS connection whose certificate it
+could not read (TLS 1.3 encrypts it), it can connect to that one server to read
+it. That *enrichment* goes only to your own endpoints by default — private
+addresses, registered network segments of any type, and connections you elevated —
+and reaches third parties only if you turn on **Actively enrich third-party TLS
+connections**. See
+[Certificates of third-party TLS connections](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections).
+
 ## What each scan does
 
 An automatic scan is the same active probe the **Discover** wizard runs: a TCP
@@ -161,6 +170,141 @@ refused nothing — not that no pass has run; that is a separate line above.
 - **It will not scan an unbounded number of hosts at once.** Each pass starts at
   most a bounded number of scans per organization; anything left over is first in
   line on the next pass.
+
+## Scanning outside your networks
+
+Everything above is about scans the platform runs **on its own**, and those
+never touch an address you have not declared as yours. A scan **you** start is
+different: you may scan any public IP address, CIDR block, range, hostname or URL
+you name, including ones outside every network segment you registered — a
+partner's endpoint you are allowed to test, a SaaS login page, your own public
+estate before you have registered it. The platform does not judge why; it asks
+you to confirm.
+
+**Where:**
+
+- **Discovery → Active Scan → Scan addresses or hostnames**, or **Discovery →
+  Command Center → Discover assets** — the same wizard, for targets you type.
+  Needs the **`discovery.create`** permission, as any scan does.
+- **Discovery → Active Scan → Scan** on an asset already in your inventory whose
+  address is outside your registered networks. Pressing Scan on an asset you
+  chose is the same explicit choice, so the page asks rather than refuses.
+  Confirming needs **`discovery.create`** as well as the **`assets.update`**
+  that scanning an asset always needs.
+
+**What you can enter** (in the wizard): one target per line or
+comma-separated — `93.184.216.34`, `93.184.216.0/28`,
+`93.184.216.10-93.184.216.20`, `www.example.com`, `www.example.com:8443` or
+`https://www.example.com:8443/login`. A URL is scanned at its host; a port
+written in it is added to the ports the scan tries.
+
+**What happens:**
+
+1. You start the scan. If every target is inside your private ranges or a
+   network segment you registered, it runs as it always has.
+2. If any target is outside them, nothing runs yet and you are asked: *"N
+   targets are outside your registered networks. Only scan systems you are
+   authorized to test."* The list shows each one — for a hostname, the
+   addresses it resolved to; for an asset, its name and address.
+3. **Scan anyway** starts the scan. **Cancel** changes nothing.
+
+Each scan you confirm is recorded in your organization's audit log: who
+confirmed it, when, the targets and the addresses they named.
+
+Your confirmation covers exactly what you were shown. A hostname is looked up
+**once**, when you start the scan; every address it resolves to is checked, and
+the scan connects to exactly those addresses (the name is still sent for TLS,
+so the right certificate comes back). If the name's DNS answer changes a moment
+later, the scan does not follow it. If a range you had registered stops being
+yours before the scan runs, that range is not scanned on the strength of your
+confirmation for something else.
+
+Targets outside your registered networks always run from the **platform
+sensor**. A scan that would hand them to one of your own sensors is refused
+with that reason: run it from the platform.
+
+### What is never scanned, confirmed or not
+
+| Never scanned | Why |
+|---|---|
+| Loopback, link-local, multicast, the unspecified and broadcast addresses | Not hosts. Link-local includes the cloud instance-metadata service (169.254.169.254). |
+| Carrier-grade NAT (`100.64.0.0/10`) | Shared between operators. Register it as a network segment if it really is yours. |
+| Documentation ranges | Not routable. |
+| IPv6 forms that carry an IPv4 address — NAT64, IPv4-compatible, IPv4-mapped and translated addresses; 6to4 and Teredo addresses whose embedded IPv4 is itself never scanned | They lead to that IPv4 address. Name the IPv4 address instead. |
+| The platform's own addresses and ranges | The platform does not scan itself. |
+| Ranges you excluded, and segments marked sensitive | Your own decision, which a confirmation does not override. |
+| A hostname that resolves to any of the above | Every address a name resolves to is checked; one refused address refuses the name. The refusal does not say which address it was. |
+| Single-label names (`web01`), and names under `.svc`, `.cluster.local`, `.internal` or `.localhost` | From the platform these resolve in the platform's own DNS, not yours. Use the full name or the address. |
+| A hostname that does not resolve | There is no address to check. |
+
+If a target is refused, you see each one and why. Remove them to scan the rest;
+confirming does not help.
+
+The same rule holds for what a scanned server tells the platform to fetch. When
+the platform checks a certificate's revocation status, it contacts the OCSP
+responder named in that certificate only at a **public** address, and never
+follows a redirect — a server being scanned cannot point the platform at its own
+network or at cloud metadata.
+
+### How big a scan can be
+
+One target outside your registered networks may name at most **4,096 addresses**
+— an IPv4 `/20` or an IPv6 `/116` — and one scan at most **16,384** such
+addresses across all its targets. Split a larger block across scans, or register
+it as a network segment if it is yours: private ranges and registered segments
+are not bounded by this. Your operator may set lower limits.
+
+A network segment wider than `/8` (IPv4) or `/16` (IPv6) never counts as yours,
+whatever its type, unless it lies wholly inside private space: nobody owns that
+much of the internet, and a segment like `0.0.0.0/0` would otherwise make every
+address "registered". IPv6 blocks that carry IPv4 addresses (6to4 `2002::/16`,
+Teredo, NAT64) count by the IPv4 space they carry, so `2002::/16` — every IPv4
+address in 6to4 form — is as wide as `0.0.0.0/0`. New segments that wide cannot
+be saved; addresses under one saved earlier are treated as outside your
+registered networks.
+
+Your operator can also lower the limits after a scan was started; a scan still
+waiting to run is then checked against the new limits and stops if it no longer
+fits.
+
+### If your operator has turned it off
+
+An installation's operator can turn scanning outside registered networks off
+entirely (some hosted services must). You are then told so instead of being
+asked, and those targets are refused as they were before this existed; a scan
+already queued stops too. Register the range as a network segment if it is
+yours, or ask your operator.
+
+### Using the API
+
+`POST /api/v1/inventory-service/discovery/jobs` accepts the same targets, and
+`POST /api/v1/inventory-service/infrastructure-assets/scan` the same assets. A
+request that reaches outside your registered networks must carry
+`"external_targets_confirmed": true`; without it the answer is **422**
+`external_targets_unconfirmed` listing the targets (for the asset scan, with
+each asset's id and name), and nothing is scanned or changed. A refused target is
+**400** `targets_refused` with each reason, and the operator's switch is **403**
+`external_targets_disabled`.
+
+For operators, in the chart:
+
+```yaml
+discovery:
+  explicitExternalTargets:
+    enabled: true              # false turns the capability off
+    maxAddressesPerTarget: 4096  # 1-4096, lower only
+    maxAddressesPerJob: 16384    # 1-16384, lower only
+```
+
+These render `DISCOVERY_EXPLICIT_EXTERNAL_TARGETS_ENABLED`,
+`DISCOVERY_EXTERNAL_TARGET_MAX_ADDRESSES` and
+`DISCOVERY_EXTERNAL_JOB_MAX_ADDRESSES` on cluster-sensor-service. They are not
+part of `extraEnv`, so replacing that list in your own values cannot drop them,
+and an `extraEnv` entry naming any `DISCOVERY_EXTERNAL_*` or
+`DISCOVERY_EXPLICIT_EXTERNAL_*` variable fails the install with a message
+pointing here — it would otherwise silently override these values.
+The switch fails **closed**: if the variable is missing or not a recognisable
+boolean, scanning outside registered networks is off.
 
 ## Turning it off
 

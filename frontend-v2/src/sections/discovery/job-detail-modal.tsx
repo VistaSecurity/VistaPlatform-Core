@@ -21,6 +21,7 @@ import {
   type OutcomeTone,
   type ResourceTypeOutcome,
 } from './cloud-outcomes';
+import { collectionWarningsView, warningReasonLabel, type CollectionWarningsView } from './collection-warnings';
 
 type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
 type ResultAsset = deviceInterrogationComponents['schemas']['JobResultAsset'];
@@ -144,6 +145,67 @@ function ResourceTypes({ types }: { types: ResourceTypeOutcome[] }) {
   );
 }
 
+/**
+ * What the collector could not read ( W0.1). A device that refused part of
+ * its API to the account still yields everything else, and the job still reads
+ * "completed" — this is the list that says which part is missing and why.
+ * Hidden when there is nothing to say; never silent when the list could not be
+ * loaded, because silence here reads as "the collector had no trouble".
+ */
+function CollectionWarnings({ view }: { view: CollectionWarningsView }) {
+  if (view.state === 'hidden') return null;
+  return (
+    <Section
+      title="Collection warnings"
+      right={view.state === 'list' ? <span style={{ fontSize: 11, color: MUTED }}>{view.warnings.length}</span> : undefined}
+    >
+      {view.state === 'error' ? (
+        <div style={{ fontSize: 11.5, color: MUTED }}>Warnings could not be loaded.</div>
+      ) : (
+        <>
+          <div style={{ fontSize: 11.5, color: MUTED, marginBottom: 8 }}>
+            The device did not answer everything it was asked. The rest of this result was collected; what is
+            listed here is missing from it — most often because the account used can read only part of the device.
+          </div>
+          <div className="panel" style={{ padding: 0, borderRadius: 10, overflow: 'hidden' }} role="list" aria-label="Collection warnings">
+            {view.warnings.map((w, i) => (
+              <div
+                key={`${w.collector}-${w.endpoint}-${w.reason}-${i}`}
+                role="listitem"
+                style={{ padding: '9px 12px', borderTop: i ? '1px solid var(--app-border)' : 'none' }}
+              >
+                <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t1)', wordBreak: 'break-word' }}>
+                    {w.endpoint}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      padding: '1px 7px',
+                      borderRadius: 20,
+                      border: '1px solid var(--warn)',
+                      color: 'var(--warn)',
+                      flex: 'none',
+                    }}
+                  >
+                    {warningReasonLabel(w.reason)}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginTop: 3 }}>{w.effect}</div>
+                {w.detail && (
+                  <div className="mono" style={{ fontSize: 10.5, color: MUTED, marginTop: 3, wordBreak: 'break-word' }}>
+                    {w.detail}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Section>
+  );
+}
+
 function AssetCard({ a }: { a: ResultAsset }) {
   const name = firstText(a.hostname, a.ip_address) ?? 'Unnamed asset';
   const certs = a.certificates ?? [];
@@ -224,6 +286,7 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
   const errors = processing?.errors ?? [];
   const resourceTypes = res?.resource_types;
   const banner = hasResourceOutcomes(resourceTypes) ? runBanner(res?.outcome, resourceTypes) : undefined;
+  const warningsView = collectionWarningsView(res, q.isError);
 
   return (
     <Modal
@@ -255,6 +318,7 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
 
       {q.isLoading && <div style={{ fontSize: 12, color: MUTED, marginTop: 16 }}>Loading results…</div>}
       {q.isError && <div style={{ fontSize: 12, color: DANGER, marginTop: 16 }}>Could not load this job's results.</div>}
+      {q.isError && <CollectionWarnings view={warningsView} />}
 
       {res && (
         <>
@@ -303,6 +367,8 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
               </div>
             </Section>
           )}
+
+          {!q.isError && <CollectionWarnings view={warningsView} />}
 
           {errors.length > 0 && (
             <Section title="Processing errors">

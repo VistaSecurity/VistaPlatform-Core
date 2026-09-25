@@ -1,0 +1,16 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {
+      "name": "vpn-server",
+      "source": "user",
+      "range": "global",
+      "comments": "",
+      "certificate": "{{PEM_JSON:_shared/leaf.pem}}",
+      "private-key": "MUST-NOT-BE-COLLECTED",
+      "password": "MUST-NOT-BE-COLLECTED"
+    }
+  ]
+}

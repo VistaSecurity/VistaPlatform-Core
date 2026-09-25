@@ -1,6 +1,9 @@
 package discovery
 
-import "crypto/x509"
+import (
+	"crypto/x509"
+	"net/http"
+)
 
 // CertChainValidation holds the results of validating a TLS certificate chain.
 type CertChainValidation struct {
@@ -15,7 +18,7 @@ type CertChainValidation struct {
 // quality classification only (no OCSP HTTP). Use on passive-capture hot paths
 // where outbound network I/O must not block the pipeline.
 func ValidateAndClassifyCertChainPassive(peerCerts []*x509.Certificate, hostname string) *CertChainValidation {
-	return validateAndClassifyCertChain(peerCerts, hostname, nil, true)
+	return validateAndClassifyCertChain(peerCerts, hostname, nil, true, nil)
 }
 
 // ValidateAndClassifyCertChain performs full certificate chain validation:
@@ -23,10 +26,18 @@ func ValidateAndClassifyCertChainPassive(peerCerts []*x509.Certificate, hostname
 // quality flags, and checks OCSP revocation (staple first, then direct query).
 // Pass an empty hostname to skip hostname verification; ocspStaple may be nil.
 func ValidateAndClassifyCertChain(peerCerts []*x509.Certificate, hostname string, ocspStaple []byte) *CertChainValidation {
-	return validateAndClassifyCertChain(peerCerts, hostname, ocspStaple, false)
+	return validateAndClassifyCertChain(peerCerts, hostname, ocspStaple, false, nil)
 }
 
-func validateAndClassifyCertChain(peerCerts []*x509.Certificate, hostname string, ocspStaple []byte, skipOCSPQueries bool) *CertChainValidation {
+// ValidateAndClassifyCertChainWith is ValidateAndClassifyCertChain with the
+// OCSP query made through ocspClient — a GuardedHTTPClient on any platform
+// runtime, because the responder URL comes from the scanned server's own
+// certificate. Nil means the default client.
+func ValidateAndClassifyCertChainWith(peerCerts []*x509.Certificate, hostname string, ocspStaple []byte, ocspClient *http.Client) *CertChainValidation {
+	return validateAndClassifyCertChain(peerCerts, hostname, ocspStaple, false, ocspClient)
+}
+
+func validateAndClassifyCertChain(peerCerts []*x509.Certificate, hostname string, ocspStaple []byte, skipOCSPQueries bool, ocspClient *http.Client) *CertChainValidation {
 	if len(peerCerts) == 0 {
 		return &CertChainValidation{
 			ValidationStatus: "unknown",
@@ -58,7 +69,7 @@ func validateAndClassifyCertChain(peerCerts []*x509.Certificate, hostname string
 		issuer := peerCerts[1]
 		result.OCSPStatus, result.OCSPDetail = CheckOCSPStaple(ocspStaple, leaf, issuer)
 		if result.OCSPStatus == "" {
-			result.OCSPStatus, result.OCSPDetail = CheckOCSPRevocation(leaf, issuer)
+			result.OCSPStatus, result.OCSPDetail = CheckOCSPRevocationWith(ocspClient, leaf, issuer)
 		}
 		if result.OCSPStatus == "revoked" {
 			result.ValidationStatus = "revoked"

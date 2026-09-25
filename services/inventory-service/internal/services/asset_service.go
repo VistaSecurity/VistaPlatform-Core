@@ -997,6 +997,70 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			ownership = "unknown"
 		}
 
+		// An interrogation finding with no address, a public one, or one at
+		// the device's OWN address belongs to the device that was
+		// interrogated — not to external_connections, and not to a new asset
+		// minted from a label, a tunnel's far end or the device's own
+		// management plane. See interrogation_owned_ingest.go. Any other
+		// private address keeps the ordinary path below.
+		if _, _, claims := interrogationOwnerClaim(f); claims {
+			owner, owned, claimed, ownerErr := s.interrogationOwner(ctx, tenantID, f)
+			if ownerErr != nil {
+				return result(), ownerErr
+			}
+			toDevice := ownedByInterrogatedDevice(effectiveIP, ownership)
+			if !toDevice && owned {
+				own, ownErr := s.isDeviceOwnAddress(ctx, tenantID, owner, *effectiveIP)
+				if ownErr != nil {
+					return result(), ownErr
+				}
+				toDevice = own
+			}
+			if !toDevice {
+				owned, claimed = false, false
+			}
+			if claimed && !owned {
+				// Claimed a device the claim does not check out for. Not
+				// routed by address: a tunnel's far end or a rule label is
+				// not a connection the tenant made. `rejected` tells
+				// discovery-processor to settle the row as `suppressed` —
+				// visible, never silently dropped.
+				log.Printf("[AssetService] IngestFindings: rejecting %s: its interrogated-device claim did not verify", findingLabel(f))
+				continue
+			}
+			if owned {
+				landed, landedStatus, retired, attachErr := s.attachToInterrogatedDevice(ctx, tenantID, owner, f, func(assetID uuid.UUID, of IngestFinding) error {
+					if err := s.processDiscoveryCryptoData(tenantID, assetID, of, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+						// Same posture as the resolved path: one finding's
+						// materialisation failure is logged, not fatal to
+						// the batch.
+						log.Printf("[AssetService] IngestFindings: materializing crypto data for interrogated device %s failed (batch continues): %v", assetID, err)
+					}
+					return nil
+				})
+				if attachErr != nil {
+					return result(), fmt.Errorf("attach %s to interrogated device %s: %w", findingLabel(f), owner, attachErr)
+				}
+				if retired {
+					// The tenant archived or denied the device: nothing was
+					// materialised or deferred, so this is not a match. Left
+					// `rejected` (discovery-processor settles the row
+					// `suppressed`), with the reason in the log.
+					log.Printf("[AssetService] IngestFindings: rejecting %s: interrogated device %s is %s; its findings are not materialised",
+						findingLabel(f), landed, landedStatus)
+					continue
+				}
+				outcomes[i] = identity.IngestResult{Outcome: string(identity.OutcomeMatched), AssetID: landed.String()}
+				effective[i] = landedStatus
+				changedAssetIDs = append(changedAssetIDs, landed)
+				inserted++
+				updatedManaged++
+				log.Printf("[AssetService] IngestFindings: %s is owned by interrogated device %s (status=%s); attached there",
+					findingLabel(f), landed, landedStatus)
+				continue
+			}
+		}
+
 		obs, obsErr := s.discoveryObservation(tenantID, f, effectiveIP, ownership)
 		if obsErr != nil {
 			// An observation with no identifier could never be matched again, so
@@ -2146,6 +2210,9 @@ func (s *AssetService) processDiscoveryCryptoData(
 	if f.RawData != nil {
 		raw = models.JSONB(f.RawData)
 	}
+	// A cipher string the parser cannot fully resolve is a partial
+	// assessment; record it where every reader can see it (cipher_assessment.go).
+	raw, cipherPartial := annotateCipherAssessment(raw, f.CipherSuite)
 	rawJSON, _ := json.Marshal(raw)
 
 	var sensor interface{}
@@ -2157,6 +2224,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 
 	var cryptoID uuid.UUID
 	var cryptoOutcome cryptoUpsertOutcome
+	var keyExchangeAdopted bool
 	// RLS-scoped write over crypto_implementations. The advisory lock is what
 	// stands in for the unique constraint this table deliberately does not have:
 	// it serializes the find-then-write for this asset across every replica, so
@@ -2165,6 +2233,14 @@ func (s *AssetService) processDiscoveryCryptoData(
 		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
 			return fmt.Errorf("lock asset materialization: %w", e)
 		}
+		// A suite-derived key-exchange label and a handshake's measured group
+		// are one fact at two precisions; reconcile them before the natural-key
+		// lookups or they split into two configurations (crypto_kex_refine.go).
+		adopted, e := refineCryptoKeyExchange(tx, tenantID, &key)
+		if e != nil {
+			return e
+		}
+		keyExchangeAdopted = adopted
 		id, outcome, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON, findingObservedAt(f))
 		if e != nil {
 			return e
@@ -2223,6 +2299,19 @@ func (s *AssetService) processDiscoveryCryptoData(
 				})
 			}
 		}
+	}
+
+	// A label-only observation that landed on a configuration whose key
+	// exchange a handshake measured adopted that group for its key (see
+	// refineCryptoKeyExchange). Link and score it with the group too, or the
+	// suite parse below would re-link the classical label the refinement
+	// removed — but link it as INFERRED, because this observation did not
+	// measure it. Measured-over-parsed precedence is unchanged: a finding that
+	// states its own key exchange is never touched here.
+	if keyExchangeAdopted && (f.KeyExchangeAlgorithm == nil || strings.TrimSpace(*f.KeyExchangeAlgorithm) == "") && key.KeyExchange != nil {
+		adopted := *key.KeyExchange
+		f.KeyExchangeAlgorithm = &adopted
+		f.keyExchangeInferred = true
 	}
 
 	// Classify and link algorithms.
@@ -2313,6 +2402,10 @@ func (s *AssetService) processDiscoveryCryptoData(
 			// the RSA floor and called it critically weak. The finding carries the
 			// field; it simply was not being passed on.
 			KeyExchangeAlgorithm: f.KeyExchangeAlgorithm,
+			// The symmetric component exactly as the row stores it, so the
+			// key-size rule here and its SQL twin (configurationWeakKeySizeSQL)
+			// read the same value.
+			SymmetricEncryption: s.deriveCipherComponents(f).Symmetric,
 		}
 
 		if issues := s.weakCryptoDetector.AnalyzeCryptoImplementation(tenantID, assetID, impl); len(issues) > 0 {
@@ -2341,6 +2434,22 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// "has a linked catalogue component" — so a written 0 and an unassessed 0
 	// stay tellable apart without the guard. A pass that resolved nothing still
 	// writes nothing.
+	// A partial cipher assessment can raise a score, never clear one: below
+	// Medium its number would claim "Low" for a set nobody resolved, so it is
+	// stored as unassessed (NULL) — including over a score an earlier pass left
+	// behind. Medium and worse, which known components support, stands.
+	if scoreThisPass && cipherPartial && !partialAssessmentKeepsScore(cryptoRiskScore) {
+		cryptoRiskAssessed = false
+		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+			return clearCryptoRiskScore(tx, cryptoID)
+		}); err != nil {
+			materializationErrs = append(materializationErrs, fmt.Errorf("clear partially assessed crypto risk: %w", err))
+		}
+		if s.onCryptoChanged != nil {
+			s.onCryptoChanged(context.Background(), tenantID)
+		}
+	}
+
 	if cryptoRiskAssessed {
 		if len(catalogueFactors) > 0 {
 			log.Printf("[AssetService] Risk %d for implementation %s (source=%s): %v",
@@ -2383,7 +2492,10 @@ func (s *AssetService) processDiscoveryCryptoData(
 			CryptoImplementationID: cryptoID,
 			Protocol:               protocol,
 			ProtocolVersion:        f.ProtocolVersion,
-			RiskScore:              cryptoRiskScore,
+			// What was stored: nil when the configuration is unassessed
+			// (including a partial cipher assessment cleared above), never
+			// the working number that was not written.
+			RiskScore: storedRiskScore(cryptoRiskAssessed, cryptoRiskScore),
 		})
 	}
 	return errors.Join(materializationErrs...)

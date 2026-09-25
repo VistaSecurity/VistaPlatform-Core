@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -74,6 +75,25 @@ type ProbeResult struct {
 // Prober runs active protocol probes with a fixed per-probe timeout.
 type Prober struct {
 	timeout time.Duration
+	// noSupportHandshakes suppresses the TLS key-exchange support handshakes
+	// (MeasureTLSKeyExchange's classical-only / hybrid-only offers): the
+	// probe then makes its one handshake and nothing more. See
+	// WithoutSupportHandshakes.
+	noSupportHandshakes bool
+	// outboundClient carries fetches a scanned server's data asks for (the
+	// OCSP responder in its certificate). Nil = the default client; a platform
+	// runtime sets a guarded one with WithOutboundAddressGuard (outbound.go).
+	outboundClient *http.Client
+}
+
+// WithoutSupportHandshakes returns a copy of p whose TLS probe makes only its
+// one handshake: the negotiated group is still recorded, the two support flags
+// are left absent. For a caller that has promised a target no extra probes —
+// the Platform Sensor when a scan turns tls_version_enumeration off.
+func (p *Prober) WithoutSupportHandshakes() *Prober {
+	c := *p
+	c.noSupportHandshakes = true
+	return &c
 }
 
 // NewProber returns a Prober with the given per-probe timeout.

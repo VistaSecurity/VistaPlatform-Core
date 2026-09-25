@@ -12,6 +12,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
+	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 )
 
 // stubControlPlane is a minimal sensor-manager stand-in: it decodes each
@@ -22,6 +23,13 @@ type stubControlPlane struct {
 	mu     sync.Mutex
 	beats  []models.SensorHealth
 	answer *agentconfig.ExchangePayload
+	owned  *probeconsent.OwnedNetworks
+}
+
+func (p *stubControlPlane) setOwned(owned *probeconsent.OwnedNetworks) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.owned = owned
 }
 
 func (p *stubControlPlane) setAnswer(payload *agentconfig.ExchangePayload) {
@@ -45,7 +53,7 @@ func (p *stubControlPlane) handler() http.HandlerFunc {
 		}
 		p.mu.Lock()
 		p.beats = append(p.beats, health)
-		resp := models.SensorCommands{Config: p.answer}
+		resp := models.SensorCommands{Config: p.answer, OwnedNetworks: p.owned}
 		p.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)

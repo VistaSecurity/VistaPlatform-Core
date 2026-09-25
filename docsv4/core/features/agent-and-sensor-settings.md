@@ -79,10 +79,24 @@ something not in force is the failure this whole surface exists to prevent.
 ## Settings that need confirming
 
 A setting that starts collecting something new asks you to confirm it, naming
-what begins to be collected. Today that is the sensor's **Host observation
-DNS**: it reads DNS *answers* only, never the questions anybody asked, but an
-answer names what was asked — so the set of names your network resolved becomes
-part of what the sensor records. Turning it **off** needs no confirmation.
+what begins to be collected. Two sensor settings do:
+
+- **Host observation DNS** reads DNS *answers* only, never the questions anybody
+  asked, but an answer names what was asked — so the set of names your network
+  resolved becomes part of what the sensor records.
+- **Actively enrich third-party TLS connections** has sensors open their own TLS
+  connections to external services your network talks to, to read their
+  certificates. Third parties may see those connections. See
+  [Certificates of third-party TLS connections](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections).
+
+Turning either **off** needs no confirmation. Neither is ever taken from what a
+device reports it is running: a confirmation is given in the console, not adopted
+from a device.
+
+Third-party TLS enrichment can also be set in an air-gapped sensor's own file; the
+platform's value replaces it the first time one is delivered, and keeps replacing
+it after restarts. See
+[Air-gapped sensors](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections).
 
 Confirmations are recorded with the account that gave them.
 
@@ -103,9 +117,9 @@ description for each. Broadly:
 
 - **Discovery agents** — host inventory on/off and how often, how often the
   agent asks for work, how often it reports in, and how much it logs.
-- **Sensors** — active probing, network discovery, host observation and its
-  window, DNS decoding, the observation rest period, the reporting interval,
-  and how much it logs.
+- **Sensors** — active probing, third-party TLS enrichment (off by default),
+  network discovery, host observation and its window, DNS decoding, the
+  observation rest period, the reporting interval, and how much it logs.
 
 A setting your device's build does not support is reported back as unsupported,
 naming the version — the console will not show it as applied.
