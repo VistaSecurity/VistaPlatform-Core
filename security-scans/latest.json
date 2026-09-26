@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-09-25T09:56:40Z",
-  "generated_date": "2026-09-25",
+  "generated_at": "2026-09-26T09:39:01Z",
+  "generated_date": "2026-09-26",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/36121112582",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/36233340888",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -57,7 +57,7 @@
           "id": "CVE-2026-84445",
           "package": "google.golang.org/grpc",
           "installed": "v1.82.1",
-          "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
+          "fixed": "1.82.2, 1.83.2, 1.84.0-dev.0.20260825144003-d5a41119e0e3, 1.85.0-dev.0.20260825072537-93e31b48545e",
           "title": "google.golang.org/grpc: gRPC-Go: Denial of Service via malformed RPC requests",
           "target": "usr/bin/caddy"
         }
@@ -197,7 +197,7 @@
           "id": "CVE-2026-84445",
           "package": "google.golang.org/grpc",
           "installed": "v1.82.1",
-          "fixed": "1.82.2, 1.83.2, 1.85.0-dev.0.20260825072537-93e31b48545e",
+          "fixed": "1.82.2, 1.83.2, 1.84.0-dev.0.20260825144003-d5a41119e0e3, 1.85.0-dev.0.20260825072537-93e31b48545e",
           "title": "google.golang.org/grpc: gRPC-Go: Denial of Service via malformed RPC requests",
           "target": "usr/bin/caddy"
         }
