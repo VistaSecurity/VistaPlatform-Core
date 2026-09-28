@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.0.0-rc.2] - 2026-09-28
+## [4.0.0] - 2026-09-28
 
 **Version 4.0.0 aligns Core with the commercial editions.** Core was on the 1.x
 line and Vista Platform Enterprise and MSP on 3.x. From this release every
