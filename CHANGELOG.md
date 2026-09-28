@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.6] - 2026-09-24
+## [1.1.0-rc.7] - 2026-09-24
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -825,6 +825,22 @@ reports. See **Upgrading** for what an existing install needs to do.
 
 ### Fixed
 
+- **admin-ui no longer reloads in a loop when the browser also holds a blocked
+  tenant's session.** admin-ui and web-ui share a parent cookie domain, so
+  admin-ui requests also carry any tenant `access_token`. notification-service's
+  platform routes resolved that tenant identity first, and once the tenant was
+  suspended or deleted the notification bell got `403 tenant_deleted`; admin-ui
+  treated it as the end of the platform session, went to `/login`, found the
+  platform session alive and came straight back. The platform routes now accept
+  only the platform cookie pair, and a tenant-blocked 403 no longer ends a
+  platform session.
+- **A Stripe update can no longer make a suspended or canceled tenant a paying
+  customer again.** After tenant lifecycle had ended a card tenant's paid
+  period, any later write to its subscription row (a routine
+  `customer.subscription.updated`, for example) opened a new one, and revenue
+  analytics counted the tenant as current MRR. The period trigger now refuses to
+  reopen for a tenant blocked after it paid, and re-applying the schema closes
+  any period an earlier release reopened.
 - **Every tenant-lifecycle action now preserves the state it interrupts.** A
   dunning suspension remembers the tenant's prior status and revokes all of
   its sessions in the same transaction; dunning resume restores that status

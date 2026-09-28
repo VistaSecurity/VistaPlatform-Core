@@ -27,21 +27,31 @@ const notifier = {
 // checkSession mirrors frontend-v2: the recovered-then-401 confirmation probe,
 // against the PLATFORM whoami. Bare fetch on purpose — an api-contract client
 // would re-enter the 401 middleware and recurse.
+//
+// onTenantBlocked is deliberately dropped. A platform session has no tenant, so
+// a 403 tenant_suspended/tenant_deleted in this app can only come from a STALE
+// tenant cookie riding along on the shared parent cookie domain to a service
+// that resolved it. Ending the platform session for that is wrong, and it
+// loops: /login finds the platform session alive, returns to the console, the
+// same call 403s again — a full reload several times a second. Without the
+// hook the middleware leaves those 403s to the caller, like any other 403.
 const sessionAuthClient = createPlatformAuthClient();
-setSessionExpiredHandler(
-  createSessionExpiryHandler({
-    hasSession: () => platformTokenManager.hasToken(),
-    refresh: () => sessionAuthClient.refresh(),
-    checkSession: () =>
-      fetch('/api/v1/admin-service/admin/auth/me', { credentials: 'include' }).then((r) => r.status !== 401),
-    onSessionExpired: (reason) => {
-      platformTokenManager.clearTokens();
-      if (!isPublicPath(window.location.pathname)) {
-        window.location.assign(`/login?reason=${reason === 'expired' ? 'session-expired' : 'signed-out'}`);
-      }
-    },
-  }),
-);
+const sessionHandlers = createSessionExpiryHandler({
+  hasSession: () => platformTokenManager.hasToken(),
+  refresh: () => sessionAuthClient.refresh(),
+  checkSession: () =>
+    fetch('/api/v1/admin-service/admin/auth/me', { credentials: 'include' }).then((r) => r.status !== 401),
+  onSessionExpired: (reason) => {
+    platformTokenManager.clearTokens();
+    if (!isPublicPath(window.location.pathname)) {
+      window.location.assign(`/login?reason=${reason === 'expired' ? 'session-expired' : 'signed-out'}`);
+    }
+  },
+});
+setSessionExpiredHandler({
+  onAuthFailure: () => sessionHandlers.onAuthFailure(),
+  onRecoveryFailed: () => sessionHandlers.onRecoveryFailed(),
+});
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

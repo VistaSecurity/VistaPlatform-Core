@@ -23161,7 +23161,15 @@ BEGIN
                 AND NEW.first_paid_at IS NOT NULL
                 AND NEW.canceled_at IS NULL
                 AND EXISTS (SELECT 1 FROM public.tenants t
-                            WHERE t.id = NEW.tenant_id AND t.deleted_at IS NULL);
+                            WHERE t.id = NEW.tenant_id
+                              AND t.deleted_at IS NULL
+                              AND (t.payment_status NOT IN ('canceled', 'suspended')
+                                   OR NOT EXISTS (
+                                        SELECT 1
+                                          FROM public.billing_subscription_periods p
+                                         WHERE p.tenant_id = NEW.tenant_id
+                                           AND p.ended_at IS NOT NULL
+                                           AND p.end_reason = 'tenant_lifecycle')));
 
     IF TG_OP = 'UPDATE' AND old_live
        AND (NOT new_live OR OLD.external_subscription_id IS DISTINCT FROM NEW.external_subscription_id) THEN
@@ -23233,6 +23241,17 @@ SELECT bs.id, bs.tenant_id, bs.provider_id,
             AND t.payment_status NOT IN ('canceled', 'suspended')))
    AND NOT EXISTS (SELECT 1 FROM public.billing_subscription_periods p
                    WHERE p.subscription_id = bs.id);
+
+-- Repair any open periods a pre-fix webhook reopened after tenant lifecycle had
+-- already blocked the tenant. The live trigger above now refuses to create
+-- those rows, but re-running the schema must also stop stale revenue/churn.
+UPDATE public.billing_subscription_periods p
+   SET ended_at = GREATEST(p.started_at, NOW()),
+       end_reason = COALESCE(p.end_reason, 'tenant_lifecycle')
+  FROM public.tenants t
+ WHERE t.id = p.tenant_id
+   AND p.ended_at IS NULL
+   AND (t.deleted_at IS NOT NULL OR t.payment_status IN ('canceled', 'suspended'));
 
 -- Card subscriptions remain active at Stripe when an MSP operator offboards
 -- or soft-deletes a tenant. End the local paid stretch at that lifecycle

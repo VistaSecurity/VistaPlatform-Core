@@ -143,6 +143,18 @@ describe('admin main session-expiry handler', () => {
     expect(assign).toHaveBeenCalledWith('/login?reason=session-expired');
   });
 
+  // A platform session has no tenant: a tenant_suspended/tenant_deleted 403 can
+  // only come from a stale tenant cookie on the shared parent domain. Honouring
+  // it bounced to /login, which found the platform session alive and went
+  // straight back — a reload loop. The hook must not be registered at all.
+  it('does not register onTenantBlocked, so a stale tenant cookie cannot end the platform session', async () => {
+    const { assign, clearTokens, handler } = await loadMain('/overview');
+
+    expect(handler.onTenantBlocked).toBeUndefined();
+    expect(clearTokens).not.toHaveBeenCalled();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it('does not evict a platform session when the whoami probe says it is alive', async () => {
     const { assign, clearTokens, handler } = await loadMain('/billing', true, 200);
 

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/devicetest"
 	"github.com/vistasecurity/vistaplatform/shared/discovery/tlskextest"
 )
 
@@ -18,6 +19,9 @@ func TestManagementProbe_HybridSupportReachesDiscoveryRow(t *testing.T) {
 	for _, c := range tlskextest.Cases {
 		t.Run(c.Name, func(t *testing.T) {
 			srv := tlskextest.Start(t, c.Groups, c.MaxVersion)
+			// The fake server is on loopback, which the dial guard refuses
+			//. Open exactly this listener, nothing else.
+			devicetest.AllowListener(t, srv.Addr)
 			ca, err := (&di.TLSProber{InsecureSkipVerify: true}).ProbeTLS(srv.Host, srv.Port)
 			if err != nil {
 				t.Fatalf("ProbeTLS: %v", err)

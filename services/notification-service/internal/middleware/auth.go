@@ -21,6 +21,25 @@ func RequireAuth(jwtSecret string) gin.HandlerFunc {
 	})
 }
 
+// RequirePlatformAuth validates platform-admin JWTs for the /platform routes
+// admin-ui calls. It reads ONLY the platform_access_token / platform_csrf_token
+// pair set by admin-service (StrictCookiePair, mirroring admin-service's own
+// AuthMiddleware). On a shared parent COOKIE_DOMAIN the browser also sends the
+// tenant access_token, and the tenant-first RequireAuth would resolve THAT
+// identity: when the tenant is suspended or deleted, the tenant-state check
+// answers 403 tenant_deleted to a platform admin whose own session is fine.
+// Bearer tokens and HMAC service calls are unaffected.
+func RequirePlatformAuth(jwtSecret string) gin.HandlerFunc {
+	return sharedmw.RequireJWTAuth(sharedmw.AuthConfig{
+		JWTSecret:         jwtSecret,
+		InternalSecret:    os.Getenv("INTERNAL_AUTH_SECRET"),
+		SkipPaths:         []string{"/health", "/ready"},
+		AccessTokenCookie: "platform_access_token",
+		CSRFCookie:        "platform_csrf_token",
+		StrictCookiePair:  true,
+	})
+}
+
 // StringifyUserID is a compat middleware for handlers that type-assert userID/tenantID as string.
 func StringifyUserID() gin.HandlerFunc {
 	return sharedmw.StringifyContextIDs()

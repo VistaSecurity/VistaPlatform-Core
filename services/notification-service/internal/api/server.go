@@ -213,7 +213,7 @@ func (s *Server) SetupRouter() *gin.Engine {
 
 		// Platform admin endpoints
 		platform := api.Group("/notification-service/platform")
-		platform.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		platform.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
 		platform.Use(sharedrbac.RequirePlatformPermission(s.db.DB, rbac.PermissionPlatformNotificationsManage))
 		{
 			// Channels
@@ -254,7 +254,7 @@ func (s *Server) SetupRouter() *gin.Engine {
 		// platform.notifications.manage — the bell is for every platform
 		// staffer, so any real platform permission grants access.
 		platformInbox := api.Group("/notification-service/platform/notifications")
-		platformInbox.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
+		platformInbox.Use(middleware.RequirePlatformAuth(s.config.JWTSecret), middleware.StringifyUserID())
 		platformInbox.Use(sharedrbac.RequireAnyPlatformPermission(s.db.DB,
 			rbac.PermissionPlatformNotificationsManage,
 			rbac.PermissionPlatformHealth,
