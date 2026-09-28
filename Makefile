@@ -290,7 +290,15 @@ build-services-parallel: ## Build all Go services in parallel
 # unbuildable outside this lab.
 #
 # To build against public bases deliberately (e.g. reproducing a community
-# build): make build-dist GO_BUILDER_IMAGE=golang:1.26-alpine RUNTIME_IMAGE=alpine:3.24.1
+# build): make build-dist GO_BUILDER_IMAGE=golang:1.26.6-alpine RUNTIME_IMAGE=alpine:3.24.1
+#
+# The builder is pinned to the EXACT Go version go.work declares, never the
+# floating 1.26 tag. The Dockerfiles set GOTOOLCHAIN to that exact version, so a
+# builder on any other patch release (the floating tag moved to 1.26.8) makes Go
+# download the pinned toolchain into GOMODCACHE — harmless for a plain build, but
+# garble (build-dist) patches the linker through an overlay and Go refuses
+# overlays beneath GOMODCACHE: "cannot get modified linker … Files beneath
+# GOMODCACHE must not be replaced". Every dist backend failed that way for 4.0.0.
 GO_BUILDER_IMAGE ?= golang:1.26-alpine
 RUNTIME_IMAGE    ?= alpine:3.24.1
 BASE_IMAGE_ARGS  := --build-arg GO_BUILDER_IMAGE=$(GO_BUILDER_IMAGE) --build-arg RUNTIME_IMAGE=$(RUNTIME_IMAGE)
