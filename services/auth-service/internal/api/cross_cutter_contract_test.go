@@ -952,9 +952,12 @@ func TestContract_RemoveRole_200(t *testing.T) {
 // stubPlatformSettingsStore satisfies platformSettingsStore. Keys present in
 // `settings` return their raw JSON value; absent keys return sql.ErrNoRows.
 type stubPlatformSettingsStore struct {
-	settings map[string][]byte
-	err      error
+	settings   map[string][]byte
+	err        error
+	signupOpen bool
 }
+
+func (s *stubPlatformSettingsStore) SignupOpen() bool { return s.signupOpen }
 
 func (s *stubPlatformSettingsStore) GetPlatformSetting(key string) ([]byte, error) {
 	if s.err != nil {

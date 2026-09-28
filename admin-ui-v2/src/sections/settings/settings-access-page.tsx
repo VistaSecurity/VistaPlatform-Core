@@ -21,6 +21,9 @@ import { clients } from '../../lib/clients';
 
 interface AccessSettings {
   registration_enabled: boolean;
+  // Read-only: sign-up is open only because this Core/Enterprise
+  // install has no organization yet. The first sign-up closes it.
+  signup_bootstrap: boolean;
   email_verification_required: boolean;
   block_personal_email_domains: boolean;
 }
@@ -33,7 +36,11 @@ function useAccessSettings() {
       if (error || !data) throw new Error('Failed to load settings');
       const s = data as any;
       return {
-        registration_enabled: s.registration_enabled ?? true,
+        // The server reports the operator's choice or this edition's default
+        // (off on Core and Enterprise, on for MSP). Absent means it could not
+        // say, and off is the safe reading.
+        registration_enabled: s.registration_enabled ?? false,
+        signup_bootstrap: data.signup_bootstrap === true,
         email_verification_required: s.email_verification_required ?? true,
         // Mirrors the server default: auth.personalEmailBlocked fails open, so an
         // absent row must read as "not blocking" here too, or the toggle would
@@ -48,7 +55,7 @@ function useAccessSettings() {
 function useSaveAccessSettings() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (patch: Partial<AccessSettings>) => {
+    mutationFn: async (patch: Partial<Omit<AccessSettings, 'signup_bootstrap'>>) => {
       const { error } = await clients.admin.PUT('/admin/settings', { body: patch as any });
       if (error) throw new Error((error as any)?.error ?? 'Save failed');
     },
@@ -104,7 +111,7 @@ export function SettingsAccessPage() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  const setKey = async (key: keyof AccessSettings, value: boolean) => {
+  const setKey = async (key: Exclude<keyof AccessSettings, 'signup_bootstrap'>, value: boolean) => {
     try {
       await save.mutateAsync({ [key]: value });
       showToast('Access settings saved.', true);
@@ -135,8 +142,10 @@ export function SettingsAccessPage() {
             <ToggleRow
               icon={<DoorOpen size={16} style={{ color: 'var(--op-accent)' }} />}
               title="Self-service sign-up"
-              description="Allow new organizations to create accounts at /signup (email or social). Sign-up is the only way tenants onboard."
-              warning="Sign-up is closed — no new tenants can join this platform until it is re-enabled. Existing tenants and member invitations are unaffected."
+              description="Allow new organizations to create accounts at /signup (email or social). Off by default on Core and Enterprise: people join an existing organization by invitation."
+              warning={data.signup_bootstrap
+                ? 'No organization exists yet, so sign-up is open for the first one. It closes automatically once that organization is created, unless you turn it on here.'
+                : 'Sign-up is closed — no new organizations can join this platform. Existing tenants and member invitations are unaffected.'}
               checked={data.registration_enabled}
               disabled={save.isPending}
               onChange={(v) => setKey('registration_enabled', v)}

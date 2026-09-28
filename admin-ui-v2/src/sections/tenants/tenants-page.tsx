@@ -6,8 +6,9 @@
 import { useMemo, useState } from 'react';
 import { Search, ChevronRight } from 'lucide-react';
 import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, relTime } from '../../components/ui/primitives';
-import { useTenants, useTenantHealthMap, tenantStatus, planLabel, type Tenant, type TenantDisplayStatus } from './queries';
+import { useTenants, useDeletedTenants, useTenantHealthMap, tenantStatus, planLabel, type Tenant, type TenantDisplayStatus } from './queries';
 import { TenantDrawer } from './tenant-drawer';
+import { DeletedTenantDrawer } from './deleted-tenant-drawer';
 import { useScope } from '../../app/scope';
 import { usePlatformEdition } from '../../lib/edition';
 
@@ -27,14 +28,20 @@ export function statusFilters(isMsp: boolean): [TenantDisplayStatus | 'all', str
 
 type Sort = 'name' | 'active' | 'created';
 
+/** A status chip, or the Deleted view: soft-deleted tenants come from
+ *  their own query and are never mixed into the live directory. */
+type ListFilter = TenantDisplayStatus | 'all' | 'deleted';
+
 export function TenantsPage() {
   const { scopeId } = useScope();
   const { data: tenants, isLoading, isError, refetch } = useTenants(scopeId);
   const { data: healthMap } = useTenantHealthMap();
   const { isMsp } = usePlatformEdition();
-  const filters = statusFilters(isMsp);
+  const filters = useMemo<[ListFilter, string][]>(() => [...statusFilters(isMsp), ['deleted', 'Deleted']], [isMsp]);
+  const deletedQ = useDeletedTenants();
   const [q, setQ] = useState('');
-  const [status, setStatus] = useState<TenantDisplayStatus | 'all'>('all');
+  const [status, setStatus] = useState<ListFilter>('all');
+  const showingDeleted = status === 'deleted';
   const [plan, setPlan] = useState('all');
   const [sort, setSort] = useState<Sort>('name');
   // The drawer holds the tenant's ID, not a copy of the row: the tenant it
@@ -48,20 +55,24 @@ export function TenantsPage() {
   // Memoised so the fallback `[]` keeps a stable identity — otherwise every
   // render produces a fresh array and the useMemo blocks below never hit.
   const all = useMemo(() => tenants ?? [], [tenants]);
-  const open: Tenant | null = openId ? all.find((t) => t.id === openId) ?? null : null;
+  const deleted = useMemo(() => deletedQ.data ?? [], [deletedQ.data]);
+  const source = showingDeleted ? deleted : all;
+  const open: Tenant | null = openId && !showingDeleted ? all.find((t) => t.id === openId) ?? null : null;
+  const openDeleted: Tenant | null = openId && showingDeleted ? deleted.find((t) => t.id === openId) ?? null : null;
   const plans = useMemo(() => Array.from(new Set(all.map((t) => planLabel(t)))), [all]);
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: all.length };
-    for (const [k] of filters.slice(1)) c[k] = all.filter((t) => tenantStatus(t) === k).length;
+    for (const [k] of filters.slice(1)) if (k !== 'deleted') c[k] = all.filter((t) => tenantStatus(t) === k).length;
+    c.deleted = deleted.length;
     return c;
-  }, [all, filters]);
+  }, [all, deleted, filters]);
 
   const rows = useMemo(() => {
     const ql = q.trim().toLowerCase();
     // Tenant scope is applied server-side (tenant_id query param); the remaining
     // facets (status/plan/text) filter client-side here.
-    const filtered = all.filter((t) =>
-      (status === 'all' || tenantStatus(t) === status) &&
+    const filtered = source.filter((t) =>
+      (status === 'all' || status === 'deleted' || tenantStatus(t) === status) &&
       (plan === 'all' || planLabel(t) === plan) &&
       (!ql || t.name.toLowerCase().includes(ql) || t.slug.toLowerCase().includes(ql) || (t.domain ?? '').toLowerCase().includes(ql)),
     );
@@ -70,7 +81,7 @@ export function TenantsPage() {
         : sort === 'created' ? Date.parse(b.created_at) - Date.parse(a.created_at)
           : Date.parse(b.updated_at) - Date.parse(a.updated_at),
     );
-  }, [all, q, status, plan, sort]);
+  }, [source, q, status, plan, sort]);
 
   return (
     <div className="op-fade" style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -82,7 +93,7 @@ export function TenantsPage() {
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {filters.map(([k, l]) => (
-            <button key={k} onClick={() => setStatus(k)} className={'op-chip' + (status === k ? ' active' : '')}>
+            <button key={k} onClick={() => { setStatus(k); setOpenId(null); }} className={'op-chip' + (status === k ? ' active' : '')}>
               {l}<span style={{ opacity: 0.6 }}>{counts[k] ?? 0}</span>
             </button>
           ))}
@@ -122,7 +133,11 @@ export function TenantsPage() {
                     </div>
                   </td>
                   <td><PlanTag plan={plan} /></td>
-                  <td><StatusTag status={tenantStatus(t)} /></td>
+                  <td>
+                    {showingDeleted
+                      ? <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--danger)', whiteSpace: 'nowrap' }}>Deleted {t.deleted_at ? relTime(t.deleted_at) : ''}</span>
+                      : <StatusTag status={tenantStatus(t)} />}
+                  </td>
                   <td>
                     {healthIndex === null ? <span className="t-muted">—</span> : (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -140,26 +155,27 @@ export function TenantsPage() {
                 </tr>
               );
             })}
-            {isLoading && <tr><td colSpan={10} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>Loading tenants…</td></tr>}
-            {isError && !isLoading && (
+            {(showingDeleted ? deletedQ.isLoading : isLoading) && <tr><td colSpan={10} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>Loading tenants…</td></tr>}
+            {(showingDeleted ? deletedQ.isError && !deletedQ.isLoading : isError && !isLoading) && (
               <tr><td colSpan={10} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>
-                Couldn't load tenants. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => refetch()}>Retry</button>
+                Couldn't load tenants. <button className="op-btn sm" style={{ marginLeft: 8 }} onClick={() => (showingDeleted ? deletedQ.refetch() : refetch())}>Retry</button>
               </td></tr>
             )}
-            {!isLoading && !isError && rows.length === 0 && (
-              <tr><td colSpan={10} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>No tenants match these filters.</td></tr>
+            {!(showingDeleted ? deletedQ.isLoading || deletedQ.isError : isLoading || isError) && rows.length === 0 && (
+              <tr><td colSpan={10} style={{ textAlign: 'center', padding: 50, color: 'var(--op-t3)' }}>{showingDeleted ? 'No deleted tenants.' : 'No tenants match these filters.'}</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
       <div style={{ flex: 'none', padding: '9px 24px', borderTop: '1px solid var(--op-border)', display: 'flex', alignItems: 'center', gap: 14, fontSize: 12, color: 'var(--op-t3)' }}>
-        <span>{rows.length} of {all.length} tenants</span>
+        <span>{rows.length} of {source.length} {showingDeleted ? 'deleted ' : ''}tenants</span>
         <span>·</span>
         <span>{isMsp ? 'Assets · Sensors · MRR enrich from inventory / fleet / billing — wiring next' : 'Assets · Sensors enrich from inventory / fleet — wiring next'}</span>
       </div>
 
       {open && <TenantDrawer tenant={open} health={healthMap?.get(open.id)} onClose={() => setOpenId(null)} />}
+      {openDeleted && <DeletedTenantDrawer tenant={openDeleted} onClose={() => setOpenId(null)} />}
     </div>
   );
 }

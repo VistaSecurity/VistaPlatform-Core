@@ -4,8 +4,9 @@
 // MOUNTED (RC-4).
 //
 // Suspension and deletion are now enforced (sessions end, sign-in and agents
-// are refused), and there is no restore for a deleted tenant. The old Delete
-// prompt promised the tenant was "recoverable", which was never true. These
+// are refused). A deleted tenant moves to the Deleted view, where it can be
+// restored or purged; the prompt names that rather than the old vague
+// "recoverable", which promised a restore nothing offered at the time. These
 // cases click the real buttons and read what window.confirm is asked, so
 // reverting the copy fails here; declining the prompt must send nothing.
 import { act } from 'react';
@@ -89,12 +90,13 @@ afterEach(() => {
 });
 
 describe('tenant drawer lifecycle confirmations', () => {
-  it('Delete no longer promises the tenant is recoverable, and says what deletion does', () => {
+  it('Delete says what deletion does and where the tenant goes', () => {
     mount(tenant());
     click(/^Delete$/);
     const msg = confirmSpy.mock.calls[0]?.[0] ?? '';
     expect(msg.toLowerCase()).not.toContain('recoverable');
-    expect(msg).toContain('cannot be restored');
+    expect(msg).toContain('Deleted view');
+    expect(msg).toContain('restored or permanently purged');
     expect(msg).toContain('signed out');
     expect(state.deleteMutate).toHaveBeenCalledTimes(1);
   });

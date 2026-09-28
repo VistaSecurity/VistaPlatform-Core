@@ -209,9 +209,13 @@ func TestIntegration_SignupTenantCap_OperatorTenantsExcluded(t *testing.T) {
 }
 
 // Enterprise (and Core) installs are never capped, whatever the licence row
-// carries.
+// carries. Sign-up is opened explicitly: since a non-MSP install with no
+// recorded choice closes after its first tenant, which is the sign-up gate's
+// rule (signup_gate_integration_test.go), not the cap's.
 func TestIntegration_SignupTenantCap_NonMSPNeverCapped(t *testing.T) {
 	e := newSignupCapEnv(t)
+	e.exec(t, `DELETE FROM platform_settings WHERE setting_key = 'registration_enabled'`)
+	e.exec(t, `INSERT INTO platform_settings (setting_key, setting_value) VALUES ('registration_enabled', 'true'::jsonb)`)
 	e.licence(t, "enterprise", 0, 0)
 	e.mustSignUp(t, "/auth/register")
 	e.mustSignUp(t, "/auth/register/complete")

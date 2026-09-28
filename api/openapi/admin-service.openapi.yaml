@@ -3382,7 +3382,7 @@ paths:
       tags:
       - tenants
       summary: List tenants
-      description: 'Paginated, filterable, sortable tenant list (admin-ui Tenants page). Excludes soft-deleted tenants. `tenants` is null when no rows match (the handler does not seed an empty slice).'
+      description: 'Paginated, filterable, sortable tenant list (admin-ui Tenants page). Excludes soft-deleted tenants unless `deleted=only`, which lists ONLY the soft-deleted ones (the Deleted view). `tenants` is null when no rows match (the handler does not seed an empty slice).'
       parameters:
       - name: page
         in: query
@@ -3418,6 +3418,13 @@ paths:
         description: "Filter by subscription tier name."
         schema:
           type: string
+      - name: deleted
+        in: query
+        required: false
+        description: "`exclude` (default) lists live tenants; `only` lists soft-deleted tenants. Any other value is a 400."
+        schema:
+          type: string
+          enum: [exclude, only]
       - name: tenant_id
         in: query
         required: false
@@ -3514,7 +3521,7 @@ paths:
       tags:
       - tenants
       summary: Soft-delete a tenant
-      description: 'Marks the tenant deleted_at (recoverable). For an irreversible hard delete use the purge endpoint.'
+      description: 'Soft-deletes the tenant (sets deleted_at, ends its sessions, refuses sign-in). Undo with POST /admin/tenants/{id}/restore; for an irreversible hard delete use the purge endpoint.'
       parameters:
       - name: id
         in: path
@@ -4045,6 +4052,39 @@ paths:
           $ref: '#/components/responses/LegacyNotFound'
         '409':
           description: The tenant is not soft-deleted; delete it before purging.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+  /admin/tenants/{id}/restore:
+    post:
+      operationId: restoreTenant
+      x-edition: enterprise
+      tags:
+      - tenants
+      summary: Restore a soft-deleted tenant
+      description: 'Clears deleted_at so the tenant and its users can sign in again (sessions ended at deletion stay ended). Requires tenants.delete. Admitted through the MSP licensed-tenant cap like a new tenant; card billing resumes on the subscription''s next write, an invoice subscription follows immediately. 404 if the tenant does not exist; 409 if it is not deleted or the cap refuses it.'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 'Restore acknowledged — `{ "message": "..." }`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          description: The tenant is not deleted, or the MSP licensed-tenant cap refuses another live tenant.
           content:
             application/json:
               schema:
@@ -6335,6 +6375,20 @@ components:
           type: [integer, 'null']
         registration_enabled:
           type: [boolean, 'null']
+          description: |
+            The operator's self-service sign-up choice, or this edition's default
+            when none is recorded: open on MSP, closed on Core and Enterprise
+            (#2056). See signup_bootstrap for the first-run exception.
+        signup_open:
+          type: boolean
+          description: |
+            Read-only. Whether a self-service sign-up would be admitted right now,
+            as auth-service decides it. Omitted when the gate could not be read.
+        signup_bootstrap:
+          type: boolean
+          description: |
+            Read-only. True when sign-up is open only because this Core or
+            Enterprise install has no tenant yet; the first sign-up closes it.
         block_personal_email_domains:
           type: [boolean, 'null']
           description: |

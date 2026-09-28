@@ -496,6 +496,10 @@ func registerAgentPublicHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.H
 			return
 		}
 
+		// Bootstrap route, ahead of the auth middleware: record whose agent this
+		// is for the audit middleware, which otherwise logs no tenant.
+		c.Set(sharedmiddleware.CtxKeyTenantID, agent.TenantID)
+
 		response := models.RegisterAgentResponse{
 			AgentID: agent.ID,
 		}

@@ -246,6 +246,7 @@ func TestIntegration_Onboarding_CompletesWithoutSubscription(t *testing.T) {
 	owner := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, owner)
 	app := testdb.ConnectAsAppRole(t, owner)
+	testdb.OpenSelfSignup(t, owner)
 
 	freeTier := tierIDByName(t, owner, "free")
 

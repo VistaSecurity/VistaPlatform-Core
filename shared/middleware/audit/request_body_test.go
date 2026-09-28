@@ -238,3 +238,54 @@ func (b *stringBody) Read(p []byte) (int, error) {
 	b.i += n
 	return n, nil
 }
+
+// user_type through the real LogRequest. The old rule guessed from the
+// role NAME, so a tenant_admin ("admin" in it) was filed as a platform user and
+// a platform support_agent as a tenant user; retention and the tenant audit
+// export key on this column.
+func TestLogRequest_UserTypeFollowsTheAuthenticatedIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tenant := uuid.New()
+	cases := []struct {
+		name string
+		set  map[string]any
+		want string
+	}{
+		{"tenant admin (the old rule said platform)", map[string]any{"tenantID": tenant, "role": "tenant_admin"}, "tenant"},
+		{"platform support agent with userType (the old rule said tenant)", map[string]any{"role": "support_agent", "userType": "platform"}, "platform"},
+		{"auth's userType wins over the tenant key", map[string]any{"tenantID": tenant, "role": "platform_admin", "userType": "platform"}, "platform"},
+		{"a role with no tenant and no userType is platform", map[string]any{"role": "support_agent"}, "platform"},
+		{"a nil tenant counts as none", map[string]any{"tenantID": uuid.Nil, "role": "support_agent"}, "platform"},
+		{"no identity at all (agent bootstrap)", map[string]any{}, "tenant"},
+		{"agent bootstrap that resolved its tenant", map[string]any{"tenantID": tenant}, "tenant"},
+		{"an unknown userType value is ignored", map[string]any{"role": "support_agent", "userType": "service"}, "platform"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Enabled = true
+			cfg.ServiceName = "inventory-service"
+			cfg.AuditServiceURL = "http://127.0.0.1:1"
+			cfg.BatchSize = 100
+			m := &Middleware{config: cfg, batch: make([]*ActivityLogRequest, 0, cfg.BatchSize), stopChan: make(chan struct{})}
+			r := gin.New()
+			r.Use(m.LogRequest())
+			// Set by the "auth" in the handler, as the bootstrap routes do:
+			// LogRequest reads the context after c.Next().
+			r.GET("/api/v1/inventory-service/assets", func(c *gin.Context) {
+				for k, v := range tc.set {
+					c.Set(k, v)
+				}
+				c.Status(http.StatusOK)
+			})
+			r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/inventory-service/assets", nil))
+			entries := m.PendingEntries()
+			if len(entries) != 1 {
+				t.Fatalf("%d entries, want 1", len(entries))
+			}
+			if got := entries[0].UserType; got != tc.want {
+				t.Fatalf("user_type = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

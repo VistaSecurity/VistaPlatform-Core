@@ -23147,9 +23147,18 @@ CREATE OR REPLACE FUNCTION public.billing_subscriptions_sync_period() RETURNS tr
 DECLARE
     old_live boolean := false;
     new_live boolean := false;
+    starts_paying boolean := false;
     period_start timestamp with time zone;
     period_end timestamp with time zone;
 BEGIN
+    -- Whether this write is the subscription STARTING to pay (a new row, or a
+    -- move into active/past_due from trialing, incomplete, canceled, …) rather
+    -- than a routine write to one that was already paying.
+    IF TG_OP = 'INSERT' THEN
+        starts_paying := true;
+    ELSE
+        starts_paying := NOT (OLD.status IN ('active', 'past_due') AND OLD.canceled_at IS NULL);
+    END IF;
     IF TG_OP = 'UPDATE' THEN
         old_live := OLD.status IN ('active', 'past_due')
                     AND OLD.first_paid_at IS NOT NULL
@@ -23163,13 +23172,21 @@ BEGIN
                 AND EXISTS (SELECT 1 FROM public.tenants t
                             WHERE t.id = NEW.tenant_id
                               AND t.deleted_at IS NULL
+                              -- A suspended or canceled tenant opens a paid
+                              -- stretch only when its subscription STARTS paying:
+                              -- a trial that expired into suspension converts,
+                              -- or a churned customer re-subscribes, and that
+                              -- webhook lands before the one reactivating the
+                              -- tenant. A subscription that was already paying
+                              -- does not resume revenue for a blocked tenant (a
+                              -- routine Stripe update after an MSP suspension or
+                              -- offboarding, including one from before period
+                              -- history existed,/); it does on its
+                              -- next write after the tenant is reactivated.
+                              -- Under-counting by up to a cycle is preferred to
+                              -- counting a blocked tenant (owner).
                               AND (t.payment_status NOT IN ('canceled', 'suspended')
-                                   OR NOT EXISTS (
-                                        SELECT 1
-                                          FROM public.billing_subscription_periods p
-                                         WHERE p.tenant_id = NEW.tenant_id
-                                           AND p.ended_at IS NOT NULL
-                                           AND p.end_reason = 'tenant_lifecycle')));
+                                   OR starts_paying));
 
     IF TG_OP = 'UPDATE' AND old_live
        AND (NOT new_live OR OLD.external_subscription_id IS DISTINCT FROM NEW.external_subscription_id) THEN

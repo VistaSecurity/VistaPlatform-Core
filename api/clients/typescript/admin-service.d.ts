@@ -1916,7 +1916,7 @@ export interface paths {
         };
         /**
          * List tenants
-         * @description Paginated, filterable, sortable tenant list (admin-ui Tenants page). Excludes soft-deleted tenants. `tenants` is null when no rows match (the handler does not seed an empty slice).
+         * @description Paginated, filterable, sortable tenant list (admin-ui Tenants page). Excludes soft-deleted tenants unless `deleted=only`, which lists ONLY the soft-deleted ones (the Deleted view). `tenants` is null when no rows match (the handler does not seed an empty slice).
          */
         get: operations["listTenants"];
         put?: never;
@@ -1944,7 +1944,7 @@ export interface paths {
         post?: never;
         /**
          * Soft-delete a tenant
-         * @description Marks the tenant deleted_at (recoverable). For an irreversible hard delete use the purge endpoint.
+         * @description Soft-deletes the tenant (sets deleted_at, ends its sessions, refuses sign-in). Undo with POST /admin/tenants/{id}/restore; for an irreversible hard delete use the purge endpoint.
          */
         delete: operations["deleteTenant"];
         options?: never;
@@ -2228,6 +2228,26 @@ export interface paths {
          * @description Irreversible: permanently deletes the tenant and cascades to all child data. The tenant MUST be soft-deleted first (DELETE /admin/tenants/{id}); purging a live tenant returns 409. 404 if the tenant does not exist.
          */
         delete: operations["purgeTenant"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/tenants/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore a soft-deleted tenant
+         * @description Clears deleted_at so the tenant and its users can sign in again (sessions ended at deletion stay ended). Requires tenants.delete. Admitted through the MSP licensed-tenant cap like a new tenant; card billing resumes on the subscription's next write, an invoice subscription follows immediately. 404 if the tenant does not exist; 409 if it is not deleted or the cap refuses it.
+         */
+        post: operations["restoreTenant"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3497,7 +3517,22 @@ export interface components {
             support_email: string;
             max_tenants: number | null;
             default_trial_days: number | null;
+            /**
+             * @description The operator's self-service sign-up choice, or this edition's default
+             *     when none is recorded: open on MSP, closed on Core and Enterprise
+             *. See signup_bootstrap for the first-run exception.
+             */
             registration_enabled: boolean | null;
+            /**
+             * @description Read-only. Whether a self-service sign-up would be admitted right now,
+             *     as auth-service decides it. Omitted when the gate could not be read.
+             */
+            signup_open?: boolean;
+            /**
+             * @description Read-only. True when sign-up is open only because this Core or
+             *     Enterprise install has no tenant yet; the first sign-up closes it.
+             */
+            signup_bootstrap?: boolean;
             /**
              * @description When true, signup rejects consumer email domains (gmail, outlook, …).
              *     Default false so self-hosted Core operators can register with a personal
@@ -8720,6 +8755,8 @@ export interface operations {
                 status?: string;
                 /** @description Filter by subscription tier name. */
                 tier?: string;
+                /** @description `exclude` (default) lists live tenants; `only` lists soft-deleted tenants. Any other value is a 400. */
+                deleted?: "exclude" | "only";
                 /** @description Narrow the directory to a single tenant (operator scope). */
                 tenant_id?: string;
                 sort_by?: string;
@@ -9235,6 +9272,40 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
             /** @description The tenant is not soft-deleted; delete it before purging. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    restoreTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Restore acknowledged — `{ "message": "..." }`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description The tenant is not deleted, or the MSP licensed-tenant cap refuses another live tenant. */
             409: {
                 headers: {
                     [name: string]: unknown;

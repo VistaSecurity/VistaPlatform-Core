@@ -27,12 +27,17 @@ type platformSettingsStore interface {
 	// GetPlatformSetting returns the raw JSON setting_value for setting_key, or
 	// an error (e.g. sql.ErrNoRows) when the key is absent.
 	GetPlatformSetting(key string) ([]byte, error)
+	// SignupOpen is the sign-up gate's answer (signupEnabled), so the page
+	// renders exactly what the register handlers will enforce.
+	SignupOpen() bool
 }
 
 // platformSettingsRepository is the production platformSettingsStore backed by
 // *sql.DB. The SQL is moved verbatim from the previous inline handler, with the
 // three identical per-key reads collapsed into one parameterized lookup.
 type platformSettingsRepository struct{ db *sql.DB }
+
+func (r *platformSettingsRepository) SignupOpen() bool { return signupEnabled(r.db) }
 
 func (r *platformSettingsRepository) GetPlatformSetting(key string) ([]byte, error) {
 	var v []byte
@@ -59,14 +64,7 @@ func getPublicPlatformConfigWithStore(store platformSettingsStore) gin.HandlerFu
 		// Default config
 		config := PlatformConfig{
 			PlatformName:  "Vista Platform",
-			SignupEnabled: true,
-		}
-
-		if b, err := store.GetPlatformSetting("registration_enabled"); err == nil {
-			var enabled bool
-			if json.Unmarshal(b, &enabled) == nil {
-				config.SignupEnabled = enabled
-			}
+			SignupEnabled: store.SignupOpen(),
 		}
 
 		if b, err := store.GetPlatformSetting("platform_name"); err == nil {

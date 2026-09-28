@@ -31,6 +31,9 @@ func (h *DeviceHandlers) RegisterSourceRefresh(router *gin.Engine, service *serv
 			return
 		}
 		c.Set("refreshTenant", tenant)
+		// The audit middleware reads the tenant from the standard key; under
+		// only "refreshTenant" every refresh was logged with no tenant.
+		c.Set("tenantID", tenant)
 		c.Next()
 	})
 	group.POST("", func(c *gin.Context) {

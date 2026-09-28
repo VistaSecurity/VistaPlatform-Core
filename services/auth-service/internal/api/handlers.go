@@ -296,6 +296,12 @@ func (h *AuthHandlers) Register(c *gin.Context) {
 			RespondTenantCapRefused(c, capErr)
 			return
 		}
+		// Sign-up gate, re-decided under a lock inside tenant creation: a
+		// second "first" sign-up that raced the early check lands here.
+		if entitlements.IsSignupClosed(err) {
+			respondSignupClosed(c)
+			return
+		}
 		switch {
 		case errors.Is(err, auth.ErrEmailExists):
 			c.JSON(http.StatusConflict, gin.H{
@@ -1406,6 +1412,12 @@ func (h *AuthHandlers) CompleteRegistration(c *gin.Context) {
 		// audit (RespondTenantCapRefused).
 		if capErr, ok := entitlements.IsTenantCapExceeded(err); ok {
 			RespondTenantCapRefused(c, capErr)
+			return
+		}
+		// Sign-up gate, re-decided under a lock inside tenant creation: a
+		// second "first" sign-up that raced the early check lands here.
+		if entitlements.IsSignupClosed(err) {
+			respondSignupClosed(c)
 			return
 		}
 		switch {

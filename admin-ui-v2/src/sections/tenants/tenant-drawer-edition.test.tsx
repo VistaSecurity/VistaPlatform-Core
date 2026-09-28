@@ -35,6 +35,7 @@ vi.mock('./queries', async (orig) => {
   return {
     ...real,
     useTenants: () => state.tenants,
+    useDeletedTenants: () => none,
     useTenantHealthMap: () => none,
     useTenantStats: () => none,
     useTenantCost: () => none,
@@ -132,9 +133,10 @@ describe('tenants list, rendered', () => {
   const chipLabels = (html: string) =>
     Array.from(html.matchAll(/class="op-chip[^"]*">([A-Za-z ]+)<span/g), (m) => m[1]);
 
-  it('Enterprise: status chips are All/Active/Suspended, no MRR column, plan display name', () => {
+  // Deleted is the soft-deleted view, offered on both editions.
+  it('Enterprise: status chips are All/Active/Suspended/Deleted, no MRR column, plan display name', () => {
     const html = page();
-    expect(chipLabels(html)).toEqual(['All', 'Active', 'Suspended']);
+    expect(chipLabels(html)).toEqual(['All', 'Active', 'Suspended', 'Deleted']);
     expect(html).not.toContain('>MRR<');
     expect(html.toLowerCase()).not.toContain('trial');
     expect(html).toContain('Vista Platform Enterprise');
@@ -144,7 +146,7 @@ describe('tenants list, rendered', () => {
     state.license = 'msp';
     state.tenants = { data: [mspTrialTenant], isLoading: false, isError: false, refetch: () => {} };
     const html = page();
-    expect(chipLabels(html)).toEqual(['All', 'Active', 'Trial', 'Past due', 'Suspended', 'Canceled']);
+    expect(chipLabels(html)).toEqual(['All', 'Active', 'Trial', 'Past due', 'Suspended', 'Canceled', 'Deleted']);
     expect(html).toContain('>MRR<');
   });
 

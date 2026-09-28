@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
@@ -34,12 +36,20 @@ type platformSettingsStore interface {
 	// The PUT needs it per FIELD (see securityGatedSettingKeys), which a route
 	// middleware cannot express.
 	HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
+	// SignupState is the self-service sign-up gate as auth-service enforces it
+	// (shared/entitlements), so the console shows the real default for
+	// this edition rather than a constant.
+	SignupState(ctx context.Context) (entitlements.SignupState, error)
 }
 
 type platformSettingsRepository struct{ db *sql.DB }
 
 func newPlatformSettingsStore(db *sql.DB) platformSettingsStore {
 	return &platformSettingsRepository{db: db}
+}
+
+func (r *platformSettingsRepository) SignupState(ctx context.Context) (entitlements.SignupState, error) {
+	return entitlements.ReadSignupState(ctx, r.db, time.Now())
 }
 
 func (r *platformSettingsRepository) ListSettings(ctx context.Context) ([]platformSettingKV, error) {
@@ -228,6 +238,12 @@ type PlatformSettings struct {
 	// request gate across every service with an operator bypass, which is a
 	// feature, not a wiring fix. The toggle was removed instead.
 	RegistrationEnabled *bool `json:"registration_enabled"`
+	// SignupOpen and SignupBootstrap are read-only: whether a sign-up would be
+	// admitted right now, and whether that is only because the install has no
+	// tenant yet (Core/Enterprise's first-run window). Absent when the
+	// gate could not be read.
+	SignupOpen      *bool `json:"signup_open,omitempty"`
+	SignupBootstrap *bool `json:"signup_bootstrap,omitempty"`
 	// BlockPersonalEmailDomains opts into rejecting consumer domains (gmail,
 	// outlook, …) at signup. Default false — required for self-hosted Core,
 	// where signup is the only way in and the operator may use a personal
@@ -300,6 +316,17 @@ func getPlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFunc {
 
 		// Try to get settings from database
 		settings := defaultSettings
+
+		// Sign-up's default depends on the edition: open on MSP, closed on
+		// Core and Enterprise once their first tenant exists. A stored
+		// choice still overrides it below.
+		if st, err := store.SignupState(c.Request.Context()); err == nil {
+			settings.RegistrationEnabled = boolPtr(st.Effective())
+			settings.SignupOpen = boolPtr(st.Open)
+			settings.SignupBootstrap = boolPtr(st.Bootstrap)
+		} else {
+			logrus.WithError(err).Warn("platform settings: sign-up gate unreadable; reporting the stored value only")
+		}
 
 		// Load persisted key-value overrides from the store.
 		kvs, err := store.ListSettings(c.Request.Context())

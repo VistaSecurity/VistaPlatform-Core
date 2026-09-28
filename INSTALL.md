@@ -29,7 +29,9 @@ docker compose up -d
 ```
 
 Then open **http://localhost:3000** and sign up. The first account you create
-becomes the administrator of a new organization.
+becomes the administrator of a new organization. That first sign-up also closes
+self-service sign-up: everyone else joins your organization by invitation. (An
+operator can reopen it under admin console → **Settings → Access & Sign-up**.)
 
 The first run builds ~18 images and applies the database schema, so give it a
 few minutes. `docker compose ps` will show 28 containers when it's ready.
@@ -384,7 +386,8 @@ command and a minimal `values.yaml`.
 
 ## After it's up
 
-1. **Sign up** at the web UI — the first account creates the organization.
+1. **Sign up** at the web UI — the first account creates the organization, and
+   sign-up then closes. Invite the rest of your team from **Settings → Members**.
 2. **Deploy a sensor** so there's something to inventory. Sensors are standalone
    Go binaries you run inside your own network — see
    [`docsv4/core/features/SENSOR_REGISTRATION.md`](docsv4/core/features/SENSOR_REGISTRATION.md).

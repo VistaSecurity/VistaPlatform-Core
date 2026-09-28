@@ -280,6 +280,10 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "Invalid registration key: missing tenant association"})
 		return
 	}
+	// This route runs before any auth middleware (it is the bootstrap), so
+	// nothing else tells the audit middleware whose sensor this is; without
+	// it every registration was logged with no tenant.
+	c.Set("tenantID", pendingSensor.TenantID)
 
 	// Registration is unauthenticated bootstrap, so the registration key is the
 	// first point at which the owning tenant is known. Refuse blocked tenants

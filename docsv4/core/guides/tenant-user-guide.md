@@ -46,6 +46,8 @@ You reach the console one of two ways:
   a password, and you land on the Dashboard.
 - **Self-service signup**, if your deployment offers it. You create the
   organization, verify your email address, and become its first administrator.
+  On most installs this is only open until the first organization exists; after
+  that, people join by invitation.
 
 Either way, the first thing worth doing is the setup checklist — see
 [The setup checklist](#the-setup-checklist) below.

@@ -12,6 +12,7 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 func newRegisterEngine(stub *stubAuthServiceStore) *gin.Engine {
@@ -98,9 +100,13 @@ func expectLegalAcceptanceInserts(mock sqlmock.Sqlmock, tenantID, userID uuid.UU
 	}
 }
 
+// expectSignupGateAllowsRegistration mocks the early sign-up gate open by an
+// explicit operator choice, which decides without reading the licence or
+// counting tenants (entitlements.readSignupState). Since an absent row no
+// longer means open: on Core it means "open only while no tenant exists".
 func expectSignupGateAllowsRegistration(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(`SELECT setting_value FROM platform_settings WHERE setting_key = 'registration_enabled'`).
-		WillReturnError(sql.ErrNoRows)
+		WillReturnRows(sqlmock.NewRows([]string{"setting_value"}).AddRow([]byte(`true`)))
 }
 
 // expectSelfServiceTierValidation mocks validateSelfServiceTierSelection's
@@ -531,5 +537,22 @@ func TestContract_CompleteRegistration_201_recordsLegalAcceptance(t *testing.T) 
 	sv.assertConforms(t, "RegisterResponse", w.Body.Bytes())
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// A sign-up the gate refuses inside tenant creation (the locked re-check that
+// catches a race past the early check) is a 403 with the public text on both
+// password routes, never the generic 500. Remove the IsSignupClosed case from
+// either handler and this fails.
+func TestContract_Register_403_signupClosedInsideTenantCreation(t *testing.T) {
+	for _, path := range []string{"/api/v1/auth-service/auth/register", "/api/v1/auth-service/auth/register/complete"} {
+		stub := &stubAuthServiceStore{registerErr: fmt.Errorf("failed to create tenant: %w", &entitlements.SignupClosedError{})}
+		w := do(newRegisterEngine(stub), http.MethodPost, path, strings.NewReader(validRegisterBody))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("POST %s: status = %d, want 403; body=%s", path, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), entitlements.SignupClosedPublicMessage) {
+			t.Fatalf("POST %s: body %s does not carry the public refusal", path, w.Body.String())
+		}
 	}
 }

@@ -263,6 +263,58 @@ export function useDeleteTenant() {
   });
 }
 
+const deletedTenantsKey = [...tenantsKey, 'deleted'] as const;
+
+/** Soft-deleted tenants (GET /admin/tenants?deleted=only), for the Deleted
+ * view. Never mixed into the live directory: its own query. */
+export function useDeletedTenants(enabled = true) {
+  const { has, resolved } = usePlatformEdition();
+  return useQuery({
+    queryKey: deletedTenantsKey,
+    enabled: enabled && resolved && has('msp'),
+    queryFn: async (): Promise<Tenant[]> => {
+      const { data, error } = await clients.admin.GET('/admin/tenants', {
+        params: { query: { page_size: 100, deleted: 'only' } },
+      });
+      if (error || !data) throw new Error('Failed to load deleted tenants');
+      return data.tenants ?? [];
+    },
+    staleTime: 60 * 1000,
+  });
+}
+
+/** Restore a soft-deleted tenant (POST /admin/tenants/{id}/restore). */
+export function useRestoreTenant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id }: { id: string }) => {
+      const { error } = await clients.admin.POST('/admin/tenants/{id}/restore', { params: { path: { id } } });
+      // The server's text when it sent one: the cap refusal names the counts.
+      if (error) throw new Error(serverError(error, 'Failed to restore tenant'));
+    },
+    onSuccess: () => {
+      // tenantsKey is a prefix of deletedTenantsKey: both lists refresh.
+      void qc.invalidateQueries({ queryKey: tenantsKey });
+      // A restored tenant counts against an MSP install's licence again.
+      void qc.invalidateQueries({ queryKey: licenseCapKey });
+    },
+  });
+}
+
+/** Permanently purge a soft-deleted tenant (DELETE /admin/tenants/{id}/purge). */
+export function usePurgeTenant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id }: { id: string }) => {
+      const { error } = await clients.admin.DELETE('/admin/tenants/{id}/purge', { params: { path: { id } } });
+      if (error) throw new Error(serverError(error, 'Failed to purge tenant'));
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: tenantsKey });
+    },
+  });
+}
+
 /** Active tier catalog for the support plan-change picker. */
 export function useAdminTiers(enabled = true) {
   return useQuery({

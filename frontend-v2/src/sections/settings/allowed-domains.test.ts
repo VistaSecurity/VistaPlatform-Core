@@ -10,6 +10,7 @@ describe('normalizeAllowedDomains', () => {
 
   it.each([
     ['bücher.example', 'punycode'],
+    ['example😀.com', 'punycode'],
     ['corp', 'fully qualified'],
     ['*.example.com', 'wildcard'],
     ['example.com.', 'ends with a dot'],

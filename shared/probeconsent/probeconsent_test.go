@@ -132,8 +132,8 @@ func TestTooBroadToClaim(t *testing.T) {
 		"192.0.0.0/7":          true,  // one bit short of the IPv4 floor
 		"192.0.0.0/8":          false, // exactly at it
 		"203.0.113.0/24":       false,
-		"2001:d00::/15":        true,  // one bit short of the IPv6 floor
-		"2001:db8::/16":        true,  // masks to 2001::/16, which contains all Teredo destinations
+		"2001:d00::/15":        true, // one bit short of the IPv6 floor
+		"2001:db8::/16":        true, // masks to 2001::/16, which contains all Teredo destinations
 		"2001:db8::/32":        false,
 		"::ffff:0.0.0.0/96":    true,  // the whole IPv4 space, spelled mapped
 		"::ffff:192.0.0.0/104": false, // a mapped /8

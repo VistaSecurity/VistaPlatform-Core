@@ -88,7 +88,15 @@ export function SecurityPolicyPage() {
     if (!current) return;
     try {
       // Send ONLY the security-owned keys (partial merge — leaves email_config etc. alone).
-      await save.mutateAsync({ ...current });
+      // registration_enabled goes only when the operator changed it here: the
+      // loaded value can be an edition default rather than a stored choice
+      //and writing it back would record one. On a fresh Core install
+      // that would close the first-run sign-up window as a side effect of,
+      // say, raising the minimum password length.
+      const { registration_enabled, ...rest } = current;
+      await save.mutateAsync(
+        baseline && registration_enabled === baseline.registration_enabled ? rest : { ...rest, registration_enabled },
+      );
       toast.success('Security policy saved.');
     } catch (e) {
       toast.error(errMsg(e, 'Failed to save security policy'));

@@ -225,7 +225,7 @@ All three are gated on the platform permission `catalogs.manage`, separate from 
 **What it's for:** platform-wide configuration — email delivery, self-service sign-up, white-labeling, legal documents, identity providers, outbound notification delivery, and the licence. Seven sub-pages:
 
 - **Email** — SMTP configuration for invitations, password resets, and onboarding mail. Saving it needs Security management (see below); anyone with Settings access can view it and send a test email.
-- **Access & Sign-up** — self-service sign-up and email-verification gates for new organizations.
+- **Access & Sign-up** — self-service sign-up and email-verification gates for new organizations. On Core and Enterprise, self-service sign-up is **off by default**, with one exception: while the install has no organization, sign-up stays open so the first one can be created, and it closes automatically once that organization exists. Turn it on here only if you deliberately want strangers able to create new organizations; people normally join an existing organization by invitation.
 - **Branding** — white-label the platform: product name, logos, and favicon.
 - **Legal** — author and version your Terms of Service and Privacy Policy.
 - **Identity Providers** — the platform's own Google / Microsoft OAuth apps, used for staff sign-in to this console (**Admin login**) and, with an Enterprise or MSP licence, for social sign-up (**Sign-up**). On Core the form offers Admin login only, and the server refuses a new Sign-up provider (`402`), because social sign-up is not part of Core. Adding, editing, enabling, disabling or deleting a provider needs Security management (see below); anyone with Settings access can view them.

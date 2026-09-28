@@ -1346,6 +1346,13 @@ func (a *AuthService) createTenant(name string) (*models.Tenant, error) {
 		if a.bypassDB != nil {
 			capWriter = a.bypassDB
 		}
+		// The sign-up gate first: every caller of createTenant is a
+		// self-service sign-up. The handlers checked it already, without a
+		// lock; this is the check that holds, so two simultaneous sign-ups in
+		// a Core install's bootstrap window cannot both create a tenant.
+		if e := entitlements.AdmitSignupTenant(context.Background(), tx, time.Now()); e != nil {
+			return e
+		}
 		capStatus, e := entitlements.AdmitTenantCreation(context.Background(), tx, capWriter, time.Now())
 		if e != nil {
 			if capErr, ok := entitlements.IsTenantCapExceeded(e); ok {

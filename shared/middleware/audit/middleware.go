@@ -133,14 +133,7 @@ func (m *Middleware) LogRequest() gin.HandlerFunc {
 		email, _ := c.Get("email")
 		role, _ := c.Get("role")
 
-		// Determine user type
-		userType := "tenant"
-		if role != nil {
-			roleStr := role.(string)
-			if strings.Contains(roleStr, "platform") || strings.Contains(roleStr, "admin") {
-				userType = "platform"
-			}
-		}
+		userType := resolveUserType(c, m.getUUIDPtr(tenantID), role)
 
 		// Extract request ID if available
 		requestID, _ := c.Get("request_id")
@@ -482,6 +475,35 @@ func (m *Middleware) Stop() {
 }
 
 // Helper functions
+// resolveUserType decides activity_logs.user_type for a request.
+//
+// It used to guess from the role NAME: "platform" or "admin" anywhere in it
+// meant platform. That labelled every tenant_admin a platform user, and a
+// platform support_agent (no "admin" in it) a tenant user, while the correct
+// answer sat unread in the context. Retention and the tenant audit export key
+// on this column, so a wrong value files an event under the wrong
+// owner.
+//
+// In order: the userType the auth middleware set (shared RequireJWTAuth and
+// the services' own auth set it from the token); otherwise the same rule they
+// use, a tenant in context means a tenant user; otherwise a role with no
+// tenant is a platform user; otherwise (no identity at all, e.g. an agent's
+// bootstrap call) tenant, since the column admits only the two values.
+func resolveUserType(c *gin.Context, tenant *uuid.UUID, role interface{}) string {
+	if v, ok := c.Get("userType"); ok {
+		if s, _ := v.(string); s == "platform" || s == "tenant" {
+			return s
+		}
+	}
+	if tenant != nil && *tenant != uuid.Nil {
+		return "tenant"
+	}
+	if r, _ := role.(string); r != "" {
+		return "platform"
+	}
+	return "tenant"
+}
+
 func (m *Middleware) getUUIDPtr(value interface{}) *uuid.UUID {
 	if value == nil {
 		return nil

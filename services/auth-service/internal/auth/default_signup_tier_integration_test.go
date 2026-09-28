@@ -31,6 +31,7 @@ import (
 // returns the new tenant id.
 func newSignupTenant(t *testing.T, db *sql.DB) uuid.UUID {
 	t.Helper()
+	testdb.OpenSelfSignup(t, db)
 	auth := makeAuthForTest(db)
 	tenant, err := auth.createTenant("Signup Co " + uuid.NewString()[:8])
 	if err != nil {

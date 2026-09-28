@@ -2522,7 +2522,7 @@ export interface components {
             /** Format: uuid */
             provider_id: string;
         };
-        /** @description Public platform branding (api.PlatformConfig). Returned bare (not wrapped). `platform_name` is always present (defaults to "Vista Platform"); the logo/favicon URLs are present only when configured (omitempty pointers). `signup_enabled` mirrors platform_settings.registration_enabled (default true) so the /signup page knows whether to render the form. */
+        /** @description Public platform branding (api.PlatformConfig). Returned bare (not wrapped). `platform_name` is always present (defaults to "Vista Platform"); the logo/favicon URLs are present only when configured (omitempty pointers). `signup_enabled` is the self-service sign-up gate's answer: the operator's platform_settings.registration_enabled choice when one is recorded; otherwise open on MSP, and on Core and Enterprise open only until the install's first tenant exists. The /signup page reads it to know whether to render the form. */
         PlatformConfig: {
             platform_name: string;
             /** @description Optional branding logo URL; omitted when unset. */

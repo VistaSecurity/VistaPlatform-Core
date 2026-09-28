@@ -114,8 +114,7 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
     );
   };
   const remove = () => {
-    // No "recoverable": there is no restore for a deleted tenant — only purge.
-    if (!window.confirm(`Delete ${t.name}? Its users are signed out and can no longer sign in, and its sensors and agents are refused. A deleted tenant cannot be restored from here — it can only be purged. This is logged to audit.`)) return;
+    if (!window.confirm(`Delete ${t.name}? Its users are signed out and can no longer sign in, and its sensors and agents are refused. It moves to the Deleted view, where it can be restored or permanently purged. This is logged to audit.`)) return;
     deleteMut.mutate(
       { id: t.id },
       {

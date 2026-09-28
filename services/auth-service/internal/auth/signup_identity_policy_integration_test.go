@@ -12,6 +12,7 @@ func TestIntegration_SignupEnablesIdentityPolicy(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	app := testdb.ConnectAsAppRole(t, db)
+	testdb.OpenSelfSignup(t, db)
 	testdb.WithSchemaShareLock(t, db, func() {
 		// An existing customer's explicit policy must survive new signups.
 		existing := testdb.NewTenant(t, db)

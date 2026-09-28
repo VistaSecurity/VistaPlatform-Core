@@ -13,6 +13,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -35,6 +36,7 @@ type stubLegacySensorService struct {
 	updateErr    error
 	db           *sql.DB
 	bypassDB     *sql.DB
+	pending      *models.PendingSensorRegistration
 }
 
 func (s *stubLegacySensorService) GetSensor(uuid.UUID) (*models.Sensor, error) {
@@ -56,7 +58,10 @@ func (s *stubLegacySensorService) GetPendingCommands(string) ([]models.Command, 
 	return nil, nil
 }
 func (s *stubLegacySensorService) GetPendingSensorByKey(string) (*models.PendingSensorRegistration, error) {
-	return nil, nil
+	if s.pending == nil {
+		return nil, errors.New("no such registration key")
+	}
+	return s.pending, nil
 }
 func (s *stubLegacySensorService) GetPendingSensors(uuid.UUID) ([]models.PendingSensorRegistration, error) {
 	return nil, nil

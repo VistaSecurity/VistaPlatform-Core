@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.7] - 2026-09-24
+## [1.1.0-rc.8] - 2026-09-24
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -121,10 +121,25 @@ reports. See **Upgrading** for what an existing install needs to do.
 - **MSP installs:** paid subscription periods are backfilled from the data that
   survives, so churn and LTV can shift once after upgrading.
 
+- **Self-service sign-up closes on Core and Enterprise.** With no choice
+  recorded, sign-up is now open only until an install's first organization
+  exists. An existing install that never set it stops accepting new sign-ups;
+  turn it back on under Settings → Access & Sign-up if you want it open.
+  Invitations and existing users are unaffected.
+
 <!-- release-notes-end -->
 
 ### Added
 
+- **Restore and purge soft-deleted tenants from the admin console.** Deleting a
+  tenant only soft-deletes it, and the console could not see it afterwards, so
+  it kept its owner's email address and blocked a fresh sign-up with nothing to
+  act on. Tenants now has a **Deleted** filter listing soft-deleted tenants.
+  Selecting one offers **Restore** (the tenant and its users come back; on MSP
+  it is admitted through the licensed-tenant limit like a new tenant) and
+  **Purge** (permanent, confirmed by typing the tenant's name). Both need
+  `tenants.delete` and are audited. New API: `POST /admin/tenants/{id}/restore`
+  and `GET /admin/tenants?deleted=only`.
 - **Scan an address, block or hostname outside your registered networks —
   when you say so.** The Discover wizard (Discovery → Command Center →
   Discover assets, and now also **Discovery → Active Scan → Scan addresses or
@@ -728,6 +743,20 @@ reports. See **Upgrading** for what an existing install needs to do.
 
 ### Changed
 
+- **Self-service sign-up is off by default on Core and Enterprise.** Public
+  sign-up is the only way those editions gain an organization, and it used to
+  be open by default and fail open, so an internet-facing install created a new
+  tenant for anyone who found `/signup`. Now, with no choice recorded under
+  admin console → Settings → Access & Sign-up, sign-up stays open only while the
+  install has no live organization, so a fresh install can still be set up the
+  usual way, and closes as soon as the first one exists. An explicit on or off
+  there still wins. MSP is unchanged: open by default, subject to the licensed
+  tenant cap. A settings read error now closes sign-up instead of opening it,
+  and two simultaneous "first" sign-ups cannot both create an organization.
+  **Upgrade note:** an existing Core or Enterprise install that never set this
+  choice will stop accepting new sign-ups after the upgrade. To keep public
+  sign-up open, turn it on under Settings → Access & Sign-up. Existing users,
+  invitations and SSO sign-in are unaffected.
 - **Plans & Pricing is shown only on an MSP licence.** Core and Enterprise
   consoles no longer show it, alongside Billing & Revenue: plans, pricing and
   billing are how a service provider sells to its own customers. Tier
@@ -825,6 +854,15 @@ reports. See **Upgrading** for what an existing install needs to do.
 
 ### Fixed
 
+- **Audit log entries record the right tenant and user type.** About a fifth
+  of tenant activity was logged with no tenant: sensor and device-agent
+  registration (the unauthenticated bootstrap, which learns its tenant from the
+  registration key but never told the audit middleware) and the internal
+  enrichment refresh (which kept the tenant under a private key). Separately,
+  `user_type` was guessed from the role *name*: every `tenant_admin` was filed as
+  a platform user and a platform `support_agent` as a tenant user. It now
+  follows the identity authentication established. Entries written before this
+  release are not rewritten.
 - **admin-ui no longer reloads in a loop when the browser also holds a blocked
   tenant's session.** admin-ui and web-ui share a parent cookie domain, so
   admin-ui requests also carry any tenant `access_token`. notification-service's
@@ -838,9 +876,12 @@ reports. See **Upgrading** for what an existing install needs to do.
   customer again.** After tenant lifecycle had ended a card tenant's paid
   period, any later write to its subscription row (a routine
   `customer.subscription.updated`, for example) opened a new one, and revenue
-  analytics counted the tenant as current MRR. The period trigger now refuses to
-  reopen for a tenant blocked after it paid, and re-applying the schema closes
-  any period an earlier release reopened.
+  analytics counted the tenant as current MRR. For a suspended or canceled
+  tenant the period trigger now opens a paid stretch only when the subscription
+  itself starts paying (a trial converting, a churned customer re-subscribing),
+  never for a write to one that was already paying, including tenants blocked
+  before period history existed. Re-applying the schema closes any period an
+  earlier release reopened.
 - **Every tenant-lifecycle action now preserves the state it interrupts.** A
   dunning suspension remembers the tenant's prior status and revokes all of
   its sessions in the same transaction; dunning resume restores that status

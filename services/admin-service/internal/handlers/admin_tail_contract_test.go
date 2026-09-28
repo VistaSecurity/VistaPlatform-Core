@@ -17,6 +17,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 )
 
 var errAdminTail = context.DeadlineExceeded
@@ -40,6 +42,13 @@ type stubPlatformSettingsStore struct {
 	permErr        error
 	permAsked      []string
 	upserted       []string
+	// signup is what SignupState answers; signupErr fails it.
+	signup    entitlements.SignupState
+	signupErr error
+}
+
+func (s *stubPlatformSettingsStore) SignupState(context.Context) (entitlements.SignupState, error) {
+	return s.signup, s.signupErr
 }
 
 func (s *stubPlatformSettingsStore) ListSettings(context.Context) ([]platformSettingKV, error) {
@@ -77,6 +86,56 @@ func TestContract_GetPlatformSettings_200(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "PlatformSettings", w.Body.Bytes())
+}
+
+// registration_enabled reports the sign-up gate's edition default rather than
+// a constant true: a Core install whose operator never chose shows
+// sign-up OFF, with signup_bootstrap saying the first-run window is open, and
+// an explicit stored choice still wins.
+func TestContract_GetPlatformSettings_SignupReflectsTheGate(t *testing.T) {
+	sv := loadSpec(t)
+	read := func(store *stubPlatformSettingsStore) map[string]any {
+		t.Helper()
+		w := doRequest(newSettingsEngine(store, true), http.MethodGet, apiBase+"/admin/settings", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "PlatformSettings", w.Body.Bytes())
+		var out map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	fresh := read(&stubPlatformSettingsStore{signup: entitlements.SignupState{
+		Edition: entitlements.EditionCore, Open: true, Bootstrap: true}})
+	if fresh["registration_enabled"] != false || fresh["signup_open"] != true || fresh["signup_bootstrap"] != true {
+		t.Fatalf("fresh Core: %v / open %v / bootstrap %v, want false / true / true",
+			fresh["registration_enabled"], fresh["signup_open"], fresh["signup_bootstrap"])
+	}
+
+	msp := read(&stubPlatformSettingsStore{signup: entitlements.SignupState{
+		Edition: entitlements.EditionMSP, Open: true}})
+	if msp["registration_enabled"] != true {
+		t.Fatalf("MSP default: registration_enabled = %v, want true", msp["registration_enabled"])
+	}
+
+	on := true
+	explicit := read(&stubPlatformSettingsStore{
+		signup: entitlements.SignupState{Edition: entitlements.EditionCore, Setting: &on, Open: true},
+		list:   []platformSettingKV{{Key: "registration_enabled", Value: []byte(`true`)}},
+	})
+	if explicit["registration_enabled"] != true || explicit["signup_bootstrap"] != false {
+		t.Fatalf("Core opened explicitly: %v / bootstrap %v, want true / false",
+			explicit["registration_enabled"], explicit["signup_bootstrap"])
+	}
+
+	// The gate unreadable: the read-only fields are omitted, never guessed.
+	broken := read(&stubPlatformSettingsStore{signupErr: errors.New("db down")})
+	if _, ok := broken["signup_open"]; ok {
+		t.Fatalf("gate unreadable: signup_open present (%v), want omitted", broken["signup_open"])
+	}
 }
 
 func TestContract_UpdatePlatformSettings_200(t *testing.T) {
