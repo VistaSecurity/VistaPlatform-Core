@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.1.0-rc.8] - 2026-09-24
+## [4.0.0-rc.1] - 2026-09-28
+
+**Version 4.0.0 aligns Core with the commercial editions.** Core was on the 1.x
+line and Vista Platform Enterprise and MSP on 3.x. From this release every
+edition shares one version number, so Core goes straight from 1.0 to 4.0. No
+Core release was skipped: this is the release that was in candidate as 1.1.0,
+and nothing between 1.1 and 3.x exists.
+
+**Enterprise and MSP customers upgrading from 3.6.0:** this is the first
+commercial release since 3.6.0, so it also carries everything in 1.0.0 and 1.0.1
+below — including the new asset model. Back up first. Licences issued before
+this release (v1, with no edition in them) keep working for this release only
+and are read as **Enterprise**, so an MSP on an old licence runs as Enterprise
+until it installs a re-issued one; ask Vista Security for it before upgrading.
 
 A security release. It is the remediation of a full ten-domain security audit of
 v1.0.0 — four Critical and ten High findings, every one verified against source
@@ -854,6 +867,11 @@ reports. See **Upgrading** for what an existing install needs to do.
 
 ### Fixed
 
+- **Purging a tenant with real data no longer fails after 15 seconds.**
+  admin-service's 15-second write timeout, which on HTTP/2 cancels the request,
+  cut off the cascade delete of any sizeable tenant, so the purge was rolled
+  back and reported a 500. The purge route now has its own 10-minute deadline,
+  and a client that disconnects mid-purge no longer cancels it.
 - **Audit log entries record the right tenant and user type.** About a fifth
   of tenant activity was logged with no tenant: sensor and device-agent
   registration (the unauthenticated bootstrap, which learns its tenant from the
