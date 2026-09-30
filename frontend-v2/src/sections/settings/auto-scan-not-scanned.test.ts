@@ -15,6 +15,17 @@ describe('describeNotScanned', () => {
     ]);
   });
 
+  // MUTATION (goes red): drop the imported_without_scan_consent copy (the row
+  // falls back to a generated label and a "rule this page does not describe").
+  it('names the imported-without-consent refusal and says what to do about it', () => {
+    const [row] = describeNotScanned([{ reason: 'imported_without_scan_consent', count: 7 }]);
+    expect(row.label).toBe('Imported, not cleared for scanning');
+    expect(row.detail).toContain('Active Scan');
+    expect(row.detail).not.toContain('does not describe');
+    // Registering a segment does not help: consent is per connection.
+    expect(row.registerSegmentsHref).toBeUndefined();
+  });
+
   it('names carrier-grade NAT by its range and the networks that use it', () => {
     // The row this panel exists for. A Tailscale or ZeroTier estate lives
     // entirely in 100.64/10; calling that "public" sends the tenant to look

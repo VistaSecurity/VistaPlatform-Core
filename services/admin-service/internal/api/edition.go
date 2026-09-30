@@ -259,8 +259,8 @@ func (h EditionHooks) Edition() string {
 // and /admin/tenants/:id/billing are.
 //
 // Deliberately NOT a list of every paid capability in the product: this service
-// can only speak for its own routes. SIEM export (audit-service/ee/siemexport),
-// CMDB sync (inventory-service/ee/cmdbsync) and the rest live in other binaries
+// can only speak for its own routes. SIEM export, NetBox and CMDB sync (all in
+// the Enterprise-only integration service now) and the rest live in other binaries
 // and keep their own response probes — see packages/primitives/src/features/
 // edition.ts. Adding them here would be a guess dressed up as a fact.
 type EditionCapabilities struct {

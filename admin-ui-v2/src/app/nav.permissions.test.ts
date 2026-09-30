@@ -121,7 +121,7 @@ describe('seeded roles', () => {
   // and Security ▸ Policy, every call on which 403'd (it holds none of
   // platform.impersonate, platform.security, platform.settings). They are
   // hidden now. Everything it still sees, its grants let it use — Retention
-  // and SIEM included, which audit-service now resolves from platform.audit.
+  // and SIEM included, which their services resolve from platform.audit.
   it('support_agent sees exactly what its grants open', () => {
     const sa = seededGrants('support_agent');
     expect(visibleTree((p) => sa.has(p))).toEqual([

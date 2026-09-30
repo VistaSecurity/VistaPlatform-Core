@@ -68,7 +68,7 @@ docs:
   sso_saml:            enterprise/features/sso-and-federated-identity.md
   billing_portal:      msp/features/billing-and-subscriptions.md
   custom_branding:     enterprise/features/custom-branding.md
-  cmdb_sync:           core/features/cmdb-integrations.md
+  cmdb_sync:           enterprise/integrations/cmdb-integrations.md
   connector_netbox:    enterprise/integrations/netbox.md
   siem_export:         enterprise/features/siem-export.md
   ot_active_probing:   null   # see no_self_service below

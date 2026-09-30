@@ -20,7 +20,6 @@ import (
 func TestProductionStartsWithoutLegacyHMACAndVerifiesJWKS(t *testing.T) {
 	t.Setenv("ENV", "production")
 	t.Setenv("INTERNAL_AUTH_SECRET", "strong-internal-auth-secret")
-	t.Setenv("ENCRYPTION_MASTER_KEY", "strong-encryption-master-key")
 	t.Setenv("JWT_SECRET", "")
 	if err := os.Unsetenv("JWT_SECRET"); err != nil {
 		t.Fatal(err)

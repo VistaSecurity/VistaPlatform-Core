@@ -272,6 +272,15 @@ upgrades, or set `strategy: Recreate` on the backends you can afford brief
 downtime on (the chart already does this for `pcap-processor`). A wedged
 upgrade recovers with `helm rollback`.
 
+**New backend pods wait for the schema migration.** Each backend's
+`wait-for-schema` init container holds it until the `schema-migration` Job has
+recorded that it applied *this* chart's schema, so an upgrade that changes the
+schema takes as long as the migration plus the rollout. Under the default
+rolling update the old pods keep serving meanwhile; a backend on
+`strategy: Recreate` is down for that whole window. Give `helm upgrade --wait`
+a `--timeout` that covers it (Helm's default is 5m). When the schema didn't
+change, the wait passes immediately.
+
 ---
 
 ## Verifying what you're running
@@ -439,6 +448,10 @@ Common first-install problems:
   re-run `helm upgrade`. Its name carries a hash of the pod template, so find it
   with `kubectl -n vista get job -l app.kubernetes.io/component=schema-migration`
   rather than guessing.
+- **Backends stuck in `Init`, or `Init:Error` with restarts** — they are
+  waiting for `schema-migration` to finish (see above). `kubectl -n vista logs
+  <pod> -c wait-for-schema` names the schema it is waiting for and the last one
+  the database recorded; it gives up and retries every ~10 minutes.
 - **Signup succeeds but login says "Email not verified"** — you have `SMTP_HOST`
   set but mail isn't actually being delivered. Either fix delivery or unset it;
   with no SMTP configured, verification isn't required.

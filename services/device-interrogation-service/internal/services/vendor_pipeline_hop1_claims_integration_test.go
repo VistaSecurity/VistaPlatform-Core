@@ -33,21 +33,6 @@ func hop1Row(t *testing.T, h pipelinetest.Hop1Handoff, protocol, destIP string) 
 	return found[0]
 }
 
-// hop1RowByPeer returns the one row of protocol whose vpn_peer_address is peer.
-func hop1RowByPeer(t *testing.T, h pipelinetest.Hop1Handoff, protocol, peer string) pipelinetest.SensorDiscoveryRow {
-	t.Helper()
-	var found []pipelinetest.SensorDiscoveryRow
-	for _, r := range h.SensorDiscoveries {
-		if r.Protocol == protocol && r.Metadata["vpn_peer_address"] == peer {
-			found = append(found, r)
-		}
-	}
-	if len(found) != 1 {
-		t.Fatalf("%s: want exactly one %s row with peer %q, found %d", h.Vendor, protocol, peer, len(found))
-	}
-	return found[0]
-}
-
 // hop1RowsOnPort returns the rows of a protocol on a port.
 func hop1RowsOnPort(h pipelinetest.Hop1Handoff, protocol string, port int) []pipelinetest.SensorDiscoveryRow {
 	var found []pipelinetest.SensorDiscoveryRow

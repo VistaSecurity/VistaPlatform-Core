@@ -29,21 +29,6 @@ func hop3ConfigOn(t *testing.T, s hop3Summary, asset, protocol string) hop3Confi
 	return found[0]
 }
 
-// hop3ConfigOnVersion is hop3ConfigOn narrowed to one protocol version.
-func hop3ConfigOnVersion(t *testing.T, s hop3Summary, asset, protocol, version string) hop3Config {
-	t.Helper()
-	var found []hop3Config
-	for _, c := range s.Configurations {
-		if c.Asset == asset && c.Protocol == protocol && c.Version != nil && *c.Version == version {
-			found = append(found, c)
-		}
-	}
-	if len(found) != 1 {
-		t.Fatalf("want exactly one %s %s configuration on %s, found %d", protocol, version, asset, len(found))
-	}
-	return found[0]
-}
-
 // hop3ConfigWithCipher returns the one configuration whose cipher suite is cs.
 func hop3ConfigWithCipher(t *testing.T, s hop3Summary, cs string) hop3Config {
 	t.Helper()

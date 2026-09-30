@@ -75,6 +75,57 @@ func (s *stubSourceImporter) HardwareAssets(_ context.Context, tenant uuid.UUID,
 	return []services.SourceHardwareAsset{{ID: uuid.New(), ClassKey: "switch", AssetStatus: "monitoring", Serial: "SN1"}}, nil
 }
 
+func (s *stubSourceImporter) AttachLinks(_ context.Context, tenant uuid.UUID, source identity.Source, items []services.SourceLink) ([]services.SourceItemResult, error) {
+	s.gotTenant, s.gotSource = tenant, source
+	out := []services.SourceItemResult{
+		{Outcome: services.SourceItemRecorded},
+		{Outcome: services.SourceItemNotFound},
+		{Outcome: services.SourceOutcomeError, Error: "not a source link"},
+	}
+	return out[:len(items)], nil
+}
+
+func (s *stubSourceImporter) RecordPresence(_ context.Context, tenant uuid.UUID, source identity.Source, _ string, items []services.SourcePresence) ([]services.SourceItemResult, error) {
+	s.gotTenant, s.gotSource = tenant, source
+	out := make([]services.SourceItemResult, 0, len(items))
+	for range items {
+		out = append(out, services.SourceItemResult{Outcome: services.SourceItemRecorded})
+	}
+	return out, nil
+}
+
+func (s *stubSourceImporter) RecordRun(_ context.Context, tenant uuid.UUID, source identity.Source, _ uuid.UUID, items []services.SourceRunItem) ([]services.SourceItemResult, error) {
+	s.gotTenant, s.gotSource = tenant, source
+	out := []services.SourceItemResult{
+		{Outcome: services.SourceItemRecorded},
+		{Outcome: services.SourceItemNotFound},
+		{Outcome: services.SourceOutcomeError, Error: "action \"deleted\" is not created or updated"},
+	}
+	return out[:len(items)], nil
+}
+
+func (s *stubSourceImporter) ArchiveRunAssets(_ context.Context, tenant uuid.UUID, source identity.Source, _ uuid.UUID, _ uuid.UUID, _ string, ids []uuid.UUID) ([]services.SourceUndoResult, error) {
+	s.gotTenant, s.gotSource = tenant, source
+	out := make([]services.SourceUndoResult, 0, len(ids))
+	outcomes := []services.SourceUndoResult{
+		{Outcome: services.SourceUndoArchived},
+		{Outcome: services.SourceUndoKept, Reason: "also reported by sensor:abc"},
+		{Outcome: services.SourceUndoAlreadyArchived},
+		{Outcome: services.SourceItemNotFound},
+	}
+	for i, id := range ids {
+		r := outcomes[i%len(outcomes)]
+		r.AssetID = id
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func (s *stubSourceImporter) SetScanConsent(_ context.Context, tenant uuid.UUID, source identity.Source, allow bool, _ uuid.UUID) (services.SourceScanConsent, error) {
+	s.gotTenant, s.gotSource = tenant, source
+	return services.SourceScanConsent{SourceRef: source.Ref, AllowActiveScan: allow}, nil
+}
+
 func sourceContractEngine(stub *stubSourceImporter) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -108,6 +159,11 @@ func TestContract_SourceImport_Responses(t *testing.T) {
 		{http.MethodPost, base + "/assets", `{"source":{"kind":"imported","ref":"netbox:x"},"assets":[{"class_key":"switch"},{"class_key":"switch"},{"class_key":"switch"}]}`, "SourceAssetsResponse", http.StatusOK},
 		{http.MethodGet, base + "/asset-classes/switch", ``, "SourceClassExistsResponse", http.StatusOK},
 		{http.MethodGet, base + "/hardware-assets?limit=10", ``, "SourceHardwareAssetsResponse", http.StatusOK},
+		{http.MethodPost, base + "/assets/presence", `{"source":{"kind":"imported","ref":"cmdb:p"},"platform":"servicenow","items":[{"asset_id":"` + uuid.NewString() + `","presence":"absent","reason":"retired in ServiceNow"}]}`, "SourceItemResultsResponse", http.StatusOK},
+		{http.MethodPost, base + "/assets/runs", `{"source":{"kind":"imported","ref":"cmdb:p"},"run_id":"` + uuid.NewString() + `","items":[{"asset_id":"` + uuid.NewString() + `","action":"created"},{"asset_id":"` + uuid.NewString() + `","action":"updated"},{"asset_id":"` + uuid.NewString() + `","action":"deleted"}]}`, "SourceItemResultsResponse", http.StatusOK},
+		{http.MethodPut, "/api/v1/inventory-service/internal/sources/scan-consent", `{"source":{"kind":"imported","ref":"cmdb:p"},"allow_active_scan":true,"actor_user_id":"` + uuid.NewString() + `"}`, "SourceScanConsent", http.StatusOK},
+		{http.MethodPost, base + "/assets/archive", `{"source":{"kind":"imported","ref":"cmdb:p"},"run_id":"` + uuid.NewString() + `","actor_user_id":"` + uuid.NewString() + `","reason":"undo","asset_ids":["` + uuid.NewString() + `","` + uuid.NewString() + `","` + uuid.NewString() + `","` + uuid.NewString() + `"]}`, "SourceUndoResponse", http.StatusOK},
+		{http.MethodPost, base + "/assets/links", `{"source":{"kind":"imported","ref":"netbox:x"},"links":[{"asset_id":"` + uuid.NewString() + `","kind":"cmdb_sys_id","value":"SRV1","scope":"p"},{"asset_id":"` + uuid.NewString() + `","kind":"cmdb_sys_id","value":"SRV2","scope":"p"},{"asset_id":"` + uuid.NewString() + `","kind":"serial_number","value":"x","scope":"p"}]}`, "SourceItemResultsResponse", http.StatusOK},
 	} {
 		w := httptest.NewRecorder()
 		e.ServeHTTP(w, signedSourceCall(tc.method, tc.path, tc.body, tenant))
@@ -169,9 +225,24 @@ func TestContract_SourceImport_RefusesBadRequests(t *testing.T) {
 		{"/assets", `{"source":{"kind":"imported","ref":"netbox:x"},"assets":[]}`},
 		{"/segments", big.String()},
 		{"/assets/admission", `{"count":-1}`},
+		{"/assets/links", `{"source":{"kind":"declared","ref":"cmdb:p"},"links":[{"asset_id":"` + uuid.NewString() + `","kind":"cmdb_sys_id","value":"v","scope":"p"}]}`},
+		{"/assets/links", `{"source":{"kind":"imported","ref":"cmdb:p"},"links":[]}`},
+		{"/assets/presence", `{"source":{"kind":"measured","ref":"cmdb:p"},"items":[{"asset_id":"` + uuid.NewString() + `","presence":"absent"}]}`},
+		{"/assets/presence", `{"source":{"kind":"imported","ref":"cmdb:p"},"items":[]}`},
+		{"/assets/runs", `{"source":{"kind":"imported","ref":"cmdb:p"},"items":[{"asset_id":"` + uuid.NewString() + `","action":"created"}]}`},
+		{"/assets/runs", `{"source":{"kind":"measured","ref":"cmdb:p"},"run_id":"` + uuid.NewString() + `","items":[{"asset_id":"` + uuid.NewString() + `","action":"created"}]}`},
+		{"/assets/archive", `{"source":{"kind":"imported","ref":"cmdb:p"},"asset_ids":["` + uuid.NewString() + `"]}`},
+		{"/assets/archive", `{"source":{"kind":"imported","ref":"cmdb:p"},"run_id":"` + uuid.NewString() + `","asset_ids":[]}`},
+		{"/scan-consent", `{"source":{"kind":"imported","ref":"cmdb:p"}}`},
+		{"/scan-consent", `{"source":{"kind":"measured","ref":"sensor:x"},"allow_active_scan":true}`},
+		{"/assets/archive", `{"source":{"kind":"declared","ref":"cmdb:p"},"run_id":"` + uuid.NewString() + `","asset_ids":["` + uuid.NewString() + `"]}`},
 	} {
 		w := httptest.NewRecorder()
-		e.ServeHTTP(w, signedSourceCall(http.MethodPost, "/api/v1/inventory-service/internal/sources"+tc.path, tc.body, uuid.New()))
+		method := http.MethodPost
+		if tc.path == "/scan-consent" {
+			method = http.MethodPut
+		}
+		e.ServeHTTP(w, signedSourceCall(method, "/api/v1/inventory-service/internal/sources"+tc.path, tc.body, uuid.New()))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("POST %s %.60s… = %d, want 400", tc.path, tc.body, w.Code)
 		}

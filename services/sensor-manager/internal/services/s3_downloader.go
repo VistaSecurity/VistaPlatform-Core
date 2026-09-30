@@ -16,7 +16,7 @@ import (
 // S3Downloader handles downloading sensor binaries from S3
 type S3Downloader struct {
 	s3Client   *s3.Client
-	downloader *manager.Downloader
+	downloader *manager.Downloader //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 	bucket     string
 	region     string
 	version    string
@@ -39,7 +39,7 @@ func NewS3Downloader(bucket, region, version string) (*S3Downloader, error) {
 	}
 
 	s3Client := s3.NewFromConfig(cfg)
-	downloader := manager.NewDownloader(s3Client)
+	downloader := manager.NewDownloader(s3Client) //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 
 	if version == "" {
 		version = "latest"
@@ -80,7 +80,7 @@ func (s *S3Downloader) DownloadBinary(ctx context.Context, osName, arch string) 
 	buf := manager.NewWriteAtBuffer([]byte{})
 
 	// Download from S3
-	_, err := s.downloader.Download(ctx, buf, &s3.GetObjectInput{
+	_, err := s.downloader.Download(ctx, buf, &s3.GetObjectInput{ //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s3Key),
 	})

@@ -135,16 +135,44 @@ spec:
       {{- if $needs.postgres }}
       initContainers:
         {{/*
-        v0.2.0 — wait for schema-migration Job to have populated the database
-        before this backend's main container starts. Avoids the "backend
-        crashloops on missing tables" cascade that breaks first-install with
-        helm --wait.
+        wait-for-schema — hold this backend's main container until the database
+        carries THIS chart's schema.
 
-        Polls Postgres for a sentinel table (public.tenants — fundamental to
-        the data model, present from the very first schema apply). Loops
-        forever until the table exists; if the schema-migration Job is
-        failing for some reason, this init container will hang until the pod
-        is killed by kubelet, which surfaces the failure to the operator.
+        The gate is the schema-migration completion marker: the row in
+        public.schema_migration_status keyed by the content hash of the shipped
+        schema.sql, which jobs/schema-migration.yaml writes only after the whole
+        file has applied (ON_ERROR_STOP=1). seed-data gates on the same row via
+        the same helper (vistaplatform.schemaMarkerQuery), so the hash cannot
+        drift between the writer and its readers.
+
+        Why not a sentinel table: this used to wait for public.tenants, which is
+        true on EVERY upgrade (and early in a fresh install's apply). The
+        schema-migration Job is a plain release resource, not a pre-upgrade hook,
+        so `helm upgrade` starts the new pods while the Job is still adding
+        columns. On the 4.1.0 upgrade that surfaced as a backend's first query
+        failing with SQLSTATE 42703 (undefined column) against a column the Job
+        had not added yet. Keying on the hash waits for the new schema rather
+        than passing on the previous release's tables or its marker.
+
+        When the schema did not change between releases, the marker row already
+        exists and the wait passes on the first query.
+
+        schemaMigration.enabled=false: the chart never writes a marker, so waiting
+        for one would never end. The gate falls back to the sentinel table — the
+        only thing the chart can know about a schema applied out of band.
+
+        Timeout: gives up after WAIT_TIMEOUT_SECONDS (same ~10m budget as
+        seed-data) with the reason and the last psql error, and exits 1. That is
+        not fatal: kubelet restarts the init container with backoff and the pod
+        proceeds once the marker lands, but a slow or failed migration shows up
+        as Init:Error / restarts instead of a silent hang. Under RollingUpdate the
+        old pods keep serving meanwhile, so a failed migration stalls the rollout
+        instead of starting new code against a half-applied schema.
+
+        The pod template embeds the schema hash, so a schema change rolls every
+        backend (it would anyway: releases change the image tag too).
+        scripts/test-chart-wait-for-schema.mjs pins all of this and executes the
+        script against a stub psql.
         */}}
         - name: wait-for-schema
           image: "{{ $ctx.Values.schemaMigration.image.repository }}:{{ $ctx.Values.schemaMigration.image.tag }}"
@@ -191,25 +219,58 @@ spec:
             - sh
             - -c
             - |
-              echo "Waiting for Postgres to be reachable..."
+              WAIT_TIMEOUT_SECONDS=600
+              ERR=/tmp/wait-for-schema.err
               {{- if $ctx.Values.datastores.postgres.enabled }}
-              until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" >/dev/null 2>&1; do
-                sleep 2
-              done
-              echo "Postgres up. Waiting for schema (sentinel: public.tenants)..."
-              until psql -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'" 2>/dev/null | grep -q '^1$'; do
-                sleep 3
-              done
+              db_ready() { pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" >/dev/null 2>&1; }
+              db_query() { psql -tAc "$1" 2>"$ERR"; }
               {{- else }}
-              until pg_isready -d "$DATABASE_URL" >/dev/null 2>&1; do
+              db_ready() { pg_isready -d "$DATABASE_URL" >/dev/null 2>&1; }
+              db_query() { psql -d "$DATABASE_URL" -tAc "$1" 2>"$ERR"; }
+              {{- end }}
+              start=$(date +%s)
+              elapsed() { echo $(( $(date +%s) - start )); }
+              give_up() {
+                echo "ERROR: $1 after $(elapsed)s (limit ${WAIT_TIMEOUT_SECONDS}s)."
+                if [ -s "$ERR" ]; then
+                  echo "  last psql error:"
+                  sed 's/^/    /' "$ERR"
+                fi
+                echo "  $2"
+                echo "  Exiting 1; kubelet retries this init container with backoff."
+                exit 1
+              }
+              echo "wait-for-schema ({{ $name }}): waiting for Postgres to accept connections..."
+              until db_ready; do
+                [ "$(elapsed)" -ge "$WAIT_TIMEOUT_SECONDS" ] && give_up "Postgres is not accepting connections" "Check the postgres pod, or DATABASE_URL for an external database."
                 sleep 2
               done
-              echo "Postgres up. Waiting for schema (sentinel: public.tenants)..."
-              until psql "$DATABASE_URL" -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'" 2>/dev/null | grep -q '^1$'; do
+              {{- if $ctx.Values.schemaMigration.enabled }}
+              {{- $schemaHash := include "vistaplatform.schemaHash" $ctx }}
+              echo "Postgres up. Waiting for schema-migration to record schema {{ $schemaHash }} in public.schema_migration_status..."
+              n=0
+              until [ "$(db_query "{{ include "vistaplatform.schemaMarkerQuery" $ctx }}")" = "1" ]; do
+                if [ "$(elapsed)" -ge "$WAIT_TIMEOUT_SECONDS" ]; then
+                  # Keep the gate's own psql error for give_up; this query is context only.
+                  cp "$ERR" "$ERR.gate"
+                  latest=$(db_query "SELECT schema_hash || ' (app ' || coalesce(app_version, '?') || ', applied ' || applied_at || ')' FROM public.schema_migration_status ORDER BY applied_at DESC LIMIT 1")
+                  mv "$ERR.gate" "$ERR"
+                  give_up "schema {{ $schemaHash }} has not been recorded as applied" "Latest recorded schema: ${latest:-none}. Check the schema-migration Job: kubectl logs -l app.kubernetes.io/component=schema-migration"
+                fi
+                n=$((n + 1))
+                [ $((n % 10)) -eq 0 ] && echo "  still waiting for schema-migration ($(elapsed)s)..."
                 sleep 3
               done
+              echo "Schema {{ $schemaHash }} applied. Starting {{ $name }}."
+              {{- else }}
+              echo "Postgres up. schemaMigration.enabled=false: this chart does not migrate the database, so there is no completion marker to wait for."
+              echo "Waiting only for a schema to exist (sentinel: public.tenants)..."
+              until [ "$(db_query "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'")" = "1" ]; do
+                [ "$(elapsed)" -ge "$WAIT_TIMEOUT_SECONDS" ] && give_up "no schema found (public.tenants is missing)" "With schemaMigration.enabled=false, apply scripts/database/schema.sql yourself before starting the backends."
+                sleep 3
+              done
+              echo "Schema present. Starting {{ $name }}."
               {{- end }}
-              echo "Schema ready."
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -536,9 +597,7 @@ spec:
             {{- end }}
             {{- /*
               Backends that intentionally reach customer RFC1918 networks:
-              device interrogation talks to appliances, inventory-service runs
-              the tenant-configured NetBox connector (whose private-endpoint
-              opt-in defaults on) and the CMDB connectors, and any backend
+              device interrogation talks to appliances; and any backend
               whose values entry sets `privateNetworkDialer: true` — an
               Enterprise-only connector host declares itself that way, inside
               its own edition fence, so this Core-shipped template never names
@@ -546,10 +605,15 @@ spec:
               installation-specific pod/Service exclusions as NetworkPolicy,
               so a private-endpoint permission cannot be used to reach this
               cluster — nor a connector's "test connection" be used to map it.
-              The two named services are a floor a values override cannot
-              remove.
+              device-interrogation-service is a floor a values override cannot
+              remove. inventory-service is deliberately NOT on it: it used to
+              host the NetBox and CMDB connectors, but they moved to an
+              Enterprise-only service (platform ADR-0002 M2/M3) and nothing it
+              still runs dials a customer private address — its only outbound
+              call is the configured ai.provider endpoint, which does not read
+              this variable.
             */}}
-            {{- $privateDialer := or (has $name (list "device-interrogation-service" "inventory-service")) (eq (toString $svc.privateNetworkDialer) "true") }}
+            {{- $privateDialer := or (eq $name "device-interrogation-service") (eq (toString $svc.privateNetworkDialer) "true") }}
             {{- if $privateDialer }}
             {{- $networkPolicy := $ctx.Values.networkPolicy | default dict }}
             {{- $internalCIDRs := $networkPolicy.clusterInternalCIDRs | default (list) }}

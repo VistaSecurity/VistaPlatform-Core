@@ -29,8 +29,8 @@ import (
 // single app.tenant_id. None of these methods are wrapped in WithTenantTx.
 type LogStorageService struct {
 	s3Client     *s3.Client
-	uploader     *manager.Uploader
-	downloader   *manager.Downloader
+	uploader     *manager.Uploader   //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
+	downloader   *manager.Downloader //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 	bucket       string
 	region       string
 	kmsKeyID     string // KMS key ID for SSE-KMS encryption
@@ -123,8 +123,8 @@ func NewLogStorageService(db, bypassDB *sql.DB, bucket, region, kmsKeyID string,
 	}
 
 	s3Client := s3.NewFromConfig(cfg)
-	uploader := manager.NewUploader(s3Client)
-	downloader := manager.NewDownloader(s3Client)
+	uploader := manager.NewUploader(s3Client)     //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
+	downloader := manager.NewDownloader(s3Client) //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 
 	// Initialize PII detector
 	piiDetector, err := NewPIIDetector(db)
@@ -175,7 +175,7 @@ func (s *LogStorageService) StoreLog(ctx context.Context, entry LogEntry) (*LogM
 		now.Year(), now.Month(), now.Day(), entry.Service, entry.ID)
 
 	// Upload to S3 with SSE-KMS encryption
-	uploadResult, err := s.uploader.Upload(ctx, &s3.PutObjectInput{
+	uploadResult, err := s.uploader.Upload(ctx, &s3.PutObjectInput{ //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 		Bucket:               aws.String(s.bucket),
 		Key:                  aws.String(s3Key),
 		Body:                 bytes.NewReader(logJSON),
@@ -372,7 +372,7 @@ func (s *LogStorageService) RetrieveLog(ctx context.Context, logID string) (*Log
 
 	// Download from S3
 	buf := manager.NewWriteAtBuffer([]byte{})
-	_, err = s.downloader.Download(ctx, buf, &s3.GetObjectInput{
+	_, err = s.downloader.Download(ctx, buf, &s3.GetObjectInput{ //nolint:staticcheck // SA1019: feature/s3/manager -> transfermanager migration deferred (new v0.x module, different upload/checksum defaults, no S3 test coverage)
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s3Key),
 	})

@@ -18,6 +18,7 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 ## Contents
 
 ### Release notes
+- [4.2.0](./releases/4.2.0.md) — the full, per-change record for the 4.2.0 (CMDB sync) release.
 - [4.1.0](./releases/4.1.0.md) — the full, per-change record for the 4.1.0 (integrations) release.
 - [1.0.0](./releases/1.0.0.md) — the full, per-change record for the 1.0.0 release. The summary for each release is in `CHANGELOG.md` at the root of the repository; an unusually large release keeps its detail here.
 
@@ -66,8 +67,6 @@ Discovery sources — how assets get into inventory:
 - [SBOM Upload](./features/sbom.md) — CycloneDX / SPDX documents become software inventory
 - [Spreadsheet Import](./features/spreadsheet-import.md)
 - [Adding Assets Manually](./features/adding-assets-manually.md) — the New asset form and the class picker
-- [CMDB Integrations](./features/cmdb-integrations.md)
-- [CMDB Terminology Glossary](./features/cmdb-terminology-glossary.md)
 - [Third-Party & External Connections](./features/third-party-and-external-connections.md)
 - [Certificate Chain Management](./features/certificate-chain-management.md)
 - [Operational Context](./features/operational-context.md)

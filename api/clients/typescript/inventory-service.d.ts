@@ -1107,174 +1107,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cmdb/profiles": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List the tenant's CMDB sync profiles
-         * @description RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.
-         */
-        get: operations["listCmdbProfiles"];
-        put?: never;
-        /**
-         * Create a CMDB sync profile
-         * @description Omitted `connection_config`, `field_mapping_config`, `sync_config` and `ci_type_mapping` are stored as `{}`. An unknown `platform_type` or a blank `name` is a 400; a name another live profile of the tenant uses is a 409.
-         */
-        post: operations["createCmdbProfile"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cmdb/profiles/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /**
-         * Get a CMDB sync profile by id
-         * @description RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.
-         */
-        get: operations["getCmdbProfile"];
-        /**
-         * Update a CMDB sync profile
-         * @description Credentials are write-only: an omitted or empty `password`, `api_token` or `client_secret` (or `extra_headers` value) in `connection_config` KEEPS the stored one. An omitted `connection_config` keeps the stored config; an omitted `field_mapping_config`, `sync_config` or `ci_type_mapping` keeps the stored value (send `{}` to clear it).
-         */
-        put: operations["updateCmdbProfile"];
-        post?: never;
-        /** Delete a CMDB sync profile (soft delete) */
-        delete: operations["deleteCmdbProfile"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cmdb/profiles/{id}/test": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Test a profile's CMDB connection */
-        post: operations["testCmdbConnection"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cmdb/profiles/{id}/sync": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Trigger a manual push for a profile
-         * @description Starts a push of the tenant's in-scope inventory (approved assets and the crypto configurations, certificates and keys on them) and returns its job; the push runs in the background. RBAC-gated `assets.manage`. Refused with a message the UI shows verbatim: 400 when the profile is disabled or its platform is pull-only in the connector registry (SolarWinds), 409 when a run of this profile — manual or scheduled, on any replica — is already in progress.
-         */
-        post: operations["triggerCmdbSync"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cmdb/profiles/{id}/pull": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Pull server CIs from the CMDB into Vista as assets
-         * @description Fetches server/device CIs from the profile's CMDB (RBAC-gated `assets.manage`) and creates them as pending-approval infrastructure assets, reusing the bulk-import path (dedupe + partial-success). Returns the per-row BulkImportResult and records the run as a sync job (summary.direction `pull`). 400 when the profile is disabled or its platform cannot be pulled from; 409 when a run of this profile is already in progress; 502 (with the sanitized reason) when the CMDB could not be read.
-         */
-        post: operations["pullFromCmdb"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cmdb/profiles/{id}/mapping": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /**
-         * Get a profile's field mapping
-         * @description The platform's default template, this profile's overrides, the effective mapping a run uses (template ⊕ overrides) and every validation problem. RBAC-gated `settings.read`. There is no editor UI yet; this is how a mapping is inspected.
-         */
-        get: operations["getCmdbMapping"];
-        /**
-         * Replace a profile's field-mapping overrides
-         * @description Replaces the overrides whole (send `{}` to return to the template). The effective mapping is validated first: an unknown class key, fact key, canonical field or enum value, an identity rule naming something that is not an identifier type, a dangling value map or two rules writing one vendor field is a 400 naming the entry, and nothing is stored. Unknown keys in the body are refused rather than ignored. A valid save clears `mapping_error`, which un-pauses the profile. RBAC-gated `settings.update`.
-         */
-        put: operations["putCmdbMapping"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/cmdb/profiles/{id}/jobs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /**
-         * List recent sync jobs for a profile
-         * @description RBAC-gated `settings.read`, like the profile reads: job summaries carry the CMDB's per-item error strings.
-         */
-        get: operations["listCmdbSyncJobs"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/connectors": {
         parameters: {
             query?: never;
@@ -1419,6 +1251,208 @@ export interface paths {
          *     in id order: pass the last id seen as `after` while `more` is true.
          */
         get: operations["listSourceHardwareAssets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/assets/links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Attach a source's scoped record ids to assets (internal)
+         * @description A source attaches its own record id for an asset it wrote to — the
+         *     CMDB push's echo link (platform ADR-0002 D11 item 3) — so its next
+         *     pull of that record resolves to the same asset. Only link kinds
+         *     (`cmdb_sys_id`) are accepted, and `scope` is required. An item naming
+         *     an asset that is not this tenant's is `not_found`. `source.kind` must
+         *     be `imported`.
+         */
+        post: operations["attachSourceLinks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/assets/presence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record assets' presence in a source on their timelines (internal)
+         * @description An `updated` history entry per item carrying
+         *     `{"source_presence": {source, platform, presence, reason}}` — a CI
+         *     retired or no longer listed in the source (`absent`), or listed again
+         *     (`present`). Nothing about the asset itself changes (platform ADR-0002
+         *     D11 item 2). An item naming an asset that is not this tenant's is
+         *     `not_found`. `source.kind` must be `imported`.
+         */
+        post: operations["recordSourcePresence"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/assets/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tag assets with the source run that created or wrote to them (internal)
+         * @description Run provenance (platform ADR-0002 D11 item 6). An `updated` history
+         *     entry per item carrying `{"source_run": {source, run_id, action}}`,
+         *     `action` being `created` (the run brought the asset in) or `updated`
+         *     (the run matched it and wrote to it). Undo reads the `created` tag. An
+         *     item naming an asset that is not this tenant's is `not_found`.
+         *     `source.kind` must be `imported`.
+         */
+        post: operations["recordSourceRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/assets/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Undo a source run on the inventory side — archive what it created (internal)
+         * @description Archives (the lifecycle archive a person uses; never a delete) each
+         *     named asset THAT RUN created — its timeline carries this source's
+         *     `source_run` tag with this `run_id` and `action: created` — unless
+         *     another source (a sensor, an agent, an interrogation or another system
+         *     of record) has also reported it, or it is merged into another asset.
+         *     Those are `kept`, with the reason. `actor_user_id` is the person who
+         *     asked for the undo, recorded on the archive. An archived asset gets a
+         *     `{"source_run_undone": {source, run_id, reason}}` entry too.
+         *     `source.kind` must be `imported`.
+         */
+        post: operations["archiveSourceRunAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/scan-consent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Record whether assets from an imported source may be actively scanned (internal)
+         * @description Per-source scan consent (platform ADR-0002 D10). An asset known ONLY
+         *     from an imported source — created by the import and never measured
+         *     by a sensor, an agent or an interrogation since — is withheld from
+         *     AUTOMATIC active scanning unless one of its importing sources has
+         *     `allow_active_scan: true` here. An additional requirement on top of
+         *     the ownership and exclusion rules, never a replacement; an explicit
+         *     scan a person asks for does not read it. No row means no consent.
+         *     `allow_active_scan` is required. `source.kind` must be `imported`.
+         */
+        put: operations["setSourceScanConsent"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/ci-export/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tenant's configuration items in push scope (internal)
+         * @description Approved infrastructure assets and the certificates, keys and crypto
+         *     configurations hanging off them (`v_ci_inventory`: not archived, not
+         *     merged away). `risk_level` is banded from `risk_score` by the one
+         *     ladder; both are empty/null where the item has no score. Paged in id
+         *     order: pass the last id seen as `after` while `more` is true.
+         */
+        get: operations["listCIExportItems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/ci-export/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Detail for named assets, for a push (internal)
+         * @description For up to 500 asset ids of this tenant: whether each has left push
+         *     scope for good (`retired`: deleted, archived, stale-archived or merged
+         *     away), and — as asked — the allowlisted canonical fields, the newest
+         *     live value of each named fact (registered keys only), the crypto
+         *     posture a summary reads, and the asset's identifiers of one link kind
+         *     (`cmdb_sys_id`) in one scope. An id that is not this tenant's asset is
+         *     absent from the answer.
+         */
+        post: operations["exportCIAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/ci-export/relationships": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tenant's approved relationships (internal)
+         * @description Relationships with `status = active` only — a pending observation is
+         *     not yet the tenant's to assert in someone else's CMDB. Paged in id
+         *     order: pass the last id seen as `after` while `more` is true.
+         */
+        get: operations["listCIExportRelationships"];
         put?: never;
         post?: never;
         delete?: never;
@@ -6094,213 +6128,6 @@ export interface components {
             links: components["schemas"]["AssetCertificateLink"][] | null;
         };
         /**
-         * @description A tenant CMDB sync integration profile (services.CMDBSyncProfile). The
-         *     four `*_config` fields are raw JSON (object / array / null depending on
-         *     the platform). `last_sync_at`, `last_sync_status` and `sync_error` are
-         *     omitempty — present only after a sync has run.
-         *
-         *     Credentials are WRITE-ONLY. `connection_config` never carries
-         *     `password`, `api_token` or `client_secret` in a response, and each
-         *     `extra_headers` value is blanked (names kept); `has_password`,
-         *     `has_api_token` and `has_client_secret` say whether each is stored.
-         */
-        CMDBSyncProfile: {
-            id: string;
-            tenant_id: string;
-            name: string;
-            /** @description servicenow / device42 / etc. (the target CMDB platform). */
-            platform_type: string;
-            /** @description Raw connection settings. Opaque JSON; null until set. Besides the endpoint (`base_url` / `instance_url`) and auth fields it carries two non-secret egress settings, validated on save: `allow_private_endpoint` (boolean — reach a CMDB on a private RFC1918/ULA/CGNAT address; never loopback or link-local, and overridden by the operator's CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false) and `ca_bundle_pem` (PEM CA certificates trusted in addition to the system store). */
-            connection_config: unknown;
-            /** @description The profile's field-mapping OVERRIDES over its platform's default template (platform ADR-0002 D10) — fields, identity, value maps, pull and retire settings — as `{"version": 1, ...}`. A pre-template flat `{"<our field>": "<their field>"}` object is still read (as push rules). Read and replace it through GET/PUT /cmdb/profiles/{id}/mapping, which validate it; saving an invalid one here is a 400 naming the entry. */
-            field_mapping_config: unknown;
-            /** @description Raw sync settings. Opaque JSON; null until set. `schedule` is `manual` / `hourly` / `daily` / `weekly` (the scheduler runs the last three in the platform's registry direction); `batch_size` (1–1000, default 100) is how many CIs a push sends per batch; `include_crypto_summary` appends a crypto-posture line to pushed asset descriptions. */
-            sync_config: unknown;
-            /** @description The class-layer overrides (`{"version": 1, "classes": [...]}`). A pre-template flat `{"<our class>": "<their CI class>"}` object is still read. See /cmdb/profiles/{id}/mapping. */
-            ci_type_mapping: unknown;
-            is_enabled: boolean;
-            /** @description Whether a password is stored. The value itself is never returned. */
-            has_password: boolean;
-            /** @description Whether an API token is stored. The value itself is never returned. */
-            has_api_token: boolean;
-            /** @description Whether an OAuth2 client secret is stored. The value itself is never returned. */
-            has_client_secret: boolean;
-            /** Format: date-time */
-            last_sync_at?: string;
-            last_sync_status?: string;
-            sync_error?: string;
-            /** @description Present when the profile's effective mapping (template ⊕ overrides) does not validate — why, naming the entry. While it is set the profile is PAUSED: scheduled runs skip it and Sync / Pull answer 400 with it. Re-evaluated on every run, every mapping save and every service start; fixing the mapping clears it. */
-            mapping_error?: string;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /** @description Body for POST/PUT /cmdb/profiles. Bound into services.CMDBSyncProfile; server-managed fields (id, timestamps, last_sync_*, has_*) are ignored. On PUT an omitted or empty credential keeps the stored one. */
-        CMDBSyncProfileInput: {
-            name?: string;
-            platform_type?: string;
-            connection_config?: unknown;
-            field_mapping_config?: unknown;
-            sync_config?: unknown;
-            ci_type_mapping?: unknown;
-            is_enabled?: boolean;
-        } & {
-            [key: string]: unknown;
-        };
-        /**
-         * @description A CMDB sync job run (services.CMDBSyncJob). `started_at` / `completed_at`
-         *     are omitempty — present once the job has started / finished. `error_log`
-         *     and `summary` are raw JSON carried verbatim.
-         */
-        CMDBSyncJob: {
-            id: string;
-            tenant_id: string;
-            profile_id: string;
-            /** @description in_progress / success / partial / failed (a job a restart interrupted is closed as failed, "interrupted (service restarted)"). */
-            status: string;
-            /** @description manual / scheduled. */
-            trigger_type: string;
-            /** Format: date-time */
-            started_at?: string;
-            /** Format: date-time */
-            completed_at?: string;
-            items_pushed: number;
-            items_reconciled: number;
-            items_failed: number;
-            items_skipped: number;
-            /** @description Raw error log. Opaque JSON; null when none. */
-            error_log: unknown;
-            /** @description Raw run summary: `direction` (`push` / `pull`), `mode` (`full` / `delta` for a platform on the mapping layer, empty otherwise), counts (`pushed`, `created`, `updated`, `reconciled`, `failed`, `skipped`, `unchanged` — not sent or not written again because nothing changed, `echo` — our own records coming back on a pull, `retired`, `absent`, `reappeared`, and for a pull `unresolved`), for a push to a platform that writes relationships `relations` (`{created, existing, unchanged, failed}` — relationships between CIs the profile links; `existing` = already held by the CMDB, `unchanged` = not sent because the set is unchanged since the last push) plus `errors` — the first 50 per-item failures as `{local_id, error}` (a pulled record, which has no Vista id yet, as `{external_id, error}`) — `errors_total` and `errors_omitted`. Opaque JSON; null when none. */
-            summary: unknown;
-            /** Format: date-time */
-            created_at: string;
-        };
-        /** @description One class-layer rule: exactly one of `class` (a class key, standards/asset-classes.yaml) or `category` (a CI category: infrastructure_asset, certificate, key, crypto_configuration, crypto_library) ↔ `theirs` (their type / table). Category rules are push-only. */
-        CMDBMappingClassRule: {
-            class?: string;
-            category?: string;
-            theirs: string;
-            /** @enum {string} */
-            direction?: "push" | "pull" | "both";
-            disabled?: boolean;
-        };
-        /** @description The whole transform language: constant or join (`{a}.{b}` over source-side fields) or the field itself → value_map → default → coerce. No scripting. */
-        CMDBMappingTransform: {
-            value_map?: string;
-            default?: unknown;
-            constant?: unknown;
-            join?: string;
-            /** @enum {string} */
-            coerce?: "string" | "integer" | "number" | "boolean";
-        };
-        /** @description `ours` is canonical vocabulary — `asset:<field>`, `ci:<field>` or `fact:<fact key>` — never a table or column. `authority` says which side wins (platform: pushed on every update, pulled only for a record Vista does not hold; vendor: pulled always, pushed only when creating the CI). */
-        CMDBMappingFieldRule: {
-            ours: string;
-            theirs: string;
-            /** @enum {string} */
-            direction: "push" | "pull" | "both";
-            /** @enum {string} */
-            authority?: "platform" | "vendor";
-            transform?: components["schemas"]["CMDBMappingTransform"];
-            omit_empty?: boolean;
-            personal_data?: boolean;
-            disabled?: boolean;
-        };
-        /** @description One of their fields as one of our identifier kinds (cmdb_sys_id, serial_number, mac_address, fqdn, cloud_resource_id). The cmdb_sys_id rule is the record's own id. */
-        CMDBMappingIdentityRule: {
-            theirs: string;
-            identifier?: string;
-            disabled?: boolean;
-        };
-        CMDBMappingValueMap: {
-            entries: {
-                ours: string;
-                theirs: string[];
-            }[];
-        };
-        CMDBMappingPullSpec: {
-            type_fields?: string[];
-            default_class?: string;
-            cursor_field?: string;
-        };
-        CMDBMappingRetireSpec: {
-            status_field?: string;
-            retired_values?: string[];
-            push_value?: string;
-        };
-        /** @description One of our canonical relationship types (runs_on, hosted_on, virtualized_by, depends_on, connects_to, member_of, contains, manages, sends_data_to, impacts) ↔ the vendor's relationship type (ServiceNow: a cmdb_rel_type name such as `Runs on::Runs`). `reverse` sends the edge with its ends swapped (their parent is our to-asset). A type with no rule is not pushed. */
-        CMDBMappingRelationRule: {
-            ours: string;
-            theirs: string;
-            reverse?: boolean;
-            disabled?: boolean;
-        };
-        /** @description A profile's differences from its platform template. Field push rules replace the template's push rule for the same vendor field; pull rules replace the template's pull rule for the same vendor field and canonical field; identity rules merge by vendor field; value maps by name; `disabled: true` removes the rule it matches. Authoring guide: docsv4/internal/developer/architecture/cmdb-mapping-templates.md. */
-        CMDBMappingOverrides: {
-            classes?: components["schemas"]["CMDBMappingClassRule"][];
-            fields?: components["schemas"]["CMDBMappingFieldRule"][];
-            identity?: components["schemas"]["CMDBMappingIdentityRule"][];
-            value_maps?: {
-                [key: string]: components["schemas"]["CMDBMappingValueMap"];
-            };
-            pull?: components["schemas"]["CMDBMappingPullSpec"];
-            retire?: components["schemas"]["CMDBMappingRetireSpec"];
-            relations?: components["schemas"]["CMDBMappingRelationRule"][];
-            /** @description Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key. */
-            options?: {
-                [key: string]: string;
-            };
-        };
-        /** @description A complete mapping (a template, or template ⊕ overrides). */
-        CMDBMapping: {
-            platform?: string;
-            /** @description The template's version. */
-            version?: number;
-            classes?: components["schemas"]["CMDBMappingClassRule"][];
-            fields?: components["schemas"]["CMDBMappingFieldRule"][];
-            identity?: components["schemas"]["CMDBMappingIdentityRule"][];
-            value_maps?: {
-                [key: string]: components["schemas"]["CMDBMappingValueMap"];
-            };
-            pull?: components["schemas"]["CMDBMappingPullSpec"];
-            retire?: components["schemas"]["CMDBMappingRetireSpec"];
-            relations?: components["schemas"]["CMDBMappingRelationRule"][];
-            /** @description Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key. */
-            options?: {
-                [key: string]: string;
-            };
-        };
-        /** @description GET/PUT /cmdb/profiles/{id}/mapping. `template` is null for a platform that ships no template yet (its connector still runs its pre-template code; its overrides are kept for when the template lands). `effective` is null when the stored overrides cannot be read at all. */
-        CMDBMappingView: {
-            platform: string;
-            template: components["schemas"]["CMDBMapping"] | null;
-            overrides: components["schemas"]["CMDBMappingOverrides"];
-            effective: components["schemas"]["CMDBMapping"] | null;
-            valid: boolean;
-            problems: {
-                entry: string;
-                message: string;
-            }[];
-        };
-        /** @description CURRENT envelope for GET /cmdb/profiles — `{ "profiles": [...] }`. Always a non-null array (handler normalizes nil to []). */
-        CMDBProfileListResponse: {
-            profiles: components["schemas"]["CMDBSyncProfile"][];
-        };
-        /** @description CURRENT envelope for GET /cmdb/profiles/{id}/jobs — `{ "jobs": [...] }`. Always a non-null array (handler normalizes nil to []). */
-        CMDBSyncJobListResponse: {
-            jobs: components["schemas"]["CMDBSyncJob"][];
-        };
-        /** @description Bare acknowledgement envelope for delete — `{ "message": "profile deleted" }`. */
-        CMDBMessageResponse: {
-            message: string;
-        };
-        /** @description Success envelope for POST /cmdb/profiles/{id}/test — `{ "success": true, "message": "..." }`. The failure case returns 400 with the LegacyError-compatible `{ "success": false, "error": "..." }`. */
-        CMDBTestConnectionResult: {
-            success: boolean;
-            message: string;
-        };
-        /**
          * @description One connector from standards/connectors.yaml, annotated for the calling
          *     tenant. `status` says whether anything DISPATCHES on the key;
          *     `entitled` says whether this tenant may use it; `addable` is the
@@ -6400,6 +6227,11 @@ export interface components {
             prospective: boolean;
             allowed: boolean;
             message?: string;
+            /** @description The cap check's current usage, when `allowed` is false. */
+            current_usage?: number;
+            /** @description The plan's asset cap when `allowed` is false; null for an unlimited plan. */
+            limit?: number | null;
+            upgrade_prompt?: string;
         };
         SourceAdmissionError: {
             error: string;
@@ -6424,6 +6256,13 @@ export interface components {
             display_name?: string;
             hostname?: string;
             ip_address?: string;
+            description?: string;
+            environment?: string;
+            business_unit?: string;
+            owner_email?: string;
+            support_group?: string;
+            /** @description Set as the class attribute `operating_system`. */
+            operating_system?: string;
             site?: string;
             region?: string;
             tags?: {
@@ -6478,6 +6317,159 @@ export interface components {
         };
         SourceHardwareAssetsResponse: {
             assets: components["schemas"]["SourceHardwareAsset"][];
+            more: boolean;
+        };
+        SourceWire: {
+            /** @enum {string} */
+            kind: "imported";
+            ref: string;
+        };
+        SourceLink: {
+            /** Format: uuid */
+            asset_id: string;
+            /** @enum {string} */
+            kind: "cmdb_sys_id";
+            value: string;
+            scope: string;
+        };
+        SourceLinksRequest: {
+            source: components["schemas"]["SourceWire"];
+            links: components["schemas"]["SourceLink"][];
+        };
+        SourcePresence: {
+            /** Format: uuid */
+            asset_id: string;
+            /** @enum {string} */
+            presence: "present" | "absent";
+            reason?: string;
+        };
+        SourcePresenceRequest: {
+            source: components["schemas"]["SourceWire"];
+            platform?: string;
+            items: components["schemas"]["SourcePresence"][];
+        };
+        SourceItemResult: {
+            /** @enum {string} */
+            outcome: "recorded" | "not_found" | "error";
+            error?: string;
+        };
+        SourceItemResultsResponse: {
+            results: components["schemas"]["SourceItemResult"][];
+        };
+        SourceRunRequest: {
+            source: components["schemas"]["SourceWire"];
+            /** Format: uuid */
+            run_id: string;
+            items: {
+                /** Format: uuid */
+                asset_id: string;
+                /** @enum {string} */
+                action: "created" | "updated";
+            }[];
+        };
+        SourceUndoRequest: {
+            source: components["schemas"]["SourceWire"];
+            /** Format: uuid */
+            run_id: string;
+            /** Format: uuid */
+            actor_user_id?: string;
+            reason?: string;
+            asset_ids: string[];
+        };
+        SourceUndoResponse: {
+            results: {
+                /** Format: uuid */
+                asset_id: string;
+                /** @enum {string} */
+                outcome: "archived" | "already_archived" | "kept" | "not_found";
+                reason?: string;
+            }[];
+        };
+        SourceScanConsentRequest: {
+            source: components["schemas"]["SourceWire"];
+            allow_active_scan: boolean;
+            /** Format: uuid */
+            actor_user_id?: string;
+        };
+        SourceScanConsent: {
+            source_ref: string;
+            allow_active_scan: boolean;
+        };
+        CIExportItem: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            category: "infrastructure_asset" | "certificate" | "key" | "crypto_configuration";
+            cmdb_ci_type: string;
+            display_name: string;
+            description: string;
+            /** @description Null where the item has no score (NOT ASSESSED). */
+            risk_score: number | null;
+            /** @description Banded from risk_score; empty when risk_score is null. */
+            risk_level: string;
+            /** Format: date-time */
+            discovered_at: string;
+            /** Format: date-time */
+            last_verified_at: string;
+        };
+        CIExportItemsResponse: {
+            items: components["schemas"]["CIExportItem"][];
+            more: boolean;
+        };
+        CIExportAssetsRequest: {
+            asset_ids: string[];
+            include?: {
+                /** @description The allowlisted canonical fields (display_name, hostname, ip_address, description, environment, business_unit, owner_email, support_group, site, region, class_key). */
+                fields?: boolean;
+                fact_keys?: string[];
+                crypto_posture?: boolean;
+                identifier?: {
+                    /** @enum {string} */
+                    kind: "cmdb_sys_id";
+                    scope: string;
+                };
+            };
+        };
+        CIExportCrypto: {
+            protocol: string;
+            protocol_version?: string;
+            key_exchange_algorithm?: string;
+            signature_algorithm?: string;
+            symmetric_encryption?: string;
+            key_size?: number;
+        };
+        CIExportPosture: {
+            risk_level: string;
+            configurations: components["schemas"]["CIExportCrypto"][];
+        };
+        CIExportAsset: {
+            /** Format: uuid */
+            id: string;
+            /** @description Deleted, archived, stale-archived or merged away — out of push scope for good. */
+            retired: boolean;
+            fields?: {
+                [key: string]: string;
+            };
+            facts?: {
+                [key: string]: unknown;
+            };
+            crypto_posture?: components["schemas"]["CIExportPosture"];
+            identifiers?: string[];
+        };
+        CIExportAssetsResponse: {
+            assets: components["schemas"]["CIExportAsset"][];
+        };
+        CIExportRelationship: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            from_asset_id: string;
+            /** Format: uuid */
+            to_asset_id: string;
+            type: string;
+        };
+        CIExportRelationshipsResponse: {
+            relationships: components["schemas"]["CIExportRelationship"][];
             more: boolean;
         };
         /**
@@ -6755,7 +6747,7 @@ export interface components {
             /** @description Why the scan failed, when it did. */
             error_message?: string;
         };
-        /** @description One reason the last sweep left hosts out, and how many. The reason is the address classification verbatim — `public`, `carrier_grade_nat` (RFC 6598, 100.64.0.0/10), `excluded` (the platform's own addresses), `link_local`, `loopback`, `multicast`, `unspecified`, `zoned`, `unparseable`. The page owns the plain-language label and, for the first two, the call to action: register the range as a network segment to bring those hosts into scope. */
+        /** @description One reason the last sweep left hosts out, and how many. The reason is the address classification verbatim — `public`, `carrier_grade_nat` (RFC 6598, 100.64.0.0/10), `excluded` (the platform's own addresses), `link_local`, `loopback`, `multicast`, `unspecified`, `zoned`, `unparseable` — or `imported_without_scan_consent` (known only from an imported source whose connection does not allow active scanning). The page owns the plain-language label and, for the first two, the call to action: register the range as a network segment to bring those hosts into scope. */
         AutoScanNotScanned: {
             reason: string;
             count: number;
@@ -8725,345 +8717,6 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
-    listCmdbProfiles: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The tenant's CMDB sync profiles (wrapped under `profiles`; always a non-null array — the handler normalizes nil to []). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBProfileListResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    createCmdbProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CMDBSyncProfileInput"];
-            };
-        };
-        responses: {
-            /** @description The created profile (credential values redacted). */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBSyncProfile"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            409: components["responses"]["LegacyConflict"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    getCmdbProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The profile (credential values redacted). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBSyncProfile"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    updateCmdbProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CMDBSyncProfileInput"];
-            };
-        };
-        responses: {
-            /** @description The updated profile (credential values redacted). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBSyncProfile"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            409: components["responses"]["LegacyConflict"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    deleteCmdbProfile: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Deleted — `{ "message": "profile deleted" }`. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBMessageResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    testCmdbConnection: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Connection succeeded — `{ "success": true, "message": "..." }`. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBTestConnectionResult"];
-                };
-            };
-            /** @description Connection failed — `{ "success": false, "error": "<reason>" }`. The reason is the real one, sanitized: a plain-language cause where one is recognisable (private address without `allow_private_endpoint`, untrusted certificate, rejected credentials, timeout, DNS, refused redirect) followed by the detail — never a URL beyond scheme://host, a response body or a header. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LegacyError"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    triggerCmdbSync: {
-        parameters: {
-            query?: {
-                /** @description `true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day. */
-                full?: boolean;
-            };
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The created sync job. */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBSyncJob"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            404: components["responses"]["LegacyNotFound"];
-            409: components["responses"]["LegacyConflict"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    pullFromCmdb: {
-        parameters: {
-            query?: {
-                /** @description `true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day. */
-                full?: boolean;
-            };
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Per-row import result for the pulled CIs. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BulkImportResult"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            /** @description The pull would exceed the tenant's subscription asset cap; nothing is created. */
-            402: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LegacyError"];
-                };
-            };
-            404: components["responses"]["LegacyNotFound"];
-            409: components["responses"]["LegacyConflict"];
-            500: components["responses"]["LegacyServerError"];
-            /** @description The CMDB could not be reached or returned an error (sanitized reason in `error`). */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LegacyError"];
-                };
-            };
-        };
-    };
-    getCmdbMapping: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The mapping view. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBMappingView"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    putCmdbMapping: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CMDBMappingOverrides"];
-            };
-        };
-        responses: {
-            /** @description The mapping view after the save. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBMappingView"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    listCmdbSyncJobs: {
-        parameters: {
-            query?: {
-                /** @description Max jobs to return (default 20). */
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                /** @description CMDB sync profile id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Recent sync jobs (wrapped under `jobs`; always a non-null array — the handler normalizes nil to []). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CMDBSyncJobListResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            403: components["responses"]["LegacyForbidden"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
     listConnectorCatalogue: {
         parameters: {
             query?: never;
@@ -9235,6 +8888,248 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceHardwareAssetsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    attachSourceLinks: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceLinksRequest"];
+            };
+        };
+        responses: {
+            /** @description One result per link, in order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceItemResultsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    recordSourcePresence: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourcePresenceRequest"];
+            };
+        };
+        responses: {
+            /** @description One result per item, in order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceItemResultsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    recordSourceRun: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceRunRequest"];
+            };
+        };
+        responses: {
+            /** @description One result per item, in order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceItemResultsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    archiveSourceRunAssets: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceUndoRequest"];
+            };
+        };
+        responses: {
+            /** @description One result per asset id, in order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceUndoResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    setSourceScanConsent: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceScanConsentRequest"];
+            };
+        };
+        responses: {
+            /** @description The consent as stored. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceScanConsent"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listCIExportItems: {
+        parameters: {
+            query?: {
+                /** @description Return items with an id greater than this one. */
+                after?: string;
+                /** @description Page size, 1–5000 (default 5000). */
+                limit?: number;
+            };
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CIExportItemsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    exportCIAssets: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CIExportAssetsRequest"];
+            };
+        };
+        responses: {
+            /** @description The assets found, in id order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CIExportAssetsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listCIExportRelationships: {
+        parameters: {
+            query?: {
+                /** @description Return relationships with an id greater than this one. */
+                after?: string;
+                /** @description Page size, 1–5000 (default 5000). */
+                limit?: number;
+            };
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CIExportRelationshipsResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];

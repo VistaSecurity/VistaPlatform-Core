@@ -90,7 +90,7 @@ func AuthorizeAutomaticScan(tx Queryer, payload sensordispatch.Payload) error {
 			return denied("automatic scan address is excluded or outside authorized scope")
 		}
 		var assetRaw []byte
-		if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('id',a.id,'class',a.class_key,'eligible',a.deleted_at IS NULL AND a.asset_status NOT IN ('denied','archived') AND a.asset_ownership<>'third_party' AND COALESCE(a.stale_status,'')<>'archived')),'[]') FROM assets a WHERE a.tenant_id=$1 AND (a.primary_address=$2::inet OR EXISTS(SELECT 1 FROM asset_endpoints e WHERE e.tenant_id=a.tenant_id AND e.asset_id=a.id AND e.address=$2::inet))`, payload.TenantID, address.String()).Scan(&assetRaw); err != nil {
+		if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('id',a.id,'class',a.class_key,'eligible',a.deleted_at IS NULL AND a.asset_status NOT IN ('denied','archived') AND a.asset_ownership<>'third_party' AND COALESCE(a.stale_status,'')<>'archived' AND NOT `+autoscan.ImportedWithoutConsentSQL("a")+`)),'[]') FROM assets a WHERE a.tenant_id=$1 AND (a.primary_address=$2::inet OR EXISTS(SELECT 1 FROM asset_endpoints e WHERE e.tenant_id=a.tenant_id AND e.asset_id=a.id AND e.address=$2::inet))`, payload.TenantID, address.String()).Scan(&assetRaw); err != nil {
 			return err
 		}
 		var assets []struct {
@@ -108,6 +108,11 @@ func AuthorizeAutomaticScan(tx Queryer, payload sensordispatch.Payload) error {
 			}
 			eligible = eligible || a.Eligible
 		}
+		// An asset known only from an import counts only when one of its
+		// importing sources allows active scanning (ImportedWithoutConsentSQL):
+		// an address whose only tenant asset came from a CMDB or NetBox with
+		// no consent is refused at every stage — job creation, platform
+		// execution and sensor pickup — not only by the planner.
 		if !eligible {
 			return denied("automatic scan target has no eligible tenant asset")
 		}

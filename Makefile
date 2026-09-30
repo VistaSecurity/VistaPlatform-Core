@@ -998,8 +998,6 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/cbom-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/diff ]; then go test ./ee/diff/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (inventory-service/infrastructure-assets + external-connections + asset-lifecycle + crypto-posture + crypto-materials + asset-reads + asset-writes + algorithm-recommendations + crypto-risks-export + asset-hard-delete + location-summary)..."
 	@cd services/inventory-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
-	@echo "==> API contract: running Go contract tests (inventory-service EE CMDB sync: profiles + test-connection + sync + jobs)..."
-	@cd services/inventory-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/cmdbsync ]; then go test ./ee/cmdbsync/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (compliance-engine/frameworks + evaluation + findings + alerts + alert-catalog + plans + scenarios + tickets)..."
 	@cd services/compliance-engine && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (compliance-engine EE policy authoring: custom-policies + controls + measurements)..."

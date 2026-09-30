@@ -40,10 +40,8 @@ can't do shows **"Ask an admin"** instead of **Set up**.
 > **Already have an inventory?** You don't have to add everything by hand. You can
 > **import a spreadsheet** (CSV/XLSX) to bulk-create network segments (*Settings →
 > Infrastructure → Network Segments → Import*) or assets (*Discovery → Command
-> Center → Import from spreadsheet*, or the **Import** control on Inventory), or
-> **pull servers from a connected CMDB** if you use ServiceNow, Device42,
-> SolarWinds, or Oomnitza. See [Spreadsheet Import](./spreadsheet-import.md) and
-> [CMDB Integrations](./cmdb-integrations.md).
+> Center → Import from spreadsheet*, or the **Import** control on Inventory). See
+> [Spreadsheet Import](./spreadsheet-import.md).
 
 ## Turning it off
 

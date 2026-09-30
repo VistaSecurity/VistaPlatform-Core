@@ -3,10 +3,11 @@ package handlers
 // Every path audit-service's spec documents has a route, and every route its
 // `ee/` trees register is tagged `x-edition: enterprise`.
 //
-// audit-service registers `ee/siemexport` and `ee/scheduledreports` routes and
+// audit-service registered `ee/siemexport` and `ee/scheduledreports` routes and
 // had no guard of either kind. The public-tree export deletes `ee/`, so a Core
 // build shipped a spec documenting SIEM-export and scheduled-report operations
-// with nothing behind them — and nothing said so.
+// with nothing behind them — and nothing said so. (SIEM export has since moved
+// to the Enterprise integration service; scheduled reports remain here.)
 //
 // The check itself, and the reasoning behind suffix matching and the inertness
 // floors, lives in shared/api/spectest. Three services share it; for
@@ -29,8 +30,8 @@ func TestContract_SpecRoutesAndEditionTags(t *testing.T) {
 		Name: "audit-service",
 		Root: serviceRoot,
 		Spec: filepath.Join(repoRoot, "api", "openapi", "audit-service.openapi.yaml"),
-		// Below the CORE count, not the full one: ee/siemexport and
-		// ee/scheduledreports are gone from an export.
+		// Below the CORE count, not the full one: ee/scheduledreports is gone
+		// from an export.
 		MinRoutes: 15,
 		MinOps:    20,
 

@@ -44,8 +44,6 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
-	log.Printf("inventory-service edition: %s", edition())
-
 	// Connect to database
 	db, err := database.NewConnection(cfg)
 	if err != nil {
@@ -251,12 +249,14 @@ func main() {
 	log.Printf("🔎 natural-language query (query seam): implementation=%s state=%s linked=%t",
 		queryDesc.Implementation, queryDesc.State, aiedition.QueryLinked())
 
-	// Internal source imports (platform ADR-0002 D3): the only way a connector
-	// running outside this service — a system of record's pull — writes the
-	// inventory. HMAC-signed service calls only, one named tenant per call,
-	// denied at the edge on every host. See source_import_routes.go.
+	// Internal source imports and the CI export (platform ADR-0002 D3 / D4):
+	// the only way a connector running outside this service — a system of
+	// record's pull, or a CMDB push — writes or reads the inventory.
+	// HMAC-signed service calls only, one named tenant per call, denied at the
+	// edge on every host. See source_import_routes.go.
 	mountSourceImportRoutes(r,
-		handlers.NewSourceImportHandler(services.NewSourceImportService(db, assetService)),
+		handlers.NewSourceImportHandler(services.NewSourceImportService(db, assetService).WithArchiver(lifecycleService)),
+		handlers.NewCIExportHandler(services.NewCIExportService(db, assetService)),
 		os.Getenv("INTERNAL_AUTH_SECRET"))
 
 	// API routes with JWT middleware
@@ -838,15 +838,6 @@ func main() {
 		// Tenant activity endpoints
 		apiv2.GET("/inventory-service/tenant/:id/activity-summary", assetHandler.GetTenantActivitySummary)
 
-		// CMDB / ITSM sync with EXTERNAL systems (ServiceNow, Device42,
-		// SolarWinds, Oomnitza) is an Enterprise capability. In Core the hook
-		// is nil and these routes are never mounted — the internal CMDB above
-		// is unaffected. The Enterprise implementation owns its own RBAC
-		// gating; see services/inventory-service/ee/cmdbsync/routes.go.
-		if hooks.RegisterCMDBSyncRoutes != nil {
-			hooks.RegisterCMDBSyncRoutes(apiv2, db, rawDB, assetService, os.Getenv("ENCRYPTION_MASTER_KEY"))
-		}
-
 		// The connector CATALOGUE is Core: a Core install can see the whole
 		// shape of the product, including what it would get by upgrading.
 		// What it cannot do is configure a paid connector.
@@ -962,15 +953,6 @@ func main() {
 		// TestFindingProducerJob_MainWiresTheCryptoTrigger.
 		producerJob.SubscribeToCryptoChanges(assetService)
 		log.Println("Finding producers started (eol, vulnerability, crypto)")
-	}
-
-	// Scheduled CMDB sync (Enterprise; nil hook in Core). The loop LOOKS for
-	// due profiles every five minutes, each profile's cadence
-	// is its own sync_config.schedule, and a run holds the profile's lock so a
-	// manual Sync/Pull and every replica see one run at a time.
-	if hooks.StartCMDBSyncScheduler != nil {
-		go hooks.StartCMDBSyncScheduler(ctx, db, rawDB, bypassDB, assetService,
-			os.Getenv("ENCRYPTION_MASTER_KEY"), 5*time.Minute)
 	}
 
 	// Automatic active scanning: scan a newly observed internal host straight

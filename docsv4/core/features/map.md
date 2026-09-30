@@ -173,7 +173,7 @@ Relationships arrive four ways, and the empty state links to the first of them:
 | | |
 |---|---|
 | **Measured** | Sensors, cloud APIs and device interrogation observe them. See [Discovery](./discovery.md). |
-| **Imported** | A CMDB or spreadsheet import brings them with the assets. See [Spreadsheet Import](./spreadsheet-import.md) and [CMDB Integrations](./cmdb-integrations.md). |
+| **Imported** | A spreadsheet import (or, in Enterprise, a CMDB pull) brings them with the assets. See [Spreadsheet Import](./spreadsheet-import.md). |
 | **Inferred** | The platform proposes one from what it has seen. These always wait for a person in **Discovery → Approvals**. |
 | **Declared** | Someone records one by hand, on the asset's **Relationships** tab. |
 

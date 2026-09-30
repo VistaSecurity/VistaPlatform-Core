@@ -276,6 +276,9 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 		id        uuid.UUID
 		address   string
 		protected bool
+		// importOnly: known only from an import whose connection does not
+		// allow active scanning (shared/autoscan ImportedWithoutConsentSQL).
+		importOnly bool
 	}
 	var rows []row
 	err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -293,7 +296,8 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 			SELECT a.id, host(a.primary_address), EXISTS(
        SELECT 1 FROM assets protected WHERE protected.tenant_id=a.tenant_id
        AND (protected.id=ANY($4::uuid[]) OR protected.class_key=ANY($5::text[]) OR protected.class_key LIKE '%industrial%' OR protected.class_key LIKE '%medical%' OR protected.class_key LIKE 'ot\_%' ESCAPE '\')
-       AND (protected.primary_address=a.primary_address OR EXISTS(SELECT 1 FROM asset_endpoints e WHERE e.tenant_id=protected.tenant_id AND e.asset_id=protected.id AND e.address=a.primary_address)))
+       AND (protected.primary_address=a.primary_address OR EXISTS(SELECT 1 FROM asset_endpoints e WHERE e.tenant_id=protected.tenant_id AND e.asset_id=protected.id AND e.address=a.primary_address))),
+       `+sharedautoscan.ImportedWithoutConsentSQL("a")+`
    FROM assets a
 			WHERE a.tenant_id = $1
 			  AND a.deleted_at IS NULL
@@ -316,7 +320,7 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 		for q.Next() {
 			var r row
 			var addr sql.NullString
-			if err := q.Scan(&r.id, &addr, &r.protected); err != nil {
+			if err := q.Scan(&r.id, &addr, &r.protected, &r.importOnly); err != nil {
 				return err
 			}
 			r.address = addr.String
@@ -333,6 +337,12 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 	for _, r := range rows {
 		if r.protected {
 			refusals[sharedautoscan.ReasonExcluded]++
+			continue
+		}
+		// Per-source scan consent is an ADDITIONAL requirement: it only ever
+		// removes a candidate the rules below would otherwise accept.
+		if r.importOnly {
+			refusals[sharedautoscan.ReasonImportedWithoutConsent]++
 			continue
 		}
 		addr, reason, ok := sharedautoscan.ParseTarget(r.address)

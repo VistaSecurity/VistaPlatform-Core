@@ -73,7 +73,7 @@ func newPermissionGateRouter(t *testing.T) (*gin.Engine, *sql.DB, func(uuid.UUID
 }
 
 // coreRouterHandlers builds the handler bundle main() builds in a Core build
-// (no SIEM exporter, no scheduled-report runner), on db for both the app and
+// (no scheduled-report runner), on db for both the app and
 // the BYPASSRLS handle.
 func coreRouterHandlers(db *sql.DB) routerHandlers {
 	dbx := sqlx.NewDb(db, "postgres")

@@ -11,13 +11,10 @@ servers:
 tags:
 - name: source-imports
   description: Internal (HMAC service calls only) — how a connector running outside this service writes a system of record's objects through the identity engine (platform ADR-0002 D3).
+- name: ci-export
+  description: Internal (HMAC service calls only) — the inventory reads a connector running outside this service makes to push the inventory into a system of record (platform ADR-0002 D4, M3). Push scope, tenant scope and a field allowlist are applied here, not by the caller.
 - name: infrastructure-assets
   description: Infrastructure asset (CMDB configuration item) read + management.
-- name: cmdb-integrations
-  description: 'Tenant CMDB sync integration profiles (ServiceNow-style) and their
-    sync jobs — full CRUD plus connection-test / manual-sync / job-history actions.
-    UI consumer: web-ui/src/components/settings/cmdb-integrations-section.tsx via
-    web-ui/src/services/cmdb-api.ts. Settings → Integrations.'
 - name: discovery
   description: 'Active-discovery jobs — scan targets (IPs/CIDRs/hostnames) for
     crypto assets and poll status/findings.
@@ -2172,353 +2169,6 @@ paths:
       - Caller must supply at least one of asset_ids / certificate_ids; the empty-both case returns 400 with an error message rather than an empty list.
       - Each parameter caps at 500 ids — beyond that the handler returns 400 rather than truncating.
       - Not in the migration-ledger seed — the route is reached only through the Infrastructure-lens visualizers (Infrastructure Map cert column, Cert Blast Radius). Tracked as a ledger gap; the spec captures the shape so the contract test pins it now.
-  /cmdb/profiles:
-    get:
-      operationId: listCmdbProfiles
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: List the tenant's CMDB sync profiles
-      description: 'RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.'
-      responses:
-        '200':
-          description: 'The tenant''s CMDB sync profiles (wrapped under `profiles`; always a non-null array — the handler normalizes nil to []).'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBProfileListResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    post:
-      operationId: createCmdbProfile
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Create a CMDB sync profile
-      description: 'Omitted `connection_config`, `field_mapping_config`, `sync_config` and `ci_type_mapping` are stored as `{}`. An unknown `platform_type` or a blank `name` is a 400; a name another live profile of the tenant uses is a 409.'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CMDBSyncProfileInput'
-      responses:
-        '201':
-          description: The created profile (credential values redacted).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBSyncProfile'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '409':
-          $ref: '#/components/responses/LegacyConflict'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /cmdb/profiles/{id}:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: CMDB sync profile id.
-      schema:
-        type: string
-    get:
-      operationId: getCmdbProfile
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Get a CMDB sync profile by id
-      description: 'RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.'
-      responses:
-        '200':
-          description: The profile (credential values redacted).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBSyncProfile'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    put:
-      operationId: updateCmdbProfile
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Update a CMDB sync profile
-      description: 'Credentials are write-only: an omitted or empty `password`, `api_token` or `client_secret` (or `extra_headers` value) in `connection_config` KEEPS the stored one. An omitted `connection_config` keeps the stored config; an omitted `field_mapping_config`, `sync_config` or `ci_type_mapping` keeps the stored value (send `{}` to clear it).'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CMDBSyncProfileInput'
-      responses:
-        '200':
-          description: The updated profile (credential values redacted).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBSyncProfile'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '409':
-          $ref: '#/components/responses/LegacyConflict'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    delete:
-      operationId: deleteCmdbProfile
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Delete a CMDB sync profile (soft delete)
-      responses:
-        '200':
-          description: 'Deleted — `{ "message": "profile deleted" }`.'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBMessageResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /cmdb/profiles/{id}/test:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: CMDB sync profile id.
-      schema:
-        type: string
-    post:
-      operationId: testCmdbConnection
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Test a profile's CMDB connection
-      responses:
-        '200':
-          description: 'Connection succeeded — `{ "success": true, "message": "..." }`.'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBTestConnectionResult'
-        '400':
-          description: 'Connection failed — `{ "success": false, "error": "<reason>" }`. The reason is the real one, sanitized: a plain-language cause where one is recognisable (private address without `allow_private_endpoint`, untrusted certificate, rejected credentials, timeout, DNS, refused redirect) followed by the detail — never a URL beyond scheme://host, a response body or a header.'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LegacyError'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /cmdb/profiles/{id}/sync:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: CMDB sync profile id.
-      schema:
-        type: string
-    post:
-      operationId: triggerCmdbSync
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Trigger a manual push for a profile
-      parameters:
-      - name: full
-        in: query
-        required: false
-        description: '`true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day.'
-        schema:
-          type: boolean
-      description: 'Starts a push of the tenant''s in-scope inventory (approved assets and the crypto configurations, certificates and keys on them) and returns its job; the push runs in the background. RBAC-gated `assets.manage`. Refused with a message the UI shows verbatim: 400 when the profile is disabled or its platform is pull-only in the connector registry (SolarWinds), 409 when a run of this profile — manual or scheduled, on any replica — is already in progress.'
-      responses:
-        '202':
-          description: The created sync job.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBSyncJob'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '409':
-          $ref: '#/components/responses/LegacyConflict'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /cmdb/profiles/{id}/pull:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: CMDB sync profile id.
-      schema:
-        type: string
-    post:
-      operationId: pullFromCmdb
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Pull server CIs from the CMDB into Vista as assets
-      parameters:
-      - name: full
-        in: query
-        required: false
-        description: '`true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day.'
-        schema:
-          type: boolean
-      description: 'Fetches server/device CIs from the profile''s CMDB (RBAC-gated `assets.manage`) and creates them as pending-approval infrastructure assets, reusing the bulk-import path (dedupe + partial-success). Returns the per-row BulkImportResult and records the run as a sync job (summary.direction `pull`). 400 when the profile is disabled or its platform cannot be pulled from; 409 when a run of this profile is already in progress; 502 (with the sanitized reason) when the CMDB could not be read.'
-      responses:
-        '200':
-          description: Per-row import result for the pulled CIs.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BulkImportResult'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          description: The pull would exceed the tenant's subscription asset cap; nothing is created.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LegacyError'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '409':
-          $ref: '#/components/responses/LegacyConflict'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-        '502':
-          description: The CMDB could not be reached or returned an error (sanitized reason in `error`).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LegacyError'
-  /cmdb/profiles/{id}/mapping:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: CMDB sync profile id.
-      schema:
-        type: string
-    get:
-      operationId: getCmdbMapping
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Get a profile's field mapping
-      description: 'The platform''s default template, this profile''s overrides, the effective mapping a run uses (template ⊕ overrides) and every validation problem. RBAC-gated `settings.read`. There is no editor UI yet; this is how a mapping is inspected.'
-      responses:
-        '200':
-          description: The mapping view.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBMappingView'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    put:
-      operationId: putCmdbMapping
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: Replace a profile's field-mapping overrides
-      description: 'Replaces the overrides whole (send `{}` to return to the template). The effective mapping is validated first: an unknown class key, fact key, canonical field or enum value, an identity rule naming something that is not an identifier type, a dangling value map or two rules writing one vendor field is a 400 naming the entry, and nothing is stored. Unknown keys in the body are refused rather than ignored. A valid save clears `mapping_error`, which un-pauses the profile. RBAC-gated `settings.update`.'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CMDBMappingOverrides'
-      responses:
-        '200':
-          description: The mapping view after the save.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBMappingView'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-  /cmdb/profiles/{id}/jobs:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: CMDB sync profile id.
-      schema:
-        type: string
-    get:
-      operationId: listCmdbSyncJobs
-      x-edition: enterprise
-      tags:
-      - cmdb-integrations
-      summary: List recent sync jobs for a profile
-      description: 'RBAC-gated `settings.read`, like the profile reads: job summaries carry the CMDB''s per-item error strings.'
-      parameters:
-      - name: limit
-        in: query
-        required: false
-        description: Max jobs to return (default 20).
-        schema:
-          type: integer
-      responses:
-        '200':
-          description: 'Recent sync jobs (wrapped under `jobs`; always a non-null array — the handler normalizes nil to []).'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CMDBSyncJobListResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-
   /connectors:
     get:
       operationId: listConnectorCatalogue
@@ -2735,6 +2385,306 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SourceHardwareAssetsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/assets/links:
+    post:
+      operationId: attachSourceLinks
+      tags:
+      - source-imports
+      summary: Attach a source's scoped record ids to assets (internal)
+      description: |
+        A source attaches its own record id for an asset it wrote to — the
+        CMDB push's echo link (platform ADR-0002 D11 item 3) — so its next
+        pull of that record resolves to the same asset. Only link kinds
+        (`cmdb_sys_id`) are accepted, and `scope` is required. An item naming
+        an asset that is not this tenant's is `not_found`. `source.kind` must
+        be `imported`.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceLinksRequest'
+      responses:
+        '200':
+          description: One result per link, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceItemResultsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/assets/presence:
+    post:
+      operationId: recordSourcePresence
+      tags:
+      - source-imports
+      summary: Record assets' presence in a source on their timelines (internal)
+      description: |
+        An `updated` history entry per item carrying
+        `{"source_presence": {source, platform, presence, reason}}` — a CI
+        retired or no longer listed in the source (`absent`), or listed again
+        (`present`). Nothing about the asset itself changes (platform ADR-0002
+        D11 item 2). An item naming an asset that is not this tenant's is
+        `not_found`. `source.kind` must be `imported`.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourcePresenceRequest'
+      responses:
+        '200':
+          description: One result per item, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceItemResultsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/assets/runs:
+    post:
+      operationId: recordSourceRun
+      tags:
+      - source-imports
+      summary: Tag assets with the source run that created or wrote to them (internal)
+      description: |
+        Run provenance (platform ADR-0002 D11 item 6). An `updated` history
+        entry per item carrying `{"source_run": {source, run_id, action}}`,
+        `action` being `created` (the run brought the asset in) or `updated`
+        (the run matched it and wrote to it). Undo reads the `created` tag. An
+        item naming an asset that is not this tenant's is `not_found`.
+        `source.kind` must be `imported`.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceRunRequest'
+      responses:
+        '200':
+          description: One result per item, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceItemResultsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/assets/archive:
+    post:
+      operationId: archiveSourceRunAssets
+      tags:
+      - source-imports
+      summary: Undo a source run on the inventory side — archive what it created (internal)
+      description: |
+        Archives (the lifecycle archive a person uses; never a delete) each
+        named asset THAT RUN created — its timeline carries this source's
+        `source_run` tag with this `run_id` and `action: created` — unless
+        another source (a sensor, an agent, an interrogation or another system
+        of record) has also reported it, or it is merged into another asset.
+        Those are `kept`, with the reason. `actor_user_id` is the person who
+        asked for the undo, recorded on the archive. An archived asset gets a
+        `{"source_run_undone": {source, run_id, reason}}` entry too.
+        `source.kind` must be `imported`.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceUndoRequest'
+      responses:
+        '200':
+          description: One result per asset id, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceUndoResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/scan-consent:
+    put:
+      operationId: setSourceScanConsent
+      tags:
+      - source-imports
+      summary: Record whether assets from an imported source may be actively scanned (internal)
+      description: |
+        Per-source scan consent (platform ADR-0002 D10). An asset known ONLY
+        from an imported source — created by the import and never measured
+        by a sensor, an agent or an interrogation since — is withheld from
+        AUTOMATIC active scanning unless one of its importing sources has
+        `allow_active_scan: true` here. An additional requirement on top of
+        the ownership and exclusion rules, never a replacement; an explicit
+        scan a person asks for does not read it. No row means no consent.
+        `allow_active_scan` is required. `source.kind` must be `imported`.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceScanConsentRequest'
+      responses:
+        '200':
+          description: The consent as stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceScanConsent'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/ci-export/items:
+    get:
+      operationId: listCIExportItems
+      tags:
+      - ci-export
+      summary: The tenant's configuration items in push scope (internal)
+      description: |
+        Approved infrastructure assets and the certificates, keys and crypto
+        configurations hanging off them (`v_ci_inventory`: not archived, not
+        merged away). `risk_level` is banded from `risk_score` by the one
+        ladder; both are empty/null where the item has no score. Paged in id
+        order: pass the last id seen as `after` while `more` is true.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      - name: after
+        in: query
+        required: false
+        description: Return items with an id greater than this one.
+        schema:
+          type: string
+          format: uuid
+      - name: limit
+        in: query
+        required: false
+        description: Page size, 1–5000 (default 5000).
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 5000
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CIExportItemsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/ci-export/assets:
+    post:
+      operationId: exportCIAssets
+      tags:
+      - ci-export
+      summary: Detail for named assets, for a push (internal)
+      description: |
+        For up to 500 asset ids of this tenant: whether each has left push
+        scope for good (`retired`: deleted, archived, stale-archived or merged
+        away), and — as asked — the allowlisted canonical fields, the newest
+        live value of each named fact (registered keys only), the crypto
+        posture a summary reads, and the asset's identifiers of one link kind
+        (`cmdb_sys_id`) in one scope. An id that is not this tenant's asset is
+        absent from the answer.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CIExportAssetsRequest'
+      responses:
+        '200':
+          description: The assets found, in id order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CIExportAssetsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/ci-export/relationships:
+    get:
+      operationId: listCIExportRelationships
+      tags:
+      - ci-export
+      summary: The tenant's approved relationships (internal)
+      description: |
+        Relationships with `status = active` only — a pending observation is
+        not yet the tenant's to assert in someone else's CMDB. Paged in id
+        order: pass the last id seen as `after` while `more` is true.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      - name: after
+        in: query
+        required: false
+        description: Return relationships with an id greater than this one.
+        schema:
+          type: string
+          format: uuid
+      - name: limit
+        in: query
+        required: false
+        description: Page size, 1–5000 (default 5000).
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 5000
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CIExportRelationshipsResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
@@ -11937,420 +11887,6 @@ components:
           - 'null'
           items:
             $ref: '#/components/schemas/AssetCertificateLink'
-    CMDBSyncProfile:
-      type: object
-      additionalProperties: false
-      description: |
-        A tenant CMDB sync integration profile (services.CMDBSyncProfile). The
-        four `*_config` fields are raw JSON (object / array / null depending on
-        the platform). `last_sync_at`, `last_sync_status` and `sync_error` are
-        omitempty — present only after a sync has run.
-
-        Credentials are WRITE-ONLY. `connection_config` never carries
-        `password`, `api_token` or `client_secret` in a response, and each
-        `extra_headers` value is blanked (names kept); `has_password`,
-        `has_api_token` and `has_client_secret` say whether each is stored.
-      required:
-      - id
-      - tenant_id
-      - name
-      - platform_type
-      - connection_config
-      - field_mapping_config
-      - sync_config
-      - ci_type_mapping
-      - is_enabled
-      - has_password
-      - has_api_token
-      - has_client_secret
-      - created_at
-      - updated_at
-      properties:
-        id:
-          type: string
-        tenant_id:
-          type: string
-        name:
-          type: string
-        platform_type:
-          type: string
-          description: "servicenow / device42 / etc. (the target CMDB platform)."
-        connection_config:
-          description: 'Raw connection settings. Opaque JSON; null until set. Besides the endpoint (`base_url` / `instance_url`) and auth fields it carries two non-secret egress settings, validated on save: `allow_private_endpoint` (boolean — reach a CMDB on a private RFC1918/ULA/CGNAT address; never loopback or link-local, and overridden by the operator''s CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false) and `ca_bundle_pem` (PEM CA certificates trusted in addition to the system store).'
-        field_mapping_config:
-          description: 'The profile''s field-mapping OVERRIDES over its platform''s default template (platform ADR-0002 D10) — fields, identity, value maps, pull and retire settings — as `{"version": 1, ...}`. A pre-template flat `{"<our field>": "<their field>"}` object is still read (as push rules). Read and replace it through GET/PUT /cmdb/profiles/{id}/mapping, which validate it; saving an invalid one here is a 400 naming the entry.'
-
-        sync_config:
-          description: 'Raw sync settings. Opaque JSON; null until set. `schedule` is `manual` / `hourly` / `daily` / `weekly` (the scheduler runs the last three in the platform''s registry direction); `batch_size` (1–1000, default 100) is how many CIs a push sends per batch; `include_crypto_summary` appends a crypto-posture line to pushed asset descriptions.'
-        ci_type_mapping:
-          description: 'The class-layer overrides (`{"version": 1, "classes": [...]}`). A pre-template flat `{"<our class>": "<their CI class>"}` object is still read. See /cmdb/profiles/{id}/mapping.'
-
-        is_enabled:
-          type: boolean
-        has_password:
-          type: boolean
-          description: Whether a password is stored. The value itself is never returned.
-        has_api_token:
-          type: boolean
-          description: Whether an API token is stored. The value itself is never returned.
-        has_client_secret:
-          type: boolean
-          description: Whether an OAuth2 client secret is stored. The value itself is never returned.
-        last_sync_at:
-          type: string
-          format: date-time
-        last_sync_status:
-          type: string
-        sync_error:
-          type: string
-        mapping_error:
-          type: string
-          description: 'Present when the profile''s effective mapping (template ⊕ overrides) does not validate — why, naming the entry. While it is set the profile is PAUSED: scheduled runs skip it and Sync / Pull answer 400 with it. Re-evaluated on every run, every mapping save and every service start; fixing the mapping clears it.'
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-    CMDBSyncProfileInput:
-      type: object
-      additionalProperties: true
-      description: 'Body for POST/PUT /cmdb/profiles. Bound into services.CMDBSyncProfile; server-managed fields (id, timestamps, last_sync_*, has_*) are ignored. On PUT an omitted or empty credential keeps the stored one.'
-      properties:
-        name:
-          type: string
-        platform_type:
-          type: string
-        connection_config: {}
-        field_mapping_config: {}
-        sync_config: {}
-        ci_type_mapping: {}
-        is_enabled:
-          type: boolean
-    CMDBSyncJob:
-      type: object
-      additionalProperties: false
-      description: |
-        A CMDB sync job run (services.CMDBSyncJob). `started_at` / `completed_at`
-        are omitempty — present once the job has started / finished. `error_log`
-        and `summary` are raw JSON carried verbatim.
-      required:
-      - id
-      - tenant_id
-      - profile_id
-      - status
-      - trigger_type
-      - items_pushed
-      - items_reconciled
-      - items_failed
-      - items_skipped
-      - error_log
-      - summary
-      - created_at
-      properties:
-        id:
-          type: string
-        tenant_id:
-          type: string
-        profile_id:
-          type: string
-        status:
-          type: string
-          description: "in_progress / success / partial / failed (a job a restart interrupted is closed as failed, \"interrupted (service restarted)\")."
-        trigger_type:
-          type: string
-          description: "manual / scheduled."
-        started_at:
-          type: string
-          format: date-time
-        completed_at:
-          type: string
-          format: date-time
-        items_pushed:
-          type: integer
-        items_reconciled:
-          type: integer
-        items_failed:
-          type: integer
-        items_skipped:
-          type: integer
-        error_log:
-          description: Raw error log. Opaque JSON; null when none.
-        summary:
-          description: 'Raw run summary: `direction` (`push` / `pull`), `mode` (`full` / `delta` for a platform on the mapping layer, empty otherwise), counts (`pushed`, `created`, `updated`, `reconciled`, `failed`, `skipped`, `unchanged` — not sent or not written again because nothing changed, `echo` — our own records coming back on a pull, `retired`, `absent`, `reappeared`, and for a pull `unresolved`), for a push to a platform that writes relationships `relations` (`{created, existing, unchanged, failed}` — relationships between CIs the profile links; `existing` = already held by the CMDB, `unchanged` = not sent because the set is unchanged since the last push) plus `errors` — the first 50 per-item failures as `{local_id, error}` (a pulled record, which has no Vista id yet, as `{external_id, error}`) — `errors_total` and `errors_omitted`. Opaque JSON; null when none.'
-        created_at:
-          type: string
-          format: date-time
-    CMDBMappingClassRule:
-      type: object
-      additionalProperties: false
-      description: 'One class-layer rule: exactly one of `class` (a class key, standards/asset-classes.yaml) or `category` (a CI category: infrastructure_asset, certificate, key, crypto_configuration, crypto_library) ↔ `theirs` (their type / table). Category rules are push-only.'
-      required: [theirs]
-      properties:
-        class:
-          type: string
-        category:
-          type: string
-        theirs:
-          type: string
-        direction:
-          type: string
-          enum: [push, pull, both]
-        disabled:
-          type: boolean
-    CMDBMappingTransform:
-      type: object
-      additionalProperties: false
-      description: 'The whole transform language: constant or join (`{a}.{b}` over source-side fields) or the field itself → value_map → default → coerce. No scripting.'
-      properties:
-        value_map:
-          type: string
-        default: {}
-        constant: {}
-        join:
-          type: string
-        coerce:
-          type: string
-          enum: [string, integer, number, boolean]
-    CMDBMappingFieldRule:
-      type: object
-      additionalProperties: false
-      description: '`ours` is canonical vocabulary — `asset:<field>`, `ci:<field>` or `fact:<fact key>` — never a table or column. `authority` says which side wins (platform: pushed on every update, pulled only for a record Vista does not hold; vendor: pulled always, pushed only when creating the CI).'
-      required: [ours, theirs, direction]
-      properties:
-        ours:
-          type: string
-        theirs:
-          type: string
-        direction:
-          type: string
-          enum: [push, pull, both]
-        authority:
-          type: string
-          enum: [platform, vendor]
-        transform:
-          $ref: '#/components/schemas/CMDBMappingTransform'
-        omit_empty:
-          type: boolean
-        personal_data:
-          type: boolean
-        disabled:
-          type: boolean
-    CMDBMappingIdentityRule:
-      type: object
-      additionalProperties: false
-      description: 'One of their fields as one of our identifier kinds (cmdb_sys_id, serial_number, mac_address, fqdn, cloud_resource_id). The cmdb_sys_id rule is the record''s own id.'
-      required: [theirs]
-      properties:
-        theirs:
-          type: string
-        identifier:
-          type: string
-        disabled:
-          type: boolean
-    CMDBMappingValueMap:
-      type: object
-      additionalProperties: false
-      required: [entries]
-      properties:
-        entries:
-          type: array
-          items:
-            type: object
-            additionalProperties: false
-            required: [ours, theirs]
-            properties:
-              ours:
-                type: string
-              theirs:
-                type: array
-                items:
-                  type: string
-    CMDBMappingPullSpec:
-      type: object
-      additionalProperties: false
-      properties:
-        type_fields:
-          type: array
-          items:
-            type: string
-        default_class:
-          type: string
-        cursor_field:
-          type: string
-    CMDBMappingRetireSpec:
-      type: object
-      additionalProperties: false
-      properties:
-        status_field:
-          type: string
-        retired_values:
-          type: array
-          items:
-            type: string
-        push_value:
-          type: string
-    CMDBMappingRelationRule:
-      type: object
-      additionalProperties: false
-      description: 'One of our canonical relationship types (runs_on, hosted_on, virtualized_by, depends_on, connects_to, member_of, contains, manages, sends_data_to, impacts) ↔ the vendor''s relationship type (ServiceNow: a cmdb_rel_type name such as `Runs on::Runs`). `reverse` sends the edge with its ends swapped (their parent is our to-asset). A type with no rule is not pushed.'
-      required: [ours, theirs]
-      properties:
-        ours:
-          type: string
-        theirs:
-          type: string
-        reverse:
-          type: boolean
-        disabled:
-          type: boolean
-    CMDBMappingOverrides:
-      type: object
-      additionalProperties: false
-      description: 'A profile''s differences from its platform template. Field push rules replace the template''s push rule for the same vendor field; pull rules replace the template''s pull rule for the same vendor field and canonical field; identity rules merge by vendor field; value maps by name; `disabled: true` removes the rule it matches. Authoring guide: docsv4/internal/developer/architecture/cmdb-mapping-templates.md.'
-      properties:
-        classes:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingClassRule'
-        fields:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingFieldRule'
-        identity:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingIdentityRule'
-        value_maps:
-          type: object
-          additionalProperties:
-            $ref: '#/components/schemas/CMDBMappingValueMap'
-        pull:
-          $ref: '#/components/schemas/CMDBMappingPullSpec'
-        retire:
-          $ref: '#/components/schemas/CMDBMappingRetireSpec'
-        relations:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingRelationRule'
-        options:
-          type: object
-          description: 'Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key.'
-          additionalProperties:
-            type: string
-    CMDBMapping:
-      type: object
-      additionalProperties: false
-      description: A complete mapping (a template, or template ⊕ overrides).
-      properties:
-        platform:
-          type: string
-        version:
-          type: integer
-          description: The template's version.
-        classes:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingClassRule'
-        fields:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingFieldRule'
-        identity:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingIdentityRule'
-        value_maps:
-          type: object
-          additionalProperties:
-            $ref: '#/components/schemas/CMDBMappingValueMap'
-        pull:
-          $ref: '#/components/schemas/CMDBMappingPullSpec'
-        retire:
-          $ref: '#/components/schemas/CMDBMappingRetireSpec'
-        relations:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBMappingRelationRule'
-        options:
-          type: object
-          description: 'Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key.'
-          additionalProperties:
-            type: string
-    CMDBMappingView:
-      type: object
-      additionalProperties: false
-      description: 'GET/PUT /cmdb/profiles/{id}/mapping. `template` is null for a platform that ships no template yet (its connector still runs its pre-template code; its overrides are kept for when the template lands). `effective` is null when the stored overrides cannot be read at all.'
-      required: [platform, template, overrides, effective, valid, problems]
-      properties:
-        platform:
-          type: string
-        template:
-          oneOf:
-          - $ref: '#/components/schemas/CMDBMapping'
-          - type: 'null'
-        overrides:
-          $ref: '#/components/schemas/CMDBMappingOverrides'
-        effective:
-          oneOf:
-          - $ref: '#/components/schemas/CMDBMapping'
-          - type: 'null'
-        valid:
-          type: boolean
-        problems:
-          type: array
-          items:
-            type: object
-            additionalProperties: false
-            required: [entry, message]
-            properties:
-              entry:
-                type: string
-              message:
-                type: string
-    CMDBProfileListResponse:
-      type: object
-      additionalProperties: false
-      description: 'CURRENT envelope for GET /cmdb/profiles — `{ "profiles": [...] }`. Always a non-null array (handler normalizes nil to []).'
-      required:
-      - profiles
-      properties:
-        profiles:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBSyncProfile'
-    CMDBSyncJobListResponse:
-      type: object
-      additionalProperties: false
-      description: 'CURRENT envelope for GET /cmdb/profiles/{id}/jobs — `{ "jobs": [...] }`. Always a non-null array (handler normalizes nil to []).'
-      required:
-      - jobs
-      properties:
-        jobs:
-          type: array
-          items:
-            $ref: '#/components/schemas/CMDBSyncJob'
-    CMDBMessageResponse:
-      type: object
-      additionalProperties: false
-      description: 'Bare acknowledgement envelope for delete — `{ "message": "profile deleted" }`.'
-      required:
-      - message
-      properties:
-        message:
-          type: string
-    CMDBTestConnectionResult:
-      type: object
-      additionalProperties: false
-      description: 'Success envelope for POST /cmdb/profiles/{id}/test — `{ "success": true, "message": "..." }`. The failure case returns 400 with the LegacyError-compatible `{ "success": false, "error": "..." }`.'
-      required:
-      - success
-      - message
-      properties:
-        success:
-          type: boolean
-        message:
-          type: string
     ConnectorCatalogueEntry:
       type: object
       additionalProperties: false
@@ -12541,6 +12077,14 @@ components:
           type: boolean
         message:
           type: string
+        current_usage:
+          type: integer
+          description: The cap check's current usage, when `allowed` is false.
+        limit:
+          type: [integer, 'null']
+          description: The plan's asset cap when `allowed` is false; null for an unlimited plan.
+        upgrade_prompt:
+          type: string
     SourceAdmissionError:
       type: object
       additionalProperties: false
@@ -12597,6 +12141,19 @@ components:
           type: string
         ip_address:
           type: string
+        description:
+          type: string
+        environment:
+          type: string
+        business_unit:
+          type: string
+        owner_email:
+          type: string
+        support_group:
+          type: string
+        operating_system:
+          type: string
+          description: Set as the class attribute `operating_system`.
         site:
           type: string
         region:
@@ -12728,6 +12285,394 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SourceHardwareAsset'
+        more:
+          type: boolean
+    SourceWire:
+      type: object
+      additionalProperties: false
+      required:
+      - kind
+      - ref
+      properties:
+        kind:
+          type: string
+          enum: [imported]
+        ref:
+          type: string
+    SourceLink:
+      type: object
+      additionalProperties: false
+      required:
+      - asset_id
+      - kind
+      - value
+      - scope
+      properties:
+        asset_id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [cmdb_sys_id]
+        value:
+          type: string
+        scope:
+          type: string
+    SourceLinksRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - links
+      properties:
+        source:
+          $ref: '#/components/schemas/SourceWire'
+        links:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/SourceLink'
+    SourcePresence:
+      type: object
+      additionalProperties: false
+      required:
+      - asset_id
+      - presence
+      properties:
+        asset_id:
+          type: string
+          format: uuid
+        presence:
+          type: string
+          enum: [present, absent]
+        reason:
+          type: string
+    SourcePresenceRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - items
+      properties:
+        source:
+          $ref: '#/components/schemas/SourceWire'
+        platform:
+          type: string
+          maxLength: 64
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/SourcePresence'
+    SourceItemResult:
+      type: object
+      additionalProperties: false
+      required:
+      - outcome
+      properties:
+        outcome:
+          type: string
+          enum: [recorded, not_found, error]
+        error:
+          type: string
+    SourceItemResultsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceItemResult'
+    SourceRunRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - run_id
+      - items
+      properties:
+        source:
+          $ref: '#/components/schemas/SourceWire'
+        run_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            additionalProperties: false
+            required: [asset_id, action]
+            properties:
+              asset_id:
+                type: string
+                format: uuid
+              action:
+                type: string
+                enum: [created, updated]
+    SourceUndoRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - run_id
+      - asset_ids
+      properties:
+        source:
+          $ref: '#/components/schemas/SourceWire'
+        run_id:
+          type: string
+          format: uuid
+        actor_user_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        asset_ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: string
+            format: uuid
+    SourceUndoResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [asset_id, outcome]
+            properties:
+              asset_id:
+                type: string
+                format: uuid
+              outcome:
+                type: string
+                enum: [archived, already_archived, kept, not_found]
+              reason:
+                type: string
+    SourceScanConsentRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - allow_active_scan
+      properties:
+        source:
+          $ref: '#/components/schemas/SourceWire'
+        allow_active_scan:
+          type: boolean
+        actor_user_id:
+          type: string
+          format: uuid
+    SourceScanConsent:
+      type: object
+      additionalProperties: false
+      required: [source_ref, allow_active_scan]
+      properties:
+        source_ref:
+          type: string
+        allow_active_scan:
+          type: boolean
+    CIExportItem:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - category
+      - cmdb_ci_type
+      - display_name
+      - description
+      - risk_score
+      - risk_level
+      - discovered_at
+      - last_verified_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        category:
+          type: string
+          enum: [infrastructure_asset, certificate, key, crypto_configuration]
+        cmdb_ci_type:
+          type: string
+        display_name:
+          type: string
+        description:
+          type: string
+        risk_score:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 100
+          description: Null where the item has no score (NOT ASSESSED).
+        risk_level:
+          type: string
+          description: Banded from risk_score; empty when risk_score is null.
+        discovered_at:
+          type: string
+          format: date-time
+        last_verified_at:
+          type: string
+          format: date-time
+    CIExportItemsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - more
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CIExportItem'
+        more:
+          type: boolean
+    CIExportAssetsRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - asset_ids
+      properties:
+        asset_ids:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: string
+            format: uuid
+        include:
+          type: object
+          additionalProperties: false
+          properties:
+            fields:
+              type: boolean
+              description: The allowlisted canonical fields (display_name, hostname, ip_address, description, environment, business_unit, owner_email, support_group, site, region, class_key).
+            fact_keys:
+              type: array
+              items:
+                type: string
+            crypto_posture:
+              type: boolean
+            identifier:
+              type: object
+              additionalProperties: false
+              required:
+              - kind
+              - scope
+              properties:
+                kind:
+                  type: string
+                  enum: [cmdb_sys_id]
+                scope:
+                  type: string
+    CIExportCrypto:
+      type: object
+      additionalProperties: false
+      required:
+      - protocol
+      properties:
+        protocol:
+          type: string
+        protocol_version:
+          type: string
+        key_exchange_algorithm:
+          type: string
+        signature_algorithm:
+          type: string
+        symmetric_encryption:
+          type: string
+        key_size:
+          type: integer
+    CIExportPosture:
+      type: object
+      additionalProperties: false
+      required:
+      - risk_level
+      - configurations
+      properties:
+        risk_level:
+          type: string
+        configurations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CIExportCrypto'
+    CIExportAsset:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - retired
+      properties:
+        id:
+          type: string
+          format: uuid
+        retired:
+          type: boolean
+          description: Deleted, archived, stale-archived or merged away — out of push scope for good.
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+        facts:
+          type: object
+          additionalProperties: true
+        crypto_posture:
+          $ref: '#/components/schemas/CIExportPosture'
+        identifiers:
+          type: array
+          items:
+            type: string
+    CIExportAssetsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - assets
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/CIExportAsset'
+    CIExportRelationship:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - from_asset_id
+      - to_asset_id
+      - type
+      properties:
+        id:
+          type: string
+          format: uuid
+        from_asset_id:
+          type: string
+          format: uuid
+        to_asset_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+    CIExportRelationshipsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - relationships
+      - more
+      properties:
+        relationships:
+          type: array
+          items:
+            $ref: '#/components/schemas/CIExportRelationship'
         more:
           type: boolean
     CreateDiscoveryJobRequest:
@@ -13252,7 +13197,9 @@ components:
         the address classification verbatim — `public`, `carrier_grade_nat`
         (RFC 6598, 100.64.0.0/10), `excluded` (the platform's own addresses),
         `link_local`, `loopback`, `multicast`, `unspecified`, `zoned`,
-        `unparseable`. The page owns the plain-language label and, for the
+        `unparseable` — or `imported_without_scan_consent` (known only from an
+        imported source whose connection does not allow active scanning). The
+        page owns the plain-language label and, for the
         first two, the call to action: register the range as a network
         segment to bring those hosts into scope.
       required:

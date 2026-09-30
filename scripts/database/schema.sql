@@ -22451,6 +22451,86 @@ CREATE UNIQUE INDEX IF NOT EXISTS health_alerts_one_active_per_type
 -- removed from the body above, so a fresh install never creates it.
 DROP TABLE IF EXISTS public.maintenance_windows;
 
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: CMDB run provenance (platform ADR-0002 D11 item 6, W21b)
+-- ----------------------------------------------------------------------------
+-- cmdb_sync_job_items is the run ledger: one row per record a CMDB sync run
+-- CREATED or CHANGED, on either side — `ours` (an asset a pull created, or
+-- matched and wrote to) or `theirs` (a CI a push created, changed or retired
+-- in the customer's CMDB). It is what tags every record with the run that
+-- wrote it, and what "Undo run" reads: undo archives the assets a run created
+-- on our side (through inventory-service, never here) and LISTS what it wrote
+-- on theirs — nothing is ever deleted in the customer's CMDB.
+--
+-- Owned by the CMDB sync engine, like the other cmdb_* tables (D7). A push
+-- that re-sends an unchanged payload on a full run writes no row: only a
+-- create or an actual change does. Rows older than 90 days are pruned by the
+-- scheduler.
+--
+-- Natively idempotent: CREATE TABLE / INDEX IF NOT EXISTS, the constraints are
+-- inline in the CREATE (a table that already exists keeps its own), and the
+-- policy is dropped and re-created like every other RLS policy above. The
+-- table is new in this release, so no existing row can violate a constraint.
+CREATE TABLE IF NOT EXISTS public.cmdb_sync_job_items (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    job_id uuid NOT NULL REFERENCES public.cmdb_sync_jobs(id) ON DELETE CASCADE,
+    profile_id uuid NOT NULL REFERENCES public.cmdb_sync_profiles(id) ON DELETE CASCADE,
+    side character varying(10) NOT NULL,
+    action character varying(20) NOT NULL,
+    entity_type character varying(50) NOT NULL,
+    local_id uuid,
+    external_id character varying(255),
+    their_type character varying(100),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT valid_cmdb_job_item_side CHECK (((side)::text = ANY ((ARRAY['ours'::character varying, 'theirs'::character varying])::text[]))),
+    CONSTRAINT valid_cmdb_job_item_action CHECK (((action)::text = ANY ((ARRAY['created'::character varying, 'updated'::character varying, 'retired'::character varying])::text[])))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cmdb_sync_job_items_job
+    ON public.cmdb_sync_job_items USING btree (tenant_id, job_id, side, action);
+CREATE INDEX IF NOT EXISTS idx_cmdb_sync_job_items_created
+    ON public.cmdb_sync_job_items USING btree (created_at);
+
+ALTER TABLE public.cmdb_sync_job_items ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS cmdb_sync_job_items_tenant_isolation ON public.cmdb_sync_job_items;
+CREATE POLICY cmdb_sync_job_items_tenant_isolation ON public.cmdb_sync_job_items
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: per-source scan consent (platform ADR-0002 D10)
+-- ----------------------------------------------------------------------------
+-- source_scan_consents records, per tenant and per imported source (a
+-- connected system of record, named by its source_ref — the ref its assets,
+-- identifiers and history carry), whether "assets from this source may be
+-- actively scanned". An asset known ONLY from an import is withheld from
+-- automatic active scanning unless one of its importing sources has a row here
+-- with allow_active_scan = true (shared/autoscan ImportedWithoutConsentSQL).
+-- It is an additional requirement on top of the ownership and exclusion rules,
+-- never a replacement, and an explicit scan a person asks for does not read it.
+--
+-- No row means no consent: every existing connection starts without one, so an
+-- upgrade turns nothing on. Written only through the inventory's signed
+-- internal source route, by the service that owns the connection.
+--
+-- Natively idempotent: CREATE TABLE IF NOT EXISTS with the constraints inline,
+-- and the RLS policy dropped and re-created like every other policy.
+CREATE TABLE IF NOT EXISTS public.source_scan_consents (
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    source_ref character varying(200) NOT NULL,
+    allow_active_scan boolean DEFAULT false NOT NULL,
+    updated_by uuid,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT source_scan_consents_pkey PRIMARY KEY (tenant_id, source_ref)
+);
+
+ALTER TABLE public.source_scan_consents ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS source_scan_consents_tenant_isolation ON public.source_scan_consents;
+CREATE POLICY source_scan_consents_tenant_isolation ON public.source_scan_consents
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -24181,3 +24261,4 @@ UPDATE audit.siem_integrations
    SET cursor_created_at = clock_timestamp(),
        cursor_event_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
  WHERE cursor_created_at IS NULL;
+

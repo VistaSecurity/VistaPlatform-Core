@@ -8,10 +8,13 @@ upgrade` tries to patch the existing Job in place and fails (#421).
 Keep ALL pod-template content inside this define.
 */}}
 {{- define "vistaplatform.schemaMigration.podTemplate" }}
-{{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+{{- $schemaHash := include "vistaplatform.schemaHash" . }}
 {{/*
-The completion marker. seed-data's init container blocks until the row for this
-schema hash exists, so the table is a sequencing barrier first and foremost.
+The completion marker. The seed-data Job and every backend's wait-for-schema init
+container block until the row for this schema hash exists
+(vistaplatform.schemaMarkerQuery), so the table is a sequencing barrier first
+and foremost. It is written LAST, after schema.sql applied under ON_ERROR_STOP,
+so its presence means the whole schema is in place — not just its first tables.
 
 It also records WHICH RELEASE wrote the schema. The hash alone identifies the
 file contents but is not ordered and means nothing to a human, so it cannot
@@ -139,12 +142,24 @@ be Ready BEFORE running post-install hooks, but backends can't be Ready without
 the schema, so the install fails before the hook ever runs.
 
 The new design makes the Job (and its ConfigMap) regular release resources.
-Backend deployments have an init container that polls Postgres for a sentinel
-table (public.tenants) — they self-gate on schema readiness, so the install
-converges naturally: Job and Deployments are created together, Job runs as
-soon as Postgres is Ready, backend init containers detect schema availability
-and exit, backend main containers start. helm --wait observes Deployments
-becoming Ready (without needing --wait-for-jobs).
+Backend deployments have an init container (wait-for-schema) that polls for
+this Job's completion marker for the CURRENT schema hash — they self-gate on
+schema readiness, so install and upgrade converge naturally: Job and
+Deployments are created together, Job runs as soon as Postgres is Ready,
+backend init containers see the marker and exit, backend main containers
+start. helm --wait observes Deployments becoming Ready (without needing
+--wait-for-jobs), which now also means the migration finished.
+
+(The init container used to wait for a sentinel table, public.tenants. That
+holds on every upgrade and early in a fresh apply, so new pods started while
+this Job was still adding columns — SQLSTATE 42703 on the 4.1.0 upgrade.)
+
+Keep this Job free of resource requests unless you also solve the deadlock it
+would create on a saturated node: the new backend pods hold their requests
+while they wait for this Job, and under RollingUpdate the old pods are not
+removed until the new ones are Ready, so a Job pod that cannot be scheduled
+blocks the rollout until someone intervenes.
+scripts/test-chart-wait-for-schema.mjs pins this.
 
 Job naming (#421): a Kubernetes Job's spec.template is immutable, so the Job
 name embeds a short hash of the FULL rendered pod template (which itself
@@ -169,7 +184,7 @@ data:
   schema.sql: |
 {{ .Files.Get "files/schema/schema.sql" | indent 4 }}
 ---
-{{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+{{- $schemaHash := include "vistaplatform.schemaHash" . }}
 {{- $podTemplate := include "vistaplatform.schemaMigration.podTemplate" . }}
 {{- $jobHash := $podTemplate | sha256sum | trunc 10 }}
 apiVersion: batch/v1

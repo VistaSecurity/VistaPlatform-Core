@@ -30,8 +30,8 @@
 # is how a catalogue came to offer a Lambda collector that never existed and a
 # "live" Azure connector whose every run failed. When a connector's behaviour
 # changes, change its entry in the same PR; for the CMDB platforms
-# `produces_classes` is additionally pinned to the mapping templates by
-# services/inventory-service/ee/cmdbsync/registry_classes_test.go.
+# `produces_classes` is additionally pinned to the mapping templates by the
+# CMDB engine's registry_classes_test.go (in the Enterprise integration service).
 #
 # Fields:
 #   key              stable identifier; for a live connector this must match the

@@ -7,6 +7,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0-rc.1] - 2026-09-30
+
+**Version 4.2.0 makes CMDB sync safe to switch on.** 4.1.0 made CMDB sync work; this
+release lets you see what a sync will do before it does it, edit how records map, undo a
+run, and decide per connection whether the assets it brings in may be actively scanned.
+It also finishes moving the external-system connectors into the integration service —
+SIEM export and NetBox went in 4.1.0, CMDB sync follows — so the inventory and audit
+services no longer carry private-network egress or a credential key they only needed for
+connectors. And an upgrade no longer lets backends start against a half-migrated
+schema. Both product lines are cut from the same commit: `v4.2.0` (commercial) and
+`core-v4.2.0` (Core). Upgrade from 4.1.0.
+
+**Read Breaking / Upgrading first** — two behaviours change for installs that already
+use CMDB sync or NetBox, and every upgrade now waits for its schema migration.
+
+### Highlights
+
+- **Scan consent per connection** (Enterprise). Assets that exist only because a CMDB
+  pull or a NetBox import created them are no longer scanned automatically unless that
+  connection says they may be: **Assets from this source may be actively scanned** on a
+  CMDB profile, **Devices from this source may be actively scanned** on a NetBox
+  connection. Both are **off** by default. Settings → Auto-scan → **Not scanned** lists
+  what is being held back and why.
+
+- **See a sync before it runs, and undo it** (Enterprise). A CMDB profile's **Dry run**
+  shows what the next push or pull would create, update and retire, writing nothing on
+  either side. A new profile's first sync is confirmed from its dry run. **Sync history**
+  shows what each run changed, and **Undo this run…** archives the assets the run created
+  in Vista; it never deletes or changes anything in your CMDB.
+
+- **A field-mapping editor with a live preview** (Enterprise). Settings → Integrations →
+  CMDB / ITSM sync → a profile's **Mapping** edits class rules, field rules (which side
+  wins, value maps, defaults, constants, joins, conversions) and identity rules, lists the
+  CMDB's own fields where it has a schema, and previews up to ten live records through the
+  mapping as edited — saved or not — before you save.
+
+- **CMDB sync now runs in the integration service** (Enterprise). Nothing changes on
+  Settings → Integrations: profiles, credentials, schedules, mappings and history carry
+  over. The CMDB API moved with it; the tenant UI is its only caller.
+
+- **Connector egress lives only where connectors run.** The inventory service is off the
+  chart's private-network dialer list, and the audit service no longer receives
+  `ENCRYPTION_MASTER_KEY`, because the integration service now makes every SIEM, NetBox
+  and CMDB call. Egress exceptions you added on those two services can be removed.
+
+- **Upgrades wait for the schema migration.** A backend's `wait-for-schema` init
+  container now waits for the migration marker for this chart's own schema, not just for
+  the first table, so a new pod no longer answers a query with a column the migration has
+  not added yet. The integration service also tolerates starting mid-migration.
+
+- **The Core release gate builds and tests both web consoles**, and Go lint is enforced
+  in CI and run over the whole tree nightly. Both close ways a break reached the main
+  branch or a release candidate unseen.
+
+### Breaking / Upgrading
+
+Back up your database (`pg_dump`) first, as always.
+
+- **Every upgrade that changes the schema now waits for its migration.**
+  - New backend pods stay in `Init` until the `schema-migration` Job has recorded this
+    chart's schema; under the default rolling update the old pods keep serving.
+  - **A backend on `strategy: Recreate` is down for the whole migration** (`pcap-processor`
+    and `sensor-manager` by default, and every backend if your values say so).
+  - **`helm upgrade --wait` now includes the migration time, and Helm's default timeout is
+    5 minutes.** Pass a `--timeout` that covers the migration plus the rollout; on a large
+    database, more.
+  - An upgrade that does not change the schema passes the wait at once. With
+    `schemaMigration.enabled=false` the gate keeps its old check (a schema exists).
+    A stuck migration shows as `Init:Error` after about 10 minutes instead of a silent hang.
+- **Scan consent is off for every existing CMDB profile and NetBox connection
+  (Enterprise).** Nothing is migrated. After the upgrade, an asset that exists only
+  because a CMDB pull or NetBox import created it — no sensor, agent or device
+  interrogation has seen it, and no spreadsheet upload has listed it — stops being
+  scanned automatically. To keep scanning those, turn on **Assets / Devices from this
+  source may be actively scanned** on the connection. Spreadsheet and SBOM uploads, assets a
+  sensor or agent has observed, and Active Scan are unaffected. Consent never makes a public
+  address scannable; ownership and exclusions still apply.
+- **A CMDB profile's first write needs a confirmed dry run (Enterprise).** A scheduled
+  profile that has never written anything is skipped until its first run has been
+  confirmed from **Dry run**; Sync and Pull open the dry run instead. **Profiles that
+  already synced keep syncing** exactly as before — one that has linked a record or
+  pushed or created anything counts as written. Runs from before the upgrade have no
+  recorded changes and cannot be undone.
+- **CMDB sync settings move to the integration service (Enterprise).**
+  - A `HTTPS_PROXY`, `NO_PROXY` or `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS` you set on the
+    inventory service for the CMDB connectors must be set on the integration service now
+    (NetBox's moved in 4.1.0). The exact values key is in the Enterprise section of the
+    release-notes document linked at the end.
+  - **The inventory service no longer has private-network egress**, and the audit service no
+    longer receives `ENCRYPTION_MASTER_KEY` by default. A NetworkPolicy exception or proxy
+    bypass you added on either for NetBox, CMDB or SIEM collectors can be removed.
+  - The integration service must run with the same `ENCRYPTION_MASTER_KEY` as the
+    inventory service (the chart gives every service the one key), or stored CMDB
+    credentials do not decrypt.
+- **The CMDB API paths moved (Enterprise).** The old inventory-service paths are gone from
+  every edition, with no compatibility route. Only the tenant UI calls them, so nothing needs
+  changing unless you scripted against them; the new prefix is in the Enterprise section of
+  the release-notes document.
+- **A CMDB sync running during the upgrade is cut off** and closed about an hour later
+  as "interrupted (service restarted)"; scheduled profiles then run at their next due
+  time, and **Sync** / **Pull** re-run a manual one. A profile is never synced twice at once.
+- **Undo a run never deletes anything in your CMDB.** It archives the assets the run
+  created in Vista (an asset another source has also reported is kept) and lists what the
+  run wrote in the CMDB so you can reverse it there yourself. A later pull re-imports the
+  records unless you change the mapping first.
+- **ServiceNow schema access for the mapping editor is optional.** To list ServiceNow's
+  fields and classes, the integration user needs read access to `sys_db_object` and
+  `sys_dictionary`, which the base `itil` role does not give. Without it the editor lists
+  the default mapping's fields and says why; sync, pull and preview are unaffected.
+
+### Editions
+
+**Core** includes the schema-migration wait (every backend, every install), the stricter
+Core release gate and the lint gate. Core installs have no CMDB or NetBox connections, so
+scan consent does not change what they scan, and spreadsheet and SBOM imports behave as
+before.
+
+**Enterprise** adds everything else in this release: the CMDB field-mapping editor, dry
+run, confirmed first sync and undo, per-connection scan consent for CMDB and NetBox, and
+CMDB sync running in the integration service. Core answers `402 Payment Required` at the
+edge for an Enterprise capability rather than hiding that it exists. The authoritative
+list is generated, not asserted: [`docsv4/core/editions.md`](docsv4/core/editions.md).
+
+**How far each vendor is verified.** As in 4.1.0, ServiceNow, Device42, SolarWinds and
+Oomnitza are contract-tested against their documented APIs only, and so is the mapping
+editor's schema listing. Splunk and Elasticsearch are verified end to end against the real
+products.
+
+### Verify
+
+Core — no key to trust; the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.2.0 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.2.0` for the image.
+Enterprise and MSP customers verify the commercial images and chart against a different signing
+workflow; the command is in the Enterprise section of the release-notes document below.
+
+**Full list of changes:** [`docsv4/core/releases/4.2.0.md`](docsv4/core/releases/4.2.0.md)
+— every Added, Changed, Fixed and Upgrading entry, with the exact names and the
+commercial verification command for Enterprise and MSP.
+
+<!-- release-notes-end -->
+
 ## [4.1.0] - 2026-09-30
 
 **Version 4.1.0 is the integrations release.** It follows a review of every way

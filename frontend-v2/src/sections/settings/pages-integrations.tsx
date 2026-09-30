@@ -15,14 +15,13 @@ import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, relTime, GREEN, AMBER, RED } from './kit';
 import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal, isDigest } from './notification-modals';
 import { ChannelTestButton, channelNotice } from './channel-test';
-import { CmdbProfileModal, CmdbDeleteModal, CmdbJobsModal, PLATFORM_LABEL, jobTone, serverError, canPushTo, canPullFrom, type CMDBProfile } from './cmdb-modals';
-import { cmdbProfilesQuery, editionSectionState } from './integrations-queries';
 import { CONNECTOR_KIND_LABEL } from '@vistasecurity/primitives/connectors';
 import {
   connectorCatalogueQuery, connectorAction, connectorBadge, connectorCaption, isSelectable, type ConnectorEntry,
 } from './connectors-queries';
 import { enterpriseSettings } from './enterprise-slots';
 import { NetBoxUpgradeSection } from './netbox-upgrade';
+import { CmdbUpgradeSection } from './cmdb-upgrade';
 import type { SettingsNavItem } from './nav';
 import type { notificationServiceComponents as NC, complianceEngineComponents } from '@vistasecurity/api-contract';
 
@@ -77,96 +76,6 @@ type ChannelModalState =
   | { kind: 'edit'; channel: Channel }
   | { kind: 'delete'; channel: Channel };
 
-type CmdbModalState =
-  | { kind: 'closed' }
-  | { kind: 'create' }
-  | { kind: 'edit'; profile: CMDBProfile }
-  | { kind: 'delete'; profile: CMDBProfile }
-  | { kind: 'jobs'; profile: CMDBProfile };
-
-function CmdbTestButton({ profile }: { profile: CMDBProfile }) {
-  const m = useMutation({
-    mutationFn: async () => {
-      const { data, error, response } = await clients.inventory.POST('/cmdb/profiles/{id}/test', { params: { path: { id: profile.id } } });
-      // The server says WHY (sanitized): a private address without the
-      // opt-in, an untrusted internal CA, rejected credentials, a timeout.
-      if (error || !response.ok) throw new Error(serverError(error) ?? 'Connection failed');
-      return data;
-    },
-    onSuccess: () => toast.success('Connection OK'),
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Connection failed'),
-  });
-  return (
-    <button className="ui-btn sm ghost" disabled={m.isPending} title="Test the CMDB connection" onClick={() => m.mutate()} style={m.isError ? { color: 'var(--danger-text)' } : undefined}>
-      {m.isPending ? 'Testing…' : 'Test'}
-    </button>
-  );
-}
-
-function CmdbSyncButton({ profile }: { profile: CMDBProfile }) {
-  const qc = useQueryClient();
-  const m = useMutation({
-    mutationFn: async () => {
-      const { error, response } = await clients.inventory.POST('/cmdb/profiles/{id}/sync', { params: { path: { id: profile.id } } });
-      // "profile is disabled", "a sync for this profile is already running", …
-      if (error || !response.ok) throw new Error(serverError(error) ?? 'Failed to start sync');
-    },
-    onSuccess: () => {
-      toast.success('Sync started');
-      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-jobs', profile.id] });
-      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Sync failed'),
-  });
-  return (
-    <button className="ui-btn sm ghost" disabled={m.isPending} title="Push inventory to the CMDB now" onClick={() => m.mutate()}>
-      {m.isPending ? 'Syncing…' : 'Sync'}
-    </button>
-  );
-}
-
-/**
- * The Pull toast. It used to report only created and already-present, so a pull
- * where half the records failed read as a clean one; failed and unresolved
- * (kept for identity review rather than created) are said too, and the sync
- * history has the per-record reasons.
- */
-export function pullSummary(r: { created: number; skipped: number; failed: number; unresolved?: number }): string {
-  const parts = [`Pulled ${r.created} new asset${r.created === 1 ? '' : 's'}`, `${r.skipped} already present`];
-  if (r.unresolved) parts.push(`${r.unresolved} held for identity review`);
-  if (r.failed) parts.push(`${r.failed} failed — see Sync history`);
-  return parts.join(', ');
-}
-
-function CmdbPullButton({ profile }: { profile: CMDBProfile }) {
-  const qc = useQueryClient();
-  const m = useMutation({
-    mutationFn: async () => {
-      const { data, error, response } = await clients.inventory.POST('/cmdb/profiles/{id}/pull', { params: { path: { id: profile.id } } });
-      if (error || !response.ok || !data) {
-        // Surface the server's message (e.g. the asset-limit reason on 402)
-        // rather than a generic failure.
-        const msg = (error as { error?: string } | undefined)?.error;
-        throw new Error(msg || 'Pull failed');
-      }
-      return data;
-    },
-    onSuccess: (data) => {
-      const msg = pullSummary(data);
-      if (data.failed > 0) toast.error(msg); else toast.success(msg);
-      void qc.invalidateQueries({ queryKey: ['inventory'] });
-      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-jobs', profile.id] });
-      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Pull failed'),
-  });
-  return (
-    <button className="ui-btn sm ghost" disabled={m.isPending} title="Pull server inventory from the CMDB into Vista" onClick={() => m.mutate()}>
-      {m.isPending ? 'Pulling…' : 'Pull'}
-    </button>
-  );
-}
-
 // Kind labels come from the GENERATED registry mirror, not from a copy here.
 // A hand-kept label map beside the page is precisely what this whole section
 // replaces — the CMDB platform names lived in one, and nothing could see it
@@ -214,11 +123,13 @@ function ConnectorCard({ entry, onAdd }: { entry: ConnectorEntry; onAdd?: () => 
 
 export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const [modal, setModal] = useState<ChannelModalState>({ kind: 'closed' });
-  const [cmdbModal, setCmdbModal] = useState<CmdbModalState>({ kind: 'closed' });
-  // The NetBox connector is an Enterprise section (enterprise-slots.ts): the
-  // catalogue below only asks it to open its "new connection" dialog.
+  // The NetBox connector and CMDB sync are Enterprise sections
+  // (enterprise-slots.ts): the catalogue below only asks each to open its
+  // "new connection" / "new profile" dialog.
   const [netboxCreate, setNetboxCreate] = useState(false);
   const NetBox = enterpriseSettings.NetBoxSection;
+  const [cmdbCreate, setCmdbCreate] = useState(false);
+  const Cmdb = enterpriseSettings.CmdbSection;
 
   // The connector CATALOGUE is Core and registry-driven: it answers from
   // standards/connectors.yaml, so what this page offers and what the platform
@@ -228,15 +139,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const catalogueQ = useQuery(connectorCatalogueQuery());
   const catalogue = catalogueQ.data ?? [];
 
-  // CMDB sync is an Enterprise-only route — see integrations-queries.ts. It is
-  // edition-probed: an absent route resolves to `unavailable`, which renders an
-  // upgrade card (and drops the Add button) instead of a red failure.
   // Notification channels are Core, so the page itself always renders.
-  const cmdbEntitled = useFeature('cmdb_sync');
-  const cmdbQ = useQuery(cmdbProfilesQuery(cmdbEntitled));
-  const cmdbState = cmdbEntitled ? editionSectionState(cmdbQ) : 'unavailable';
-  const cmdbProfiles = cmdbQ.data ?? [];
-  const closeCmdb = () => setCmdbModal({ kind: 'closed' });
   const channelsQ = useChannels();
   const deliveryStatusQ = useDeliveryStatus();
   // SIEM forwarders are no longer listed here (SECURITY H2, v1.0.0 audit).
@@ -322,97 +225,16 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
           : 'Outbound SIEM forwarding of the audit event stream (Splunk, Datadog, Elasticsearch or a webhook) is an Enterprise feature, configured platform-wide by your operator. Audit events are still recorded and searchable in every edition — only forwarding them to an external SIEM is gated.'}
       </p>
 
-      <SSection
-        title="CMDB / ITSM sync"
-        desc="Sync your inventory with ServiceNow, Device42 and Oomnitza (two-way), and pull monitored nodes in from SolarWinds (read-only)."
-        style={{ marginTop: 22 }}
-        action={
-          cmdbState === 'unavailable' ? undefined : (
-            <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-              <button className="ui-btn sm accent" onClick={() => setCmdbModal({ kind: 'create' })}><Icon name="plus" size={14} />Add CMDB sync</button>
-            </PermissionGate>
-          )
-        }
-      >
-        {cmdbState === 'unavailable' ? (
-          <SCard>
-            <StateNote icon="lock" tone="var(--accent)" title="An Enterprise feature"
-              message="CMDB sync pushes your inventory into ServiceNow, Device42 or Oomnitza and pulls their records back in, and pulls monitored nodes in from SolarWinds. The internal CMDB, and every discovery and inventory capability behind it, is included in every edition. Upgrade to Enterprise to connect an external CMDB." />
-          </SCard>
-        ) : cmdbState === 'error' ? (
-          <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load CMDB profiles" message="The CMDB sync profiles failed to load." /></SCard>
-        ) : cmdbQ.isLoading ? (
-          <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading CMDB profiles…" message="Fetching configured CMDB sync profiles." /></SCard>
-        ) : cmdbProfiles.length === 0 ? (
-          <SCard><StateNote icon="plug" tone="var(--app-t3)" title="No CMDB sync configured" message="Connect a CMDB/ITSM platform to push your cryptographic inventory into the tools your IT teams already use." /></SCard>
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 12 }}>
-            {cmdbProfiles.map((p) => {
-              // A profile whose field mapping no longer validates is PAUSED by
-              // the server (mapping_error): nothing runs until it is fixed.
-              const tone = p.mapping_error ? RED : !p.is_enabled ? AMBER : testTone(p.last_sync_status);
-              const last = p.last_sync_at ? `last sync ${relTime(p.last_sync_at)}` : 'never synced';
-              return (
-                <SCard key={p.id} pad={16}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 12 }}>
-                    <span style={{ width: 34, height: 34, borderRadius: 9, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', color: 'var(--app-t2)' }}>
-                      <Icon name="plug" size={15} />
-                    </span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--app-t3)' }}>{PLATFORM_LABEL[p.platform_type] ?? p.platform_type}</div>
-                    </div>
-                    <span title={p.mapping_error ? 'paused: mapping invalid' : p.is_enabled ? 'enabled' : 'disabled'}><SDot color={tone} /></span>
-                  </div>
-                  {p.mapping_error && (
-                    <div role="alert" style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 10, fontSize: 11.5, color: 'var(--danger-text)' }}>
-                      <STag color={RED}>Mapping invalid</STag>
-                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>Paused — nothing syncs until the field mapping is fixed: {p.mapping_error}</span>
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--app-t3)', minWidth: 0 }}>
-                      {/* sync_error says WHY the last sync failed or was
-                          partial (bad config, unreachable CMDB, per-item
-                          refusals); the tag alone only says that it did. */}
-                      {p.last_sync_status && <span title={p.sync_error}><STag color={jobTone(p.last_sync_status)}>{p.last_sync_status}</STag></span>}
-                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{last}</span>
-                    </div>
-                    {/* Two gates, because the routes behind these buttons ask
-                        for two different permissions (ee/cmdbsync/routes.go):
-                        profile CRUD + /test are settings.update, while /sync
-                        and /pull are assets.manage — they move inventory, not
-                        configuration. One settings.update gate over the whole
-                        cluster both 403'd on sync/pull for a role holding only
-                        settings.update, and hid sync/pull from security_admin,
-                        which holds assets.manage but no settings.update. */}
-                    <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
-                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-                        <CmdbTestButton profile={p} />
-                      </PermissionGate>
-                      {/* Which buttons a platform gets is its registry direction
-                          (standards/connectors.yaml): SolarWinds is pull-only,
-                          so it has no Sync — which used to push certificates,
-                          keys and crypto configurations into Orion as nodes. */}
-                      <PermissionGate permission={TENANT_PERMISSIONS.assets.manage}>
-                        {canPullFrom(p.platform_type) && <CmdbPullButton profile={p} />}
-                        {canPushTo(p.platform_type) && <CmdbSyncButton profile={p} />}
-                      </PermissionGate>
-                      {/* Job history needs settings.read — as does the profile
-                          list this card came from, so no gate of its own. */}
-                      <button className="ui-btn sm ghost" title="Sync history" onClick={() => setCmdbModal({ kind: 'jobs', profile: p })}><Icon name="history" size={14} /></button>
-                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-                        <button className="ui-btn sm ghost" title="Configure" onClick={() => setCmdbModal({ kind: 'edit', profile: p })}><Icon name="settings" size={14} /></button>
-                        <button className="ui-btn sm ghost" title="Remove" style={{ color: 'var(--danger-text)' }} onClick={() => setCmdbModal({ kind: 'delete', profile: p })}><Icon name="x" size={14} /></button>
-                      </PermissionGate>
-                    </div>
-                  </div>
-                </SCard>
-              );
-            })}
-          </div>
-        )}
-      </SSection>
+      {/* CMDB / ITSM sync runs in an Enterprise-only service (platform
+          ADR-0002 M3). Where that section is not part of the build (Core),
+          the upgrade card stands in for it, decided without a request: the
+          cmdb_sync flag is never granted in Core, and the catalogue below
+          says "Included in Enterprise" from the same registry. */}
+      {Cmdb ? (
+        <Cmdb createOpen={cmdbCreate} onCreateClose={() => setCmdbCreate(false)} />
+      ) : (
+        <CmdbUpgradeSection />
+      )}
 
       {/* NetBox runs in an Enterprise-only service. Where that
           section is not part of the build (Core), the upgrade card stands in
@@ -455,7 +277,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                       entry.key === 'netbox'
                         ? () => setNetboxCreate(true)
                         : entry.kind === 'cmdb'
-                          ? () => setCmdbModal({ kind: 'create' })
+                          ? () => setCmdbCreate(true)
                           : undefined
                     }
                   />
@@ -470,12 +292,6 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         <ChannelModal key={modal.kind === 'edit' ? modal.channel.id : 'new'} channel={modal.kind === 'edit' ? modal.channel : null} open onClose={close} />
       )}
       {modal.kind === 'delete' && <ChannelDeleteModal channel={modal.channel} open onClose={close} />}
-
-      {(cmdbModal.kind === 'create' || cmdbModal.kind === 'edit') && (
-        <CmdbProfileModal key={cmdbModal.kind === 'edit' ? cmdbModal.profile.id : 'new'} profile={cmdbModal.kind === 'edit' ? cmdbModal.profile : null} open onClose={closeCmdb} />
-      )}
-      {cmdbModal.kind === 'delete' && <CmdbDeleteModal profile={cmdbModal.profile} open onClose={closeCmdb} />}
-      {cmdbModal.kind === 'jobs' && <CmdbJobsModal profile={cmdbModal.profile} open onClose={closeCmdb} />}
     </SPage>
   );
 }

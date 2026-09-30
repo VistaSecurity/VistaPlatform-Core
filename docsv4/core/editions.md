@@ -36,7 +36,7 @@ Enterprise, plus the multi-tenant management plane. Note that tenant isolation i
 |---|---|---|---|
 | **Self-Service Billing** | MSP | Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional. | in MSP docs |
 | **CBOM Signing & Attestation** | Enterprise | Cryptographic signing of CBOM artifacts with compliance-attestation layers | in Enterprise docs |
-| **CMDB / ITSM Sync** | Enterprise | Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds) | [Guide](features/cmdb-integrations.md) |
+| **CMDB / ITSM Sync** | Enterprise | Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds) | in Enterprise docs |
 | **NetBox Connector** | Enterprise | Pull sites, prefixes, VLANs, device types and devices from a NetBox network source of truth, and see the drift between NetBox and discovered inventory. Read-only towards NetBox. | in Enterprise docs |
 | **Custom Branding** | Enterprise | White-label admin and web UI with custom logos and colors | in Enterprise docs |
 | **Custom Compliance Policies** | Enterprise | Tenant may author their own compliance frameworks beyond platform-published ones | in Enterprise docs |

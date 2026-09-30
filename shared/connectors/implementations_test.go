@@ -57,8 +57,14 @@ func TestEveryImplementationPathExists(t *testing.T) {
 	// than per-entry: "this file is missing" and "this whole tree is missing"
 	// are different facts, and skipping per-entry would let a genuinely
 	// deleted Enterprise package pass in the private repo too.
-	_, eeErr := os.Stat(filepath.Join(root, "services", "inventory-service", "ee"))
-	coreTree := os.IsNotExist(eeErr)
+	//
+	// The probe is ANY services/*/ee directory, not a particular service's:
+	// this used to look at inventory-service/ee, and when the connectors moved
+	// out of it (platform ADR-0002 M3) that directory vanished from the private
+	// tree too, so the private tree was mistaken for a Core one and every
+	// Enterprise path went unchecked — a package deleted or renamed would have
+	// passed. TestEnterpriseProbeSeesThePrivateTree pins the probe itself.
+	coreTree := !hasEnterpriseTrees(root)
 
 	checked := 0
 	for _, key := range ImplementedKeys() {
@@ -87,6 +93,33 @@ func TestEveryImplementationPathExists(t *testing.T) {
 	// skipped — which is how a guard quietly stops guarding.
 	if checked == 0 {
 		t.Fatal("no implementation path was actually checked; this test would pass whatever the map said")
+	}
+}
+
+// hasEnterpriseTrees reports whether the checkout carries any services/*/ee
+// directory — true for the private repo, false for a Core export.
+func hasEnterpriseTrees(root string) bool {
+	matches, err := filepath.Glob(filepath.Join(root, "services", "*", "ee"))
+	return err == nil && len(matches) > 0
+}
+
+// The probe TestEveryImplementationPathExists uses to tell a Core checkout
+// from the private tree must not go blind. The check is skipped where the
+// export removed the ee trees; everywhere else an Enterprise path must be
+// verified. A checkout whose implementations.go still names Enterprise
+// packages is a private one (a Core export fences those lines out), so the
+// probe must say "not Core" there.
+func TestEnterpriseProbeSeesThePrivateTree(t *testing.T) {
+	root := repoRoot(t)
+	enterprisePath := false
+	for _, key := range ImplementedKeys() {
+		if impl, _ := ImplementationFor(key); impl.Enterprise && impl.Package != "" {
+			enterprisePath = true
+		}
+	}
+	if enterprisePath && !hasEnterpriseTrees(root) {
+		t.Fatal("implementations.go names Enterprise packages but the checkout has no services/*/ee tree: " +
+			"the Core-tree probe is blind and TestEveryImplementationPathExists is skipping every Enterprise path")
 	}
 }
 

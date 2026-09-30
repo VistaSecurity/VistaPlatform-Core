@@ -700,7 +700,7 @@ func (s *AWSInterrogationService) getCertificateDetails(ctx context.Context, cer
 	if cert.Options != nil {
 		options := make(map[string]interface{})
 		// CertificateTransparencyLoggingPreference is an enum (value type, not pointer)
-		options["certificate_transparency_logging"] = string(cert.Options.CertificateTransparencyLoggingPreference)
+		options["certificate_transparency_logging"] = string(cert.Options.CertificateTransparencyLoggingPreference) //nolint:staticcheck // SA1019: no replacement — AWS keeps returning the (now always-logged) preference and it is persisted in the interrogation details; dropping it would change stored output
 		details["options"] = options
 	}
 

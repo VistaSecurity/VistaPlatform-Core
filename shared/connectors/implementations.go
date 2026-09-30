@@ -109,19 +109,15 @@ var implementations = map[string]Implementation{
 			"the parser is shared/sbom (CycloneDX 1.4-1.7, SPDX 2.2/2.3)",
 	},
 	ConnectorServicenow: {
-		Package:    "services/inventory-service/ee/cmdb/servicenow",
 		Enterprise: true,
 	},
 	ConnectorDevice42: {
-		Package:    "services/inventory-service/ee/cmdb/device42",
 		Enterprise: true,
 	},
 	ConnectorSolarwinds: {
-		Package:    "services/inventory-service/ee/cmdb/solarwinds",
 		Enterprise: true,
 	},
 	ConnectorOomnitza: {
-		Package:    "services/inventory-service/ee/cmdb/oomnitza",
 		Enterprise: true,
 	},
 	ConnectorNetbox: {

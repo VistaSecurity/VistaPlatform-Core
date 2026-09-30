@@ -139,12 +139,6 @@ describe('flag-gated surfaces skip the request entirely (sso_saml)', () => {
 });
 
 describe('flag-gated Enterprise integrations skip the request entirely', () => {
-  it('fires NOTHING for CMDB / ITSM sync when cmdb_sync is off', async () => {
-    const res = await observeDormant(integrations.cmdbProfilesQuery(false));
-    expect(fetchStub).not.toHaveBeenCalled();
-    expect(requestedUrls).toEqual([]);
-    expect(res.status).toBe('pending');
-  });
 
   // SIEM export used to have a twin of the CMDB case above. It was removed with
   // the H2 security fix: /siem/integrations is platform-global config and now
@@ -209,57 +203,6 @@ describe('flag-gated tenant billing skips the request entirely (billing_portal)'
   });
 });
 
-describe('edition-probed backstop: CMDB / ITSM sync collection failures', () => {
-  it('treats a 404 on the profiles collection as "not in this edition", and does not retry', async () => {
-    nextResponse = () => json({ error: 'not found' }, 404);
-    const res = await run(integrations.cmdbProfilesQuery());
-
-    // Exactly ONE request: editionAwareRetry must not re-ask a settled absence.
-    expect(fetchStub).toHaveBeenCalledTimes(1);
-    expect(res.status).toBe('error');
-    expect(isEditionUnavailable(res.error)).toBe(true);
-
-    // ...and that is what drives the upgrade card rather than an error card.
-    expect(integrations.editionSectionState({ isLoading: false, isError: true, error: res.error })).toBe('unavailable');
-  });
-
-  it('treats a 402 on the profiles collection as "upgrade required", and does not retry', async () => {
-    nextResponse = () => json({ error: 'cmdb_sync entitlement required' }, 402);
-    const res = await run(integrations.cmdbProfilesQuery());
-
-    // A stale feature map or direct caller may still reach the route. That must
-    // land on the same upgrade state as a Core 404, not a generic load error.
-    expect(fetchStub).toHaveBeenCalledTimes(1);
-    expect(res.status).toBe('error');
-    expect(isEditionUnavailable(res.error)).toBe(true);
-    expect(integrations.editionSectionState({ isLoading: false, isError: true, error: res.error })).toBe('unavailable');
-  });
-
-  it('renders normally against an Enterprise build', async () => {
-    nextResponse = () => json({ profiles: [{ id: 'c1', name: 'ServiceNow prod', platform_type: 'servicenow' }] });
-    const res = await run(integrations.cmdbProfilesQuery());
-
-    expect(fetchStub).toHaveBeenCalledTimes(1);
-    expect(requestedUrls[0]).toContain('/cmdb/profiles');
-    expect(res.status).toBe('success');
-    expect((res.data as { id: string }[])[0].id).toBe('c1');
-    expect(integrations.editionSectionState({ isLoading: false, isError: false, error: null })).toBe('ready');
-  });
-
-  it('still reports a REAL failure as an error, not as an edition gate', async () => {
-    nextResponse = () => json({ error: 'boom' }, 500);
-    const res = await run(integrations.cmdbProfilesQuery());
-
-    expect(res.status).toBe('error');
-    expect(isEditionUnavailable(res.error)).toBe(false);
-    expect(integrations.editionSectionState({ isLoading: false, isError: true, error: res.error })).toBe('error');
-    // A 500 IS worth retrying, so more than one attempt is expected here.
-    expect(fetchStub.mock.calls.length).toBeGreaterThan(1);
-  });
-
-  // No SIEM counterpart: see the H2 note above — the tenant UI does not call
-  // /siem/integrations in any edition now, so there is nothing to probe.
-});
 
 describe('editionSectionState precedence', () => {
   it('ranks an absent capability above a load error', () => {

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -155,7 +156,14 @@ func TestIntegration_EnrichmentSourceFirstPauseAndReplay(t *testing.T) {
 	s, tenant, o := enrichmentFixture(t)
 	ctx := context.Background()
 	backend := &fakeBackend{}
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	// The coordinator stamps each source request with a rescan cycle derived
+	// from the clock (now / rescan interval), and a new cycle is supposed to
+	// schedule new work. So the clock must start at a known point inside a
+	// cycle: from the wall clock, the +20m step below crossed into the next
+	// cycle for every run started in the last 20 minutes of the UTC day, and
+	// the dedupe assertion failed on legitimate rescan work.
+	cycle := int64(time.Duration(autoscan.DefaultRescanIntervalHours) * time.Hour / time.Second)
+	now := time.Unix(time.Now().Unix()/cycle*cycle, 0).UTC().Add(time.Minute)
 	c := &Coordinator{Store: s, Backend: backend, Enabled: true, Now: func() time.Time { return now }}
 	if err := c.Sweep(ctx, tenant); err != nil {
 		t.Fatal(err)
@@ -176,6 +184,15 @@ func TestIntegration_EnrichmentSourceFirstPauseAndReplay(t *testing.T) {
 	}
 	if backend.dispatches != 1 {
 		t.Fatal("repeat evidence dispatched duplicate work")
+	}
+	// The other polarity, so the check above cannot pass because nothing ever
+	// dispatches twice: the same evidence in the next rescan cycle is new work.
+	now = time.Unix((now.Unix()/cycle+1)*cycle, 0).UTC().Add(time.Minute)
+	if err := c.Sweep(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if backend.dispatches != 2 {
+		t.Fatalf("next rescan cycle dispatched %d source requests, want 2", backend.dispatches)
 	}
 	if _, err := s.DB.Exec(`UPDATE tenant_admin_settings SET config=jsonb_set(config,'{identity_admission,mode}','"paused"') WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)

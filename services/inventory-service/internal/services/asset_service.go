@@ -3374,7 +3374,7 @@ func bulkAssetKey(in models.AssetInput) string {
 // row is recorded as an error and the rest of the batch proceeds. The caller is
 // responsible for enforcing the subscription asset cap before invoking this.
 func (s *AssetService) BulkCreateAssets(tenantID uuid.UUID, inputs []models.AssetInput) *models.BulkImportResult {
-	return s.BulkCreateAssetsFromSource(tenantID, inputs, identity.Source{Kind: identity.SourceImported, Ref: "import"})
+	return s.BulkCreateAssetsFromSource(tenantID, inputs, identity.Source{Kind: identity.SourceImported, Ref: identity.SpreadsheetImportSourceRef})
 }
 
 func (s *AssetService) BulkCreateAssetsFromSource(tenantID uuid.UUID, inputs []models.AssetInput, source identity.Source) *models.BulkImportResult {

@@ -1247,6 +1247,37 @@ bindings:
       minimum/maximum constraints; preserve current wire compatibility. The risk
       concept declares the intended scale; this audit does not prove runtime
       validation.
+  inventory-service.openapi.yaml#/components/schemas/CIExportItem/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/CIExportItem/properties/risk_level:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Internal CI export (platform ADR-0002 M3). Banded from
+      risk_score by shared/riskbands; the empty string means the item has no
+      score (NOT ASSESSED), which a risk_display enum cannot carry.
+  inventory-service.openapi.yaml#/components/schemas/CIExportPosture/properties/risk_level:
+    concept: risk_band
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+    schema_exception: Internal CI export (platform ADR-0002 M3). The asset read's
+      own risk_level (Asset.risk_level), passed through unchanged; that contract
+      omits enum constraints, and this one mirrors it.
   inventory-service.openapi.yaml#/components/schemas/CryptoApplication/properties/risk_level:
     concept: risk_band
     delivery: implement

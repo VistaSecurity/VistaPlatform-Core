@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
@@ -154,6 +155,13 @@ type SourceAdmission struct {
 	Allowed bool `json:"allowed"`
 	// Message is the cap check's sentence when Allowed is false.
 	Message string `json:"message,omitempty"`
+	// CurrentUsage, Limit and UpgradePrompt are the rest of the cap check's
+	// answer when Allowed is false, so a caller can refuse its tenant with the
+	// same 402 body every other asset-creating path answers. Limit is
+	// null for an unlimited plan.
+	CurrentUsage  int    `json:"current_usage,omitempty"`
+	Limit         *int   `json:"limit,omitempty"`
+	UpgradePrompt string `json:"upgrade_prompt,omitempty"`
 }
 
 // ErrAdmissionPolicy and ErrAssetLimit say which half of an admission check
@@ -200,6 +208,8 @@ type SourceImportService struct {
 	assets   sourceAssetWriter
 	limits   assetLimitChecker
 	identity *pgidentity.Repository
+	// archiver is the lifecycle archive a run undo uses (WithArchiver).
+	archiver runArchiver
 }
 
 // NewSourceImportService wires it against Core's AssetService.
@@ -404,7 +414,8 @@ func (s *SourceImportService) Admission(ctx context.Context, tenantID uuid.UUID,
 		return SourceAdmission{}, fmt.Errorf("%w: %v", ErrAssetLimit, err)
 	}
 	if check != nil && !check.Allowed {
-		return SourceAdmission{Allowed: false, Message: check.Message}, nil
+		return SourceAdmission{Allowed: false, Message: check.Message, CurrentUsage: check.CurrentUsage,
+			Limit: check.Limit, UpgradePrompt: check.UpgradePrompt}, nil
 	}
 	return SourceAdmission{Allowed: true}, nil
 }
@@ -520,6 +531,170 @@ func (s *SourceImportService) writeFacts(ctx context.Context, tenantID, assetID 
 	}
 	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	return s.identity.UpsertFacts(ctx, ref, facts.ProducerConnector, fs)
+}
+
+// ---------------------------------------------------------------------------
+// Link identifiers and source presence (platform ADR-0002 D11 items 2–3)
+// ---------------------------------------------------------------------------
+
+// sourceLinkKinds are the identifier kinds a source may attach to an asset it
+// did not just resolve: the scoped link to ITS OWN record for the asset (a
+// CMDB sys_id, scoped to the profile). That link is what makes the source's
+// next pull of the record resolve to the same asset instead of a duplicate
+// (echo suppression). Evidence kinds — serials, MACs, cloud ids — arrive only
+// with an observation, through the identity engine.
+var sourceLinkKinds = map[string]bool{string(identity.KindCMDBSysID): true}
+
+// SourceLink is one link identifier a source attaches to an asset.
+type SourceLink struct {
+	AssetID uuid.UUID `json:"asset_id"`
+	Kind    string    `json:"kind"`
+	Value   string    `json:"value"`
+	// Scope is REQUIRED: a record id is unique only within one source
+	// instance, and an unscoped one would join two instances' records.
+	Scope string `json:"scope"`
+}
+
+// SourcePresence is one change of an asset's presence in a source.
+type SourcePresence struct {
+	AssetID uuid.UUID `json:"asset_id"`
+	// Presence is "present" or "absent".
+	Presence string `json:"presence"`
+	// Reason is the sentence the timeline shows ("retired in ServiceNow").
+	Reason string `json:"reason"`
+}
+
+// SourceItemResult is what happened to one link or presence item.
+type SourceItemResult struct {
+	// Outcome is "recorded", "not_found" (no asset of this tenant has that
+	// id) or "error".
+	Outcome string `json:"outcome"`
+	Error   string `json:"error,omitempty"`
+}
+
+// Outcomes of SourceItemResult.
+const (
+	SourceItemRecorded = "recorded"
+	SourceItemNotFound = "not_found"
+)
+
+// tenantAssets returns which of ids are assets of this tenant (live or not:
+// a presence change on an asset we archived is still worth recording).
+func (s *SourceImportService) tenantAssets(ctx context.Context, tenantID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := map[uuid.UUID]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	raw := make([]string, 0, len(ids))
+	for _, id := range ids {
+		raw = append(raw, id.String())
+	}
+	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		rows, err := tx.QueryContext(ctx, `SELECT id FROM assets WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+			tenantID, pq.Array(raw))
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out[id] = true
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// AttachLinks attaches a source's link identifiers to assets of this tenant.
+//
+// The asset must be this tenant's: the ownership check is explicit here rather
+// than left to the identity repository, because an asset id is a caller's
+// claim and this route exists for callers outside the service.
+func (s *SourceImportService) AttachLinks(ctx context.Context, tenantID uuid.UUID, source identity.Source, items []SourceLink) ([]SourceItemResult, error) {
+	ids := make([]uuid.UUID, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.AssetID)
+	}
+	owned, err := s.tenantAssets(ctx, tenantID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("could not read the tenant's assets: %w", err)
+	}
+	out := make([]SourceItemResult, 0, len(items))
+	for _, it := range items {
+		switch {
+		case !sourceLinkKinds[it.Kind]:
+			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: fmt.Sprintf("identifier kind %q is not a source link", it.Kind)})
+			continue
+		case strings.TrimSpace(it.Scope) == "":
+			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: "a source link needs its scope"})
+			continue
+		case strings.TrimSpace(it.Value) == "":
+			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: "a source link needs a value"})
+			continue
+		case !owned[it.AssetID]:
+			out = append(out, SourceItemResult{Outcome: SourceItemNotFound})
+			continue
+		}
+		err := s.identity.AttachIdentifiers(ctx,
+			identity.AssetRef{TenantID: tenantID.String(), ID: it.AssetID.String()},
+			[]identity.Identifier{{
+				Kind: identity.Kind(it.Kind), Value: it.Value, Scope: it.Scope, Confidence: 1,
+				Source: source, SeenAt: time.Now().UTC(),
+			}})
+		if err != nil {
+			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: err.Error()})
+			continue
+		}
+		out = append(out, SourceItemResult{Outcome: SourceItemRecorded})
+	}
+	return out, nil
+}
+
+// RecordPresence writes source-presence changes on assets' timelines — an
+// `updated` history entry naming the source, and NOTHING about the asset
+// itself: the source's lifecycle and ours decide the rest (D11 item 2).
+func (s *SourceImportService) RecordPresence(ctx context.Context, tenantID uuid.UUID, source identity.Source, platform string, items []SourcePresence) ([]SourceItemResult, error) {
+	ids := make([]uuid.UUID, 0, len(items))
+	for _, it := range items {
+		ids = append(ids, it.AssetID)
+	}
+	owned, err := s.tenantAssets(ctx, tenantID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("could not read the tenant's assets: %w", err)
+	}
+	out := make([]SourceItemResult, 0, len(items))
+	for _, it := range items {
+		if it.Presence != "present" && it.Presence != "absent" {
+			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: fmt.Sprintf("presence %q is not present or absent", it.Presence)})
+			continue
+		}
+		if !owned[it.AssetID] {
+			out = append(out, SourceItemResult{Outcome: SourceItemNotFound})
+			continue
+		}
+		reason := it.Reason
+		if len(reason) > 500 {
+			reason = reason[:500]
+		}
+		err := s.identity.RecordHistory(ctx, identity.HistoryEntry{
+			TenantID: tenantID.String(), AssetID: it.AssetID.String(), Action: identity.ActionUpdated,
+			Source: source,
+			Changes: map[string]any{"source_presence": map[string]any{
+				"source": source.Ref, "platform": platform,
+				"presence": it.Presence, "reason": reason,
+			}},
+			At: time.Now().UTC(),
+		})
+		if err != nil {
+			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: err.Error()})
+			continue
+		}
+		out = append(out, SourceItemResult{Outcome: SourceItemRecorded})
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

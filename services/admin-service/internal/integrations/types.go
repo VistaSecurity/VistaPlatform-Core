@@ -8,9 +8,10 @@ import "fmt"
 // slack, pagerduty, datadog and splunk rows in platform_integrations were
 // dispatched by nothing: alerts are delivered by notification-service from the
 // tenant/platform notification channels, and SIEM forwarding is configured on
-// the audit-service SIEM export page. The old "test" only checked that a
-// credential field was non-empty and reported success, so a row of one of these
-// types looked healthy while doing nothing. They are rejected here instead.
+// the SIEM export page (Security & Trust → SIEM Export, an Enterprise
+// capability). The old "test" only checked that a credential field was
+// non-empty and reported success, so a row of one of these types looked healthy
+// while doing nothing. They are rejected here instead.
 //
 // The platform_integrations CHECK constraint still lists the keys — that is the
 // connector registry's contract, not this package's.

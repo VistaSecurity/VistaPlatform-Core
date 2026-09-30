@@ -16,9 +16,10 @@
 //
 // (1) is always preferable. (2) is the fallback for capabilities that were
 // carved out of Core but have NO registered entitlement key yet — as of the
-// carve that is CMDB/ITSM sync (`inventory-service/ee/cmdbsync`). (SIEM
-// export has since moved to an Enterprise-only service, and the Core console
-// does not offer it at all.) With no key there is nothing to
+// carve that was CMDB/ITSM sync. (It has a key now — `cmdb_sync` — and, like
+// SIEM export and NetBox, has since moved to the Enterprise-only
+// integration service, platform ADR-0002 M3; the Core console shows its
+// upgrade card without asking.) With no key there is nothing to
 // consult before the call, so the client learns the edition FROM the 404 and
 // turns a red "couldn't load" error into an honest "not in this edition"
 // notice: one request, never retried, no broken page.

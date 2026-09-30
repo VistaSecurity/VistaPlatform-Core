@@ -250,12 +250,14 @@ admin_plane:
     # whole platform's audit log: HMAC-gated with RequireInternalAuth, and the
     # caller reaches audit-service through PeerServiceURL, never the edge.
     - /audit-service/internal/
-    # POST /sources/segments, /sources/assets(/admission); GET
-    # /sources/asset-classes/:key, /sources/hardware-assets — the write path
-    # a connector running outside inventory-service uses to bring a system of
-    # record's objects in through the identity engine (platform ADR-0002 D3).
-    # HMAC-only (RequireSignedServiceCall, a signed X-Tenant-ID required); the
-    # caller reaches inventory-service through PeerServiceURL, never the edge.
+    # POST /sources/segments, /sources/assets(/admission|/links|/presence);
+    # GET /sources/asset-classes/:key, /sources/hardware-assets — the write
+    # path a connector running outside inventory-service uses to bring a
+    # system of record's objects in through the identity engine (platform
+    # ADR-0002 D3). GET /ci-export/items, /ci-export/relationships; POST
+    # /ci-export/assets — the reads a CMDB push makes (D4, M3). HMAC-only
+    # (RequireSignedServiceCall, a signed X-Tenant-ID required); the caller
+    # reaches inventory-service through PeerServiceURL, never the edge.
     - /inventory-service/internal/
 
   # Prefixes whose first URL segment does not name the Service that answers
@@ -324,16 +326,17 @@ services:
   - key: inventory-service
     name: inventory-service
     dir: services/inventory-service
-    description: Asset and inventory management (Infrastructure Assets, Crypto Configurations, CMDB sync)
+    description: Asset and inventory management (Infrastructure Assets, Crypto Configurations)
     internal_port: 8080
     external_port: 8082
     route_prefix: /inventory-service
     gateway_timeout: 30s
     api_versions: [v1, v2]
     status: active
-    # ENCRYPTION_MASTER_KEY: CMDB connector credentials (cmdb_sync_profiles.
-    # connection_config) are encrypted at rest with the shared AES-256-GCM
-    # envelope service.
+    # ENCRYPTION_MASTER_KEY: integration credentials (integrations.auth_config)
+    # are encrypted at rest with the shared AES-256-GCM envelope service. (CMDB
+    # connector credentials moved to the Enterprise integration service at platform ADR-0002
+    # M3.)
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
@@ -360,12 +363,6 @@ services:
       renamed_paths:
         /assets: /infrastructure-assets
         /crypto-implementations: /crypto-configurations
-      new_paths:
-        - /cmdb/profiles
-        - /cmdb/profiles/:id
-        - /cmdb/profiles/:id/test
-        - /cmdb/profiles/:id/sync
-        - /cmdb/profiles/:id/jobs
 
   - key: compliance-engine
     name: compliance-engine
@@ -571,12 +568,11 @@ services:
     route_prefix: /audit-service
     gateway_timeout: 15s
     status: active
-    # ENCRYPTION_MASTER_KEY: SIEM integration credentials
-    # (audit.siem_integrations.config — Splunk HEC token, Datadog API key,
-    # webhook secrets) go through shared/security/credentials. The create path
-    # is in-memory today; the key is declared now so persistence cannot land
-    # without the plumbing already in place ( gap 7).
-    required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
+    # No ENCRYPTION_MASTER_KEY: SIEM destination credentials
+    # (audit.siem_integrations.config) are encrypted and decrypted by the
+    # Enterprise integration service, not here (platform ADR-0002 M1), so this
+    # service holds no key to the connector credentials it used to guard.
+    required_secrets: [INTERNAL_AUTH_SECRET, JWT_SECRET]
     docker:
       type: go-service
       dependencies: [postgres, redis, nats]

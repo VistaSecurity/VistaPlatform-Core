@@ -2527,8 +2527,8 @@ export interface paths {
          *     Enterprise and MSP editions, so it cannot honestly distinguish them.
          *
          *     This service speaks only for its own routes. Capabilities carved out of
-         *     other binaries (SIEM export in audit-service, CMDB sync in
-         *     inventory-service) keep their own response probes.
+         *     other binaries (SIEM export, NetBox and CMDB sync in the Enterprise
+         *     integration service) keep their own response probes.
          */
         get: operations["getPlatformEdition"];
         put?: never;

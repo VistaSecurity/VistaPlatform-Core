@@ -119,5 +119,6 @@ known by; its name is its identity.
 
 Spreadsheet Import is for getting inventory **in**. To export inventory **out**, use the
 per-page **Export** button (CSV of the current view) or generate a **CBOM artifact** for
-audit-grade, content-hashed output. To sync with an ITAM/ITSM system continuously, use
-[CMDB Integrations](./cmdb-integrations.md).
+audit-grade, content-hashed output. To sync with an ITAM/ITSM system continuously,
+use an Enterprise CMDB integration (Settings → Integrations).
+

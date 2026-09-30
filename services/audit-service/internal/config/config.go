@@ -70,9 +70,8 @@ type TelemetryConfig struct {
 func Load() *Config {
 	// Reject well-known dev defaults in production (shared guard across services).
 	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.JWTSecret(),
-		"INTERNAL_AUTH_SECRET":  sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", ""),
-		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", ""),
+		"JWT_SECRET":           sharedconfig.JWTSecret(),
+		"INTERNAL_AUTH_SECRET": sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", ""),
 	})
 
 	// Primary configuration uses DATABASE_URL for consistency

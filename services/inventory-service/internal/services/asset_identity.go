@@ -740,7 +740,7 @@ func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInpu
 		TenantID:   tenantID.String(),
 		Source:     source,
 		ObservedAt: observedAt,
-		Admission:  identity.AdmissionEvidence{ReceiptID: receiptID, Authoritative: source.Kind == identity.SourceImported && (strings.HasPrefix(source.Ref, "cmdb:") || strings.HasPrefix(source.Ref, "netbox:"))},
+		Admission:  identity.AdmissionEvidence{ReceiptID: receiptID, Authoritative: identity.IsConnectionSource(source)},
 		Confidence: 1, // a person or a system of record asserted it
 		// The class attributes, so the matcher seam has a vendor and a model to
 		// COMPARE when this turns out to be contested (workstream 4.6). The

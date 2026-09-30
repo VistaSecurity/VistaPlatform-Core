@@ -190,7 +190,7 @@
       "key": "inventory-service",
       "name": "inventory-service",
       "dir": "services/inventory-service",
-      "description": "Asset and inventory management (Infrastructure Assets, Crypto Configurations, CMDB sync)",
+      "description": "Asset and inventory management (Infrastructure Assets, Crypto Configurations)",
       "internal_port": 8080,
       "external_port": 8082,
       "route_prefix": "/inventory-service",
@@ -249,14 +249,7 @@
         "renamed_paths": {
           "/assets": "/infrastructure-assets",
           "/crypto-implementations": "/crypto-configurations"
-        },
-        "new_paths": [
-          "/cmdb/profiles",
-          "/cmdb/profiles/:id",
-          "/cmdb/profiles/:id/test",
-          "/cmdb/profiles/:id/sync",
-          "/cmdb/profiles/:id/jobs"
-        ]
+        }
       }
     },
     {
@@ -570,7 +563,6 @@
       "status": "active",
       "required_secrets": [
         "INTERNAL_AUTH_SECRET",
-        "ENCRYPTION_MASTER_KEY",
         "JWT_SECRET"
       ],
       "docker": {

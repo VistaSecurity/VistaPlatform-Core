@@ -111,7 +111,7 @@ a NEW one still fails.
 
 Only mark an operation this way when its handler is genuinely absent from a
 Core build. A capability that Core mounts as a 402 stub (see
-inventory-service's `internal/handlers/connector_edition.go`) is still
+cbom-service's `internal/cbom/edition.go`, which answers 402 for SPDX/PDF) is still
 `x-edition: enterprise` —
 the tag is about where the *real* handler lives, not about the HTTP status a
 Core build happens to answer with. An operation that is merely

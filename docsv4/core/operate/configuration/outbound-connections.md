@@ -22,7 +22,6 @@ that traffic:
 | `notification-service` | Webhook, Slack, PagerDuty and SMTP delivery |
 | `monitoring-service`, `auth-service`, `admin-service` | SMTP; `admin-service` also fetches the catalogue feeds and delivers licence reports |
 | `device-interrogation-service`, `sensor-manager`, `cluster-sensor-service` | Device management APIs and active probes on your networks |
-| `inventory-service` | Enterprise: the tenant's CMDB connectors |
 | `audit-service` | S3 archival of expired audit logs, when configured |
 | `compliance-engine`, `cbom-service` | Enterprise: the configured [model provider](ai-provider.md) — framework authoring and remediation drafts, and the CBOM comparison narrative. `inventory-service` and `admin-service`, the other two AI callers, reach it too. |
 
@@ -136,8 +135,8 @@ That setting never opens:
 - the platform's own cluster ranges. The chart passes
   `networkPolicy.clusterInternalCIDRs` as `VISTA_PLATFORM_INTERNAL_CIDRS` to
   the services that dial private targets — `device-interrogation-service`
-  and `inventory-service` (CMDB connectors), and any backend whose
-  values entry sets `privateNetworkDialer: true` — whether or not
+  and any backend whose values entry sets `privateNetworkDialer: true` —
+  whether or not
   `egressEnabled` is on, and refuses to render if you try to override it with
   `extraEnv`. A malformed value makes those services refuse every outbound
   connection rather than ignore it. So set `clusterInternalCIDRs` to your

@@ -76,6 +76,11 @@ const REASONS: Record<string, ReasonCopy> = {
     label: 'Not an address',
     detail: 'A stored value that does not parse as an address — look at the asset.',
   },
+  imported_without_scan_consent: {
+    label: 'Imported, not cleared for scanning',
+    detail:
+      'Known only from a connected system of record, and that connection does not allow its assets to be actively scanned. Turn the setting on in the connection, or scan them yourself in Active Scan.',
+  },
 };
 
 /** A reason this build does not know, rendered from its name rather than dropped. */

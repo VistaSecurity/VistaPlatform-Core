@@ -77,6 +77,28 @@ podAntiAffinity:
 {{- toYaml .Values.containerSecurityContext -}}
 {{- end -}}
 
+{{/*
+Short content hash of the shipped schema.sql. It is the key of the
+schema-migration completion marker (public.schema_migration_status, written by
+jobs/schema-migration.yaml once the whole file has applied), and every reader of
+that marker — the seed-data Job and each backend's wait-for-schema init
+container — must derive it identically, or a reader waits for a row that is
+never written. So it is defined once, here.
+*/}}
+{{- define "vistaplatform.schemaHash" -}}
+{{- .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 -}}
+{{- end -}}
+
+{{/*
+The completion-marker check: prints 1 once schema-migration has fully applied
+THIS chart's schema.sql. Keyed on the content hash rather than "a marker
+exists", so on an upgrade it waits for the new schema instead of passing on the
+previous release's row.
+*/}}
+{{- define "vistaplatform.schemaMarkerQuery" -}}
+SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ include "vistaplatform.schemaHash" . }}'
+{{- end -}}
+
 {{/* Name of the chart-managed Secret holding generated datastore creds. */}}
 {{- define "vistaplatform.generatedSecretName" -}}
 {{- printf "%s-generated" (include "vistaplatform.fullname" .) -}}

@@ -93,7 +93,7 @@ data:
 {{ .Files.Get "files/ee/edition-public-key.pem" | indent 4 }}
   {{- end }}
 ---
-{{- $schemaHash := .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 }}
+{{- $schemaHash := include "vistaplatform.schemaHash" . }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -261,7 +261,7 @@ spec:
               done
               echo "Waiting for schema-migration (hash {{ $schemaHash }}) to finish..."
               i=0
-              until psql -tAc "SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ $schemaHash }}'" 2>/dev/null | grep -q 1; do
+              until psql -tAc "{{ include "vistaplatform.schemaMarkerQuery" . }}" 2>/dev/null | grep -q 1; do
                 i=$((i + 1))
                 if [ "$i" -gt 200 ]; then
                   echo "ERROR: schema-migration completion marker not present after ~10m; aborting seed"
@@ -282,7 +282,7 @@ spec:
               done
               echo "Waiting for schema-migration (hash {{ $schemaHash }}) to finish..."
               i=0
-              until psql -d "$DATABASE_URL" -tAc "SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ $schemaHash }}'" 2>/dev/null | grep -q 1; do
+              until psql -d "$DATABASE_URL" -tAc "{{ include "vistaplatform.schemaMarkerQuery" . }}" 2>/dev/null | grep -q 1; do
                 i=$((i + 1))
                 if [ "$i" -gt 200 ]; then
                   echo "ERROR: schema-migration completion marker not present after ~10m; aborting seed"

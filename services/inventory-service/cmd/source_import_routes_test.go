@@ -58,7 +58,7 @@ func sourceEngine(t *testing.T) *gin.Engine {
 	})
 	users.GET("/inventory-service/assets", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), sourceTestSecret)
+	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), sourceTestSecret)
 	return r
 }
 
@@ -79,6 +79,13 @@ var sourceRoutes = []struct{ method, path string }{
 	{http.MethodPost, "/api/v1/inventory-service/internal/sources/assets"},
 	{http.MethodGet, "/api/v1/inventory-service/internal/sources/asset-classes/switch"},
 	{http.MethodGet, "/api/v1/inventory-service/internal/sources/hardware-assets"},
+	// M3: the CMDB push's link identifiers and source presence…
+	{http.MethodPost, "/api/v1/inventory-service/internal/sources/assets/links"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/sources/assets/presence"},
+	// …and the CI export it reads the inventory through.
+	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/items"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/ci-export/assets"},
+	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/relationships"},
 }
 
 func sourceRequest(method, path string, body []byte) *http.Request {
@@ -177,6 +184,9 @@ func TestSourceImportRoutes_AdmitASignedServiceCall(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/inventory-service/internal/sources/segments",
 		"/api/v1/inventory-service/internal/sources/assets",
+		"/api/v1/inventory-service/internal/sources/assets/links",
+		"/api/v1/inventory-service/internal/sources/assets/presence",
+		"/api/v1/inventory-service/internal/ci-export/assets",
 	} {
 		req := sourceRequest(http.MethodPost, path, []byte(`{}`))
 		req.Header.Set(serviceauth.HeaderTenantID, uuid.NewString())
@@ -195,7 +205,7 @@ func TestSourceImportRoutes_AdmitASignedServiceCall(t *testing.T) {
 func TestSourceImportRoutes_FailClosedWithoutASecret(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), "")
+	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), "")
 	req := sourceRequest(http.MethodPost, "/api/v1/inventory-service/internal/sources/segments", nil)
 	req.Header.Set(serviceauth.HeaderTenantID, uuid.NewString())
 	serviceauth.NewSigner("anything-at-all-0123456789").SignRequest(req)
@@ -216,7 +226,9 @@ func TestMainMountsSourceImportRoutesOnlyThroughTheGate(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^\s*mountSourceImportRoutes\(r,`).MatchString(src) {
 		t.Error("main.go does not call mountSourceImportRoutes(r, …); the internal source routes are not served")
 	}
-	if strings.Contains(src, "/internal/sources/") {
-		t.Error("main.go names an /internal/sources/ path directly; it must be mounted only by mountSourceImportRoutes, behind the signed-call gate")
+	for _, prefix := range []string{"/internal/sources/", "/internal/ci-export/"} {
+		if strings.Contains(src, prefix) {
+			t.Errorf("main.go names an %s path directly; it must be mounted only by mountSourceImportRoutes, behind the signed-call gate", prefix)
+		}
 	}
 }

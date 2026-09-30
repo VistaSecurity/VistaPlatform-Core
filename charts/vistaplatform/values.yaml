@@ -488,7 +488,8 @@ backends:
 
   inventory-service:
     needs: {postgres: true, redis: true, nats: true}
-    # encryptionMasterKey: CMDB connector credentials are encrypted at rest.
+    # encryptionMasterKey: integration credentials (integrations.auth_config)
+    # are encrypted at rest.
     secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true, encryptionMasterKey: true}
     resources:
       requests: {cpu: 150m, memory: 256Mi}
@@ -707,8 +708,7 @@ backends:
 
   audit-service:
     needs: {postgres: true, redis: true, nats: true}
-    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey:
-        true, redisUrl: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true}
     resources:
       requests: {cpu: 150m, memory: 192Mi}
       limits: {cpu: 400m, memory: 384Mi}
@@ -1200,7 +1200,12 @@ networkPolicy:
   #   * monitoring-service — historically alert email (SMTP); its incident
   #     notifications now go through notification-service, but the grant is
   #     kept so existing egress proxies/policies keep working
-  #   * inventory-service — the tenant's CMDB connectors (Enterprise)
+  #   * inventory-service — the configured ai.provider endpoint (natural-
+  #     language query), and nothing else. The Enterprise NetBox and CMDB
+  #     connectors that used to dial out from it moved to the Enterprise-only
+  #     integration service (platform ADR-0002 M2/M3). It is off the
+  #     private-network dialer list for the same reason (see
+  #     clusterInternalCIDRs below).
   #   * audit-service — S3 archival of expired audit logs (when configured)
   #   * compliance-engine / cbom-service — the configured ai.provider endpoint,
   #     for framework authoring and remediation drafts, and for the CBOM
@@ -1238,11 +1243,12 @@ networkPolicy:
   # customer's device networks. Those device networks are almost always
   # RFC1918, which is why this list must be your cluster's OWN ranges and not
   # a blanket 10/8 + 172.16/12 + 192.168/16 exclusion.
-  # The same list is injected into the dial guard of device-interrogation-service,
-  # inventory-service (the CMDB connectors) and every backend whose entry sets
-  # `privateNetworkDialer: true`, even when egressEnabled is false, so their
-  # deliberate customer-RFC1918 access can never be used to reach pod or
-  # ClusterIP addresses.
+  # The same list is injected into the dial guard of device-interrogation-service
+  # and every backend whose entry sets `privateNetworkDialer: true`, even when
+  # egressEnabled is false, so their deliberate customer-RFC1918 access can
+  # never be used to reach pod or ClusterIP addresses. (inventory-service was
+  # on this list while it hosted the NetBox and CMDB connectors; it no longer
+  # dials customer private networks and is not.)
   #
   # 169.254.0.0/16 (link-local, including the cloud instance-metadata endpoint
   # at 169.254.169.254) is always excluded by the template and does not need

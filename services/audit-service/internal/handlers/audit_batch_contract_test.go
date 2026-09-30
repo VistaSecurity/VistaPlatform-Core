@@ -6,8 +6,8 @@ package handlers
 // the activity-logs harness — they don't conflict with each other.
 //
 // The SIEM-integration cases that used to live here moved with the feature to
-// ee/siemexport/handlers_contract_test.go when SIEM export was carved out of
-// the Core build; the schemas they assert stay in the shared spec.
+// the Enterprise integration service (platform ADR-0002 M1), along with the
+// spec operations they assert; only the export feed stays in this service.
 //
 // Each handler had a behaviour-preserving field→interface refactor first (see the
 // per-handler *Service interfaces), so the real gin handlers run over httptest
