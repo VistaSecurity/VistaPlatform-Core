@@ -51,6 +51,9 @@ paths:
     get:
       operationId: listTenantChannels
       summary: List the tenant's notification channels
+      description: >
+        Requires `settings.read`. Credentials in each channel's `config` are
+        masked in the response — see `TenantNotificationChannel.config`.
       responses:
         '200':
           description: The tenant's channels (bare array; null when none exist).
@@ -58,6 +61,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TenantChannelListResponse'
+        '403':
+          description: The caller lacks `settings.read`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           description: Internal error.
           content:
@@ -96,6 +105,9 @@ paths:
     get:
       operationId: getTenantChannel
       summary: Get one channel
+      description: >
+        Requires `settings.read`. Credentials in `config` are masked in the
+        response — see `TenantNotificationChannel.config`.
       parameters:
         - name: id
           in: path
@@ -110,6 +122,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TenantNotificationChannel'
+        '403':
+          description: The caller lacks `settings.read`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '400':
           description: Invalid channel ID.
           content:
@@ -190,6 +208,11 @@ paths:
     post:
       operationId: testTenantChannel
       summary: Send a test notification through a channel
+      description: >
+        Delivers a test notification through the channel and reports the real
+        outcome. A channel that did not deliver answers 422 with a sanitized
+        `reason` (see `ChannelTestFailure`). A PagerDuty test triggers and
+        immediately resolves a throwaway incident, so it leaves nothing open.
       parameters:
         - name: id
           in: path
@@ -210,6 +233,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Channel not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: The channel did not deliver the test. `reason` says why.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelTestFailure'
         '500':
           description: Internal error.
           content:
@@ -351,6 +386,33 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
         '400':
           description: Invalid rule ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '500':
+          description: Internal error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+  /tenant/delivery-status:
+    get:
+      operationId: getTenantDeliveryStatus
+      summary: Whether operator-configured delivery transports can deliver
+      description: >
+        Requires `settings.read`. Today this reports email only: with no SMTP
+        host configured (tenant override, platform email settings, or SMTP_HOST)
+        every email channel is inert, and the Settings card says so.
+      responses:
+        '200':
+          description: Per-transport delivery availability.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDeliveryStatus'
+        '403':
+          description: The caller lacks `settings.read`.
           content:
             application/json:
               schema:
@@ -705,6 +767,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
+        '404':
+          description: Channel not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
+        '422':
+          description: The channel did not deliver the test. `reason` says why.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelTestFailure'
         '500':
           description: Internal error.
           content:
@@ -971,6 +1045,15 @@ components:
         config:
           type: [object, 'null']
           additionalProperties: true
+          description: >
+            Delivery configuration with every credential MASKED: a URL keeps
+            only its scheme and host (`https://hooks.example.test/••••`), any
+            other secret keeps only its last four characters (`••••wxyz`, or
+            just `••••` when short). Credentials are the `webhook_url`, `url`,
+            `integration_key`, token/password-style keys, every value under
+            `headers`, and `auth.token` / `auth.username` / `auth.password`.
+            Recipients, `channel` and `auth.type` are returned as-is. The real
+            values are never returned by this API.
         enabled:
           type: boolean
         test_status:
@@ -992,6 +1075,14 @@ components:
         updated_at:
           type: string
           format: date-time
+        signing_secret:
+          type: string
+          description: >
+            Present ONLY on the response to creating a generic webhook channel
+            that has no signing secret of its own: the server-generated HMAC
+            secret, shown once. It is write-only afterwards (masked like every
+            other credential in `config.webhook_secret`); rotate it by sending a
+            new `config.webhook_secret`.
     TenantNotificationRule:
       type: object
       additionalProperties: false
@@ -1092,6 +1183,13 @@ components:
         config:
           type: object
           additionalProperties: true
+          description: >
+            Replaces the channel's config. A credential that is omitted, empty,
+            or equal to the masked form returned by GET keeps its stored value,
+            so a client can echo a GET body back (or leave a secret field
+            blank) without destroying the credential; only a new value replaces
+            it. Omitting a whole nested object (`auth`, `headers`) removes it,
+            and an omitted header is a removed header.
         enabled:
           type: boolean
         description:
@@ -1171,6 +1269,47 @@ components:
       properties:
         status:
           type: string
+    ChannelTestFailure:
+      type: object
+      additionalProperties: false
+      description: >
+        A channel Test that did not deliver. `reason` is a sanitized sentence from
+        a fixed vocabulary — it never contains the channel's URL, query string,
+        headers, tokens or the remote's response body — so it is safe to show.
+      required:
+        - status
+        - error
+        - reason
+      properties:
+        status:
+          type: string
+          enum: [test_failed]
+        error:
+          type: string
+          description: Legacy generic message, kept for clients that only read `error`.
+        reason:
+          type: string
+          description: Why the channel did not deliver, e.g. "Email delivery isn't configured by the platform operator."
+        permanent:
+          type: boolean
+          description: True when retrying cannot help (misconfiguration, rejected address), false when it may be transient.
+    TenantDeliveryStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - email
+      properties:
+        email:
+          type: object
+          additionalProperties: false
+          required:
+            - configured
+          properties:
+            configured:
+              type: boolean
+              description: >
+                False when no SMTP host is configured anywhere — every email
+                channel then fails with "not configured" instead of retrying.
     MaintenanceWindow:
       type: object
       additionalProperties: false
@@ -1257,6 +1396,11 @@ components:
         config:
           type: [object, 'null']
           additionalProperties: true
+          description: >
+            Delivery configuration with every credential MASKED, exactly as for
+            tenant channels (see `TenantNotificationChannel.config`). On update a
+            credential that is omitted, blank or still in its masked form keeps
+            its stored value.
         enabled:
           type: boolean
         test_status:
@@ -1396,10 +1540,22 @@ components:
             type: string
         status:
           type: string
-          description: "sent / failed / pending / partial."
+          description: >
+            `sent` — every attempted channel delivered. `partial` — at least one
+            delivered and at least one did not (failed channels that are still
+            queued for retry count as not delivered). `failed` — none delivered.
+            `pending` — only queued for a digest. The delivery retry worker
+            updates this row when a queued retry succeeds or is abandoned.
         metadata:
           type: [object, 'null']
           additionalProperties: true
+          description: >
+            The notification's own metadata plus delivery bookkeeping.
+            `channel_results` is an array with one entry per attempted channel —
+            `{ channel_id, channel_type, status: sent | retrying | failed,
+            retries_exhausted? }` — and `last_retry_at` is set once the retry
+            worker has touched the row. Delivery error text is deliberately not
+            included.
         created_at:
           type: string
           format: date-time

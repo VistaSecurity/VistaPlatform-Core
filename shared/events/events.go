@@ -348,6 +348,15 @@ const (
 	// audit.job-execution rail was published to for years with no subscriber.
 	SubjectAuditActivityLogs = "audit.activity-logs"
 
+	// SubjectDoorbellAuditStored is rung (core NATS, fire-and-forget) after
+	// audit-service stores audit events, so a consumer of its export feed reads
+	// forward now rather than at its next poll. It carries no event: the feed,
+	// read from the consumer's own cursor, is the source of truth, and a lost
+	// ring only delays delivery. Deliberately OUTSIDE every JetStream stream
+	// (audit.> would capture it and persist every ring for 72h) —
+	// TestDoorbellSubjectsAreOutsideEveryStream holds that.
+	SubjectDoorbellAuditStored = "doorbell.audit.stored"
+
 	// Notification subjects
 	SubjectNotificationsSend = "notifications.send"
 

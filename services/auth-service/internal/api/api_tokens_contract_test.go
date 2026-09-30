@@ -1,6 +1,6 @@
 package api
 
-// Contract test for the API-tokens surface (Settings → API Tokens; consumed
+// Contract test for the API-tokens surface (My Profile → API Tokens; consumed
 // programmatically by mcp-service clients). Extends the auth-service
 // spec-first contract (ADR-0001) and reuses the shared harness (loadSpec /
 // assertConforms / do) from cross_cutter_contract_test.go.

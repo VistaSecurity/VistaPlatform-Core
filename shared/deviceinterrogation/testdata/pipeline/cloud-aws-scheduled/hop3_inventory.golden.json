@@ -1,0 +1,29 @@
+{
+  "vendor": "cloud-aws-scheduled",
+  "input_sha256": "feba12a985ccfe850da56611d2176547453ea8b3c02e450aa9cea1c20fe2bcf8",
+  "inventory": {
+    "outcomes": [
+      [
+        "created",
+        "created"
+      ],
+      [
+        "matched",
+        "matched"
+      ]
+    ],
+    "assets": [
+      {
+        "resource_id": "arn:aws:rds:us-east-1:123456789012:db:orders-db",
+        "class": "managed_database",
+        "identity_status": "established"
+      },
+      {
+        "resource_id": "arn:aws:s3:::example-audit-logs",
+        "class": "object_storage",
+        "identity_status": "established"
+      }
+    ],
+    "parked": 0
+  }
+}

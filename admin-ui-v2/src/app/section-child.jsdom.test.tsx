@@ -35,7 +35,6 @@ vi.mock('../sections/security/dashboard-page', () => ({ SecurityDashboardPage: (
 vi.mock('../sections/security/policy-page', () => ({ SecurityPolicyPage: () => <p>page:policy</p> }));
 vi.mock('../sections/security/activity-page', () => ({ ActivityPage: () => <p>page:activity</p> }));
 vi.mock('../sections/security/retention-page', () => ({ RetentionPage: () => <p>page:retention</p> }));
-vi.mock('../sections/security/siem-page', () => ({ SiemPage: () => <p>page:siem</p> }));
 
 import { SupportPage } from '../sections/support/support-page';
 import { SecurityPage } from '../sections/security/security-page';

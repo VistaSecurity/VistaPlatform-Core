@@ -144,6 +144,14 @@ Sensors automatically rotate certificates when they are expiring soon (within 30
 4. Sensor will rotate on next heartbeat or restart
 
 #### Via API
+
+> **What `$TOKEN` is.** Every `Authorization: Bearer $TOKEN` example in this guide
+> uses a **signed-in session access token** — the short-lived access
+> token issued when a user signs in (`POST /api/v1/auth-service/auth/login`; the
+> web UI holds the same token in its `access_token` cookie). It carries that
+> user's role. A **personal API token** (My Profile → API Tokens, `qvpat_…`) is
+> *not* accepted by these endpoints: those work only with the MCP server.
+
 ```bash
 # Sensor initiates rotation with new CSR
 curl -X POST http://localhost:8080/api/v1/sensor-manager/sensors/{sensor_id}/certificates/rotate \

@@ -438,5 +438,131 @@
     "match": false,
     "observation": { "name": "fileserver", "class": "server", "segment": "seg-a", "source_kind": "measured", "seen_at": "2026-09-11T10:00:00Z", "vendor": "Dell", "identifiers": { "hostname": "fileserver", "serial_number": "new-4400" } },
     "candidate": { "name": "fileserver", "class": "server", "segment": "seg-a", "source_kind": "imported", "seen_at": "2024-09-11T10:00:00Z", "vendor": "Dell", "identifiers": { "hostname": "fileserver", "serial_number": "old-1100" } }
+  },
+  {
+    "name": "positive/v2-second-nic-mac-matches",
+    "match": true,
+    "observation": { "name": "", "class": "hypervisor", "segment": "seg-dc2", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "f8:bc:12:10:20:30", "ip_address": "198.51.100.140" } },
+    "candidate": { "name": "hv-12", "class": "hypervisor", "segment": "seg-dc2", "source_kind": "imported", "seen_at": "2026-09-19T10:00:00Z", "vendor": "Dell", "identifiers": { "mac_address": ["f8:bc:12:10:20:31", "f8:bc:12:10:20:30"], "hostname": "hv-12" } }
+  },
+  {
+    "name": "positive/v2-dock-nic-vendor-differs-agent-agrees",
+    "match": true,
+    "observation": { "name": "eng-laptop-31", "class": "laptop", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "f8:bc:12:31:31:01", "agent_id": "ag-5531", "hostname": "eng-laptop-31" } },
+    "candidate": { "name": "eng-laptop-31", "class": "laptop", "segment": "seg-office", "source_kind": "declared", "seen_at": "2026-09-18T10:00:00Z", "identifiers": { "mac_address": "00:07:e9:31:31:02", "agent_id": "ag-5531", "hostname": "eng-laptop-31" } }
+  },
+  {
+    "name": "negative/v2-printer-and-workstation-nic-vendors-differ",
+    "match": false,
+    "observation": { "name": "", "class": "printer", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "f4:81:39:77:00:01", "ip_address": "198.51.100.77" } },
+    "candidate": { "name": "wks-2207", "class": "workstation", "segment": "seg-office", "source_kind": "imported", "seen_at": "2026-06-01T10:00:00Z", "identifiers": { "mac_address": "f8:bc:12:22:07:00", "ip_address": "198.51.100.77", "hostname": "wks-2207" } }
+  },
+  {
+    "name": "negative/v2-rack-of-identical-nics",
+    "match": false,
+    "observation": { "name": "node-a7", "class": "server", "segment": "seg-dc2", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "f8:bc:12:aa:00:07", "hostname": "node-a7" } },
+    "candidate": { "name": "node-c3", "class": "server", "segment": "seg-dc2", "source_kind": "measured", "seen_at": "2026-09-20T09:00:00Z", "identifiers": { "mac_address": "f8:bc:12:aa:00:33", "hostname": "node-c3" } }
+  },
+  {
+    "name": "positive/v2-nas-oui-agrees-hostname-agrees",
+    "match": true,
+    "observation": { "name": "backup-nas", "class": "storage_device", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "00:11:32:5e:5e:01", "hostname": "backup-nas", "ip_address": "198.51.100.150" } },
+    "candidate": { "name": "backup-nas", "class": "storage_device", "segment": "seg-office", "source_kind": "imported", "seen_at": "2026-09-10T10:00:00Z", "vendor": "Synology Inc.", "identifiers": { "hostname": "backup-nas", "ip_address": "198.51.100.150" } }
+  },
+  {
+    "name": "negative/v2-lease-passed-to-another-nic",
+    "match": false,
+    "observation": { "name": "", "class": "", "segment": "seg-guest", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "0a:4f:10:00:00:51", "ip_address": "203.0.113.50" } },
+    "candidate": { "name": "kiosk-a", "class": "iot_device", "segment": "seg-guest", "source_kind": "declared", "seen_at": "2026-09-16T10:00:00Z", "identifiers": { "mac_address": "0a:4f:10:00:00:77", "ip_address": "203.0.113.50", "hostname": "kiosk-a" } }
+  },
+  {
+    "name": "negative/v2-lease-passed-same-hardware-vendor",
+    "match": false,
+    "observation": { "name": "", "class": "laptop", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "00:0c:f1:40:00:01", "ip_address": "198.51.100.180" } },
+    "candidate": { "name": "finance-lt-9", "class": "laptop", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-12T10:00:00Z", "identifiers": { "mac_address": "00:0c:f1:40:00:99", "ip_address": "198.51.100.180", "hostname": "finance-lt-9" } }
+  },
+  {
+    "name": "positive/v2-replaced-nic-fqdn-and-address-agree",
+    "match": true,
+    "observation": { "name": "db-replica-2.corp.example.com", "class": "server", "segment": "seg-a", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "f8:bc:12:dd:02:02", "ip_address": "198.51.100.160", "fqdn": "db-replica-2.corp.example.com" } },
+    "candidate": { "name": "db-replica-2", "class": "server", "segment": "seg-a", "source_kind": "imported", "seen_at": "2026-09-02T10:00:00Z", "identifiers": { "mac_address": "f8:bc:12:dd:02:01", "ip_address": "198.51.100.160", "fqdn": "db-replica-2.corp.example.com", "hostname": "db-replica-2" } }
+  },
+  {
+    "name": "negative/v2-two-phones-both-called-iphone",
+    "match": false,
+    "observation": { "name": "iPhone", "class": "mobile", "segment": "seg-guest", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "hostname": "iphone", "mac_address": "0a:1c:22:00:00:01", "ip_address": "203.0.113.70" } },
+    "candidate": { "name": "iPhone", "class": "mobile", "segment": "seg-guest", "source_kind": "measured", "seen_at": "2026-09-19T10:00:00Z", "identifiers": { "hostname": "iphone", "mac_address": "0e:5d:31:00:00:02", "ip_address": "203.0.113.91" } }
+  },
+  {
+    "name": "negative/v2-tenant-common-name",
+    "match": false,
+    "observation": { "name": "lobby-display", "class": "iot_device", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "hostname": "lobby-display", "mac_address": "00:1a:11:0d:00:01" }, "generic_names": ["lobby-display"] },
+    "candidate": { "name": "lobby-display", "class": "iot_device", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-15T10:00:00Z", "identifiers": { "hostname": "lobby-display", "mac_address": "00:1a:11:0d:00:02" } }
+  },
+  {
+    "name": "positive/v2-generic-name-but-mac-agrees",
+    "match": true,
+    "observation": { "name": "iPad", "class": "mobile", "segment": "seg-guest", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "hostname": "ipad", "mac_address": "0a:11:22:33:44:55", "ip_address": "203.0.113.72" } },
+    "candidate": { "name": "iPad", "class": "mobile", "segment": "seg-guest", "source_kind": "measured", "seen_at": "2026-09-20T08:00:00Z", "identifiers": { "hostname": "ipad", "mac_address": "0a:11:22:33:44:55" } }
+  },
+  {
+    "name": "negative/v2-rotating-uuid-names-look-alike",
+    "match": false,
+    "observation": { "name": "5f3c2a9e-1b7d-4c8e-9f00-3a2b1c0d9e8f.local", "class": "iot_device", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": {} },
+    "candidate": { "name": "5f3c2a9e-7d10-4e2b-8a11-6c5d4e3f2a1b.local", "class": "iot_device", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-19T10:00:00Z", "identifiers": {} }
+  },
+  {
+    "name": "negative/v2-address-written-as-a-name",
+    "match": false,
+    "observation": { "name": "198-51-100-23.local", "class": "", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "ip_address": "198.51.100.23" } },
+    "candidate": { "name": "198-51-100-23.local", "class": "printer", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-07-01T10:00:00Z", "identifiers": { "hostname": "198-51-100-23.local", "ip_address": "198.51.100.23" } }
+  },
+  {
+    "name": "negative/v2-placeholder-none-names",
+    "match": false,
+    "observation": { "name": "none", "class": "iot_device", "segment": "seg-iot", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "00:1a:11:0e:00:01" } },
+    "candidate": { "name": "none", "class": "iot_device", "segment": "seg-iot", "source_kind": "measured", "seen_at": "2026-09-18T10:00:00Z", "identifiers": { "mac_address": "00:1a:11:0e:00:09" } }
+  },
+  {
+    "name": "positive/v2-synthetic-name-but-mac-agrees",
+    "match": true,
+    "observation": { "name": "198-51-100-40.local", "class": "printer", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "00:1b:a9:40:40:40", "ip_address": "198.51.100.40" } },
+    "candidate": { "name": "198-51-100-40.local", "class": "printer", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-19T10:00:00Z", "identifiers": { "mac_address": "00:1b:a9:40:40:40" } }
+  },
+  {
+    "name": "positive/v2-eui64-derived-mac-meets-controller-mac",
+    "match": true,
+    "observation": { "name": "", "class": "hypervisor", "segment": "seg-dc2", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "ip_address": "2001:db8:0:2:fabc:12ff:fed4:e5f6", "mac_address": "f8:bc:12:d4:e5:f6" }, "derived_identifiers": { "mac_address": "f8:bc:12:d4:e5:f6" } },
+    "candidate": { "name": "hv-03", "class": "hypervisor", "segment": "seg-dc2", "source_kind": "measured", "seen_at": "2026-09-20T09:30:00Z", "identifiers": { "mac_address": "f8:bc:12:d4:e5:f6", "hostname": "hv-03" } }
+  },
+  {
+    "name": "positive/v2-serial-derived-mac-meets-sensor-mac",
+    "match": true,
+    "observation": { "name": "", "class": "storage_device", "segment": "seg-office", "source_kind": "declared", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "serial_number": "001132a4b5c6", "mac_address": "00:11:32:a4:b5:c6" }, "derived_identifiers": { "mac_address": "00:11:32:a4:b5:c6" } },
+    "candidate": { "name": "", "class": "storage_device", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T09:00:00Z", "identifiers": { "mac_address": "00:11:32:a4:b5:c6", "ip_address": "198.51.100.199" } }
+  },
+  {
+    "name": "negative/v2-derived-mac-from-a-stale-dns-record",
+    "match": false,
+    "observation": { "name": "old-build-box.corp.example.com", "class": "server", "segment": "seg-a", "source_kind": "imported", "seen_at": "2026-02-01T10:00:00Z", "identifiers": { "fqdn": "old-build-box.corp.example.com", "ip_address": "2001:db8:0:1:207:e9ff:fe31:3102", "mac_address": "00:07:e9:31:31:02" }, "derived_identifiers": { "mac_address": "00:07:e9:31:31:02" } },
+    "candidate": { "name": "design-laptop-4", "class": "laptop", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "mac_address": "00:07:e9:31:31:02", "hostname": "design-laptop-4" } }
+  },
+  {
+    "name": "negative/v2-cloned-vm-kept-its-templates-static-ipv6",
+    "match": false,
+    "observation": { "name": "app-clone-17", "class": "server", "segment": "seg-a", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "hostname": "app-clone-17", "ip_address": "2001:db8:0:1:250:56ff:fe00:1001", "mac_address": "00:50:56:00:10:01" }, "derived_identifiers": { "mac_address": "00:50:56:00:10:01" } },
+    "candidate": { "name": "app-golden", "class": "server", "segment": "seg-a", "source_kind": "measured", "seen_at": "2026-08-02T10:00:00Z", "identifiers": { "hostname": "app-golden", "mac_address": "00:50:56:00:10:01" } }
+  },
+  {
+    "name": "positive/v2-one-name-spelled-two-ways",
+    "match": true,
+    "observation": { "name": "mktg-print-01", "class": "printer", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "hostname": "mktg-print-01", "ip_address": "198.51.100.61" } },
+    "candidate": { "name": "MKTG Print 01", "class": "printer", "segment": "seg-office", "source_kind": "imported", "seen_at": "2026-09-19T10:00:00Z", "identifiers": { "ip_address": "198.51.100.61" } }
+  },
+  {
+    "name": "negative/v2-sequential-names-cmdb-and-sensor",
+    "match": false,
+    "observation": { "name": "print-srv-07", "class": "server", "segment": "seg-office", "source_kind": "measured", "seen_at": "2026-09-20T10:00:00Z", "identifiers": { "hostname": "print-srv-07" } },
+    "candidate": { "name": "print-srv-08", "class": "server", "segment": "seg-office", "source_kind": "imported", "seen_at": "2026-09-18T10:00:00Z", "identifiers": { "hostname": "print-srv-08", "cmdb_sys_id": "sys-6108" } }
   }
 ]

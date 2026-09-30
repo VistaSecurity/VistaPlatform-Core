@@ -150,14 +150,16 @@ func (m LearnedMatcher) Match(_ context.Context, candidate Observation, existing
 
 func observationSide(o Observation) matcher.Side {
 	return matcher.Side{
-		Name:        o.Name,
-		Class:       o.Kind,
-		Identifiers: o.Identifiers,
-		Segment:     o.Segment,
-		Vendor:      attributeString(o.Attributes, "vendor"),
-		Model:       attributeString(o.Attributes, "model"),
-		SourceKind:  o.SourceKind,
-		SeenAt:      o.ObservedAt,
+		Name:         o.Name,
+		Class:        o.Kind,
+		Identifiers:  o.Identifiers,
+		Derived:      o.DerivedIdentifiers,
+		GenericNames: o.GenericNames,
+		Segment:      o.Segment,
+		Vendor:       attributeString(o.Attributes, "vendor"),
+		Model:        attributeString(o.Attributes, "model"),
+		SourceKind:   o.SourceKind,
+		SeenAt:       o.ObservedAt,
 	}
 }
 
@@ -166,6 +168,7 @@ func assetSide(a AssetSummary) matcher.Side {
 		Name:        a.Name,
 		Class:       a.Class,
 		Identifiers: a.Identifiers,
+		Derived:     a.DerivedIdentifiers,
 		Segment:     a.Segment,
 		Vendor:      attributeString(a.Attributes, "vendor"),
 		Model:       attributeString(a.Attributes, "model"),

@@ -131,7 +131,9 @@
     "internal_prefixes": [
       "/notification-service/internal/",
       "/sensor-manager/internal/",
-      "/auth-service/internal/"
+      "/auth-service/internal/",
+      "/audit-service/internal/",
+      "/inventory-service/internal/"
     ],
     "service_overrides": {
       "/admin-service/status/": "monitoring-service"

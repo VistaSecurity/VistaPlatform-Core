@@ -40,6 +40,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/assetclasshistory"
 	"github.com/vistasecurity/vistaplatform/shared/database"
@@ -59,6 +60,15 @@ type Repository struct {
 	// tx and boundTenant are set only on a bound Repository.
 	tx          *sql.Tx
 	boundTenant string
+
+	// freshReceipts records, per observation id, the receipt StoreObservation
+	// INSERTED in this transaction — as opposed to one it found already there
+	// (a transport retry, or a re-evaluation replaying stored evidence).
+	// FinishObservation reads it to tell a new sighting from a re-read of an
+	// old one when it settles which row the resolution belongs to
+	// (observation_split.go). Only a bound Repository has one transaction to
+	// remember it for.
+	freshReceipts map[string]string
 }
 
 // New returns a Repository over db. Each method opens its own tenant-scoped
@@ -98,6 +108,27 @@ func (r *Repository) RunInTx(ctx context.Context, tenantID string, fn func(*Repo
 	return database.WithTenantTx(ctx, r.db, tid, func(tx *sql.Tx) error {
 		return fn(&Repository{db: r.db, tx: tx, boundTenant: tid.String()})
 	})
+}
+
+// Bind returns a Repository bound to a transaction the CALLER already opened —
+// the other direction of [Repository.RunInTx], for a caller whose unit of work
+// is not the engine's. The transaction must already carry the tenant session
+// (`app.tenant_id`) for tenantID, which is what database.WithTenantTx sets up;
+// the Repository neither commits nor rolls it back.
+//
+// inventory-service's rule-merge executor uses it to re-read the two records
+// through [Repository.LoadSummaries] and [Repository.LastKeptSeparate] inside
+// the merge's own transaction, under the merge's locks, so the same-device rule
+// is judged on exactly the rows the merge then moves ( Phase 4).
+func Bind(db *sql.DB, tx *sql.Tx, tenantID string) (*Repository, error) {
+	if tx == nil {
+		return nil, errors.New("identity/postgres: Bind needs a transaction")
+	}
+	tid, err := parseTenant(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return &Repository{db: db, tx: tx, boundTenant: tid.String()}, nil
 }
 
 // Tx returns the transaction a bound Repository runs on, or nil.
@@ -500,6 +531,14 @@ func (r *Repository) AttachIdentifiers(ctx context.Context, asset identity.Asset
 // row count IS the conflict, reported as [identity.ErrIdentifierConflict]
 // without ever provoking a constraint violation that would poison the
 // transaction.
+//
+// Provenance on a re-sighting ( Phase 2): a value held as DERIVED
+// (`source_kind = 'inferred'`) that is now observed natively is upgraded to the
+// native source and ref; a value held natively that arrives again as derived
+// keeps its native source AND ref — a `measured` row whose ref said
+// "derived:eui64:…" would tell the asset page it was worked out when it was
+// seen. Every SET expression reads the row's OLD values, so the two CASEs see
+// the same pre-update source_kind.
 func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.AssetRef, ids []identity.Identifier) error {
 	assetID, err := parseAsset(asset.ID)
 	if err != nil {
@@ -520,7 +559,14 @@ func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.Asse
 			ON CONFLICT (tenant_id, kind, value, coalesce(scope, '')) DO UPDATE
 			SET last_seen_at = GREATEST(public.asset_identifiers.last_seen_at, EXCLUDED.last_seen_at),
 			    confidence   = GREATEST(public.asset_identifiers.confidence, EXCLUDED.confidence),
-			    source_ref   = coalesce(EXCLUDED.source_ref, public.asset_identifiers.source_ref),
+			    source_kind  = CASE
+			        WHEN public.asset_identifiers.source_kind = 'inferred' AND EXCLUDED.source_kind <> 'inferred'
+			        THEN EXCLUDED.source_kind
+			        ELSE public.asset_identifiers.source_kind END,
+			    source_ref   = CASE
+			        WHEN EXCLUDED.source_kind = 'inferred' AND public.asset_identifiers.source_kind <> 'inferred'
+			        THEN public.asset_identifiers.source_ref
+			        ELSE coalesce(EXCLUDED.source_ref, public.asset_identifiers.source_ref) END,
 			    updated_at   = now()
 			WHERE public.asset_identifiers.asset_id = EXCLUDED.asset_id`,
 			asset.TenantID, assetID, string(id.Kind), id.Value, id.Scope,
@@ -945,60 +991,8 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 		return identity.ProposalRef{}, err
 	}
 
-	candidates := make([]map[string]any, 0, len(p.Candidates))
-	for _, c := range p.Candidates {
-		matched := make([]map[string]any, 0, len(c.MatchedIdentifiers))
-		for _, id := range c.MatchedIdentifiers {
-			matched = append(matched, map[string]any{
-				"kind": string(id.Kind), "value": id.Value, "scope": id.Scope,
-			})
-		}
-		candidate := map[string]any{
-			"asset_id":            c.Ref.ID,
-			"matched_identifiers": matched,
-			"score":               c.Score,
-			"reason":              c.Reason,
-		}
-		// The score's working, when the matcher could show any. Omitted rather
-		// than written empty: a candidate the null matcher left unscored has no
-		// explanation, and `"explanation": []` would read as "we looked and
-		// there was nothing to say".
-		if len(c.Explanation) > 0 {
-			factors := make([]map[string]any, 0, len(c.Explanation))
-			for _, f := range c.Explanation {
-				factors = append(factors, map[string]any{
-					"feature":      f.Feature,
-					"label":        f.Label,
-					"value":        f.Value,
-					"weight":       f.Weight,
-					"contribution": f.Contribution,
-				})
-			}
-			candidate["explanation"] = factors
-		}
-		candidates = append(candidates, candidate)
-	}
 	fingerprint := identity.MergeProposalFingerprint(p)
-	payload, err := json.Marshal(map[string]any{
-		"kind":                 "merge_proposal",
-		"status":               "pending",
-		"observation_asset_id": p.ObservationAssetID,
-		"candidates":           candidates,
-		"reason":               p.Reason,
-		// Which matcher RANKED this proposal, whether or not it accepted
-		// anything. A proposal a human resolves should still be able to say
-		// which model put the winner at the top (ADR-0008 D4.1).
-		"model_id":            p.ModelID,
-		"source_ref":          p.SourceRef,
-		"auto_accepted":       p.AutoAccepted,
-		"accepted_asset_id":   p.AcceptedAssetID,
-		"accepted_score":      p.AcceptedScore,
-		"accepted_model_id":   p.AcceptedModelID,
-		"accepted_source_ref": p.AcceptedSourceRef,
-		"source_kind":         string(p.Source.Kind),
-		// The idempotency key. See idx_asset_history_pending_merge_proposal.
-		"fingerprint": fingerprint,
-	})
+	payload, err := json.Marshal(mergeProposalPayload(p, fingerprint))
 	if err != nil {
 		return identity.ProposalRef{}, fmt.Errorf("identity/postgres: marshal merge proposal: %w", err)
 	}
@@ -1033,23 +1027,48 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 			// an error and not a zero ref: the caller is about to tell somebody
 			// "review the merge proposal", and it has to name the one that is
 			// actually in the queue.
+			//
+			// FOR UPDATE: the fold below is a read-modify-write, and two
+			// observations re-asking the question in parallel must not each
+			// fold into the same old copy and lose the other's evidence.
+			var (
+				stored    []byte
+				createdAt time.Time
+			)
 			if err := tx.QueryRowContext(ctx, `
-				SELECT id FROM public.asset_history
+				SELECT id, changes_json, created_at FROM public.asset_history
 				WHERE tenant_id = $1
 				  AND action = 'merge_proposed'
 				  AND changes_json ->> 'fingerprint' = $2
 				  AND COALESCE(changes_json ->> 'status', 'pending') = 'pending'
 				ORDER BY seq DESC
-				LIMIT 1`, tenantID, fingerprint).Scan(&id); err != nil {
+				LIMIT 1
+				FOR UPDATE`, tenantID, fingerprint).Scan(&id, &stored, &createdAt); err != nil {
 				return fmt.Errorf("identity/postgres: find the existing merge proposal: %w", err)
 			}
-			// A recurring sighting refreshes the pending question's evidence,
-			// without changing its original proposal time or any decision.
+			// A recurring sighting FOLDS its evidence into the pending question
+			// ( A3) — the union of what every sighting matched, the best
+			// score — without changing its original proposal time or any
+			// decision. identity.FoldMergeProposal is the rule; the in-memory
+			// store applies the same function.
+			prior, err := decodeStoredMergeProposal(stored, createdAt)
+			if err != nil {
+				return err
+			}
+			incoming := p
+			incoming.ProposedAt = timeOrNow(p.ProposedAt)
+			merged := identity.FoldMergeProposal(prior, incoming)
+			refreshed, err := json.Marshal(mergeProposalPayload(merged, fingerprint))
+			if err != nil {
+				return fmt.Errorf("identity/postgres: marshal folded merge proposal: %w", err)
+			}
+			// `||` rather than a replace: keys another path stamped on the row
+			// (the approvals path's reconcile notes, for one) survive a fold.
 			if _, err := tx.ExecContext(ctx, `UPDATE public.asset_history
              SET changes_json=changes_json||$3::jsonb||jsonb_build_object('latest_evidence_at',$4::timestamptz)
-             WHERE tenant_id=$1 AND id=$2 AND coalesce(changes_json->>'status','pending')='pending'
-             AND coalesce((changes_json->>'latest_evidence_at')::timestamptz,created_at)<=$4`, tenantID, id, payload, timeOrNow(p.ProposedAt)); err != nil {
-				return fmt.Errorf("identity/postgres: refresh pending merge evidence: %w", err)
+             WHERE tenant_id=$1 AND id=$2 AND coalesce(changes_json->>'status','pending')='pending'`,
+				tenantID, id, refreshed, merged.LatestEvidenceAt); err != nil {
+				return fmt.Errorf("identity/postgres: fold pending merge evidence: %w", err)
 			}
 			reused = true
 			// Still refresh the observation's status below: the asset is
@@ -1084,6 +1103,305 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 		return identity.ProposalRef{}, err
 	}
 	return identity.ProposalRef{TenantID: tenantID, ID: id.String(), Reused: reused}, nil
+}
+
+// mergeProposalPayload is the `changes_json` a merge proposal row carries — the
+// shape the Approvals surface reads. One spelling for the insert and for the
+// fold, so a reused proposal cannot drift from a fresh one.
+func mergeProposalPayload(p identity.MergeProposal, fingerprint string) map[string]any {
+	candidates := make([]map[string]any, 0, len(p.Candidates))
+	var snapshots []map[string]any
+	for _, c := range p.Candidates {
+		matched := make([]map[string]any, 0, len(c.MatchedIdentifiers))
+		for _, id := range c.MatchedIdentifiers {
+			m := map[string]any{
+				"kind": string(id.Kind), "value": id.Value, "scope": id.Scope,
+			}
+			// A generic name ( B2) is per-observation context, not
+			// identity, so it is not in the identifier's key — but it is part
+			// of the EVIDENCE: the rule-merge executor re-evaluates the
+			// same-device rule from this row, and its condition 8 ("no
+			// candidate linked by a generic name alone") has to be able to see
+			// it. Written only when true, so every other row is unchanged.
+			if id.Generic {
+				m["generic"] = true
+			}
+			// Likewise a DERIVED identifier ( Phase 2) keeps its
+			// provenance here: the rule counts a derived MAC and no other
+			// derived kind (condition 3), and a reviewer reading the proposal
+			// should see which value was worked out rather than seen.
+			if id.Inferred() {
+				m["source"] = map[string]any{"kind": string(id.Source.Kind), "ref": id.Source.Ref}
+			}
+			matched = append(matched, m)
+		}
+		candidate := map[string]any{
+			"asset_id":            c.Ref.ID,
+			"matched_identifiers": matched,
+			"score":               c.Score,
+			"reason":              c.Reason,
+		}
+		// The score's working, when the matcher could show any. Omitted rather
+		// than written empty: a candidate the null matcher left unscored has no
+		// explanation, and `"explanation": []` would read as "we looked and
+		// there was nothing to say".
+		if len(c.Explanation) > 0 {
+			factors := make([]map[string]any, 0, len(c.Explanation))
+			for _, f := range c.Explanation {
+				factors = append(factors, map[string]any{
+					"feature":      f.Feature,
+					"label":        f.Label,
+					"value":        f.Value,
+					"weight":       f.Weight,
+					"contribution": f.Contribution,
+				})
+			}
+			candidate["explanation"] = factors
+		}
+		// The candidate as the matcher compared it ( Phase 5), for the
+		// lossless training export. A TOP-LEVEL list keyed by asset id, not a
+		// key inside the candidate: an executed merge rewrites `candidates`
+		// (reconcileMergeProposals remaps every merged record onto the survivor
+		// and drops the duplicates), and the losing record's snapshot is the
+		// half of the training pair that would go with it.
+		if c.Snapshot != nil {
+			snap := matcherSidePayload(*c.Snapshot, true)
+			snap["asset_id"] = c.Ref.ID
+			snapshots = append(snapshots, snap)
+		}
+		candidates = append(candidates, candidate)
+	}
+	payload := map[string]any{
+		"kind":                 "merge_proposal",
+		"status":               "pending",
+		"observation_asset_id": p.ObservationAssetID,
+		"candidates":           candidates,
+		"reason":               p.Reason,
+		// Which matcher RANKED this proposal, whether or not it accepted
+		// anything. A proposal a human resolves should still be able to say
+		// which model put the winner at the top (ADR-0008 D4.1).
+		"model_id":            p.ModelID,
+		"source_ref":          p.SourceRef,
+		"auto_accepted":       p.AutoAccepted,
+		"accepted_asset_id":   p.AcceptedAssetID,
+		"accepted_score":      p.AcceptedScore,
+		"accepted_model_id":   p.AcceptedModelID,
+		"accepted_source_ref": p.AcceptedSourceRef,
+		"source_kind":         string(p.Source.Kind),
+		// The idempotency key. See idx_asset_history_pending_merge_proposal.
+		"fingerprint": fingerprint,
+	}
+	// The same-device rule's verdict ( Phase 4) — the rule-merge
+	// executor's work item. Written only when the rule held: the fold merges
+	// with `||`, so an absent key leaves a verdict another sighting stamped
+	// (or the executor cleared) exactly as it is.
+	if p.RuleVerdict != "" {
+		payload["rule_verdict"] = p.RuleVerdict
+		evidence := p.RuleEvidence
+		if evidence == nil {
+			evidence = []string{}
+		}
+		payload["rule_evidence"] = evidence
+	}
+	// The two top candidates scored against EACH OTHER ( Phase 5).
+	// Advisory: nothing reads it to decide. Omitted when unscored, because a
+	// written 0 would read as "scored, and certainly two things".
+	if p.PairScore > 0 {
+		payload["pair_score"] = p.PairScore
+		payload["pair_asset_ids"] = p.PairAssetIDs
+		payload["pair_reason"] = p.PairReason
+	}
+	// The observation side as the matcher saw it, so an export of this row is
+	// a complete training sample (scripts/export-merge-decisions.sql).
+	if len(p.ObservationIdentifiers) > 0 {
+		payload["observation_identifiers"] = identifierPayload(p.ObservationIdentifiers)
+	}
+	if p.ObservationContext != nil {
+		payload["observation_context"] = matcherSidePayload(*p.ObservationContext, false)
+	}
+	if len(snapshots) > 0 {
+		payload["candidate_snapshots"] = snapshots
+	}
+	return payload
+}
+
+// identifierPayload is the compact spelling of identifiers on a proposal row:
+// kind, value, scope, and the two per-value marks the matcher reads — derived
+// (`source_kind = inferred`) and generic. Provenance refs, confidences and
+// times are left out: the row is evidence for a reviewer and a training
+// sample, not a second copy of asset_identifiers.
+func identifierPayload(ids []identity.Identifier) []map[string]any {
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		m := map[string]any{"kind": string(id.Kind), "value": id.Value, "scope": id.Scope}
+		if id.Inferred() {
+			m["derived"] = true
+		}
+		if id.Generic {
+			m["generic"] = true
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// matcherSidePayload is one side's matcher snapshot. Identifiers only when
+// asked for: on the observation they live under `observation_identifiers`.
+func matcherSidePayload(s identity.MatcherSide, withIdentifiers bool) map[string]any {
+	m := map[string]any{
+		"name":        s.Name,
+		"class":       s.Class,
+		"segment":     s.Segment,
+		"vendor":      s.Vendor,
+		"model":       s.Model,
+		"source_kind": s.SourceKind,
+	}
+	if !s.SeenAt.IsZero() {
+		m["seen_at"] = s.SeenAt.UTC().Format(time.RFC3339Nano)
+	}
+	if withIdentifiers {
+		m["identifiers"] = identifierPayload(s.Identifiers)
+	}
+	return m
+}
+
+// storedIdentifier is [identifierPayload]'s element, read back.
+type storedIdentifier struct {
+	Kind    string `json:"kind"`
+	Value   string `json:"value"`
+	Scope   string `json:"scope"`
+	Derived bool   `json:"derived"`
+	Generic bool   `json:"generic"`
+}
+
+func (s storedIdentifier) identifier() identity.Identifier {
+	id := identity.Identifier{Kind: identity.Kind(s.Kind), Value: s.Value, Scope: s.Scope, Generic: s.Generic}
+	if s.Derived {
+		id.Source.Kind = identity.SourceInferred
+	}
+	return id
+}
+
+func storedIdentifiers(in []storedIdentifier) []identity.Identifier {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]identity.Identifier, 0, len(in))
+	for _, s := range in {
+		out = append(out, s.identifier())
+	}
+	return out
+}
+
+// storedMatcherSide is [matcherSidePayload], read back.
+type storedMatcherSide struct {
+	Name        string             `json:"name"`
+	Class       string             `json:"class"`
+	Segment     string             `json:"segment"`
+	Vendor      string             `json:"vendor"`
+	Model       string             `json:"model"`
+	SourceKind  string             `json:"source_kind"`
+	SeenAt      *time.Time         `json:"seen_at"`
+	Identifiers []storedIdentifier `json:"identifiers"`
+}
+
+func (s *storedMatcherSide) side() *identity.MatcherSide {
+	if s == nil {
+		return nil
+	}
+	out := &identity.MatcherSide{
+		Name: s.Name, Class: s.Class, Segment: s.Segment, Vendor: s.Vendor, Model: s.Model,
+		SourceKind: s.SourceKind, Identifiers: storedIdentifiers(s.Identifiers),
+	}
+	if s.SeenAt != nil {
+		out.SeenAt = s.SeenAt.UTC()
+	}
+	return out
+}
+
+// storedCandidateSnapshot is one entry of `candidate_snapshots`.
+type storedCandidateSnapshot struct {
+	AssetID string `json:"asset_id"`
+	storedMatcherSide
+}
+
+// storedMergeProposal is [mergeProposalPayload]'s shape, read back.
+type storedMergeProposal struct {
+	ObservationAssetID string `json:"observation_asset_id"`
+	Candidates         []struct {
+		AssetID            string                `json:"asset_id"`
+		MatchedIdentifiers []identity.Identifier `json:"matched_identifiers"`
+		Score              float64               `json:"score"`
+		Reason             string                `json:"reason"`
+		Explanation        []seams.MatchFactor   `json:"explanation"`
+	} `json:"candidates"`
+	CandidateSnapshots     []storedCandidateSnapshot `json:"candidate_snapshots"`
+	PairScore              float64                   `json:"pair_score"`
+	PairAssetIDs           []string                  `json:"pair_asset_ids"`
+	PairReason             string                    `json:"pair_reason"`
+	ObservationIdentifiers []storedIdentifier        `json:"observation_identifiers"`
+	ObservationContext     *storedMatcherSide        `json:"observation_context"`
+	Reason                 string                    `json:"reason"`
+	ModelID                string                    `json:"model_id"`
+	SourceRef              string                    `json:"source_ref"`
+	AutoAccepted           bool                      `json:"auto_accepted"`
+	AcceptedAssetID        string                    `json:"accepted_asset_id"`
+	AcceptedScore          float64                   `json:"accepted_score"`
+	AcceptedModelID        string                    `json:"accepted_model_id"`
+	AcceptedSourceRef      string                    `json:"accepted_source_ref"`
+	SourceKind             string                    `json:"source_kind"`
+	LatestEvidenceAt       *time.Time                `json:"latest_evidence_at"`
+}
+
+// decodeStoredMergeProposal reads a pending proposal row back into the value
+// [identity.FoldMergeProposal] folds into. `createdAt` is the row's own time,
+// which is when the question was first asked.
+func decodeStoredMergeProposal(raw []byte, createdAt time.Time) (identity.MergeProposal, error) {
+	var s storedMergeProposal
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return identity.MergeProposal{}, fmt.Errorf("identity/postgres: decode the pending merge proposal: %w", err)
+	}
+	p := identity.MergeProposal{
+		ObservationAssetID: s.ObservationAssetID,
+		Source:             identity.Source{Kind: identity.SourceKind(s.SourceKind)},
+		Reason:             s.Reason,
+		ProposedAt:         createdAt.UTC(),
+		ModelID:            s.ModelID,
+		SourceRef:          s.SourceRef,
+		AutoAccepted:       s.AutoAccepted,
+		AcceptedAssetID:    s.AcceptedAssetID,
+		AcceptedScore:      s.AcceptedScore,
+		AcceptedModelID:    s.AcceptedModelID,
+		AcceptedSourceRef:  s.AcceptedSourceRef,
+		// rule_verdict / rule_evidence are deliberately NOT read back: the fold
+		// writes with `||`, so a stored verdict the incoming sighting does not
+		// restate stays on the row untouched, and one it does restate is
+		// replaced. Decoding them would be plumbing nothing depends on.
+
+		PairScore:              s.PairScore,
+		PairAssetIDs:           s.PairAssetIDs,
+		PairReason:             s.PairReason,
+		ObservationIdentifiers: storedIdentifiers(s.ObservationIdentifiers),
+		ObservationContext:     s.ObservationContext.side(),
+	}
+	if s.LatestEvidenceAt != nil {
+		p.LatestEvidenceAt = s.LatestEvidenceAt.UTC()
+	}
+	snapshots := make(map[string]*identity.MatcherSide, len(s.CandidateSnapshots))
+	for i := range s.CandidateSnapshots {
+		snapshots[s.CandidateSnapshots[i].AssetID] = s.CandidateSnapshots[i].side()
+	}
+	for _, c := range s.Candidates {
+		p.Candidates = append(p.Candidates, identity.MergeCandidate{
+			Ref:                identity.AssetRef{ID: c.AssetID},
+			MatchedIdentifiers: c.MatchedIdentifiers,
+			Score:              c.Score,
+			Reason:             c.Reason,
+			Explanation:        c.Explanation,
+			Snapshot:           snapshots[c.AssetID],
+		})
+	}
+	return p, nil
 }
 
 // LastKeptSeparate implements [identity.Repository]: the engine's decision
@@ -1185,6 +1503,39 @@ func (r *Repository) LastKeptSeparate(ctx context.Context, tenantID string, asse
 	return d, true, nil
 }
 
+// IdentifierLastSeen implements [identity.Repository]: the identifier row's
+// own `asset_identifiers.last_seen_at`.
+//
+// That column is per identifier, not per asset. The attach upsert advances it
+// with GREATEST(last_seen_at, EXCLUDED.last_seen_at) every time an observation
+// resolved to the owner carries the value, so it answers "when was the current
+// owner last seen WITH this value" — which for an address is "when did that
+// device last hold this lease". `assets.last_seen_at` would be the wrong
+// column: a device seen yesterday at a DIFFERENT address still has a fresh
+// asset row.
+//
+// The lookup is the unique index (tenant, kind, value, coalesce(scope, ”)), so
+// it returns at most one row; MAX() makes a store that lost the invariant
+// answer with the freshest holder rather than an arbitrary one.
+func (r *Repository) IdentifierLastSeen(ctx context.Context, tenantID string, id identity.Identifier) (time.Time, bool, error) {
+	var seen sql.NullTime
+	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `
+			SELECT max(last_seen_at)
+			  FROM public.asset_identifiers
+			 WHERE tenant_id = $1 AND kind = $2 AND value = $3 AND coalesce(scope, '') = $4`,
+			tenantID, string(id.Kind), id.Value, id.Scope).Scan(&seen)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: read last-seen of %s=%q: %w", id.Kind, id.Value, err)
+		}
+		return nil
+	})
+	if err != nil || !seen.Valid {
+		return time.Time{}, false, err
+	}
+	return seen.Time.UTC(), true, nil
+}
+
 // announcementEdgeType is the relationship a floating address is recorded as:
 // the address's asset is `hosted_on` the node that announces it (reverse label
 // "hosts"). Chosen over a new vocabulary entry because the ten types of
@@ -1233,6 +1584,47 @@ func (r *Repository) RecordAnnouncement(ctx context.Context, announcer, holder i
 		},
 		ObservedAt: a.At,
 	})
+}
+
+// AddressAnnounced implements [identity.Repository]: has the floating-address
+// rule ever recorded `address` as announced for `holder`?
+//
+// Both places [identity.Engine]'s resolveFloating writes are consulted:
+//
+//   - the holder's outgoing `hosted_on` edges. RecordAnnouncement upserts one
+//     per (holder, announcer) and merges attributes with `||`, so an edge's
+//     `floating_address.addresses` is only that announcer's LATEST
+//     announcement;
+//   - the holder's `asset_history` entries carrying `floating_address` — the
+//     `updated` entry resolveFloating writes on the holder for every
+//     announcement. Append-only, so an address announced once and since
+//     superseded on the edge still counts.
+//
+// jsonb `?` tests array membership of a string, which is exactly how both
+// payloads store the addresses (canonical `ip_address` values).
+func (r *Repository) AddressAnnounced(ctx context.Context, holder identity.AssetRef, address string) (bool, error) {
+	holderID, err := parseAsset(holder.ID)
+	if err != nil {
+		return false, nil
+	}
+	var announced bool
+	err = r.withTx(ctx, holder.TenantID, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+			         SELECT 1 FROM public.asset_relationships
+			          WHERE tenant_id = $1 AND from_asset_id = $2 AND type = $3
+			            AND attributes -> 'floating_address' -> 'addresses' ? $4)
+			    OR EXISTS (
+			         SELECT 1 FROM public.asset_history
+			          WHERE tenant_id = $1 AND asset_id = $2
+			            AND changes_json -> 'floating_address' -> 'addresses' ? $4)`,
+			holder.TenantID, holderID, string(announcementEdgeType), address).Scan(&announced)
+		if err != nil {
+			return fmt.Errorf("identity/postgres: reading announcements of %s for %s: %w", address, holder.ID, err)
+		}
+		return nil
+	})
+	return announced, err
 }
 
 // ---------------------------------------------------------------------------

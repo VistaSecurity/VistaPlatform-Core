@@ -15,6 +15,7 @@ import { useMergeProposals } from './asset-queries';
 import { useRelationshipProposals } from './relationship-queries';
 import { useClassProposals } from '../discovery/class-proposal-queries';
 import { assetIdentity, assetRisk, classLabel, primaryAddressPort } from './asset-shape';
+import { ASSET_CSV_HEADER, assetCsvRow } from './asset-csv';
 import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, type CryptoConfig, type Key, type OpenAsset, type OpenCert, type OpenConfig, type OpenKey } from './drawers';
 import { AssetFormModal } from './asset-form-modal';
 import { SoftwareLens } from './software-lens';
@@ -455,16 +456,8 @@ export function InventoryPage() {
         }));
     } else {
       const rows = lens === 'stale' ? staleAssets : assets;
-      // `address` is the PRIMARY ENDPOINT's address and port (blank when the
-      // asset has no network face), and `class` replaces the retired
-      // `asset_type`. An importer reading the old header against the new export
-      // gets nothing rather than something wrong, which is the point.
-      downloadCsv(`vista-inventory-${lens}-${stamp}.csv`,
-        ['name', 'address', 'class', 'environment', 'segment', 'status', 'identity_status', 'has_identity_conflict', 'last_seen_at', 'risk_score'],
-        rows.map((a) => {
-          const ident = assetIdentity(a);
-          return [ident.primary, primaryAddressPort(a), classLabel(a.class_key), a.environment, a.network_segment_name || a.business_unit, a.asset_status, a.identity_status, String(a.has_identity_conflict ?? false), a.last_seen_at, typeof a.risk_score === 'number' ? a.risk_score : 0];
-        }));
+      // Layout and the risk_score rule (blank when unassessed) live in asset-csv.ts.
+      downloadCsv(`vista-inventory-${lens}-${stamp}.csv`, ASSET_CSV_HEADER, rows.map(assetCsvRow));
     }
   };
 

@@ -410,18 +410,32 @@ func TestIPInADynamicScopeNeverMatches(t *testing.T) {
 	e, repo := newEngine(t, identity.Config{DynamicScopes: map[string]bool{"dhcp-segment": true}})
 	first := mustResolve(t, e, obs(assetclass.KeyServer, scoped(identity.KindIPAddress, "192.0.2.10", "dhcp-segment")))
 
-	res := mustResolve(t, e, obs(assetclass.KeyServer, scoped(identity.KindIPAddress, "192.0.2.10", "dhcp-segment")))
-	if res.Outcome != identity.OutcomeConflict {
-		t.Fatalf("outcome = %s on %s, want conflict: today's DHCP lease is tomorrow's other host, so the "+
-			"IP must not MATCH — and the address is already owned, so there is nothing to create either",
+	later := obs(assetclass.KeyServer, scoped(identity.KindIPAddress, "192.0.2.10", "dhcp-segment"))
+	later.ObservedAt = observedAt.Add(time.Hour)
+	res := mustResolve(t, e, later)
+	if res.Outcome == identity.OutcomeMatched {
+		t.Fatalf("outcome = matched on %s: today's DHCP lease is tomorrow's other host, so the IP must not MATCH",
+			res.Asset.ID)
+	}
+	// Every identifier belongs to ONE asset, so this is not a question
+	// ( A1): no proposal, nothing created. And the only link is a lease
+	// ( C1): an address in a DHCP range says nothing about WHICH device
+	// holds it now, so the resolution names no asset for the caller to write
+	// this sighting's context onto, and the previous holder is not kept fresh.
+	if res.Outcome != identity.OutcomeUnresolved || !res.Asset.Zero() {
+		t.Fatalf("outcome = %s on %q, want unresolved with no asset — a one-candidate proposal is a "+
+			"question a reviewer cannot answer, and the lease holder is not shown to be this device",
 			res.Outcome, res.Asset.ID)
 	}
-	if !res.Asset.Zero() {
-		t.Fatalf("resolution names asset %s; the only identifier belongs to %s, so an asset created here "+
-			"would carry none and could never be matched again", res.Asset.ID, first.Asset.ID)
+	if n := proposalCount(repo); n != 0 {
+		t.Errorf("%d proposals, want 0", n)
 	}
-	if res.Proposal.ID == "" {
-		t.Error("no merge proposal: a human has to say whether this is the same host on the same lease")
+	if got := repo.LastSeen(first.Asset); !got.Equal(observedAt) {
+		t.Errorf("last_seen = %s, want %s unchanged: a dynamic address alone is a lease, not a sighting "+
+			"of the asset that last held it", got, observedAt)
+	}
+	if !hasChange(repo.HistoryFor(first.Asset), identity.ActionUpdated, "address_only_link", true) {
+		t.Error("no `updated` history entry with address_only_link: the timeline has to say why the clock stayed")
 	}
 	// The identifier still belongs to the first asset and is reported, not dropped.
 	if len(res.Unattached) != 1 {
@@ -459,14 +473,13 @@ func TestMACOnlyObservationNeverMatchesACloudResource(t *testing.T) {
 		t.Fatalf("a MAC-only observation MATCHED cloud resource %s; a cloud resource never identifies by MAC", res.Asset.ID)
 	}
 	// It cannot match, and the MAC is already owned by that cloud resource, so
-	// there is nothing left to attach either: the floor turns this into a
-	// proposal rather than an asset with no identifier.
-	if res.Outcome != identity.OutcomeConflict {
-		t.Fatalf("outcome = %s, want conflict", res.Outcome)
+	// there is nothing left to attach either. With ONE owner that is not a
+	// question ( A1): supporting evidence, no proposal, nothing created.
+	if res.Outcome != identity.OutcomeSupporting || res.Asset.ID != first.Asset.ID {
+		t.Fatalf("outcome = %s on %q, want supporting on %s", res.Outcome, res.Asset.ID, first.Asset.ID)
 	}
-	if !res.Asset.Zero() {
-		t.Fatalf("resolution names asset %s; the MAC belongs to %s, so an asset created here would carry none",
-			res.Asset.ID, first.Asset.ID)
+	if res.Proposal.ID != "" || proposalCount(repo) != 0 {
+		t.Errorf("proposal %q (%d total); a one-candidate proposal cannot be answered", res.Proposal.ID, proposalCount(repo))
 	}
 	if repo.AssetCount() != 1 {
 		t.Errorf("%d assets, want 1", repo.AssetCount())
@@ -499,9 +512,14 @@ func TestServiceIdentifiesByNameAndNothingElse(t *testing.T) {
 		t.Fatalf("outcome = %s, want created", byHost.Outcome)
 	}
 	again := mustResolve(t, e, hostOnly)
-	if again.Outcome != identity.OutcomeConflict || !again.Asset.Zero() {
-		t.Fatalf("second hostname-only observation: outcome = %s on %s, want a conflict that creates nothing "+
-			"- a hostname must not identify a service, and it is already owned", again.Outcome, again.Asset.ID)
+	if again.Outcome == identity.OutcomeMatched {
+		t.Fatalf("second hostname-only observation MATCHED %s; a hostname must not identify a service", again.Asset.ID)
+	}
+	// Already owned by ONE asset, so supporting evidence rather than a
+	// one-candidate proposal ( A1) — and never a second asset.
+	if again.Outcome != identity.OutcomeSupporting || again.Asset.ID != byHost.Asset.ID || proposalCount(repo) != 0 {
+		t.Fatalf("second hostname-only observation: outcome = %s on %q with %d proposals, want supporting on %s "+
+			"and no proposal", again.Outcome, again.Asset.ID, proposalCount(repo), byHost.Asset.ID)
 	}
 	if repo.AssetCount() != 1 {
 		t.Fatalf("%d assets, want 1: a service cannot be identified by a hostname, so it must not be "+

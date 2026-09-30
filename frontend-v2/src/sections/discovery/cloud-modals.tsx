@@ -112,6 +112,17 @@ const PROVIDER_FIELDS: Record<ProviderType, CredField[]> = {
   ],
 };
 
+/**
+ * The server's own error text (LegacyError `{ error: string }`), or `fallback`
+ * when there is none. A fixed "Failed to create integration" hid the one thing
+ * the user could act on — e.g. a 409 "An integration named "Production"
+ * already exists".
+ */
+export function serverErrorMessage(error: unknown, fallback: string): string {
+  const msg = (error as { error?: unknown } | null | undefined)?.error;
+  return typeof msg === 'string' && msg.trim() ? msg.trim() : fallback;
+}
+
 // ---- Create / edit ---------------------------------------------------------
 
 export function CloudIntegrationFormModal({ open, integration, onClose, onSaved }: {
@@ -226,7 +237,7 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
         const { error } = await clients.devices.PUT('/integrations/{id}', {
           params: { path: { id: integration!.id } }, body,
         });
-        if (error) throw new Error('Failed to update integration');
+        if (error) throw new Error(serverErrorMessage(error, 'Failed to update integration'));
         return;
       }
 
@@ -242,7 +253,7 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
         is_enabled: isEnabled,
       };
       const { data, error } = await clients.devices.POST('/integrations', { body });
-      if (error || !data) throw new Error('Failed to create integration');
+      if (error || !data) throw new Error(serverErrorMessage(error, 'Failed to create integration'));
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'integrations'] });
@@ -453,17 +464,23 @@ export const RESOURCE_TYPES: Record<ProviderKey, ResourceTypeOption[]> = {
     { value: 'nlb',         label: 'Network Load Balancer',     description: 'NLBs with TLS listeners.' },
     { value: 'api_gateway', label: 'API Gateway',               description: 'API Gateway endpoints and their TLS configuration.' },
     { value: 'cloudfront',  label: 'CloudFront',                description: 'CloudFront distributions and their viewer TLS configuration.', global: true },
-    { value: 'kms',         label: 'KMS keys',                  description: 'Customer-managed KMS keys — key spec, state, usage, rotation status and period, aliases and multi-Region. AWS-managed keys (aws/s3, aws/ebs …) are skipped.' },
+    { value: 'kms',         label: 'KMS keys',                  description: 'Every KMS key — key spec, state, usage, rotation status and period, aliases and multi-Region — including AWS-managed keys (aws/s3, aws/ebs …), each labelled with who manages it.' },
     { value: 's3',          label: 'S3 bucket encryption',      description: 'Default at-rest encryption on every bucket — SSE-S3, SSE-KMS or DSSE-KMS, the KMS key in use, and whether S3 Bucket Keys are on.', global: true },
     { value: 'rds',         label: 'RDS instance encryption',   description: 'Storage encryption on each RDS instance — whether it is on, the KMS key, engine and version, Multi-AZ, and the Performance Insights key.' },
   ],
   azure: [
-    { value: 'application_gateway', label: 'Application Gateway', description: 'App Gateways with SSL policies' },
-    { value: 'load_balancer',       label: 'Load Balancer',       description: 'Azure Load Balancers' },
+    { value: 'application_gateway', label: 'Application Gateway',      description: 'App Gateways with SSL policies' },
+    { value: 'load_balancer',       label: 'Load Balancer',            description: 'Azure Load Balancers' },
+    { value: 'key_vault',           label: 'Key Vault keys',           description: 'Keys in every Key Vault in the subscription — key type and size, state, and rotation.' },
+    { value: 'storage_account',     label: 'Storage account encryption', description: 'At-rest encryption on each storage account — Microsoft-managed or customer-managed key, and the Key Vault key in use.' },
+    { value: 'sql_database',        label: 'SQL Database encryption',  description: 'Transparent Data Encryption on each Azure SQL database — on or off, and whether the server protector is service-managed or a Key Vault key.' },
   ],
   gcp: [
-    { value: 'load_balancer', label: 'HTTPS Load Balancer', description: 'GCP HTTPS load balancers' },
-    { value: 'ssl_proxy',     label: 'SSL Proxy',           description: 'GCP SSL proxy load balancers' },
+    { value: 'load_balancer', label: 'HTTPS Load Balancer',       description: 'GCP HTTPS load balancers' },
+    { value: 'ssl_proxy',     label: 'SSL Proxy',                 description: 'GCP SSL proxy load balancers' },
+    { value: 'kms',           label: 'Cloud KMS keys',            description: 'Cloud KMS keys in every location — purpose, algorithm, protection level, state and rotation.' },
+    { value: 'storage',       label: 'Cloud Storage encryption',  description: 'Default at-rest encryption on each bucket — Google-managed or a Cloud KMS key.' },
+    { value: 'cloudsql',      label: 'Cloud SQL encryption',      description: 'At-rest encryption on each Cloud SQL instance — Google-managed or a customer-managed Cloud KMS key.' },
   ],
 };
 

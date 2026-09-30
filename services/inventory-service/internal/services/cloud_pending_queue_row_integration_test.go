@@ -41,6 +41,7 @@ package services
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -133,71 +134,91 @@ func TestIntegration_CloudFindingOnMonitoringAsset_ReportsMonitoring(t *testing.
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			raw := testdb.Connect(t)
-			testdb.ApplySchemaAndSeed(t, raw)
-			db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
-			tenant := testdb.NewTenant(t, raw)
-			svc := newCloudRoutingAssetService(db)
+	// Both admission modes. This test passed for months with an ENFORCE-mode
+	// tenant's at-rest resources never becoming assets at all, because its
+	// tenant ran the default (disabled) mode, where the admission question is
+	// never asked (integrations review W6). In enforce mode the findings carry
+	// what discovery-processor stamps on a real row — the platform collector's
+	// sensor, a receipt and an observation time — since that is what the
+	// admission decision reads.
+	for _, mode := range []string{"disabled", "enforce"} {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				raw := testdb.Connect(t)
+				testdb.ApplySchemaAndSeed(t, raw)
+				db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+				tenant := testdb.NewTenant(t, raw)
+				svc := newCloudRoutingAssetService(db)
 
-			// The resource as the tenant already has it: discovered by an
-			// earlier run and since approved.
-			if _, err := svc.IngestFindings(tenant, []IngestFinding{tc.finding()}, identity.StatusMonitoring); err != nil {
-				t.Fatalf("seeding the monitoring asset: %v", err)
-			}
+				finding := tc.finding
+				if mode == "enforce" {
+					enforceIdentityAdmission(t, raw, tenant)
+					collector := platformInterrogationSensor(t, raw, tenant)
+					seen := time.Now().UTC().Add(-time.Hour)
+					finding = func() IngestFinding {
+						seen = seen.Add(time.Minute)
+						return fromSensor(tc.finding(), collector, seen)
+					}
+				}
 
-			var assetID uuid.UUID
-			var status string
-			if err := raw.QueryRow(
-				`SELECT id, asset_status FROM assets WHERE tenant_id = $1 AND hostname = $2 AND deleted_at IS NULL`,
-				tenant, tc.hostname).Scan(&assetID, &status); err != nil {
-				t.Fatalf("the cloud resource did not become an asset: %v", err)
-			}
-			if status != identity.StatusMonitoring {
-				t.Fatalf("the fixture asset is %q, not %q — every assertion below would be about the wrong thing",
-					status, identity.StatusMonitoring)
-			}
+				// The resource as the tenant already has it: discovered by an
+				// earlier run and since approved.
+				if _, err := svc.IngestFindings(tenant, []IngestFinding{finding()}, identity.StatusMonitoring); err != nil {
+					t.Fatalf("seeding the monitoring asset: %v", err)
+				}
 
-			// The next run of the same discovery. No auto-approval rule matches
-			// anything reached through a cloud API (the tenant's rules are
-			// scoped to sensors and private segments), so the batch asks for
-			// pending_approval — exactly the six rows' situation.
-			report, err := svc.IngestFindingsReport(tenant, []IngestFinding{tc.finding()}, identity.StatusPendingApproval)
-			if err != nil {
-				t.Fatalf("IngestFindingsReport: %v", err)
-			}
+				var assetID uuid.UUID
+				var status string
+				if err := raw.QueryRow(
+					`SELECT id, asset_status FROM assets WHERE tenant_id = $1 AND hostname = $2 AND deleted_at IS NULL`,
+					tenant, tc.hostname).Scan(&assetID, &status); err != nil {
+					t.Fatalf("the cloud resource did not become an asset: %v", err)
+				}
+				if status != identity.StatusMonitoring {
+					t.Fatalf("the fixture asset is %q, not %q — every assertion below would be about the wrong thing",
+						status, identity.StatusMonitoring)
+				}
 
-			if len(report.EffectiveStatus) != 1 {
-				t.Fatalf("report carries %d per-finding statuses, want 1", len(report.EffectiveStatus))
-			}
-			if report.EffectiveStatus[0] != identity.StatusMonitoring {
-				t.Fatalf("EffectiveStatus = %q, want %q — discovery-processor stamps the queue row from this, "+
-					"and anything but %q leaves the row `pending` with nothing that can ever clear it",
-					report.EffectiveStatus[0], identity.StatusMonitoring, identity.StatusMonitoring)
-			}
+				// The next run of the same discovery. No auto-approval rule matches
+				// anything reached through a cloud API (the tenant's rules are
+				// scoped to sensors and private segments), so the batch asks for
+				// pending_approval — exactly the six rows' situation.
+				report, err := svc.IngestFindingsReport(tenant, []IngestFinding{finding()}, identity.StatusPendingApproval)
+				if err != nil {
+					t.Fatalf("IngestFindingsReport: %v", err)
+				}
 
-			if len(report.Results) != 1 || report.Results[0].AssetID != assetID.String() {
-				t.Fatalf("results = %+v, want one naming asset %s — the queue row's asset_id is read from this",
-					report.Results, assetID)
-			}
+				if len(report.EffectiveStatus) != 1 {
+					t.Fatalf("report carries %d per-finding statuses, want 1", len(report.EffectiveStatus))
+				}
+				if report.EffectiveStatus[0] != identity.StatusMonitoring {
+					t.Fatalf("EffectiveStatus = %q, want %q — discovery-processor stamps the queue row from this, "+
+						"and anything but %q leaves the row `pending` with nothing that can ever clear it",
+						report.EffectiveStatus[0], identity.StatusMonitoring, identity.StatusMonitoring)
+				}
 
-			if n := countExternalConnections(t, raw, tenant); n != tc.externalsAfter {
-				t.Fatalf("%d external_connections row(s), want %d — a resource enumerated through the "+
-					"tenant's own cloud credential is theirs, whatever its address", n, tc.externalsAfter)
-			}
+				if len(report.Results) != 1 || report.Results[0].AssetID != assetID.String() {
+					t.Fatalf("results = %+v, want one naming asset %s — the queue row's asset_id is read from this",
+						report.Results, assetID)
+				}
 
-			var assets int
-			if err := raw.QueryRow(
-				`SELECT count(*) FROM assets WHERE tenant_id = $1 AND hostname = $2 AND deleted_at IS NULL`,
-				tenant, tc.hostname).Scan(&assets); err != nil {
-				t.Fatalf("count assets: %v", err)
-			}
-			if assets != 1 {
-				t.Fatalf("%d assets for %s, want 1 — the second observation did not MATCH, so this test is "+
-					"no longer exercising the case it exists for", assets, tc.hostname)
-			}
-		})
+				if n := countExternalConnections(t, raw, tenant); n != tc.externalsAfter {
+					t.Fatalf("%d external_connections row(s), want %d — a resource enumerated through the "+
+						"tenant's own cloud credential is theirs, whatever its address", n, tc.externalsAfter)
+				}
+
+				var assets int
+				if err := raw.QueryRow(
+					`SELECT count(*) FROM assets WHERE tenant_id = $1 AND hostname = $2 AND deleted_at IS NULL`,
+					tenant, tc.hostname).Scan(&assets); err != nil {
+					t.Fatalf("count assets: %v", err)
+				}
+				if assets != 1 {
+					t.Fatalf("%d assets for %s, want 1 — the second observation did not MATCH, so this test is "+
+						"no longer exercising the case it exists for", assets, tc.hostname)
+				}
+			})
+		}
 	}
 }
 

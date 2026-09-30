@@ -105,7 +105,7 @@ frontend-v2/src/sections/inventory/inventory-page.tsx#InventoryPage:
   concept: inventory_counts
   reason: Displays grade groups and asset counts; risk conversion delegates to
     shared helpers.
-  fingerprint: 7b8381f5992f942abfdddf6d0ac45387fb6f39c3c2fab18a75254c0da32f0bf5
+  fingerprint: 95c96872e12777b6479ffa318ad5821e9f4f53736a3ab80f3c3b8f4b836fe247
 frontend-v2/src/sections/posture/algorithm-reference.tsx#AlgorithmReference:
   concept: catalogue_display
   reason: Strength filter values, row counts and column alignment coexist; score

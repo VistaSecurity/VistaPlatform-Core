@@ -1,9 +1,14 @@
 // Package identitysettings is the tenant's identification configuration, as
 // every service that resolves an observation has to read it.
 //
-// Today that is one number: the learned matcher's auto-accept threshold
-// (workstream 4.6, ADR-0002 D3) — the score at or above which the platform may
-// merge two of a tenant's assets without asking.
+// Two settings today:
+//
+//   - the learned matcher's auto-accept threshold (workstream 4.6, ADR-0002
+//     D3) — the score at or above which the platform may merge two of a
+//     tenant's assets without asking; and
+// - `auto_merge_existing` ( Phase 4, owner decision D1) — whether a
+//     FIXED RULE, not a score, may merge two EXISTING assets it is sure are
+//     one device. Default ON.
 //
 // # Why it is shared rather than owned by inventory-service
 //
@@ -33,6 +38,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/google/uuid"
@@ -49,6 +55,21 @@ const Key = "identity"
 
 // AutoAcceptThresholdKey is the field inside it.
 const AutoAcceptThresholdKey = "auto_accept_threshold"
+
+// AutoMergeExistingKey is the rule-merge switch inside it ( Phase 4).
+const AutoMergeExistingKey = "auto_merge_existing"
+
+// DefaultAutoMergeExisting is what a tenant that has never touched the rule-merge
+// switch gets: TRUE.
+//
+// This is the OPPOSITE default to [DefaultAutoAcceptThreshold], and deliberately:
+// owner decision D1 — "automatically merge assets that we are
+// reasonably sure are the same. Default on, toggle to turn off." The two are
+// different acts. The threshold lets a MODEL's score settle a question; ADR-0008
+// D5 keeps that off until a tenant says otherwise. The rule merge is a rule —
+// fixed conditions, no score, never overriding a recorded "keep separate" — so
+// the consent it needs is a way to say no, not a way to say yes.
+const DefaultAutoMergeExisting = true
 
 // DefaultAutoAcceptThreshold is what a tenant that has never touched the
 // setting gets: ZERO, meaning never auto-accept.
@@ -139,4 +160,88 @@ func ReadAutoAcceptThresholdFor(ctx context.Context, q Queryer, tenantID string)
 		return DefaultAutoAcceptThreshold, fmt.Errorf("identitysettings: tenant id %q is not a uuid: %w", tenantID, err)
 	}
 	return ReadAutoAcceptThreshold(ctx, q, tid)
+}
+
+// logf is where [ReadAutoMergeExisting] reports a value it could not read as a
+// boolean. A variable so a test can capture it.
+var logf = log.Printf
+
+// ReadAutoMergeExisting reads whether the tenant lets a rule merge two existing
+// assets it is sure are one device ( Phase 4, owner decision D1).
+//
+// Read it the same way as [ReadAutoAcceptThreshold]: per observation, on the
+// resolving transaction, never cached — a tenant turning this OFF must take
+// effect on the next sighting, not "soon".
+//
+// # What is NOT an error, and what it reads as
+//
+//	no settings row / no `identity` block / no key   → true  (the default)
+//	an explicit true                                 → true
+//	an explicit false                                → false
+//	JSON null                                        → true  (nobody set it)
+//	anything else (a string, a number, an object)    → true, AND LOGGED
+//
+// A value nobody can account for behaves like an absent one: the owner chose ON
+// as the default and a corrupt cell is not a decision to turn it off. That is
+// the opposite reading to the threshold's ("never"), and it is the sharper
+// edge — a hand-edited `"false"` (a string) still reads ON — which is why it is
+// logged rather than silently defaulted. The settings API only ever writes a
+// JSON boolean, so this is reachable only by writing the jsonb by hand.
+//
+// A failure to READ is returned, exactly as for the threshold: a value the
+// database would not give us is not evidence the tenant left the default, and
+// the observation is better refused and retried than resolved under a setting
+// nobody chose. The default is returned alongside the error only so a caller
+// that ignores it fails toward the documented default, not toward false.
+func ReadAutoMergeExisting(ctx context.Context, q Queryer, tenantID uuid.UUID) (bool, error) {
+	if q == nil {
+		return DefaultAutoMergeExisting, errors.New("identitysettings: no transaction to read the rule-merge setting on")
+	}
+	// `->` (jsonb), not `->>` (text): the text form would render the STRING
+	// "false" and the boolean false identically, and the difference between
+	// them is exactly what separates a real answer from a malformed one.
+	var raw []byte
+	err := q.QueryRowContext(ctx, `
+		SELECT config -> $2::text -> $3::text
+		FROM tenant_admin_settings
+		WHERE tenant_id = $1`,
+		tenantID, Key, AutoMergeExistingKey).Scan(&raw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return DefaultAutoMergeExisting, nil
+	case err != nil:
+		return DefaultAutoMergeExisting, fmt.Errorf("read the rule-merge setting: %w", err)
+	case len(raw) == 0:
+		return DefaultAutoMergeExisting, nil
+	}
+	return decodeAutoMergeExisting(raw, tenantID), nil
+}
+
+// decodeAutoMergeExisting is the pure half: one jsonb value to a decision.
+func decodeAutoMergeExisting(raw []byte, tenantID uuid.UUID) bool {
+	// A *bool so JSON null (nobody set it) is distinguishable from false (the
+	// tenant turned it off): decoding null into a plain bool leaves it false and
+	// would silently turn the rule off for a cell that says nothing.
+	var v *bool
+	if err := json.Unmarshal(raw, &v); err != nil {
+		logf("identitysettings: tenant %s: %s.%s is not a boolean (%.40s); reading it as the default (%t)",
+			tenantID, Key, AutoMergeExistingKey, raw, DefaultAutoMergeExisting)
+		return DefaultAutoMergeExisting
+	}
+	if v == nil {
+		return DefaultAutoMergeExisting
+	}
+	return *v
+}
+
+// ReadAutoMergeExistingFor is [ReadAutoMergeExisting] over a tenant id that is
+// still a string, which is the shape [identity.Observation] carries. A tenant
+// id that is not a uuid is an ERROR, for the reason given on
+// [ReadAutoAcceptThresholdFor].
+func ReadAutoMergeExistingFor(ctx context.Context, q Queryer, tenantID string) (bool, error) {
+	tid, err := uuid.Parse(strings.TrimSpace(tenantID))
+	if err != nil {
+		return DefaultAutoMergeExisting, fmt.Errorf("identitysettings: tenant id %q is not a uuid: %w", tenantID, err)
+	}
+	return ReadAutoMergeExisting(ctx, q, tid)
 }

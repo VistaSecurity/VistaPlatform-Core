@@ -267,6 +267,20 @@
       "metadata": {
         "dhcp": "enabled",
         "dynamic": true,
+        "dynamic_by_source": {
+          "measured": {
+            "dynamic": true,
+            "evidence": {
+              "observed_at": "{{TIMESTAMP}}",
+              "source_asset_id": "{{DEVICE_ASSET_ID}}"
+            }
+          }
+        },
+        "dynamic_evidence": {
+          "observed_at": "{{TIMESTAMP}}",
+          "source_asset_id": "{{DEVICE_ASSET_ID}}"
+        },
+        "dynamic_source": "measured",
         "source": "interrogation",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_type": "unifi"
@@ -279,6 +293,20 @@
       "metadata": {
         "dhcp": "disabled",
         "dynamic": false,
+        "dynamic_by_source": {
+          "measured": {
+            "dynamic": false,
+            "evidence": {
+              "observed_at": "{{TIMESTAMP}}",
+              "source_asset_id": "{{DEVICE_ASSET_ID}}"
+            }
+          }
+        },
+        "dynamic_evidence": {
+          "observed_at": "{{TIMESTAMP}}",
+          "source_asset_id": "{{DEVICE_ASSET_ID}}"
+        },
+        "dynamic_source": "measured",
         "source": "interrogation",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_type": "unifi"

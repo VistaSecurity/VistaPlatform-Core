@@ -605,7 +605,17 @@ const (
 // set at the others — the field is the claim, and a claim made by omission is
 // the shape this repository keeps finding.
 func unavailable(reason, message string) askUnavailable {
-	return askUnavailable{Available: false, Reason: reason, Message: message, Instead: askInstead}
+	return unavailableInstead(reason, message, askInstead)
+}
+
+// unavailableInstead is the same refusal shape with a caller-chosen alternative.
+// `vistaplatform_compare_cbom_artifacts` and
+// `vistaplatform_get_compliance_summary` answer the same way for the same
+// reason: a well-formed request this tenant's edition or state cannot satisfy is
+// a fact to report, not a failure to retry — and, above all, not a 404 an agent
+// could read as "that thing does not exist".
+func unavailableInstead(reason, message, instead string) askUnavailable {
+	return askUnavailable{Available: false, Reason: reason, Message: message, Instead: instead}
 }
 
 const askInstead = "Use vistaplatform_query_assets with a query-language predicate, or " +

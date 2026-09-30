@@ -45,20 +45,12 @@ That denominator is deliberate. "412 imported" on its own is a number you cannot
 check against your build output; "412 of 480, 68 excluded" is one you can. Under
 it, **What was skipped** lists everything the parse dropped and why.
 
-### Uploading from CI
+### Uploading from a pipeline
 
-The endpoint takes the raw document as well as a form upload, so a pipeline does
-not need a multipart encoder:
-
-```bash
-curl -X POST \
-  "https://<your-host>/api/v2/inventory-service/infrastructure-assets/<asset-id>/sbom?filename=build-1234.cdx.json" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <api token>" \
-  --data-binary @bom.cdx.json
-```
-
-See [API Tokens & MCP](api-tokens-and-mcp.md) for issuing a token.
+There is no token-authenticated upload endpoint today. Personal API tokens work
+only with the [MCP server](api-tokens-and-mcp.md), so a CI job cannot upload a
+document with one. Upload from **Add software from a document** in the UI as
+above.
 
 ## Where the software appears
 
@@ -281,5 +273,5 @@ than dropped in silence, so you know the graph did not come across.
 - [Asset Approval](asset-approval.md) — the queue a created asset lands in
 - [Query](query.md) — the `software:(…)` predicate
 - [CBOM Artifacts](../cbom/cbom-artifacts.md) — the platform's own CycloneDX output
-- [API Tokens & MCP](api-tokens-and-mcp.md) — uploading from a pipeline, and the MCP tool
+- [API Tokens & MCP](api-tokens-and-mcp.md) — the MCP tool
 - [Findings](findings.md) — the end-of-life and vulnerability findings the two columns read

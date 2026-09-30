@@ -52,31 +52,14 @@ type editionHooks struct {
 		encryptionMasterKey string,
 	)
 
-	// RegisterNetBoxRoutes mounts the NetBox network-source-of-truth connector
-	// (workstream 2.7): connection CRUD, test-connection, run-now, run history
-	// and the read-only drift view. Nil in Core, where handlers'
-	// RegisterUnavailableConnectorRoutes mounts 402 stubs at the same paths
-	// instead — so exactly one of the two is ever registered.
+	// StartCMDBSyncScheduler runs the scheduled CMDB sync loop: profiles on an
+	// hourly / daily / weekly schedule are pushed and/or pulled in their
+	// platform's registry direction, one run per profile at a time across
+	// replicas. Nil in Core. Blocks; main() runs it in a goroutine.
 	//
-	// Same signature as RegisterCMDBSyncRoutes, and for the same reason: the
-	// dependency direction is Enterprise → Core, so the connector's asset
-	// creation goes through Core's AssetService rather than duplicating it.
-	RegisterNetBoxRoutes func(
-		apiv2 *gin.RouterGroup,
-		db *database.DB,
-		rawDB *sql.DB,
-		assetService *services.AssetService,
-		encryptionMasterKey string,
-	)
-
-	// StartNetBoxScheduler runs the due-import loop for scheduled NetBox
-	// connections. Nil in Core. It blocks, so main() runs it in a goroutine;
-	// it returns when the context is cancelled.
-	//
-	// A scheduler that is STORED but never runs is the failure this exists to
-	// avoid: cmdb_sync_profiles has carried a `schedule` field since the
-	// feature shipped and nothing has ever executed it.
-	StartNetBoxScheduler func(
+	// It is the runner cmdb_sync_profiles' `schedule` never had — the field
+	// was saved and shown and nothing executed it.
+	StartCMDBSyncScheduler func(
 		ctx context.Context,
 		db *database.DB,
 		rawDB *sql.DB,

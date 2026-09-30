@@ -20,6 +20,68 @@ func learned(t *testing.T) LearnedMatcher {
 
 var sighting = time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
 
+// one spells a one-value-per-kind map in the seam's multi-valued shape.
+func one(ids map[string]string) map[string][]string {
+	out := make(map[string][]string, len(ids))
+	for k, v := range ids {
+		out[k] = []string{v}
+	}
+	return out
+}
+
+// The v2 fields — several values per kind, which of them were derived, which
+// names are generic — are carried through the adapter. Each is a feature that
+// would otherwise read zero forever with nothing failing.
+func TestLearnedMatcher_CarriesTheV2Fields(t *testing.T) {
+	m := learned(t)
+	scoreOf := func(t *testing.T, o Observation, a AssetSummary) float64 {
+		t.Helper()
+		scores, err := m.Match(t.Context(), o, []AssetSummary{a})
+		if err != nil || len(scores) != 1 {
+			t.Fatalf("Match: %v (%d scores)", err, len(scores))
+		}
+		return scores[0].Score
+	}
+	obs := func() Observation {
+		return Observation{Kind: "server", Segment: "seg-a", SourceKind: SourceKindMeasured, ObservedAt: sighting,
+			Identifiers: map[string][]string{"mac_address": {"0a:00:00:00:00:02"}, "hostname": {"lobby-host"}}}
+	}
+	asset := func() AssetSummary {
+		return AssetSummary{ID: "c", Class: "server", Segment: "seg-a", SourceKind: SourceKindMeasured, LastSeenAt: sighting,
+			Identifiers: map[string][]string{"mac_address": {"0a:00:00:00:00:01", "0a:00:00:00:00:02"}, "hostname": {"lobby-host"}}}
+	}
+	base := scoreOf(t, obs(), asset())
+
+	t.Run("a candidate's second value", func(t *testing.T) {
+		a := asset()
+		a.Identifiers["mac_address"] = []string{"0a:00:00:00:00:01"}
+		if got := scoreOf(t, obs(), a); got >= base {
+			t.Errorf("dropping the candidate's second MAC — the one that agrees — did not lower the score (%.6f vs %.6f)", got, base)
+		}
+	})
+	t.Run("derived on the observation", func(t *testing.T) {
+		o := obs()
+		o.DerivedIdentifiers = map[string][]string{"mac_address": {"0a:00:00:00:00:02"}}
+		if got := scoreOf(t, o, asset()); got >= base {
+			t.Errorf("marking the agreeing MAC derived did not lower the score (%.6f vs %.6f)", got, base)
+		}
+	})
+	t.Run("derived on the asset", func(t *testing.T) {
+		a := asset()
+		a.DerivedIdentifiers = map[string][]string{"mac_address": {"0a:00:00:00:00:02"}}
+		if got := scoreOf(t, obs(), a); got >= base {
+			t.Errorf("marking the asset's agreeing MAC derived did not lower the score (%.6f vs %.6f)", got, base)
+		}
+	})
+	t.Run("generic names", func(t *testing.T) {
+		o := obs()
+		o.GenericNames = []string{"lobby-host"}
+		if got := scoreOf(t, o, asset()); got >= base {
+			t.Errorf("marking the agreeing hostname generic did not lower the score (%.6f vs %.6f)", got, base)
+		}
+	})
+}
+
 func TestLearnedMatcher_IsTheRegistryDefault(t *testing.T) {
 	set := Default()
 	if _, ok := set.Matcher.(LearnedMatcher); !ok {
@@ -42,21 +104,21 @@ func TestLearnedMatcher_ScoresExplainsAndCarriesProvenance(t *testing.T) {
 			Segment:     "seg-a",
 			SourceKind:  SourceKindMeasured,
 			ObservedAt:  sighting,
-			Identifiers: map[string]string{"serial_number": "sn-1", "hostname": "db01"},
+			Identifiers: one(map[string]string{"serial_number": "sn-1", "hostname": "db01"}),
 			Attributes:  map[string]any{"vendor": "Dell", "model": "R650"},
 		},
 		[]AssetSummary{
 			{
 				ID: "match", Class: "server", Name: "db01", Segment: "seg-a",
 				SourceKind: SourceKindImported, LastSeenAt: sighting.Add(-time.Hour),
-				Identifiers: map[string]string{"serial_number": "sn-1", "hostname": "db01"},
+				Identifiers: one(map[string]string{"serial_number": "sn-1", "hostname": "db01"}),
 				Attributes:  map[string]any{"vendor": "Dell", "model": "R650"},
 				Status:      "monitoring",
 			},
 			{
 				ID: "other", Class: "printer", Name: "lobby-printer", Segment: "seg-b",
 				SourceKind: SourceKindMeasured, LastSeenAt: sighting.Add(-200 * 24 * time.Hour),
-				Identifiers: map[string]string{"ip_address": "198.51.100.9"},
+				Identifiers: one(map[string]string{"ip_address": "198.51.100.9"}),
 				Status:      "monitoring",
 			},
 		})
@@ -122,12 +184,12 @@ func TestLearnedMatcher_CarriesEveryComparableField(t *testing.T) {
 		return Observation{
 				Kind: "server", Name: "host-a", Segment: "seg-a",
 				SourceKind: SourceKindMeasured, ObservedAt: sighting,
-				Identifiers: map[string]string{"hostname": "host-a"},
+				Identifiers: one(map[string]string{"hostname": "host-a"}),
 				Attributes:  map[string]any{"vendor": "Dell", "model": "R650"},
 			}, AssetSummary{
 				ID: "c", Class: "server", Name: "host-a", Segment: "seg-a",
 				SourceKind: SourceKindMeasured, LastSeenAt: sighting,
-				Identifiers: map[string]string{"hostname": "host-a"},
+				Identifiers: one(map[string]string{"hostname": "host-a"}),
 				Attributes:  map[string]any{"vendor": "Dell", "model": "R650"},
 			}
 	}
@@ -178,9 +240,9 @@ func TestLearnedMatcher_IgnoresApprovalStatus(t *testing.T) {
 	score := func(status string) float64 {
 		scores, err := m.Match(t.Context(),
 			Observation{Kind: "server", Name: "h", Segment: "s", ObservedAt: sighting,
-				Identifiers: map[string]string{"hostname": "h"}},
+				Identifiers: one(map[string]string{"hostname": "h"})},
 			[]AssetSummary{{ID: "c", Class: "server", Name: "h", Segment: "s", LastSeenAt: sighting,
-				Identifiers: map[string]string{"hostname": "h"}, Status: status}})
+				Identifiers: one(map[string]string{"hostname": "h"}), Status: status}})
 		if err != nil || len(scores) != 1 {
 			t.Fatalf("Match: %v", err)
 		}
@@ -199,10 +261,10 @@ func TestLearnedMatcher_NonStringAttributeIsUnknown(t *testing.T) {
 	score := func(vendor any) float64 {
 		scores, err := m.Match(t.Context(),
 			Observation{Kind: "server", Name: "h", Segment: "s", ObservedAt: sighting,
-				Identifiers: map[string]string{"hostname": "h"},
+				Identifiers: one(map[string]string{"hostname": "h"}),
 				Attributes:  map[string]any{"vendor": vendor}},
 			[]AssetSummary{{ID: "c", Class: "server", Name: "h", Segment: "s", LastSeenAt: sighting,
-				Identifiers: map[string]string{"hostname": "h"},
+				Identifiers: one(map[string]string{"hostname": "h"}),
 				Attributes:  map[string]any{"vendor": "Dell"}}})
 		if err != nil || len(scores) != 1 {
 			t.Fatalf("Match: %v", err)
@@ -237,9 +299,9 @@ func TestLearnedMatcher_ExplanationRepeatsNoValues(t *testing.T) {
 		"hostname":                 "secret-host",
 	}
 	scores, err := learned(t).Match(t.Context(),
-		Observation{Kind: "server", Name: "secret-host", Segment: "seg", ObservedAt: sighting, Identifiers: secrets},
+		Observation{Kind: "server", Name: "secret-host", Segment: "seg", ObservedAt: sighting, Identifiers: one(secrets)},
 		[]AssetSummary{{ID: "c", Class: "server", Name: "secret-host", Segment: "seg",
-			LastSeenAt: sighting, Identifiers: secrets}})
+			LastSeenAt: sighting, Identifiers: one(secrets)}})
 	if err != nil || len(scores) != 1 {
 		t.Fatalf("Match: %v", err)
 	}

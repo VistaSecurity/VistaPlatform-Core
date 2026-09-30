@@ -25,7 +25,7 @@ import {
   type AssetClassChange, type AssetEndpoint, type AssetHistoryEntry, type AssetIdentifier,
 } from './asset-queries';
 import {
-  assetRisk, attr, classIcon, classLabel, confidenceLabel, identifierKindLabel,
+  assetRisk, attr, classIcon, classLabel, confidenceLabel, identifierKindLabel, identifierProvenanceLabel,
   operatingSystem, primaryAddressPort, relativeSeen, sourceKindLabel, stripMask,
   type AssetLike,
 } from './asset-shape';
@@ -101,19 +101,23 @@ function PhasePlaceholder({ tab }: { tab: AssetTab }) {
 
 function IdentifierRow({ ident }: { ident: AssetIdentifier }) {
   const conf = confidenceLabel(ident.confidence);
+  // A DERIVED identifier ( Phase 2) says what it was derived from, so a
+  // MAC worked out from an IPv6 address is never read as one a device reported.
+  const provenance = identifierProvenanceLabel(ident);
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,150px) minmax(0,1.6fr) minmax(0,1fr) 96px 92px', gap: 12, alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
       <span style={{ fontSize: 12, color: 'var(--app-t2)', fontWeight: 600 }}>{identifierKindLabel(ident.kind)}</span>
       <span className="mono" title={ident.value} style={{ fontSize: 12, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.value}</span>
       <span
-        style={{ fontSize: 11.5, color: 'var(--app-t3)' }}
+        data-testid="identifier-provenance"
+        style={{ fontSize: 11.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
         title={
           ident.source_ref
             ? `${sourceKindLabel(ident.source_kind)} · ${ident.source_ref}`
             : sourceKindLabel(ident.source_kind)
         }
       >
-        {sourceKindLabel(ident.source_kind) || '—'}
+        {provenance || '—'}
       </span>
       {/* An ABSENT confidence is not a low one. It renders as a dash, and the
           tooltip says which it is, because a "0%" here would read as "we are

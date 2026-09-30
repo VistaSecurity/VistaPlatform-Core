@@ -274,6 +274,123 @@ func TestIntegration_PostgresIdentityRepository_HistoryOrderSurvivesOneTransacti
 // helpers
 // ---------------------------------------------------------------------------
 
+// TestIntegration_OpenMergeProposal_OnePairIsOnePendingRow is A3 through
+// the real engine and real SQL: two sightings of the same contested pair that
+// carry DIFFERENT identifiers leave ONE pending proposal row, whose candidates
+// carry the union of what both sightings matched.
+//
+// Mutation check: put the matched identifier keys back into
+// identity.MergeProposalFingerprint and this sees two pending rows; replace the
+// fold in OpenMergeProposal with the old whole-payload overwrite and candidate
+// b loses the MAC the first sighting matched.
+func TestIntegration_OpenMergeProposal_OnePairIsOnePendingRow(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+	tenant := testdb.NewTenant(t, admin).String()
+	ctx := context.Background()
+	repo := pgrepo.New(admin)
+	engine, err := identity.New(identity.Config{Repo: repo})
+	if err != nil {
+		t.Fatalf("identity.New: %v", err)
+	}
+
+	serial := identity.Identifier{Kind: identity.KindSerialNumber, Value: "SN-FOLD-A", Confidence: 1}
+	mac := identity.Identifier{Kind: identity.KindMACAddress, Value: "aa:bb:cc:00:00:31", Confidence: 1}
+	host := identity.Identifier{Kind: identity.KindHostname, Value: "fold-b", Scope: identity.ScopeTenantDefault, Confidence: 1}
+	a, err := repo.CreateAsset(ctx, tenant, newAsset("fold-a", serial))
+	if err != nil {
+		t.Fatalf("CreateAsset(a): %v", err)
+	}
+	b, err := repo.CreateAsset(ctx, tenant, newAsset("fold-b", mac, host))
+	if err != nil {
+		t.Fatalf("CreateAsset(b): %v", err)
+	}
+
+	firstAt := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)
+	laterAt := firstAt.Add(4 * time.Hour)
+	resolve := func(at time.Time, ids ...identity.Identifier) identity.Resolution {
+		t.Helper()
+		o := observation(tenant, "", "")
+		o.ObservedAt = at
+		o.Identifiers = ids
+		var res identity.Resolution
+		if err := repo.RunInTx(ctx, tenant, func(r *pgrepo.Repository) error {
+			var rErr error
+			res, rErr = engine.WithRepository(r).Resolve(ctx, o)
+			return rErr
+		}); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		return res
+	}
+	// The serial says a, and b's hostname (first) or b's MAC (second) says b:
+	// a cross-kind conflict with nothing left to attach, each time with
+	// DIFFERENT evidence for b. Neither sighting alone carries both.
+	first := resolve(firstAt, serial, host)
+	second := resolve(laterAt, serial, mac)
+	if first.Outcome != identity.OutcomeConflict || second.Outcome != identity.OutcomeConflict {
+		t.Fatalf("outcomes %s / %s, want conflict / conflict", first.Outcome, second.Outcome)
+	}
+	if second.Proposal.ID != first.Proposal.ID || !second.Proposal.Reused {
+		t.Errorf("second sighting got proposal %s (reused %v), want %s reused", second.Proposal.ID, second.Proposal.Reused, first.Proposal.ID)
+	}
+
+	var pending int
+	if err := admin.QueryRow(`
+		SELECT count(*) FROM public.asset_history
+		 WHERE tenant_id = $1 AND action = 'merge_proposed'
+		   AND changes_json ->> 'kind' = 'merge_proposal'
+		   AND COALESCE(changes_json ->> 'status', 'pending') = 'pending'`, tenant).Scan(&pending); err != nil {
+		t.Fatalf("count pending proposals: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("%d pending proposal rows for one pair, want 1 — a sighting carrying one more identifier is "+
+			"more evidence for the same question, not a new question", pending)
+	}
+
+	var (
+		raw       []byte
+		createdAt time.Time
+	)
+	if err := admin.QueryRow(`
+		SELECT changes_json, created_at FROM public.asset_history
+		 WHERE tenant_id = $1 AND id = $2`, tenant, first.Proposal.ID).Scan(&raw, &createdAt); err != nil {
+		t.Fatalf("read the proposal: %v", err)
+	}
+	var row struct {
+		Candidates []struct {
+			AssetID string `json:"asset_id"`
+			Matched []struct {
+				Kind  string `json:"kind"`
+				Value string `json:"value"`
+			} `json:"matched_identifiers"`
+		} `json:"candidates"`
+		LatestEvidenceAt time.Time `json:"latest_evidence_at"`
+	}
+	if err := json.Unmarshal(raw, &row); err != nil {
+		t.Fatalf("decode the proposal: %v", err)
+	}
+	matched := map[string]map[string]bool{}
+	for _, c := range row.Candidates {
+		matched[c.AssetID] = map[string]bool{}
+		for _, m := range c.Matched {
+			matched[c.AssetID][m.Kind+"="+m.Value] = true
+		}
+	}
+	if len(matched) != 2 || !matched[a.ID]["serial_number=SN-FOLD-A"] {
+		t.Errorf("candidates = %v, want a (%s) matched by its serial", matched, a.ID)
+	}
+	if !matched[b.ID]["mac_address=aa:bb:cc:00:00:31"] || !matched[b.ID]["hostname=fold-b"] {
+		t.Errorf("candidate b (%s) matched %v, want the union of both sightings: its MAC and its hostname", b.ID, matched[b.ID])
+	}
+	if !createdAt.Equal(firstAt) {
+		t.Errorf("created_at = %s, want the first sighting's time %s: a fold must not move when the question was asked", createdAt, firstAt)
+	}
+	if !row.LatestEvidenceAt.Equal(laterAt) {
+		t.Errorf("latest_evidence_at = %s, want the later sighting's time %s", row.LatestEvidenceAt, laterAt)
+	}
+}
+
 func observation(tenant, serial, mac string) identity.Observation {
 	o := identity.Observation{
 		TenantID:   tenant,
@@ -485,6 +602,14 @@ func (c *contractRepo) LastKeptSeparate(ctx context.Context, tenantID string, as
 	return c.inner.LastKeptSeparate(ctx, c.tenantID(tenantID), mapped)
 }
 
+func (c *contractRepo) AddressAnnounced(ctx context.Context, holder identity.AssetRef, address string) (bool, error) {
+	return c.inner.AddressAnnounced(ctx, c.ref(holder), address)
+}
+
+func (c *contractRepo) IdentifierLastSeen(ctx context.Context, tenantID string, id identity.Identifier) (time.Time, bool, error) {
+	return c.inner.IdentifierLastSeen(ctx, c.tenantID(tenantID), id)
+}
+
 func (c *contractRepo) RecordAnnouncement(ctx context.Context, announcer, holder identity.AssetRef, a identity.Announcement) error {
 	return c.inner.RecordAnnouncement(ctx, c.ref(announcer), c.ref(holder), a)
 }
@@ -517,6 +642,129 @@ func (c *contractRepo) ResolveProposal(ref identity.ProposalRef, status, actor s
 		return fmt.Errorf("ResolveProposal: %d rows matched proposal %s, want 1", n, ref.ID)
 	}
 	return nil
+}
+
+// PendingProposal is identitytest.ProposalReader, decoded here from the row
+// rather than through the package's own reader, so the contract asserts what
+// the Approvals surface would read and not this package's opinion of it.
+func (c *contractRepo) PendingProposal(ref identity.ProposalRef) (identity.MergeProposal, bool) {
+	var (
+		raw       []byte
+		createdAt time.Time
+	)
+	err := c.db.QueryRow(`
+		SELECT changes_json, created_at FROM public.asset_history
+		 WHERE tenant_id = $1 AND id = $2 AND action = 'merge_proposed'
+		   AND COALESCE(changes_json ->> 'status', 'pending') = 'pending'`,
+		c.tenantID(ref.TenantID), ref.ID).Scan(&raw, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return identity.MergeProposal{}, false
+	}
+	if err != nil {
+		c.t.Fatalf("read proposal %s: %v", ref.ID, err)
+	}
+	var row struct {
+		Candidates []struct {
+			AssetID string `json:"asset_id"`
+			Matched []struct {
+				Kind  string `json:"kind"`
+				Value string `json:"value"`
+				Scope string `json:"scope"`
+			} `json:"matched_identifiers"`
+			Score  float64 `json:"score"`
+			Reason string  `json:"reason"`
+		} `json:"candidates"`
+		CandidateSnapshots []struct {
+			AssetID string `json:"asset_id"`
+			rowMatcherSide
+		} `json:"candidate_snapshots"`
+		LatestEvidenceAt       *time.Time      `json:"latest_evidence_at"`
+		PairScore              float64         `json:"pair_score"`
+		PairAssetIDs           []string        `json:"pair_asset_ids"`
+		PairReason             string          `json:"pair_reason"`
+		ObservationIdentifiers []rowIdentifier `json:"observation_identifiers"`
+		ObservationContext     *rowMatcherSide `json:"observation_context"`
+	}
+	if err := json.Unmarshal(raw, &row); err != nil {
+		c.t.Fatalf("decode proposal %s: %v", ref.ID, err)
+	}
+	out := identity.MergeProposal{
+		ProposedAt:   createdAt,
+		PairScore:    row.PairScore,
+		PairAssetIDs: row.PairAssetIDs,
+		PairReason:   row.PairReason,
+		// The Phase 5 keys are read with this file's own types, the spelling
+		// scripts/export-merge-decisions.sql reads, not the package decoder.
+		ObservationContext: row.ObservationContext.side(),
+	}
+	for _, id := range row.ObservationIdentifiers {
+		out.ObservationIdentifiers = append(out.ObservationIdentifiers, id.identifier())
+	}
+	if row.LatestEvidenceAt != nil {
+		out.LatestEvidenceAt = *row.LatestEvidenceAt
+	}
+	snapshots := map[string]*identity.MatcherSide{}
+	for i := range row.CandidateSnapshots {
+		snapshots[row.CandidateSnapshots[i].AssetID] = row.CandidateSnapshots[i].side()
+	}
+	for _, cand := range row.Candidates {
+		mc := identity.MergeCandidate{
+			Ref:      identity.AssetRef{TenantID: ref.TenantID, ID: cand.AssetID},
+			Score:    cand.Score,
+			Reason:   cand.Reason,
+			Snapshot: snapshots[cand.AssetID],
+		}
+		for _, m := range cand.Matched {
+			mc.MatchedIdentifiers = append(mc.MatchedIdentifiers, identity.Identifier{
+				Kind: identity.Kind(m.Kind), Value: m.Value, Scope: m.Scope,
+			})
+		}
+		out.Candidates = append(out.Candidates, mc)
+	}
+	return out, true
+}
+
+// rowIdentifier and rowMatcherSide read the Phase 5 keys of a proposal
+// row independently of the package's own decoder.
+type rowIdentifier struct {
+	Kind    string `json:"kind"`
+	Value   string `json:"value"`
+	Scope   string `json:"scope"`
+	Derived bool   `json:"derived"`
+	Generic bool   `json:"generic"`
+}
+
+func (r rowIdentifier) identifier() identity.Identifier {
+	id := identity.Identifier{Kind: identity.Kind(r.Kind), Value: r.Value, Scope: r.Scope, Generic: r.Generic}
+	if r.Derived {
+		id.Source.Kind = identity.SourceInferred
+	}
+	return id
+}
+
+type rowMatcherSide struct {
+	Name        string          `json:"name"`
+	Class       string          `json:"class"`
+	Segment     string          `json:"segment"`
+	Vendor      string          `json:"vendor"`
+	Model       string          `json:"model"`
+	SourceKind  string          `json:"source_kind"`
+	SeenAt      *time.Time      `json:"seen_at"`
+	Identifiers []rowIdentifier `json:"identifiers"`
+}
+
+func (r *rowMatcherSide) side() *identity.MatcherSide {
+	if r == nil {
+		return nil
+	}
+	out := &identity.MatcherSide{Name: r.Name, Class: r.Class, Segment: r.Segment, Vendor: r.Vendor, Model: r.Model, SourceKind: r.SourceKind}
+	if r.SeenAt != nil {
+		out.SeenAt = *r.SeenAt
+	}
+	for _, id := range r.Identifiers {
+		out.Identifiers = append(out.Identifiers, id.identifier())
+	}
+	return out
 }
 
 // Announcements is identitytest.AnnouncementReader, read straight from

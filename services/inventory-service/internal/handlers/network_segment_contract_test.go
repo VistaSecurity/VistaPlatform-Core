@@ -12,7 +12,9 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -23,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 )
 
 // --- stub networkSegmentService --------------------------------------------
@@ -38,6 +41,7 @@ type stubNetworkSegmentService struct {
 	createErr    error
 	updateResult *models.NetworkSegment
 	updateErr    error
+	updateInput  models.NetworkSegmentInput // what the handler handed to Update
 	deleteErr    error
 	// cloud classification (B-49)
 	cloudSegment    *models.NetworkSegment
@@ -60,7 +64,8 @@ func (s *stubNetworkSegmentService) BulkCreate(_ uuid.UUID, inputs []models.Netw
 	}
 	return res
 }
-func (s *stubNetworkSegmentService) Update(uuid.UUID, uuid.UUID, models.NetworkSegmentInput) (*models.NetworkSegment, error) {
+func (s *stubNetworkSegmentService) Update(_ uuid.UUID, _ uuid.UUID, in models.NetworkSegmentInput) (*models.NetworkSegment, error) {
+	s.updateInput = in
 	return s.updateResult, s.updateErr
 }
 func (s *stubNetworkSegmentService) Delete(uuid.UUID, uuid.UUID) error                  { return s.deleteErr }
@@ -305,3 +310,109 @@ func TestContract_DeleteNetworkSegment_404(t *testing.T) {
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
+
+// --- DHCP posture ( Phase 1a) ------------------------------------------
+
+// The response carries the effective posture and whose statement it is, and both
+// are null — not false, not absent — for a segment nobody has spoken for.
+func TestContract_NetworkSegment_ExposesDHCPPosture(t *testing.T) {
+	sv := loadSpec(t)
+	yes, src, name := true, "measured", "edge-router"
+	measured := sampleSegment()
+	measured.Dynamic, measured.DynamicSource, measured.DynamicSourceName = &yes, &src, &name
+	silent := minimalSegment()
+
+	for label, seg := range map[string]models.NetworkSegment{"measured": measured, "unknown": silent} {
+		s := seg
+		w := do(newSegmentEngine(&stubNetworkSegmentService{byID: &s}), http.MethodGet, nsBase+"/network-segments/"+aUUID, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200; body=%s", label, w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "NetworkSegment", w.Body.Bytes())
+		var got map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if _, has := got["dynamic"]; !has {
+			t.Fatalf("%s: dynamic is absent from the response; unknown must be an explicit null", label)
+		}
+		if _, has := got["dynamic_source"]; !has {
+			t.Fatalf("%s: dynamic_source is absent from the response", label)
+		}
+	}
+	w := do(newSegmentEngine(&stubNetworkSegmentService{byID: &measured}), http.MethodGet, nsBase+"/network-segments/"+aUUID, nil)
+	if !strings.Contains(w.Body.String(), `"dynamic":true`) || !strings.Contains(w.Body.String(), `"dynamic_source":"measured"`) {
+		t.Fatalf("posture not serialised: %s", w.Body.String())
+	}
+}
+
+// PUT `dhcp` is three-valued and the handler must tell the three apart:
+// absent keeps, true/false sets, null clears. A *bool decodes absent and null
+// to the same nil, which is how "keep" and "clear" would silently swap.
+func TestContract_UpdateNetworkSegment_DHCPIsThreeValued(t *testing.T) {
+	sv := loadSpec(t)
+	const head = `{"name":"lan","segment_type":"cidr","value":"192.0.2.0/24","network_type":"private","environment":"production"`
+	for _, c := range []struct {
+		name, body string
+		set        bool
+		val        *bool
+	}{
+		{"absent keeps", head + `}`, false, nil},
+		{"true sets", head + `,"dhcp":true}`, true, boolP(true)},
+		{"false sets", head + `,"dhcp":false}`, true, boolP(false)},
+		{"null clears", head + `,"dhcp":null}`, true, nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// The body is a valid NetworkSegmentInput per the spec...
+			sv.assertConforms(t, "NetworkSegmentInput", []byte(c.body))
+			// ...and reaches the service as the state it names.
+			seg := sampleSegment()
+			stub := &stubNetworkSegmentService{updateResult: &seg}
+			w := do(newSegmentEngine(stub), http.MethodPut, nsBase+"/network-segments/"+aUUID, strings.NewReader(c.body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			got := stub.updateInput.DHCP
+			if got.Set != c.set || (got.Value == nil) != (c.val == nil) || (got.Value != nil && *got.Value != *c.val) {
+				t.Fatalf("service saw dhcp = {Set:%v Value:%v}, want {Set:%v Value:%v}", got.Set, got.Value, c.set, c.val)
+			}
+		})
+	}
+}
+
+// A dhcp that is not a boolean is refused at the door, by the spec and by the
+// handler, with the message the form shows.
+func TestContract_UpdateNetworkSegment_DHCPMustBeABoolean(t *testing.T) {
+	sv := loadSpec(t)
+	bad := `{"name":"lan","segment_type":"cidr","value":"192.0.2.0/24","network_type":"private","environment":"production","dhcp":"yes"}`
+	sch, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/NetworkSegmentInput")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, err := jsonschema.UnmarshalJSON(strings.NewReader(bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sch.Validate(inst); err == nil {
+		t.Fatal("the spec accepted dhcp:\"yes\" — the guardrail is not checking the field")
+	}
+	w := do(newSegmentEngine(&stubNetworkSegmentService{}), http.MethodPut, nsBase+"/network-segments/"+aUUID, strings.NewReader(bad))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// A DHCP answer on a segment type that cannot hold a lease is a field error the
+// person at the form can act on, not a 500.
+func TestContract_UpdateNetworkSegment_400_dhcpNotApplicable(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newSegmentEngine(&stubNetworkSegmentService{updateErr: fmt.Errorf("%w: %q is neither", services.ErrDHCPNotApplicable, "domain")})
+	w := do(eng, http.MethodPut, nsBase+"/network-segments/"+aUUID, strings.NewReader(validSegmentBody))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+func boolP(b bool) *bool { return &b }

@@ -20,6 +20,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -1355,5 +1356,216 @@ func TestIntegration_MergePreview_PreservesDeclaredDonorNamesAgainstPromotion(t 
 	}
 	if name != "operator.example.test" || kind != "declared" || !preserved || copied {
 		t.Fatalf("name=%s provenance=%s preserved=%v copied=%v", name, kind, preserved, copied)
+	}
+}
+
+// insertMergeProposalRow writes a merge_proposal history row with exactly the given
+// changes_json, hung off subject — for the shapes openProposal cannot express
+// (the floor path's empty observation id, several candidates).
+func insertMergeProposalRow(t *testing.T, db *database.DB, tenant, subject uuid.UUID, changes map[string]any) uuid.UUID {
+	t.Helper()
+	encoded, err := json.Marshal(changes)
+	if err != nil {
+		t.Fatalf("marshal proposal: %v", err)
+	}
+	var id uuid.UUID
+	if err := db.QueryRow(`
+		INSERT INTO asset_history (asset_id, tenant_id, source, action, changes_json, created_at)
+		VALUES ($1,$2,'sensor','merge_proposed',$3::jsonb, NOW()) RETURNING id`,
+		subject, tenant, encoded).Scan(&id); err != nil {
+		t.Fatalf("insert proposal: %v", err)
+	}
+	return id
+}
+
+func proposalCandidates(ids ...uuid.UUID) []any {
+	out := make([]any, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, map[string]any{
+			"asset_id":            id.String(),
+			"matched_identifiers": []map[string]any{{"kind": "hostname", "value": "shared-name", "scope": "tenant"}},
+			"score":               0.0,
+		})
+	}
+	return out
+}
+
+// identityConflictFlags reads has_identity_conflict for every listed asset
+// through GetAssets — the query the inventory list and asset page use.
+func identityConflictFlags(t *testing.T, db *database.DB, tenant uuid.UUID) map[uuid.UUID]bool {
+	t.Helper()
+	assets, _, err := NewAssetService(db).GetAssets(tenant, models.AssetFilters{Page: 1, PageSize: 100})
+	if err != nil {
+		t.Fatalf("GetAssets: %v", err)
+	}
+	out := map[uuid.UUID]bool{}
+	for _, a := range assets {
+		out[a.ID] = a.HasIdentityConflict
+	}
+	return out
+}
+
+// A2: the floor path stores observation_asset_id as "" (the sighting created no
+// asset). Merging the two candidates must resolve the proposal that launched
+// the merge and clear the survivor's conflict badge. It used to count "" as a
+// second participant, rewrite the row, and leave it pending.
+func TestIntegration_MergeProposal_EmptyObservationIDResolvesOnMerge(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	testdb.HoldSchemaShareLock(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	actor := seedUser(t, db, tenant)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+
+	survivor := seedAsset(t, db, tenant, "floor-keep.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "floor-source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	proposal := insertMergeProposalRow(t, db, tenant, survivor, map[string]any{
+		"kind": "merge_proposal", "status": "pending",
+		"observation_asset_id": "",
+		"reason":               "every identifier this observation carries already belongs to another asset",
+		"source_kind":          "measured",
+		"candidates":           proposalCandidates(survivor, source),
+	})
+	if flags := identityConflictFlags(t, db, tenant); !flags[survivor] || !flags[source] {
+		t.Fatalf("precondition: a two-candidate proposal must flag both records: %v", flags)
+	}
+
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(ctx, tenant, proposal, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, tenant, proposal, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Same device confirmed by the reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var status, mergedInto string
+	if err := db.QueryRow(`SELECT changes_json->>'status', COALESCE(changes_json->>'merged_into','') FROM asset_history WHERE tenant_id=$1 AND id=$2`, tenant, proposal).Scan(&status, &mergedInto); err != nil {
+		t.Fatal(err)
+	}
+	if status != mergeStatusMerged || mergedInto != survivor.String() {
+		t.Fatalf("launching proposal: status=%q merged_into=%q, want merged into %s", status, mergedInto, survivor)
+	}
+	if flags := identityConflictFlags(t, db, tenant); flags[survivor] {
+		t.Fatal("survivor still shows has_identity_conflict after its only question was merged")
+	}
+}
+
+// A2 (also): a proposal whose other participants were already archived, denied
+// or deleted collapses to one LIVE record once the selected sources fold into
+// the survivor. That is answered by this merge, not left pending.
+func TestIntegration_MergeProposal_DeadParticipantsCollapseOnMerge(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	testdb.HoldSchemaShareLock(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	actor := seedUser(t, db, tenant)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+
+	survivor := seedAsset(t, db, tenant, "dead-keep.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "dead-source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	gone := seedAsset(t, db, tenant, "dead-gone.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	if _, err := db.Exec(`UPDATE assets SET asset_status='archived' WHERE tenant_id=$1 AND id=$2`, tenant, gone); err != nil {
+		t.Fatal(err)
+	}
+	proposal := insertMergeProposalRow(t, db, tenant, source, map[string]any{
+		"kind": "merge_proposal", "status": "pending",
+		"observation_asset_id": source.String(),
+		"source_kind":          "measured",
+		"candidates":           proposalCandidates(survivor, gone),
+	})
+
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor}
+	preview, err := svc.PreviewMerge(ctx, tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ExecuteMerge(ctx, tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: "Same device confirmed by the reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	var status, mergedInto string
+	if err := db.QueryRow(`SELECT changes_json->>'status', COALESCE(changes_json->>'merged_into','') FROM asset_history WHERE tenant_id=$1 AND id=$2`, tenant, proposal).Scan(&status, &mergedInto); err != nil {
+		t.Fatal(err)
+	}
+	if status != mergeStatusMerged || mergedInto != survivor.String() {
+		t.Fatalf("proposal with an archived third participant: status=%q merged_into=%q", status, mergedInto)
+	}
+}
+
+// Wiring check for phase 0: a proposal naming fewer than two LIVE records
+// can only be "kept separate", so it is not a question. The Approvals queue
+// (ListPending, list and total) must not show it, and GetAssets must not raise
+// has_identity_conflict because of it. Both read mergeProposalAnswerableSQL.
+func TestIntegration_ListPending_HidesSingleCandidateRows(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	testdb.HoldSchemaShareLock(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	svc := NewMergeProposalService(db)
+	ctx := context.Background()
+
+	seed := func(name string) uuid.UUID {
+		return seedAsset(t, db, tenant, name, "server", "hardware.computer.server", "production", 0, 0)
+	}
+	// Each "lonely" asset is the only live record of one hidden proposal shape.
+	lonelyFloor := seed("lonely-floor.example.test")
+	lonelyDup := seed("lonely-dup.example.test")
+	lonelyArchived, archived := seed("lonely-archived.example.test"), seed("peer-archived.example.test")
+	lonelyDenied, denied := seed("lonely-denied.example.test"), seed("peer-denied.example.test")
+	lonelyDeleted, deleted := seed("lonely-deleted.example.test"), seed("peer-deleted.example.test")
+	if _, err := db.Exec(`UPDATE assets SET asset_status='archived' WHERE tenant_id=$1 AND id=$2`, tenant, archived); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE assets SET asset_status='denied' WHERE tenant_id=$1 AND id=$2`, tenant, denied); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE assets SET deleted_at=NOW() WHERE tenant_id=$1 AND id=$2`, tenant, deleted); err != nil {
+		t.Fatal(err)
+	}
+	// The answerable one: two live records, one of them via the observation.
+	pairObs, pairCand := seed("pair-observed.example.test"), seed("pair-candidate.example.test")
+
+	pending := func(subject uuid.UUID, observation string, candidates ...uuid.UUID) uuid.UUID {
+		return insertMergeProposalRow(t, db, tenant, subject, map[string]any{
+			"kind": "merge_proposal", "status": "pending",
+			"observation_asset_id": observation,
+			"source_kind":          "measured",
+			"candidates":           proposalCandidates(candidates...),
+		})
+	}
+	// The A1 shape: floor path, empty observation, ONE candidate.
+	pending(lonelyFloor, "", lonelyFloor)
+	// The same record twice is still one record.
+	pending(lonelyDup, lonelyDup.String(), lonelyDup, lonelyDup)
+	pending(lonelyArchived, "", lonelyArchived, archived)
+	pending(lonelyDenied, lonelyDenied.String(), denied)
+	pending(lonelyDeleted, "", lonelyDeleted, deleted)
+	answerable := pending(pairObs, pairObs.String(), pairCand)
+
+	views, total, err := svc.ListPending(ctx, tenant, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(views) != 1 || views[0].ID != answerable {
+		got := []uuid.UUID{}
+		for _, v := range views {
+			got = append(got, v.ID)
+		}
+		t.Fatalf("ListPending: total=%d rows=%v, want only %s", total, got, answerable)
+	}
+
+	flags := identityConflictFlags(t, db, tenant)
+	for name, id := range map[string]uuid.UUID{"floor": lonelyFloor, "dup": lonelyDup, "archived peer": lonelyArchived, "denied peer": lonelyDenied, "deleted peer": lonelyDeleted} {
+		if flags[id] {
+			t.Errorf("%s: has_identity_conflict raised by a proposal with one live record", name)
+		}
+	}
+	if !flags[pairObs] || !flags[pairCand] {
+		t.Errorf("answerable proposal lost its conflict flag: observation=%v candidate=%v", flags[pairObs], flags[pairCand])
 	}
 }

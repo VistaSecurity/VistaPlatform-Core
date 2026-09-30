@@ -38,14 +38,13 @@ type metricsSource interface {
 
 // AlertEvaluator periodically evaluates metrics against alert thresholds and triggers notifications
 type AlertEvaluator struct {
-	alertingService     alertStore
-	notificationService *services.NotificationService
-	metricsService      metricsSource
-	natsClient          *events.NATSClient
-	logger              *log.Logger
-	interval            time.Duration
-	config              *config.Config
-	httpClient          *http.Client
+	alertingService alertStore
+	metricsService  metricsSource
+	natsClient      *events.NATSClient
+	logger          *log.Logger
+	interval        time.Duration
+	config          *config.Config
+	httpClient      *http.Client
 	// notify is the notification sink. Overridable so tests can count
 	// notifications without a notification-service or a NATS server.
 	notify func(req map[string]interface{}) error
@@ -60,7 +59,6 @@ type AlertEvaluator struct {
 // NewAlertEvaluator creates a new alert evaluator job
 func NewAlertEvaluator(
 	alertingService *services.AlertingService,
-	notificationService *services.NotificationService,
 	metricsService *services.MetricsService,
 	cfg *config.Config,
 	interval time.Duration,
@@ -91,14 +89,13 @@ func NewAlertEvaluator(
 	}
 
 	ae := &AlertEvaluator{
-		alertingService:     alertingService,
-		notificationService: notificationService,
-		metricsService:      metricsService,
-		natsClient:          natsClient,
-		logger:              log.New(log.Writer(), "[AlertEvaluator] ", log.LstdFlags),
-		interval:            interval,
-		config:              cfg,
-		httpClient:          httpClient,
+		alertingService: alertingService,
+		metricsService:  metricsService,
+		natsClient:      natsClient,
+		logger:          log.New(log.Writer(), "[AlertEvaluator] ", log.LstdFlags),
+		interval:        interval,
+		config:          cfg,
+		httpClient:      httpClient,
 	}
 	ae.notify = ae.sendToUnifiedNotificationService
 	if natsClient != nil {

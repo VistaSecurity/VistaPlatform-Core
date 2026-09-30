@@ -263,6 +263,10 @@ func (b *IdentityEnrichmentBackend) pollDNS(ctx context.Context, j identityenric
 		evidence.Identifiers = append(evidence.Identifiers, identity.Identifier{Kind: identity.KindIPAddress, Value: address, Scope: j.Plan.SegmentID.String()})
 	}
 	evidence, _ = evidence.Sanitize()
+	// A DNS answer is measured context: a generic name looked up here is marked
+	// exactly as it was at ingest, so the lookup cannot make it decide what the
+	// sighting could not ( B2). MarkAll touches only `hostname`.
+	evidence.Identifiers = b.assets.genericNames().MarkAll(ctx, j.TenantID.String(), evidence.Identifiers)
 	// Hold the tenant policy decision through the evidence transaction; a
 	// disable that commits first cannot be overtaken by a queued DNS result.
 	engine, err := b.assets.identityEngine()

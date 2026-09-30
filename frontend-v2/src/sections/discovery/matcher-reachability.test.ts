@@ -80,7 +80,31 @@ describe('the auto-accept threshold is reachable', () => {
   });
 });
 
-describe('what the matcher merged unasked is reachable', () => {
+describe('the same-device rule-merge switch is reachable (#2081 Phase 4)', () => {
+  const card = read('../settings/auto-accept-card.tsx');
+  const queries = read('../inventory/asset-queries.ts');
+
+  it('the settings card RENDERS the control', () => {
+    // The wiring line. Delete `<RuleMergeControl />` and the switch vanishes
+    // with everything still compiling and every jsdom test still green (they
+    // render the card, not this line), leaving the PUT field with no caller.
+    expect(card).toMatch(/<RuleMergeControl\s*\/>/);
+  });
+
+  it('the control uses the toggle-only mutation, gated on BOTH write permissions', () => {
+    expect(card).toContain('useSetAutoMergeExisting');
+    expect(queries).toMatch(/export function useSetAutoMergeExisting/);
+    const control = card.slice(card.indexOf('function RuleMergeControl'), card.indexOf('export function AutoAcceptCard'));
+    expect(control).toMatch(/allOf=\{\[TENANT_PERMISSIONS\.settings\.update, TENANT_PERMISSIONS\.assets\.update\]\}/);
+  });
+
+  it('Approvals says where the rule merges are, under the renamed section', () => {
+    expect(card).toContain('Discovery → Approvals → Merged automatically');
+    expect(read('./auto-merged-section.tsx')).toContain('Merged automatically (last');
+  });
+});
+
+describe('what the platform merged unasked is reachable', () => {
   it('Approvals asks for it', () => {
     expect(approvalsPage).toContain('useAutoAcceptedMerges');
   });

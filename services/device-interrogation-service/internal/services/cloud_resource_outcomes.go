@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/aws/smithy-go"
+	azureclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/azure"
+	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 )
 
@@ -370,11 +372,15 @@ func SanitizeCloudErrorMessage(msg string) string {
 func classifyCloudFailure(code, msg string) string {
 	h := strings.ToLower(code + " " + msg)
 	switch {
-	case containsAny(h, "accessdenied", "unauthorizedoperation", "authorizationerror", "not authorized", "forbidden"):
+	case containsAny(h, "accessdenied", "unauthorizedoperation", "authorizationerror", "not authorized", "forbidden",
+		// Azure Resource Manager and Google's API vocabulary.
+		"authorizationfailed", "does not have authorization", "permission_denied", "permissiondenied"):
 		return CloudFailureAccessDenied
-	case containsAny(h, "expiredtoken", "invalidclienttokenid", "signaturedoesnotmatch", "unrecognizedclient", "invalidaccesskeyid", "authfailure", "incompletesignature", "credential", "invalidsecurity"):
+	case containsAny(h, "expiredtoken", "invalidclienttokenid", "signaturedoesnotmatch", "unrecognizedclient", "invalidaccesskeyid", "authfailure", "incompletesignature", "credential", "invalidsecurity",
+		// OAuth errors from Microsoft Entra ID and Google's token endpoint.
+		"invalid_client", "invalid_grant", "unauthorized_client", "authentication_failed", "unauthenticated", "invalidauthenticationtoken"):
 		return CloudFailureCredentials
-	case containsAny(h, "throttl", "toomanyrequests", "requestlimitexceeded", "slowdown", "limitexceeded", "provisionedthroughput"):
+	case containsAny(h, "throttl", "toomanyrequests", "requestlimitexceeded", "slowdown", "limitexceeded", "provisionedthroughput", "resource_exhausted"):
 		return CloudFailureThrottled
 	case containsAny(h, "optinrequired", "invalidregion", "unsupportedregion", "endpointunreachable", "no such host"):
 		return CloudFailureRegion
@@ -411,6 +417,15 @@ func SanitizeCloudFailure(scope string, err error) CloudCollectorFailure {
 	if errors.As(err, &apiErr) {
 		f.Code = SanitizeCloudErrorMessage(apiErr.ErrorCode())
 		f.Message = SanitizeCloudErrorMessage(apiErr.ErrorMessage())
+	} else if code, msg, _, ok := azureclient.ErrorDetail(err); ok {
+		// Azure's SDK error text is a dump of the request and the whole
+		// response; its code (AuthorizationFailed, invalid_client …) is what
+		// says what to do.
+		f.Code = SanitizeCloudErrorMessage(code)
+		f.Message = SanitizeCloudErrorMessage(msg)
+	} else if code, msg, _, ok := gcpclient.ErrorDetail(err); ok {
+		f.Code = SanitizeCloudErrorMessage(code)
+		f.Message = SanitizeCloudErrorMessage(msg)
 	} else {
 		f.Message = SanitizeCloudErrorMessage(err.Error())
 	}

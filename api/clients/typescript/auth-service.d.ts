@@ -1407,7 +1407,8 @@ export interface paths {
         put?: never;
         /**
          * Mint a new API token
-         * @description Creates a token owned by the calling user. `permissions` must be a subset of the allowed read-only set (`assets.read`, `compliance.read`, `reports.read`, `discovery.read`, `sensors.read`, `settings.read`); omitted means the default set (`assets.read`, `compliance.read`, `reports.read`). `expires_in_days` defaults to 90, max 365. The response's `plaintext_token` is shown exactly once and never retrievable again.
+         * @description Creates a token owned by the calling user. `permissions` must be a subset of the allowed read-only set (`assets.read`, `compliance.read`, `reports.read`, `discovery.read`, `sensors.read`, `settings.read`); omitted means the default set (`assets.read`, `compliance.read`, `reports.read`). The My Profile → API Tokens page offers only those three — the ones the MCP tools actually use — while the server still accepts `discovery.read`, `sensors.read` and `settings.read` so tokens minted before the UI narrowed keep working; no tool consumes them today. `expires_in_days` defaults to 90, max 365. The response's `plaintext_token` is shown exactly once and never retrievable again.
+         *     A personal API token is presented only to the MCP server. It is not accepted as a bearer credential by the platform's REST API, which takes a signed-in session access token.
          */
         post: operations["createApiToken"];
         delete?: never;

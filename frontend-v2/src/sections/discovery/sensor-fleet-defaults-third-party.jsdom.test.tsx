@@ -144,6 +144,12 @@ describe('Sensor fleet defaults: third-party TLS enrichment opt-in', () => {
     mocks.put.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
     await mount();
     await turnOnAndConfirm();
+    // The mutation goes pending at once, but TanStack Query hands `isPending`
+    // to React on a setTimeout(0), and act() only waits for a setImmediate —
+    // Node does not order those two, so on a slow runner the dialog has not
+    // re-rendered yet when act() returns. Wait for the render. The PUT is held
+    // open until `finish`, so whatever is seen here is the in-flight state.
+    await settled(() => button(/^Saving/) !== undefined);
 
     expect(mocks.put).toHaveBeenCalledWith('/sensors/config/defaults', {
       body: { values: { third_party_tls_enrichment: true }, confirmed: true },

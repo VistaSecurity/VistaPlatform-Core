@@ -170,9 +170,18 @@ func (s *AssetService) resolveObservationWithRepo(
 			if tErr != nil {
 				return tErr
 			}
+			// The tenant's rule-merge switch ( Phase 4), read the same way
+			// and for the same reason: it decides whether a same-device verdict
+			// is stamped on this observation's proposal for the rule-merge
+			// executor to act on. Absent means ON; a read the database refuses
+			// fails the observation rather than guessing.
+			autoMerge, mErr := identitysettings.ReadAutoMergeExistingFor(ctx, tx, obs.TenantID)
+			if mErr != nil {
+				return mErr
+			}
 
 			var rErr error
-			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithRepository(r).Resolve(ctx, obs)
+			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).Resolve(ctx, obs)
 			if rErr != nil {
 				return rErr
 			}
@@ -497,6 +506,10 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 			return identity.Observation{}, errors.New("discovery collector does not belong to tenant")
 		}
 	}
+	cloudAuthoritative, err := s.cloudCollectorAuthoritative(context.Background(), tenantID, f)
+	if err != nil {
+		return identity.Observation{}, err
+	}
 	obs := identity.Observation{
 		TenantID:   tenantID.String(),
 		Source:     findingSource(f),
@@ -552,6 +565,10 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
 			Kind: identity.KindCloudResourceID, Value: rid, Confidence: 1,
 		})
+		// The provider's API listing the resource IS the authoritative source
+		// for it — see cloudCollectorAuthoritative for why this is decided from
+		// the row's writer and not from anything in the finding.
+		obs.Admission.Authoritative = cloudAuthoritative
 	}
 	if mac := rawDataString(f.RawData, "mac_address", "mac"); mac != "" {
 		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
@@ -599,6 +616,12 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 	if len(clean.Identifiers) == 0 {
 		return identity.Observation{}, fmt.Errorf("%w: %s", errNoIdentifiers, findingLabel(f))
 	}
+	// A finding is a MEASUREMENT (findingSource is always SourceMeasured): the
+	// name came off the wire or out of a collector, so a generic one (`iphone`,
+	// `printer`, or a name three assets here already carry) is marked and cannot
+	// decide a match ( B2). Same rule, same decider, as the host-observation
+	// path; MarkAll touches only `hostname` identifiers.
+	clean.Identifiers = s.genericNames().MarkAll(context.Background(), tenantID.String(), clean.Identifiers)
 	return clean, nil
 }
 
@@ -769,6 +792,11 @@ func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInpu
 		})
 	}
 
+	// The name is NOT marked generic here ( B2), deliberately. Every caller
+	// of this builder is a person or a system of record — manual create,
+	// elevation and SBOM subjects (declared), spreadsheet, CMDB and NetBox
+	// imports (imported) — and a `printer` somebody typed or curated is a
+	// statement about which device this is, not a default a device announced.
 	host := strings.TrimSpace(derefString(in.Hostname))
 	if host != "" {
 		obs.Hostname = strings.ToLower(host)
@@ -920,6 +948,60 @@ func parseObservedAddr(ip *string) (netip.Addr, bool) {
 // ---------------------------------------------------------------------------
 // finding → observation field helpers
 // ---------------------------------------------------------------------------
+
+// cloudCollectorAuthoritative reports whether a finding is a cloud provider's
+// own listing of a resource, written by the platform's cloud collector — the
+// evidence that may establish an asset keyed on the provider's resource id.
+//
+// Why it matters: the at-rest collectors (object storage, managed databases,
+// key stores) record nothing themselves; their resources reach inventory ONLY
+// as findings. Unmarked, a finding carrying just a bucket name and its ARN has
+// no device or address binding, so a tenant in ENFORCE admission mode parked
+// every one of them as an unresolved observation and none ever became an
+// asset. The load balancers and distributions were unaffected only because the
+// collector also records those through upsertDeviceAsset, which has always
+// admitted them as authoritative. A cloud API listing a resource is the same
+// statement whichever of the two paths carries it.
+//
+// All three conditions are required, and none of them may be relaxed:
+//
+//   - The row was written under this tenant's platform-managed
+//     device-interrogation sensor — the one sensor the cloud collector writes
+//     sensor_discoveries under (writeSensorDiscoveriesTx). This is the trust
+//     anchor. `discovery_method = cloud_api` alone is NOT: it sits in the
+//     sensor-controlled metadata envelope, so any tenant sensor could claim it.
+//     `platform_managed` is set only by the platform's own provisioning, never
+//     by a tenant registration (see sensor-manager auto_registration.go).
+//   - The finding says it came from a cloud API. The platform sensor also
+//     carries device-interrogation rows, which are not a provider's listing.
+//   - The finding carries the provider's resource id. That is what the
+//     admission is keyed on (`authoritative_identifier`), and what makes the
+//     next run of the same discovery match the same asset.
+//
+// A sensor's passive observation, an active scan, or a cloud-shaped row from
+// any other sensor stays exactly as unauthoritative as before.
+func (s *AssetService) cloudCollectorAuthoritative(ctx context.Context, tenantID uuid.UUID, f IngestFinding) (bool, error) {
+	if s.db == nil || f.SourceSensorID == nil || !isCloudAPIFinding(f) || cloudResourceID(f) == "" {
+		return false, nil
+	}
+	sensorID, err := uuid.Parse(strings.TrimSpace(*f.SourceSensorID))
+	if err != nil || sensorID == uuid.Nil {
+		return false, nil
+	}
+	var platform bool
+	if err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM sensors
+				 WHERE tenant_id = $1 AND id = $2
+				   AND profile = 'device_interrogation'
+				   AND platform_managed
+				   AND deleted_at IS NULL)`, tenantID, sensorID).Scan(&platform)
+	}); err != nil {
+		return false, fmt.Errorf("verify cloud collector: %w", err)
+	}
+	return platform, nil
+}
 
 func findingCollectorSource(f IngestFinding) bool {
 	ref := findingSource(f).Ref

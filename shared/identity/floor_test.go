@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
@@ -117,6 +118,137 @@ func TestFloor_AllIdentifiersOwnedOpensAProposalAndCreatesNothing(t *testing.T) 
 	if len(res.Candidates) != 2 {
 		t.Errorf("%d candidates, want 2 — a reviewer needs both assets the identifiers pointed at",
 			len(res.Candidates))
+	}
+}
+
+// TestResolve_FloorSingleOwnerIsSupportingNotProposal is A1.
+//
+// Every identifier the observation carries is already owned — and all by the
+// SAME asset — but none of them may decide. The floor used to open a merge
+// proposal naming that one asset: a "question" whose only possible answer is
+// "keep separate" from nothing, because the Approvals UI needs two live records
+// to offer a merge. It is another sighting of a known thing: supporting
+// evidence, no proposal, nothing created.
+//
+// Both ways into the floor are covered, and the admission-enabled one runs with
+// Config.ProvisionalInventory OFF: the shortcut is about ownership, not about
+// provisional inventory.
+//
+// Mutation check: delete the single-owner branch in the floor AND the
+// one-candidate refusal in resolveContested → a one-candidate proposal opens and
+// this fails. Deleting either one alone leaves it green, by design: the other is
+// the belt and braces, and TestResolveContested_NeverProposesOneCandidate pins
+// the refusal on its own.
+func TestResolve_FloorSingleOwnerIsSupportingNotProposal(t *testing.T) {
+	ctx := context.Background()
+	cloudMAC := id(identity.KindMACAddress, "aa:bb:cc:00:20:81")
+	cloudARN := id(identity.KindCloudResourceID, "arn:aws:ec2:us-east-1:1:instance/i-2081")
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (identity.Repository, *identity.Engine, identity.AssetRef, identity.Observation)
+	}{
+		{
+			// No admission at all: a cloud class drops mac_address from its
+			// precedence, so the MAC is recorded and mute.
+			name: "unassessed observation, a kind the class does not vote on",
+			setup: func(t *testing.T) (identity.Repository, *identity.Engine, identity.AssetRef, identity.Observation) {
+				e, repo := newEngine(t, identity.Config{})
+				owner := mustResolve(t, e, obs(assetclass.KeyCloudResource, cloudARN, cloudMAC))
+				return repo, e, owner.Asset, obs(assetclass.KeyCloudResource, cloudMAC)
+			},
+		},
+		{
+			// Admission on, provisional inventory OFF, and the observation IS
+			// established (a direct, scoped interface) — the floor is reached
+			// because its only identifier may not vote for the class.
+			name: "established observation, provisional inventory off",
+			setup: func(t *testing.T) (identity.Repository, *identity.Engine, identity.AssetRef, identity.Observation) {
+				e, repo := newProvisionalEngine(t, false)
+				owner, err := repo.CreateAsset(ctx, tenant, identity.NewAsset{
+					ClassKey:        assetclass.KeyCloudResource,
+					ClassSourceKind: identity.ClassSourceMeasured,
+					DisplayName:     "i-2081",
+					Status:          identity.StatusPendingApproval,
+					Source:          identity.Source{Kind: identity.SourceMeasured, Ref: "collector"},
+					Identifiers:     []identity.Identifier{cloudARN, cloudMAC},
+					FirstSeenAt:     observedAt,
+					LastSeenAt:      observedAt,
+				})
+				if err != nil {
+					t.Fatalf("seed the owner: %v", err)
+				}
+				o := direct(observedAt.Add(time.Hour), segmentB, cloudMAC)
+				o.ClassHint = assetclass.KeyCloudResource
+				return repo.Repository, e, owner, o
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, e, owner, o := tt.setup(t)
+			repo := r.(interface {
+				AssetCount() int
+				Proposals() []identity.MergeProposal
+				HistoryFor(identity.AssetRef) []identity.HistoryEntry
+			})
+			before := repo.AssetCount()
+
+			res := mustResolve(t, e, o)
+
+			if res.Outcome != identity.OutcomeSupporting {
+				t.Fatalf("outcome = %s, want supporting: every identifier belongs to ONE asset, so this is "+
+					"another sighting of it, not a question", res.Outcome)
+			}
+			if res.Asset.ID != owner.ID {
+				t.Errorf("supporting evidence named %q, want the owner %s", res.Asset.ID, owner.ID)
+			}
+			if n := len(repo.Proposals()); n != 0 || res.Proposal.ID != "" {
+				t.Errorf("%d proposals (resolution names %q), want 0 — a one-candidate proposal can only be "+
+					"kept separate from nothing", n, res.Proposal.ID)
+			}
+			if n := repo.AssetCount(); n != before {
+				t.Errorf("%d assets, want %d: the floor never creates", n, before)
+			}
+			entries := repo.HistoryFor(owner)
+			if !hasChange(entries, identity.ActionUpdated, "supporting", true) {
+				t.Errorf("no supporting history entry on the owner: %v", historyActions(entries))
+			}
+			for _, h := range entries {
+				if h.Action == identity.ActionMergeProposed {
+					t.Errorf("a merge_proposed pointer entry was written: %+v", h.Changes)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveContested_NeverProposesOneCandidate is A1's belt and braces,
+// driven directly: whatever routes a single owner into the contested path, it
+// answers supporting instead of opening a proposal nobody can answer.
+//
+// Mutation check: delete the `len(candidateSeq) == 1` refusal in
+// resolveContested → a one-candidate proposal opens and this fails.
+func TestResolveContested_NeverProposesOneCandidate(t *testing.T) {
+	e, repo := newEngine(t, identity.Config{})
+	owner := mustResolve(t, e, obs(assetclass.KeyServer, id(identity.KindSerialNumber, "SN-BELT")))
+
+	serial, err := id(identity.KindSerialNumber, "SN-BELT").Normalized()
+	if err != nil {
+		t.Fatalf("Normalized: %v", err)
+	}
+	o := obs(assetclass.KeyServer, serial)
+	o.ObservedAt = observedAt.Add(time.Hour)
+	res, err := e.ResolveContestedForTest(context.Background(), o,
+		[]identity.Identifier{serial}, map[string][]identity.AssetRef{serial.Key(): {owner.Asset}})
+	if err != nil {
+		t.Fatalf("resolveContested: %v", err)
+	}
+	if res.Outcome != identity.OutcomeSupporting || res.Asset.ID != owner.Asset.ID {
+		t.Fatalf("outcome = %s on %q, want supporting on %s", res.Outcome, res.Asset.ID, owner.Asset.ID)
+	}
+	if n := proposalCount(repo); n != 0 {
+		t.Errorf("%d proposals, want 0: one candidate is not a question", n)
 	}
 }
 

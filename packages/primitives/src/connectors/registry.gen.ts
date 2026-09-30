@@ -17,7 +17,8 @@ export type ConnectorKind =
   | "notification"
   | "edr_mdm"
   | "sbom_source"
-  | "secrets_store";
+  | "secrets_store"
+  | "generic";
 
 /** Which way data flows. */
 export type ConnectorDirection = 'pull' | 'push' | 'both';
@@ -34,15 +35,27 @@ export type ConnectorDirection = 'pull' | 'push' | 'both';
  */
 export type ConnectorStatus = 'live' | 'registered' | 'planned';
 
+/**
+ * Who sets a connector up. `tenant` — the tenant's own admins. `platform_operator`
+ * — the deployment's operator, in the administration console: a tenant sees the
+ * connector in the catalogue and cannot add it (SIEM export is platform-global).
+ */
+export type ConnectorConfiguredBy = 'tenant' | 'platform_operator';
+
 /** Every registered connector key. */
 export type ConnectorKey =
   | "aws"
   | "azure"
   | "gcp"
+  | "email"
   | "slack"
   | "pagerduty"
-  | "datadog"
+  | "webhook"
+  | "in_app"
   | "splunk"
+  | "datadog"
+  | "elastic"
+  | "generic_webhook"
   | "github"
   | "gitlab"
   | "bitbucket"
@@ -67,6 +80,7 @@ export interface ConnectorDef {
   /** Asset-class keys this connector can create assets for. */
   producesClasses: readonly string[];
   status: ConnectorStatus;
+  configuredBy: ConnectorConfiguredBy;
   /**
    * Entitlement key (a billable_items key) this connector is gated on.
    * Absent means Core — free in every edition.
@@ -82,27 +96,40 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     label: "Amazon Web Services",
     kind: "cloud",
     direction: "pull",
-    producesClasses: ["compute_instance", "object_storage", "managed_database", "cloud_load_balancer", "serverless_function"],
+    producesClasses: ["compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "api_gateway", "cdn_distribution", "key_store", "object_storage", "managed_database"],
     status: "live",
-    description: "Pulls EC2, S3, RDS, ELB, Lambda and ACM inventory with placement facts (cloud.account_id, cloud.region, cloud.vpc_id, cloud.subnet_id) and the certificates and keys those services present.",
+    configuredBy: "tenant",
+    description: "Reads EC2 instances, VPCs and subnets; ALB, NLB and classic ELB load balancers; API Gateway (v2) APIs; CloudFront distributions; KMS keys; S3 buckets and RDS instances, with placement facts (cloud.account_id, cloud.region, cloud.vpc_id, cloud.subnet_id). Load-balancer and CloudFront certificates are collected with their ACM metadata. Lambda functions are not collected, and ACM is read only as metadata on those certificates, not as inventory of its own.",
   },
   {
     key: "azure",
     label: "Microsoft Azure",
     kind: "cloud",
     direction: "pull",
-    producesClasses: ["compute_instance", "object_storage", "managed_database", "cloud_load_balancer", "serverless_function", "key_store"],
+    producesClasses: ["compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"],
     status: "live",
-    description: "Pulls virtual machines, storage accounts, SQL databases, application gateways, functions and Key Vault inventory, with subscription and region placement facts.",
+    configuredBy: "tenant",
+    description: "Reads virtual machines, virtual networks and subnets; Application Gateway and load balancers; Key Vault keys; storage accounts and SQL databases, with subscription and region placement facts. Azure Functions are not collected.",
   },
   {
     key: "gcp",
     label: "Google Cloud Platform",
     kind: "cloud",
     direction: "pull",
-    producesClasses: ["compute_instance", "object_storage", "managed_database", "cloud_load_balancer", "serverless_function"],
+    producesClasses: ["compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"],
     status: "live",
-    description: "Pulls Compute Engine, Cloud Storage, Cloud SQL, load balancers and Cloud Functions inventory, with project and region placement facts.",
+    configuredBy: "tenant",
+    description: "Reads Compute Engine instances, VPC networks and subnetworks; HTTPS load balancers and SSL proxies; Cloud KMS keys; Cloud Storage buckets and Cloud SQL instances, with project and region placement facts. Cloud Functions are not collected.",
+  },
+  {
+    key: "email",
+    label: "Email",
+    kind: "notification",
+    direction: "push",
+    producesClasses: [],
+    status: "live",
+    configuredBy: "tenant",
+    description: "Emails alerts to the recipients listed on a notification channel. Sent through the SMTP settings the platform operator has configured; a channel is flagged in the console while none are. A sink only.",
   },
   {
     key: "slack",
@@ -111,7 +138,8 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "push",
     producesClasses: [],
     status: "live",
-    description: "Delivers alerts to a Slack workspace. A sink only: it never reads, and never creates an asset.",
+    configuredBy: "tenant",
+    description: "Posts alerts to a Slack channel through an incoming-webhook URL held on a notification channel. A sink only: it never reads, and never creates an asset.",
   },
   {
     key: "pagerduty",
@@ -120,16 +148,28 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "push",
     producesClasses: [],
     status: "live",
-    description: "Raises PagerDuty incidents from alerts. A sink only.",
+    configuredBy: "tenant",
+    description: "Raises PagerDuty incidents from alerts through the Events API v2, using the integration (routing) key held on a notification channel. A sink only.",
   },
   {
-    key: "datadog",
-    label: "Datadog",
-    kind: "siem",
+    key: "webhook",
+    label: "Generic webhook",
+    kind: "notification",
     direction: "push",
     producesClasses: [],
     status: "live",
-    description: "Ships events and metrics to Datadog. Classified as a siem sink rather than an observability source because nothing is read back: the platform is the producer in this relationship.",
+    configuredBy: "tenant",
+    description: "POSTs each alert as JSON to a URL you choose, optionally authenticated (bearer, basic or a custom header) and signed with an HMAC-SHA256 signature the receiver can verify. A sink only. Not the SIEM webhook: that one carries the audit event stream and is configured by the platform operator.",
+  },
+  {
+    key: "in_app",
+    label: "In-app notifications",
+    kind: "notification",
+    direction: "push",
+    producesClasses: [],
+    status: "live",
+    configuredBy: "tenant",
+    description: "Delivers alerts to the notification bell in the console. Every tenant gets this channel automatically when it is created; it needs no setup. A sink only.",
   },
   {
     key: "splunk",
@@ -138,7 +178,42 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "push",
     producesClasses: [],
     status: "live",
-    description: "Ships findings and audit events to Splunk (OCSF for event export, per ADR-0005 D6). Push only today; a pull direction would mean treating Splunk as an inventory source, which is a separate decision.",
+    configuredBy: "platform_operator",
+    feature: "siem_export",
+    description: "Ships the platform audit event stream to Splunk HTTP Event Collector (HEC event format; verified against Splunk Enterprise 9.4). Findings are not exported and events are not OCSF. Configured by the platform operator (SIEM Export, Enterprise), not per tenant. Push only; a pull direction would mean treating Splunk as an inventory source, which is a separate decision.",
+  },
+  {
+    key: "datadog",
+    label: "Datadog",
+    kind: "siem",
+    direction: "push",
+    producesClasses: [],
+    status: "live",
+    configuredBy: "platform_operator",
+    feature: "siem_export",
+    description: "Ships the platform audit event stream to Datadog Logs (Logs API v2, DD-API-KEY, site-derived intake). Contract-tested against the documented API, not verified against a live Datadog organization. Configured by the platform operator (SIEM Export, Enterprise), not per tenant. Classified as a siem sink rather than an observability source because nothing is read back.",
+  },
+  {
+    key: "elastic",
+    label: "Elasticsearch",
+    kind: "siem",
+    direction: "push",
+    producesClasses: [],
+    status: "live",
+    configuredBy: "platform_operator",
+    feature: "siem_export",
+    description: "Ships the platform audit event stream to Elasticsearch through the bulk API, into a data stream or an index, with an API key or basic authentication (verified against Elasticsearch 8.15). A re-sent batch is not duplicated: the event id is the document id. Configured by the platform operator (SIEM Export, Enterprise), not per tenant.",
+  },
+  {
+    key: "generic_webhook",
+    label: "Generic webhook (SIEM)",
+    kind: "siem",
+    direction: "push",
+    producesClasses: [],
+    status: "live",
+    configuredBy: "platform_operator",
+    feature: "siem_export",
+    description: "Posts batches of the platform audit event stream as a JSON array to a URL the operator chooses, with no authentication, bearer, basic or one custom header, and an HMAC-SHA256 signature the receiver can verify. Our own documented contract rather than a vendor's. Configured by the platform operator (SIEM Export, Enterprise), not per tenant.",
   },
   {
     key: "github",
@@ -147,6 +222,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: [],
     status: "registered",
+    configuredBy: "tenant",
     description: "Reads repository metadata and dependency data. Produces software inventory, not assets — a repository is not a configuration item, and the source-code scanning that once mapped repos to assets was removed because no repository-to-asset mapping ever existed. REGISTERED, NOT LIVE: the platform_integrations CHECK accepts the key, but nothing in the tree dispatches on it — the collector went with the source-code scanning that was deleted.",
   },
   {
@@ -156,6 +232,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: [],
     status: "registered",
+    configuredBy: "tenant",
     description: "Reads project metadata and dependency data. Produces software inventory, not assets. REGISTERED, NOT LIVE: no collector dispatches on this key.",
   },
   {
@@ -165,6 +242,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: [],
     status: "registered",
+    configuredBy: "tenant",
     description: "Reads repository metadata and dependency data. Produces software inventory, not assets. REGISTERED, NOT LIVE: no collector dispatches on this key.",
   },
   {
@@ -174,66 +252,73 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: ["key_store"],
     status: "registered",
+    configuredBy: "tenant",
     description: "Reads Vault's own posture — which secret engines and PKI mounts exist, the transit key algorithms and sizes, and PKI role configuration — as key_store assets. Posture only: no secret and no key material is retrieved or stored (CLAUDE.md, \"Collect posture, never key material\"). REGISTERED, NOT LIVE: the key is carried by the platform_integrations CHECK, but no Vault collector exists — it is roadmap (docsv4/internal/roadmap/encryption-detection-opportunities.md). No code dispatches on the type, and the tenant-facing create handler's `oneof` does not accept it, so nothing reaches Vault today.",
   },
   {
     key: "custom",
     label: "Custom integration",
-    kind: "cmdb",
+    kind: "generic",
     direction: "both",
     producesClasses: [],
-    status: "live",
-    description: "A tenant-defined integration configured through the generic integration form. Deliberately claims no classes: what a custom integration produces is not knowable from the registry, so nothing downstream may assume a shape for it.",
+    status: "registered",
+    configuredBy: "tenant",
+    description: "A generic integration row: the schema and the integrations API accept the type, but nothing reads, runs or delivers through it, there is no page to add one, and it claims no asset classes. REGISTERED, NOT LIVE. The direction is nominal.",
   },
   {
     key: "servicenow",
     label: "ServiceNow CMDB",
     kind: "cmdb",
     direction: "both",
-    producesClasses: ["server", "workstation", "switch", "router", "firewall", "printer", "application", "business_service"],
+    producesClasses: ["server", "hypervisor", "virtual_machine", "computer", "workstation", "network_device", "switch", "router", "firewall", "load_balancer", "access_point", "storage_device", "printer", "hardware", "application", "business_service"],
     status: "live",
+    configuredBy: "tenant",
     feature: "cmdb_sync",
-    description: "Two-way sync with the ServiceNow CMDB: pull configuration items as assets, push discovered assets and their relationships back. The class tree is ServiceNow-derived (ADR-0002 D2), so the CI-class mapping is close to identity.",
+    description: "Two-way sync with the ServiceNow CMDB. Push: hardware assets go through the Identification and Reconciliation Engine, so ServiceNow's own rules decide whether a CI already exists, with the relationships between them (runs on, hosted on, depends on, contains, ...). Pull: one paginated listing per CI class the class mapping names — servers, network and storage devices, virtual machines, applications and business services — creating the matching assets, incrementally on the last-updated time. Certificates, keys and crypto configurations are not written as CIs; the crypto posture travels in the CI description. Basic and OAuth client credentials only. Contract-tested against ServiceNow's documented APIs, not verified against a live instance.",
   },
   {
     key: "device42",
     label: "Device42",
     kind: "cmdb",
     direction: "both",
-    producesClasses: ["server", "workstation", "switch", "router", "firewall", "application"],
+    producesClasses: ["hardware", "hypervisor", "switch", "server", "virtual_machine", "cluster"],
     status: "live",
+    configuredBy: "tenant",
     feature: "cmdb_sync",
-    description: "Two-way sync with a Device42 CMDB.",
+    description: "Two-way sync with Device42, devices only. Push: infrastructure assets become Device42 devices; certificates, keys, crypto configurations and libraries are not sent, and a device is never matched by name alone (by its Device42 id or serial number). The crypto posture goes in the device's notes. Pull: every device, page by page, classified by its type and switch / virtual-host / blade flags (a plain physical device is `hardware`, not a guessed server). Basic authentication only. Contract-tested against Device42's published API, not verified against a live instance.",
   },
   {
     key: "solarwinds",
     label: "SolarWinds",
     kind: "cmdb",
     direction: "pull",
-    producesClasses: ["server", "switch", "router", "firewall"],
+    producesClasses: ["firewall", "load_balancer", "wireless_controller", "access_point", "router", "switch", "printer", "storage_device", "hypervisor", "workstation", "server", "hardware"],
     status: "live",
+    configuredBy: "tenant",
     feature: "cmdb_sync",
-    description: "Pulls monitored nodes from SolarWinds as assets. Pull only: SolarWinds is a monitoring system of record, and pushing discovered devices into it would create nodes it would then try to poll.",
+    description: "Pulls the monitored nodes from SolarWinds Orion, page by page, and classifies each from its machine type and description text (switch, router, firewall, server, ...); a node no keyword recognises becomes `hardware`. Pull only: SolarWinds is a monitoring system of record, and pushing discovered devices into it would create nodes it would then try to poll. Basic authentication only. Contract-tested against the Orion SDK documentation, not verified against a live Orion.",
   },
   {
     key: "oomnitza",
     label: "Oomnitza",
     kind: "cmdb",
     direction: "both",
-    producesClasses: ["server", "workstation", "mobile", "application"],
+    producesClasses: ["laptop", "workstation", "server", "virtual_machine", "mobile", "printer", "network_device", "switch", "router", "firewall", "access_point", "storage_device", "hardware"],
     status: "live",
+    configuredBy: "tenant",
     feature: "cmdb_sync",
-    description: "Two-way sync with Oomnitza's enterprise technology management inventory.",
+    description: "Two-way sync with Oomnitza's asset register, assets only. Push: infrastructure assets become Oomnitza assets; certificates, keys, crypto configurations and libraries are not sent. Pull: every asset, page by page, classified by its asset type (laptops, desktops, servers, virtual machines, phones and tablets, printers, network gear, storage); a type it does not know becomes `hardware`, not a guessed server. The type, status and last-modified field names are Oomnitza defaults. Contract-tested against Oomnitza's published API, not verified against a live instance.",
   },
   {
     key: "netbox",
     label: "NetBox",
     kind: "network_source_of_truth",
     direction: "pull",
-    producesClasses: ["server", "switch", "router", "firewall"],
+    producesClasses: ["switch", "router", "firewall", "vpn_gateway", "load_balancer", "wireless_controller", "access_point", "server", "hypervisor", "storage_device", "bmc", "printer", "workstation", "laptop", "iot_device", "plc", "rtu", "hmi", "unknown_host"],
     status: "live",
+    configuredBy: "tenant",
     feature: "connector_netbox",
-    description: "Pulls sites, prefixes, VLANs, device types and devices from NetBox (ADR-0001 D3 Q3, ADR-0004 D5). Sites become location context, prefixes and VLANs become network segments, devices become observations through the identification engine. NetBox is the source of truth for network structure, so the pull direction wins on conflict. Direction is PULL, not both: v1 writes NOTHING back. What NetBox does not know about is surfaced as a read-only Drift view for the network team to act on in NetBox itself — pushing discovered devices into a source of truth would make it a mirror of our guesses rather than a statement of their intent. A push direction is a separate, deliberate decision.",
+    description: "Pulls sites, prefixes, VLANs, device types and devices from NetBox (ADR-0001 D3 Q3, ADR-0004 D5). Sites become location context, prefixes and VLANs become network segments, devices become observations through the identification engine, classed by their NetBox device role (a role the shipped table and the connection's own mapping do not know arrives as `unknown_host`, never a guess). Where the two disagree: NetBox's site and region are written onto the assets it matches, while a prefix that matches a network segment you already drew keeps your name, environment, tags and auto-approval — only provenance and site and VLAN details are added. Direction is PULL, not both: v1 writes NOTHING back. What NetBox does not know about is surfaced as a read-only Drift view for the network team to act on in NetBox itself — pushing discovered devices into a source of truth would make it a mirror of our guesses rather than a statement of their intent. A push direction is a separate, deliberate decision.",
   },
   {
     key: "jira",
@@ -242,6 +327,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "push",
     producesClasses: [],
     status: "planned",
+    configuredBy: "tenant",
     description: "Creates and updates Jira issues from tickets. Push only, and deliberately so: the boundary review refused a workflow engine, so Jira owns the workflow and the platform owns the finding.",
   },
   {
@@ -251,6 +337,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: ["workstation", "mobile"],
     status: "planned",
+    configuredBy: "tenant",
     description: "Pulls managed endpoints with their OS, hardware and compliance facts. The managed-endpoint coverage a network-observation-only inventory cannot reach: a laptop that never appears on a monitored segment.",
   },
   {
@@ -260,6 +347,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: ["workstation", "mobile"],
     status: "planned",
+    configuredBy: "tenant",
     description: "Pulls managed macOS and iOS endpoints with their OS, hardware and software inventory.",
   },
   {
@@ -269,6 +357,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     direction: "pull",
     producesClasses: ["server", "workstation"],
     status: "planned",
+    configuredBy: "tenant",
     description: "Adapter over an existing osquery fleet, reading host facts and software inventory from the customer's own deployment. An adapter, not an embedding: osquery was rejected as a dependency on CGO and licence grounds (ADR-0004), so this consumes results rather than linking the engine.",
   },
   {
@@ -276,9 +365,10 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     label: "SBOM upload",
     kind: "sbom_source",
     direction: "pull",
-    producesClasses: [],
-    status: "planned",
-    description: "Ingests a CycloneDX 1.6 or SPDX 2.3/3.0 document uploaded by the tenant and turns it into software installs against an existing asset. Produces no assets of its own: an SBOM describes what runs on something, and inventing the something from a document nobody verified is how a CMDB fills with ghosts.",
+    producesClasses: ["application"],
+    status: "live",
+    configuredBy: "tenant",
+    description: "Ingests a CycloneDX 1.4–1.7 or SPDX 2.2/2.3 JSON document you upload (Discovery → SBOM Upload) and records its components as software installs. Uploaded against an existing asset, it adds to that asset's Software tab and creates no asset. With no target asset, the document's own subject becomes an application asset that waits in Approvals as \"declared from SBOM upload\" until someone admits it. XML, SPDX 3.0 and cryptographic (CBOM) components are refused or skipped with a warning, and the dependency graph is counted but not stored. There is no stored connection: it is an upload, not a configured integration.",
   },
 ];
 
@@ -293,6 +383,7 @@ export const CONNECTOR_KINDS: readonly ConnectorKind[] = [
   "edr_mdm",
   "sbom_source",
   "secrets_store",
+  "generic",
 ];
 
 /** Human labels for each kind, for section headings. */
@@ -306,6 +397,7 @@ export const CONNECTOR_KIND_LABEL: Record<ConnectorKind, string> = {
   "edr_mdm": "EDR / MDM",
   "sbom_source": "Software & SBOM",
   "secrets_store": "Secrets stores",
+  "generic": "Generic",
 };
 
 const byKey = new Map(CONNECTORS.map((c) => [c.key, c]));

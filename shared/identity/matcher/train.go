@@ -34,16 +34,54 @@ type Sample struct {
 }
 
 // SampleSide is [Side] in its JSON spelling, with SeenAt as an RFC-3339 string.
+//
+// `identifiers` maps a kind to a LIST of values. A bare string is still read as
+// a one-value list, so a v1 fixtures or decisions file parses unchanged.
+// `derived_identifiers` names the values among them that were derived rather
+// than observed, and `generic_names` the names the intake judged generic —
+// the two per-value facts [Side] carries beyond the values themselves.
 type SampleSide struct {
-	Name        string            `json:"name,omitempty"`
-	Class       string            `json:"class,omitempty"`
-	Identifiers map[string]string `json:"identifiers,omitempty"`
-	Segment     string            `json:"segment,omitempty"`
-	Vendor      string            `json:"vendor,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	SourceKind  string            `json:"source_kind,omitempty"`
-	SeenAt      string            `json:"seen_at,omitempty"`
-	Status      string            `json:"status,omitempty"`
+	Name               string                  `json:"name,omitempty"`
+	Class              string                  `json:"class,omitempty"`
+	Identifiers        map[string]SampleValues `json:"identifiers,omitempty"`
+	DerivedIdentifiers map[string]SampleValues `json:"derived_identifiers,omitempty"`
+	GenericNames       []string                `json:"generic_names,omitempty"`
+	Segment            string                  `json:"segment,omitempty"`
+	Vendor             string                  `json:"vendor,omitempty"`
+	Model              string                  `json:"model,omitempty"`
+	SourceKind         string                  `json:"source_kind,omitempty"`
+	SeenAt             string                  `json:"seen_at,omitempty"`
+	Status             string                  `json:"status,omitempty"`
+}
+
+// SampleValues is one kind's values in a sample: a JSON list, or a bare string
+// meaning a list of one (the v1 spelling).
+type SampleValues []string
+
+// UnmarshalJSON accepts `"v"` and `["v", "w"]`.
+func (v *SampleValues) UnmarshalJSON(raw []byte) error {
+	var one string
+	if err := json.Unmarshal(raw, &one); err == nil {
+		*v = SampleValues{one}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(raw, &many); err != nil {
+		return fmt.Errorf("identifier values must be a string or a list of strings: %w", err)
+	}
+	*v = many
+	return nil
+}
+
+func sampleValueMap(in map[string]SampleValues) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, vs := range in {
+		out[k] = []string(vs)
+	}
+	return out
 }
 
 // Side converts the JSON spelling to the extractor's. An unparseable time is
@@ -51,14 +89,16 @@ type SampleSide struct {
 // and "1970" are different facts, and only one of them is in the data.
 func (s SampleSide) Side() (Side, error) {
 	out := Side{
-		Name:        s.Name,
-		Class:       s.Class,
-		Identifiers: s.Identifiers,
-		Segment:     s.Segment,
-		Vendor:      s.Vendor,
-		Model:       s.Model,
-		SourceKind:  s.SourceKind,
-		Status:      s.Status,
+		Name:         s.Name,
+		Class:        s.Class,
+		Identifiers:  sampleValueMap(s.Identifiers),
+		Derived:      sampleValueMap(s.DerivedIdentifiers),
+		GenericNames: s.GenericNames,
+		Segment:      s.Segment,
+		Vendor:       s.Vendor,
+		Model:        s.Model,
+		SourceKind:   s.SourceKind,
+		Status:       s.Status,
 	}
 	if s.SeenAt != "" {
 		t, err := time.Parse(time.RFC3339, s.SeenAt)
@@ -123,6 +163,12 @@ type TrainOptions struct {
 // weights file records the accuracy they achieved, and a retrain that quietly
 // used different hyper-parameters would make that number incomparable.
 const (
+	// DefaultModelID is the id a retrain stamps when none is given: the model
+	// this build's feature set describes. Bumped whenever the feature set
+	// changes, because weights fitted over different features are a different
+	// model and an audit has to be able to tell the two apart.
+	DefaultModelID = "matcher-logreg-v2"
+
 	DefaultIterations   = 4000
 	DefaultLearningRate = 0.35
 	DefaultL2           = 0.004
@@ -226,7 +272,7 @@ func Train(samples []Sample, opts TrainOptions) (*Model, Metrics, error) {
 	}
 
 	m := &Model{
-		ModelID:   orDefault(opts.ModelID, "matcher-logreg-v1"),
+		ModelID:   orDefault(opts.ModelID, DefaultModelID),
 		TrainedOn: opts.TrainedOn,
 		Weights:   make(map[string]float64, len(featureNames)),
 	}

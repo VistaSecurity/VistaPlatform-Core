@@ -59,28 +59,28 @@ func fixtureSnapshot() *Snapshot {
 				DisplayName: "web-01", Hostname: "web-01.example.com", PrimaryAddress: "192.0.2.10",
 				Environment: "production", BusinessUnit: "Platform", OwnerEmail: "ops@example.com",
 				Site: "dc1", Region: "us-east", Zone: "a",
-				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 72,
+				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 72, RiskAssessed: true,
 				FirstSeenAt: earlier, LastSeenAt: t,
 				Tags: map[string]string{"tier": "1", "pci": "in-scope"},
 			},
 			{
 				ID: assetSwitch, ClassKey: "switch", ClassPath: "hardware.network_device.switch",
 				DisplayName: "", Hostname: "", PrimaryAddress: "192.0.2.20",
-				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 10,
+				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 10, RiskAssessed: true,
 				FirstSeenAt: earlier, LastSeenAt: t,
 				Tags: map[string]string{},
 			},
 			{
 				ID: assetService, ClassKey: "business_service", ClassPath: "service.business_service",
 				DisplayName: "Checkout", Environment: "production",
-				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 0,
+				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 0, RiskAssessed: true, // assessed clean: emits 0
 				FirstSeenAt: earlier, LastSeenAt: t,
 				Tags: map[string]string{},
 			},
 			{
 				ID: assetBucket, ClassKey: "object_storage", ClassPath: "cloud_resource.object_storage",
 				DisplayName: "reports-bucket",
-				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 40,
+				AssetStatus: "monitoring", AssetOwnership: "internal", RiskScore: 0, RiskAssessed: false, // never assessed: no score at all
 				FirstSeenAt: earlier, LastSeenAt: t,
 				Tags: map[string]string{},
 			},

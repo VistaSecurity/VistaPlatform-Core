@@ -56,6 +56,7 @@ organization.
 ### Configuration
 - [Platform Integrations](./configuration/platform-integrations.md) — AWS, Azure, GCP, SaaS CMDB integrations
 - [Connecting a model provider](./configuration/ai-provider.md) — optional; every AI capability has a rule-based default that runs without one
+- [Outbound connections](./configuration/outbound-connections.md) — egress proxy (`HTTPS_PROXY`), the egress NetworkPolicy, private endpoints and custom CA bundles for integrations
 
 ### Troubleshooting
 - [Common Issues](./troubleshooting/common-issues.md)

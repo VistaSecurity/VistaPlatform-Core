@@ -22,7 +22,7 @@ Each type is either **regional** (scanned once per region you select) or **globa
 | Classic Load Balancer (ELB) | Regional | Basic SSL/TLS configuration only — see Limitations. |
 | API Gateway (v2) | Regional | Per mapped custom domain: the domain's minimum TLS security policy, endpoint type, domain status and bound ACM certificate. |
 | CloudFront | **Global** | Viewer-side minimum protocol version, SSL support method, certificate source and bound ACM certificate; **plus one record per custom origin**, including the origin protocol policy and the TLS versions permitted toward that origin. |
-| KMS keys | Regional | Customer-managed keys only (AWS-managed keys are skipped): key spec / algorithm, state, usage, origin, rotation enabled and period, multi-Region flag, aliases. Metadata only — KMS never exposes key material. |
+| KMS keys | Regional | Every key, customer-managed and AWS-managed (aws/s3, aws/ebs …), each labelled with who manages it: key spec / algorithm, state, usage, origin, rotation enabled and period, multi-Region flag, aliases. Metadata only — KMS never exposes key material. |
 | S3 bucket encryption | **Global** | Default server-side encryption per bucket (SSE-S3, SSE-KMS, DSSE-KMS), the KMS key when customer-managed, whether S3 Bucket Keys are enabled, and the bucket's home region. |
 | RDS instance encryption | Regional | Storage-encrypted flag, algorithm, KMS key, engine and version, Multi-AZ, Performance Insights KMS key. |
 
@@ -177,6 +177,12 @@ Sensitive values — access key ID, secret access key, session token and externa
 
 Discovery → Cloud → the plug icon on the integration runs **`sts:GetCallerIdentity`** through exactly the same credential-assembly path discovery uses, so a green test proves discovery will authenticate the same way — including through the assume-role chain. **Your policy must therefore allow `sts:GetCallerIdentity`**; it is included in the policy below.
 
+If a stored credential can no longer be read — it was saved under an encryption key the platform has since retired — the test says so and asks you to re-enter it, exactly as a discovery run would. It is never sent to AWS.
+
+#### Turning an integration off
+
+The integration's **Enabled** switch stops it being used: a Discover run or a scheduled run of a disabled integration fails at once with *the integration is disabled*, and it is not used to refresh identity evidence. Its stored credentials are kept, so switching it back on needs nothing else.
+
 ### 2. Cross-account setup for assume-role
 
 Assume-role is the right choice when you do not want to hand out a long-lived IAM user key, or when you want the read to appear in CloudTrail as an identifiable session.
@@ -233,6 +239,10 @@ Choose the resource types, and — if any regional type is selected — the regi
 
 `regions` is optional and applies only to the regional types. When omitted, the integration's default region is used.
 
+#### Scheduled runs
+
+A schedule for this integration (Discovery → Scheduled Scans) runs the same collectors a Discover run with every type ticked would, and delivers exactly the same results: S3 buckets, RDS instances and KMS keys as well as the load balancers, with the same certificate quality flags, OCSP status, region and resource identity. A scheduled run's job detail reports per-type outcomes and counts the same way.
+
 ### 4. Automatic processing
 
 The service creates a discovery job, enumerates and interrogates the resources, and writes discoveries to the `sensor_discoveries` table — the same pipeline sensor discoveries use. Each discovery carries its `cloud_provider` and `cloud_region`, so cloud resources are grouped into per-region cloud network segments.
@@ -254,6 +264,8 @@ The job's detail lists **every resource type the run asked for**, and says which
 A failed type shows the region it failed in, the provider's own error code (`AccessDeniedException`, `ThrottlingException`, …) and what to do about it — a denial needs an IAM change, a throttle needs a re-run. The provider's message is stored with secret-shaped values stripped out.
 
 The banner above the list gives the run's verdict: **complete** (everything requested was read), **partly collected**, or **nothing could be collected**. Only a *complete* run reports `success: true`, so a discovery whose KMS permission was revoked can no longer look like a clean run that found no keys.
+
+The account-enumeration calls are listed there too — **EC2 instances**, **VPCs**, **Subnets** and **Security group membership**, per region. A region where `ec2:DescribeInstances` (or another `ec2:Describe*` call) was refused shows as *Could not collect* or *Partly collected* with AWS's `UnauthorizedOperation`, not as a region with no instances.
 
 If the integration has account-wide compute enumeration switched off, or enumeration could not run, the job detail says so rather than leaving the instance and VPC counts silently at zero.
 
@@ -462,17 +474,9 @@ Read this section before drawing conclusions from a run.
 
 **You can run KMS discovery, but you cannot yet browse the results as a key inventory in the tenant UI.** Discovered KMS keys are written to a separate `kms_keys` table that no page in the tenant UI reads. The keys do appear as devices on Discovery → Devices and as `service`-type Infrastructure Assets, but Inventory → Keys is a different inventory and does not show them; there is no view today that lists key spec, rotation status or rotation age for your KMS estate. Do not plan a KMS rotation review around this feature yet.
 
-### Azure and GCP runs do not report per-type outcomes yet
-
-The per-resource-type outcome described under [Reading the result](#reading-the-result-found-nothing-vs-could-not-look) is recorded for **AWS** discoveries. An Azure or GCP job's detail shows no Resource types section at all — which means "not reported", not "everything succeeded". Until it is extended, treat an empty Azure or GCP result the way you had to treat every cloud result before: verify permissions before concluding there is nothing there.
-
 ### S3 and RDS records are not reachable endpoints
 
-S3 buckets and RDS instances are inventoried with a **placeholder network endpoint** (port 443, an unresolved address). They are at-rest posture records, not TLS endpoints, and nothing handshakes with them. Treat the endpoint fields on those records as meaningless.
-
-### Scheduled runs collect less than interactive runs
-
-A **scheduled** cloud discovery produces materially less than a run started from Discovery → Cloud. The scheduled path does not carry certificates, certificate quality flags, OCSP status, or the region/segment enrichment, because it takes a different route into the inventory. Use an interactive run when you need full certificate detail.
+S3 buckets and RDS instances are at-rest posture records, not TLS endpoints: they are inventoried with **no network endpoint** and no protocol, and nothing handshakes with them. They are identified by their ARN.
 
 ### Other gaps
 

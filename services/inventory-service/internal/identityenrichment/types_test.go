@@ -79,6 +79,51 @@ func TestGenerationIgnoresRepeatedSightingsButIncludesUsefulEvidence(t *testing.
 		t.Fatal("new interface evidence did not become eligible")
 	}
 }
+
+// A name crossing the tenant-frequency threshold between two sightings, a
+// builder's confidence changing, or the engine stamping provenance on an
+// identifier is the SAME evidence: the generation must not change, or it
+// schedules a redundant probe ( B2). A different value still does.
+//
+// Mutation checks: stop zeroing Generic, Confidence or Source in Generation →
+// the matching case fails.
+func TestGenerationIgnoresPerObservationIdentifierAnnotations(t *testing.T) {
+	base := func() Observation {
+		return Observation{Evidence: identity.Observation{
+			Source: identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:a"},
+			Identifiers: []identity.Identifier{
+				{Kind: identity.KindHostname, Value: "iphone", Scope: "seg-1", Confidence: 1},
+				{Kind: identity.KindIPAddress, Value: "192.0.2.5", Scope: "seg-1", Confidence: 1},
+			},
+		}}
+	}
+	want := Generation(base())
+	for _, tc := range []struct {
+		name   string
+		mutate func(*identity.Identifier)
+	}{
+		{"marked generic", func(id *identity.Identifier) { id.Generic = true; id.Confidence = identity.GenericConfidence }},
+		{"generic flag alone", func(id *identity.Identifier) { id.Generic = true }},
+		{"confidence alone", func(id *identity.Identifier) { id.Confidence = 0.5 }},
+		{"engine provenance", func(id *identity.Identifier) {
+			id.Source = identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:a", Mode: identity.ModePassive}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := base()
+			tc.mutate(&o.Evidence.Identifiers[0])
+			if got := Generation(o); got != want {
+				t.Errorf("generation changed on a per-observation annotation: %s != %s", got, want)
+			}
+		})
+	}
+	o := base()
+	o.Evidence.Identifiers[0].Value = "desk-phone"
+	if Generation(o) == want {
+		t.Error("a different hostname value did not change the generation")
+	}
+}
+
 func TestPolicyRequiresExplicitEnrichmentAndEnforcement(t *testing.T) {
 	for _, raw := range []string{`{}`, `{"identity_enrichment":{"enabled":true}}`, `{"identity_enrichment":{"enabled":true},"identity_admission":{"mode":"paused"}}`} {
 		p, err := ParsePolicy([]byte(raw))

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
@@ -284,6 +285,60 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 	})
 
+	// Phase 2: a derived identifier's provenance is what the asset page
+	// shows as "derived from <evidence>". A derived re-sighting of a value held
+	// natively must not relabel it, and a native sighting of a value held as
+	// derived must upgrade it — otherwise the page says "worked out" about a
+	// MAC a controller has since reported.
+	t.Run("AttachIdentifiers: a derived re-sighting never demotes native provenance, a native one upgrades it", func(t *testing.T) {
+		r := newRepo()
+		derived := func(value, ref string) identity.Identifier {
+			d := ident(identity.KindMACAddress, value, "")
+			d.Source = identity.Source{Kind: identity.SourceInferred, Ref: ref}
+			d.Confidence = 0.9
+			return d
+		}
+		provenance := func(ref identity.AssetRef, value string) identity.Source {
+			t.Helper()
+			sums, err := r.LoadSummaries(ctx, tenant, []string{ref.ID})
+			if err != nil || len(sums) != 1 {
+				t.Fatalf("LoadSummaries = %+v (err %v)", sums, err)
+			}
+			for _, id := range sums[0].Identifiers {
+				if id.Kind == identity.KindMACAddress && id.Value == value {
+					return id.Source
+				}
+			}
+			t.Fatalf("%s not on the asset", value)
+			return identity.Source{}
+		}
+
+		native, err := r.CreateAsset(ctx, tenant, newAsset("host-native", ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:01", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		if err := r.AttachIdentifiers(ctx, native, []identity.Identifier{derived("aa:bb:cc:dd:ee:01", "derived:eui64:2001:db8::a8bb:ccff:fedd:ee01")}); err != nil {
+			t.Fatalf("AttachIdentifiers(derived over native): %v", err)
+		}
+		if got := provenance(native, "aa:bb:cc:dd:ee:01"); got.Kind != identity.SourceMeasured || got.Ref != "contract" {
+			t.Errorf("a derived re-sighting relabelled a native MAC: %+v, want measured/contract", got)
+		}
+
+		held, err := r.CreateAsset(ctx, tenant, newAsset("host-derived", derived("aa:bb:cc:dd:ee:02", "derived:serial:AABBCCDDEE02")))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		if got := provenance(held, "aa:bb:cc:dd:ee:02"); got.Kind != identity.SourceInferred || got.Ref != "derived:serial:AABBCCDDEE02" {
+			t.Fatalf("a derived MAC was stored as %+v, want inferred with its evidence", got)
+		}
+		if err := r.AttachIdentifiers(ctx, held, []identity.Identifier{ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:02", "")}); err != nil {
+			t.Fatalf("AttachIdentifiers(native over derived): %v", err)
+		}
+		if got := provenance(held, "aa:bb:cc:dd:ee:02"); got.Kind != identity.SourceMeasured || got.Ref != "contract" {
+			t.Errorf("a native sighting did not upgrade a derived MAC: %+v, want measured/contract", got)
+		}
+	})
+
 	t.Run("AttachIdentifiers and Touch reject an unknown asset", func(t *testing.T) {
 		r := newRepo()
 		ghost := identity.AssetRef{TenantID: tenant, ID: "no-such-asset"}
@@ -419,6 +474,60 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 		if got := reader.LastSeen(ref); !got.Equal(now.Add(2 * time.Hour)) {
 			t.Errorf("last seen = %v after a newer Touch, want it advanced to %v", got, now.Add(2*time.Hour))
+		}
+	})
+
+	// 1b compares an observation's time against this value to decide
+	// whether a lease has moved. A store that let an older attach drag it
+	// backwards would let a replayed sighting move an address back to a device
+	// that no longer holds it; one that answered for another tenant's row, or
+	// for a value nobody holds, would move addresses on evidence that is not
+	// there.
+	t.Run("IdentifierLastSeen reports the newest attach and never moves backwards", func(t *testing.T) {
+		r := newRepo()
+		addr := ident(identity.KindIPAddress, "192.0.2.7", "segment-1")
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-1", addr))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		// The identifier's SeenAt is ignored by the lookup: only kind, value
+		// and scope select the row.
+		probe := addr
+		probe.SeenAt = time.Time{}
+		probe.Source = identity.Source{}
+
+		got, ok, err := r.IdentifierLastSeen(ctx, tenant, probe)
+		if err != nil || !ok || !got.Equal(now) {
+			t.Fatalf("IdentifierLastSeen after create = %v, %v (err %v), want %v, true", got, ok, err, now)
+		}
+
+		later := addr
+		later.SeenAt = now.Add(time.Hour)
+		if err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{later}); err != nil {
+			t.Fatalf("AttachIdentifiers(later): %v", err)
+		}
+		if got, _, _ := r.IdentifierLastSeen(ctx, tenant, probe); !got.Equal(now.Add(time.Hour)) {
+			t.Errorf("last seen = %v after a newer attach, want it advanced to %v", got, now.Add(time.Hour))
+		}
+
+		earlier := addr
+		earlier.SeenAt = now.Add(-time.Hour)
+		if err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{earlier}); err != nil {
+			t.Fatalf("AttachIdentifiers(earlier): %v", err)
+		}
+		if got, _, _ := r.IdentifierLastSeen(ctx, tenant, probe); !got.Equal(now.Add(time.Hour)) {
+			t.Errorf("last seen = %v after an OLDER attach, want it unchanged at %v: a late sighting "+
+				"is evidence the value existed then, not that it has not been seen since", got, now.Add(time.Hour))
+		}
+
+		if _, ok, err := r.IdentifierLastSeen(ctx, tenant, ident(identity.KindIPAddress, "192.0.2.8", "segment-1")); err != nil || ok {
+			t.Errorf("IdentifierLastSeen(unheld value) = found %v (err %v), want not found", ok, err)
+		}
+		if _, ok, err := r.IdentifierLastSeen(ctx, tenant, ident(identity.KindIPAddress, "192.0.2.7", "segment-2")); err != nil || ok {
+			t.Errorf("IdentifierLastSeen(same value, other scope) = found %v (err %v), want not found", ok, err)
+		}
+		if _, ok, err := r.IdentifierLastSeen(ctx, otherTenant, probe); err != nil || ok {
+			t.Errorf("IdentifierLastSeen(other tenant) = found %v (err %v), want not found: tenants are isolated", ok, err)
 		}
 	})
 
@@ -671,20 +780,214 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 				"with identical rows a reviewer cannot clear by deciding any one of them", first.ID, second.ID)
 		}
 
-		// A DIFFERENT question — different identifiers against the same
-		// candidates — must still get its own proposal, or the second thing is
-		// silently dropped instead of reviewed.
+		// A DIFFERENT question — a different candidate set — must still get its
+		// own proposal, or the second thing is silently dropped instead of
+		// reviewed. (Different identifiers against the SAME candidates are the
+		// same question since A3; the fold contract below pins that the
+		// evidence is kept rather than dropped.)
+		c, err := r.CreateAsset(ctx, tenant, newAsset("host-idem-3"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
 		other := question
 		other.Candidates = []identity.MergeCandidate{
-			{Ref: a, MatchedIdentifiers: []identity.Identifier{ident(identity.KindSerialNumber, "SN-OTHER", "")}},
-			{Ref: b, MatchedIdentifiers: []identity.Identifier{ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:02", "")}},
+			question.Candidates[0],
+			{Ref: c, MatchedIdentifiers: []identity.Identifier{ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:02", "")}},
 		}
 		third, err := r.OpenMergeProposal(ctx, tenant, other)
 		if err != nil {
 			t.Fatalf("OpenMergeProposal (other): %v", err)
 		}
 		if third.ID == first.ID {
-			t.Error("two different contested observations collapsed into one proposal; the second was never reviewed")
+			t.Error("two different candidate sets collapsed into one proposal; the second question was never reviewed")
+		}
+	})
+
+	// A3: one pair, one pending row, whatever identifiers each sighting
+	// happened to carry — and every identifier any of them carried is kept.
+	t.Run("OpenMergeProposal folds new evidence into the pending proposal for the same pair", func(t *testing.T) {
+		r := newRepo()
+		reader, ok := r.(ProposalReader)
+		if !ok {
+			t.Fatalf("%T does not implement identitytest.ProposalReader; the fold contract cannot read back what it folded", r)
+		}
+		a, err := r.CreateAsset(ctx, tenant, newAsset("host-fold-a"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		b, err := r.CreateAsset(ctx, tenant, newAsset("host-fold-b"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		serial := ident(identity.KindSerialNumber, "SN-FOLD", "")
+		mac := ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:31", "")
+		host := ident(identity.KindHostname, "fold-host", identity.ScopeTenantDefault)
+		addr := ident(identity.KindIPAddress, "198.51.100.31", identity.ScopeTenantDefault)
+		src := identity.Source{Kind: identity.SourceMeasured, Ref: "contract"}
+
+		first, err := r.OpenMergeProposal(ctx, tenant, identity.MergeProposal{
+			Candidates: []identity.MergeCandidate{
+				{Ref: a, MatchedIdentifiers: []identity.Identifier{serial}, Score: 0.4, Reason: "first"},
+				{Ref: b, MatchedIdentifiers: []identity.Identifier{host}, Score: 0.3, Reason: "first"},
+			},
+			Source: src, Reason: "contested", ProposedAt: now,
+		})
+		if err != nil {
+			t.Fatalf("OpenMergeProposal (first): %v", err)
+		}
+		// A later sighting of the same pair carrying MORE identifiers: a
+		// higher score for a, a lower one for b.
+		later := now.Add(3 * time.Hour)
+		second, err := r.OpenMergeProposal(ctx, tenant, identity.MergeProposal{
+			Candidates: []identity.MergeCandidate{
+				{Ref: b, MatchedIdentifiers: []identity.Identifier{host, addr}, Score: 0.2, Reason: "second"},
+				{Ref: a, MatchedIdentifiers: []identity.Identifier{serial, mac}, Score: 0.7, Reason: "second"},
+			},
+			Source: src, Reason: "contested", ProposedAt: later,
+		})
+		if err != nil {
+			t.Fatalf("OpenMergeProposal (second): %v", err)
+		}
+		if second.ID != first.ID || !second.Reused {
+			t.Fatalf("second sighting opened %s (reused %v) beside %s; one pair is one question", second.ID, second.Reused, first.ID)
+		}
+		// An OLDER sighting delivered late: its time must not move the
+		// latest-evidence clock backwards.
+		if _, err := r.OpenMergeProposal(ctx, tenant, identity.MergeProposal{
+			Candidates: []identity.MergeCandidate{
+				{Ref: a, MatchedIdentifiers: []identity.Identifier{serial}, Score: 0.1},
+				{Ref: b, MatchedIdentifiers: []identity.Identifier{host}, Score: 0.1},
+			},
+			Source: src, Reason: "contested", ProposedAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("OpenMergeProposal (late): %v", err)
+		}
+
+		got, ok := reader.PendingProposal(first)
+		if !ok {
+			t.Fatalf("proposal %s is not pending any more", first.ID)
+		}
+		byID := map[string]identity.MergeCandidate{}
+		for _, c := range got.Candidates {
+			byID[c.Ref.ID] = c
+		}
+		if len(got.Candidates) != 2 {
+			t.Fatalf("candidates = %+v, want the two records", got.Candidates)
+		}
+		keys := func(ids []identity.Identifier) map[string]bool {
+			out := map[string]bool{}
+			for _, id := range ids {
+				out[string(id.Kind)+"="+id.Value] = true
+			}
+			return out
+		}
+		wantA := map[string]bool{"serial_number=SN-FOLD": true, "mac_address=aa:bb:cc:dd:ee:31": true}
+		wantB := map[string]bool{"hostname=fold-host": true, "ip_address=198.51.100.31": true}
+		if gotA := keys(byID[a.ID].MatchedIdentifiers); !reflect.DeepEqual(gotA, wantA) {
+			t.Errorf("candidate a matched %v, want the union %v — a later sighting's evidence was dropped", gotA, wantA)
+		}
+		if gotB := keys(byID[b.ID].MatchedIdentifiers); !reflect.DeepEqual(gotB, wantB) {
+			t.Errorf("candidate b matched %v, want the union %v — a later sighting's evidence was dropped", gotB, wantB)
+		}
+		if byID[a.ID].Score != 0.7 || byID[a.ID].Reason != "second" {
+			t.Errorf("candidate a score %v (%q), want the higher 0.7 (\"second\")", byID[a.ID].Score, byID[a.ID].Reason)
+		}
+		if byID[b.ID].Score != 0.3 || byID[b.ID].Reason != "first" {
+			t.Errorf("candidate b score %v (%q), want 0.3 kept: a weaker re-run must not erase the stronger case", byID[b.ID].Score, byID[b.ID].Reason)
+		}
+		if !got.ProposedAt.Equal(now) {
+			t.Errorf("proposed_at = %s, want the first time the question was asked (%s)", got.ProposedAt, now)
+		}
+		if !got.LatestEvidenceAt.Equal(later) {
+			t.Errorf("latest_evidence_at = %s, want the newest sighting's time %s", got.LatestEvidenceAt, later)
+		}
+	})
+
+	// Phase 5: the pair score and the matcher's view of both sides
+	// survive the store, and fold like the rest of the evidence — the higher
+	// pair score wins, the observation's identifiers are the union, and the
+	// derived / generic marks the matcher reads come back as they went in.
+	t.Run("OpenMergeProposal carries and folds the pair score and the training snapshot", func(t *testing.T) {
+		r := newRepo()
+		reader, ok := r.(ProposalReader)
+		if !ok {
+			t.Fatalf("%T does not implement identitytest.ProposalReader", r)
+		}
+		a, err := r.CreateAsset(ctx, tenant, newAsset("host-pair-a"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		b, err := r.CreateAsset(ctx, tenant, newAsset("host-pair-b"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		src := identity.Source{Kind: identity.SourceMeasured, Ref: "contract"}
+		derivedMAC := ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:41", "")
+		derivedMAC.Source = identity.Source{Kind: identity.SourceInferred, Ref: "derived:eui64:2001:db8::a8bb:ccff:fedd:ee41"}
+		genericHost := ident(identity.KindHostname, "iphone", identity.ScopeTenantDefault)
+		genericHost.Generic = true
+		addr := ident(identity.KindIPAddress, "198.51.100.41", identity.ScopeTenantDefault)
+		serial := ident(identity.KindSerialNumber, "SN-PAIR", "")
+		seen := now.Add(-time.Hour)
+
+		open := func(pair float64, reason string, at time.Time, observed ...identity.Identifier) identity.ProposalRef {
+			t.Helper()
+			ref, err := r.OpenMergeProposal(ctx, tenant, identity.MergeProposal{
+				Candidates: []identity.MergeCandidate{
+					{Ref: a, MatchedIdentifiers: []identity.Identifier{serial}, Snapshot: &identity.MatcherSide{
+						Name: "host-pair-a", Class: "server", Segment: "seg-1", Vendor: "Dell", SourceKind: "measured",
+						SeenAt: seen, Identifiers: []identity.Identifier{serial},
+					}},
+					{Ref: b, MatchedIdentifiers: []identity.Identifier{addr}},
+				},
+				Source: src, Reason: "contested", ProposedAt: at,
+				PairScore: pair, PairAssetIDs: []string{a.ID, b.ID}, PairReason: reason,
+				ObservationIdentifiers: observed,
+				ObservationContext:     &identity.MatcherSide{Name: "iphone", Class: "mobile", Segment: "seg-1", SourceKind: "measured", SeenAt: at},
+			})
+			if err != nil {
+				t.Fatalf("OpenMergeProposal: %v", err)
+			}
+			return ref
+		}
+		first := open(0.3, "first", now, derivedMAC, genericHost)
+		open(0.6, "second", now.Add(time.Hour), genericHost, addr)
+		open(0.1, "third", now.Add(2*time.Hour), serial)
+
+		got, ok := reader.PendingProposal(first)
+		if !ok {
+			t.Fatalf("proposal %s is not pending", first.ID)
+		}
+		if got.PairScore != 0.6 || got.PairReason != "second" || !reflect.DeepEqual(got.PairAssetIDs, []string{a.ID, b.ID}) {
+			t.Errorf("pair = %v %q %v, want the highest (0.6, \"second\") with its ids", got.PairScore, got.PairReason, got.PairAssetIDs)
+		}
+		byKey := map[string]identity.Identifier{}
+		for _, id := range got.ObservationIdentifiers {
+			byKey[string(id.Kind)+"="+id.Value] = id
+		}
+		if len(byKey) != 4 {
+			t.Errorf("observation identifiers = %+v, want the union of four across the three sightings", got.ObservationIdentifiers)
+		}
+		if id := byKey["mac_address=aa:bb:cc:dd:ee:41"]; !id.Inferred() {
+			t.Errorf("the derived MAC came back as %+v, no longer marked derived", id)
+		}
+		if id := byKey["hostname=iphone"]; !id.Generic {
+			t.Errorf("the generic hostname came back as %+v, no longer marked generic", id)
+		}
+		if id := byKey["ip_address=198.51.100.41"]; id.Inferred() || id.Generic {
+			t.Errorf("an ordinary address came back marked: %+v", id)
+		}
+		if got.ObservationContext == nil || got.ObservationContext.Class != "mobile" || got.ObservationContext.Name != "iphone" {
+			t.Errorf("observation context = %+v, want the matcher's view of the observation", got.ObservationContext)
+		}
+		var snap *identity.MatcherSide
+		for _, c := range got.Candidates {
+			if c.Ref.ID == a.ID {
+				snap = c.Snapshot
+			}
+		}
+		if snap == nil || snap.Vendor != "Dell" || snap.Segment != "seg-1" || len(snap.Identifiers) != 1 || !snap.SeenAt.Equal(seen) {
+			t.Errorf("candidate a's snapshot = %+v, want the candidate as the matcher compared it", snap)
 		}
 	})
 
@@ -923,6 +1226,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 	runDecisionMemoryContract(t, newRepo, tenant, now, ident, newAsset)
 	runAnnouncementContract(t, newRepo, tenant, now, ident, newAsset)
 	runProvisionalContract(t, newRepo, tenant, ident, newAsset)
+	runHostnameCardinalityContract(t, newRepo, tenant, otherTenant, ident, newAsset)
 }
 
 // ProposalResolver stamps a proposal's outcome the way the approvals path does
@@ -933,6 +1237,16 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 // engine never resolves a proposal (ADR-0002 D5).
 type ProposalResolver interface {
 	ResolveProposal(ref identity.ProposalRef, status, actor string, at time.Time) error
+}
+
+// ProposalReader reads a PENDING proposal back as the store holds it: its
+// candidates with their matched identifiers and scores, ProposedAt (when the
+// question was first asked) and LatestEvidenceAt. REQUIRED of an
+// implementation under test: A3's fold is a read-modify-write on the
+// stored row, and only reading the row back shows the union was kept. False
+// when the proposal is unknown or no longer pending.
+type ProposalReader interface {
+	PendingProposal(ref identity.ProposalRef) (identity.MergeProposal, bool)
 }
 
 // AnnouncementReader reads back what [identity.Repository.RecordAnnouncement]
@@ -1195,6 +1509,63 @@ func runAnnouncementContract(
 		ghost := identity.AssetRef{TenantID: tenant, ID: "asset-that-does-not-exist"}
 		if err := r.RecordAnnouncement(ctx, node, ghost, a); err == nil {
 			t.Error("an announcement to an asset that does not exist was recorded")
+		}
+	})
+
+	// 1b reads this to keep a VIP from "following" the MAC of whichever
+	// node announces it. A store that answered no would let a failover move
+	// the service's address onto a node; one that answered yes for the wrong
+	// holder or address would freeze an ordinary lease.
+	t.Run("AddressAnnounced remembers every address announced for a holder, and only those", func(t *testing.T) {
+		r := newRepo()
+		node, err := r.CreateAsset(ctx, tenant, newAsset("node", ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:a2", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(node): %v", err)
+		}
+		vip, err := r.CreateAsset(ctx, tenant, newAsset("vip", ident(identity.KindIPAddress, "192.0.2.231", identity.ScopeTenantDefault)))
+		if err != nil {
+			t.Fatalf("CreateAsset(vip): %v", err)
+		}
+		ask := func(holder identity.AssetRef, addr string) bool {
+			t.Helper()
+			got, err := r.AddressAnnounced(ctx, holder, addr)
+			if err != nil {
+				t.Fatalf("AddressAnnounced(%s, %s): %v", holder.ID, addr, err)
+			}
+			return got
+		}
+		if ask(vip, "192.0.2.231") {
+			t.Fatal("an address nothing ever announced reads as announced")
+		}
+
+		// The edge: the latest announcement per announcer.
+		if err := r.RecordAnnouncement(ctx, node, vip, identity.Announcement{
+			MACs: []string{"aa:bb:cc:dd:ee:a2"}, Addresses: []string{"192.0.2.231"}, Source: src, At: now,
+		}); err != nil {
+			t.Fatalf("RecordAnnouncement: %v", err)
+		}
+		// The history entry the engine's floating-address path writes on the
+		// holder, for an address no edge carries any more.
+		if err := r.RecordHistory(ctx, identity.HistoryEntry{
+			TenantID: tenant, AssetID: vip.ID, Action: identity.ActionUpdated, Source: src, At: now,
+			Changes: map[string]any{"floating_address": map[string]any{
+				"announcer_asset_id": node.ID, "addresses": []string{"192.0.2.229"},
+			}},
+		}); err != nil {
+			t.Fatalf("RecordHistory: %v", err)
+		}
+
+		if !ask(vip, "192.0.2.231") {
+			t.Error("the address on the holder's announcement edge does not read as announced")
+		}
+		if !ask(vip, "192.0.2.229") {
+			t.Error("an address only the holder's history records as announced does not read as announced")
+		}
+		if ask(vip, "192.0.2.232") {
+			t.Error("an address never announced reads as announced")
+		}
+		if ask(node, "192.0.2.231") {
+			t.Error("the ANNOUNCER reads as holding an announced address; only the holder does")
 		}
 	})
 }
@@ -1819,5 +2190,110 @@ func runProvisionalContract(
 					eligible, reason, identity.ReasonOverlappingNetworkScope)
 			}
 		})
+	})
+}
+
+// runHostnameCardinalityContract holds every implementation to
+// [identity.Repository.HostnameCardinality] ( B2): the count is of distinct
+// LIVE assets, across every scope, case-insensitive, for `hostname` identifiers
+// only, and never crosses a tenant.
+func runHostnameCardinalityContract(
+	t *testing.T,
+	newRepo func() identity.Repository,
+	tenant, otherTenant string,
+	ident func(identity.Kind, string, string) identity.Identifier,
+	newAsset func(string, ...identity.Identifier) identity.NewAsset,
+) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("HostnameCardinality counts distinct live assets across scopes", func(t *testing.T) {
+		r := newRepo()
+		const name = "lobby-display"
+
+		count := func(tenantID, value string) int {
+			t.Helper()
+			n, err := r.HostnameCardinality(ctx, tenantID, value)
+			if err != nil {
+				t.Fatalf("HostnameCardinality(%q): %v", value, err)
+			}
+			return n
+		}
+
+		// An unknown value is a normal answer: zero, no error.
+		if got := count(tenant, name); got != 0 {
+			t.Fatalf("empty store: cardinality = %d, want 0", got)
+		}
+
+		a, err := r.CreateAsset(ctx, tenant, newAsset("a", ident(identity.KindHostname, name, "segment-1")))
+		if err != nil {
+			t.Fatalf("CreateAsset(a): %v", err)
+		}
+		if _, err := r.CreateAsset(ctx, tenant, newAsset("b", ident(identity.KindHostname, name, "segment-2"))); err != nil {
+			t.Fatalf("CreateAsset(b): %v", err)
+		}
+		if got := count(tenant, name); got != 2 {
+			t.Errorf("one value under two scopes on two assets: cardinality = %d, want 2 (any scope counts)", got)
+		}
+
+		// The same asset carrying the value under a second scope is still ONE
+		// asset. The count is of assets, not of identifier rows.
+		if err := r.AttachIdentifiers(ctx, a, []identity.Identifier{ident(identity.KindHostname, name, "segment-3")}); err != nil {
+			t.Fatalf("AttachIdentifiers: %v", err)
+		}
+		if got := count(tenant, name); got != 2 {
+			t.Errorf("one asset under two scopes: cardinality = %d, want 2 (distinct assets, not rows)", got)
+		}
+
+		// Stored hostnames are lower case with no trailing dot, so the question
+		// is folded the same way.
+		if got := count(tenant, "  LOBBY-Display. "); got != 2 {
+			t.Errorf("case and a trailing dot changed the answer: cardinality = %d, want 2", got)
+		}
+
+		// A different kind with the same text is a different fact.
+		if _, err := r.CreateAsset(ctx, tenant, newAsset("c", ident(identity.KindName, name, "server"))); err != nil {
+			t.Fatalf("CreateAsset(c): %v", err)
+		}
+		if got := count(tenant, name); got != 2 {
+			t.Errorf("a `name` identifier counted as a hostname: cardinality = %d, want 2", got)
+		}
+
+		// Tenants do not see each other.
+		if _, err := r.CreateAsset(ctx, otherTenant, newAsset("d", ident(identity.KindHostname, name, "segment-1"))); err != nil {
+			t.Fatalf("CreateAsset(d): %v", err)
+		}
+		if got := count(tenant, name); got != 2 {
+			t.Errorf("another tenant's asset leaked into the count: cardinality = %d, want 2", got)
+		}
+		if got := count(otherTenant, name); got != 1 {
+			t.Errorf("other tenant: cardinality = %d, want 1", got)
+		}
+	})
+
+	t.Run("HostnameCardinality stops counting an archived asset", func(t *testing.T) {
+		r := newRepo()
+		archiver, ok := r.(identity.AssetArchiver)
+		if !ok {
+			t.Fatalf("%T does not implement identity.AssetArchiver", r)
+		}
+		const name = "lobby-display"
+		a, err := r.CreateAsset(ctx, tenant, newAsset("a", ident(identity.KindHostname, name, "segment-1")))
+		if err != nil {
+			t.Fatalf("CreateAsset(a): %v", err)
+		}
+		if _, err := r.CreateAsset(ctx, tenant, newAsset("b", ident(identity.KindHostname, name, "segment-2"))); err != nil {
+			t.Fatalf("CreateAsset(b): %v", err)
+		}
+		if err := archiver.ArchiveAsset(ctx, a); err != nil {
+			t.Fatalf("ArchiveAsset: %v", err)
+		}
+		got, err := r.HostnameCardinality(ctx, tenant, name)
+		if err != nil {
+			t.Fatalf("HostnameCardinality: %v", err)
+		}
+		if got != 1 {
+			t.Errorf("cardinality = %d after archiving one of two, want 1: a retired record still testified that the name is common", got)
+		}
 	})
 }

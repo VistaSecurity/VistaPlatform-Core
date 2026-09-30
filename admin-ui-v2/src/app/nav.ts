@@ -31,11 +31,10 @@
 // The partial cases are gated inside their own pages — a section is only listed
 // here when the WHOLE section is absent.
 //
-// Not covered here: SIEM Export under Security & Trust lives in
-// audit-service/ee/siemexport, a different binary this read-out cannot speak
-// for. It keeps its own response probe (sections/security/audit-queries.ts,
-// via packages/primitives/src/features/edition.ts) and renders an edition
-// notice rather than an error.
+// Not covered here: SIEM Export under Security & Trust. It is an Enterprise
+// console surface, fenced out of the Core tree entirely (the entry below and
+// its page); on a commercial console whose install lacks the service it keeps
+// its own response probe and renders a notice rather than an error.
 import { PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import type { EditionCapabilities, EditionCapability, LicenseState } from '../lib/edition';
 
@@ -369,8 +368,7 @@ export const SECTIONS: NavItem[] = [
   //   dashboard  admin-service /admin/security/**          platform.security
   //   activity   audit-service /activity-logs             platform.audit
   //   retention  audit-service /retention-policies        platform.audit
-  //   siem       audit-service /siem/integrations          platform.audit
-  //              (both pages gate their writes on platform.audit.manage)
+  //              (gates its writes on platform.audit.manage)
   //   policy     admin-service GET /admin/settings        platform.settings
   //              (editing needs platform.security.manage, enforced server-side
   // per key since; the page renders read-only without it)
@@ -382,7 +380,6 @@ export const SECTIONS: NavItem[] = [
       { id: 'dashboard', label: 'Dashboard', title: 'Security Dashboard', subtitle: 'Security events, anomalies, and posture', permission: P.platform.security },
       { id: 'activity', label: 'Activity Log', title: 'Activity Log', subtitle: 'Platform-wide staff and tenant activity trail', permission: P.platform.audit },
       { id: 'retention', label: 'Retention', title: 'Retention Policies', subtitle: 'Log retention and archival', permission: P.platform.audit },
-      { id: 'siem', label: 'SIEM Export', title: 'SIEM Integrations', subtitle: 'Outbound SIEM forwarding', permission: P.platform.audit },
       { id: 'policy', label: 'Policy', title: 'Security Policy', subtitle: 'Platform security and authentication settings', permission: P.platform.settings },
     ] },
 ];

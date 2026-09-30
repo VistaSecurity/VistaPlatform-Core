@@ -245,6 +245,18 @@ admin_plane:
     # Sole caller reaches auth-service via PeerServiceURLAuto (in-cluster,
     # never through the edge). HMAC-gated with RequireInternalOnly.
     - /auth-service/internal/
+    # GET /export/events, /export/head — the audit trail read forward from a
+    # cursor, for the Enterprise SIEM exporter (platform ADR-0002 M1). The
+    # whole platform's audit log: HMAC-gated with RequireInternalAuth, and the
+    # caller reaches audit-service through PeerServiceURL, never the edge.
+    - /audit-service/internal/
+    # POST /sources/segments, /sources/assets(/admission); GET
+    # /sources/asset-classes/:key, /sources/hardware-assets — the write path
+    # a connector running outside inventory-service uses to bring a system of
+    # record's objects in through the identity engine (platform ADR-0002 D3).
+    # HMAC-only (RequireSignedServiceCall, a signed X-Tenant-ID required); the
+    # caller reaches inventory-service through PeerServiceURL, never the edge.
+    - /inventory-service/internal/
 
   # Prefixes whose first URL segment does not name the Service that answers
   # them. /admin-service/status/** is historically routed to monitoring-service.
@@ -620,6 +632,7 @@ services:
       type: go-service
       dependencies: []
       env_template: standard-go-service
+
 
   - key: pcap-processor
     name: pcap-processor

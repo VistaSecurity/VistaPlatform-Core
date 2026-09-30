@@ -2,6 +2,7 @@ package resourcetracking
 
 import (
 	"io"
+	"net/http"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,19 @@ func (w *ResponseWriter) WriteString(s string) (int, error) {
 // Size returns the total size of data written
 func (w *ResponseWriter) Size() int {
 	return w.size
+}
+
+// Unwrap exposes the wrapped writer to http.ResponseController.
+//
+// A handler that needs a longer write deadline than the server's WriteTimeout
+// (a synchronous import, a tenant purge) calls
+// http.NewResponseController(c.Writer).SetWriteDeadline, which walks Unwrap
+// methods down to the connection. gin's own writer has one, but the
+// gin.ResponseWriter interface this struct embeds does not declare it, so
+// embedding does not promote it: without this method every such call in a
+// service running this middleware returned ErrNotSupported and changed nothing.
+func (w *ResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // Tracker holds the batch processor and configuration

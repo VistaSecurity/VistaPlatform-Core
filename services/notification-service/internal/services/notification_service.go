@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/notification-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/email"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // NotificationService is the main unified notification service
@@ -29,6 +30,10 @@ type NotificationService struct {
 	emailResolver   *email.EmailConfigResolver
 	rateLimiter     *ChannelRateLimiter
 	logger          *log.Logger
+
+	// tenantStateLookup answers "is this tenant suspended/canceled/deleted".
+	// nil means the real tenantstate.Lookup against db; tests inject a stub.
+	tenantStateLookup func(ctx context.Context, tenantID uuid.UUID) (tenantstate.State, error)
 }
 
 // NewNotificationService creates a new notification service.
@@ -95,6 +100,15 @@ func (s *NotificationService) SendNotification(ctx context.Context, req *models.
 	// Normalize severity at the bus boundary so rules, history, and channel
 	// payloads all see the canonical enum regardless of producer vocabulary.
 	req.Severity = NormalizeSeverity(req.Severity)
+
+	// A suspended, canceled or deleted tenant is not notified (RC-4). Checked
+	// before anything is recorded or sent — a deleted tenant's history INSERT
+	// would violate the tenants FK anyway.
+	if s.tenantBlocked(ctx, req.TenantID) {
+		s.logger.Printf("Notification dropped: tenant %s is suspended, canceled or deleted (source=%s type=%s)",
+			*req.TenantID, req.AlertSource, req.AlertType)
+		return nil
+	}
 
 	// Get notification type (default to 'alert' if not provided)
 	notificationType := req.NotificationType
@@ -278,22 +292,26 @@ func (s *NotificationService) SendNotification(ctx context.Context, req *models.
 	}
 
 	history.ChannelsUsed = channelsUsed
+	// The history row must say what actually happened. SendToChannels returns
+	// an error only when EVERY channel failed, so keying the status off that
+	// error recorded "sent" for a fan-out where some channels failed — derive it
+	// from the per-channel outcome instead (see delivery_history.go).
+	//
+	// Annotate a COPY of the metadata: history.Metadata aliases req.Metadata,
+	// which channels send and the retry queue serializes.
+	history.Metadata = cloneMetadata(history.Metadata)
 	switch {
-	case len(immediateChannels) > 0 && derr != nil:
-		history.Status = "partial"
-		if len(channelsUsed) == 0 {
-			history.Status = "failed"
-		}
-		s.logger.Printf("Partial notification failure: %v", derr)
 	case len(immediateChannels) > 0:
-		history.Status = "sent"
+		history.Status = historyStatusFor(len(channelsUsed), len(failures))
+		history.Metadata["channel_results"] = buildChannelResults(immediateChannels, failures)
+		if derr != nil || len(failures) > 0 {
+			s.logger.Printf("Notification delivery incomplete (status=%s, %d of %d channel(s) failed): %v",
+				history.Status, len(failures), len(immediateChannels), derr)
+		}
 	default:
 		history.Status = "pending" // only queued for digest
 	}
 	if digestQueued > 0 {
-		if history.Metadata == nil {
-			history.Metadata = map[string]interface{}{}
-		}
 		history.Metadata["digest_queued_channels"] = digestQueued
 	}
 

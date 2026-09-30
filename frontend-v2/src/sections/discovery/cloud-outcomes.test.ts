@@ -8,6 +8,7 @@ import {
   runBanner,
   type ResourceTypeOutcome,
 } from './cloud-outcomes';
+import { RESOURCE_TYPES } from './cloud-modals';
 
 // slice E. Every assertion here is about a DISTINCTION the tenant has to
 // be able to make from Discovery → Discovery Jobs → job detail. If two
@@ -166,6 +167,22 @@ describe('resourceTypeLabel', () => {
 
   it('degrades readably for a type it has no name for', () => {
     expect(resourceTypeLabel('some_new_type')).toBe('some new type');
+  });
+
+  // Azure and GCP runs report per-type outcomes now (M7), and the label map
+  // used spellings no collector reports (app_gateway, cloud_sql …), so their
+  // rows fell back to raw ids.
+  it('names every type the Cloud modal offers, for every provider', () => {
+    for (const types of Object.values(RESOURCE_TYPES)) {
+      for (const rt of types) {
+        expect(resourceTypeLabel(rt.value), rt.value).not.toBe(rt.value.replace(/_/g, ' '));
+      }
+    }
+  });
+
+  it('names the AWS account-enumeration calls a run reports', () => {
+    expect(resourceTypeLabel('ec2_instances')).toBe('EC2 instances');
+    expect(resourceTypeLabel('vpcs')).toBe('VPCs');
   });
 });
 

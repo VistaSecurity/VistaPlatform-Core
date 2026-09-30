@@ -189,10 +189,33 @@ func TestContract_CreateAlertRule_400(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
+// A body the audit.alert_rules constraints would refuse is the client's
+// mistake: 400 naming the field, and nothing reaches the service. It used to
+// reach the INSERT and come back as a 500.
+func TestContract_CreateAlertRule_400_invalidRule(t *testing.T) {
+	sv := loadSpec(t)
+	for body, field := range map[string]string{
+		`{}`:                                   "name",
+		`{"name":"x","severity":"low"}`:        "rule_type",
+		`{"name":"x","rule_type":"threshold"}`: "severity",
+		`{"name":"x","rule_type":"threshold","severity":"urgent"}`: "severity",
+		`{"name":"x","rule_type":"heuristic","severity":"low"}`:    "rule_type",
+		`{"name":"  ","rule_type":"threshold","severity":"low"}`:   "name",
+	} {
+		stub := &stubAlertRuleService{createErr: errAlertRule}
+		w := do(newAlertRuleEngine(stub), http.MethodPost, base+"/alert-rules", strings.NewReader(body))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), field) {
+			t.Errorf("%s: status = %d body=%s, want 400 naming %s", body, w.Code, w.Body.String(), field)
+			continue
+		}
+		sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	}
+}
+
 func TestContract_CreateAlertRule_500(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newAlertRuleEngine(&stubAlertRuleService{createErr: errAlertRule})
-	w := do(eng, http.MethodPost, base+"/alert-rules", strings.NewReader(`{"name":"x","rule_type":"threshold"}`))
+	w := do(eng, http.MethodPost, base+"/alert-rules", strings.NewReader(`{"name":"x","rule_type":"threshold","severity":"low"}`))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", w.Code, w.Body.String())
 	}
@@ -309,6 +332,25 @@ func TestContract_UpdateAlertRule_404(t *testing.T) {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// Validation runs on the MERGED rule: a partial body that blanks or corrupts
+// a constrained field is a 400 and the update is never attempted.
+func TestContract_UpdateAlertRule_400_invalidRule(t *testing.T) {
+	sv := loadSpec(t)
+	for _, body := range []string{`{"severity":""}`, `{"rule_type":"heuristic"}`, `{"name":""}`} {
+		r := sampleAlertRule()
+		stub := &stubAlertRuleService{rule: &r}
+		w := do(newAlertRuleEngine(stub), http.MethodPut, base+"/alert-rules/"+aUUID, strings.NewReader(body))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d body=%s, want 400", body, w.Code, w.Body.String())
+			continue
+		}
+		if stub.gotUpdate != nil {
+			t.Errorf("%s: UpdateAlertRule was called with an invalid rule", body)
+		}
+		sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	}
 }
 
 func TestContract_UpdateAlertRule_500(t *testing.T) {

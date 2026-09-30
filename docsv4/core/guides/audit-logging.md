@@ -228,8 +228,8 @@ There is **no advanced query builder** and **no saved queries** on this page.
 ### Getting events out
 
 **There is no export control on the Audit page in this release.** The audit
-service exposes an export endpoint instead, which you can call with a personal
-API token (**My Profile → API Tokens**):
+service exposes an export endpoint instead. Open it in a browser tab where you are
+signed in to Vista Platform, and the download runs under your session:
 
 ```
 GET /api/v1/audit-service/activity-logs/export?format=csv
@@ -238,6 +238,10 @@ GET /api/v1/audit-service/activity-logs/export?format=json
 
 `format` accepts `csv` or `json` and defaults to `json`. A tenant user's request
 is always scoped to their own organization, whatever else is passed.
+
+Personal API tokens do **not** work here — they are accepted only by the
+[MCP server](../features/api-tokens-and-mcp.md), and this endpoint answers them
+with `401`. There is no unattended, token-based way to pull the audit trail yet.
 
 The same request accepts filters, which is how you reach further back than the
 page can show:
@@ -547,8 +551,8 @@ endpoint's filters above.
 - Version control policies
 
 **Automation**
-- Script the export endpoint against a personal API token rather than repeating
-  the pull by hand — the console has no scheduler for it
+- Pull the export on a regular cadence — the console has no scheduler for it, and
+  personal API tokens cannot be used to script it
 - Configure retention policies so the trail still holds the period you will be
   asked about
 

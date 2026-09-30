@@ -75,9 +75,9 @@ root `CLAUDE.md`'s "Open Core" section) gets a sibling `x-edition: enterprise`
 extension next to its `operationId`:
 
 ```yaml
-/connectors/netbox/connections:
+/cmdb/profiles:
   get:
-    operationId: listNetBoxConnections
+    operationId: listCmdbProfiles
     x-edition: enterprise
     ...
 ```

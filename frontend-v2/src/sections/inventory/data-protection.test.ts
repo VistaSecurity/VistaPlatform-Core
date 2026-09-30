@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { levelFromScore } from '../../components/ui';
 import {
   atRestState, protectionRung, rungLevel, rungColor, rowRiskLevel,
-  RUNG_META, RUNG_ORDER, dataProtectionCsvRow, DATA_PROTECTION_CSV_HEADER,
+  RUNG_META, RUNG_ORDER, dataProtectionCsvRow, dataProtectionRiskScore, DATA_PROTECTION_CSV_HEADER,
   determinedParam, resourceTypeParam, encryptionTypeLabel, resourceTypeLabel, originLabel,
   type CryptoApplication,
 } from './data-protection';
@@ -180,5 +180,27 @@ describe('CSV export', () => {
     expect(row[DATA_PROTECTION_CSV_HEADER.indexOf('resource_identifier')]).toBe('arn:aws:s3:::example-bucket');
     expect(row[DATA_PROTECTION_CSV_HEADER.indexOf('key_custody')]).toBe(RUNG_META['customer-managed'].label);
     expect(row[DATA_PROTECTION_CSV_HEADER.indexOf('encryption_state')]).toBe('encrypted');
+  });
+
+  // `risk_score` on a crypto application follows the at-rest ladder, where 0 is
+  // NOT ASSESSED (an undetermined row). Exporting the 0 reads in a spreadsheet as
+  // "assessed, no risk" — the drawer already says "not assessed" for it.
+  it('exports a blank risk_score for an unassessed (0) row, and the score for an assessed one', () => {
+    const cell = (over: Partial<CryptoApplication>) =>
+      dataProtectionCsvRow(app(over))[DATA_PROTECTION_CSV_HEADER.indexOf('risk_score')];
+    expect(cell({ encryption_determined: false, encrypted: false, risk_score: 0 })).toBe('');
+    expect(cell({ risk_score: 0 })).toBe('');
+    expect(cell({})).toBe('');
+    expect(cell({ encryption_determined: true, encrypted: true, key_manager: 'customer', risk_score: 10 })).toBe(10);
+    expect(cell({ encryption_determined: true, encrypted: false, risk_score: 90 })).toBe(90);
+  });
+});
+
+describe('dataProtectionRiskScore — the one rule the drawer and the CSV share', () => {
+  it('is null for 0, absent and non-numeric, and the score otherwise', () => {
+    expect(dataProtectionRiskScore({ risk_score: 0 })).toBeNull();
+    expect(dataProtectionRiskScore({})).toBeNull();
+    expect(dataProtectionRiskScore({ risk_score: null as unknown as number })).toBeNull();
+    expect(dataProtectionRiskScore({ risk_score: 40 })).toBe(40);
   });
 });

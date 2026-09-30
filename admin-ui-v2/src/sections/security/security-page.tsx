@@ -8,15 +8,22 @@
 // Retention, and SIEM Export sub-pages moved here from sections/audit/ (the cut Audit
 // Alerts / Alert Rules / Compliance Reports views were dropped). Dashboard + Policy are
 // wired to admin-service (/admin/security/*, /admin/settings) + auth-service; Activity /
-// Retention / SIEM to audit-service — all via the typed @vistasecurity/api-contract
-// client. Do NOT add a tab strip to the content area — the left rail is the navigation.
+// Retention to audit-service, and SIEM Export (Enterprise) to its own service — all via
+// the typed @vistasecurity/api-contract client. Do NOT add a tab strip to the content
+// area — the left rail is the navigation.
+import type { ReactNode } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { SecurityDashboardPage } from './dashboard-page';
 import { SecurityPolicyPage } from './policy-page';
 import { ActivityPage } from './activity-page';
 import { RetentionPage } from './retention-page';
-import { SiemPage } from './siem-page';
 import { FirstPermittedChild, RequireChildPermission } from '../../app/section-child';
+
+// Sub-views that exist only in the Enterprise console. Held outside the JSX so
+// each can sit inside an edition fence (a `//` line inside JSX would be text):
+// the Core export removes the entries and leaves an empty list.
+const enterpriseRoutes: ReactNode[] = [
+];
 
 export function SecurityPage() {
   return (
@@ -27,7 +34,7 @@ export function SecurityPage() {
       <Route path="dashboard" element={<RequireChildPermission section="security" child="dashboard"><SecurityDashboardPage /></RequireChildPermission>} />
       <Route path="activity" element={<RequireChildPermission section="security" child="activity"><ActivityPage /></RequireChildPermission>} />
       <Route path="retention" element={<RequireChildPermission section="security" child="retention"><RetentionPage /></RequireChildPermission>} />
-      <Route path="siem" element={<RequireChildPermission section="security" child="siem"><SiemPage /></RequireChildPermission>} />
+      {enterpriseRoutes}
       <Route path="policy" element={<RequireChildPermission section="security" child="policy"><SecurityPolicyPage /></RequireChildPermission>} />
       <Route path="*" element={<Navigate to="/security" replace />} />
     </Routes>

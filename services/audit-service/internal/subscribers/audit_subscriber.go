@@ -19,8 +19,21 @@ type alertEvaluator interface {
 	EvaluateEvent(ctx context.Context, event map[string]interface{}) []services.Alert
 }
 
+// activityLogWriter is the narrow surface of *services.ActivityLogService the
+// subscriber writes through, so the ingestion path can be tested without a
+// database.
+type activityLogWriter interface {
+	LogActivity(ctx context.Context, logEntry *models.ActivityLog) error
+}
+
 // AuditSubscriber consumes audit events from NATS and persists them
 // via the ActivityLogService, replacing the legacy HTTP ingestion path.
+//
+// Every persisted entry also rings the stored-events doorbell through
+// services.RingStored — the same seam the HTTP handler uses — so how promptly
+// an export-feed consumer sees an event does not depend on which transport
+// carried it. This is also the path batched entries take (AuditBatchEvent):
+// each entry of a batch is persisted and rung individually.
 //
 // It evaluates alert rules on every ingested entry, exactly as the HTTP
 // ingestion handler does. Ingestion has two transports and detection must not
@@ -30,19 +43,22 @@ type alertEvaluator interface {
 type AuditSubscriber struct {
 	natsClient         *events.NATSClient
 	subscriber         *events.Subscriber
-	activityLogService *services.ActivityLogService
+	activityLogService activityLogWriter
 	alertService       alertEvaluator
+	doorbell           services.StoredDoorbell
 }
 
 // NewAuditSubscriber creates a new audit event subscriber. alertService may be
-// nil, in which case ingested entries are persisted but not evaluated.
+// nil, in which case ingested entries are persisted but not evaluated; a nil
+// doorbell rings nothing.
 func NewAuditSubscriber(natsClient *events.NATSClient, activityLogService *services.ActivityLogService,
-	alertService alertEvaluator) *AuditSubscriber {
+	alertService alertEvaluator, doorbell services.StoredDoorbell) *AuditSubscriber {
 	return &AuditSubscriber{
 		natsClient:         natsClient,
 		subscriber:         events.NewSubscriber(natsClient),
 		activityLogService: activityLogService,
 		alertService:       alertService,
+		doorbell:           doorbell,
 	}
 }
 
@@ -89,6 +105,7 @@ func (s *AuditSubscriber) handleAuditBatch(ctx context.Context, msg *nats.Msg) e
 			continue
 		}
 		s.evaluateAlerts(ctx, activityLog)
+		services.RingStored(s.doorbell, activityLog)
 	}
 
 	return lastErr

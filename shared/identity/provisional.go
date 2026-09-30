@@ -57,6 +57,19 @@ const (
 	// met. `merged_into` is deliberately NOT set: nothing was merged, the
 	// guess was simply wrong about there being a separate thing.
 	ReasonSupersededByDirectEvidence = "superseded_by_direct_evidence"
+	// ReasonDynamicAddressWithoutDeviceBinding — the evidence is an address
+	// in a DHCP range and nothing else: no name, no device-binding identifier.
+	// It is both an admission reason ([AssessAdmission]) and, since 1c,
+	// the reason a provisional asset is NOT created from such evidence: a bare
+	// lease names whoever holds it today, and a record built from one absorbs
+	// tomorrow's holder.
+	ReasonDynamicAddressWithoutDeviceBinding = "dynamic_address_without_device_binding"
+	// ReasonLeaseMoved — an `ip_address` in a dynamic scope moved from its
+	// previous holder to the asset a device-binding identifier matched, because
+	// that device was met directly at the address more recently than the
+	// previous holder was ( 1b, "the address follows the MAC"). Written on
+	// BOTH assets' `identifier_reassigned` history entries.
+	ReasonLeaseMoved = "lease_moved"
 )
 
 // ProvisionalScopeChecker is an OPTIONAL [Repository] capability: it answers

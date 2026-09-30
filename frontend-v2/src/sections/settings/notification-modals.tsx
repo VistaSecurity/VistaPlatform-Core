@@ -3,11 +3,21 @@
 // fields follow the delivery service's per-type expectations: email →
 // recipients[], slack → webhook_url, webhook → url, pagerduty →
 // integration_key. Unknown config keys are carried through on edit.
+//
+// Credentials never come back from the API — the server masks them (a URL is
+// reduced to scheme + host, a key to its last four characters). So editing a
+// channel never prefills the secret: the field starts blank with the masked
+// form as a placeholder, and blank means "keep the current value". The server
+// treats an omitted / blank / still-masked credential as unchanged.
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { alertSourceOptions, fetchAlertCatalogSources } from './alert-sources';
+import {
+  WEBHOOK_AUTH_MODES, applyWebhookOptions, generateSigningSecret, initialWebhookOptions, storedHeaderCount,
+  webhookModeOf, webhookOptionsError, type WebhookAuthMode, type WebhookOptions,
+} from './webhook-options';
 import type { notificationServiceComponents as NC } from '@vistasecurity/api-contract';
 
 type Channel = NC['schemas']['TenantNotificationChannel'];
@@ -18,7 +28,36 @@ function legacyMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-const CHANNEL_TYPES: Array<{ value: string; label: string; configKey: 'recipients' | 'webhook_url' | 'url' | 'integration_key'; configLabel: string; hint: string; csv?: boolean }> = [
+type ChannelTypeDef = { value: string; label: string; configKey: 'recipients' | 'webhook_url' | 'url' | 'integration_key'; configLabel: string; hint: string; csv?: boolean };
+
+/** Email recipients are addresses, not secrets; every other field is a credential. */
+export function isSecretChannelField(typeDef: Pick<ChannelTypeDef, 'configKey'>): boolean {
+  return typeDef.configKey !== 'recipients';
+}
+
+/**
+ * The config to PUT/POST. On edit, a blank credential field is left OUT of the
+ * body so the server keeps the stored value; carried-through keys (headers,
+ * auth) stay in their masked form, which the server also treats as unchanged.
+ */
+export function buildChannelConfig(
+  existing: Record<string, unknown> | null | undefined,
+  typeDef: ChannelTypeDef,
+  value: string,
+  isEdit: boolean,
+): Record<string, unknown> {
+  const config: Record<string, unknown> = { ...(existing ?? {}) };
+  if (isEdit && isSecretChannelField(typeDef) && !value.trim()) {
+    delete config[typeDef.configKey];
+    return config;
+  }
+  config[typeDef.configKey] = typeDef.csv
+    ? value.split(',').map((s) => s.trim()).filter(Boolean)
+    : value.trim();
+  return config;
+}
+
+const CHANNEL_TYPES: ChannelTypeDef[] = [
   { value: 'email', label: 'Email', configKey: 'recipients', configLabel: 'Recipients', hint: 'Comma-separated email addresses.', csv: true },
   { value: 'slack', label: 'Slack', configKey: 'webhook_url', configLabel: 'Webhook URL', hint: 'Incoming-webhook URL for the target channel.' },
   { value: 'webhook', label: 'Generic webhook', configKey: 'url', configLabel: 'URL', hint: 'POST endpoint that receives the alert JSON.' },
@@ -32,36 +71,56 @@ export function ChannelModal({ channel, open, onClose }: { channel: Channel | nu
   const [type, setType] = useState(channel?.channel_type ?? 'email');
   const [description, setDescription] = useState(channel?.description ?? '');
   const typeDef = CHANNEL_TYPES.find((t) => t.value === type) ?? CHANNEL_TYPES[0];
+  const secretField = isSecretChannelField(typeDef);
   const initialCfg = channel?.config?.[typeDef.configKey];
+  // A credential arrives masked and is never prefilled: the masked form is only
+  // shown as a placeholder so the user can tell which connection this is.
+  const maskedCurrent = isEdit && secretField && typeof initialCfg === 'string' ? initialCfg : '';
   const [configValue, setConfigValue] = useState(
-    Array.isArray(initialCfg) ? initialCfg.join(', ') : typeof initialCfg === 'string' ? initialCfg : '',
+    Array.isArray(initialCfg) ? initialCfg.join(', ') : typeof initialCfg === 'string' && !secretField ? initialCfg : '',
   );
+  const keepsCurrent = isEdit && secretField;
+
+  // Generic-webhook only: how Vista authenticates to the receiver, and the HMAC
+  // signing secret. See webhook-options.ts.
+  const isWebhook = type === 'webhook';
+  const [webhook, setWebhook] = useState<WebhookOptions>(() => initialWebhookOptions(channel?.config));
+  const setWebhookField = <K extends keyof WebhookOptions>(k: K, v: WebhookOptions[K]) => setWebhook((p) => ({ ...p, [k]: v }));
+  const webhookError = isWebhook ? webhookOptionsError(webhook, channel?.config, isEdit) : null;
+  // The signing secret the server generated for a new webhook — shown once.
+  const [createdSecret, setCreatedSecret] = useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (): Promise<string | null> => {
       // carry through config keys the form doesn't expose
-      const config: Record<string, unknown> = { ...(channel?.config ?? {}) };
-      config[typeDef.configKey] = typeDef.csv
-        ? configValue.split(',').map((s) => s.trim()).filter(Boolean)
-        : configValue.trim();
+      let config = buildChannelConfig(channel?.config, typeDef, configValue, isEdit);
+      if (isWebhook) config = applyWebhookOptions(config, webhook);
       if (isEdit) {
         const { error, response } = await clients.notifications.PUT('/tenant/channels/{id}', {
           params: { path: { id: channel.id } },
           body: { channel_name: name.trim(), config, description: description.trim() || undefined },
         });
         if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to update the channel'));
-      } else {
-        const { error, response } = await clients.notifications.POST('/tenant/channels', {
-          body: { channel_name: name.trim(), channel_type: type, config, enabled: true, description: description.trim() || undefined },
-        });
-        if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to create the channel'));
+        return null;
       }
+      const { data, error, response } = await clients.notifications.POST('/tenant/channels', {
+        body: { channel_name: name.trim(), channel_type: type, config, enabled: true, description: description.trim() || undefined },
+      });
+      if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to create the channel'));
+      return data?.signing_secret ?? null;
     },
-    onSuccess: () => {
+    onSuccess: (generatedSecret) => {
       void queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
-      onClose();
+      // A generated signing secret is returned exactly once. Keep the modal open
+      // on it rather than closing over the only chance to copy it.
+      if (generatedSecret) setCreatedSecret(generatedSecret);
+      else onClose();
     },
   });
+
+  if (createdSecret) {
+    return <SigningSecretModal secret={createdSecret} open={open} onClose={onClose} />;
+  }
 
   return (
     <Modal
@@ -74,7 +133,7 @@ export function ChannelModal({ channel, open, onClose }: { channel: Channel | nu
         ? 'The connection is authenticated once here, then referenced from routing rules.'
         : 'Authenticate a delivery channel once; routing rules then choose what it receives.'}
       primary={
-        <button className="ui-btn sm accent" disabled={!name.trim() || !configValue.trim() || mutation.isPending} onClick={() => mutation.mutate()}>
+        <button className="ui-btn sm accent" disabled={!name.trim() || (!configValue.trim() && !keepsCurrent) || webhookError !== null || mutation.isPending} onClick={() => mutation.mutate()}>
           {mutation.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Add connection'}
         </button>
       }
@@ -93,11 +152,127 @@ export function ChannelModal({ channel, open, onClose }: { channel: Channel | nu
           {CHANNEL_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
         </ModalSelect>
       </ModalField>
-      <ModalField label={typeDef.configLabel} hint={typeDef.hint}>
-        <ModalInput value={configValue} className="mono" onChange={(e) => setConfigValue(e.target.value)} />
+      <ModalField label={typeDef.configLabel} hint={keepsCurrent ? `${typeDef.hint} Leave blank to keep the current value.` : typeDef.hint}>
+        <ModalInput
+          value={configValue}
+          className="mono"
+          placeholder={keepsCurrent && maskedCurrent ? `${maskedCurrent} (unchanged)` : undefined}
+          autoComplete="off"
+          onChange={(e) => setConfigValue(e.target.value)}
+        />
       </ModalField>
+      {isWebhook && (
+        <WebhookFields
+          value={webhook}
+          onChange={setWebhookField}
+          existing={channel?.config}
+          isEdit={isEdit}
+          error={webhookError}
+        />
+      )}
       <ModalField label="Description" hint="Optional — shown on the connection card.">
         <ModalInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. SOC rotation" />
+      </ModalField>
+    </Modal>
+  );
+}
+
+/** Authentication + signing fields of a generic webhook connection. */
+function WebhookFields({ value, onChange, existing, isEdit, error }: {
+  value: WebhookOptions;
+  onChange: <K extends keyof WebhookOptions>(k: K, v: WebhookOptions[K]) => void;
+  existing: Record<string, unknown> | null | undefined;
+  isEdit: boolean;
+  error: string | null;
+}) {
+  const sameMode = isEdit && webhookModeOf(existing) === value.mode;
+  const keep = (label: string) => (sameMode ? `${label} Leave blank to keep the current value.`.trim() : label);
+  const maskedAuth = (key: 'token' | 'username' | 'password'): string | undefined => {
+    const auth = existing?.auth;
+    const v = auth && typeof auth === 'object' ? (auth as Record<string, unknown>)[key] : undefined;
+    return sameMode && typeof v === 'string' ? `${v} (unchanged)` : undefined;
+  };
+  const extraHeaders = storedHeaderCount(existing) > 1;
+  const hasSecret = isEdit && typeof existing?.webhook_secret === 'string' && existing.webhook_secret !== '';
+  return (
+    <>
+      <ModalField label="Authentication" hint="How the receiver knows the request came from Vista. Credentials are write-only.">
+        <ModalSelect value={value.mode} onChange={(e) => onChange('mode', e.target.value as WebhookAuthMode)}>
+          {WEBHOOK_AUTH_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+        </ModalSelect>
+      </ModalField>
+      {value.mode === 'bearer' && (
+        <ModalField label="Bearer token" hint={keep('Sent as "Authorization: Bearer …".')}>
+          <ModalInput value={value.token} className="mono" autoComplete="off" placeholder={maskedAuth('token')} onChange={(e) => onChange('token', e.target.value)} />
+        </ModalField>
+      )}
+      {value.mode === 'basic' && (
+        <>
+          <ModalField label="Username" hint={keep('HTTP basic authentication.')}>
+            <ModalInput value={value.username} className="mono" autoComplete="off" placeholder={maskedAuth('username')} onChange={(e) => onChange('username', e.target.value)} />
+          </ModalField>
+          <ModalField label="Password" hint={keep('')}>
+            <ModalInput value={value.password} type="password" className="mono" autoComplete="new-password" placeholder={maskedAuth('password')} onChange={(e) => onChange('password', e.target.value)} />
+          </ModalField>
+        </>
+      )}
+      {value.mode === 'header' && (
+        <>
+          <ModalField label="Header name" hint="e.g. X-Api-Key">
+            <ModalInput value={value.headerName} className="mono" autoComplete="off" onChange={(e) => onChange('headerName', e.target.value)} />
+          </ModalField>
+          <ModalField label="Header value" hint={keep(extraHeaders ? 'Saving replaces this connection\'s other custom headers with this one.' : '')}>
+            <ModalInput value={value.headerValue} className="mono" autoComplete="off" onChange={(e) => onChange('headerValue', e.target.value)} />
+          </ModalField>
+        </>
+      )}
+      <ModalField
+        label="Signing secret"
+        hint={isEdit
+          ? `Every delivery carries an HMAC-SHA256 signature (X-Vista-Signature) computed with this secret. ${hasSecret ? 'Leave blank to keep the current secret; enter a new one to rotate it.' : 'This connection has no signing secret yet — enter one to start signing.'}`
+          : 'Every delivery carries an HMAC-SHA256 signature (X-Vista-Signature). Leave blank and Vista generates a secret, shown once after you save.'}
+      >
+        <div style={{ display: 'flex', gap: 6 }}>
+          <ModalInput
+            value={value.signingSecret}
+            className="mono"
+            autoComplete="off"
+            placeholder={hasSecret ? `${String(existing?.webhook_secret)} (unchanged)` : undefined}
+            onChange={(e) => onChange('signingSecret', e.target.value)}
+          />
+          <button type="button" className="ui-btn sm" onClick={() => onChange('signingSecret', generateSigningSecret())}>Generate</button>
+        </div>
+      </ModalField>
+      {error && <div role="alert" style={{ fontSize: 11.5, color: 'var(--danger-text)' }}>{error}</div>}
+    </>
+  );
+}
+
+/** One-time display of the signing secret the server generated for a new webhook. */
+function SigningSecretModal({ secret, open, onClose }: { secret: string; open: boolean; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      icon="lock"
+      eyebrow="Integrations"
+      title="Save your signing secret"
+      description="Vista signs every delivery to this webhook with HMAC-SHA256. This is the only time the secret is shown — copy it into your receiver now. You can rotate it later by entering a new one."
+      primary={<button className="ui-btn sm accent" onClick={onClose}>Done</button>}
+      secondary={
+        <button
+          className="ui-btn sm"
+          onClick={() => {
+            void navigator.clipboard?.writeText(secret).then(() => setCopied(true), () => setCopied(false));
+          }}
+        >
+          {copied ? 'Copied' : 'Copy secret'}
+        </button>
+      }
+    >
+      <ModalField label="Signing secret">
+        <ModalInput value={secret} readOnly className="mono" data-testid="signing-secret" onFocus={(e) => e.currentTarget.select()} />
       </ModalField>
     </Modal>
   );

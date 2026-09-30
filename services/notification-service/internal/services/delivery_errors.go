@@ -74,16 +74,17 @@ func statusIsPermanent(status int) bool {
 // permanently discard a tenant's webhook deliveries.
 func classifyURLRejection(format string, err error) error {
 	if errors.Is(err, network.ErrUnresolvableHost) {
-		return fmt.Errorf(format, err)
+		return withReason(fmt.Errorf(format, err), reasonHostUnresolvable)
 	}
-	return permanentf(format, err)
+	return permanentReasonf(reasonAddressNotAllowed, format, err)
 }
 
 // classifyHTTPStatus wraps a remote-endpoint error as permanent or transient
 // according to the response status.
 func classifyHTTPStatus(status int, format string, a ...interface{}) error {
+	reason := httpStatusReason(status)
 	if statusIsPermanent(status) {
-		return permanentf(format, a...)
+		return permanentReasonf(reason, format, a...)
 	}
-	return fmt.Errorf(format, a...)
+	return withReason(fmt.Errorf(format, a...), reason)
 }

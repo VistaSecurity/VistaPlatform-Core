@@ -63,6 +63,17 @@ type ProcessingLog struct {
 	// zero when a dozen findings landed, and it is not credited with a clean
 	// success either, because the payload plainly does not describe the run.
 	ExistingFindings int
+	// ExecutorDiscoveries is how many sensor_discoveries rows the run's
+	// discovery job holds when the executor wrote them itself and wrote no
+	// findings — a cloud run, which writes through the same
+	// WriteSensorDiscoveries the interactive run uses. Counted from the
+	// database, never taken from the executor's word; -1 when the count
+	// failed. ExecutorDiscoveriesExpected is what the executor said it
+	// inserted: fewer rows present than that is a shortfall, not a success.
+	//
+	// Both are zero for every other job, and then change nothing below.
+	ExecutorDiscoveries         int
+	ExecutorDiscoveriesExpected int
 	// Fatal is set when processing aborted before it could run per-asset steps —
 	// today, a missing platform device-interrogation sensor. It is separate from
 	// a failed step because it is not per-asset: nothing was attempted, so no
@@ -190,19 +201,23 @@ func (p *ProcessingLog) Summary() map[string]interface{} {
 	targetsOK, targetsFailed, _ := p.counts(StageDiscoveryTarget)
 	_, observationsFailed, _ := p.counts(StageObservations)
 
+	executorRows := max(p.ExecutorDiscoveries, 0)
 	summary := map[string]interface{}{
-		"assets_received":        p.AssetsReceived,
-		"discovery_job_id":       p.DiscoveryJobID,
-		"targets_created":        targetsOK,
-		"targets_failed":         targetsFailed,
-		"findings_created":       findingsOK,
-		"findings_failed":        findingsFailed,
-		"existing_findings":      p.ExistingFindings,
-		"discoveries_written":    discOK,
-		"discoveries_failed":     discFailed,
-		"discoveries_skipped":    discSkipped,
-		"observations_failed":    observationsFailed,
-		"materialized":           findingsOK + p.ExistingFindings,
+		"assets_received":     p.AssetsReceived,
+		"discovery_job_id":    p.DiscoveryJobID,
+		"targets_created":     targetsOK,
+		"targets_failed":      targetsFailed,
+		"findings_created":    findingsOK,
+		"findings_failed":     findingsFailed,
+		"existing_findings":   p.ExistingFindings,
+		"discoveries_written": discOK + executorRows,
+		"discoveries_failed":  discFailed,
+		"discoveries_skipped": discSkipped,
+		"observations_failed": observationsFailed,
+		// A run whose executor wrote its rows itself (cloud) creates no
+		// findings; what reached the ingestion queue is its rows. The two
+		// never both apply to one job, so the sum does not double-count.
+		"materialized":           findingsOK + p.ExistingFindings + executorRows,
 		"fully_materialized":     p.fullyMaterialized(findingsFailed, discFailed, targetsFailed) && observationsFailed == 0,
 		"errors":                 p.distinctErrors(),
 		"steps":                  p.steps,
@@ -249,6 +264,11 @@ func (p *ProcessingLog) fullyMaterialized(findingsFailed, discFailed, targetsFai
 		return false
 	}
 	if p.AssetsReceived == 0 && p.ExistingFindings > 0 {
+		return false
+	}
+	// The executor said it wrote N rows; fewer than N present (or a count
+	// that could not be taken) is not a clean run.
+	if p.ExecutorDiscoveries < 0 || p.ExecutorDiscoveries < p.ExecutorDiscoveriesExpected {
 		return false
 	}
 	return true

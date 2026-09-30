@@ -83,7 +83,14 @@ const PRIORITY_ADMIN_PLANE_EXCEPTION = 950;
 const PRIORITY_SERVICE_HEALTH = PRIORITY_ADMIN_PLANE_EXCEPTION;
 
 async function main() {
-  const root = path.resolve(__dirname, '..');
+  // VISTA_GENERATE_ROOT points the generator at ANOTHER tree's registry and
+  // writes that tree's artifacts. Only the public-tree export sets it: it strips
+  // Enterprise-only services from the exported registry and regenerates from
+  // there, running this script from the source checkout (whose node_modules the
+  // export does not copy). Unset, the generator works on its own repository.
+  const root = process.env.VISTA_GENERATE_ROOT
+    ? path.resolve(process.env.VISTA_GENERATE_ROOT)
+    : path.resolve(__dirname, '..');
   const registryPath = path.resolve(root, 'standards', 'service-registry.yaml');
   const outDir = path.resolve(root, 'charts', 'vistaplatform', 'templates', 'ingress');
 

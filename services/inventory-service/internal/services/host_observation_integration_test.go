@@ -821,7 +821,9 @@ func TestIntegration_HostObservation_RetainsTypedEvidenceBeforeResolution(t *tes
 		t.Fatal(err)
 	}
 	seen := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
-	ho := &hostobs.HostObservation{ObservedAt: seen, Source: hostobs.SourceMDNS, FQDNs: []string{uuid.NewString() + ".local"},
+	// A unique but REAL name: a UUID-form label is not identity ( D1), so
+	// a sighting carrying only that would be refused before retention.
+	ho := &hostobs.HostObservation{ObservedAt: seen, Source: hostobs.SourceMDNS, FQDNs: []string{"printer-" + uuid.NewString()[:8] + ".local"},
 		Services: []string{"_ipp._tcp"}, Attributes: map[string]interface{}{"password": "must-not-persist", "mdns_service_port": 631}}
 	finding := observationFinding(t, ho)
 	finding.RawData["password"] = "must-not-persist"

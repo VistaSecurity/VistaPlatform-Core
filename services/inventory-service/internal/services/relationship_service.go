@@ -152,6 +152,11 @@ type RelationshipPeer struct {
 	// empty, which it is for most freshly discovered assets.
 	PrimaryIdentifier string `json:"primary_identifier,omitempty"`
 	RiskScore         *int   `json:"risk_score,omitempty"`
+	// RiskAssessed is true when something has assessed the peer's risk
+	// (`risk_assessed_by` is non-empty). `risk_score` is only meaningful when it
+	// is true: a 0 with this false is NOT ASSESSED, not safe — the same
+	// three-valued answer the network map carries beside its own score.
+	RiskAssessed bool `json:"risk_assessed"`
 	// Deleted marks a peer that has been soft-deleted or merged away. Shown
 	// rather than dropped: an edge whose peer silently vanishes reads as a
 	// corrupt row, and "that thing is gone" is the actual answer.
@@ -208,6 +213,11 @@ type NeighbourhoodNode struct {
 	ClassKey    string    `json:"class_key,omitempty"`
 	AssetStatus string    `json:"asset_status,omitempty"`
 	RiskScore   *int      `json:"risk_score,omitempty"`
+	// RiskAssessed says whether `risk_score` is an assessment at all: a 0 with
+	// this false is NOT ASSESSED. Without it a consumer of the neighbourhood
+	// (the map's GraphML / Cytoscape export) cannot tell "assessed clean" from
+	// "nobody looked" and writes a score of 0 into a file for both.
+	RiskAssessed bool `json:"risk_assessed"`
 	// CloudAccount and CloudRegion are the resource's SCOPING ATTRIBUTES, read
 	// from the `cloud.account_id` and `cloud.region` facts ( D6). They are
 	// not asset classes and there is no account or region asset — the map turns
@@ -358,6 +368,7 @@ func NormalizeImpactDirection(v string) (string, bool) {
 // three call sites cannot come to disagree about what a peer is.
 const peerColumns = `
 	a.id, a.display_name, a.hostname, a.class_key, a.asset_status, a.risk_score,
+	COALESCE(cardinality(a.risk_assessed_by), 0) > 0 AS risk_assessed,
 	(a.deleted_at IS NOT NULL OR a.asset_status = 'archived') AS deleted`
 
 // edgeColumns is every column of an edge row, in scan order, qualified for a
@@ -563,7 +574,7 @@ func (s *RelationshipService) Neighbourhood(
 		for _, id := range nodeIDs {
 			n := NeighbourhoodNode{AssetID: id, Depth: depths[id], IsRoot: id == assetID}
 			if p, ok := peers[id]; ok {
-				n.DisplayName, n.ClassKey, n.AssetStatus, n.RiskScore = p.DisplayName, p.ClassKey, p.AssetStatus, p.RiskScore
+				n.DisplayName, n.ClassKey, n.AssetStatus, n.RiskScore, n.RiskAssessed = p.DisplayName, p.ClassKey, p.AssetStatus, p.RiskScore, p.RiskAssessed
 			}
 			if sc, ok := scopes[id]; ok {
 				n.CloudAccount, n.CloudRegion = sc.AccountID, sc.Region
@@ -838,7 +849,7 @@ func (s *RelationshipService) Impact(
 		for _, id := range ids {
 			n := NeighbourhoodNode{AssetID: id, Depth: depths[id]}
 			if p, ok := peers[id]; ok {
-				n.DisplayName, n.ClassKey, n.AssetStatus, n.RiskScore = p.DisplayName, p.ClassKey, p.AssetStatus, p.RiskScore
+				n.DisplayName, n.ClassKey, n.AssetStatus, n.RiskScore, n.RiskAssessed = p.DisplayName, p.ClassKey, p.AssetStatus, p.RiskScore, p.RiskAssessed
 			}
 			out.Nodes = append(out.Nodes, n)
 			byDepth[depths[id]]++
@@ -1247,7 +1258,7 @@ func loadPeers(ctx context.Context, tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.
 			riskScore sql.NullInt64
 			label     string
 		)
-		if err := rows.Scan(&p.AssetID, &name, &hostname, &classKey, &status, &riskScore, &p.Deleted, &label); err != nil {
+		if err := rows.Scan(&p.AssetID, &name, &hostname, &classKey, &status, &riskScore, &p.RiskAssessed, &p.Deleted, &label); err != nil {
 			return nil, fmt.Errorf("scan relationship peer: %w", err)
 		}
 		// Hostname is the fallback display name, the same order the asset page

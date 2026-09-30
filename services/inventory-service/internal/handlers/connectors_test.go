@@ -172,6 +172,48 @@ func TestGatedConnectorFollowsTheEntitlement(t *testing.T) {
 	})
 }
 
+// SIEM export is platform-global: the operator configures it, so a tenant is
+// never offered an Add button for it — entitled or not. Both polarities of the
+// entitlement, because the reason must not depend on it, while `entitled` stays
+// truthful so the page can still say whether the plan includes SIEM export.
+func TestOperatorConfiguredConnectorsAreNeverAddableByATenant(t *testing.T) {
+	for name, allowed := range map[string]map[string]bool{
+		"unentitled": {},
+		"entitled":   {"siem_export": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := flatten(getCatalogue(t, &stubFeatures{allowed: allowed}))
+			checked := 0
+			for _, key := range []string{connectors.ConnectorSplunk, connectors.ConnectorDatadog, connectors.ConnectorElastic, connectors.ConnectorGenericWebhook} {
+				e := got[key]
+				checked++
+				if e.Addable {
+					t.Errorf("%s (%s) is addable; the platform operator configures SIEM export", key, name)
+				}
+				if e.UnavailableReason != "operator" {
+					t.Errorf("%s (%s): reason = %q, want operator", key, name, e.UnavailableReason)
+				}
+				if e.ConfiguredBy != "platform_operator" {
+					t.Errorf("%s: configured_by = %q", key, e.ConfiguredBy)
+				}
+				if e.Edition != "enterprise" {
+					t.Errorf("%s: edition = %q, want enterprise", key, e.Edition)
+				}
+				if e.Entitled != allowed["siem_export"] {
+					t.Errorf("%s (%s): entitled = %v, want %v", key, name, e.Entitled, allowed["siem_export"])
+				}
+			}
+			if checked != 4 {
+				t.Fatalf("checked %d SIEM connectors, want 4", checked)
+			}
+			// A tenant-configured connector is unaffected.
+			if !got[connectors.ConnectorSlack].Addable || got[connectors.ConnectorSlack].ConfiguredBy != "tenant" {
+				t.Errorf("slack: %+v", got[connectors.ConnectorSlack])
+			}
+		})
+	}
+}
+
 // `registered` is NOT `upgrade`. Offering an upgrade for something nobody can
 // buy yet is the worse of the two mistakes.
 func TestRegisteredConnectorsSayUnavailableNotUpgrade(t *testing.T) {
@@ -189,6 +231,13 @@ func TestRegisteredConnectorsSayUnavailableNotUpgrade(t *testing.T) {
 		entry := got[c.Key]
 		switch c.Status {
 		case connectors.StatusLive:
+			if c.ConfiguredBy == connectors.ConfiguredByPlatformOperator {
+				// Live and entitled, and still not the tenant's to add.
+				if entry.Addable || entry.UnavailableReason != "operator" {
+					t.Errorf("%s is operator-configured: addable=%v reason=%q, want false / operator", c.Key, entry.Addable, entry.UnavailableReason)
+				}
+				continue
+			}
 			if !entry.Addable {
 				t.Errorf("%s is live and fully entitled but not addable", c.Key)
 			}
@@ -239,59 +288,12 @@ func TestCatalogueResolvesEachFeatureOnce(t *testing.T) {
 	}
 }
 
-// --- the Core 402 stubs ----------------------------------------------------
-
-func stubEngine() *gin.Engine {
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	grp := r.Group("/api/v2")
-	RegisterUnavailableConnectorRoutes(grp)
-	return r
-}
-
-// The Core polarity. Every route the Enterprise build mounts must answer 402
-// here — including the BARE path, which a `/*rest` wildcard does not match.
-// That trailing-path shape is the same one that let a deny rule leak a route
-// past Traefik.
-func TestCoreAnswers402ForEveryNetBoxRoute(t *testing.T) {
-	e := stubEngine()
-	const base = "/api/v2/inventory-service/connectors/netbox/connections"
-	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, base},
-		{http.MethodPost, base},
-		{http.MethodPut, base + "/11111111-1111-1111-1111-111111111111"},
-		{http.MethodDelete, base + "/11111111-1111-1111-1111-111111111111"},
-		{http.MethodPost, base + "/11111111-1111-1111-1111-111111111111/test"},
-		{http.MethodPost, base + "/11111111-1111-1111-1111-111111111111/run"},
-		{http.MethodGet, base + "/11111111-1111-1111-1111-111111111111/runs"},
-		{http.MethodGet, base + "/11111111-1111-1111-1111-111111111111/drift"},
-		// The connector root itself, which is what a wildcard-only
-		// registration would miss.
-		{http.MethodGet, "/api/v2/inventory-service/connectors/netbox"},
-	} {
-		req := httptest.NewRequest(tc.method, tc.path, nil)
-		w := httptest.NewRecorder()
-		e.ServeHTTP(w, req)
-		if w.Code != http.StatusPaymentRequired {
-			t.Errorf("%s %s = %d, want 402", tc.method, tc.path, w.Code)
-			continue
-		}
-		var body map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-			t.Errorf("%s %s: unparseable body %s", tc.method, tc.path, w.Body.String())
-			continue
-		}
-		// The UI keys its upgrade card on `feature`, and it must be the same
-		// key RequireFeature returns so one branch handles both cases.
-		if body["feature"] != "connector_netbox" {
-			t.Errorf("%s %s: feature = %v, want connector_netbox", tc.method, tc.path, body["feature"])
-		}
-	}
-}
-
 // The Core catalogue still lists NetBox — a Core install can see the shape of
-// the product, it just cannot configure the paid parts. The stub above and
-// this are the two halves of the same promise.
+// the product, it just cannot configure the paid parts. Since platform
+// ADR-0002 M2 this entry (with the connector_netbox feature flag) is the WHOLE
+// of Core's answer: the connector runs in an Enterprise-only service, so Core
+// mounts no NetBox route at all, and the Integrations page renders its upgrade
+// card from this entry instead of from a 402.
 func TestCoreCatalogueStillListsTheGatedConnector(t *testing.T) {
 	got := flatten(getCatalogue(t, &stubFeatures{}))
 	nb, ok := got[connectors.ConnectorNetbox]
@@ -303,5 +305,12 @@ func TestCoreCatalogueStillListsTheGatedConnector(t *testing.T) {
 	}
 	if nb.Description == "" {
 		t.Error("the catalogue entry carries no description, so the page has nothing to say about it")
+	}
+	// The upgrade card is keyed on these two, so they must say "upgrade" for
+	// a tenant without the entitlement — the Core case, where it is never
+	// granted.
+	if nb.Addable || nb.UnavailableReason != "upgrade" || nb.Edition != "enterprise" {
+		t.Errorf("an unentitled tenant's netbox entry = addable %t, reason %q, edition %q; want false, upgrade, enterprise",
+			nb.Addable, nb.UnavailableReason, nb.Edition)
 	}
 }

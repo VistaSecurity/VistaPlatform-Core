@@ -25,7 +25,6 @@ const SITES = [
   'frontend-v2/src/sections/posture/framework-browser.tsx',
   'frontend-v2/src/sections/settings/custom-policy-detail.tsx',
   'admin-ui-v2/src/sections/catalog/measurement-rules-modal.tsx',
-  'docsv4/enterprise/features/custom-policies.md',
 ];
 
 describe.each(SITES)('B-46: %s', (rel) => {

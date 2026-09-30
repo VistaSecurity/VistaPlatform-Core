@@ -228,6 +228,30 @@ function ObservationCard({ observation }: { observation: MergeCandidate }) {
   );
 }
 
+/**
+ * The pair score as a sentence ( Phase 5): the matcher's score of the two
+ * top-ranked candidates compared with EACH OTHER, not with the sighting. When a
+ * sighting links two records (the MAC of one, the address of the other) that
+ * is the question the reviewer is really answering.
+ *
+ * Null when unscored — zero is the matcher's "no score" sentinel, as for a
+ * candidate — or when the two records it names are not both on the card. With
+ * exactly two candidates they are "the two records"; with more, they are named.
+ */
+export function pairScoreLine(proposal: MergeProposal): { text: string; reason?: string } | null {
+  const pct = matcherConfidencePercent(proposal.pair_score);
+  const ids = proposal.pair_asset_ids ?? [];
+  if (pct === null || ids.length !== 2) return null;
+  const byID = new Map(proposal.candidates.map((c) => [c.asset_id, c]));
+  const a = byID.get(ids[0]);
+  const b = byID.get(ids[1]);
+  if (!a || !b) return null;
+  const who = proposal.candidates.length === 2 ? 'The two records' : `${candidateName(a)} and ${candidateName(b)}`;
+  // An empty reason is no reason: nothing is shown after the dash.
+  const reason = proposal.pair_reason?.trim() ? proposal.pair_reason : undefined;
+  return { text: `${who} themselves score ${percentLabel(pct)}`, reason };
+}
+
 /** The candidate a fresh row should have selected: the highest-scoring one that
  *  is still available, or the first available one when nothing is scored. */
 export function defaultSurvivor(candidates: MergeCandidate[]): string | undefined {
@@ -248,6 +272,7 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
   if (proposal.observation && !proposal.observation.deleted && proposal.observation.asset_status !== 'archived' && proposal.observation.asset_status !== 'denied') aliveIDs.add(proposal.observation.asset_id);
   const hasObservation = !!proposal.observation_asset_id;
   const canMerge = aliveIDs.size >= 2;
+  const pair = pairScoreLine(proposal);
 
   return (
     <div
@@ -303,6 +328,21 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
 
       {proposal.reason && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>{proposal.reason}</div>
+      )}
+
+      {/* The records compared with each other. Each card's score compares the
+          SIGHTING with that record; this is the model's view of whether the
+          records are one thing. Advisory — it merges nothing. */}
+      {pair && (
+        <div
+          data-testid="merge-pair-score"
+          title="How likely the matcher thinks these records are the same thing, comparing them with each other rather than with this sighting. It is evidence for you; nothing is merged on it."
+          style={{ display: 'flex', alignItems: 'baseline', gap: 7, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}
+        >
+          <Icon name="equal" size={11} style={{ color: 'var(--app-t3)', flex: 'none' }} />
+          <span>{pair.text}</span>
+          {pair.reason && <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>— {pair.reason}</span>}
+        </div>
       )}
 
       <div style={{ display: 'flex', gap: 11, alignItems: 'stretch', flexWrap: 'wrap' }}>

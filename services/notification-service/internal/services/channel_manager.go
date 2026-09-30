@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -16,6 +17,25 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/email"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 )
+
+// ErrChannelNotFound is returned when a channel id matches no channel.
+var ErrChannelNotFound = errors.New("channel not found")
+
+// EmailDeliveryConfigured reports whether email channels can deliver for this
+// tenant: a tenant SMTP override, the platform's email settings, or an explicit
+// SMTP_HOST. False means every email channel is inert — see
+// email.ErrNotConfigured.
+func (cm *ChannelManager) EmailDeliveryConfigured(tenantID uuid.UUID) (bool, error) {
+	_, err := cm.emailResolver.ResolveDeliverableConfig(&tenantID)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, email.ErrNotConfigured):
+		return false, nil
+	default:
+		return false, err
+	}
+}
 
 // ChannelManager handles CRUD operations for notification channels
 type ChannelManager struct {
@@ -192,7 +212,7 @@ func (cm *ChannelManager) GetTenantChannelByID(ctx context.Context, tenantID, ch
 		return nil, fmt.Errorf("failed to get channel: %w", err)
 	}
 	if !found {
-		return nil, fmt.Errorf("channel not found")
+		return nil, ErrChannelNotFound
 	}
 
 	channel.Config = cm.decodeConfig(configJSON)
@@ -355,7 +375,9 @@ func (cm *ChannelManager) UpdateTenantChannel(ctx context.Context, tenantID, cha
 		channel.ChannelName = *req.ChannelName
 	}
 	if req.Config != nil {
-		channel.Config = req.Config
+		// Credentials the client left blank / echoed back masked keep their
+		// stored value — see channel_secrets.go.
+		channel.Config = MergeChannelSecrets(channel.Config, req.Config)
 	}
 	if req.Enabled != nil {
 		channel.Enabled = *req.Enabled
@@ -543,7 +565,7 @@ func (cm *ChannelManager) GetPlatformChannelByID(channelID uuid.UUID) (*models.P
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("channel not found")
+			return nil, ErrChannelNotFound
 		}
 		return nil, fmt.Errorf("failed to get channel: %w", err)
 	}
@@ -702,7 +724,11 @@ func (cm *ChannelManager) UpdatePlatformChannel(channelID uuid.UUID, req *models
 		channel.ChannelName = *req.ChannelName
 	}
 	if req.Config != nil {
-		channel.Config = req.Config
+		// Same contract as tenant channels: a credential left blank or echoed
+		// back masked keeps its stored value (channel_secrets.go). Now that the
+		// platform GETs return masked configs, a client that round-trips one
+		// would otherwise overwrite the real secret with its own mask.
+		channel.Config = MergeChannelSecrets(channel.Config, req.Config)
 	}
 	if req.Enabled != nil {
 		channel.Enabled = *req.Enabled

@@ -39,7 +39,7 @@
 // The feature vector is an ALLOWLIST, built by [Features] from a [Pair], and
 // nothing else reaches the model. No raw metadata, no command output, no
 // certificate bytes, no credential, no key material — the whole of the input is
-// the ~20 numbers [FeatureNames] lists, every one of them a comparison rather
+// the numbers [FeatureNames] lists, every one of them a comparison rather
 // than a value. A pair carries identifier values only so the extractor can
 // compare them; the values never leave this package and are never serialised
 // into an explanation (the explanation names the KIND that matched, not the
@@ -47,10 +47,13 @@
 //
 // # Its dependencies
 //
-// None outside the standard library and shared/assetclass. It deliberately does
-// not import shared/identity: that package imports shared/ai/seams, and the
-// seam adapter that registers this model lives in seams, so the import would
-// close a cycle. The identifier-kind vocabulary is therefore restated here as
+// Outside the standard library, three pure-Go lookups the identity stack already
+// shares: shared/assetclass (class ancestry), shared/hostobs (the OUI table
+// behind the v2 vendor features) and shared/identity/hostnamequality (generic
+// and synthetic names). None of them imports shared/identity or the seams. It
+// deliberately does not import shared/identity: that package imports
+// shared/ai/seams, and the seam adapter that registers this model lives in
+// seams, so the import would close a cycle. The identifier-kind vocabulary is therefore restated here as
 // strings and pinned to shared/identity's by
 // TestMatcherKindVocabularyMatchesIdentity, which lives in shared/identity and
 // fails if the two ever drift.

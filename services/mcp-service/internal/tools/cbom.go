@@ -2,10 +2,13 @@ package tools
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/platform"
 )
 
 type listArtifactsInput struct {
@@ -73,7 +76,9 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "vistaplatform_compare_cbom_artifacts",
 		Description: "Diff two CBOM artifacts of the same tenant. Components are matched by purl/OID/fingerprint and every change is categorized as " +
-			"improvement, regression, drift or neutral with a one-phrase reason — ideal for answering \"did our crypto posture regress since the last snapshot?\".",
+			"improvement, regression, drift or neutral with a one-phrase reason — ideal for answering \"did our crypto posture regress since the last snapshot?\". " +
+			"Comparison is an Enterprise capability: where it is not included the tool answers {\"available\": false, \"reason\": \"edition\"} " +
+			"(the artifacts still exist) instead of a diff.",
 		Annotations: readOnly("Compare CBOM artifacts"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in compareArtifactsInput) (*mcp.CallToolResult, any, error) {
 		return d.run(ctx, req, "reports.read", in, func() (any, error) {
@@ -85,7 +90,30 @@ func registerCBOMTools(s *mcp.Server, d *Deps) {
 			if err != nil {
 				return nil, err
 			}
-			return d.Client.Get(ctx, d.Client.CBOMURL, "/api/v1/cbom-service/cbom/compare/"+baseID+"/"+headID, nil)
+			v, err := d.Client.Get(ctx, d.Client.CBOMURL, "/api/v1/cbom-service/cbom/compare/"+baseID+"/"+headID, nil)
+			if err == nil {
+				return v, nil
+			}
+			// Comparison is an Enterprise capability. A Core build (or a tenant
+			// without the entitlement) answers 402: report it as what it is —
+			// "not included in your subscription" — as a RESULT, never as an
+			// error or an empty diff. An agent that read this as a missing
+			// artifact would tell the user their snapshots were gone.
+			if status, message, ok := platform.HTTPStatus(err); ok && status == http.StatusPaymentRequired {
+				return unavailableInstead(compareReasonEdition,
+					"CBOM artifact comparison is not included in your subscription (it is an Enterprise capability). "+
+						"The artifacts themselves exist and are unaffected — this is not a missing-artifact error. "+
+						"Platform said: "+message,
+					compareInstead), nil
+			}
+			return nil, err
 		})
 	})
 }
+
+const (
+	compareReasonEdition = "edition"
+	compareInstead       = "vistaplatform_get_cbom_artifact returns each artifact's metadata (content hash, component count, " +
+		"data freshness, signature) in every edition, and the CycloneDX documents can be downloaded from the Vista Platform UI " +
+		"for a manual diff."
+)

@@ -23,8 +23,9 @@ package identity
 //
 // The rule: when an observation is L2-ONLY — its evidence is nothing but a MAC
 // and addresses, measured on the wire — and its MAC resolves to one asset while
-// its addresses resolve to a different one, the observation is of the ADDRESS
-// holder. It lands there, WITHOUT the MAC (deliberately unattached, and
+// its addresses resolve to a different one (or, since B3, to the
+// announcer itself, as long as one is the other asset's), the observation is of
+// the ADDRESS holder. It lands there, WITHOUT the MAC (deliberately unattached, and
 // reported as such), the announcement is recorded as a relationship between
 // the two assets so the knowledge is not lost, both assets get history, and no
 // proposal is opened.
@@ -124,17 +125,31 @@ func isL2Only(obs Observation, ids []Identifier) bool {
 type floatingPair struct {
 	announcer, holder string
 	macs, addresses   []string
+	// ownAddresses are voting addresses the ANNOUNCER itself owns ( B3):
+	// a node announcing its own address and a VIP in one frame. They are the
+	// announcer's, not floated, and never appear in the announcement.
+	ownAddresses []string
 }
 
 // floatingAddress recognises the floating-address shape after the precedence
 // walk has found a cross-kind conflict.
 //
 // It is deliberately narrow. Every voting MAC must resolve to one asset (the
-// announcer) and every voting address to one OTHER asset (the holder); a second
-// MAC belonging to nobody, or an address belonging to a third asset, is not
-// this shape and falls through to the ordinary conflict. The store must also
-// be healthy — a MAC owned by two assets is the lost-invariant case the walk
-// already flagged, and no rule should paper over it.
+// announcer) and every voting address either to one OTHER asset (the holder)
+// or to the announcer itself; a second MAC belonging to nobody, or an address
+// belonging to a third asset, is not this shape and falls through to the
+// ordinary conflict. At least one address must be the holder's — without one
+// there is nothing floating, only a host and its own address. The store must
+// also be healthy — a MAC owned by two assets is the lost-invariant case the
+// walk already flagged, and no rule should paper over it.
+//
+// The announcer's own address used to disqualify the shape ( B3): a node
+// whose frame carried its own address beside the VIP it holds — which is what
+// MetalLB and keepalived nodes send when a sensor aggregates a node's ARP
+// claims — was a cross-kind conflict and a merge proposal between the node and
+// the service. An address the announcer already owns is no evidence that the
+// two are one thing; it only confirms the MAC belongs to the node it already
+// belongs to.
 func (e *Engine) floatingAddress(obs Observation, ids []Identifier, owners map[string][]AssetRef, decided string, decidedBy Kind, candidateSeq []string) (floatingPair, bool) {
 	if !isL2Only(obs, ids) {
 		return floatingPair{}, false
@@ -165,10 +180,14 @@ func (e *Engine) floatingAddress(obs Observation, ids []Identifier, owners map[s
 			}
 			p.macs = append(p.macs, id.Value)
 		case KindIPAddress:
-			if refs[0].ID != p.holder {
+			switch refs[0].ID {
+			case p.holder:
+				p.addresses = append(p.addresses, id.Value)
+			case p.announcer:
+				p.ownAddresses = append(p.ownAddresses, id.Value)
+			default:
 				return floatingPair{}, false
 			}
-			p.addresses = append(p.addresses, id.Value)
 		default:
 			// Unreachable: isL2Only above admits only the two kinds. It is
 			// deliberately NOT a second refusal — a duplicate guard here would
@@ -237,6 +256,18 @@ func (e *Engine) resolveFloating(ctx context.Context, obs Observation, at time.T
 	if err := e.repo.RecordAnnouncement(ctx, announcer, holder, ann); err != nil {
 		return Resolution{}, fmt.Errorf("identity: recording that %s announces %s's address: %w", announcer.ID, holder.ID, err)
 	}
+	// B3: addresses the announcer owns itself are its addresses, not
+	// floated ones. They are re-attached to it as an ordinary match would —
+	// which refreshes their last-seen — and so are NOT reported unattached.
+	// Only addresses the announcer ALONE owns: anything else stays where
+	// splitByOwner put it.
+	own := announcerOwnAddresses(ids, owners, announcer.ID)
+	if len(own) > 0 {
+		if err := e.repo.AttachIdentifiers(ctx, announcer, own); err != nil {
+			return Resolution{}, fmt.Errorf("identity: attaching announcer %s's own addresses: %w", announcer.ID, err)
+		}
+		unattached = withoutKeys(unattached, keySet(own))
+	}
 	if err := e.repo.Touch(ctx, announcer, at); err != nil {
 		return Resolution{}, fmt.Errorf("identity: touching announcer %s: %w", announcer.ID, err)
 	}
@@ -247,6 +278,9 @@ func (e *Engine) resolveFloating(ctx context.Context, obs Observation, at time.T
 			"addresses":      evidence["addresses"],
 			"gratuitous_arp": evidence["gratuitous_arp"],
 		},
+	}
+	if len(own) > 0 {
+		announcerChanges["identifiers"] = identifierKeys(own)
 	}
 	if err := e.history(ctx, announcer, obs, at, ActionUpdated, announcerChanges); err != nil {
 		return Resolution{}, err
@@ -264,6 +298,31 @@ func (e *Engine) resolveFloating(ctx context.Context, obs Observation, at time.T
 	}, nil
 }
 
+// announcerOwnAddresses are the observation's addresses owned by the announcer
+// and nobody else ( B3). Voting or not: an address in a dynamic scope the
+// announcer already holds is still its own, and re-attaching it moves nothing.
+func announcerOwnAddresses(ids []Identifier, owners map[string][]AssetRef, announcer string) []Identifier {
+	var out []Identifier
+	for _, id := range ids {
+		if id.Kind != KindIPAddress {
+			continue
+		}
+		if refs := owners[id.Key()]; len(refs) == 1 && refs[0].ID == announcer {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// keySet is the set of identifier keys.
+func keySet(ids []Identifier) map[string]bool {
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		out[id.Key()] = true
+	}
+	return out
+}
+
 // priorDecision is decision memory: the `kept_separate` answer a reviewer
 // already gave for these candidates, on this evidence, or nil.
 //
@@ -277,25 +336,48 @@ func (e *Engine) resolveFloating(ctx context.Context, obs Observation, at time.T
 //     MAC against an address did not weigh an SSH host key; a conflict that now
 //     carries one is a new question, and the same pair gets a new proposal.
 func (e *Engine) priorDecision(ctx context.Context, obs Observation, candidates []MergeCandidate) (*PriorDecision, error) {
+	d, kept, err := e.keptSeparate(ctx, obs, candidates)
+	if err != nil || !kept {
+		return nil, err
+	}
+	return d.appliesTo(candidates), nil
+}
+
+// keptSeparate is the store half of [Engine.priorDecision]: the most recent
+// `kept_separate` decision naming every one of these candidates, and whether
+// there is one — WHATEVER evidence it was taken on. The conflict paths read it
+// once and use it twice: filtered by [PriorDecision.appliesTo] it suppresses a
+// re-proposal, and unfiltered it is condition 7 of the same-device rule
+// ([SameDeviceLink.KeptSeparate]), which never merges a pair a person kept
+// apart (guard rail 4) even when today's evidence would make it a new question
+// for that person.
+func (e *Engine) keptSeparate(ctx context.Context, obs Observation, candidates []MergeCandidate) (PriorDecision, bool, error) {
 	if len(candidates) < 2 {
-		return nil, nil
+		return PriorDecision{}, false, nil
 	}
 	ids := candidateIDs(candidates)
 	d, ok, err := e.repo.LastKeptSeparate(ctx, obs.TenantID, ids)
 	if err != nil {
-		return nil, fmt.Errorf("identity: reading prior decisions for %v: %w", ids, err)
+		return PriorDecision{}, false, fmt.Errorf("identity: reading prior decisions for %v: %w", ids, err)
 	}
 	if !ok || !d.Covers(ids) {
-		return nil, nil
+		return PriorDecision{}, false, nil
 	}
+	return d, true, nil
+}
+
+// appliesTo is the evidence gate of decision memory: the decision answers
+// today's question only when today's evidence is the same KINDS or a subset of
+// what the reviewer saw. Nil when it does not.
+func (d PriorDecision) appliesTo(candidates []MergeCandidate) *PriorDecision {
 	// The identifiers that matched the earlier proposal's OWN observation
 	// asset are not evidence about the pair: they are what that asset was
 	// created carrying, and the reviewer saw them as its identity. Only the
 	// kinds pointing at the other candidates are compared.
 	if !d.SameEvidence(evidenceKinds(candidates, d.ObservationAssetID)) {
-		return nil, nil
+		return nil
 	}
-	return &d, nil
+	return &d
 }
 
 // evidenceKinds are the identifier kinds that matched any candidate other than

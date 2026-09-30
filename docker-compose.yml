@@ -882,6 +882,16 @@ services:
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - LOG_LEVEL=debug
       - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
+      # Email delivery. An EMPTY SMTP_HOST is meaningful: with no host here and none
+      # in platform settings (admin-ui → Settings → Email), email channels report
+      # "Email delivery isn't configured" and are not retried, instead of dialling
+      # localhost:587. Set SMTP_HOST in .env (a mail catcher works) to send in dev.
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - FROM_EMAIL=${FROM_EMAIL:-noreply@example.com}
+      - FROM_NAME=${FROM_NAME:-Vista}
       # mTLS Configuration
       - USE_MTLS=true
       - TLS_PORT=8443

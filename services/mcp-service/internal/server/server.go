@@ -66,7 +66,7 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, disc Discove
 				Outcome: auditlog.OutcomeTokenMissing,
 				Request: reqCtx,
 			})
-			unauthorized(w, disc.ResourceMetadataURL(r), "Missing bearer token. Pass a Vista Platform API token (qvpat_...) in the Authorization header; mint one in Settings → API Tokens.")
+			unauthorized(w, disc.ResourceMetadataURL(r), "Missing bearer token. Pass a Vista Platform API token (qvpat_...) in the Authorization header; mint one in My Profile → API Tokens.")
 			return
 		}
 		// Exchange records its own outcome — accepted, rejected or backend

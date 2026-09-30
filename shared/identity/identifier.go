@@ -252,6 +252,17 @@ func KindsFromStrings(in []string) []Kind {
 // SeenAt are the provenance `asset_identifiers` also stores (DATA_MODEL §2)
 // and are filled in by the engine from the observation, so a caller building
 // an Observation does not set them.
+//
+// With ONE exception: a caller may mark an identifier it DERIVED rather than
+// observed — a MAC recovered from an EUI-64 IPv6 address or read out of a
+// MAC-shaped serial (shared/identity/derive, D3) — by setting
+// Source.Kind to [SourceInferred] and Source.Ref to the evidence
+// ("derived:eui64:<addr>", "derived:serial:<serial>"). The engine keeps that
+// provenance instead of overwriting it with the observation's, so it reaches
+// `asset_identifiers.source_kind/source_ref` and the asset page can say what
+// the value was derived from. Any other per-identifier Source is ignored: a
+// caller can only WEAKEN an identifier's provenance, never strengthen it. See
+// [Identifier.Inferred] for the rules an inferred identifier votes under.
 type Identifier struct {
 	Kind  Kind   `json:"kind"`
 	Value string `json:"value"`
@@ -260,11 +271,36 @@ type Identifier struct {
 	Scope string `json:"scope,omitempty"`
 	// Confidence is 0..1, and 1.0 for a measured identifier.
 	Confidence float64 `json:"confidence"`
+	// Generic marks a hostname that many unrelated devices carry — a default
+	// or role name (`iphone`, `printer`) or one the tenant already sees on
+	// three or more assets ( B2). It is per-observation CONTEXT decided at
+	// ingest ([GenericNames.Mark]); it is not part of the identity of the row
+	// ([Identifier.Key] ignores it) and it is not stored: the name is still
+	// recorded, as true, and the flag exists so the engine needs no lookup.
+	Generic bool `json:"generic,omitempty"`
 
 	// Source and SeenAt are provenance, set by the engine.
 	Source Source    `json:"source,omitzero"`
 	SeenAt time.Time `json:"seen_at,omitzero"`
 }
+
+// Inferred reports whether the identifier was derived from other evidence
+// rather than observed (see the exception on [Identifier]).
+//
+// An inferred identifier is recorded and may vote, under three guards
+// ( Phase 2):
+//
+//  1. it never CREATES: an asset whose every identifier would be inferred is
+//     not written ([ErrNoUsableIdentifier]);
+//  2. within its kind it votes AFTER the native identifiers, so when a native
+//     one has decided, an inferred one may only corroborate or conflict;
+//  3. the singleton, prior-decision and dynamic-scope rules apply unchanged.
+//
+// It is also not DIRECT evidence of anything: it does not count toward
+// admission ([AssessAdmission]) and a match it decided does not move a DHCP
+// lease (lease.go). It still counts as naming a device where that is the safe
+// reading — the address-only link rule and 1c's provisional refusal.
+func (i Identifier) Inferred() bool { return i.Source.Kind == SourceInferred }
 
 // Key is the tuple the uniqueness invariant is defined over, within a tenant:
 // kind, value and scope. Two identifiers with the same Key are the same

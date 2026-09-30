@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
+import { dhcpBody, initialDhcpChoice, segmentPosture, type DhcpChoice } from './segment-provenance';
 
 type Location = inventoryComponents['schemas']['Location'];
 type NetworkSegment = inventoryComponents['schemas']['NetworkSegment'];
@@ -189,6 +190,11 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
   // always something the tenant ticks on purpose.
   const [approveSensor, setApproveSensor] = useState(true);
   const [approveCloud, setApproveCloud] = useState(false);
+  // The operator's DHCP answer: on, off, or automatic (what devices and network
+  // traffic report). `initialDhcp` is where the dialog opened, so an untouched
+  // control sends nothing and cannot rewrite a posture by accident.
+  const [dhcp, setDhcp] = useState<DhcpChoice>('auto');
+  const initialDhcp = initialDhcpChoice(segment);
 
   useEffect(() => {
     setName(segment?.name ?? '');
@@ -205,6 +211,7 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
     const sources = segment?.auto_approve_sources ?? ['sensor'];
     setApproveSensor(sources.includes('sensor'));
     setApproveCloud(sources.includes('cloud'));
+    setDhcp(initialDhcpChoice(segment));
   }, [segment, open]);
 
   // A cloud VPC segment can only ever be matched by cloud discoveries — no IP
@@ -223,6 +230,9 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
   const sourcesValid = !autoApprove || approveSensor || approveCloud;
   const valid = name.trim().length > 0 && valueValid && !!networkType && !!environment && sourcesValid;
   const placeholder = SEGMENT_TYPES.find((t) => t.value === segType)?.placeholder;
+  // Identity places an address by CIDR or range; a domain or cloud-VPC segment
+  // cannot hold a lease, so the control is not offered there.
+  const hasLeases = segType === 'cidr' || segType === 'ip_range';
 
   const save = useMutation({
     mutationFn: async () => {
@@ -242,6 +252,9 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
           ...(approveSensor ? ['sensor' as const] : []),
           ...(approveCloud ? ['cloud' as const] : []),
         ],
+        // Only address-scoped segments hold a lease; sending it for a domain
+        // segment would be a 400 the form gave no way to avoid.
+        ...(hasLeases ? dhcpBody(initialDhcp, dhcp) : {}),
       };
       const res = isEdit
         ? await clients.inventory.PUT('/network-segments/{id}', { params: { path: { id: segment.id } }, body })
@@ -257,6 +270,11 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] }); onClose(); },
   });
 
+  // The server refuses a DHCP answer it cannot place with a message about that
+  // field; show it where the person is looking, not in the footer.
+  const dhcpError = save.isError && /^dhcp\b/i.test(save.error.message) ? save.error.message : null;
+  const current = isEdit ? segmentPosture(segment) : null;
+
   const Toggle = ({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) => (
     <button onClick={() => onChange(!on)} aria-pressed={on} style={{ width: 38, height: 22, borderRadius: 40, border: 'none', cursor: 'pointer', padding: 0, background: on ? 'var(--accent-gradient)' : 'var(--app-track)', position: 'relative', flex: 'none' }}>
       <span style={{ position: 'absolute', top: 2, left: on ? 18 : 2, width: 18, height: 18, borderRadius: 50, background: '#fff', transition: 'left .18s' }} />
@@ -271,7 +289,7 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
       description="Network boundaries Discovery scopes its scans against, by CIDR, IP range, domain, or cloud VPC."
       primary={<button className="ui-btn accent" disabled={!valid || save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Create segment'}</button>}
       secondary={<button className="ui-btn" onClick={onClose} disabled={save.isPending}>Cancel</button>}
-      footerNote={save.isError ? <span style={{ color: 'var(--danger-text)' }}>{save.error.message}</span> : undefined}
+      footerNote={save.isError && !dhcpError ? <span style={{ color: 'var(--danger-text)' }}>{save.error.message}</span> : undefined}
     >
       <div style={{ display: 'flex', gap: 14 }}>
         <div style={{ flex: 1.4 }}><ModalField label="Name"><ModalInput data-autofocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Prod DMZ" /></ModalField></div>
@@ -326,6 +344,33 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
           <span style={{ fontSize: 12.5, color: 'var(--app-t1)' }}>Auto-approve discoveries</span>
         </label>
       </div>
+      {hasLeases && (
+        <fieldset
+          disabled={save.isPending}
+          aria-describedby="segment-dhcp-help"
+          style={{ margin: '14px 0 0', padding: '10px 12px', border: '1px solid var(--app-border)', borderRadius: 8 }}
+        >
+          <legend style={{ fontSize: 12.5, color: 'var(--app-t1)', padding: '0 6px' }}>This network hands out addresses (DHCP)</legend>
+          <div id="segment-dhcp-help" style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 8 }}>
+            On a DHCP network an address does not identify a device — it belongs to whoever holds
+            the lease today — so Vista Platform stops letting an address decide which device
+            something is. {current ? <>Currently: {current.text}.</> : null}
+          </div>
+          <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap' }}>
+            {([
+              ['auto', 'Automatic', 'use what devices and network traffic report'],
+              ['on', 'Yes', 'it hands out addresses'],
+              ['off', 'No', 'addresses are fixed'],
+            ] as const).map(([value, label, hint]) => (
+              <label key={value} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: save.isPending ? 'default' : 'pointer', fontSize: 12.5, color: 'var(--app-t1)' }}>
+                <input type="radio" name="segment-dhcp" value={value} checked={dhcp === value} onChange={() => setDhcp(value)} />
+                <span>{label}<span style={{ color: 'var(--app-t3)' }}> — {hint}</span></span>
+              </label>
+            ))}
+          </div>
+          {dhcpError && <div role="alert" style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 8 }}>{dhcpError}</div>}
+        </fieldset>
+      )}
       {autoApprove && (
         <div style={{ marginTop: 10, padding: '10px 12px', border: '1px solid var(--app-border)', borderRadius: 8 }}>
           <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 8 }}>

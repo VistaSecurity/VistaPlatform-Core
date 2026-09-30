@@ -172,7 +172,7 @@ it never has to be.
 
 Store Azure credentials in platform integrations:
 
-**UI:** Navigate to Settings → Integrations → Add Integration
+**UI:** Discovery → Cloud → Connect, provider Azure.
 
 **Required Fields:**
 - **Integration Type**: `azure`
@@ -183,11 +183,21 @@ Store Azure credentials in platform integrations:
 
 Credentials are encrypted at rest using the platform's master encryption key.
 
+#### Test the connection
+
+Discovery → Cloud → the plug icon on the integration contacts Azure for real: it builds the same client discovery uses from the stored integration, obtains a token with the client ID and secret from Microsoft Entra ID, and reads the configured subscription from Azure Resource Manager. A green test therefore proves discovery can authenticate and see the subscription; any role assignment on the subscription (Reader included) is enough for the read.
+
+When it fails, it shows the provider's own answer — for example `invalid_client: AADSTS7000215: Invalid client secret provided` for a wrong or expired secret, or `AuthorizationFailed` from Resource Manager when the service principal has no role on the subscription. A subscription that is not *Enabled* also fails the test. A stored secret the platform can no longer read (saved under a retired encryption key) is reported with an instruction to re-enter it, and is never sent to Azure.
+
+The integration's **Enabled** switch stops it being used: Discover and scheduled runs of a disabled integration fail at once with *the integration is disabled*.
+
 ### 2. Discover Azure Resources
 
 Initiate cloud resource discovery:
 
-**UI:** Navigate to Devices → Discover Cloud Resources
+**UI:** Discovery → Cloud → the ▶ (play) icon on the integration. The dialog offers every type below — Application Gateway, Load Balancer, Key Vault keys, Storage account encryption and SQL Database encryption — all ticked by default.
+
+A schedule for the integration (Discovery → Scheduled Scans) runs that same default set and delivers the same results, the at-rest storage and SQL records included.
 
 **API:** `POST /api/v1/device-interrogation-service/cloud/discover`
 
@@ -405,9 +415,10 @@ Resources are filtered case-insensitively to the specified resource groups.
 
 ## Error Handling
 
-- **Authentication Errors**: Logged with status `connection_error` - verify credentials
-- **Permission Errors**: Logged with details - verify RBAC permissions
-- **API Errors**: Non-fatal, discovery continues for other resources
+Each resource type is collected independently and its outcome is recorded on the job (Discovery → Discovery Jobs → the job → **Resource types**), the same way as for AWS — see [Reading the result](aws-cloud-discovery.md#5-reading-the-result-found-nothing-vs-could-not-look):
+
+- **Permission and authentication errors** — recorded against the type with Azure's own error code (`AuthorizationFailed`, `invalid_client`, …) and what to do about it. The type reads *Could not collect*, never "none found".
+- **One type failing never stops the others.** An Application Gateway listing that is refused no longer abandons the run, and a Key Vault, storage or SQL listing that is refused no longer reports success with zero found. A run where anything failed is *partly collected*, not a success.
 - **Retries and throttling**: the platform configures no retry or backoff policy of its own; it relies on the Azure SDK's default retry behaviour for throttled and transient responses. There is no platform-level pacing across a run.
 
 ---

@@ -58,6 +58,7 @@ func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *s
 	}
 	for i := range segments {
 		segments[i].HydrateAutoApproveSources()
+		segments[i].HydratePosture()
 	}
 
 	byID := make(map[string]*models.NetworkSegment, len(segments))
@@ -184,7 +185,13 @@ func (s *NetworkSegmentService) List(tenantID uuid.UUID, filters models.NetworkS
 		if e := tx.QueryRow(`SELECT COUNT(*) `+baseQuery, countArgs...).Scan(&total); e != nil {
 			return e
 		}
-		return tx.Select(&list, query, args...)
+		if e := tx.Select(&list, query, args...); e != nil {
+			return e
+		}
+		for i := range list {
+			list[i].HydratePosture()
+		}
+		return hydratePostureNames(tx, tenantID, list)
 	})
 	if err != nil {
 		return nil, 0, err
@@ -200,9 +207,18 @@ func (s *NetworkSegmentService) GetByID(tenantID, id uuid.UUID) (*models.Network
 	var seg models.NetworkSegment
 	// RLS-scoped read over network_segments (JOIN locations).
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.Get(&seg, `SELECT ns.*, l.name as location_name, l.full_path as location_full_path
+		if e := tx.Get(&seg, `SELECT ns.*, l.name as location_name, l.full_path as location_full_path
 		FROM network_segments ns LEFT JOIN locations l ON l.id = ns.location_id
-		WHERE ns.id = $1 AND ns.tenant_id = $2`, id, tenantID)
+		WHERE ns.id = $1 AND ns.tenant_id = $2`, id, tenantID); e != nil {
+			return e
+		}
+		one := []models.NetworkSegment{seg}
+		one[0].HydratePosture()
+		if e := hydratePostureNames(tx, tenantID, one); e != nil {
+			return e
+		}
+		seg = one[0]
+		return nil
 	})
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -246,15 +262,21 @@ func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkS
 		defaultAutoApprove := false
 		autoApprove = &defaultAutoApprove
 	}
+	if err := validatePostureApplies(input.SegmentType, input.DHCP); err != nil {
+		return nil, err
+	}
 	var id uuid.UUID
 	q := `INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, location_id, business_unit, owner_email, description, is_active, auto_approve_discoveries, tags, metadata, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW()) RETURNING id`
 	// RLS-scoped write over network_segments.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(q,
+		if e := tx.QueryRow(q,
 			tenantID, input.Name, input.SegmentType, input.Value, input.NetworkType, input.Environment, input.LocationID,
 			input.BusinessUnit, input.OwnerEmail, input.Description, isActive, autoApprove, tags, meta,
-		).Scan(&id)
+		).Scan(&id); e != nil {
+			return e
+		}
+		return applyOperatorPosture(context.Background(), tx, tenantID, id, input.DHCP)
 	})
 	if err != nil {
 		return nil, err
@@ -407,6 +429,16 @@ func (s *NetworkSegmentService) Update(tenantID, id uuid.UUID, input models.Netw
 	baseMeta := input.Metadata
 	if baseMeta == nil {
 		baseMeta = map[string]interface{}(seg.Metadata)
+	} else {
+		// DHCP posture is not the caller's to replace by rewriting the blob.
+		// It has its own field (`dhcp`) and its own precedence, and a client
+		// that sends `metadata` without it — every client written before it
+		// existed — would otherwise erase a measurement or the operator's
+		// answer on an unrelated edit.
+		baseMeta = withPostureKeys(baseMeta, seg.Metadata)
+	}
+	if err := validatePostureApplies(input.SegmentType, input.DHCP); err != nil {
+		return nil, err
 	}
 	meta := withAutoApproveSources(baseMeta, sources)
 	isActive := input.IsActive
@@ -428,7 +460,12 @@ func (s *NetworkSegmentService) Update(tenantID, id uuid.UUID, input models.Netw
 		_, e := tx.Exec(`UPDATE network_segments SET name = $1, segment_type = $2, value = $3, network_type = $4, environment = $5, location_id = $6, business_unit = $7, owner_email = $8, description = $9, is_active = $10, auto_approve_discoveries = $11, tags = $12, metadata = $13, updated_at = NOW() WHERE id = $14 AND tenant_id = $15`,
 			input.Name, input.SegmentType, input.Value, input.NetworkType, input.Environment, input.LocationID,
 			input.BusinessUnit, input.OwnerEmail, input.Description, isActive, autoApprove, tags, meta, id, tenantID)
-		return e
+		if e != nil {
+			return e
+		}
+		// Same transaction as the rest of the edit: a save that changes the
+		// name and the DHCP answer either changes both or neither.
+		return applyOperatorPosture(context.Background(), tx, tenantID, id, input.DHCP)
 	})
 	if err != nil {
 		return nil, err
@@ -1018,5 +1055,6 @@ func (s *NetworkSegmentService) GetByValue(tenantID uuid.UUID, value string) (*m
 		return nil, err
 	}
 	seg.HydrateAutoApproveSources()
+	seg.HydratePosture()
 	return &seg, nil
 }

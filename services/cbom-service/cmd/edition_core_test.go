@@ -16,7 +16,11 @@ package main
 // polarities, because a test that only ever sees one of them cannot tell a
 // correctly-wired build from one where the tag does nothing.
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestCoreBuildWiresNoEnterpriseHooks(t *testing.T) {
 	if hooks.NewSigner != nil {
@@ -36,5 +40,33 @@ func TestCoreBuildWiresNoEnterpriseHooks(t *testing.T) {
 	if got := edition(); got != "core" {
 		t.Errorf("edition() = %q, want %q — this is the first line of the service log and what an operator "+
 			"reads to know which binary is running", got, "core")
+	}
+}
+
+// A Core build must MOUNT the 402 stubs for comparison, not leave the paths
+// unrouted. The hook being nil (asserted above) only says the Enterprise routes
+// are absent; whether the refusal stands in for them is a line in main.go that
+// nothing else observes — delete it and every other test stays green while an
+// MCP agent gets a bare 404 and concludes the artifacts do not exist.
+func TestCoreMountsComparisonUnavailableStubs(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("reading main.go: %v", err)
+	}
+	main := string(src)
+
+	call := "cbom.RegisterUnavailableComparisonRoutes(api)"
+	idx := strings.Index(main, call)
+	if idx < 0 {
+		t.Fatalf("main.go no longer calls %q — a Core build would answer a bare 404 on /cbom/compare "+
+			"instead of 402 'not included in your subscription'", call)
+	}
+	// It has to be the ELSE of the hook check, or Enterprise would register
+	// the same paths twice and gin would panic at start-up.
+	before := main[:idx]
+	hookCheck := strings.LastIndex(before, "if hooks.RegisterComparisonRoutes != nil {")
+	elseAt := strings.LastIndex(before, "} else {")
+	if hookCheck < 0 || elseAt < hookCheck {
+		t.Errorf("%q must sit in the else branch of `if hooks.RegisterComparisonRoutes != nil`", call)
 	}
 }

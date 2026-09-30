@@ -164,7 +164,7 @@ you sign in, and then approve read-only access.
 
 **Step 1 — Copy your MCP URL**
 
-Go to **Settings → API Tokens**. The **Connect an AI assistant** card at the
+Go to **My Profile → API Tokens**. The **Connect an AI assistant** card at the
 bottom shows your MCP URL. Click **Copy URL**.
 
 The URL is always: `https://<your-vista-host>/api/v1/mcp-service/mcp`
@@ -196,7 +196,7 @@ Vista credentials. Vista shows a consent screen listing the read-only scopes
 it will grant — click **Authorize**.
 
 The client receives a scoped access token. It is stored in the client, not
-shown to you; you can revoke it at any time from **Settings → API Tokens**.
+shown to you; you can revoke it at any time from **My Profile → API Tokens**.
 
 **Step 4 — Ask questions**
 
@@ -238,13 +238,20 @@ See **Personal Access Tokens** below for how to mint one.
 
 ## Personal Access Tokens (advanced)
 
-For scripted access or clients that don't support OAuth, you can create a
-**Personal Access Token (PAT)** and pass it directly as an `Authorization:
-Bearer` header.
+For AI clients that can send an `Authorization: Bearer` header — Claude Code,
+scripts that speak MCP, and other header-capable MCP clients — you can create a
+**Personal Access Token (PAT)** and pass it directly. This is the way to connect
+today, because hosted assistants (Claude.ai, ChatGPT, Gemini) cannot yet complete
+sign-in (see the limitation above).
 
-Go to **Settings → API Tokens → New token**:
+**A personal token works only with the MCP server.** It is not a general API
+credential: Vista Platform's other REST endpoints (inventory, audit export,
+SBOM upload and so on) do not accept it and answer `401`. Those endpoints take
+your signed-in session; they are not currently available to a token.
 
-1. Name it for where it will live (e.g. "CI pipeline").
+Go to **My Profile → API Tokens → New token**:
+
+1. Name it for where it will live (e.g. "Claude Code on my laptop").
 2. Pick permissions — the default set (`assets.read`, `compliance.read`,
    `reports.read`) covers all 23 MCP tools.
 3. Pick an expiry (default 90 days, max 1 year).

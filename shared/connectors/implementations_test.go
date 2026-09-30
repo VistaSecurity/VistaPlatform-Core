@@ -63,11 +63,13 @@ func TestEveryImplementationPathExists(t *testing.T) {
 	checked := 0
 	for _, key := range ImplementedKeys() {
 		impl, _ := ImplementationFor(key)
-		if impl.Package == "" {
-			t.Errorf("%s: implementation entry names no package", key)
+		// Before the empty-package check: in Core an Enterprise-only service's
+		// Package line is fenced out, so the entry legitimately names nothing.
+		if impl.Enterprise && coreTree {
 			continue
 		}
-		if impl.Enterprise && coreTree {
+		if impl.Package == "" {
+			t.Errorf("%s: implementation entry names no package", key)
 			continue
 		}
 		info, err := os.Stat(filepath.Join(root, filepath.FromSlash(impl.Package)))
@@ -115,11 +117,16 @@ func TestNetBoxIsLiveAndPullOnly(t *testing.T) {
 	}
 }
 
-// The four keys the platform_integrations CHECK accepts but nothing collects.
+// The keys the platform_integrations CHECK accepts but nothing dispatches on.
 // Named so that "we shipped it" cannot be asserted by editing one word.
+//
+// `custom` is the fifth. It used to be `live` on the strength of an
+// inventory-service CRUD that writes a different table (`integrations`) than
+// the one the key belongs to; nothing reads a platform_integrations `custom`
+// row, so it is registered like the rest (integrations review M32-M35, W19).
 func TestDeclaredButUnimplementedConnectorsAreRegistered(t *testing.T) {
 	for _, key := range []string{
-		ConnectorHashicorpVault, ConnectorGithub, ConnectorGitlab, ConnectorBitbucket,
+		ConnectorHashicorpVault, ConnectorGithub, ConnectorGitlab, ConnectorBitbucket, ConnectorCustom,
 	} {
 		c, ok := Get(key)
 		if !ok {

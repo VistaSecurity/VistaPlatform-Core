@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -21,6 +22,21 @@ func InitializeIntegrationService(db, bypassDB *sql.DB, encryptionKey string, lo
 		log.WithError(err).Fatal("Failed to initialize encryption service")
 	}
 	integrationService = integrations.NewIntegrationService(db, bypassDB, encryptionService, log)
+}
+
+// respondUnsupportedIntegrationType answers a request that names a retired
+// integration type (slack, pagerduty, datadog, splunk) with a 400 that says
+// where that job is done now. It reports whether it wrote a response.
+func respondUnsupportedIntegrationType(c *gin.Context, err error) bool {
+	var unsupported *integrations.UnsupportedTypeError
+	if !errors.As(err, &unsupported) {
+		return false
+	}
+	c.JSON(http.StatusBadRequest, gin.H{
+		"error":            unsupported.Message,
+		"integration_type": unsupported.Type,
+	})
+	return true
 }
 
 // GetIntegrations retrieves all platform integrations
@@ -100,6 +116,9 @@ func CreateIntegration() gin.HandlerFunc {
 
 		integration, err := integrationService.CreateIntegration(c.Request.Context(), &req, userID)
 		if err != nil {
+			if respondUnsupportedIntegrationType(c, err) {
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "Failed to create integration",
 			})
@@ -144,6 +163,9 @@ func UpdateIntegration() gin.HandlerFunc {
 
 		integration, err := integrationService.UpdateIntegration(c.Request.Context(), id, &req, userID)
 		if err != nil {
+			if respondUnsupportedIntegrationType(c, err) {
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "Failed to update integration",
 			})
@@ -203,6 +225,9 @@ func TestIntegration() gin.HandlerFunc {
 
 		result, err := integrationService.TestIntegration(c.Request.Context(), id)
 		if err != nil {
+			if respondUnsupportedIntegrationType(c, err) {
+				return
+			}
 			status := http.StatusInternalServerError
 			if err.Error() == "integration not found" {
 				status = http.StatusNotFound

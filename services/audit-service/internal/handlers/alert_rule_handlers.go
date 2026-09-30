@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -33,11 +34,39 @@ func NewAlertRuleHandler(service *services.AlertRuleService) *AlertRuleHandler {
 	return &AlertRuleHandler{service: service}
 }
 
+// alertRuleTypes and alertRuleSeverities mirror the audit.alert_rules CHECK
+// constraints (alert_rules_rule_type_check, alert_rules_severity_check).
+var (
+	alertRuleTypes      = map[string]bool{"threshold": true, "pattern": true, "anomaly": true}
+	alertRuleSeverities = map[string]bool{"critical": true, "high": true, "medium": true, "low": true}
+)
+
+// alertRuleInvalid names what is wrong with a rule about to be written, or
+// returns "" when the row satisfies the table's NOT NULL and CHECK
+// constraints. Without it a body missing rule_type or severity reached the
+// INSERT/UPDATE, the database refused it, and the client got a 500 "Failed to
+// create alert rule" for what is its own mistake.
+func alertRuleInvalid(rule *models.AlertRule) string {
+	switch {
+	case strings.TrimSpace(rule.Name) == "":
+		return "name is required"
+	case !alertRuleTypes[rule.RuleType]:
+		return "rule_type must be one of: threshold, pattern, anomaly"
+	case !alertRuleSeverities[rule.Severity]:
+		return "severity must be one of: critical, high, medium, low"
+	}
+	return ""
+}
+
 // CreateAlertRule handles POST /api/v1/audit-service/alert-rules
 func (h *AlertRuleHandler) CreateAlertRule(c *gin.Context) {
 	var rule models.AlertRule
 	if err := c.ShouldBindJSON(&rule); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if msg := alertRuleInvalid(&rule); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 		return
 	}
 
@@ -219,6 +248,13 @@ func (h *AlertRuleHandler) UpdateAlertRule(c *gin.Context) {
 	existing.TenantID = origTenantID
 	existing.CreatedBy = origCreatedBy
 	existing.CreatedAt = origCreatedAt
+
+	// Checked after the merge: a partial body is valid when the rule it
+	// produces is (an explicit "severity": "" is not).
+	if msg := alertRuleInvalid(existing); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
 
 	err = h.service.UpdateAlertRule(c.Request.Context(), id, existing, scope)
 	if err != nil {

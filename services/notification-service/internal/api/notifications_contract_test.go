@@ -121,6 +121,14 @@ type stubChannelManager struct {
 	deleteErr error
 	testErr   error
 
+	// lastCreate is the request the create handler passed to the manager.
+	lastCreate *models.CreateChannelRequest
+	// echoRequest makes CreateTenantChannel behave like the real manager: the
+	// created channel carries the type and config that were SUBMITTED (so the
+	// handler's own additions, e.g. a generated signing secret, show up in it).
+	// Off by default so existing tests keep the canned `created` channel.
+	echoRequest bool
+
 	// platform surface
 	platList      []models.PlatformNotificationChannel
 	platListErr   error
@@ -140,7 +148,14 @@ func (s *stubChannelManager) GetTenantChannels(context.Context, uuid.UUID) ([]mo
 func (s *stubChannelManager) GetTenantChannelByID(context.Context, uuid.UUID, uuid.UUID) (*models.TenantNotificationChannel, error) {
 	return s.get, s.getErr
 }
-func (s *stubChannelManager) CreateTenantChannel(context.Context, uuid.UUID, *models.CreateChannelRequest, *uuid.UUID) (*models.TenantNotificationChannel, error) {
+func (s *stubChannelManager) CreateTenantChannel(_ context.Context, _ uuid.UUID, req *models.CreateChannelRequest, _ *uuid.UUID) (*models.TenantNotificationChannel, error) {
+	s.lastCreate = req
+	if s.echoRequest && s.created != nil && s.createErr == nil {
+		c := *s.created
+		c.ChannelType = req.ChannelType
+		c.Config = req.Config
+		return &c, nil
+	}
 	return s.created, s.createErr
 }
 func (s *stubChannelManager) UpdateTenantChannel(context.Context, uuid.UUID, uuid.UUID, *models.UpdateChannelRequest, *uuid.UUID) (*models.TenantNotificationChannel, error) {

@@ -208,13 +208,18 @@ func (s *SBOMIngestService) Ingest(
 			res.AssetName = *asset.DisplayName
 		}
 	} else {
-		name, status, ok, aerr := s.assetNameAndStatus(ctx, tenantID, assetID)
+		resolved, name, status, redirected, aerr := s.resolveTargetAsset(ctx, tenantID, assetID)
 		if aerr != nil {
 			return nil, aerr
 		}
-		if !ok {
-			return nil, ErrSBOMAssetNotFound
+		if redirected {
+			// Say so, rather than silently writing somewhere the caller did not
+			// name: the result's asset_id already reports the survivor, and this
+			// tells a person why it is not the id they sent.
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"asset %s was merged into %s; the software was recorded on %s", assetID, resolved, resolved))
 		}
+		assetID = resolved
 		res.AssetName, res.AssetStatus = name, status
 	}
 	res.AssetID = assetID.String()
@@ -549,20 +554,62 @@ func subjectAttributes(p software.Product) map[string]interface{} {
 	return out
 }
 
-// assetNameAndStatus reads the display name and approval status of the asset an
-// upload was aimed at, and reports whether it exists at all.
+// maxMergeRedirects bounds how far an upload follows `merged_into` pointers.
+// The same bound withResolvedAssetLifecycle uses: a chain (A into B, B later
+// into C) is legitimate, a cycle is corruption, and eight hops tells them apart
+// without an unbounded loop.
+const maxMergeRedirects = 8
+
+// resolveTargetAsset finds the asset an upload aimed at ought to be written to.
 //
-// Under RLS an asset in another tenant simply is not there, so "not found" and
-// "not yours" are the same answer — which is the answer we want to give.
-func (s *SBOMIngestService) assetNameAndStatus(
+// A merge archives its source and leaves a tombstone — `metadata.merged_into`
+// naming the survivor — and the merge code treats that pointer as authoritative
+// everywhere else (identity resolution follows it, lifecycle writes redirect
+// through it, approval and restore refuse a tombstone). An SBOM upload that
+// named the old id used to check only `deleted_at IS NULL`, so it happily
+// hung a software list off an archived tombstone that no inventory view shows —
+// a successful upload whose data appears nowhere.
+//
+// It follows the pointer to the survivor, bounded by maxMergeRedirects, and
+// reports that it did so. Under RLS an asset in another tenant simply is not
+// there, so "not found" and "not yours" are the same answer — the answer we want
+// to give.
+func (s *SBOMIngestService) resolveTargetAsset(
 	ctx context.Context, tenantID, assetID uuid.UUID,
-) (name, status string, ok bool, err error) {
+) (resolved uuid.UUID, name, status string, redirected bool, err error) {
+	current := assetID
+	for hop := 0; hop <= maxMergeRedirects; hop++ {
+		n, st, mergedInto, ok, e := s.assetNameStatusAndTombstone(ctx, tenantID, current)
+		if e != nil {
+			return uuid.Nil, "", "", false, e
+		}
+		if !ok {
+			return uuid.Nil, "", "", false, ErrSBOMAssetNotFound
+		}
+		if mergedInto == "" {
+			return current, n, st, current != assetID, nil
+		}
+		next, perr := uuid.Parse(mergedInto)
+		if perr != nil || next == uuid.Nil {
+			return uuid.Nil, "", "", false, fmt.Errorf("asset %s carries a malformed merge redirect", current)
+		}
+		current = next
+	}
+	return uuid.Nil, "", "", false, fmt.Errorf("asset merge redirect chain requires reconciliation")
+}
+
+// assetNameStatusAndTombstone reads the display name, approval status and merge
+// tombstone of one asset, and reports whether it exists at all.
+func (s *SBOMIngestService) assetNameStatusAndTombstone(
+	ctx context.Context, tenantID, assetID uuid.UUID,
+) (name, status, mergedInto string, ok bool, err error) {
 	err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		var display sql.NullString
 		e := tx.QueryRowContext(ctx, `
-			SELECT display_name, asset_status FROM assets
+			SELECT display_name, asset_status, COALESCE(metadata->>'merged_into','')
+			  FROM assets
 			 WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`,
-			tenantID, assetID).Scan(&display, &status)
+			tenantID, assetID).Scan(&display, &status, &mergedInto)
 		switch {
 		case errors.Is(e, sql.ErrNoRows):
 			return nil
@@ -572,7 +619,7 @@ func (s *SBOMIngestService) assetNameAndStatus(
 		name, ok = display.String, true
 		return nil
 	})
-	return name, status, ok, err
+	return name, status, mergedInto, ok, err
 }
 
 // likePattern turns a user's search term into a LIKE pattern with the

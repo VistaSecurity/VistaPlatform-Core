@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"github.com/vistasecurity/vistaplatform/shared/cloudcredentials"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -106,6 +107,9 @@ type IntegrationTestResult struct {
 // CreateIntegration creates a new platform integration with encrypted credentials
 // RLS: cross-tenant — platform_integrations are platform-global rows keyed by id with no tenant predicate; runs on the bypass role (Phase 4).
 func (s *IntegrationService) CreateIntegration(ctx context.Context, req *CreateIntegrationRequest, userID uuid.UUID) (*Integration, error) {
+	if err := ValidateIntegrationType(req.IntegrationType); err != nil {
+		return nil, err
+	}
 	// Encrypt config credentials
 	encryptedConfig, err := s.encryptConfig(req.Config)
 	if err != nil {
@@ -191,6 +195,9 @@ func (s *IntegrationService) CreateIntegration(ctx context.Context, req *CreateI
 // UpdateIntegration replaces an existing integration's configuration.
 // RLS: cross-tenant — platform_integrations keyed by id, no tenant predicate; runs on the bypass role (Phase 4).
 func (s *IntegrationService) UpdateIntegration(ctx context.Context, id uuid.UUID, req *CreateIntegrationRequest, userID uuid.UUID) (*Integration, error) {
+	if err := ValidateIntegrationType(req.IntegrationType); err != nil {
+		return nil, err
+	}
 	encryptedConfig, err := s.encryptConfig(req.Config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt config: %w", err)
@@ -342,6 +349,12 @@ func (s *IntegrationService) TestIntegration(ctx context.Context, id uuid.UUID) 
 		return nil, fmt.Errorf("failed to load integration: %w", err)
 	}
 
+	// A row of a retired type (created before this was rejected) has nothing
+	// to test: no code dispatches on it, so "connection successful" would be a lie.
+	if err := ValidateIntegrationType(integrationType); err != nil {
+		return nil, err
+	}
+
 	var encryptedConfig map[string]interface{}
 	if err := json.Unmarshal([]byte(configJSON), &encryptedConfig); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
@@ -363,9 +376,6 @@ func (s *IntegrationService) TestIntegration(ctx context.Context, id uuid.UUID) 
 		resolvedAccount, testErr = s.testAzureIntegration(ctx, decryptedConfig)
 	case "gcp":
 		resolvedAccount, testErr = s.testGCPIntegration(ctx, decryptedConfig)
-	case "slack", "pagerduty", "datadog", "splunk":
-		// SaaS integrations - test by making a simple API call
-		resolvedAccount, testErr = s.testSaaSIntegration(ctx, integrationType, decryptedConfig)
 	default:
 		return nil, fmt.Errorf("test integration not implemented for %s", integrationType)
 	}
@@ -475,48 +485,6 @@ func (s *IntegrationService) testGCPIntegration(ctx context.Context, config map[
 	}
 
 	return projectID, nil
-}
-
-func (s *IntegrationService) testSaaSIntegration(ctx context.Context, integrationType string, config map[string]interface{}) (string, error) {
-	// Common SaaS integration test - validate API token/key
-	apiToken := asString(config["api_token"])
-	apiKey := asString(config["api_key"])
-	webhookURL := asString(config["webhook_url"])
-
-	// Different SaaS services use different auth methods
-	switch integrationType {
-	case "slack":
-		if webhookURL == "" && apiToken == "" {
-			return "", fmt.Errorf("missing Slack credentials (webhook_url or api_token required)")
-		}
-		// For Slack, we could test by sending a test message or checking auth
-		// For now, just validate credentials are present
-		return "slack-workspace", nil
-
-	case "pagerduty":
-		if apiKey == "" {
-			return "", fmt.Errorf("missing PagerDuty API key")
-		}
-		// PagerDuty uses API key for authentication
-		return "pagerduty-service", nil
-
-	case "datadog":
-		if apiKey == "" || apiToken == "" {
-			return "", fmt.Errorf("missing Datadog credentials (api_key and api_token required)")
-		}
-		// Datadog requires both API key and application key
-		return "datadog-org", nil
-
-	case "splunk":
-		if apiToken == "" {
-			return "", fmt.Errorf("missing Splunk API token")
-		}
-		// Splunk uses API token for authentication
-		return "splunk-instance", nil
-
-	default:
-		return "", fmt.Errorf("unsupported SaaS integration type: %s", integrationType)
-	}
 }
 
 // RLS: cross-tenant — platform_integrations keyed by id, no tenant predicate; runs on the bypass role (Phase 4).
@@ -711,10 +679,36 @@ func (s *IntegrationService) ListIntegrations(ctx context.Context, integrationTy
 	return integrations, nil
 }
 
+// sensitiveKeys are the config keys stored encrypted: every cloud provider's
+// secret keys from shared/cloudcredentials — the same list the
+// device-interrogation handler writes with and the provider clients decrypt
+// with — plus this service's non-cloud secrets.
+//
+// It used to be a local copy that disagreed with both: it did not encrypt an
+// AWS external_id, an Azure client_id or a GCP service-account key, so a
+// platform-shared cloud integration created here stored them in plaintext and
+// the discovery client then refused to decrypt them.
+var sensitiveKeys = append(cloudcredentials.All(), "api_token", "api_key", "password")
+
+// legacyPlaintextKeys are the keys this service used to store in PLAINTEXT
+// (they were missing from its old list). A row written before the list was
+// fixed still holds them in the clear, so a decrypt failure on one of them
+// falls back to the stored value rather than making the row unreadable here.
+// Every other sensitive key still fails hard.
+var legacyPlaintextKeys = func() map[string]bool {
+	old := []string{"access_key_id", "secret_access_key", "session_token", "api_token", "api_key", "password", "client_secret"}
+	out := map[string]bool{}
+	for _, k := range sensitiveKeys {
+		if !slices.Contains(old, k) {
+			out[k] = true
+		}
+	}
+	return out
+}()
+
 // encryptConfig encrypts sensitive fields in the config
 func (s *IntegrationService) encryptConfig(config map[string]interface{}) (map[string]interface{}, error) {
 	encrypted := make(map[string]interface{})
-	sensitiveKeys := []string{"access_key_id", "secret_access_key", "session_token", "api_token", "api_key", "password", "client_secret"}
 
 	for key, value := range config {
 		if slices.Contains(sensitiveKeys, key) {
@@ -740,7 +734,6 @@ func (s *IntegrationService) encryptConfig(config map[string]interface{}) (map[s
 // decryptConfig decrypts sensitive fields in the config
 func (s *IntegrationService) decryptConfig(config map[string]interface{}) (map[string]interface{}, error) {
 	decrypted := make(map[string]interface{})
-	sensitiveKeys := []string{"access_key_id", "secret_access_key", "session_token", "api_token", "api_key", "password", "client_secret"}
 
 	for key, value := range config {
 		if slices.Contains(sensitiveKeys, key) {
@@ -751,6 +744,11 @@ func (s *IntegrationService) decryptConfig(config map[string]interface{}) (map[s
 			}
 			decryptedValue, err := s.encryptionService.Decrypt(strValue)
 			if err != nil {
+				if legacyPlaintextKeys[key] {
+					// Written before this key was classified sensitive here.
+					decrypted[key] = value
+					continue
+				}
 				return nil, fmt.Errorf("failed to decrypt %s: %w", key, err)
 			}
 			decrypted[key] = decryptedValue

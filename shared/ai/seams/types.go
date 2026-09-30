@@ -150,13 +150,26 @@ func ProposalOf(p Proposed) Proposal { return p.Provenance() }
 // asset: a discovery row, a cloud resource, an imported spreadsheet line.
 //
 // Identifiers is the map the rule-based identification engine keys on (serial,
-// cloud id, MAC, FQDN, …). A matcher is asked to say which existing assets
-// this might be, not to decide.
+// cloud id, MAC, FQDN, …): kind → every value of that kind, because a machine
+// has several MACs, addresses and names. A matcher is asked to say which
+// existing assets this might be, not to decide.
 type Observation struct {
-	Kind        string            `json:"kind"`
-	Identifiers map[string]string `json:"identifiers,omitempty"`
-	Attributes  map[string]any    `json:"attributes,omitempty"`
-	ObservedAt  time.Time         `json:"observed_at"`
+	Kind        string              `json:"kind"`
+	Identifiers map[string][]string `json:"identifiers,omitempty"`
+	Attributes  map[string]any      `json:"attributes,omitempty"`
+	ObservedAt  time.Time           `json:"observed_at"`
+
+	// DerivedIdentifiers is the subset of Identifiers that was WORKED OUT from
+	// other evidence rather than observed — a MAC recovered from an EUI-64
+	// address or a serial ( Phase 2). Recorded, and voting, but an
+	// inference: a matcher may weigh it below an observed value.
+	DerivedIdentifiers map[string][]string `json:"derived_identifiers,omitempty"`
+
+	// GenericNames are the names the intake judged GENERIC ( B2): carried
+	// by many unrelated devices, so a name agreeing is not evidence of one.
+	// The engine's verdict includes the tenant-frequency signal, which needs a
+	// database no matcher has.
+	GenericNames []string `json:"generic_names,omitempty"`
 
 	// Name is what a person would call this thing — the display name, else the
 	// hostname. It is not identity (Identifiers is), and a matcher compares it
@@ -179,10 +192,15 @@ type Observation struct {
 // against. Deliberately not the full asset: a seam gets what it needs to score
 // a candidate, not the tenant's inventory.
 type AssetSummary struct {
-	ID          string            `json:"id"`
-	Class       string            `json:"class"`
-	Name        string            `json:"name"`
-	Identifiers map[string]string `json:"identifiers,omitempty"`
+	ID          string              `json:"id"`
+	Class       string              `json:"class"`
+	Name        string              `json:"name"`
+	Identifiers map[string][]string `json:"identifiers,omitempty"`
+
+	// DerivedIdentifiers is the subset of Identifiers the asset holds as
+	// derived (`source_kind = inferred`), the counterpart of
+	// [Observation.DerivedIdentifiers].
+	DerivedIdentifiers map[string][]string `json:"derived_identifiers,omitempty"`
 
 	// Attributes are the few class attributes worth COMPARING across a pair —
 	// `vendor` and `model` today. Deliberately not the asset's whole attribute

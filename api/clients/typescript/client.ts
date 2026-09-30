@@ -630,3 +630,4 @@ export function createTenantHealthServiceClient(
   client.use(makeSessionExpiryMiddleware(opts.fetch));
   return client;
 }
+

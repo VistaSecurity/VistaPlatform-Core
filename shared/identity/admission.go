@@ -64,6 +64,13 @@ func AssessAdmission(obs Observation) AdmissionDecision {
 		if err != nil {
 			continue
 		}
+		if id.Inferred() {
+			// A derived identifier ( Phase 2) is not evidence the
+			// collector met anything: a MAC worked out from an IPv6 address is
+			// not "a directly observed interface". It can match; it cannot
+			// establish.
+			continue
+		}
 		switch id.Kind {
 		case KindDeclarationID:
 			if obs.Source.Kind == SourceDeclared && obs.Admission.OperatorConfirmed {
@@ -101,7 +108,7 @@ func AssessAdmission(obs Observation) AdmissionDecision {
 	case obs.Admission.Relayed:
 		reason = "unverified_relayed_advertisement"
 	case dynamic && !hasMAC:
-		reason = "dynamic_address_without_device_binding"
+		reason = ReasonDynamicAddressWithoutDeviceBinding
 	case !resolvedScope && (hasMAC || hasAddress):
 		reason = "network_scope_unresolved"
 	case !hasMAC && !hasAddress:

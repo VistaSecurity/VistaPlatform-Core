@@ -332,7 +332,8 @@
             "value": "203.0.113.2"
           },
           {
-            "confidence": 1,
+            "confidence": 0.3,
+            "generic": true,
             "kind": "hostname",
             "scope": "tenant",
             "value": "server"

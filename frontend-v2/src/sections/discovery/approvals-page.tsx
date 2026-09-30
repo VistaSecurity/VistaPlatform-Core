@@ -95,10 +95,10 @@ export function ApprovalsPage() {
   // rendering it as an empty section tells them there is nothing to do.
   const classProposalsQ = useClassProposals();
   const decideClass = useDecideClassProposal();
-  // What the matcher merged WITHOUT asking. Not a queue — a record, so the one
-  // unattended act in this pipeline is visible to the person who enabled it.
-  // Empty for every tenant on the default threshold, and the section renders
-  // nothing when it is empty.
+  // What the platform merged WITHOUT asking — the matcher's auto-accepts and the
+  // same-device rule's merges. Not a queue — a record, so the one unattended act
+  // in this pipeline is visible to the person who enabled it. The rule is on by
+  // default, so an empty list is an answer and the section says so.
   const autoMergedQ = useAutoAcceptedMerges();
   const qc = useQueryClient();
 
@@ -286,10 +286,28 @@ export function ApprovalsPage() {
         </div>
       )}
 
-      <AutoMergedSection
-        merges={autoMergedQ.data?.merges ?? []}
-        windowDays={autoMergedQ.data?.windowDays ?? 30}
-      />
+      {/* A failed read of what was merged unasked is not "nothing was merged".
+          The section is NOT rendered in this state — its empty line would be a
+          false negative about the one act nobody approved — and the reviewer
+          is told, with the same retry banner every other read here uses. */}
+      {autoMergedQ.isError ? (
+        <div
+          data-testid="auto-merged-error"
+          style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 12, padding: '9px 14px', borderRadius: 12, border: '1px solid color-mix(in srgb, var(--danger) 35%, transparent)', background: 'color-mix(in srgb, var(--danger) 8%, transparent)' }}
+        >
+          <Icon name="alert-triangle" size={15} style={{ color: 'var(--danger-text)', flexShrink: 0 }} />
+          <span style={{ fontSize: 12.5, color: 'var(--app-t1)', flex: 1 }}>
+            Couldn&rsquo;t load what was merged automatically — {autoMergedQ.error instanceof Error ? autoMergedQ.error.message : 'the request failed'}. Nothing is shown below, which does not mean nothing was merged.
+          </span>
+          <button className="ui-btn sm" onClick={() => { void autoMergedQ.refetch(); }}>Retry</button>
+        </div>
+      ) : (
+        <AutoMergedSection
+          merges={autoMergedQ.data?.merges ?? []}
+          windowDays={autoMergedQ.data?.windowDays ?? 30}
+          loading={autoMergedQ.isLoading}
+        />
+      )}
 
       {proposals.length > 0 && (
         <div style={{ marginBottom: 16 }}>

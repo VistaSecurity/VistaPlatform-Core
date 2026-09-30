@@ -71,6 +71,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/derive"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
@@ -452,8 +453,7 @@ func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUI
 	host := strings.TrimSpace(in.Hostname)
 	ip := strings.TrimSpace(in.IPAddress)
 	managementAddress := managementHost(in.ManagementURL)
-	scopeIP, scopeHost := deviceScopeInputs(ip, host, managementAddress)
-	segmentID, dynamicScope := s.segmentScope(ctx, tenantID, scopeIP, scopeHost, in.CloudNetworkRef)
+	segmentID, dynamicScope := s.deviceSegmentScope(ctx, tenantID, ip, host, managementAddress, in.CloudNetworkRef)
 
 	obs := identity.Observation{
 		TenantID:    tenantID.String(),
@@ -492,6 +492,20 @@ func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUI
 
 	if serial := strings.TrimSpace(in.SerialNumber); serial != "" {
 		add(identity.KindSerialNumber, serial, "")
+		// D3 (B4): some vendors use the interface MAC as the serial. A
+		// 12-hex serial whose first three octets are a registered OUI is also
+		// recorded as the MAC it spells — DERIVED (Source inferred, ref
+		// derived:serial:<serial>), so the device a person typed in and the
+		// same device a sensor or controller later reports by MAC meet by MAC.
+		// This form has no MAC field, so there is never a stated one to prefer.
+		// The operator's addresses are not put through the IPv6 hygiene rule:
+		// a person typed them, and a declared value is not second-guessed.
+		if mac, ok := derive.MACFromSerialRegistered(serial); ok {
+			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
+				Kind: identity.KindMACAddress, Value: mac, Confidence: derivedMACConfidence,
+				Source: identity.Source{Kind: identity.SourceInferred, Ref: derive.RefSerial(serial)},
+			})
+		}
 	}
 	if rid := strings.TrimSpace(in.CloudResourceID); rid != "" {
 		add(identity.KindCloudResourceID, rid, "")
@@ -698,14 +712,54 @@ func parseScopeAddr(ip string) (netip.Addr, bool) {
 	return addr, true
 }
 
-// segmentScope is the Devices form's seat at the same resolver.
-func (s *DeviceService) segmentScope(ctx context.Context, tenantID uuid.UUID, ip, hostname, cloudNetworkRef string) (string, bool) {
+// firstSegmentForAddresses returns the scope of the first value that is an
+// address inside a real segment — never the tenant default — through
+// `ScopeForAddress`, the one address lookup both services share. False when
+// none of them is ( B5).
+func (r scopeResolver) firstSegmentForAddresses(ctx context.Context, tenantID uuid.UUID, cloudNetworkRef string, values ...string) (string, bool, bool) {
+	if r.repo == nil {
+		return "", false, false
+	}
+	for _, v := range values {
+		addr, ok := parseScopeAddr(v)
+		if !ok {
+			continue
+		}
+		scope, dynamic, err := r.repo.ScopeForAddress(ctx, tenantID.String(), addr, cloudNetworkRef)
+		if err != nil {
+			logSegmentLookupFailed(tenantID, err)
+			continue
+		}
+		if scope != "" && scope != identity.ScopeTenantDefault {
+			return scope, dynamic, true
+		}
+	}
+	return "", false, false
+}
+
+// deviceSegmentScope is the Devices form's seat at the same resolver.
+//
+// The scope is that of the FIRST address the form carries — the IP field, an
+// address typed into the name field, the management URL's host — that falls in
+// a real segment ( B5). It used to consider only the IP field, falling
+// back to the management host: an operator who typed the address into the name
+// field (which the form invites) or whose IP field held an address no segment
+// covers got every identifier scoped to the tenant default, while the sensor
+// filed the same address under its segment — one appliance, two scopes, two
+// records that could never collide. When no address resolves, the old rule
+// stands, including the `domain` segment match on the name.
+func (s *DeviceService) deviceSegmentScope(ctx context.Context, tenantID uuid.UUID, ip, host, managementAddress, cloudNetworkRef string) (string, bool) {
 	repo, err := s.Repo()
 	if err != nil {
 		logSegmentLookupFailed(tenantID, err)
 		repo = nil
 	}
-	return newDeviceScopeResolver(s.db, repo).segmentScope(ctx, tenantID, ip, hostname, cloudNetworkRef)
+	resolver := newDeviceScopeResolver(s.db, repo)
+	if scope, dynamic, ok := resolver.firstSegmentForAddresses(ctx, tenantID, cloudNetworkRef, ip, host, managementAddress); ok {
+		return scope, dynamic
+	}
+	scopeIP, scopeHost := deviceScopeInputs(ip, host, managementAddress)
+	return resolver.segmentScope(ctx, tenantID, scopeIP, scopeHost, cloudNetworkRef)
 }
 
 // ---------------------------------------------------------------------------

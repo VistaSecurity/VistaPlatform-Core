@@ -146,6 +146,16 @@ export function rowRiskLevel(a: CryptoApplication): RiskLevel {
   return levelFromScore(typeof a.risk_score === 'number' ? a.risk_score : 0);
 }
 
+// The score a row may be SHOWN or EXPORTED with, or null when it has none.
+// `risk_score` on a crypto application follows the at-rest ladder — 0 is NOT
+// ASSESSED (an undetermined row: AccessDenied on the encryption read), 10 / 40 /
+// 90 are assessments — so a 0 is never a statement that the resource is safe.
+// One function, because the drawer and the CSV each wrote this rule down
+// separately and the CSV wrote it down wrong (it exported the 0).
+export function dataProtectionRiskScore(a: Pick<CryptoApplication, 'risk_score'>): number | null {
+  return typeof a.risk_score === 'number' && a.risk_score > 0 ? a.risk_score : null;
+}
+
 // ---- Display labels --------------------------------------------------------
 const RESOURCE_LABEL: Record<string, string> = {
   cloud_storage: 'Object storage',
@@ -224,7 +234,8 @@ export function dataProtectionCsvRow(a: CryptoApplication): (string | number | n
     a.cloud_provider,
     a.cloud_region,
     rowRiskLevel(a),
-    typeof a.risk_score === 'number' ? a.risk_score : null,
+    // Blank when unassessed — a 0 here reads in a spreadsheet as "assessed, no risk".
+    dataProtectionRiskScore(a) ?? '',
     a.last_verified_at,
   ];
 }

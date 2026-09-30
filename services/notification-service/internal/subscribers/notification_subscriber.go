@@ -92,6 +92,12 @@ func convertNotificationEventToRequest(e *events.NotificationEvent) *models.Send
 		Metadata:         e.Metadata,
 		NotificationType: "alert",
 	}
+	// The producer's event id becomes the notification's id, so a NATS
+	// redelivery of the same event is the same X-Vista-Event-Id to a webhook
+	// receiver (and the same PagerDuty dedup key when the alert has no id).
+	if e.EventID != uuid.Nil {
+		req.EventID = e.EventID.String()
+	}
 
 	// uuid.Nil and the platform sentinel BOTH mean "this is a platform
 	// notification" — route it to the platform rules, not to a tenant.

@@ -66,6 +66,47 @@ var serviceEventCategory = map[string]string{
 	// mcp-service writes its own entries (internal/auditlog) instead of using
 	// LogRequest; listed so the registry check stays exhaustive.
 	"mcp-service": EventCategoryData,
+
+	// Services whose registry entry declares `edition: enterprise` are NOT
+	// listed here. They do not exist in the Core tree — the public export
+	// removes the service and its registry entry — so a line naming one would
+	// name a service Core does not have. Each registers its own category from
+	// its own module instead; see RegisterServiceEventCategory.
+}
+
+// RegisterServiceEventCategory records the category LogRequest assigns to a
+// service that is not in serviceEventCategory because it is edition-gated: an
+// Enterprise-only service whose code, registry entry and deployment are all
+// absent from the Core tree. The service calls this from an init() in its own
+// module, so the decision still lives next to the code it describes and no Core
+// file has to name it.
+//
+// Init-time only: categoryForRequest reads the map without a lock, which is
+// safe because every registration completes before main() starts serving.
+//
+// It panics on an invalid category (audit.activity_logs would reject every row
+// it produced, silently — see ValidEventCategory) and on a service that already
+// has a DIFFERENT category, which would mean two decisions for one service.
+// Re-registering the same category is a no-op.
+func RegisterServiceEventCategory(service, category string) {
+	if service == "" {
+		panic("audit: RegisterServiceEventCategory with an empty service name")
+	}
+	if !ValidEventCategory(category) {
+		panic("audit: RegisterServiceEventCategory(" + service + ", " + category + "): not an event category audit.activity_logs accepts")
+	}
+	if existing, ok := serviceEventCategory[service]; ok && existing != category {
+		panic("audit: RegisterServiceEventCategory(" + service + "): already categorised " + existing + ", refusing to change it to " + category)
+	}
+	serviceEventCategory[service] = category
+}
+
+// ServiceEventCategory returns the category LogRequest assigns to requests for
+// service when no resource override applies, and whether the service has a
+// deliberate category at all (false means it falls back to "system").
+func ServiceEventCategory(service string) (string, bool) {
+	c, ok := serviceEventCategory[service]
+	return c, ok
 }
 
 // resourceEventCategory overrides the service's category for a resource that

@@ -5,7 +5,7 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, MetaRow, RiskChip, SectionLabel, riskColor, type RiskLevel } from '../../components/ui';
 import {
-  atRestState, protectionRung, rungColor, rowRiskLevel, RUNG_META,
+  atRestState, protectionRung, rungColor, rowRiskLevel, dataProtectionRiskScore, RUNG_META,
   encryptionTypeLabel, orText, originLabel, resourceTypeLabel,
   type AtRestState, type CryptoApplication, type ResourceTypeParam,
 } from './data-protection';
@@ -189,7 +189,7 @@ export function DataProtectionDrawer({ app, onClose, onOpenAsset, active = true,
         <MetaRow k="Risk level" v={level} />
         <MetaRow
           k="Risk score"
-          v={typeof app.risk_score === 'number' && app.risk_score > 0 ? app.risk_score : 'not assessed'}
+          v={dataProtectionRiskScore(app) ?? 'not assessed'}
         />
         <MetaRow k="Last verified" v={app.last_verified_at ? new Date(app.last_verified_at).toLocaleString() : 'never'} />
         <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--app-t3)', lineHeight: 1.5 }}>

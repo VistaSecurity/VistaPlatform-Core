@@ -6,6 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { notificationServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { testFailureReason } from './notification-channel-types';
 
 export type PlatformChannel = notificationServiceComponents['schemas']['PlatformNotificationChannel'];
 export type PlatformRule = notificationServiceComponents['schemas']['PlatformNotificationRule'];
@@ -33,6 +34,13 @@ export function usePlatformChannels() {
   });
 }
 
+/** POST a platform channel Test. Rejects with the server's sanitized reason on a 422. */
+export async function platformChannelTest(id: string): Promise<void> {
+  const { error, response } = await clients.notifications.POST('/platform/channels/{id}/test', { params: { path: { id } } });
+  // 422 = the channel did not deliver; `reason` says why (sanitized server-side).
+  if (error || !response.ok) throw new Error(testFailureReason(error));
+}
+
 export function useChannelMutations() {
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: ['platform', 'notif', 'channels'] });
@@ -58,11 +66,9 @@ export function useChannelMutations() {
     onSuccess: invalidate,
   });
   const test = useMutation({
-    mutationFn: async (id: string) => {
-      const { error } = await clients.notifications.POST('/platform/channels/{id}/test', { params: { path: { id } } });
-      if (error) throw new Error('Test failed');
-    },
-    onSuccess: invalidate,
+    mutationFn: platformChannelTest,
+    // A failed test records test_status='failed' server-side; refresh either way.
+    onSettled: invalidate,
   });
   return { create, update, remove, test };
 }

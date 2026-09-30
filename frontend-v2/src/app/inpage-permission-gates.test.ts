@@ -85,16 +85,6 @@ describe('Compliance frameworks (activate / deactivate / set default)', () => {
   });
 });
 
-describe('Custom policies (Enterprise policy authoring)', () => {
-  it('gates on compliance.update — the permission the ee authoring routes require', () => {
-    routeRequires(
-      'services/compliance-engine/ee/policyauthoring/handlers.go',
-      'requireUpdate :=',
-      'PermissionComplianceUpdate',
-    );
-    gateUses(`${FE}sections/settings/pages-custom-policies.tsx`, 'compliance.update', ['compliance.manage']);
-  });
-});
 
 describe('Retention policies are no longer a tenant surface (SECURITY C4)', () => {
   // The guard used to assert the tenant page's audit.manage gate matched
@@ -125,29 +115,22 @@ describe('Retention policies are no longer a tenant surface (SECURITY C4)', () =
   });
 });
 
-describe('Alert-rule enable/disable toggle (Settings → Alert Rules)', () => {
-  it('gates on audit.manage — the toggle PUTs an audit-service route', () => {
-    routeRequires('services/audit-service/cmd/main.go', '/audit-service/alert-rules/:id"', 'PermissionAuditManage');
+describe('Alert-rule enable/disable toggle (Settings → Alert Rules) is gone', () => {
+  // The toggle PUT audit-service /alert-rules/:id, but nothing evaluates
+  // audit.alert_rules (audit-service's evaluator uses hard-coded rules), so the
+  // "enable/disable is live" claim was false and the control a no-op. The section
+  // was removed from the tenant UI (integrations review M29); the audit-service
+  // endpoints are untouched. This pins the removal so the control cannot quietly
+  // come back before something actually evaluates those rows.
+  it('ships no tenant control over audit.alert_rules', () => {
     const src = read(`${FE}sections/settings/pages-integrations.tsx`);
-    expect(src).toContain('TENANT_PERMISSIONS.audit.manage');
-    // The toggle and its fallback must sit under audit.manage, not settings.update.
-    expect(gateEnclosing(src, '<AlertRuleToggle')).toBe('audit.manage');
+    expect(src).not.toContain('AlertRuleToggle');
+    expect(src).not.toContain("'/alert-rules'");
+    expect(src).not.toContain('evaluated by the audit pipeline');
+    expect(src).not.toContain('enable/disable is live');
   });
 });
 
-describe('CMDB sync / pull (Settings → Integrations)', () => {
-  it('gates the inventory-moving actions on assets.manage, not settings.update', () => {
-    const go = 'services/inventory-service/ee/cmdbsync/routes.go';
-    routeRequires(go, '/cmdb/profiles/:id/sync"', 'PermissionAssetsManage');
-    routeRequires(go, '/cmdb/profiles/:id/pull"', 'PermissionAssetsManage');
-    // Profile CRUD stays settings.update in the same file.
-    routeRequires(go, '/cmdb/profiles"', 'PermissionSettingsUpdate');
-    const src = read(`${FE}sections/settings/pages-integrations.tsx`);
-    expect(gateEnclosing(src, '<CmdbPullButton')).toBe('assets.manage');
-    expect(gateEnclosing(src, '<CmdbSyncButton')).toBe('assets.manage');
-    expect(gateEnclosing(src, '<CmdbTestButton')).toBe('settings.update');
-  });
-});
 
 describe('Sensor detail drawer (config, interfaces, commands)', () => {
   it('gates on sensors.update — sensors.manage guards only certificate operations', () => {

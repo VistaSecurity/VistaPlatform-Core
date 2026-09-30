@@ -55,9 +55,14 @@ func (s *ActivityLogService) LogActivity(ctx context.Context, logEntry *models.A
 			$18, $19, $20,
 			$21, $22,
 			$23, $24,
-			$25, $26
+			$25, clock_timestamp()
 		)
 	`
+	// created_at is stamped by the DATABASE, not this process: it is the order
+	// of the export feed (export_feed.go), and replicas with skewed clocks must
+	// not be able to write it out of order. clock_timestamp(), not now(): now()
+	// is the transaction's start, and the later the stamp, the closer it sits
+	// to the commit that makes the row visible (the feed's settle window).
 
 	args := []interface{}{
 		logEntry.ID,
@@ -85,7 +90,6 @@ func (s *ActivityLogService) LogActivity(ctx context.Context, logEntry *models.A
 		metadataJSON,
 		pq.Array(logEntry.Tags),
 		logEntry.OccurredAt,
-		time.Now(),
 	}
 
 	// RLS-scoped write on audit.activity_logs (audit_logs / activity_logs policy).

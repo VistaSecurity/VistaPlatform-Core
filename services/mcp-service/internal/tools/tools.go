@@ -76,7 +76,7 @@ func (d *Deps) run(ctx context.Context, req *mcp.CallToolRequest, perm string, a
 	}
 
 	if !g.HasPermission(perm) {
-		err := fmt.Errorf("%w: needs %q (token has %v) — mint a token including this permission in Settings → API Tokens", errPermission, perm, g.Permissions)
+		err := fmt.Errorf("%w: needs %q (token has %v) — mint a token including this permission in My Profile → API Tokens", errPermission, perm, g.Permissions)
 		record(auditlog.ToolCall{Denied: true, Err: err})
 		return nil, nil, err
 	}

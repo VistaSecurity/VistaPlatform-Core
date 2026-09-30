@@ -17,6 +17,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/cloudcredentials"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -55,6 +56,11 @@ type Client struct {
 	// Empty in every production path — NewClient never sets it — and set only
 	// by a test pointing one client at a recorded-response server.
 	computeBaseOverride string
+	// tokenURLOverride replaces the token endpoint, and apiBaseOverride the
+	// Cloud KMS, Cloud Storage and Cloud SQL Admin bases. Same rule: empty in
+	// production, set only through WithEndpoints by a test.
+	tokenURLOverride string
+	apiBaseOverride  string
 
 	mu          sync.Mutex
 	accessToken string
@@ -67,7 +73,7 @@ type Client struct {
 // (tenant_id IS NULL) integrations, which the RLS policy excludes — so it runs on
 // the BYPASSRLS connection (the integration id was authorized upstream by the
 // tenant-scoped flow). Pre-flip bypassDB resolves to the same connection as db.
-func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, masterKey string) (*Client, error) {
+func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, masterKey string, opts ...Option) (*Client, error) {
 	// Load integration from database
 	query := `
 		SELECT config, account_id, region
@@ -87,7 +93,99 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 		return nil, fmt.Errorf("failed to load GCP integration: %w", err)
 	}
 
-	// Decrypt credentials
+	return NewClientFromStoredConfig(integrationID, configJSON, projectID.String, masterKey, opts...)
+}
+
+// SensitiveConfigKeys is the canonical list of GCP integration config keys that
+// are stored ENCRYPTED — the three names a service-account key JSON has been
+// accepted under. It is the single source of truth for the encrypt, decrypt and
+// mask paths: the handler package builds its list from this slice. The handler
+// used to encrypt only service_account_json while its validator also accepted
+// service_account_key and credentials_json, so an integration created under
+// either of those names was stored in plaintext and then failed to decrypt here.
+//
+// The list itself lives in shared/cloudcredentials so admin-service's
+// platform-integration writer uses the same one.
+var SensitiveConfigKeys = cloudcredentials.GCP
+
+// DecryptConfigMap decrypts the sensitive fields of a stored GCP integration
+// config. Non-sensitive fields are passed through untouched; a decrypt failure
+// on a sensitive field is a hard error.
+func DecryptConfigMap(enc *encryption.Service, config map[string]interface{}) (map[string]string, error) {
+	sensitive := make(map[string]bool, len(SensitiveConfigKeys))
+	for _, k := range SensitiveConfigKeys {
+		sensitive[k] = true
+	}
+
+	decrypted := make(map[string]string, len(config))
+	for key, value := range config {
+		raw := ""
+		switch v := value.(type) {
+		case string:
+			raw = v
+		case nil:
+			continue
+		default:
+			raw = fmt.Sprintf("%v", v)
+		}
+		if raw == "" {
+			continue
+		}
+		if !sensitive[key] {
+			decrypted[key] = raw
+			continue
+		}
+		plain, err := enc.Decrypt(raw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt %s: %w", key, err)
+		}
+		decrypted[key] = plain
+	}
+	return decrypted, nil
+}
+
+// NewClientFromStoredConfig builds a Client from an integration row's stored
+// (encrypted-at-rest) config JSON and its account_id column. NewClient is this
+// plus the row lookup; it is split out so a test can feed it exactly what the
+// integrations handler writes and prove the two agree on what is encrypted.
+func NewClientFromStoredConfig(integrationID uuid.UUID, configJSON, accountProjectID, masterKey string, opts ...Option) (*Client, error) {
+	c, err := newClientFromStoredConfig(integrationID, configJSON, accountProjectID, masterKey)
+	if err != nil {
+		return nil, err
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
+// Option adjusts where a Client reaches Google. Production passes none.
+type Option func(*Client)
+
+// WithEndpoints points the token exchange and every Google API this client
+// calls at a local server over hc. It exists for tests; it changes WHERE the
+// client connects, never how it signs its assertion, so a test built with it
+// runs the same credential construction discovery does.
+func WithEndpoints(hc *http.Client, tokenEndpoint, apiBase string) Option {
+	return func(c *Client) {
+		if hc != nil {
+			c.httpClient = hc
+		}
+		c.tokenURLOverride = tokenEndpoint
+		c.computeBaseOverride = apiBase
+		c.apiBaseOverride = apiBase
+	}
+}
+
+// apiBase is def unless a test pointed the client elsewhere.
+func (c *Client) apiBase(def string) string {
+	if strings.TrimSpace(c.apiBaseOverride) != "" {
+		return strings.TrimRight(c.apiBaseOverride, "/")
+	}
+	return def
+}
+
+func newClientFromStoredConfig(integrationID uuid.UUID, configJSON, accountProjectID, masterKey string) (*Client, error) {
 	enc, err := encryption.NewService(masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize encryption service: %w", err)
@@ -98,42 +196,9 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 		return nil, fmt.Errorf("failed to unmarshal GCP integration config: %w", err)
 	}
 
-	// Decrypt sensitive fields
-	sensitiveKeys := []string{"service_account_key", "credentials_json", "service_account_json"}
-	decrypted := make(map[string]string)
-
-	for key, value := range encryptedConfig {
-		raw := ""
-		switch v := value.(type) {
-		case string:
-			raw = v
-		case nil:
-			continue
-		default:
-			raw = fmt.Sprintf("%v", v)
-		}
-
-		if raw == "" {
-			continue
-		}
-
-		isSensitive := false
-		for _, sk := range sensitiveKeys {
-			if key == sk {
-				isSensitive = true
-				break
-			}
-		}
-
-		if isSensitive {
-			plain, err := enc.Decrypt(raw)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decrypt %s: %w", key, err)
-			}
-			decrypted[key] = plain
-		} else {
-			decrypted[key] = raw
-		}
+	decrypted, err := DecryptConfigMap(enc, encryptedConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get service account key JSON (try all known field names)
@@ -163,7 +228,7 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 	}
 
 	// Use project ID from integration config, then service account key
-	projID := projectID.String
+	projID := accountProjectID
 	if projID == "" {
 		if pid, ok := decrypted["project_id"]; ok && pid != "" {
 			projID = pid
@@ -215,9 +280,9 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 
 	// Create JWT assertion
 	now := time.Now()
-	tokenURI := c.serviceKey.TokenURI
-	if tokenURI == "" {
-		tokenURI = tokenURL
+	tokenURI, err := c.tokenEndpoint()
+	if err != nil {
+		return "", err
 	}
 
 	claims := jwt.MapClaims{
@@ -256,7 +321,7 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token request failed (%d): %s", resp.StatusCode, string(body))
+		return "", newTokenError(resp.StatusCode, body)
 	}
 
 	var tokenResp struct {
@@ -299,53 +364,137 @@ func (c *Client) doRequest(ctx context.Context, urlPath string) ([]byte, error) 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed (%d): %s", resp.StatusCode, truncateBody(body))
+		return nil, newAPIError(resp.StatusCode, body)
 	}
 
 	return body, nil
 }
 
-// ValidateCredentials validates credentials by calling the GCP projects API
-func (c *Client) ValidateCredentials(ctx context.Context) error {
-	// Validate service account key structure
-	var creds map[string]interface{}
-	if err := json.Unmarshal(c.credentials, &creds); err != nil {
-		return fmt.Errorf("invalid credentials JSON: %w", err)
-	}
+// googleTokenHosts are the hosts a service-account key's token_uri may name.
+// Every key Google issues says https://oauth2.googleapis.com/token; older keys
+// say accounts.google.com. The key is tenant-supplied JSON, and the platform
+// POSTs a signed assertion to whatever it names and — through Test
+// Connection — reports what came back, so an arbitrary URL there would turn
+// the integration into a request the platform makes on the tenant's behalf.
+var googleTokenHosts = map[string]bool{
+	"oauth2.googleapis.com": true,
+	"accounts.google.com":   true,
+}
 
-	requiredFields := []string{"type", "project_id", "private_key_id", "private_key", "client_email"}
-	for _, field := range requiredFields {
-		if _, ok := creds[field]; !ok {
-			return fmt.Errorf("missing required field in credentials: %s", field)
-		}
+// tokenEndpoint is where the JWT assertion is exchanged: the key's token_uri
+// when it names a Google OAuth host over https, Google's default when it names
+// none, and an error otherwise.
+func (c *Client) tokenEndpoint() (string, error) {
+	if c.tokenURLOverride != "" {
+		return c.tokenURLOverride, nil
 	}
-
-	// Try to get an access token — this validates the private key and service account
-	_, err := c.getAccessToken(ctx)
-	if err != nil {
-		return fmt.Errorf("credential validation failed: %w", err)
+	raw := strings.TrimSpace(c.serviceKey.TokenURI)
+	if raw == "" {
+		return tokenURL, nil
 	}
-
-	// Verify project access by listing SSL policies (lightweight call)
-	apiURL := fmt.Sprintf("%s/projects/%s/global/sslPolicies?maxResults=1", computeBaseURL, c.projectID)
-	_, err = c.doRequest(ctx, apiURL)
-	if err != nil {
-		// Check if it's a permissions issue vs invalid project
-		if strings.Contains(err.Error(), "403") {
-			return fmt.Errorf("service account lacks compute.viewer permissions on project %s", c.projectID)
-		}
-		if strings.Contains(err.Error(), "404") {
-			return fmt.Errorf("project %s not found or Compute Engine API not enabled", c.projectID)
-		}
-		return fmt.Errorf("failed to validate project access: %w", err)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || !googleTokenHosts[strings.ToLower(u.Hostname())] || u.Port() != "" {
+		return "", fmt.Errorf("the service account key's token_uri is not a Google OAuth endpoint; use the key file exactly as Google issued it")
 	}
+	return raw, nil
+}
 
-	return nil
+// TokenError is a refused token exchange: the OAuth error code and
+// description Google returned, never the raw body.
+type TokenError struct {
+	StatusCode  int
+	Code        string
+	Description string
+}
+
+func (e *TokenError) Error() string {
+	msg := fmt.Sprintf("token request failed (%d)", e.StatusCode)
+	if e.Code != "" {
+		msg += ": " + e.Code
+	}
+	if e.Description != "" {
+		msg += ": " + e.Description
+	}
+	return msg
+}
+
+func newTokenError(status int, body []byte) *TokenError {
+	var parsed struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	return &TokenError{StatusCode: status, Code: parsed.Error, Description: parsed.ErrorDescription}
+}
+
+// APIError is a non-200 answer from a Google API. Error() keeps the historical
+// text (status and a bounded body) so existing log lines and status-code
+// checks read the same; Status and Message are Google's structured error, for
+// callers that show it to a user.
+type APIError struct {
+	StatusCode int
+	Status     string
+	Message    string
+	body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API request failed (%d): %s", e.StatusCode, e.body)
+}
+
+func newAPIError(status int, body []byte) *APIError {
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	return &APIError{StatusCode: status, Status: parsed.Error.Status, Message: parsed.Error.Message, body: truncateBody(body)}
+}
+
+// ProjectCheck is what a connection test learned: who the key authenticated
+// as, and the project it read.
+type ProjectCheck struct {
+	ProjectID      string
+	ServiceAccount string
+}
+
+// Stages of CheckProject, carried on its error.
+const (
+	CheckStageToken   = "token"
+	CheckStageProject = "project"
+)
+
+// CheckError says which step of CheckProject failed.
+type CheckError struct {
+	Stage string
+	Err   error
+}
+
+func (e *CheckError) Error() string { return e.Stage + ": " + e.Err.Error() }
+func (e *CheckError) Unwrap() error { return e.Err }
+
+// CheckProject proves the integration can do what discovery does first:
+// exchange the service-account key for an access token (the JWT-bearer grant
+// discovery uses) and read the configured project through the Compute API —
+// listing at most one SSL policy, the cheapest read in the permission set the
+// load-balancer collectors need (roles/compute.viewer).
+func (c *Client) CheckProject(ctx context.Context) (ProjectCheck, error) {
+	out := ProjectCheck{ProjectID: c.projectID, ServiceAccount: c.serviceKey.ClientEmail}
+	if _, err := c.getAccessToken(ctx); err != nil {
+		return out, &CheckError{Stage: CheckStageToken, Err: err}
+	}
+	apiURL := fmt.Sprintf("%s/projects/%s/global/sslPolicies?maxResults=1", c.computeEndpoint(), url.PathEscape(c.projectID))
+	if _, err := c.doRequest(ctx, apiURL); err != nil {
+		return out, &CheckError{Stage: CheckStageProject, Err: err}
+	}
+	return out, nil
 }
 
 // ListTargetHTTPSProxies lists all target HTTPS proxies in the project
 func (c *Client) ListTargetHTTPSProxies(ctx context.Context) ([]TargetHTTPSProxy, error) {
-	apiURL := fmt.Sprintf("%s/projects/%s/global/targetHttpsProxies", computeBaseURL, c.projectID)
+	apiURL := fmt.Sprintf("%s/projects/%s/global/targetHttpsProxies", c.computeEndpoint(), c.projectID)
 
 	var allProxies []TargetHTTPSProxy
 	for apiURL != "" {
@@ -361,7 +510,7 @@ func (c *Client) ListTargetHTTPSProxies(ctx context.Context) ([]TargetHTTPSProxy
 		allProxies = append(allProxies, resp.Items...)
 		apiURL = resp.NextPageToken
 		if apiURL != "" {
-			apiURL = fmt.Sprintf("%s/projects/%s/global/targetHttpsProxies?pageToken=%s", computeBaseURL, c.projectID, apiURL)
+			apiURL = fmt.Sprintf("%s/projects/%s/global/targetHttpsProxies?pageToken=%s", c.computeEndpoint(), c.projectID, apiURL)
 		}
 	}
 	return allProxies, nil
@@ -369,7 +518,7 @@ func (c *Client) ListTargetHTTPSProxies(ctx context.Context) ([]TargetHTTPSProxy
 
 // ListTargetSSLProxies lists all target SSL proxies in the project
 func (c *Client) ListTargetSSLProxies(ctx context.Context) ([]TargetSSLProxy, error) {
-	apiURL := fmt.Sprintf("%s/projects/%s/global/targetSslProxies", computeBaseURL, c.projectID)
+	apiURL := fmt.Sprintf("%s/projects/%s/global/targetSslProxies", c.computeEndpoint(), c.projectID)
 
 	var allProxies []TargetSSLProxy
 	for apiURL != "" {
@@ -385,7 +534,7 @@ func (c *Client) ListTargetSSLProxies(ctx context.Context) ([]TargetSSLProxy, er
 		allProxies = append(allProxies, resp.Items...)
 		apiURL = resp.NextPageToken
 		if apiURL != "" {
-			apiURL = fmt.Sprintf("%s/projects/%s/global/targetSslProxies?pageToken=%s", computeBaseURL, c.projectID, apiURL)
+			apiURL = fmt.Sprintf("%s/projects/%s/global/targetSslProxies?pageToken=%s", c.computeEndpoint(), c.projectID, apiURL)
 		}
 	}
 	return allProxies, nil
@@ -398,7 +547,7 @@ func (c *Client) GetSSLPolicy(ctx context.Context, policyRef string) (*SSLPolicy
 	if strings.HasPrefix(policyRef, "https://") {
 		apiURL = policyRef
 	} else {
-		apiURL = fmt.Sprintf("%s/projects/%s/global/sslPolicies/%s", computeBaseURL, c.projectID, policyRef)
+		apiURL = fmt.Sprintf("%s/projects/%s/global/sslPolicies/%s", c.computeEndpoint(), c.projectID, policyRef)
 	}
 
 	body, err := c.doRequest(ctx, apiURL)
@@ -415,7 +564,7 @@ func (c *Client) GetSSLPolicy(ctx context.Context, policyRef string) (*SSLPolicy
 
 // ListSSLCertificates lists all global SSL certificates in the project
 func (c *Client) ListSSLCertificates(ctx context.Context) ([]SSLCertificate, error) {
-	apiURL := fmt.Sprintf("%s/projects/%s/global/sslCertificates", computeBaseURL, c.projectID)
+	apiURL := fmt.Sprintf("%s/projects/%s/global/sslCertificates", c.computeEndpoint(), c.projectID)
 
 	var allCerts []SSLCertificate
 	for apiURL != "" {
@@ -431,7 +580,7 @@ func (c *Client) ListSSLCertificates(ctx context.Context) ([]SSLCertificate, err
 		allCerts = append(allCerts, resp.Items...)
 		apiURL = resp.NextPageToken
 		if apiURL != "" {
-			apiURL = fmt.Sprintf("%s/projects/%s/global/sslCertificates?pageToken=%s", computeBaseURL, c.projectID, apiURL)
+			apiURL = fmt.Sprintf("%s/projects/%s/global/sslCertificates?pageToken=%s", c.computeEndpoint(), c.projectID, apiURL)
 		}
 	}
 	return allCerts, nil
@@ -443,7 +592,7 @@ func (c *Client) GetSSLCertificate(ctx context.Context, certRef string) (*SSLCer
 	if strings.HasPrefix(certRef, "https://") {
 		apiURL = certRef
 	} else {
-		apiURL = fmt.Sprintf("%s/projects/%s/global/sslCertificates/%s", computeBaseURL, c.projectID, certRef)
+		apiURL = fmt.Sprintf("%s/projects/%s/global/sslCertificates/%s", c.computeEndpoint(), c.projectID, certRef)
 	}
 
 	body, err := c.doRequest(ctx, apiURL)
@@ -460,7 +609,7 @@ func (c *Client) GetSSLCertificate(ctx context.Context, certRef string) (*SSLCer
 
 // ListGlobalForwardingRules lists all global forwarding rules in the project
 func (c *Client) ListGlobalForwardingRules(ctx context.Context) ([]ForwardingRule, error) {
-	apiURL := fmt.Sprintf("%s/projects/%s/global/forwardingRules", computeBaseURL, c.projectID)
+	apiURL := fmt.Sprintf("%s/projects/%s/global/forwardingRules", c.computeEndpoint(), c.projectID)
 
 	var allRules []ForwardingRule
 	for apiURL != "" {
@@ -476,7 +625,7 @@ func (c *Client) ListGlobalForwardingRules(ctx context.Context) ([]ForwardingRul
 		allRules = append(allRules, resp.Items...)
 		apiURL = resp.NextPageToken
 		if apiURL != "" {
-			apiURL = fmt.Sprintf("%s/projects/%s/global/forwardingRules?pageToken=%s", computeBaseURL, c.projectID, apiURL)
+			apiURL = fmt.Sprintf("%s/projects/%s/global/forwardingRules?pageToken=%s", c.computeEndpoint(), c.projectID, apiURL)
 		}
 	}
 	return allRules, nil
@@ -484,7 +633,7 @@ func (c *Client) ListGlobalForwardingRules(ctx context.Context) ([]ForwardingRul
 
 // ListKMSLocations lists the Cloud KMS locations available to the project.
 func (c *Client) ListKMSLocations(ctx context.Context) ([]KMSLocation, error) {
-	apiURL := fmt.Sprintf("%s/projects/%s/locations", cloudKMSBaseURL, c.projectID)
+	apiURL := fmt.Sprintf("%s/projects/%s/locations", c.apiBase(cloudKMSBaseURL), c.projectID)
 
 	var all []KMSLocation
 	for apiURL != "" {
@@ -499,7 +648,7 @@ func (c *Client) ListKMSLocations(ctx context.Context) ([]KMSLocation, error) {
 		all = append(all, resp.Locations...)
 		apiURL = ""
 		if resp.NextPageToken != "" {
-			apiURL = fmt.Sprintf("%s/projects/%s/locations?pageToken=%s", cloudKMSBaseURL, c.projectID, resp.NextPageToken)
+			apiURL = fmt.Sprintf("%s/projects/%s/locations?pageToken=%s", c.apiBase(cloudKMSBaseURL), c.projectID, resp.NextPageToken)
 		}
 	}
 	return all, nil
@@ -507,7 +656,7 @@ func (c *Client) ListKMSLocations(ctx context.Context) ([]KMSLocation, error) {
 
 // ListKeyRings lists the key rings in a Cloud KMS location.
 func (c *Client) ListKeyRings(ctx context.Context, location string) ([]KMSKeyRing, error) {
-	base := fmt.Sprintf("%s/projects/%s/locations/%s/keyRings", cloudKMSBaseURL, c.projectID, location)
+	base := fmt.Sprintf("%s/projects/%s/locations/%s/keyRings", c.apiBase(cloudKMSBaseURL), c.projectID, location)
 	apiURL := base
 
 	var all []KMSKeyRing
@@ -532,7 +681,7 @@ func (c *Client) ListKeyRings(ctx context.Context, location string) ([]KMSKeyRin
 // ListCryptoKeys lists the crypto keys in a key ring. keyRingName is the full
 // resource name (projects/{p}/locations/{loc}/keyRings/{kr}).
 func (c *Client) ListCryptoKeys(ctx context.Context, keyRingName string) ([]KMSCryptoKey, error) {
-	base := fmt.Sprintf("%s/%s/cryptoKeys", cloudKMSBaseURL, keyRingName)
+	base := fmt.Sprintf("%s/%s/cryptoKeys", c.apiBase(cloudKMSBaseURL), keyRingName)
 	apiURL := base
 
 	var all []KMSCryptoKey
@@ -557,7 +706,7 @@ func (c *Client) ListCryptoKeys(ctx context.Context, keyRingName string) ([]KMSC
 // ListStorageBuckets lists the Cloud Storage buckets in the project, including
 // each bucket's default encryption configuration.
 func (c *Client) ListStorageBuckets(ctx context.Context) ([]StorageBucket, error) {
-	base := fmt.Sprintf("%s/b?project=%s", storageBaseURL, url.QueryEscape(c.projectID))
+	base := fmt.Sprintf("%s/b?project=%s", c.apiBase(storageBaseURL), url.QueryEscape(c.projectID))
 	apiURL := base
 
 	var all []StorageBucket
@@ -581,7 +730,7 @@ func (c *Client) ListStorageBuckets(ctx context.Context) ([]StorageBucket, error
 
 // ListSQLInstances lists the Cloud SQL instances in the project.
 func (c *Client) ListSQLInstances(ctx context.Context) ([]SQLInstance, error) {
-	base := fmt.Sprintf("%s/projects/%s/instances", sqlAdminBaseURL, c.projectID)
+	base := fmt.Sprintf("%s/projects/%s/instances", c.apiBase(sqlAdminBaseURL), c.projectID)
 	apiURL := base
 
 	var all []SQLInstance

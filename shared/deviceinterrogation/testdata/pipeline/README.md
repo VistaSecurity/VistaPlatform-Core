@@ -176,3 +176,24 @@ own PR was open.
 Add `<vendor>/scenario.json` and `<vendor>/device/`, add the vendor to
 `pipelinetest.Vendors`, generate the chain in order with `-update-golden`, and
 add a case to each hop's claims table. A vendor with no claims fails its hop.
+
+## The scheduled-cloud chain (`cloud-aws-scheduled/`)
+
+The same three hops for the platform worker's **scheduled** cloud discovery,
+which is not a device interrogation and so has no scenario, appliance or
+device record. It exists because the scheduled path used to drop every at-rest
+resource (buckets, databases, key stores) and to write rows without the
+provider resource id that enforce-mode admission keys on (integrations review
+W14).
+
+| Hop | Test | Real code it runs |
+|---|---|---|
+| 1 | `device-interrogation-service/.../scheduled_cloud_at_rest_integration_test.go` (`TestIntegration_ScheduledCloudJob_WritesThroughTheInteractiveWriter`) | the worker's `executeCloudDiscovery` against a fake provider (an S3 bucket and an RDS instance), `platformCloudRunSink` → `WriteSensorDiscoveries`, then `storeJobOutcome` → `ProcessJobResults`, twice |
+| 2 | `discovery-processor-service/.../cloud_scheduled_hop2_integration_test.go` | `ProcessBatch` over each run's rows under the platform sensor |
+| 3 | `inventory-service/.../cloud_scheduled_hop3_integration_test.go` | the import decode and `IngestFindingsReport` under **enforce** admission |
+
+Hop 1 records two runs (`runs[0]`, `runs[1]`); the integration id is
+`{{INTEGRATION_ID}}`. Hop 3's claim: one `object_storage` and one
+`managed_database` asset, established on the resource id, and the second run
+matches both with nothing parked. Regenerate in the same order as the vendor
+chain; `TestChain_CloudScheduledHopsReadTheGoldenBeforeThem` is its drift check.

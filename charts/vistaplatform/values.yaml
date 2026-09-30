@@ -536,6 +536,14 @@ backends:
       # Empty is the right default: a cluster on its own RFC 1918 range that no
       # tenant has claimed is already out of scope.
       - {name: DISCOVERY_AUTO_SCAN_EXCLUDE_CIDRS, value: ""}
+      # Same-device rule merges: when the identification rules are sure two
+      # existing records are one device, a worker merges them every 30s through
+      # the audited merge path (listed under Discovery -> Approvals -> "Merged
+      # automatically"). Default on. This is the OPERATOR's switch; the tenant's
+      # own lives at Settings -> Identification rules. Here for the same reason
+      # DISCOVERY_AUTO_SCAN_WORKER_ENABLED is: without an entry the variable does
+      # not exist in the pod and the switch is unreachable.
+      - {name: IDENTITY_RULE_MERGE_WORKER_ENABLED, value: "true"}
     image:
       digest: ""
 
@@ -763,6 +771,7 @@ backends:
       limits: {cpu: 300m, memory: 256Mi}
     image:
       digest: ""
+
 
   pcap-processor:
     needs: {postgres: true, redis: false, nats: true}
@@ -1188,13 +1197,27 @@ networkPolicy:
   #   * notification-service — webhook + SMTP delivery
   #   * auth-service — password reset, user invites, email verification (SMTP)
   #   * admin-service — platform-admin invites and the SMTP test endpoint
-  #   * monitoring-service — alert email (SMTP)
+  #   * monitoring-service — historically alert email (SMTP); its incident
+  #     notifications now go through notification-service, but the grant is
+  #     kept so existing egress proxies/policies keep working
+  #   * inventory-service — the tenant's CMDB connectors (Enterprise)
+  #   * audit-service — S3 archival of expired audit logs (when configured)
+  #   * compliance-engine / cbom-service — the configured ai.provider endpoint,
+  #     for framework authoring and remediation drafts, and for the CBOM
+  #     comparison narrative (Enterprise; inventory-service and admin-service,
+  #     the other two AI callers, are already listed above)
   # Every other backend stays cluster-internal.
   #
-  # All seven dial out from their own pod (shared/email opens the SMTP
-  # connection in-process; there is no central mail relay pod), so a service
-  # missing from this list fails silently — the API still returns success and
-  # the only trace is a warning in the pod log.
+  # All of these dial out from their own pod (shared/email opens the SMTP
+  # connection in-process; there is no central mail relay pod, each
+  # integration builds its own guarded HTTP client, and each AI caller builds
+  # its own provider client), so a service missing from
+  # this list fails silently — the API still returns success and the only
+  # trace is a warning in the pod log. scripts/test-chart-egress-policy.mjs
+  # derives each set from the source tree and fails if one is missing.
+  #
+  # Behind an egress proxy instead (or as well), see
+  # docsv4/core/operate/configuration/outbound-connections.md.
   externalEgressBackends:
     - sensor-manager
     - cluster-sensor-service
@@ -1203,6 +1226,10 @@ networkPolicy:
     - auth-service
     - admin-service
     - monitoring-service
+    - inventory-service
+    - audit-service
+    - compliance-engine
+    - cbom-service
 
   # ── Outbound egress carve-out ────────────────────────────────────────────
   # The Internet/outbound rule permits 0.0.0.0/0 MINUS these CIDRs, so a
@@ -1211,9 +1238,11 @@ networkPolicy:
   # customer's device networks. Those device networks are almost always
   # RFC1918, which is why this list must be your cluster's OWN ranges and not
   # a blanket 10/8 + 172.16/12 + 192.168/16 exclusion.
-  # The same list is injected into device-interrogation-service's dial guard,
-  # even when egressEnabled is false, so its deliberate customer-RFC1918
-  # access can never be used to reach pod or ClusterIP addresses.
+  # The same list is injected into the dial guard of device-interrogation-service,
+  # inventory-service (the CMDB connectors) and every backend whose entry sets
+  # `privateNetworkDialer: true`, even when egressEnabled is false, so their
+  # deliberate customer-RFC1918 access can never be used to reach pod or
+  # ClusterIP addresses.
   #
   # 169.254.0.0/16 (link-local, including the cloud instance-metadata endpoint
   # at 169.254.169.254) is always excluded by the template and does not need

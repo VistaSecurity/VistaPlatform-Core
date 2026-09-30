@@ -33,7 +33,7 @@ func main() {
 		fixtures  = flag.String("fixtures", "testdata/fixtures.json", "labelled synthetic fixtures")
 		decisions = flag.String("decisions", "", "optional: exported real merge decisions, same JSON shape")
 		out       = flag.String("out", "", "where to write the weights file; empty prints to stdout")
-		modelID   = flag.String("model-id", "matcher-logreg-v1", "the model id stamped on the weights")
+		modelID   = flag.String("model-id", matcher.DefaultModelID, "the model id stamped on the weights")
 		evalOnly  = flag.Bool("eval-only", false, "measure the weights already in -out (or the embedded ones) instead of training")
 		iters     = flag.Int("iterations", matcher.DefaultIterations, "gradient-descent iterations")
 		lr        = flag.Float64("learning-rate", matcher.DefaultLearningRate, "gradient-descent learning rate")

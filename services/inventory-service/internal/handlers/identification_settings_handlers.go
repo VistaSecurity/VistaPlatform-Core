@@ -2,12 +2,14 @@ package handlers
 
 // Settings → Identification rules, the writable half (workstream 4.6).
 //
-// One setting today: the learned matcher's auto-accept threshold. It is the
-// only NEW write path this workstream adds, and the only place in the product
-// where a tenant grants the platform permission to merge two of their assets
-// without asking — so it is deliberately its own small handler rather than a
-// field smuggled into a larger settings payload, and the reachability check for
-// it is a control on a page a tenant can navigate to, not an endpoint.
+// Two settings: the learned matcher's auto-accept threshold, and whether a fixed
+// rule may merge two existing assets it is sure are one device
+// (`auto_merge_existing`, Phase 4). Between them they are the only places
+// in the product where a tenant decides whether the platform may merge two of
+// their assets without asking — so this is deliberately its own small handler
+// rather than a field smuggled into a larger settings payload, and the
+// reachability check for it is a control on a page a tenant can navigate to,
+// not an endpoint.
 
 import (
 	"context"
@@ -33,7 +35,7 @@ type IdentificationSettingsHandler struct {
 
 type identificationSettingsStore interface {
 	Get(ctx context.Context, tenantID uuid.UUID) (services.IdentificationSettings, error)
-	Set(ctx context.Context, tenantID, actorUserID uuid.UUID, threshold float64) (services.IdentificationSettings, error)
+	Update(ctx context.Context, tenantID, actorUserID uuid.UUID, in services.IdentificationSettingsUpdate) (services.IdentificationSettings, error)
 }
 
 // NewIdentificationSettingsHandler wires the handler.
@@ -58,10 +60,12 @@ func (h *IdentificationSettingsHandler) GetIdentificationSettings(c *gin.Context
 
 // UpdateIdentificationSettings handles PUT /settings/identification.
 //
-// `auto_accept_threshold` is a POINTER in the body so "not sent" and "sent as
-// 0" are distinguishable. They mean opposite things — leave it alone, and turn
-// auto-accept OFF — and a plain float64 renders both as 0, so a client sending
-// an unrelated future field would silently disable a tenant's auto-accept.
+// A PARTIAL update: send either field, or both. Both are POINTERS in the body so
+// "not sent" and "sent as 0 / false" are distinguishable. They mean opposite
+// things — leave it alone, and turn it OFF — and a plain float64 or bool renders
+// both as the zero value, so a client that only meant to flip the rule-merge
+// toggle would silently disable a tenant's auto-accept, and the reverse. A body
+// carrying neither field is a 400, not a no-op that reports success.
 func (h *IdentificationSettingsHandler) UpdateIdentificationSettings(c *gin.Context) {
 	tenantID, userID, ok := tenantAndUser(c)
 	if !ok {
@@ -69,15 +73,20 @@ func (h *IdentificationSettingsHandler) UpdateIdentificationSettings(c *gin.Cont
 	}
 	var body struct {
 		AutoAcceptThreshold *float64 `json:"auto_accept_threshold"`
+		AutoMergeExisting   *bool    `json:"auto_merge_existing"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.AutoAcceptThreshold == nil {
+	if err := c.ShouldBindJSON(&body); err != nil || (body.AutoAcceptThreshold == nil && body.AutoMergeExisting == nil) {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "Invalid request body",
-			"message": "auto_accept_threshold is required: a number between 0 and 1, where 0 means never auto-accept",
+			"error": "Invalid request body",
+			"message": "send auto_accept_threshold (a number between 0 and 1, where 0 means never auto-accept), " +
+				"auto_merge_existing (true or false), or both",
 		})
 		return
 	}
-	out, err := h.settings.Set(c.Request.Context(), tenantID, userID, *body.AutoAcceptThreshold)
+	out, err := h.settings.Update(c.Request.Context(), tenantID, userID, services.IdentificationSettingsUpdate{
+		AutoAcceptThreshold: body.AutoAcceptThreshold,
+		AutoMergeExisting:   body.AutoMergeExisting,
+	})
 	if errors.Is(err, services.ErrInvalidAutoAcceptThreshold) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "Invalid auto_accept_threshold",
@@ -91,15 +100,24 @@ func (h *IdentificationSettingsHandler) UpdateIdentificationSettings(c *gin.Cont
 	}
 	out.MatcherModelID = h.matcherModelID
 
-	// The audit trail. `tenant_admin_settings` carries its own change trigger,
-	// so the row-level before/after is recorded whatever happens here; this is
-	// the activity-log entry that names the ACT — a tenant admin changing how
-	// much the platform may decide on its own.
+	// The audit trail. `tenant_admin_settings` carries its own change trigger
+	// (`log_tenant_admin_settings_change`), so the row-level before/after is
+	// recorded whatever happens here; this is the activity-log entry that names
+	// the ACT — a tenant admin changing how much the platform may decide on its
+	// own. Only the fields the caller SENT are listed as changed.
+	newValues := map[string]any{}
+	changed := []string{}
+	if body.AutoAcceptThreshold != nil {
+		newValues["auto_accept_threshold"] = out.AutoAcceptThreshold
+		changed = append(changed, "auto_accept_threshold")
+	}
+	if body.AutoMergeExisting != nil {
+		newValues["auto_merge_existing"] = out.AutoMergeExisting
+		changed = append(changed, "auto_merge_existing")
+	}
 	resourceType := "identification_settings"
 	logAuditActivity(c, "settings.identification.updated", auditmiddleware.EventCategoryConfig, "update",
-		&resourceType, &tenantID, nil,
-		map[string]any{"auto_accept_threshold": out.AutoAcceptThreshold},
-		[]string{"auto_accept_threshold"},
+		&resourceType, &tenantID, nil, newValues, changed,
 		map[string]any{"matcher_model_id": h.matcherModelID})
 
 	c.JSON(http.StatusOK, gin.H{"identification": out})

@@ -49,22 +49,6 @@ type AlertHistory struct {
 	TriggeredAt       time.Time                `json:"triggered_at" db:"triggered_at"`
 }
 
-// NotificationChannel represents a notification channel configuration
-type NotificationChannel struct {
-	ID          uuid.UUID              `json:"id" db:"id"`
-	ChannelName string                 `json:"channel_name" db:"channel_name"`
-	ChannelType string                 `json:"channel_type" db:"channel_type"`
-	Config      map[string]interface{} `json:"config" db:"config"`
-	Enabled     bool                   `json:"enabled" db:"enabled"`
-	TestStatus  *string                `json:"test_status,omitempty" db:"test_status"`
-	LastTestAt  *time.Time             `json:"last_test_at,omitempty" db:"last_test_at"`
-	Description *string                `json:"description,omitempty" db:"description"`
-	CreatedBy   *uuid.UUID             `json:"created_by,omitempty" db:"created_by"`
-	CreatedAt   time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at" db:"updated_at"`
-	UpdatedBy   *uuid.UUID             `json:"updated_by,omitempty" db:"updated_by"`
-}
-
 // CreateAlertThresholdRequest represents a request to create an alert threshold
 type CreateAlertThresholdRequest struct {
 	ThresholdName      string   `json:"threshold_name" binding:"required"`

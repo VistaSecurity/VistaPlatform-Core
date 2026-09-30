@@ -49,7 +49,9 @@ import (
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
 	"github.com/vistasecurity/vistaplatform/shared/identity/classproposal"
+	"github.com/vistasecurity/vistaplatform/shared/identity/derive"
 	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identityaudit"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
@@ -105,6 +107,12 @@ type ObservationSink struct {
 	repo *pgidentity.Repository
 	eng  *identity.Engine
 	err  error
+
+	// Decides which peer hostnames are generic for a tenant ( B2), with
+	// its per-tenant cardinality cache. Built lazily over repo by
+	// genericNames(). Tests may set it before first use to substitute a store.
+	genericOnce sync.Once
+	generic     *identity.GenericNames
 
 	// The rule-based classifier over the CURATED classification_rules table
 	// (ADR-0004 D6, workstream 2.10b), reloaded on an interval so an admin's
@@ -178,6 +186,22 @@ func (s *ObservationSink) engine() (*identity.Engine, *pgidentity.Repository, er
 		s.eng, s.err = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission, Repo: s.repo})
 	})
 	return s.eng, s.repo, s.err
+}
+
+// genericNames returns the sink's generic-hostname decider, building it on first
+// use over the identity repository. If the engine cannot be built (or a test
+// preset one) the static dictionary alone applies; a nil *identity.GenericNames
+// is usable by design.
+func (s *ObservationSink) genericNames() *identity.GenericNames {
+	s.genericOnce.Do(func() {
+		if s.generic != nil {
+			return
+		}
+		if _, repo, err := s.engine(); err == nil {
+			s.generic = identity.NewGenericNames(repo)
+		}
+	})
+	return s.generic
 }
 
 // Persist writes everything an interrogation observed about assetID and its
@@ -267,6 +291,10 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 			if resolveErr != nil {
 				var retained *identity.RetainedObservation
 				if errors.As(resolveErr, &retained) {
+					continue
+				}
+				if errors.Is(resolveErr, errPeerSyntheticNamesOnly) {
+					log.Printf("[ObservationSink] fact %s skipped: subject %v", f.Key, resolveErr)
 					continue
 				}
 				errs = append(errs, fmt.Errorf("fact %s: resolving subject: %w", f.Key, resolveErr))
@@ -377,7 +405,7 @@ func (s *ObservationSink) persistRelationship(
 			if errors.As(err, &retained) {
 				return nil
 			}
-			if errors.Is(err, errPeerContested) {
+			if errors.Is(err, errPeerContested) || errors.Is(err, errPeerSyntheticNamesOnly) {
 				log.Printf("[ObservationSink] %s edge skipped: subject %v", rel.Type, err)
 				return nil
 			}
@@ -391,9 +419,10 @@ func (s *ObservationSink) persistRelationship(
 		if errors.As(err, &retained) {
 			return nil
 		}
-		if errors.Is(err, errPeerContested) {
+		if errors.Is(err, errPeerContested) || errors.Is(err, errPeerSyntheticNamesOnly) {
 			// Not a failure of the interrogation: one edge could not be
-			// attached because a human has to settle who its far end is.
+			// attached because a human has to settle who its far end is, or
+			// because its far end carries nothing that identifies it.
 			// Logged and skipped, so the rest of the job's edges still land.
 			log.Printf("[ObservationSink] %s edge skipped: %v", rel.Type, err)
 			return nil
@@ -469,8 +498,19 @@ func (s *ObservationSink) resolvePeer(
 		}
 	}
 	// No FirstHand: a peer is described by somebody else. See [classIntent].
+	synthetic := peerSyntheticNames(peer)
+	addressEvidence := peerAddressEvidence(peer, obs.Network.SegmentID)
 	res, _, err := s.resolveObservationWith(ctx, engine, obs, classIntent{Proposal: prop}, func(repo *pgidentity.Repository, res identity.Resolution) error {
-		return retainPeerContext(ctx, repo, tenantID, res)
+		if err := retainPeerContext(ctx, repo, tenantID, res); err != nil {
+			return err
+		}
+		if res.Asset.Zero() {
+			return nil
+		}
+		if err := recordSyntheticNames(ctx, repo.Tx(), tenantID, res.Asset.ID, synthetic); err != nil {
+			return err
+		}
+		return recordAddressEvidence(ctx, repo.Tx(), tenantID, res.Asset.ID, addressEvidence)
 	})
 	if err != nil {
 		return identity.AssetRef{}, err
@@ -591,9 +631,17 @@ func (s *ObservationSink) resolveObservationWith(
 			if tErr != nil {
 				return tErr
 			}
+			// The rule-merge switch ( Phase 4): whether a same-device
+			// verdict is stamped on this observation's proposal. A controller's
+			// client table is authoritative evidence, so this is the path that
+			// most often links two records of one device.
+			autoMerge, mErr := identitysettings.ReadAutoMergeExistingFor(ctx, r.Tx(), obs.TenantID)
+			if mErr != nil {
+				return mErr
+			}
 
 			var rErr error
-			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithRepository(r).Resolve(ctx, obs)
+			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).Resolve(ctx, obs)
 			if rErr != nil {
 				return rErr
 			}
@@ -755,6 +803,28 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 	if dynamicScope {
 		obs.DynamicScopes = map[string]bool{scope: true}
 	}
+	var synthetic []string
+	// D3: a MAC the collector did not report can sometimes be worked
+	// out — from an EUI-64 IPv6 address, or from a serial that IS the MAC
+	// (derive.MACFromSerialRegistered, which also requires a registered OUI).
+	// Only when the peer carries no MAC of its own: a reported MAC is strictly
+	// better evidence, and a derived one that differed from it would be noise.
+	// Appended after the loop so the collector's own identifiers keep their
+	// order.
+	statedMAC := strings.TrimSpace(peer.Identifier(string(identity.KindMACAddress))) != ""
+	var derived []identity.Identifier
+	deriveMAC := func(mac, ref string) {
+		for _, d := range derived {
+			if d.Value == mac {
+				return
+			}
+		}
+		derived = append(derived, identity.Identifier{
+			Kind: identity.KindMACAddress, Value: mac, Confidence: derivedMACConfidence,
+			Source: identity.Source{Kind: identity.SourceInferred, Ref: ref},
+		})
+	}
+	segmentScoped := scope != "" && scope != identity.ScopeTenantDefault
 	for _, id := range peer.Identifiers {
 		kind := identity.Kind(id.Kind)
 		if !kind.Valid() {
@@ -773,6 +843,31 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 				kind = identity.KindFQDN
 			}
 		}
+		if peerNameIsSynthetic(kind, id.Value) {
+			// Not identity ( D1): a UUID-form, IP-encoded or `none` name.
+			// Kept as the peer asset's `synthetic_names` attribute
+			// (peerSyntheticNames, written by resolvePeer), never an identifier.
+			synthetic = append(synthetic, id.Value)
+			continue
+		}
+		if kind == identity.KindSerialNumber && !statedMAC {
+			if mac, ok := derive.MACFromSerialRegistered(id.Value); ok {
+				deriveMAC(mac, derive.RefSerial(id.Value))
+			}
+		}
+		if kind == identity.KindIPAddress {
+			if addr, err := netip.ParseAddr(strings.TrimSpace(id.Value)); err == nil {
+				if mac, ok := derive.MACFromEUI64(addr); ok && !statedMAC {
+					deriveMAC(mac, derive.RefEUI64(addr))
+				}
+				// D2: a temporary-shaped IPv6 address, or a link-local one
+				// with no real segment to scope it to, is kept as an attribute
+				// (peerAddressEvidence, written by resolvePeer), not an identifier.
+				if attrlist.AddressAttribute(addr, segmentScoped) != "" {
+					continue
+				}
+			}
+		}
 		// hostname and ip_address identify only WITHIN a scope; the other kinds
 		// a collector can report about a peer are globally unique, and a scope
 		// on one is rejected outright because it would split the uniqueness key.
@@ -784,6 +879,18 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 			Kind: kind, Value: id.Value, Scope: identifierScope, Confidence: 1,
 		})
 	}
+	obs.Identifiers = append(obs.Identifiers, derived...)
+	// A peer is MEASURED — a device told us about it; nobody typed it — so a
+	// hostname many unrelated devices carry (`iphone`, `printer`, or a name three
+	// assets in this tenant already hold) is marked generic at confidence 0.3
+	// ( B2). It is still recorded: it is true. A name an operator DECLARES
+	// on a manual device is not marked (managed_asset.go); that is their
+	// statement of which device this is.
+	obs.Identifiers = s.genericNames().MarkAll(ctx, tenantID.String(), obs.Identifiers)
+
+	// A synthetic name is still the best LABEL when it is the only one, so the
+	// display name and hostname columns choose from it as they always did;
+	// only its identifier is gone.
 	var names []string
 	if obs.DisplayName != "" {
 		names = append(names, obs.DisplayName)
@@ -793,10 +900,11 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 			names = append(names, id.Value)
 		}
 	}
+	names = append(names, synthetic...)
 	if d := hostnamequality.Best(names...); d != "" {
 		obs.DisplayName = d
 	}
-	if h := hostnamequality.BestHostname(peerIdentifierNames(obs.Identifiers)...); h != "" {
+	if h := hostnamequality.BestHostname(append(peerIdentifierNames(obs.Identifiers), synthetic...)...); h != "" {
 		obs.Hostname = strings.ToLower(h)
 	}
 
@@ -819,9 +927,95 @@ func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUI
 		// the case where every identifier it had failed normalisation here. An
 		// identifier-less asset can never be recognised again, so creating one
 		// would mint a duplicate on every run.
+		if len(synthetic) > 0 || len(peerAddressEvidence(peer, scope)) > 0 {
+			// Its only names were synthetic, or its only addresses rotate or
+			// are link-local with nowhere to scope them ( D1, D2). Before
+			// those rules such a peer became an asset held together by a value
+			// that changes; now there is nothing to hold it, and that is a
+			// skipped peer, not a failed job.
+			return identity.Observation{}, classify.ClassProposal{}, fmt.Errorf("%w: peer %q", errPeerSyntheticNamesOnly, obs.DisplayName)
+		}
 		return identity.Observation{}, classify.ClassProposal{}, fmt.Errorf("peer %q carries no usable identifier", obs.DisplayName)
 	}
 	return clean, prop, nil
+}
+
+// errPeerSyntheticNamesOnly means a peer's only identifiers were names that are
+// not identity (hostnamequality.IsIdentityName) or addresses that are not
+// ( D2: temporary-shaped IPv6, unscopable link-local). Callers skip that
+// peer's edge or fact and carry on, the way they treat a contested peer.
+var errPeerSyntheticNamesOnly = errors.New("the peer carries only synthetic names or rotating addresses, which are not identifiers")
+
+// peerNameIsSynthetic is the one test the peer path applies to a name: a
+// hostname or fqdn that is not identity ( D1).
+func peerNameIsSynthetic(kind identity.Kind, value string) bool {
+	return (kind == identity.KindHostname || kind == identity.KindFQDN) && !hostnamequality.IsIdentityName(value)
+}
+
+// peerSyntheticNames is every name on the peer reference that
+// peerObservation refused as an identifier, normalised and deduplicated.
+func peerSyntheticNames(peer di.PeerRef) []string {
+	var names []string
+	for _, id := range peer.Identifiers {
+		if peerNameIsSynthetic(identity.Kind(id.Kind), id.Value) {
+			names = append(names, id.Value)
+		}
+	}
+	return hostnamequality.MergeSyntheticNames(names, nil)
+}
+
+// recordSyntheticNames folds names into the asset's `synthetic_names`
+// attribute on the resolving transaction: most recent first, deduplicated,
+// capped at hostnamequality.MaxSyntheticNames. inventory-service's host
+// observation ingest writes the same attribute through the same
+// attrlist.Record; nothing is written when the list would not change, and there
+// is no history entry — the attribute explains an asset, it is not an event.
+func recordSyntheticNames(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, assetID string, names []string) error {
+	return attrlist.Record(ctx, tx, tenantID.String(), assetID, attrlist.KeySyntheticNames, names, hostnamequality.MaxSyntheticNames)
+}
+
+// derivedMACConfidence is the confidence a derived MAC is recorded with
+// ( Phase 2) — the same value inventory-service's host-observation ingest
+// uses. It does not affect voting; it tells a reviewer the value was worked
+// out, not reported.
+const derivedMACConfidence = 0.9
+
+// peerAddressEvidence is the IPv6 evidence on a peer reference that D2
+// keeps as ATTRIBUTES rather than identifiers, keyed by attribute
+// (attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal). scope is the peer's
+// segment scope (peerObservation's, and obs.Network.SegmentID): a link-local
+// address is an identifier inside a real segment and an attribute outside one.
+// The rule is attrlist.AddressAttribute — the one inventory-service applies.
+func peerAddressEvidence(peer di.PeerRef, scope string) map[string][]string {
+	segmentScoped := scope != "" && scope != identity.ScopeTenantDefault
+	var out map[string][]string
+	for _, id := range peer.Identifiers {
+		if identity.Kind(id.Kind) != identity.KindIPAddress {
+			continue
+		}
+		addr, err := netip.ParseAddr(strings.TrimSpace(id.Value))
+		if err != nil {
+			continue
+		}
+		if key := attrlist.AddressAttribute(addr, segmentScoped); key != "" {
+			if out == nil {
+				out = map[string][]string{}
+			}
+			out[key] = append(out[key], addr.Unmap().WithZone("").String())
+		}
+	}
+	return out
+}
+
+// recordAddressEvidence writes peerAddressEvidence onto the peer's asset, each
+// list capped at attrlist.MaxAddressEvidence, most recent first.
+func recordAddressEvidence(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, assetID string, evidence map[string][]string) error {
+	for _, key := range []string{attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal} {
+		if err := attrlist.Record(ctx, tx, tenantID.String(), assetID, key, evidence[key], attrlist.MaxAddressEvidence); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // scopeFor resolves the network segment a peer's address falls in, which is the
@@ -1041,12 +1235,18 @@ func segmentablePrefix(p netip.Prefix) bool {
 
 // vlanSegmentMetadata is what a learned segment records about itself.
 //
-// `dynamic` is written only when the device ANSWERED: it is a measured
-// statement, and the Network Segments page reports it as one. An unknown
-// posture is recorded as `dhcp: unknown` and nothing else. How identity treats
-// an unknown is the reader's decision, and it is the conservative one in both
-// places that read it: [vlanSegmentSpec.leaseScope] for this run, and
-// ScopeForAddress (shared/identity/postgres) for every run after it.
+// It deliberately does NOT carry `dynamic`. The effective DHCP flag has three
+// possible authors — an operator, a device that measured it, traffic that
+// implied it — with a precedence between them, and that rule lives in exactly
+// one place (pgidentity.RecordSegmentPosture). Writing the key here as well
+// would be a second author outside the rule, able to overwrite an operator's
+// answer with a measurement on any owned row. [ensureVLANSegments] states the
+// posture through the shared helper after the row exists, and only when the
+// device ANSWERED: an unknown posture is recorded as `dhcp: unknown` and
+// nothing else. How identity treats an unknown is the reader's decision, and
+// it is the conservative one in both places that read it:
+// [vlanSegmentSpec.leaseScope] for this run, and ScopeForAddress
+// (shared/identity/postgres) for every run after it.
 func vlanSegmentMetadata(spec vlanSegmentSpec, deviceType, assetID string) map[string]any {
 	meta := map[string]any{
 		"source":          segmentSourceInterrogation,
@@ -1056,23 +1256,30 @@ func vlanSegmentMetadata(spec vlanSegmentSpec, deviceType, assetID string) map[s
 	if deviceType != "" {
 		meta["source_device_type"] = deviceType
 	}
-	if spec.DHCP != dhcpUnknown {
-		meta["dynamic"] = spec.DHCP == dhcpEnabled
-	}
 	return meta
 }
 
 // ensureVLANSegments creates, or refreshes, the cidr segments a device's
 // net.vlans fact declares.
 //
-// It only ever writes rows it owns. The INSERT does nothing on a CIDR that
-// already exists, so an operator-declared segment keeps its name, type and
-// metadata; the UPDATE refreshes only rows a previous interrogation created —
-// under the current label or the legacy `unifi` one.
+// Its ROWS are its own only when it created them. The INSERT does nothing on a
+// CIDR that already exists, so an operator-declared segment keeps its name,
+// type and metadata; the UPDATE refreshes only rows a previous interrogation
+// created — under the current label or the legacy `unifi` one.
+//
+// The DHCP POSTURE is different, and it is written to the matching segment
+// whatever created it ( C2). A controller that answered "this network
+// hands out addresses" has measured a fact about the network, and an operator
+// who drew the same CIDR by hand did not measure it — leaving their segment
+// silent about DHCP is how every home network ended up with addresses still
+// voting on identity. It goes through pgidentity.RecordSegmentPosture, which
+// owns the precedence: the measurement never overwrites an operator's answer,
+// it is recorded beside it and takes over if the operator withdraws theirs.
 //
 // An unknown posture never overwrites a known one: a UniFi controller that
 // measured DHCP on a network and a firewall that routes the same network
 // without knowing are not in disagreement, and the row keeps the answer.
+// An unknown posture is not stated at all.
 func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID, assetID uuid.UUID, value any) error {
 	if s.db == nil {
 		return nil
@@ -1117,6 +1324,28 @@ func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID, asse
 				segmentSourceInterrogation, segmentSourceLegacyUniFi,
 				spec.DHCP == dhcpUnknown); err != nil {
 				return fmt.Errorf("update vlan segment %s: %w", spec.CIDR, err)
+			}
+			if spec.DHCP == dhcpUnknown {
+				continue
+			}
+			var segmentID string
+			if err := tx.QueryRowContext(ctx, `
+				SELECT id::text FROM public.network_segments
+				WHERE tenant_id = $1 AND value = $2 AND segment_type = 'cidr'
+				  AND coalesce(cloud_network_ref, '') = ''`,
+				tenantID, spec.CIDR).Scan(&segmentID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					// The value is taken by a segment of another type (the
+					// unique index ignores type). Identity never consults
+					// such a segment by address, so there is no posture to state.
+					continue
+				}
+				return fmt.Errorf("find vlan segment %s: %w", spec.CIDR, err)
+			}
+			if _, err := pgidentity.RecordSegmentPosture(ctx, tx, tenantID.String(), segmentID,
+				pgidentity.PostureMeasured, spec.DHCP == dhcpEnabled,
+				pgidentity.PostureEvidence{SourceAssetID: assetID.String(), ObservedAt: time.Now()}); err != nil {
+				return fmt.Errorf("record dhcp posture for vlan segment %s: %w", spec.CIDR, err)
 			}
 		}
 		return nil

@@ -534,17 +534,27 @@ spec:
             - name: DISCOVERY_EXTERNAL_JOB_MAX_ADDRESSES
               value: {{ $ext.maxAddressesPerJob | default 16384 | int | toString | quote }}
             {{- end }}
-            {{- if eq $name "device-interrogation-service" }}
-            {{/*
-              Device interrogation intentionally reaches customer RFC1918
-              networks. Give its application-level dial guard the same
+            {{- /*
+              Backends that intentionally reach customer RFC1918 networks:
+              device interrogation talks to appliances, inventory-service runs
+              the tenant-configured NetBox connector (whose private-endpoint
+              opt-in defaults on) and the CMDB connectors, and any backend
+              whose values entry sets `privateNetworkDialer: true` — an
+              Enterprise-only connector host declares itself that way, inside
+              its own edition fence, so this Core-shipped template never names
+              it. Give their application-level dial guard the same
               installation-specific pod/Service exclusions as NetworkPolicy,
-              so that permission cannot be used to reach this cluster.
+              so a private-endpoint permission cannot be used to reach this
+              cluster — nor a connector's "test connection" be used to map it.
+              The two named services are a floor a values override cannot
+              remove.
             */}}
+            {{- $privateDialer := or (has $name (list "device-interrogation-service" "inventory-service")) (eq (toString $svc.privateNetworkDialer) "true") }}
+            {{- if $privateDialer }}
             {{- $networkPolicy := $ctx.Values.networkPolicy | default dict }}
             {{- $internalCIDRs := $networkPolicy.clusterInternalCIDRs | default (list) }}
             {{- if empty $internalCIDRs }}
-            {{- fail "networkPolicy.clusterInternalCIDRs must contain this cluster's pod and Service CIDRs; device interrogation uses it to block application-level access to platform-internal addresses" }}
+            {{- fail (printf "networkPolicy.clusterInternalCIDRs must contain this cluster's pod and Service CIDRs; %s dials customer private networks and uses it to block application-level access to platform-internal addresses" $name) }}
             {{- end }}
             - name: VISTA_PLATFORM_INTERNAL_CIDRS
               value: {{ join "," $internalCIDRs | quote }}
@@ -561,8 +571,8 @@ spec:
             {{- if or (hasPrefix "DISCOVERY_EXTERNAL_" $envName) (hasPrefix "DISCOVERY_EXPLICIT_EXTERNAL_" $envName) }}
             {{- fail (printf "backends.%s.extraEnv sets %s: the explicit external scan target settings are configured only under discovery.explicitExternalTargets (enabled, maxAddressesPerTarget, maxAddressesPerJob) — an extraEnv entry would silently override them. Remove it and set the value there." $name $envName) }}
             {{- end }}
-            {{- if and (eq $name "device-interrogation-service") (eq $envName "VISTA_PLATFORM_INTERNAL_CIDRS") }}
-            {{- fail "backends.device-interrogation-service.extraEnv must not set VISTA_PLATFORM_INTERNAL_CIDRS; configure networkPolicy.clusterInternalCIDRs so the application and NetworkPolicy use the same source of truth" }}
+            {{- if and $privateDialer (eq $envName "VISTA_PLATFORM_INTERNAL_CIDRS") }}
+            {{- fail (printf "backends.%s.extraEnv must not set VISTA_PLATFORM_INTERNAL_CIDRS; configure networkPolicy.clusterInternalCIDRs so the application and NetworkPolicy use the same source of truth" $name) }}
             {{- end }}
             {{- end }}
             {{- with $svc.extraEnv }}

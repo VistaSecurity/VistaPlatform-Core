@@ -102,3 +102,22 @@ func TestConvertNotificationEventToRequest_RealTenantIsNotTreatedAsPlatform(t *t
 		t.Errorf("req.TenantID = %v, want the real tenant %v", req.TenantID, tid)
 	}
 }
+
+// The producer's event id must survive the conversion: it is what makes a NATS
+// redelivery (or the retry queue's re-send) the SAME X-Vista-Event-Id to a
+// webhook receiver, i.e. an idempotency key.
+func TestConvertNotificationEventToRequest_CarriesEventID(t *testing.T) {
+	id := uuid.New()
+	req := convertNotificationEventToRequest(&events.NotificationEvent{
+		EventID: id, AlertSource: "inventory-service", AlertType: "certificate_expiring", Severity: "high",
+	})
+	if req.EventID != id.String() {
+		t.Errorf("req.EventID = %q, want the event's id %q", req.EventID, id)
+	}
+
+	// No id on the event: leave it empty so delivery assigns one; never the nil UUID.
+	req = convertNotificationEventToRequest(&events.NotificationEvent{AlertSource: "system", AlertType: "test", Severity: "info"})
+	if req.EventID != "" {
+		t.Errorf("req.EventID = %q, want empty for an event with no id", req.EventID)
+	}
+}

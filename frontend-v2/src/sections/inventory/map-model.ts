@@ -55,6 +55,12 @@ export interface MapNode {
   /** Lifecycle status — drives the ring, not the fill. '' on a grouping node. */
   status: string;
   riskScore?: number;
+  /** Whether anything has assessed this asset's risk — the server's
+   *  `risk_assessed` (`risk_assessed_by` non-empty). `riskScore` alone cannot say:
+   *  a 0 is "assessed clean" or "nobody looked" depending on this. Optional
+   *  because a payload from before the server sent it has no answer; see
+   *  `nodeRiskForExport` for how absence is read. */
+  riskAssessed?: boolean;
   /** Shortest hop count from the focus asset; 0 is the focus itself. A grouping
    *  node takes the shallowest depth of what it groups. */
   depth: number;
@@ -306,6 +312,7 @@ export function buildMapGraph(nbh: Neighbourhood | undefined): MapGraph {
       group: classGroupOf(n.class_key),
       status: n.asset_status ?? '',
       riskScore: n.risk_score,
+      riskAssessed: n.risk_assessed,
       depth: n.depth,
       isRoot: n.is_root === true || n.asset_id === nbh.root_asset_id,
       // Trimmed, and absent stays absent. `cloud_account: ''` and "no account
@@ -771,4 +778,23 @@ export function legendFor(graph: MapGraph): LegendEntry[] {
     entries.push({ group, style: CLASS_GROUP_STYLES[group], count });
   }
   return entries;
+}
+
+/**
+ * The risk score a node may be EXPORTED with, or undefined when there is none
+ * to state.
+ *
+ * A score is only an assessment when something assessed it. The server says so
+ * with `risk_assessed`; a stored 0 without it is NOT ASSESSED, and writing
+ * `risk_score=0` into a GraphML or Cytoscape file reads, in yEd or Gephi, as
+ * "assessed clean" — the wrong answer, delivered as data, in a file that will
+ * outlive the page. Same rule as the asset CSV, inventory CycloneDX and OCSF
+ * exports (`assetRisk`): assessed means a producer looked, and a positive score
+ * can only have come from one, so it stands even on a payload that predates the
+ * flag. Absent is not zero — the attribute is omitted, not defaulted.
+ */
+export function nodeRiskForExport(n: Pick<MapNode, 'riskScore' | 'riskAssessed'>): number | undefined {
+  const score = n.riskScore;
+  if (typeof score !== 'number' || !Number.isFinite(score)) return undefined;
+  return n.riskAssessed === true || score > 0 ? score : undefined;
 }

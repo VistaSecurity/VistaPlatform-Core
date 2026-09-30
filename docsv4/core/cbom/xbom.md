@@ -104,6 +104,11 @@ It also carries:
   sources disagree about the same fact, **both** are carried, each tagged with
   its source — the disagreement is real and flattening it would publish a
   reconciliation nobody performed.
+- **Risk score only when assessed.** An asset's `vista:asset:risk_score` property
+  is present only if something has assessed the asset's risk. A never-assessed
+  asset carries no score and instead states `vista:asset:risk_assessed` =
+  `false`: a score of `0` means "assessed, nothing found", and the export will
+  not claim that for an asset it has no assessment for.
 - **Open vulnerabilities as `vulnerabilities`.**
 
 ### What is *not* in the vulnerabilities list
@@ -181,7 +186,7 @@ download.
 | `device.domain` | the parent of the FQDN — only when the FQDN actually has one |
 | `device.vendor_name` / `device.model` | `hw.vendor` / `hw.model` |
 | `device.region` / `device.zone` | the asset's region / zone |
-| `device.risk_score` | the asset's risk score |
+| `device.risk_score` | the asset's risk score — **only when the asset has been assessed**. An asset nobody has assessed carries no `risk_score`, not `0`; an assessed asset with a clean result carries `0` |
 | `device.first_seen_time` / `device.last_seen_time` | first discovered / last seen |
 | `device.os.{name, version, kernel_release, cpe_name}` | `os.name`, `os.version`, `os.kernel`, `sw.cpe` |
 | `device.os.type_id` | the OS name mapped onto the OCSF OS enumeration |

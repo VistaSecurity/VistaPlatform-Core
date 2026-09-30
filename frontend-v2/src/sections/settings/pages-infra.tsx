@@ -11,7 +11,7 @@ import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SInput, SToggle, STable, STableRow, STag, StateNote, GREEN, AMBER } from './kit';
 import { LocationModal, NetworkSegmentModal, DeleteInfraModal } from './infra-modals';
 import { ImportSpreadsheetModal } from '../discovery/import-modal';
-import { segmentProvenance, SEGMENT_DHCP_LABEL } from './segment-provenance';
+import { segmentPosture, segmentProvenance } from './segment-provenance';
 import type { SettingsNavItem } from './nav';
 
 type Location = inventoryComponents['schemas']['Location'];
@@ -94,16 +94,23 @@ export function LocationsPage({ meta }: { meta: SettingsNavItem }) {
 // ---- Network Segments -----------------------------------------------------
 const SEGMENT_TYPE_LABEL: Record<string, string> = { cidr: 'CIDR', ip_range: 'IP range', domain: 'Domain', cloud_vpc: 'Cloud VPC' };
 
-// A learned segment says which device it came from and what is known about
-// DHCP on it; a declared one shows its name alone.
+// A learned segment says which device it came from; every segment says what is
+// known about DHCP on it and whose word that is (measured by a device, inferred
+// from traffic, or set by you). "DHCP unknown" is the honest default: on a DHCP
+// network an address does not identify a device, so an unknown is worth a look.
 function SegmentName({ segment }: { segment: NetworkSegment }) {
   const learned = segmentProvenance(segment.metadata);
+  const posture = segmentPosture(segment);
   return (
     <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
       <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{segment.name}</span>
-      {learned && (
-        <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{learned.label} · {SEGMENT_DHCP_LABEL[learned.dhcp]}</span>
-      )}
+      <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>
+        {learned && <>{learned.label} · </>}
+        <span
+          data-testid="segment-dhcp-chip"
+          style={{ color: posture.dhcp === 'unknown' ? 'var(--app-t3)' : 'var(--app-t2)' }}
+        >{posture.text}</span>
+      </span>
     </span>
   );
 }

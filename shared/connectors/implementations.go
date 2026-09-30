@@ -34,9 +34,12 @@ type Implementation struct {
 	// asserted to EXIST by the registry test, so a package that is renamed or
 	// deleted fails the build rather than leaving a registry entry lying.
 	Package string
-	// Enterprise marks an implementation under a services/*/ee/ tree. Such a
-	// path is absent from the open-source Core checkout by construction, so the
-	// existence assertion is skipped there — see the test.
+	// Enterprise marks an implementation under a services/*/ee/ tree or in an
+	// Enterprise-only service. Such a path is absent from the open-source Core
+	// checkout by construction, so the existence assertion is skipped there —
+	// see the test. An Enterprise-only service may not even be NAMED in the
+	// Core tree, so its Package line sits inside an edition fence and a Core
+	// checkout sees the entry with no Package at all.
 	Enterprise bool
 	// Note says what the implementation actually does, when the package path
 	// does not.
@@ -50,38 +53,60 @@ type Implementation struct {
 var implementations = map[string]Implementation{
 	ConnectorAWS: {
 		Package: "services/device-interrogation-service/internal/cloud/aws",
-		Note:    "EC2/S3/RDS/ELB/Lambda/ACM inventory collector; credentials tested by admin-service/internal/integrations",
+		Note: "the client; the collectors are device-interrogation-service/internal/services cloud_discovery_service.go " +
+			"and cloud_enumeration*.go: EC2/VPC/subnet enumeration, ALB/NLB/ELB, API Gateway v2, CloudFront, KMS, S3, RDS. " +
+			"No Lambda collector exists. Credentials tested by the integrations handler",
 	},
 	ConnectorAzure: {
 		Package: "services/device-interrogation-service/internal/cloud/azure",
-		Note:    "VM / storage account / SQL / gateway / function / Key Vault collector",
+		Note: "the client; collectors in device-interrogation-service/internal/services: VM/VNet/subnet enumeration, " +
+			"Application Gateway, load balancer, Key Vault, storage account, SQL. No Functions collector exists",
 	},
 	ConnectorGCP: {
 		Package: "services/device-interrogation-service/internal/cloud/gcp",
-		Note:    "Compute Engine / Cloud Storage / Cloud SQL / load balancer collector",
+		Note: "the client; collectors in device-interrogation-service/internal/services: instance/network/subnetwork " +
+			"enumeration, HTTPS load balancer, SSL proxy, KMS, Cloud Storage, Cloud SQL. No Cloud Functions collector exists",
+	},
+	ConnectorEmail: {
+		Package: "services/notification-service/internal/services",
+		Note:    "delivery_service.go sendEmail, from a tenant notification channel; needs the operator's SMTP settings",
 	},
 	ConnectorSlack: {
 		Package: "services/notification-service/internal/services",
-		Note:    "delivery_service.go sendSlack; admin-service/internal/integrations tests the connection",
+		Note:    "delivery_service.go sendSlack, from a tenant notification channel",
 	},
 	ConnectorPagerduty: {
 		Package: "services/notification-service/internal/services",
-		Note:    "delivery_service.go sendPagerDuty",
+		Note:    "delivery_service.go sendPagerDuty (Events API v2), from a tenant notification channel",
 	},
-	ConnectorDatadog: {
-		Package:    "services/audit-service/ee/siemexport",
-		Note:       "event/metric forwarding",
-		Enterprise: true,
+	ConnectorWebhook: {
+		Package: "services/notification-service/internal/services",
+		Note:    "delivery_service.go sendWebhook + delivery_webhook_pagerduty.go (HMAC signature), from a tenant notification channel",
+	},
+	ConnectorInApp: {
+		Package: "services/notification-service/internal/services",
+		Note:    "delivery_service.go sendInApp; the channel row is seeded when a tenant is created",
 	},
 	ConnectorSplunk: {
-		Package:    "services/audit-service/ee/siemexport",
-		Note:       "finding/audit-event forwarding (OCSF, ADR-0005 D6)",
+		Note:       "format_splunk.go: HEC events for the audit stream (not OCSF, no findings)",
 		Enterprise: true,
 	},
-	ConnectorCustom: {
+	ConnectorDatadog: {
+		Note:       "format_datadog.go: Logs API v2 for the audit stream; contract-tested only",
+		Enterprise: true,
+	},
+	ConnectorElastic: {
+		Note:       "format_elastic.go: _bulk into a data stream or index",
+		Enterprise: true,
+	},
+	ConnectorGenericWebhook: {
+		Note:       "format_webhook.go: JSON array with optional auth and an HMAC signature",
+		Enterprise: true,
+	},
+	ConnectorSBOMUpload: {
 		Package: "services/inventory-service/internal/services",
-		Note: "the generic tenant integration CRUD (asset_service.go ListIntegrations / CreateIntegration). " +
-			"It deliberately dispatches nowhere else, because what a custom integration does is the tenant's to wire",
+		Note: "sbom_ingest.go / sbom_subject.go behind POST /sbom and POST /assets/:id/sbom; " +
+			"the parser is shared/sbom (CycloneDX 1.4-1.7, SPDX 2.2/2.3)",
 	},
 	ConnectorServicenow: {
 		Package:    "services/inventory-service/ee/cmdb/servicenow",
@@ -100,8 +125,8 @@ var implementations = map[string]Implementation{
 		Enterprise: true,
 	},
 	ConnectorNetbox: {
-		Package:    "services/inventory-service/ee/connectors/netbox",
-		Note:       "pull only: sites, prefixes, VLANs, device types and devices. Writes nothing back to NetBox",
+		Note: "pull only: sites, prefixes, VLANs, device types and devices, written through inventory-service's " +
+			"internal source routes. Writes nothing back to NetBox",
 		Enterprise: true,
 	},
 }

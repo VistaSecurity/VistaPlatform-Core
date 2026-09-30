@@ -17,10 +17,9 @@
 // answerable by a build with no ee/ tree.
 //
 // SCOPE. admin-service can only speak for its own routes. Enterprise surfaces
-// carved out of OTHER binaries — SIEM export (audit-service/ee/siemexport) —
-// keep their own response probes from @vistasecurity/primitives/features. Do
-// not extend this map with capabilities this service cannot observe; that would
-// be a guess dressed up as a fact.
+// served by OTHER binaries keep their own response probes from
+// @vistasecurity/primitives/features. Do not extend this map with capabilities
+// this service cannot observe; that would be a guess dressed up as a fact.
 import { useQuery } from '@tanstack/react-query';
 import { clients } from './clients';
 

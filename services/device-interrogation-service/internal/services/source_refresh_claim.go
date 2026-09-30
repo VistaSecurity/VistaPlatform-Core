@@ -8,8 +8,10 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	database "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
 // The cross-tenant read finds only candidate IDs. Policy authorization and work
@@ -22,7 +24,15 @@ func (s *JobQueueService) claimAuthorizedJob(ctx context.Context, agent, tenant 
 		predicate = `tenant_id=$1 AND job_type='device_interrogation' AND (agent_id=$2 OR (agent_id IS NULL AND COALESCE(parameters->>'identity_refresh_executor','')<>'platform'))`
 		args = []interface{}{*tenant, *agent}
 	}
-	rows, err := s.bypassDB.QueryContext(ctx, `SELECT id,tenant_id FROM device_jobs WHERE status='pending' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) AND `+predicate+` AND (NOT COALESCE(parameters?'identity_refresh_request_id',false) OR EXISTS (SELECT 1 FROM tenant_admin_settings policy WHERE policy.tenant_id=device_jobs.tenant_id AND policy.config#>>'{identity_admission,mode}'='enforce' AND policy.config#>>'{identity_enrichment,enabled}'='true')) ORDER BY created_at,id LIMIT 32`, args...)
+	// A job of a tenant that is no longer usable — suspended, canceled or
+	// deleted — is not a candidate. The scheduler stopped creating such jobs
+	// (scheduler_service.go, the same tenantstate predicate), but a job queued
+	// BEFORE the suspension still ran, with the suspended tenant's
+	// credentials. It stays pending: reactivated, the tenant's work resumes;
+	// never reactivated, the job expires.
+	candidateArgs := append(append([]interface{}{}, args...), pq.Array(tenantstate.BlockedPaymentStatuses))
+	usableTenant := fmt.Sprintf(`EXISTS (SELECT 1 FROM tenants t WHERE t.id=device_jobs.tenant_id AND t.deleted_at IS NULL AND COALESCE(t.payment_status,'') <> ALL($%d))`, len(candidateArgs))
+	rows, err := s.bypassDB.QueryContext(ctx, `SELECT id,tenant_id FROM device_jobs WHERE status='pending' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at>clock_timestamp()) AND `+predicate+` AND `+usableTenant+` AND (NOT COALESCE(parameters?'identity_refresh_request_id',false) OR EXISTS (SELECT 1 FROM tenant_admin_settings policy WHERE policy.tenant_id=device_jobs.tenant_id AND policy.config#>>'{identity_admission,mode}'='enforce' AND policy.config#>>'{identity_enrichment,enabled}'='true')) ORDER BY created_at,id LIMIT 32`, candidateArgs...)
 	if err != nil {
 		return nil, err
 	}

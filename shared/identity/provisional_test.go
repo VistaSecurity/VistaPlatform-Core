@@ -67,11 +67,11 @@ func (r *admissionRepo) StoreObservation(context.Context, identity.Observation, 
 }
 
 func (r *admissionRepo) FinishObservation(_ context.Context, _ identity.Observation, id string,
-	res identity.Resolution, decision identity.AdmissionDecision, establish bool) error {
+	res identity.Resolution, decision identity.AdmissionDecision, establish bool) (string, error) {
 	r.finished = append(r.finished, finishedObservation{
 		observationID: id, resolution: res, decision: decision, establish: establish,
 	})
-	return nil
+	return id, nil
 }
 
 func (r *admissionRepo) PreserveObservationDismissal(context.Context, identity.Observation, string, identity.AdmissionDecision) (bool, error) {

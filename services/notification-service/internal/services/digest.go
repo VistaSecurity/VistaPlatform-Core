@@ -165,6 +165,14 @@ func (s *NotificationService) flushDigestGroup(ctx context.Context, g digestGrou
 		ids[i] = it.id
 	}
 
+	if s.tenantBlocked(ctx, g.tenantID) {
+		// Suspended/canceled/deleted since these were batched — drop them rather
+		// than deliver (RC-4), and so they cannot accumulate forever.
+		s.logger.Printf("digest: tenant %s is blocked, dropping %d batched item(s)", *g.tenantID, len(items))
+		_ = s.deleteDigestItems(ctx, ids)
+		return 0, nil
+	}
+
 	ch, ok := s.loadOneChannel(ctx, g.tenantID, g.channelID)
 	if !ok {
 		// Channel removed or disabled — drop the batch so it can't accumulate forever.

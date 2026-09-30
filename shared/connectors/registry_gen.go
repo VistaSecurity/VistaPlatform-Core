@@ -18,10 +18,15 @@ const (
 	ConnectorAWS            = "aws"
 	ConnectorAzure          = "azure"
 	ConnectorGCP            = "gcp"
+	ConnectorEmail          = "email"
 	ConnectorSlack          = "slack"
 	ConnectorPagerduty      = "pagerduty"
-	ConnectorDatadog        = "datadog"
+	ConnectorWebhook        = "webhook"
+	ConnectorInApp          = "in_app"
 	ConnectorSplunk         = "splunk"
+	ConnectorDatadog        = "datadog"
+	ConnectorElastic        = "elastic"
+	ConnectorGenericWebhook = "generic_webhook"
 	ConnectorGithub         = "github"
 	ConnectorGitlab         = "gitlab"
 	ConnectorBitbucket      = "bitbucket"
@@ -50,6 +55,7 @@ const (
 	KindEDRMDM               = "edr_mdm"
 	KindSBOMSource           = "sbom_source"
 	KindSecretsStore         = "secrets_store"
+	KindGeneric              = "generic"
 )
 
 // Direction values.
@@ -58,6 +64,16 @@ const (
 	DirectionPush = "push"
 	DirectionBoth = "both"
 )
+
+// ConfiguredBy values.
+const (
+	ConfiguredByTenant           = "tenant"
+	ConfiguredByPlatformOperator = "platform_operator"
+)
+
+// SchemaSourceNone is the SchemaSource of a live connector with no connection
+// row — an upload endpoint rather than a configured integration.
+const SchemaSourceNone = "none"
 
 // Status values.
 //
@@ -89,8 +105,15 @@ type Connector struct {
 	ProducesClasses []string `json:"produces_classes,omitempty"`
 	Status          string   `json:"status"`
 	// SchemaSource names the CHECK constraint carrying this key while the
-	// CHECKs remain hand-maintained. Empty for planned connectors.
+	// CHECKs remain hand-maintained: platform_integrations, cmdb_sync_profiles,
+	// connector_connections, tenant_notification_channels or siem_integrations.
+	// "none" for a live connector that keeps no connection row (an upload
+	// endpoint); empty for planned connectors.
 	SchemaSource string `json:"schema_source,omitempty"`
+	// ConfiguredBy says who sets the connector up: [ConfiguredByTenant] (the
+	// default) or [ConfiguredByPlatformOperator]. A tenant sees a
+	// platform-operator connector in the catalogue and cannot add it.
+	ConfiguredBy string `json:"configured_by"`
 	// Feature is the entitlement key (a billable_items key) this connector is
 	// gated on, or empty for a Core connector. The EDITION is deliberately not
 	// stored here: shared/entitlements.EditionFor(Feature) is the single source
@@ -106,33 +129,48 @@ var All = []Connector{
 		Label:           "Amazon Web Services",
 		Kind:            "cloud",
 		Direction:       "pull",
-		ProducesClasses: []string{"compute_instance", "object_storage", "managed_database", "cloud_load_balancer", "serverless_function"},
+		ProducesClasses: []string{"compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "api_gateway", "cdn_distribution", "key_store", "object_storage", "managed_database"},
 		Status:          "live",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Pulls EC2, S3, RDS, ELB, Lambda and ACM inventory with placement facts (cloud.account_id, cloud.region, cloud.vpc_id, cloud.subnet_id) and the certificates and keys those services present.",
+		Description:     "Reads EC2 instances, VPCs and subnets; ALB, NLB and classic ELB load balancers; API Gateway (v2) APIs; CloudFront distributions; KMS keys; S3 buckets and RDS instances, with placement facts (cloud.account_id, cloud.region, cloud.vpc_id, cloud.subnet_id). Load-balancer and CloudFront certificates are collected with their ACM metadata. Lambda functions are not collected, and ACM is read only as metadata on those certificates, not as inventory of its own.",
 	},
 	{
 		Key:             "azure",
 		Label:           "Microsoft Azure",
 		Kind:            "cloud",
 		Direction:       "pull",
-		ProducesClasses: []string{"compute_instance", "object_storage", "managed_database", "cloud_load_balancer", "serverless_function", "key_store"},
+		ProducesClasses: []string{"compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"},
 		Status:          "live",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Pulls virtual machines, storage accounts, SQL databases, application gateways, functions and Key Vault inventory, with subscription and region placement facts.",
+		Description:     "Reads virtual machines, virtual networks and subnets; Application Gateway and load balancers; Key Vault keys; storage accounts and SQL databases, with subscription and region placement facts. Azure Functions are not collected.",
 	},
 	{
 		Key:             "gcp",
 		Label:           "Google Cloud Platform",
 		Kind:            "cloud",
 		Direction:       "pull",
-		ProducesClasses: []string{"compute_instance", "object_storage", "managed_database", "cloud_load_balancer", "serverless_function"},
+		ProducesClasses: []string{"compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"},
 		Status:          "live",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Pulls Compute Engine, Cloud Storage, Cloud SQL, load balancers and Cloud Functions inventory, with project and region placement facts.",
+		Description:     "Reads Compute Engine instances, VPC networks and subnetworks; HTTPS load balancers and SSL proxies; Cloud KMS keys; Cloud Storage buckets and Cloud SQL instances, with project and region placement facts. Cloud Functions are not collected.",
+	},
+	{
+		Key:             "email",
+		Label:           "Email",
+		Kind:            "notification",
+		Direction:       "push",
+		ProducesClasses: nil,
+		Status:          "live",
+		SchemaSource:    "tenant_notification_channels",
+		ConfiguredBy:    "tenant",
+		Feature:         "",
+		Description:     "Emails alerts to the recipients listed on a notification channel. Sent through the SMTP settings the platform operator has configured; a channel is flagged in the console while none are. A sink only.",
 	},
 	{
 		Key:             "slack",
@@ -141,9 +179,10 @@ var All = []Connector{
 		Direction:       "push",
 		ProducesClasses: nil,
 		Status:          "live",
-		SchemaSource:    "platform_integrations",
+		SchemaSource:    "tenant_notification_channels",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Delivers alerts to a Slack workspace. A sink only: it never reads, and never creates an asset.",
+		Description:     "Posts alerts to a Slack channel through an incoming-webhook URL held on a notification channel. A sink only: it never reads, and never creates an asset.",
 	},
 	{
 		Key:             "pagerduty",
@@ -152,20 +191,34 @@ var All = []Connector{
 		Direction:       "push",
 		ProducesClasses: nil,
 		Status:          "live",
-		SchemaSource:    "platform_integrations",
+		SchemaSource:    "tenant_notification_channels",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Raises PagerDuty incidents from alerts. A sink only.",
+		Description:     "Raises PagerDuty incidents from alerts through the Events API v2, using the integration (routing) key held on a notification channel. A sink only.",
 	},
 	{
-		Key:             "datadog",
-		Label:           "Datadog",
-		Kind:            "siem",
+		Key:             "webhook",
+		Label:           "Generic webhook",
+		Kind:            "notification",
 		Direction:       "push",
 		ProducesClasses: nil,
 		Status:          "live",
-		SchemaSource:    "platform_integrations",
+		SchemaSource:    "tenant_notification_channels",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Ships events and metrics to Datadog. Classified as a siem sink rather than an observability source because nothing is read back: the platform is the producer in this relationship.",
+		Description:     "POSTs each alert as JSON to a URL you choose, optionally authenticated (bearer, basic or a custom header) and signed with an HMAC-SHA256 signature the receiver can verify. A sink only. Not the SIEM webhook: that one carries the audit event stream and is configured by the platform operator.",
+	},
+	{
+		Key:             "in_app",
+		Label:           "In-app notifications",
+		Kind:            "notification",
+		Direction:       "push",
+		ProducesClasses: nil,
+		Status:          "live",
+		SchemaSource:    "tenant_notification_channels",
+		ConfiguredBy:    "tenant",
+		Feature:         "",
+		Description:     "Delivers alerts to the notification bell in the console. Every tenant gets this channel automatically when it is created; it needs no setup. A sink only.",
 	},
 	{
 		Key:             "splunk",
@@ -174,9 +227,46 @@ var All = []Connector{
 		Direction:       "push",
 		ProducesClasses: nil,
 		Status:          "live",
-		SchemaSource:    "platform_integrations",
-		Feature:         "",
-		Description:     "Ships findings and audit events to Splunk (OCSF for event export, per ADR-0005 D6). Push only today; a pull direction would mean treating Splunk as an inventory source, which is a separate decision.",
+		SchemaSource:    "siem_integrations",
+		ConfiguredBy:    "platform_operator",
+		Feature:         "siem_export",
+		Description:     "Ships the platform audit event stream to Splunk HTTP Event Collector (HEC event format; verified against Splunk Enterprise 9.4). Findings are not exported and events are not OCSF. Configured by the platform operator (SIEM Export, Enterprise), not per tenant. Push only; a pull direction would mean treating Splunk as an inventory source, which is a separate decision.",
+	},
+	{
+		Key:             "datadog",
+		Label:           "Datadog",
+		Kind:            "siem",
+		Direction:       "push",
+		ProducesClasses: nil,
+		Status:          "live",
+		SchemaSource:    "siem_integrations",
+		ConfiguredBy:    "platform_operator",
+		Feature:         "siem_export",
+		Description:     "Ships the platform audit event stream to Datadog Logs (Logs API v2, DD-API-KEY, site-derived intake). Contract-tested against the documented API, not verified against a live Datadog organization. Configured by the platform operator (SIEM Export, Enterprise), not per tenant. Classified as a siem sink rather than an observability source because nothing is read back.",
+	},
+	{
+		Key:             "elastic",
+		Label:           "Elasticsearch",
+		Kind:            "siem",
+		Direction:       "push",
+		ProducesClasses: nil,
+		Status:          "live",
+		SchemaSource:    "siem_integrations",
+		ConfiguredBy:    "platform_operator",
+		Feature:         "siem_export",
+		Description:     "Ships the platform audit event stream to Elasticsearch through the bulk API, into a data stream or an index, with an API key or basic authentication (verified against Elasticsearch 8.15). A re-sent batch is not duplicated: the event id is the document id. Configured by the platform operator (SIEM Export, Enterprise), not per tenant.",
+	},
+	{
+		Key:             "generic_webhook",
+		Label:           "Generic webhook (SIEM)",
+		Kind:            "siem",
+		Direction:       "push",
+		ProducesClasses: nil,
+		Status:          "live",
+		SchemaSource:    "siem_integrations",
+		ConfiguredBy:    "platform_operator",
+		Feature:         "siem_export",
+		Description:     "Posts batches of the platform audit event stream as a JSON array to a URL the operator chooses, with no authentication, bearer, basic or one custom header, and an HMAC-SHA256 signature the receiver can verify. Our own documented contract rather than a vendor's. Configured by the platform operator (SIEM Export, Enterprise), not per tenant.",
 	},
 	{
 		Key:             "github",
@@ -186,6 +276,7 @@ var All = []Connector{
 		ProducesClasses: nil,
 		Status:          "registered",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Reads repository metadata and dependency data. Produces software inventory, not assets — a repository is not a configuration item, and the source-code scanning that once mapped repos to assets was removed because no repository-to-asset mapping ever existed. REGISTERED, NOT LIVE: the platform_integrations CHECK accepts the key, but nothing in the tree dispatches on it — the collector went with the source-code scanning that was deleted.",
 	},
@@ -197,6 +288,7 @@ var All = []Connector{
 		ProducesClasses: nil,
 		Status:          "registered",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Reads project metadata and dependency data. Produces software inventory, not assets. REGISTERED, NOT LIVE: no collector dispatches on this key.",
 	},
@@ -208,6 +300,7 @@ var All = []Connector{
 		ProducesClasses: nil,
 		Status:          "registered",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Reads repository metadata and dependency data. Produces software inventory, not assets. REGISTERED, NOT LIVE: no collector dispatches on this key.",
 	},
@@ -219,74 +312,81 @@ var All = []Connector{
 		ProducesClasses: []string{"key_store"},
 		Status:          "registered",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Reads Vault's own posture — which secret engines and PKI mounts exist, the transit key algorithms and sizes, and PKI role configuration — as key_store assets. Posture only: no secret and no key material is retrieved or stored (CLAUDE.md, \"Collect posture, never key material\"). REGISTERED, NOT LIVE: the key is carried by the platform_integrations CHECK, but no Vault collector exists — it is roadmap (docsv4/internal/roadmap/encryption-detection-opportunities.md). No code dispatches on the type, and the tenant-facing create handler's `oneof` does not accept it, so nothing reaches Vault today.",
 	},
 	{
 		Key:             "custom",
 		Label:           "Custom integration",
-		Kind:            "cmdb",
+		Kind:            "generic",
 		Direction:       "both",
 		ProducesClasses: nil,
-		Status:          "live",
+		Status:          "registered",
 		SchemaSource:    "platform_integrations",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "A tenant-defined integration configured through the generic integration form. Deliberately claims no classes: what a custom integration produces is not knowable from the registry, so nothing downstream may assume a shape for it.",
+		Description:     "A generic integration row: the schema and the integrations API accept the type, but nothing reads, runs or delivers through it, there is no page to add one, and it claims no asset classes. REGISTERED, NOT LIVE. The direction is nominal.",
 	},
 	{
 		Key:             "servicenow",
 		Label:           "ServiceNow CMDB",
 		Kind:            "cmdb",
 		Direction:       "both",
-		ProducesClasses: []string{"server", "workstation", "switch", "router", "firewall", "printer", "application", "business_service"},
+		ProducesClasses: []string{"server", "hypervisor", "virtual_machine", "computer", "workstation", "network_device", "switch", "router", "firewall", "load_balancer", "access_point", "storage_device", "printer", "hardware", "application", "business_service"},
 		Status:          "live",
 		SchemaSource:    "cmdb_sync_profiles",
+		ConfiguredBy:    "tenant",
 		Feature:         "cmdb_sync",
-		Description:     "Two-way sync with the ServiceNow CMDB: pull configuration items as assets, push discovered assets and their relationships back. The class tree is ServiceNow-derived (ADR-0002 D2), so the CI-class mapping is close to identity.",
+		Description:     "Two-way sync with the ServiceNow CMDB. Push: hardware assets go through the Identification and Reconciliation Engine, so ServiceNow's own rules decide whether a CI already exists, with the relationships between them (runs on, hosted on, depends on, contains, ...). Pull: one paginated listing per CI class the class mapping names — servers, network and storage devices, virtual machines, applications and business services — creating the matching assets, incrementally on the last-updated time. Certificates, keys and crypto configurations are not written as CIs; the crypto posture travels in the CI description. Basic and OAuth client credentials only. Contract-tested against ServiceNow's documented APIs, not verified against a live instance.",
 	},
 	{
 		Key:             "device42",
 		Label:           "Device42",
 		Kind:            "cmdb",
 		Direction:       "both",
-		ProducesClasses: []string{"server", "workstation", "switch", "router", "firewall", "application"},
+		ProducesClasses: []string{"hardware", "hypervisor", "switch", "server", "virtual_machine", "cluster"},
 		Status:          "live",
 		SchemaSource:    "cmdb_sync_profiles",
+		ConfiguredBy:    "tenant",
 		Feature:         "cmdb_sync",
-		Description:     "Two-way sync with a Device42 CMDB.",
+		Description:     "Two-way sync with Device42, devices only. Push: infrastructure assets become Device42 devices; certificates, keys, crypto configurations and libraries are not sent, and a device is never matched by name alone (by its Device42 id or serial number). The crypto posture goes in the device's notes. Pull: every device, page by page, classified by its type and switch / virtual-host / blade flags (a plain physical device is `hardware`, not a guessed server). Basic authentication only. Contract-tested against Device42's published API, not verified against a live instance.",
 	},
 	{
 		Key:             "solarwinds",
 		Label:           "SolarWinds",
 		Kind:            "cmdb",
 		Direction:       "pull",
-		ProducesClasses: []string{"server", "switch", "router", "firewall"},
+		ProducesClasses: []string{"firewall", "load_balancer", "wireless_controller", "access_point", "router", "switch", "printer", "storage_device", "hypervisor", "workstation", "server", "hardware"},
 		Status:          "live",
 		SchemaSource:    "cmdb_sync_profiles",
+		ConfiguredBy:    "tenant",
 		Feature:         "cmdb_sync",
-		Description:     "Pulls monitored nodes from SolarWinds as assets. Pull only: SolarWinds is a monitoring system of record, and pushing discovered devices into it would create nodes it would then try to poll.",
+		Description:     "Pulls the monitored nodes from SolarWinds Orion, page by page, and classifies each from its machine type and description text (switch, router, firewall, server, ...); a node no keyword recognises becomes `hardware`. Pull only: SolarWinds is a monitoring system of record, and pushing discovered devices into it would create nodes it would then try to poll. Basic authentication only. Contract-tested against the Orion SDK documentation, not verified against a live Orion.",
 	},
 	{
 		Key:             "oomnitza",
 		Label:           "Oomnitza",
 		Kind:            "cmdb",
 		Direction:       "both",
-		ProducesClasses: []string{"server", "workstation", "mobile", "application"},
+		ProducesClasses: []string{"laptop", "workstation", "server", "virtual_machine", "mobile", "printer", "network_device", "switch", "router", "firewall", "access_point", "storage_device", "hardware"},
 		Status:          "live",
 		SchemaSource:    "cmdb_sync_profiles",
+		ConfiguredBy:    "tenant",
 		Feature:         "cmdb_sync",
-		Description:     "Two-way sync with Oomnitza's enterprise technology management inventory.",
+		Description:     "Two-way sync with Oomnitza's asset register, assets only. Push: infrastructure assets become Oomnitza assets; certificates, keys, crypto configurations and libraries are not sent. Pull: every asset, page by page, classified by its asset type (laptops, desktops, servers, virtual machines, phones and tablets, printers, network gear, storage); a type it does not know becomes `hardware`, not a guessed server. The type, status and last-modified field names are Oomnitza defaults. Contract-tested against Oomnitza's published API, not verified against a live instance.",
 	},
 	{
 		Key:             "netbox",
 		Label:           "NetBox",
 		Kind:            "network_source_of_truth",
 		Direction:       "pull",
-		ProducesClasses: []string{"server", "switch", "router", "firewall"},
+		ProducesClasses: []string{"switch", "router", "firewall", "vpn_gateway", "load_balancer", "wireless_controller", "access_point", "server", "hypervisor", "storage_device", "bmc", "printer", "workstation", "laptop", "iot_device", "plc", "rtu", "hmi", "unknown_host"},
 		Status:          "live",
 		SchemaSource:    "connector_connections",
+		ConfiguredBy:    "tenant",
 		Feature:         "connector_netbox",
-		Description:     "Pulls sites, prefixes, VLANs, device types and devices from NetBox (ADR-0001 D3 Q3, ADR-0004 D5). Sites become location context, prefixes and VLANs become network segments, devices become observations through the identification engine. NetBox is the source of truth for network structure, so the pull direction wins on conflict. Direction is PULL, not both: v1 writes NOTHING back. What NetBox does not know about is surfaced as a read-only Drift view for the network team to act on in NetBox itself — pushing discovered devices into a source of truth would make it a mirror of our guesses rather than a statement of their intent. A push direction is a separate, deliberate decision.",
+		Description:     "Pulls sites, prefixes, VLANs, device types and devices from NetBox (ADR-0001 D3 Q3, ADR-0004 D5). Sites become location context, prefixes and VLANs become network segments, devices become observations through the identification engine, classed by their NetBox device role (a role the shipped table and the connection's own mapping do not know arrives as `unknown_host`, never a guess). Where the two disagree: NetBox's site and region are written onto the assets it matches, while a prefix that matches a network segment you already drew keeps your name, environment, tags and auto-approval — only provenance and site and VLAN details are added. Direction is PULL, not both: v1 writes NOTHING back. What NetBox does not know about is surfaced as a read-only Drift view for the network team to act on in NetBox itself — pushing discovered devices into a source of truth would make it a mirror of our guesses rather than a statement of their intent. A push direction is a separate, deliberate decision.",
 	},
 	{
 		Key:             "jira",
@@ -296,6 +396,7 @@ var All = []Connector{
 		ProducesClasses: nil,
 		Status:          "planned",
 		SchemaSource:    "",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Creates and updates Jira issues from tickets. Push only, and deliberately so: the boundary review refused a workflow engine, so Jira owns the workflow and the platform owns the finding.",
 	},
@@ -307,6 +408,7 @@ var All = []Connector{
 		ProducesClasses: []string{"workstation", "mobile"},
 		Status:          "planned",
 		SchemaSource:    "",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Pulls managed endpoints with their OS, hardware and compliance facts. The managed-endpoint coverage a network-observation-only inventory cannot reach: a laptop that never appears on a monitored segment.",
 	},
@@ -318,6 +420,7 @@ var All = []Connector{
 		ProducesClasses: []string{"workstation", "mobile"},
 		Status:          "planned",
 		SchemaSource:    "",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Pulls managed macOS and iOS endpoints with their OS, hardware and software inventory.",
 	},
@@ -329,6 +432,7 @@ var All = []Connector{
 		ProducesClasses: []string{"server", "workstation"},
 		Status:          "planned",
 		SchemaSource:    "",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
 		Description:     "Adapter over an existing osquery fleet, reading host facts and software inventory from the customer's own deployment. An adapter, not an embedding: osquery was rejected as a dependency on CGO and licence grounds (ADR-0004), so this consumes results rather than linking the engine.",
 	},
@@ -337,16 +441,33 @@ var All = []Connector{
 		Label:           "SBOM upload",
 		Kind:            "sbom_source",
 		Direction:       "pull",
-		ProducesClasses: nil,
-		Status:          "planned",
-		SchemaSource:    "",
+		ProducesClasses: []string{"application"},
+		Status:          "live",
+		SchemaSource:    "none",
+		ConfiguredBy:    "tenant",
 		Feature:         "",
-		Description:     "Ingests a CycloneDX 1.6 or SPDX 2.3/3.0 document uploaded by the tenant and turns it into software installs against an existing asset. Produces no assets of its own: an SBOM describes what runs on something, and inventing the something from a document nobody verified is how a CMDB fills with ghosts.",
+		Description:     "Ingests a CycloneDX 1.4–1.7 or SPDX 2.2/2.3 JSON document you upload (Discovery → SBOM Upload) and records its components as software installs. Uploaded against an existing asset, it adds to that asset's Software tab and creates no asset. With no target asset, the document's own subject becomes an application asset that waits in Approvals as \"declared from SBOM upload\" until someone admits it. XML, SPDX 3.0 and cryptographic (CBOM) components are refused or skipped with a warning, and the dependency graph is counted but not stored. There is no stored connection: it is an upload, not a configured integration.",
 	},
 }
 
 // Kinds is the connector-kind vocabulary, in YAML order.
-var Kinds = []string{"cloud", "cmdb", "network_source_of_truth", "itsm", "siem", "notification", "edr_mdm", "sbom_source", "secrets_store"}
+var Kinds = []string{"cloud", "cmdb", "network_source_of_truth", "itsm", "siem", "notification", "edr_mdm", "sbom_source", "secrets_store", "generic"}
+
+// RetiredCheckValues are values a schema.sql CHECK still accepts that nothing
+// acts on and the catalogue does not offer, keyed by SchemaSource and then by
+// value, with the reason. The audit treats them as accounted for; it fails if
+// one is no longer in its CHECK.
+var RetiredCheckValues = map[string]map[string]string{
+	"platform_integrations": {
+		"datadog":   "Dead row type. Datadog forwarding is SIEM export (audit.siem_integrations); admin-service refuses to create, update or test a platform_integrations row of this type.",
+		"pagerduty": "Dead row type. PagerDuty alerts are delivered from tenant notification channels (tenant_notification_channels); admin-service refuses to create, update or test a platform_integrations row of this type.",
+		"slack":     "Dead row type. Slack alerts are delivered from tenant notification channels (tenant_notification_channels); admin-service refuses to create, update or test a platform_integrations row of this type.",
+		"splunk":    "Dead row type. Splunk forwarding is SIEM export (audit.siem_integrations); admin-service refuses to create, update or test a platform_integrations row of this type.",
+	},
+	"tenant_notification_channels": {
+		"sms": "Reserved, never delivered. notification-service accepts the type and its sender is a placeholder that refuses every message permanently. Not offered anywhere, and not promised: it is neither live nor planned.",
+	},
+}
 
 var byKey = func() map[string]Connector {
 	m := make(map[string]Connector, len(All))

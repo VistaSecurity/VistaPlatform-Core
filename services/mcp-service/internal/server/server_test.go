@@ -221,6 +221,36 @@ func newFixture(t *testing.T) *fixture {
 						`"provenance":{"source_kind":"inferred","source_ref":"query:model","confidence":0,"model_id":"mock-model-1"}}`,
 					jsonString("(environment:production) and status:monitoring"))
 			}
+		// Artifact comparison. The base id chooses the branch: the platform's
+		// two real non-2xx answers — the Core/no-entitlement 402 and a genuine
+		// 404 for an artifact that does not exist — must stay distinguishable.
+		case strings.Contains(r.URL.Path, "/cbom/compare/"):
+			switch {
+			case strings.Contains(r.URL.Path, compareMissingBase):
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"Artifact not found"}`))
+			case strings.Contains(r.URL.Path, compareCoreBase):
+				w.WriteHeader(http.StatusPaymentRequired)
+				_, _ = w.Write([]byte(`{"error":"This capability is not included in your subscription",` +
+					`"feature":"cbom_signing","detail":"CBOM artifact comparison is an Enterprise capability and is not part of this build."}`))
+			default:
+				_, _ = w.Write([]byte(`{"summary":{"regressions":1},"changes":[]}`))
+			}
+		// Compliance summary. The framework id chooses the branch, mirroring
+		// what compliance-engine's GetSummary answers.
+		case strings.HasSuffix(r.URL.Path, "/compliance-engine/summary"):
+			switch r.URL.Query().Get("framework_id") {
+			case frameworkNotActivated:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"This framework is not activated for your organization. Activate it to evaluate it.",` +
+					`"reason":"framework_not_activated"}`))
+			case frameworkForbiddenOther:
+				// A 403 that is NOT the activation answer: no `reason`.
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"Permission outside token scope","required_permission":"compliance.read"}`))
+			default:
+				_, _ = w.Write([]byte(`{"framework":{"name":"Best Practices"},"kpis":{"score":88}}`))
+			}
 		case strings.HasSuffix(r.URL.Path, "/history"):
 			_, _ = w.Write([]byte(`{"history":[{"id":"h1","action":"updated","source":"discovery"}]}`))
 		case strings.HasSuffix(r.URL.Path, "/asset-classes"):

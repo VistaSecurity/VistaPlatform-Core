@@ -7,10 +7,18 @@ import (
 
 // ObservationRepository is implemented by durable repositories. Rollout stays
 // disabled until every consumer understands resolutions without an asset.
+//
+// FinishObservation returns the id of the evidence row the resolution ended up
+// on. It is normally the id StoreObservation returned; it differs when that row
+// was already linked to a DIFFERENT asset and the sighting was split off onto a
+// row of its own (the postgres store's observation split). The engine reports
+// the returned id in [Resolution.ObservationID], because callers write the
+// sighting's retained context (payloads, host inventories) against it, and that
+// context must follow the sighting to the asset it resolved to.
 type ObservationRepository interface {
 	AdmissionMode(context.Context, string) (string, error)
 	StoreObservation(context.Context, Observation, AdmissionDecision) (string, error)
-	FinishObservation(context.Context, Observation, string, Resolution, AdmissionDecision, bool) error
+	FinishObservation(context.Context, Observation, string, Resolution, AdmissionDecision, bool) (string, error)
 	PreserveObservationDismissal(context.Context, Observation, string, AdmissionDecision) (bool, error)
 }
 
@@ -98,9 +106,11 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 		}
 		if settled != nil {
 			settled.ObservationID = id
-			if err := recorder.FinishObservation(ctx, obs, id, *settled, decision, true); err != nil {
+			finished, err := recorder.FinishObservation(ctx, obs, id, *settled, decision, true)
+			if err != nil {
 				return Resolution{}, err
 			}
+			settled.ObservationID = finished
 			return *settled, nil
 		}
 	}
@@ -109,8 +119,10 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 		return Resolution{}, err
 	}
 	res.ObservationID = id
-	if err := recorder.FinishObservation(ctx, obs, id, res, decision, mode == "enforce"); err != nil {
+	finished, err := recorder.FinishObservation(ctx, obs, id, res, decision, mode == "enforce")
+	if err != nil {
 		return Resolution{}, err
 	}
+	res.ObservationID = finished
 	return res, nil
 }

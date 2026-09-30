@@ -9,6 +9,9 @@
 // clients.csrf.test.ts / edition-gating.test.ts. A static top-level import
 // here would eval clients.ts against the real (unstubbed) globals first and
 // poison the module cache for the rest of the file.
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const fetchStub = vi.fn(async () => nextResponse());
@@ -90,5 +93,121 @@ describe('B-33: fetchAlertCatalogSources', () => {
   it('extracts the `source` field off each catalog entry', async () => {
     nextResponse = () => json({ catalog: [{ id: 'certificate_expiring', source: 'inventory-service' }, { id: 'sensor_offline', source: 'sensor-manager' }] });
     await expect(mod.fetchAlertCatalogSources()).resolves.toEqual(['inventory-service', 'sensor-manager']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M26 — the dropdown must offer every source a producer can publish.
+//
+// The dropdown was a hand-kept list; `discovery`, `ticketing`,
+// `remediation_plans` and `billing` were real producers it omitted, so a rule
+// scoped to them could never be created and source-specific routing for those
+// events silently never fired. This finds every AlertSource the Go producers
+// publish to `notifications.send` — from the source, not from a second list — and
+// fails when the UI's option universe lacks one.
+//
+// Mutation-check both ways: drop an entry from NON_REGISTRY_ALERT_SOURCES (fails
+// naming it); add `AlertSource: "brand_new"` to any producer (fails naming it).
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+
+function walkGo(dir: string, out: string[] = []): string[] {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) {
+      if (e.name === 'node_modules' || e.name === 'vendor' || e.name === '.git') continue;
+      walkGo(p, out);
+    } else if (e.name.endsWith('.go') && !e.name.endsWith('_test.go')) {
+      out.push(p);
+    }
+  }
+  return out;
+}
+
+/** Sources published to notifications.send: every file that publishes to the
+ *  subject or POSTs to /internal/send, outside notification-service itself. */
+function producerSources(): { literals: Map<string, string[]>; dynamicFiles: string[] } {
+  const literals = new Map<string, string[]>();
+  const dynamicFiles: string[] = [];
+  for (const file of [...walkGo(join(REPO_ROOT, 'services')), ...walkGo(join(REPO_ROOT, 'shared'))]) {
+    const rel = file.slice(REPO_ROOT.length + 1);
+    if (rel.startsWith('services/notification-service/')) continue; // the consumer, not a producer
+    const src = readFileSync(file, 'utf8');
+    if (!src.includes('SubjectNotificationsSend') && !src.includes('/internal/send')) continue;
+    for (const m of src.matchAll(/(?:AlertSource:|"alert_source":)\s*"([^"]+)"/g)) {
+      literals.set(m[1], [...(literals.get(m[1]) ?? []), rel]);
+    }
+    if (/AlertSource:\s*[A-Za-z_]/.test(src)) dynamicFiles.push(rel);
+  }
+  return { literals, dynamicFiles };
+}
+
+/** Sources standards/alert-registry.yaml assigns to TENANT-track alert types —
+ *  what GET /alert-catalog (and so the dropdown) returns. */
+function tenantTrackRegistrySources(): string[] {
+  const text = readFileSync(join(REPO_ROOT, 'standards', 'alert-registry.yaml'), 'utf8');
+  const sources: string[] = [];
+  for (const block of text.split(/\n {2}- id: /).slice(1)) {
+    const track = /\n\s+track:\s*(\w+)/.exec(block)?.[1];
+    const source = /\n\s+source:\s*(\S+)/.exec(block)?.[1];
+    if (track === 'tenant' && source) sources.push(source);
+  }
+  return sources;
+}
+
+// Producers whose AlertSource is a variable, not a literal. Each is safe ONLY
+// because of the reason given; a NEW dynamic producer must be added here on
+// purpose (or, better, pass a literal).
+const DYNAMIC_PRODUCERS: Record<string, string> = {
+  'services/compliance-engine/internal/services/alert_engine_service.go':
+    "the stateful alert engine forwards the alert's registry `source` (tenant-track sources are in the option list via GET /alert-catalog)",
+  'services/monitoring-service/internal/jobs/alert_evaluator.go':
+    'reads req["alert_source"], whose literal ("monitoring") is scanned in the same file',
+  'services/cluster-sensor-service/internal/services/alert_service.go':
+    'reads req["alert_source"], whose literal ("discovery") is scanned in the same file',
+};
+
+// Sources that only ever appear on PLATFORM-scoped notifications (tenant_id
+// nil), which are routed by platform rules in admin-ui — Settings → Notification
+// Delivery — never by a tenant's routing rule, so the tenant dropdown must not
+// offer them.
+const PLATFORM_SCOPED_SOURCES = new Set(['monitoring']);
+
+describe('M26: every Go-published alert source is offered by the routing-rule dropdown', () => {
+  it('finds the producers (guards against the scan silently matching nothing)', () => {
+    const { literals } = producerSources();
+    // A scan that finds nothing would make every assertion below vacuous.
+    expect([...literals.keys()]).toEqual(expect.arrayContaining(['discovery', 'ticketing', 'remediation_plans', 'audit']));
+    // Core publishes five sources; Enterprise adds billing (ee/billing), which the
+    // public (Core) tree does not carry.
+    let minProducers = 5;
+    expect(literals.size).toBeGreaterThanOrEqual(minProducers);
+  });
+
+  it('offers every source a producer publishes', () => {
+    const { literals } = producerSources();
+    const offered = new Set(mod.alertSourceOptions(tenantTrackRegistrySources(), 'all'));
+    const missing = [...literals.entries()]
+      .filter(([source]) => !offered.has(source) && !PLATFORM_SCOPED_SOURCES.has(source))
+      .map(([source, files]) => `${source}  (published by ${[...new Set(files)].join(', ')})`);
+    expect(missing, `producers publish alert sources the dropdown does not offer — add them to NON_REGISTRY_ALERT_SOURCES in alert-sources.ts:\n${missing.join('\n')}`).toEqual([]);
+  });
+
+  it('knows every producer whose source is a variable', () => {
+    const { dynamicFiles } = producerSources();
+    const unknown = dynamicFiles.filter((f) => !(f in DYNAMIC_PRODUCERS));
+    expect(unknown, `a producer publishes a non-literal AlertSource this guard cannot resolve — pass a literal or add it to DYNAMIC_PRODUCERS with a reason:\n${unknown.join('\n')}`).toEqual([]);
+  });
+
+  it('does not offer platform-scoped sources to tenants', () => {
+    const offered = new Set(mod.alertSourceOptions(tenantTrackRegistrySources(), 'all'));
+    for (const s of PLATFORM_SCOPED_SOURCES) expect(offered.has(s)).toBe(false);
   });
 });

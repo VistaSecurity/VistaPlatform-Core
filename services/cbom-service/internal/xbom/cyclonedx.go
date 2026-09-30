@@ -31,6 +31,7 @@ const (
 	propAssetRegn  = propPrefix + "asset:region"
 	propAssetZone  = propPrefix + "asset:zone"
 	propAssetRisk  = propPrefix + "asset:risk_score"
+	propAssetRAsmt = propPrefix + "asset:risk_assessed"
 	propAssetFirst = propPrefix + "asset:first_seen_at"
 	propAssetLast  = propPrefix + "asset:last_seen_at"
 	propIDPrefix   = propPrefix + "identifier:"
@@ -674,7 +675,15 @@ func baseAssetProperties(a Asset) []formatters.CDXProperty {
 		{Name: propAssetPath, Value: a.ClassPath},
 		{Name: propAssetStat, Value: a.AssetStatus},
 		{Name: propAssetOwnsp, Value: a.AssetOwnership},
-		{Name: propAssetRisk, Value: strconv.Itoa(a.RiskScore)},
+	}
+	// An asset nobody has assessed has NO risk score, not a score of 0: 0 is a
+	// finding ("assessed, nothing found") and the exporter must not assert it
+	// about an asset it has no assessment for. The explicit `risk_assessed=false`
+	// keeps the absence legible to a reader of the document.
+	if a.RiskAssessed {
+		props = append(props, formatters.CDXProperty{Name: propAssetRisk, Value: strconv.Itoa(a.RiskScore)})
+	} else {
+		props = append(props, formatters.CDXProperty{Name: propAssetRAsmt, Value: "false"})
 	}
 	props = appendIfSet(props, propAssetEnv, a.Environment)
 	props = appendIfSet(props, propAssetBU, a.BusinessUnit)

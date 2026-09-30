@@ -1,0 +1,109 @@
+{
+  "scenario": "cloud-aws-scheduled",
+  "runs": [
+    [
+      {
+        "protocol": "",
+        "dest_ip": "0.0.0.0",
+        "port": 0,
+        "confidence": 0.80,
+        "hostname": "example-audit-logs",
+        "source_ip": null,
+        "metadata": {
+          "at_rest": true,
+          "cloud_provider": "aws",
+          "cloud_region": "us-east-1",
+          "device_type": "aws_s3_bucket",
+          "discovery_method": "cloud_api",
+          "integration_id": "{{INTEGRATION_ID}}",
+          "raw_metadata": {
+            "algorithm": "AES-256",
+            "arn": "arn:aws:s3:::example-audit-logs",
+            "discovery_method": "cloud_api",
+            "encrypted": true,
+            "encryption_type": "aws-kms",
+            "region": "us-east-1",
+            "resource_type": "s3_bucket"
+          }
+        }
+      },
+      {
+        "protocol": "",
+        "dest_ip": "0.0.0.0",
+        "port": 0,
+        "confidence": 0.80,
+        "hostname": "orders-db",
+        "source_ip": null,
+        "metadata": {
+          "at_rest": true,
+          "cloud_provider": "aws",
+          "cloud_region": "us-east-1",
+          "device_type": "aws_rds_instance",
+          "discovery_method": "cloud_api",
+          "integration_id": "{{INTEGRATION_ID}}",
+          "raw_metadata": {
+            "algorithm": "AES-256",
+            "arn": "arn:aws:rds:us-east-1:123456789012:db:orders-db",
+            "discovery_method": "cloud_api",
+            "encrypted": true,
+            "encryption_type": "aws-kms",
+            "region": "us-east-1",
+            "resource_type": "rds_instance"
+          }
+        }
+      }
+    ],
+    [
+      {
+        "protocol": "",
+        "dest_ip": "0.0.0.0",
+        "port": 0,
+        "confidence": 0.80,
+        "hostname": "example-audit-logs",
+        "source_ip": null,
+        "metadata": {
+          "at_rest": true,
+          "cloud_provider": "aws",
+          "cloud_region": "us-east-1",
+          "device_type": "aws_s3_bucket",
+          "discovery_method": "cloud_api",
+          "integration_id": "{{INTEGRATION_ID}}",
+          "raw_metadata": {
+            "algorithm": "AES-256",
+            "arn": "arn:aws:s3:::example-audit-logs",
+            "discovery_method": "cloud_api",
+            "encrypted": true,
+            "encryption_type": "aws-kms",
+            "region": "us-east-1",
+            "resource_type": "s3_bucket"
+          }
+        }
+      },
+      {
+        "protocol": "",
+        "dest_ip": "0.0.0.0",
+        "port": 0,
+        "confidence": 0.80,
+        "hostname": "orders-db",
+        "source_ip": null,
+        "metadata": {
+          "at_rest": true,
+          "cloud_provider": "aws",
+          "cloud_region": "us-east-1",
+          "device_type": "aws_rds_instance",
+          "discovery_method": "cloud_api",
+          "integration_id": "{{INTEGRATION_ID}}",
+          "raw_metadata": {
+            "algorithm": "AES-256",
+            "arn": "arn:aws:rds:us-east-1:123456789012:db:orders-db",
+            "discovery_method": "cloud_api",
+            "encrypted": true,
+            "encryption_type": "aws-kms",
+            "region": "us-east-1",
+            "resource_type": "rds_instance"
+          }
+        }
+      }
+    ]
+  ]
+}

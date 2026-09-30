@@ -1,9 +1,14 @@
 package models
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
 // NetworkSegment represents a network segment (CIDR, IP range, or domain). Environment is
@@ -57,6 +62,15 @@ type NetworkSegment struct {
 	// above is, for the same reason.
 	SourceKind *string `json:"source_kind,omitempty" db:"source_kind"`
 	SourceRef  *string `json:"source_ref,omitempty" db:"source_ref"`
+	// Dynamic is the effective DHCP posture — does this network hand out
+	// addresses — and DynamicSource is whose statement it is: "operator",
+	// "measured" or "inferred". Both are read off Metadata (see
+	// HydratePosture), never stored on their own, and both are null when no
+	// source has said anything: unknown is not "off". DynamicSourceName is the
+	// name of the device a measurement came from, for the row's provenance text.
+	Dynamic           *bool   `json:"dynamic" db:"-"`
+	DynamicSource     *string `json:"dynamic_source" db:"-"`
+	DynamicSourceName *string `json:"dynamic_source_name,omitempty" db:"-"`
 	// Joined for responses (from locations join)
 	LocationName     *string `json:"location_name,omitempty" db:"location_name"`
 	LocationFullPath *string `json:"location_full_path,omitempty" db:"location_full_path"`
@@ -84,7 +98,49 @@ type NetworkSegmentInput struct {
 	AutoApproveSources []string               `json:"auto_approve_sources"`
 	Tags               map[string]interface{} `json:"tags"`
 	Metadata           map[string]interface{} `json:"metadata"`
+	// DHCP is the operator's statement about whether this network hands out
+	// addresses. Three states, because the third one is a request: omitted
+	// keeps whatever the segment has, true/false sets the operator's answer
+	// (which no measurement overwrites), and null withdraws it so the segment
+	// falls back to what devices and traffic say.
+	DHCP OptionalBool `json:"dhcp,omitzero"`
 }
+
+// OptionalBool is a JSON boolean that tells "absent" from "null" from a value —
+// which a *bool cannot: encoding/json decodes an absent key and an explicit
+// null to the same nil. Set is false when the key was absent; Value is nil for
+// an explicit null.
+type OptionalBool struct {
+	Set   bool
+	Value *bool
+}
+
+// UnmarshalJSON implements json.Unmarshaler. It is only called when the key is
+// present, which is what makes Set meaningful.
+func (o *OptionalBool) UnmarshalJSON(b []byte) error {
+	o.Set = true
+	if strings.TrimSpace(string(b)) == "null" {
+		o.Value = nil
+		return nil
+	}
+	var v bool
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("must be true, false or null: %w", err)
+	}
+	o.Value = &v
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler.
+func (o OptionalBool) MarshalJSON() ([]byte, error) {
+	if o.Value == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(*o.Value)
+}
+
+// IsZero lets `omitzero` drop an unset field.
+func (o OptionalBool) IsZero() bool { return !o.Set }
 
 // Discovery sources a segment's auto-approval can cover.
 //
@@ -180,6 +236,31 @@ func (s *NetworkSegment) HydrateAutoApproveSources() {
 		return
 	}
 	s.AutoApproveSources = AutoApproveSourcesFromMetadata(s.Metadata)
+}
+
+// HydratePosture fills Dynamic and DynamicSource from Metadata. Called wherever
+// a segment is read back for a caller, beside HydrateAutoApproveSources, so the
+// two are never out of step with the row.
+func (s *NetworkSegment) HydratePosture() {
+	if s == nil {
+		return
+	}
+	s.Dynamic, s.DynamicSource = nil, nil
+	dyn, src := pgidentity.PostureFromMetadata(s.Metadata)
+	s.Dynamic = dyn
+	if src != "" {
+		v := string(src)
+		s.DynamicSource = &v
+	}
+}
+
+// PostureEvidenceAssetID is the asset the effective posture was measured from,
+// or "" — what the service resolves to a device name.
+func (s *NetworkSegment) PostureEvidenceAssetID() string {
+	if s == nil || s.DynamicSource == nil {
+		return ""
+	}
+	return pgidentity.PostureEvidenceAssetID(s.Metadata, pgidentity.PostureSource(*s.DynamicSource))
 }
 
 // NetworkSegmentFilters are query parameters for listing network segments.

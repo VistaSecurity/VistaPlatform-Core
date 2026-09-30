@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 )
@@ -156,6 +157,17 @@ func (h *WorkspaceHandlers) GetSummary(c *gin.Context) {
 		// instead of surfacing a 500.
 		if errors.Is(err, services.ErrFrameworkNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Framework not found"})
+			return
+		}
+		// A published framework the tenant has not activated. 403 ("this
+		// tenant's state can't"), like the neighbouring edition/licence
+		// refusals — not a 500. `reason` identifies it positively so a client
+		// (the MCP tool) does not have to sniff the sentence.
+		if errors.Is(err, services.ErrFrameworkNotLicensed) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":  "This framework is not activated for your organization. Activate it to evaluate it.",
+				"reason": sharedapi.ReasonFrameworkNotActivated,
+			})
 			return
 		}
 		// Log genuine evaluation failures for debugging.

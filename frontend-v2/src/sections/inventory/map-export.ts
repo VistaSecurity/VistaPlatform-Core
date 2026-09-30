@@ -15,7 +15,7 @@
 //
 // Pure functions, so the serialisers are pinned against golden fixtures rather
 // than eyeballed in a downloaded file.
-import type { MapEdge, MapGraph, MapNode } from './map-model';
+import { nodeRiskForExport, type MapEdge, type MapGraph, type MapNode } from './map-model';
 
 /** Escape for XML TEXT and ATTRIBUTE content.
  *
@@ -35,6 +35,7 @@ export function xmlEscape(value: string | number | boolean | null | undefined): 
 /** The node attributes both formats carry, in one place so the two exports
  *  cannot describe different graphs. */
 function nodeFields(n: MapNode, rootId: string): Record<string, string | number> {
+  const risk = nodeRiskForExport(n);
   return {
     label: n.label,
     // `node_kind` is what tells the importing tool which boxes are assets. A
@@ -48,7 +49,9 @@ function nodeFields(n: MapNode, rootId: string): Record<string, string | number>
     asset_status: n.status,
     depth: n.depth,
     is_root: n.id === rootId ? 'true' : 'false',
-    ...(n.riskScore === undefined ? {} : { risk_score: n.riskScore }),
+    // Only an ASSESSED score is exported (see `nodeRiskForExport`): a 0 that means
+    // "nobody looked" must be absent, not `0`.
+    ...(risk === undefined ? {} : { risk_score: risk }),
   };
 }
 

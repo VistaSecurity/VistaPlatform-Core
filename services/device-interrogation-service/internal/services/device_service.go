@@ -266,9 +266,17 @@ func (s *DeviceService) resolveObservation(
 			if tErr != nil {
 				return tErr
 			}
+			// The rule-merge switch ( Phase 4), same transaction, same
+			// reasons: it decides whether a same-device verdict is stamped on
+			// this observation's proposal. The merge itself is inventory-service's
+			// rule-merge executor's, whichever service opened the proposal.
+			autoMerge, mErr := identitysettings.ReadAutoMergeExistingFor(ctx, r.Tx(), obs.TenantID)
+			if mErr != nil {
+				return mErr
+			}
 
 			var rErr error
-			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithRepository(r).Resolve(ctx, obs)
+			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).Resolve(ctx, obs)
 			if rErr != nil {
 				return rErr
 			}
@@ -712,7 +720,7 @@ func (s *DeviceService) attachAddressIdentifiers(ctx context.Context, repo *pgid
 	if strings.TrimSpace(hostname) == "" && strings.TrimSpace(ip) == "" {
 		return nil
 	}
-	segmentID, _ := s.segmentScope(ctx, tenantID, strings.TrimSpace(ip), strings.TrimSpace(hostname), "")
+	segmentID, _ := s.deviceSegmentScope(ctx, tenantID, strings.TrimSpace(ip), strings.TrimSpace(hostname), "", "")
 	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 
 	var ids []identity.Identifier

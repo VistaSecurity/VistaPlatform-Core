@@ -34,6 +34,15 @@ func TestPartialCloudRunStillProcessesResults(t *testing.T) {
 			in:   &models.JobResult{Success: false},
 			want: false,
 		},
+		// A cloud run writes its own rows and hands over no assets. Its
+		// partial (and failed) runs must still get a processing block — the
+		// source-refresh state machine waits on it.
+		// Mutation: drop `|| materializedByExecutor(result)` and this goes red.
+		{
+			name: "partial cloud run that wrote its own rows",
+			in:   &models.JobResult{Success: false, Assets: []models.DiscoveredAsset{}, Metadata: map[string]interface{}{metaMaterializedByExecutor: true}},
+			want: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -33,25 +33,24 @@ type activityLogService interface {
 type ActivityLogHandler struct {
 	service      activityLogService
 	alertService *services.AlertService
-	// siemService is the Enterprise SIEM tee (see edition.go). Nil in a Core
-	// build — and nil in Enterprise too until an exporter is constructed — so
-	// every use of it is nil-guarded. Interface-typed rather than a concrete
-	// *SIEMService precisely so the implementation can live outside Core.
-	siemService SIEMForwarder
+	// doorbell is rung after each stored entry so export-feed consumers read
+	// forward promptly (see edition.go). Nil without NATS; every use is
+	// nil-guarded.
+	doorbell StoredDoorbell
 }
 
 func NewActivityLogHandler(service *services.ActivityLogService) *ActivityLogHandler {
 	return &ActivityLogHandler{service: service}
 }
 
-// NewActivityLogHandlerWithMonitoring wires the alert evaluator and, in an
-// Enterprise build, the SIEM forwarder. Pass a nil siemService for Core: audit
-// logging is unaffected, the events are simply not forwarded anywhere.
-func NewActivityLogHandlerWithMonitoring(service *services.ActivityLogService, alertService *services.AlertService, siemService SIEMForwarder) *ActivityLogHandler {
+// NewActivityLogHandlerWithMonitoring wires the alert evaluator and the
+// stored-events doorbell. A nil doorbell (no NATS) leaves audit logging
+// unaffected; feed consumers then pick new events up at their next poll.
+func NewActivityLogHandlerWithMonitoring(service *services.ActivityLogService, alertService *services.AlertService, doorbell StoredDoorbell) *ActivityLogHandler {
 	return &ActivityLogHandler{
 		service:      service,
 		alertService: alertService,
-		siemService:  siemService,
+		doorbell:     doorbell,
 	}
 }
 
@@ -93,23 +92,9 @@ func (h *ActivityLogHandler) LogActivity(c *gin.Context) {
 		}()
 	}
 
-	// Send to SIEM integrations (non-blocking)
-	if h.siemService != nil {
-		go func() {
-			eventMap := map[string]interface{}{
-				"id":              logEntry.ID,
-				"event_type":      logEntry.EventType,
-				"event_category":  logEntry.EventCategory,
-				"action":          logEntry.Action,
-				"success":         logEntry.Success,
-				"user_id":         logEntry.UserID,
-				"tenant_id":       logEntry.TenantID,
-				"compliance_tags": logEntry.ComplianceTags,
-				"occurred_at":     logEntry.OccurredAt,
-			}
-			h.siemService.SendEvent(c.Request.Context(), eventMap)
-		}()
-	}
+	// Tell export-feed consumers something was stored (fire-and-forget; a
+	// no-op when nil). The NATS subscriber goes through the same seam.
+	services.RingStored(h.doorbell, &logEntry)
 
 	c.JSON(http.StatusCreated, gin.H{"id": logEntry.ID, "message": "Activity logged successfully"})
 }

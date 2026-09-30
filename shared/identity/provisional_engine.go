@@ -3,10 +3,12 @@ package identity
 // The engine half of provisional inventory: rules D2 (creation) and D3
 // (corroboration, supporting evidence, hearsay yields) of.
 //
-// Every entry point here is gated on [Config.ProvisionalInventory], which is
-// false by default. With the flag off this file changes nothing: the same
-// observations reach the same outcomes they reached before it existed, which
-// is what makes the PR that introduced it behaviour-neutral.
+// Creation and hearsay-yields are gated on [Config.ProvisionalInventory], which
+// is false by default. Supporting evidence ([Engine.resolveSupporting]) is not
+// any more: since A1 the floor routes a fully-owned observation whose
+// identifiers all belong to ONE asset here whatever the flag says, because
+// that shortcut is about ownership, not about provisional inventory. The
+// admission branch's single-owner shortcut is still flag-gated.
 
 import (
 	"context"
@@ -69,6 +71,15 @@ func (e *Engine) provisionalMatchMode(ctx context.Context, ref AssetRef, matched
 		// path seeds the candidate directly). It is still a direct answer about
 		// this asset, so it corroborates.
 		return provisionalCorroborate, nil
+	}
+	// A generic name is not corroboration ( B2): two records sharing
+	// `iphone` agree about nothing. It never votes, so it should not be in
+	// `matched`; skipping it here keeps the rule in force if it ever is.
+	matched = withoutGeneric(matched)
+	if len(matched) == 0 {
+		// Nothing but generic names: no agreement to corroborate with, and no
+		// address to yield. The ordinary match stands, unchanged.
+		return provisionalNone, nil
 	}
 	for _, id := range matched {
 		if id.Kind != KindIPAddress {
@@ -231,6 +242,17 @@ func isSighting(obs Observation) bool {
 //
 // And an observation that is not a SIGHTING at all — see [isSighting] — gets
 // the link and the history entry and nothing else, whatever the asset's status.
+//
+// Nor does a sighting linked to the asset by a LEASE alone — an address, while
+// the observation names a device or the address is in a dynamic scope (
+// C1, [Engine.leaseOnlyLink]): the lease is evidence about whoever holds it
+// now, so it attaches nothing, moves no clock, whatever the asset's status, and
+// comes back `unresolved` with no asset so no caller writes its context there.
+//
+// Two callers: the admission branch (not-established evidence, flag-gated) and
+// the floor ( A1 — every identifier already belongs to this one asset, so
+// there is nothing new to attach and the call amounts to a touch or a
+// provisional refresh).
 func (e *Engine) resolveSupporting(
 	ctx context.Context,
 	obs Observation,
@@ -248,11 +270,74 @@ func (e *Engine) resolveSupporting(
 		// happened rather than touching a row that is not there.
 		return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
 	}
+	if len(e.muted) > 0 {
+		// Inside a hearsay-yields re-run (yieldToDirectEvidence). The outer
+		// resolution owns every write for this observation: it falls back to an
+		// ordinary match on the provisional asset when the re-run names no
+		// OTHER asset. Writing supporting evidence here as well would put two
+		// entries on one timeline for one observation. A zero Asset is what
+		// tells the yield there is nowhere to move the address.
+		return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
+	}
+	link := matchedAgainst(ids, owners, ref.ID)
+	if genericOnly(link) {
+		// B2: the ONLY thing tying this observation to the asset is a
+		// generic name — `iphone`, `printer`, a name the tenant sees on three
+		// or more assets. That is no link at all: it says nothing about which
+		// device was met. So the asset is not a candidate, exactly as
+		// resolveContested drops it, and nothing is written to it — no
+		// identifier (a MAC arriving beside a shared default name must not
+		// fill in another phone's provisional record: the C1 wrong merge with
+		// a name standing in for the lease), no clock, and no history entry,
+		// because every unrenamed phone's sighting would otherwise leave one on
+		// whichever record first held the name.
+		return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
+	}
 	attach, unattached := splitByOwner(ids, owners, ref.ID)
 	sighting := isSighting(obs)
 	changes := map[string]any{"supporting": true, "sighting": sighting}
 	if e.observationID != "" {
 		changes["observation_id"] = e.observationID
+	}
+	// A generic name in the link is not corroboration either: `iphone` plus a
+	// lease is still a lease link.
+	if sighting && e.leaseOnlyLink(obs, ids, withoutGeneric(link)) {
+		// C1: the ONLY thing tying this observation to the asset is an
+		// address, and that address says nothing about WHICH device was met —
+		// see [Engine.leaseOnlyLink]. An address is a lease, not an identity:
+		// this sighting is about whatever holds the lease NOW, which need not
+		// be the thing the asset describes.
+		//
+		// So nothing is attached — not a device-binding identifier, and not
+		// the names either (they came with the same device) — and last-seen is
+		// NOT advanced: the asset was not shown to be there. This is the path
+		// that fused an access point's MAC and serial onto a laptop's
+		// advertised name because the two held one DHCP lease at different
+		// times.
+		//
+		// Status-independent on purpose. A provisional asset would otherwise
+		// have the identifiers attached; an established one would otherwise be
+		// kept fresh by a different device's traffic. The link is recorded in
+		// the asset's history, which says why it wrote nothing.
+		//
+		// And the resolution names NO asset. Every intake path writes context
+		// onto a resolution's asset — facts (the OUI vendor, the model, mDNS
+		// services), the segment placement, a class proposal, relationship
+		// edges — and all of that came from the device holding the lease now.
+		// Handing back the asset would let a caller do in facts what this
+		// branch refuses to do in identifiers. `unresolved` with a zero asset
+		// is the outcome every caller already treats as "evidence retained,
+		// nothing to write to", and the observation stays unlinked, which is
+		// the truth: nothing has shown which asset it belongs to.
+		unattached = append(unattached, attach...)
+		changes["address_only_link"] = true
+		if len(unattached) > 0 {
+			changes["unattached"] = identifierKeys(unattached)
+		}
+		if err := e.history(ctx, ref, obs, at, ActionUpdated, changes); err != nil {
+			return Resolution{}, err
+		}
+		return Resolution{Outcome: OutcomeUnresolved, Unattached: unattached}, nil
 	}
 	if !sighting {
 		// Name-to-address context: a DNS answer about a name this asset holds.
@@ -322,6 +407,10 @@ type provisionalPlacement struct {
 // ambiguity it is, and refused with the same reason an overlapping segment
 // gets — the point of the rule is that there is ONE answer to "which VLAN is
 // this on".
+//
+// And a DYNAMIC segment is no place for a record whose only identity is an
+// address ( 1c): with no name and no device-binding identifier the answer
+// is [ReasonDynamicAddressWithoutDeviceBinding].
 func (e *Engine) provisionalScopeFor(ctx context.Context, obs Observation, ids []Identifier) (provisionalPlacement, error) {
 	scoped := false
 	segment := ""
@@ -352,6 +441,18 @@ func (e *Engine) provisionalScopeFor(ctx context.Context, obs Observation, ids [
 		return provisionalPlacement{reason: ReasonNoDeviceOrAddressBinding}, nil
 	case segment == "":
 		return provisionalPlacement{reason: ReasonNetworkScopeUnresolved}, nil
+	}
+	if (e.dynamic[segment] || obs.DynamicScopes[segment]) && !carriesName(ids) && !carriesDeviceBinding(ids) {
+		// 1c: on a DHCP segment, evidence that is an address and nothing
+		// else describes whoever holds the lease today. A record built from it
+		// has nothing to be recognised by but that lease, so the next device
+		// handed the address is "another sighting" of it — the IP-only record
+		// that absorbs every later holder. Refused before the topology
+		// question, because no answer to it would make this evidence name a
+		// device. A name or a device-binding identifier alongside the address
+		// is something to recognise the record by, and those are created as
+		// before.
+		return provisionalPlacement{reason: ReasonDynamicAddressWithoutDeviceBinding}, nil
 	}
 	checker, ok := e.repo.(ProvisionalScopeChecker)
 	if !ok {
@@ -398,6 +499,12 @@ func (e *Engine) resolveProvisional(
 		// recognised again, whatever created it.
 		return Resolution{}, fmt.Errorf("%w: refusing to create a provisional asset with no identifier", ErrNoUsableIdentifier)
 	}
+	if allInferred(ids) {
+		// Guard 1 of Phase 2, restated at this create too: a derived
+		// identifier never mints a record. Unreachable today — placement needs
+		// a scoped name or address, and neither is ever derived.
+		return Resolution{}, fmt.Errorf("%w: refusing to create a provisional asset whose only identifiers are derived", ErrNoUsableIdentifier)
+	}
 	classKey, classSource, classRef, classConf := e.classForCreate(obs)
 	newAsset := NewAsset{
 		ClassKey:        classKey,
@@ -440,6 +547,87 @@ func (e *Engine) resolveProvisional(
 		Asset:    ref,
 		ClassKey: classKey,
 	}, nil
+}
+
+// leaseOnlyLink reports whether the identifiers linking an observation to an
+// asset amount to a lease and nothing more ( C1). It requires the link to
+// be ALL `ip_address` — any name, MAC or stronger kind in common is
+// corroboration and the answer is false — and then either of:
+//
+//   - the observation carries a device-binding identifier (C1 as written):
+//     it names a device, the asset does not hold that identifier (it would be
+//     part of the link if it did), and the address is the only thing the two
+//     share;
+//   - every linking address is in a DYNAMIC scope. The floor reaches here
+// since A1 with an address-only sighting inside a DHCP range, and
+//     ADR-0002 D3 already says such an address decides nothing — today's
+//     lease is tomorrow's other host. Letting it move last-seen would keep
+//     the previous holder fresh for as long as anything holds the lease.
+//
+// An empty link is not a lease link; it is no link, and the callers never
+// reach here without one.
+func (e *Engine) leaseOnlyLink(obs Observation, ids, linking []Identifier) bool {
+	if len(linking) == 0 {
+		return false
+	}
+	allDynamic := true
+	for _, id := range linking {
+		if id.Kind != KindIPAddress {
+			return false
+		}
+		if !e.dynamic[id.Scope] && !obs.DynamicScopes[id.Scope] {
+			allDynamic = false
+		}
+	}
+	return allDynamic || carriesDeviceBinding(ids)
+}
+
+// deviceBindingKinds are the identifiers that name one physical or logical
+// device rather than a lease on an address or a name somebody chose: a NIC, a
+// host key, a serial, an installed agent or sensor, a cloud resource.
+//
+// It is C1's list verbatim. `cmdb_sys_id` and `declaration_id` are not in
+// it: they are records ABOUT a device, written by a person or a sync, not
+// evidence met on the wire.
+var deviceBindingKinds = map[Kind]bool{
+	KindMACAddress:            true,
+	KindSSHHostKeyFingerprint: true,
+	KindSerialNumber:          true,
+	KindAgentID:               true,
+	KindSensorID:              true,
+	KindCloudResourceID:       true,
+}
+
+// carriesDeviceBinding reports whether the observation names a device.
+//
+// A DERIVED device binding counts ( Phase 2): a MAC worked out from an
+// EUI-64 address or a serial still says "this sighting is about some particular
+// NIC". Both callers use the answer to REFUSE something — the address-only link
+// attaches nothing, 1c's placement refuses an IP-only record — or, for 1c, to
+// allow a record that has something besides a lease to be recognised by. Either
+// way counting it is the safe reading; not counting it would let a sighting
+// that names another device through a derivation be treated as one that names
+// none, and attach its identifiers to whatever holds the lease.
+func carriesDeviceBinding(ids []Identifier) bool {
+	for _, id := range ids {
+		if deviceBindingKinds[id.Kind] {
+			return true
+		}
+	}
+	return false
+}
+
+// carriesName reports whether the observation carries a name kind — the
+// things a person or a device chose to call it — as opposed to only an address
+// or a device binding.
+func carriesName(ids []Identifier) bool {
+	for _, id := range ids {
+		switch id.Kind {
+		case KindHostname, KindFQDN, KindName:
+			return true
+		}
+	}
+	return false
 }
 
 // withoutKeys drops the identifiers whose key is in the set.

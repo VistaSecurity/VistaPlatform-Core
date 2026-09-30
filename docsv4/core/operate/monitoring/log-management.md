@@ -20,11 +20,11 @@ Set these variables in `.env`, `.env.prod`, or through AWS parameter stores befo
 When `ENABLE_INCIDENT_HOOKS=true`, monitoring-service will:
 1. Evaluate each stored log via `IncidentResponseHook`
 2. Auto-create a security incident when PII/security patterns trip
-3. Send notifications through configured monitoring notification channels (Slack, webhook, PagerDuty, email)
+3. Publish a platform-scoped `monitoring` / `security_incident` notification to the notification service, which routes it through the platform notification channels and rules (in-app, email, Slack, webhook, PagerDuty)
 4. Record an audit entry (`access_type=incident`) in `platform_log_access_audit` with `access_result=created`
-5. If the hook fails (missing channel, API error, etc.) an `access_type=incident` entry is still added with `access_result=error` and the error message for audit/replay
+5. If the hook fails (NATS unavailable, publish error, etc.) an `access_type=incident` entry is still added with `access_result=error` and the error message for audit/replay
 
-Use admin UI → Settings → Notifications to configure channels.
+Configure who is told in the admin console under **Settings → Notification Delivery**. Incident notices are platform notifications: they go to the platform channels and rules only, never to a tenant's own rules, even when the log line belonged to a tenant (that tenant's id is carried as `affected_tenants` metadata).
 
 ## Retention & Archival
 - Hot storage policy: 90 days (logs remain `status=active`)
@@ -49,7 +49,7 @@ docker compose exec postgres psql -U crypto_user -d crypto_inventory -c \
 1. These tables are part of `scripts/database/schema.sql` (there is no separate migration file — the schema is applied as a whole; see [Database Migrations](../deployment/database-migrations.md)). Confirm they're present before enabling logging.
 2. Ensure monitoring-service IAM role has access to the S3 log bucket and KMS key.
 3. Verify retention job logs (`monitoring-service` container) to confirm archival/deletion runs.
-4. Confirm incident notifications reach Slack/PagerDuty as expected before enabling in production.
+4. Confirm incident notifications reach the channels you configured in **Settings → Notification Delivery** (check its delivery history) before enabling in production.
 
 ## Related Documentation
 - [Monitoring Setup](./monitoring.md) - Complete monitoring and alerting setup

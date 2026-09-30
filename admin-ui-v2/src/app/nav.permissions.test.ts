@@ -38,7 +38,6 @@ const ROUTE_GATES: Record<string, string | string[]> = {
   'security/activity': 'platform.audit',
   // audit-service RequirePermission(audit.read) → platform.audit for operators
   'security/retention': 'platform.audit',
-  'security/siem': 'platform.audit',
   // admin-service GET /admin/settings → platform.settings
   'security/policy': 'platform.settings',
   // compliance-engine /admin frameworks → catalogs.manage
@@ -133,7 +132,7 @@ describe('seeded roles', () => {
       'jobs',
       'system', 'system/services', 'system/gateway', 'system/alerts',
       'staff', 'staff/staff',
-      'security', 'security/activity', 'security/retention', 'security/siem',
+      'security', 'security/activity', 'security/retention',
     ]);
   });
 });

@@ -204,10 +204,22 @@ func TestEveryRegistryServiceHasAnEventCategory(t *testing.T) {
 		t.Fatalf("parsed only %d route_prefix entries out of %s; the registry shape changed and this guard needs updating", len(matches), path)
 	}
 
+	enterpriseOnly := enterpriseOnlyRegistryServices(t, string(raw))
+
 	inRegistry := map[string]bool{}
 	for _, m := range matches {
 		svc := m[1]
 		inRegistry[svc] = true
+		if enterpriseOnly[svc] {
+			// Edition-gated: absent from the Core tree, so it registers its
+			// own category from its own module (RegisterServiceEventCategory)
+			// and this Core table must NOT name it. The service's tests pin
+			// the registration.
+			if _, ok := serviceEventCategory[svc]; ok {
+				t.Errorf("serviceEventCategory names %q, an `edition: enterprise` registry service — Core code must not name it; register it from the service's own module", svc)
+			}
+			continue
+		}
 		if _, ok := serviceEventCategory[svc]; !ok {
 			t.Errorf("registry service %q has no entry in serviceEventCategory — every request it audits would be filed under %q by default", svc, EventCategorySystem)
 		}
@@ -225,6 +237,78 @@ func TestEveryRegistryServiceHasAnEventCategory(t *testing.T) {
 			t.Errorf("resourceEventCategory[%q] = %q, which audit.activity_logs rejects", res, c)
 		}
 	}
+}
+
+// enterpriseOnlyRegistryServices returns the route-prefix names of the registry
+// services that declare `edition: enterprise`. Parsed per `- key:` block so an
+// `edition:` line can only ever apply to the service it sits in.
+func enterpriseOnlyRegistryServices(t *testing.T, registry string) map[string]bool {
+	t.Helper()
+	body := registry
+	if i := strings.Index(body, "\nservices:\n"); i >= 0 {
+		body = body[i:]
+	}
+	editionRe := regexp.MustCompile(`(?m)^\s+edition:\s*enterprise\s*$`)
+	prefixRe := regexp.MustCompile(`(?m)^\s+route_prefix:\s*/([a-z0-9-]+)\s*$`)
+	out := map[string]bool{}
+	for _, block := range strings.Split(body, "\n  - key: ")[1:] {
+		if !editionRe.MatchString(block) {
+			continue
+		}
+		m := prefixRe.FindStringSubmatch(block)
+		if m == nil {
+			t.Fatalf("an `edition: enterprise` registry block has no route_prefix; the registry shape changed:\n%s", block)
+		}
+		out[m[1]] = true
+	}
+	return out
+}
+
+func TestEnterpriseOnlyRegistryServices_ParsesPerBlock(t *testing.T) {
+	reg := "services:\n" +
+		"  - key: core-svc\n    route_prefix: /core-svc\n    status: active\n" +
+		"  - key: ee-svc\n    route_prefix: /ee-svc\n    edition: enterprise\n" +
+		"  - key: other-core\n    route_prefix: /other-core\n"
+	got := enterpriseOnlyRegistryServices(t, "\n"+reg)
+	if len(got) != 1 || !got["ee-svc"] {
+		t.Fatalf("enterpriseOnlyRegistryServices = %v, want only ee-svc", got)
+	}
+}
+
+// An edition-gated service registers its category from its own module. The
+// registration must reach categoryForRequest (what LogRequest records), must
+// refuse a category the database would reject, and must refuse to silently
+// change a decision already made.
+func TestRegisterServiceEventCategory(t *testing.T) {
+	const svc = "edition-gated-test-service"
+	t.Cleanup(func() { delete(serviceEventCategory, svc) })
+
+	if got := categoryForRequest(svc, "anything"); got != EventCategorySystem {
+		t.Fatalf("unregistered service category = %q, want the %q fallback", got, EventCategorySystem)
+	}
+	RegisterServiceEventCategory(svc, EventCategoryConfig)
+	if got := categoryForRequest(svc, "anything"); got != EventCategoryConfig {
+		t.Fatalf("registered service category = %q, want %q", got, EventCategoryConfig)
+	}
+	if got, ok := ServiceEventCategory(svc); !ok || got != EventCategoryConfig {
+		t.Fatalf("ServiceEventCategory = (%q, %v), want (%q, true)", got, ok, EventCategoryConfig)
+	}
+	// Same decision again is harmless.
+	RegisterServiceEventCategory(svc, EventCategoryConfig)
+
+	mustPanic := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Errorf("%s: expected a panic", name)
+			}
+		}()
+		fn()
+	}
+	mustPanic("conflicting category", func() { RegisterServiceEventCategory(svc, EventCategoryData) })
+	mustPanic("invalid category", func() { RegisterServiceEventCategory("another-gated-service", "not-a-category") })
+	mustPanic("empty service", func() { RegisterServiceEventCategory("", EventCategoryConfig) })
+	mustPanic("overriding a Core service", func() { RegisterServiceEventCategory("inventory-service", EventCategoryData) })
 }
 
 func readSchema(t *testing.T) string {

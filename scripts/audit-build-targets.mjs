@@ -82,9 +82,26 @@ if (registryServices.length === 0) {
   process.exit(1);
 }
 
-const recipe =
-  readFileSync('Makefile', 'utf8').split(/^build-services:/m)[1]?.split(/^\w[\w-]*:/m)[0] ?? '';
+const makefile = readFileSync('Makefile', 'utf8');
+const recipe = makefile.split(/^build-services:/m)[1]?.split(/^\w[\w-]*:/m)[0] ?? '';
 const built = new Set([...recipe.matchAll(/-o \.\.\/\.\.\/bin\/([a-z][a-z0-9-]*)/g)].map((m) => m[1]));
+
+// Edition-gated services cannot be a line in the chained recipe above: the
+// Core export strips them with `# edition:enterprise` fences, and a fence
+// cannot sit inside a backslash-continued recipe. They are attached instead as
+// extra prerequisites — a recipe-less `build-services: build-<svc>` rule inside
+// the fence. Credit such a prerequisite only when its own `build-<svc>:` recipe
+// really builds bin/<svc>, so naming a target that builds nothing (or
+// something else) does not count as coverage.
+const recipeOf = (target) =>
+  makefile.split(new RegExp(`^${target.replace(/[-]/g, '\\-')}:`, 'm'))[1]?.split(/^\w[\w-]*:/m)[0] ?? '';
+for (const m of makefile.matchAll(/^build-services:([^\n#]*)$/gm)) {
+  for (const dep of m[1].trim().split(/\s+/).filter(Boolean)) {
+    const svc = dep.replace(/^build-/, '');
+    if (dep === svc) continue;
+    if (new RegExp(`-o \\.\\./\\.\\./bin/${svc}\\s`).test(recipeOf(dep))) built.add(svc);
+  }
+}
 const uncovered = registryServices.filter((s) => !BUILD_EXEMPT.has(s) && !built.has(s));
 const expected = registryServices.filter((s) => !BUILD_EXEMPT.has(s)).length;
 

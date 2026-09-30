@@ -709,6 +709,113 @@ func TestIntegration_SBOM_UnknownAssetIsNotFound(t *testing.T) {
 	}
 }
 
+// mergeAway archives `source` exactly as merge_execution.go does — status,
+// stale_status and the `metadata.merged_into` tombstone — without dragging the
+// whole proposal machinery into an SBOM test.
+func mergeAway(t *testing.T, db *database.DB, tenant, source, survivor uuid.UUID) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE assets SET asset_status='archived',stale_status='archived',
+		metadata=metadata||jsonb_build_object('merged_into',$3::text),updated_at=now()
+		WHERE tenant_id=$1 AND id=$2`, tenant, source, survivor.String()); err != nil {
+		t.Fatalf("merging %s into %s: %v", source, survivor, err)
+	}
+}
+
+func installCountOn(t *testing.T, db *database.DB, tenant, asset uuid.UUID) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM software_installs WHERE tenant_id = $1 AND asset_id = $2`,
+		tenant, asset).Scan(&n); err != nil {
+		t.Fatalf("counting installs: %v", err)
+	}
+	return n
+}
+
+// An upload aimed at an asset that has since been MERGED AWAY lands on the
+// survivor, not on the archived tombstone.
+//
+// The merge archives its source and leaves `metadata.merged_into`; the merge code
+// treats that pointer as authoritative everywhere else. This path checked only
+// `deleted_at IS NULL`, so the upload succeeded and hung its software off an
+// archived row no inventory view shows — data stored and nowhere to be seen.
+func TestIntegration_SBOM_MergedAwayTargetResolvesToSurvivor(t *testing.T) {
+	svc, db, tenant := newSBOMFixture(t)
+	source := hostAsset(t, svc.assets, tenant, "merged-source.example.test")
+	survivor := hostAsset(t, svc.assets, tenant, "merged-survivor.example.test")
+	mergeAway(t, db, tenant, source, survivor)
+
+	res := ingest(t, svc, tenant, source, cycloneDX(t, "", comp("libmerge", map[string]any{"version": "1"})))
+
+	if res.AssetID != survivor.String() {
+		t.Fatalf("result asset_id = %s, want the survivor %s", res.AssetID, survivor)
+	}
+	if got := installCountOn(t, db, tenant, survivor); got == 0 {
+		t.Error("nothing was written to the survivor")
+	}
+	if got := installCountOn(t, db, tenant, source); got != 0 {
+		t.Errorf("%d installs were written onto the archived tombstone", got)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, source.String()) && strings.Contains(w, survivor.String()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the redirect was not reported to the caller; warnings = %v", res.Warnings)
+	}
+}
+
+// A chain (A into B, later B into C) resolves to the end of it; a cycle — which
+// only corruption can produce — fails loudly instead of looping.
+func TestIntegration_SBOM_MergeChainAndCycle(t *testing.T) {
+	svc, db, tenant := newSBOMFixture(t)
+	a := hostAsset(t, svc.assets, tenant, "chain-a.example.test")
+	b := hostAsset(t, svc.assets, tenant, "chain-b.example.test")
+	c := hostAsset(t, svc.assets, tenant, "chain-c.example.test")
+	mergeAway(t, db, tenant, a, b)
+	mergeAway(t, db, tenant, b, c)
+
+	res := ingest(t, svc, tenant, a, cycloneDX(t, "", comp("libchain", map[string]any{"version": "1"})))
+	if res.AssetID != c.String() {
+		t.Fatalf("chain resolved to %s, want the end of the chain %s", res.AssetID, c)
+	}
+
+	// Close the loop: c -> a.
+	mergeAway(t, db, tenant, c, a)
+	_, err := svc.Ingest(context.Background(), tenant, a, uuid.Nil, "x.json",
+		strings.NewReader(cycloneDX(t, "", comp("libcycle", map[string]any{"version": "1"}))))
+	if err == nil {
+		t.Fatal("a merge cycle was followed to a write instead of failing")
+	}
+}
+
+// The other polarity: a live asset is untouched — no redirect, no warning — and
+// a merged-away pointer at a survivor that no longer exists is "not found", not a
+// write to nowhere.
+func TestIntegration_SBOM_LiveTargetIsNotRedirected(t *testing.T) {
+	svc, db, tenant := newSBOMFixture(t)
+	live := hostAsset(t, svc.assets, tenant, "live.example.test")
+
+	res := ingest(t, svc, tenant, live, cycloneDX(t, "", comp("liblive", map[string]any{"version": "1"})))
+	if res.AssetID != live.String() {
+		t.Fatalf("a live asset was redirected to %s", res.AssetID)
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "merged into") {
+			t.Errorf("a live asset produced a merge warning: %s", w)
+		}
+	}
+
+	orphan := hostAsset(t, svc.assets, tenant, "orphan.example.test")
+	mergeAway(t, db, tenant, orphan, uuid.New()) // survivor does not exist
+	_, err := svc.Ingest(context.Background(), tenant, orphan, uuid.Nil, "x.json",
+		strings.NewReader(cycloneDX(t, "", comp("libgone", map[string]any{"version": "1"}))))
+	if err == nil || !strings.Contains(err.Error(), "asset not found") {
+		t.Fatalf("want ErrSBOMAssetNotFound for a tombstone whose survivor is gone, got %v", err)
+	}
+}
+
 // An SPDX document goes through the same writer, and its subject — which IS one
 // of its packages — is written once.
 func TestIntegration_SBOM_SPDXSubjectIsNotWrittenTwice(t *testing.T) {

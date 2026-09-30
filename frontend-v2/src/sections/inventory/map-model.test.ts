@@ -66,6 +66,21 @@ describe('buildMapGraph', () => {
     expect(g.edges.map((e) => e.id)).toEqual(['e1', 'e2']);
   });
 
+  it('carries the server\'s risk_assessed onto the node, and does not invent it', () => {
+    const g = buildMapGraph(neighbourhood({
+      nodes: [
+        { asset_id: ROOT, display_name: 'app-01', class_key: 'web_application', depth: 0, is_root: true, risk_score: 0, risk_assessed: true },
+        { asset_id: HOST, display_name: 'host-01', class_key: 'server', depth: 1, risk_score: 0, risk_assessed: false },
+        { asset_id: DB, display_name: 'db-01', class_key: 'managed_database', depth: 2 },
+      ],
+    }));
+    expect(g.nodes.find((n) => n.id === ROOT)!.riskAssessed).toBe(true);
+    expect(g.nodes.find((n) => n.id === HOST)!.riskAssessed).toBe(false);
+    // Absent stays absent — a payload that never said is not "not assessed" by
+    // fiat, it is unknown, and `nodeRiskForExport` reads it by the score alone.
+    expect(g.nodes.find((n) => n.id === DB)!.riskAssessed).toBeUndefined();
+  });
+
   it('NEVER draws a rejected edge', () => {
     // Somebody decided that relationship was wrong. Redrawing it puts a settled
     // decision back up for grabs, and it is the one edge status the map must be

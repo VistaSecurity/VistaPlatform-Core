@@ -298,6 +298,18 @@ type MergeCandidate struct {
 	// explanation for all of them would explain none of them.
 	Explanation []seams.MatchFactor `json:"explanation,omitempty"`
 
+	// Snapshot is this candidate as the matcher compared it when the proposal
+	// was opened ( Phase 5): its identifiers, name, class, segment and the
+	// rest of what [Engine.rank] handed the seam. Nil when nothing ranked the
+	// proposal (a person's edit, or a store that predates it).
+	//
+	// It is what makes the training export lossless on THIS side. Reading the
+	// candidate back from `assets` at export time sees it after the decision —
+	// and after an accepted merge the survivor holds the observation's
+	// identifiers too, so a reconstructed pair would agree on everything and
+	// hand the model its own label.
+	Snapshot *MatcherSide `json:"snapshot,omitempty"`
+
 	// modelID and sourceRef are the matcher's provenance (ADR-0008 D4.1),
 	// carried from seams.Proposal onto the merge proposal so a reviewer — or
 	// an audit six months later — can see WHICH implementation proposed a
@@ -331,6 +343,13 @@ type MergeProposal struct {
 	Source     Source           `json:"source"`
 	Reason     string           `json:"reason"`
 	ProposedAt time.Time        `json:"proposed_at"`
+
+	// LatestEvidenceAt is when the newest observation re-asking this question
+	// was made ( A3): [FoldMergeProposal] advances it every time a pending
+	// proposal is reused, while ProposedAt keeps the time the question was
+	// first asked. Zero on a proposal nobody has re-asked; read it as
+	// ProposedAt then.
+	LatestEvidenceAt time.Time `json:"latest_evidence_at,omitzero"`
 
 	// ModelID and SourceRef name the matcher that RANKED this proposal, whether
 	// or not it was auto-accepted (ADR-0008 D4.1). Empty when nothing scored it.
@@ -367,6 +386,63 @@ type MergeProposal struct {
 	// of service on the strength of one unverified keystroke would be a far
 	// larger act than the one they performed.
 	PreserveObservationStatus bool `json:"preserve_observation_status,omitempty"`
+
+	// RuleVerdict and RuleEvidence record that the same-device rule held for
+	// this proposal ([SameDeviceVerdict], Phase 4): RuleVerdict is
+	// [RuleVerdictSameDevice] and RuleEvidence the sentences it rested on.
+	// Empty when the rule did not hold or the tenant turned rule merges off.
+	//
+	// It is a verdict, not a merge. The engine never merges inside Resolve
+	// (guard rail 2): inventory-service's rule-merge executor picks the
+	// proposal up, re-evaluates the rule on the records as they are then, and
+	// merges through the audited path — or clears the verdict and leaves the
+	// question to a person.
+	RuleVerdict  string   `json:"rule_verdict,omitempty"`
+	RuleEvidence []string `json:"rule_evidence,omitempty"`
+
+	// PairScore is the matcher's score of the two top-ranked CANDIDATES against
+	// each other ( Phase 5) — not the observation against either, which is
+	// what each candidate's Score says. When a sighting ties two records
+	// together (the MAC of one, the address of the other), the question the
+	// reviewer is really asked is whether those two records are one thing, and
+	// this is the model's answer to exactly that. PairAssetIDs names the two, in
+	// rank order; PairReason is the model's one-phrase summary.
+	//
+	// ADVISORY, like every score (ADR-0008 D5): no rule, threshold or
+	// auto-accept reads it. Zero means unscored — the null matcher, fewer than
+	// two readable candidates — not "certainly two things"; a singleton
+	// disagreement between the two scores the model's small positive ceiling.
+	PairScore    float64  `json:"pair_score,omitempty"`
+	PairAssetIDs []string `json:"pair_asset_ids,omitempty"`
+	PairReason   string   `json:"pair_reason,omitempty"`
+
+	// ObservationIdentifiers are the observation's own identifiers at proposal
+	// time, normalised, each marked derived / generic where it was (
+	// Phase 5). The candidates' MatchedIdentifiers are only the SUBSET that
+	// resolved to somebody; a floor proposal has no observation asset to read
+	// the rest from. ObservationContext is the rest of the observation side as
+	// the matcher saw it. Together with each candidate's Snapshot they make the
+	// proposal row a complete training sample — see
+	// scripts/export-merge-decisions.sql. When a pending proposal is re-asked
+	// the identifiers are the UNION across the folded sightings.
+	ObservationIdentifiers []Identifier `json:"observation_identifiers,omitempty"`
+	ObservationContext     *MatcherSide `json:"observation_context,omitempty"`
+}
+
+// MatcherSide is one side of a comparison as the matcher saw it when a proposal
+// was opened: the fields of a [seams.Observation] / [seams.AssetSummary] that a
+// matcher may read, and nothing else (no status — the model never reads it).
+// Identifiers are carried on a candidate's [MergeCandidate.Snapshot]; on the
+// observation they are [MergeProposal.ObservationIdentifiers] instead.
+type MatcherSide struct {
+	Name        string       `json:"name,omitempty"`
+	Class       string       `json:"class,omitempty"`
+	Segment     string       `json:"segment,omitempty"`
+	Vendor      string       `json:"vendor,omitempty"`
+	Model       string       `json:"model,omitempty"`
+	SourceKind  string       `json:"source_kind,omitempty"`
+	SeenAt      time.Time    `json:"seen_at,omitzero"`
+	Identifiers []Identifier `json:"identifiers,omitempty"`
 }
 
 // ProposalRef names one merge proposal.
@@ -491,7 +567,8 @@ func (d PriorDecision) SameEvidence(kinds []Kind) bool {
 // Two methods joined the eight with the floating-address rule
 // ([Resolution.FloatingAddress]) and decision memory
 // ([Resolution.Suppressed]): [Repository.RecordAnnouncement] and
-// [Repository.LastKeptSeparate]. They are on the interface rather than
+// [Repository.LastKeptSeparate]; and [Repository.IdentifierLastSeen] and
+// [Repository.AddressAnnounced] with the lease-follows-MAC rule ( 1b). They are on the interface rather than
 // behind an optional type assertion because an optional seam that silently
 // no-ops when an implementation forgets it is a check that cannot fail —
 // exactly the shape that let seven services' revocation check compile, pass
@@ -571,6 +648,28 @@ type Repository interface {
 	// gone.
 	LastKeptSeparate(ctx context.Context, tenantID string, assetIDs []string) (PriorDecision, bool, error)
 
+	// IdentifierLastSeen returns when this identifier value was last seen ON
+	// ITS CURRENT OWNER — `asset_identifiers.last_seen_at` in the SQL store —
+	// and false when no asset in the tenant holds it. The identifier's kind,
+	// value and scope select the row; its SeenAt, Source and Confidence are
+	// ignored.
+	//
+	// The value is the newest SeenAt any [Repository.AttachIdentifiers] (or
+	// [Repository.CreateAsset]) wrote for it, and like [Repository.Touch] it
+	// never moves backwards: an older sighting attached late does not make the
+	// identifier look staler than it is. It is advanced ONLY by writes that
+	// attach the identifier to its owner — a sighting the engine resolved to
+	// that owner, or supporting evidence that filled in a provisional sketch —
+	// and not by an observation that merely carried the value while landing
+	// somewhere else.
+	//
+	// The engine reads it for "the address follows the MAC" ( 1b): a
+	// lease moves only when the observation that met the new holder is NEWER
+	// than the last time the previous holder was seen with the address. That
+	// comparison is what stops a late-arriving or replayed observation from
+	// moving an address back to a device that no longer holds it.
+	IdentifierLastSeen(ctx context.Context, tenantID string, id Identifier) (time.Time, bool, error)
+
 	// RecordAnnouncement records that announcer's NIC announced an address
 	// belonging to holder — the floating-address fact — as a relationship
 	// between the two assets, idempotently: a re-observation bumps the edge's
@@ -584,6 +683,21 @@ type Repository interface {
 	// announcer == holder: that is not a floating address, it is the same
 	// asset, and the engine never asks.
 	RecordAnnouncement(ctx context.Context, announcer, holder AssetRef, a Announcement) error
+
+	// AddressAnnounced reports whether the floating-address rule has EVER
+	// recorded `address` as announced for `holder` — that is, whether some
+	// node's NIC was seen claiming this address on the holder's behalf
+	// ([Repository.RecordAnnouncement]). An address with that history is a
+	// VIP, not a lease, and "the address follows the MAC" ( 1b) must not
+	// move it onto whichever node announces it next.
+	//
+	// The SQL implementation answers from both places the rule writes: the
+	// holder's `hosted_on` edges (attributes.floating_address.addresses, which
+	// hold the LATEST announcement per announcer) and the holder's
+	// `asset_history` entries carrying `floating_address` (append-only, so an
+	// address announced once and since superseded still counts). `address` is
+	// the canonical `ip_address` identifier value.
+	AddressAnnounced(ctx context.Context, holder AssetRef, address string) (bool, error)
 
 	// ScopeForAddress answers the one question every observation builder has
 	// to ask before it can produce a hostname or ip_address identifier: WHERE
@@ -634,6 +748,26 @@ type Repository interface {
 	//     standing and the topology has two answers; picking one would be a
 	//     coin flip that decides an asset's identity.
 	ScopeForAddress(ctx context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (scope string, dynamic bool, err error)
+
+	// HostnameCardinality is the number of distinct LIVE assets in the tenant
+	// carrying a `hostname` identifier with this value, in ANY scope (
+	// B2). It is the tenant-frequency half of the generic-name rule: a name
+	// three or more assets carry is not evidence that two records are one
+	// device ([GenericNames]).
+	//
+	// "Any scope" is the point. A hostname identifies within a scope, so
+	// `iphone` under two segments is two rows and never collides — which is
+	// exactly why the count has to look across them.
+	//
+	// The value is compared case-insensitively: hostnames are stored lower
+	// case ([Normalize]), so the implementation folds the argument the same way.
+	// Only `hostname` counts, not `fqdn` (an FQDN is issued by someone who owns
+	// the domain, and is not what this rule is about). "Live" is the merge
+	// approvals' own definition: not deleted, not archived, not denied, not
+	// merged away — a retired record stops testifying that the name is common.
+	//
+	// An unknown value answers 0 and no error.
+	HostnameCardinality(ctx context.Context, tenantID, value string) (int, error)
 }
 
 // MergeProposalFingerprint is the idempotency key of a merge proposal: what
@@ -650,19 +784,23 @@ type Repository interface {
 //
 // # What "the same question" means
 //
-// Three things, in a stable spelling:
+// Two things, in a stable spelling:
 //
 //   - the observation asset, when there is one (a conflict that DID create a
 //     pending asset is about that asset, and the next observation matches it
 //     rather than reaching here again);
 //   - the candidate set, SORTED — the same two candidates found in the other
-//     order are the same two candidates;
-//   - the identifiers that matched them, sorted and de-duplicated. Without
-//     these, two DIFFERENT things contested against the same candidate would
-//     collapse into one proposal, and the second would be dropped rather than
-//     reviewed.
+//     order are the same two candidates.
 //
-// Scores and reasons are deliberately NOT in it: a matcher that scores the same
+// The identifiers that matched the candidates are deliberately NOT in it any
+// more ( A3). A reviewer is asked "are these records one thing?", and a
+// sighting carrying one more identifier than the last one does not change that
+// question — it adds evidence to it. With the identifiers in the key, one pair
+// of records accumulated a pending row per combination of identifiers its
+// sightings happened to carry. The evidence is FOLDED into the one pending row
+// instead ([FoldMergeProposal]), so nothing a later sighting saw is dropped.
+//
+// Scores and reasons are not in it either: a matcher that scores the same
 // candidates 0.71 today and 0.72 tomorrow has not asked a new question.
 //
 // The value is hex SHA-256 — fixed-width and index-friendly — and is stored on
@@ -671,21 +809,10 @@ type Repository interface {
 // gain.
 func MergeProposalFingerprint(p MergeProposal) string {
 	candidates := make([]string, 0, len(p.Candidates))
-	idKeys := make([]string, 0, len(p.Candidates))
-	seenID := map[string]bool{}
 	for _, c := range p.Candidates {
 		candidates = append(candidates, c.Ref.ID)
-		for _, id := range c.MatchedIdentifiers {
-			k := id.Key()
-			if seenID[k] {
-				continue
-			}
-			seenID[k] = true
-			idKeys = append(idKeys, k)
-		}
 	}
 	sort.Strings(candidates)
-	sort.Strings(idKeys)
 
 	h := sha256.New()
 	// Length-prefixed sections, so a value containing the separator cannot be
@@ -702,6 +829,180 @@ func MergeProposalFingerprint(p MergeProposal) string {
 	}
 	write("obs", []string{p.ObservationAssetID})
 	write("cand", candidates)
-	write("ids", idKeys)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// FoldMergeProposal folds a re-asked question's evidence into the pending
+// proposal that already asks it ( A3). Both repository implementations
+// call it when [Repository.OpenMergeProposal] finds a pending proposal with the
+// same [MergeProposalFingerprint], so the in-memory store and Postgres cannot
+// disagree about what a reused proposal holds.
+//
+// The rules, each commutative so the order observations arrive in does not
+// matter:
+//
+//   - each candidate's matched identifiers become the UNION of both — a
+//     reviewer sees every identifier any sighting tied to that record;
+//   - a candidate's score, reason and explanation are replaced only by a
+//     strictly HIGHER score: the strongest case made for a pairing is the one
+//     worth showing, and a weaker re-run must not quietly erase it;
+//   - the proposal's ModelID/SourceRef follow the highest top score for the
+//     same reason;
+//   - an auto-accept is sticky: once the matcher accepted for this question,
+//     a later non-accepting observation does not un-record it;
+//   - a same-device verdict ([MergeProposal.RuleVerdict]) is sticky the same
+//     way, and a later sighting that also establishes it restates the evidence;
+//   - ProposedAt stays the first time the question was asked, and
+//     LatestEvidenceAt becomes the newest observation time seen;
+//   - the pair score is replaced only by a strictly HIGHER one, with the ids
+//     and reason that go with it — the same rule as a candidate's score;
+//   - the observation's identifiers, and each candidate snapshot's, become the
+// UNION of both ( Phase 5: the training sample describes every
+//     sighting that asked the question, not only the first);
+//   - a context or snapshot the stored proposal lacks is taken from incoming.
+//
+// Everything else — the reason, the source, the observation asset — is the
+// stored proposal's. The fingerprint guarantees the candidate set is the same;
+// a candidate present only in `incoming` (which the fingerprint rules out) is
+// appended rather than dropped, because evidence is never thrown away here.
+func FoldMergeProposal(stored, incoming MergeProposal) MergeProposal {
+	out := stored
+	out.Candidates = make([]MergeCandidate, 0, len(stored.Candidates))
+	storedTop := maxCandidateScore(stored.Candidates)
+
+	incomingByID := make(map[string]MergeCandidate, len(incoming.Candidates))
+	for _, c := range incoming.Candidates {
+		incomingByID[c.Ref.ID] = c
+	}
+	folded := make(map[string]bool, len(stored.Candidates))
+	for _, c := range stored.Candidates {
+		folded[c.Ref.ID] = true
+		in, ok := incomingByID[c.Ref.ID]
+		if ok {
+			c.MatchedIdentifiers = unionIdentifiers(c.MatchedIdentifiers, in.MatchedIdentifiers)
+			if in.Score > c.Score {
+				c.Score, c.Reason, c.Explanation = in.Score, in.Reason, in.Explanation
+				c.modelID, c.sourceRef = in.modelID, in.sourceRef
+			}
+			c.Snapshot = foldMatcherSide(c.Snapshot, in.Snapshot)
+		}
+		out.Candidates = append(out.Candidates, c)
+	}
+	for _, c := range incoming.Candidates {
+		if !folded[c.Ref.ID] {
+			folded[c.Ref.ID] = true
+			out.Candidates = append(out.Candidates, c)
+		}
+	}
+
+	if maxCandidateScore(incoming.Candidates) > storedTop {
+		out.ModelID, out.SourceRef = incoming.ModelID, incoming.SourceRef
+	}
+	if incoming.AutoAccepted && !stored.AutoAccepted {
+		out.AutoAccepted = true
+		out.AcceptedAssetID = incoming.AcceptedAssetID
+		out.AcceptedScore = incoming.AcceptedScore
+		out.AcceptedModelID = incoming.AcceptedModelID
+		out.AcceptedSourceRef = incoming.AcceptedSourceRef
+	}
+	if incoming.PairScore > stored.PairScore {
+		out.PairScore, out.PairReason = incoming.PairScore, incoming.PairReason
+		out.PairAssetIDs = append([]string(nil), incoming.PairAssetIDs...)
+	}
+	out.ObservationIdentifiers = unionIdentifiers(stored.ObservationIdentifiers, incoming.ObservationIdentifiers)
+	if len(out.ObservationIdentifiers) == 0 {
+		out.ObservationIdentifiers = nil
+	}
+	out.ObservationContext = foldMatcherSide(stored.ObservationContext, incoming.ObservationContext)
+
+	// A same-device verdict is carried by the sighting that established it:
+	// a later sighting that did not (a relayed one, say) does not un-record
+	// it, and one that did restates it with its own evidence. The executor
+	// re-evaluates every verdict on current data before acting, so keeping the
+	// newest statement is the useful one.
+	if incoming.RuleVerdict != "" {
+		out.RuleVerdict = incoming.RuleVerdict
+		out.RuleEvidence = append([]string(nil), incoming.RuleEvidence...)
+	}
+
+	out.ProposedAt = stored.ProposedAt
+	latest := stored.LatestEvidenceAt
+	if latest.IsZero() {
+		latest = stored.ProposedAt
+	}
+	for _, t := range []time.Time{incoming.LatestEvidenceAt, incoming.ProposedAt} {
+		if t.After(latest) {
+			latest = t
+		}
+	}
+	out.LatestEvidenceAt = latest
+	return out
+}
+
+// maxCandidateScore is the highest score among the candidates, 0 when none is
+// scored.
+func maxCandidateScore(cs []MergeCandidate) float64 {
+	top := 0.0
+	for _, c := range cs {
+		if c.Score > top {
+			top = c.Score
+		}
+	}
+	return top
+}
+
+// unionIdentifiers appends to `have` every identifier of `more` it does not
+// already hold, by [Identifier.Key]. Order is stable: what was there first
+// stays first.
+func unionIdentifiers(have, more []Identifier) []Identifier {
+	seen := make(map[string]bool, len(have)+len(more))
+	out := make([]Identifier, 0, len(have)+len(more))
+	for _, id := range have {
+		if k := id.Key(); !seen[k] {
+			seen[k] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range more {
+		if k := id.Key(); !seen[k] {
+			seen[k] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// foldMatcherSide folds one side's matcher snapshot: the identifiers are the
+// union, and each context field keeps the stored value unless it was empty.
+// Nil on both sides stays nil — "nobody ranked this" is not an empty snapshot.
+func foldMatcherSide(stored, incoming *MatcherSide) *MatcherSide {
+	switch {
+	case incoming == nil:
+		return stored
+	case stored == nil:
+		c := *incoming
+		c.Identifiers = append([]Identifier(nil), incoming.Identifiers...)
+		return &c
+	}
+	out := *stored
+	pick := func(have, more string) string {
+		if have != "" {
+			return have
+		}
+		return more
+	}
+	out.Name = pick(stored.Name, incoming.Name)
+	out.Class = pick(stored.Class, incoming.Class)
+	out.Segment = pick(stored.Segment, incoming.Segment)
+	out.Vendor = pick(stored.Vendor, incoming.Vendor)
+	out.Model = pick(stored.Model, incoming.Model)
+	out.SourceKind = pick(stored.SourceKind, incoming.SourceKind)
+	if out.SeenAt.IsZero() {
+		out.SeenAt = incoming.SeenAt
+	}
+	out.Identifiers = unionIdentifiers(stored.Identifiers, incoming.Identifiers)
+	if len(out.Identifiers) == 0 {
+		out.Identifiers = nil
+	}
+	return &out
 }

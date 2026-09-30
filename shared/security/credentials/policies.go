@@ -52,10 +52,10 @@ var BaseIntegrationFields = []string{
 }
 
 // NotificationChannelPolicy covers tenant_notification_channels.config and
-// platform_notification_channels.config (notification-service) and
-// monitoring_notification_channels.config (monitoring-service). All three hold
-// the same shape and all three are read by delivery code that expects
-// plaintext.
+// platform_notification_channels.config (both owned by notification-service).
+// The two hold the same shape and are read by delivery code that expects
+// plaintext. (monitoring_notification_channels.config used to be a third; that
+// table and its reader are gone.)
 //
 // webhook_url and url ARE credentials here, unlike in a generic integration: a
 // Slack incoming-webhook URL is a bearer credential — anyone holding it can
@@ -96,4 +96,21 @@ var ConnectorAuthConfigPolicy = Policy{
 var IntegrationAuthConfigPolicy = Policy{
 	Fields:      BaseIntegrationFields,
 	AllValuesIn: []string{"headers", "extra_headers"},
+}
+
+// SIEMIntegrationConfigPolicy covers audit.siem_integrations.config
+// (Enterprise SIEM export). The blob carries a Splunk HEC token,
+// a Datadog API key, an Elastic API key or basic-auth password, or a webhook
+// bearer token, under whichever of the base names the destination uses, plus a
+// free-form header bag sent verbatim — so every header value is a credential.
+//
+// url is deliberately NOT a credential here, unlike NotificationChannelPolicy:
+// every SIEM destination authenticates with a separate token or key, the
+// endpoint URL is shown in the operator's list, and the save path refuses a URL
+// carrying userinfo. The same policy drives masking on the read path
+// (the SIEM exporter's secrets.go), so a field cannot be encrypted but left
+// unmasked.
+var SIEMIntegrationConfigPolicy = Policy{
+	Fields:      BaseIntegrationFields,
+	AllValuesIn: []string{"headers"},
 }

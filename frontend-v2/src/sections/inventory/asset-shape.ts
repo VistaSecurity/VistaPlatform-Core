@@ -317,6 +317,36 @@ export function sourceKindLabel(kind?: string | null): string {
   return SOURCE_KIND_LABELS[k] ?? k;
 }
 
+/** What each derivation's evidence is called in "derived from <evidence>". */
+const DERIVED_EVIDENCE_LABELS: Record<string, string> = {
+  eui64: 'IPv6 address',
+  serial: 'serial',
+};
+
+/**
+ * The provenance an identifier row shows.
+ *
+ * An identifier the platform DERIVED rather than observed — a MAC worked out
+ * from an EUI-64 IPv6 address, or read out of a serial that is the MAC — is
+ * stored `source_kind: inferred` with `source_ref: derived:<how>:<evidence>`
+ * ( Phase 2). It reads "Derived from IPv6 address fd00::…" so nobody
+ * mistakes it for a MAC a device reported. Anything else keeps the plain source
+ * label ("Measured", "Declared", …).
+ */
+export function identifierProvenanceLabel(ident: { source_kind?: string | null; source_ref?: string | null }): string {
+  const ref = (ident.source_ref ?? '').trim();
+  if (clean(ident.source_kind) === 'inferred' && ref.startsWith('derived:')) {
+    const rest = ref.slice('derived:'.length);
+    const sep = rest.indexOf(':');
+    const how = sep < 0 ? rest : rest.slice(0, sep);
+    const evidence = sep < 0 ? '' : rest.slice(sep + 1);
+    const noun = DERIVED_EVIDENCE_LABELS[how];
+    if (noun && evidence) return `Derived from ${noun} ${evidence}`;
+    return `Derived from ${rest || 'other evidence'}`;
+  }
+  return sourceKindLabel(ident.source_kind);
+}
+
 /**
  * Relative "last seen", coarser than a timestamp on purpose — a row answers
  * "recently or not", the page answers "exactly when".

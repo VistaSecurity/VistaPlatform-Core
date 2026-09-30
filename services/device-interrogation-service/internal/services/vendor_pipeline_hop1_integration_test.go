@@ -203,6 +203,11 @@ func (r hop1Run) normalize(t *testing.T, v any) any {
 	return pipelinetest.Walk(pipelinetest.Canonical(t, v), func(key string, val any) any {
 		switch x := val.(type) {
 		case string:
+			// A learned segment's DHCP posture records when the device answered
+			// (`dynamic_evidence.observed_at`); the instant differs every run.
+			if key == "observed_at" {
+				return pipelinetest.PlaceholderTimestamp
+			}
 			if x == host {
 				return pipelinetest.PlaceholderApplianceIP
 			}

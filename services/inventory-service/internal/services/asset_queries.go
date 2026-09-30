@@ -19,11 +19,15 @@ import (
 
 // The proposal owns conflict state; a cached boolean on assets would become
 // stale when a different candidate is merged or a reviewer keeps them separate.
+// Only an ANSWERABLE proposal (two live records, mergeProposalAnswerableSQL)
+// counts: the Approvals queue does not list a one-candidate row, so a badge
+// raised by one would point at a question nobody can find.
 const assetIdentityConflictSQL = `EXISTS (
  SELECT 1 FROM asset_history h WHERE h.tenant_id=a.tenant_id
  AND h.changes_json->>'kind'='merge_proposal'
  AND COALESCE(h.changes_json->>'status','pending')='pending'
  AND (h.asset_id=a.id OR h.changes_json->'candidates' @> jsonb_build_array(jsonb_build_object('asset_id',a.id::text)))
+ AND ` + mergeProposalAnswerableSQL + `
 )`
 
 // GetAssets returns one page of ASSETS — never an asset once per endpoint —

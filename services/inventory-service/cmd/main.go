@@ -251,6 +251,14 @@ func main() {
 	log.Printf("🔎 natural-language query (query seam): implementation=%s state=%s linked=%t",
 		queryDesc.Implementation, queryDesc.State, aiedition.QueryLinked())
 
+	// Internal source imports (platform ADR-0002 D3): the only way a connector
+	// running outside this service — a system of record's pull — writes the
+	// inventory. HMAC-signed service calls only, one named tenant per call,
+	// denied at the edge on every host. See source_import_routes.go.
+	mountSourceImportRoutes(r,
+		handlers.NewSourceImportHandler(services.NewSourceImportService(db, assetService)),
+		os.Getenv("INTERNAL_AUTH_SECRET"))
+
 	// API routes with JWT middleware
 	// Apply middleware to all routes under /api/v1
 	api := r.Group("/api/v1")
@@ -844,16 +852,10 @@ func main() {
 		// What it cannot do is configure a paid connector.
 		apiv2.GET("/inventory-service/connectors", handlers.NewConnectorCatalogueHandler(rawDB).List)
 
-		// The NetBox network-source-of-truth connector (workstream 2.7) is
-		// Enterprise. Exactly one of these two branches registers the route
-		// shape: the real handlers, or 402 stubs at the same paths. Core
-		// answering 402 rather than 404 is deliberate — see
-		// internal/handlers/connector_edition.go.
-		if hooks.RegisterNetBoxRoutes != nil {
-			hooks.RegisterNetBoxRoutes(apiv2, db, rawDB, assetService, os.Getenv("ENCRYPTION_MASTER_KEY"))
-		} else {
-			handlers.RegisterUnavailableConnectorRoutes(apiv2)
-		}
+		// The NetBox connector no longer runs here (platform ADR-0002 M2): it
+		// pulls from its own service and writes the inventory through the
+		// internal source routes mounted above. The catalogue entry is what
+		// tells a Core tenant it is an upgrade.
 	}
 
 	// Health check server (HTTP, port 8080). Answers a static body and never
@@ -962,13 +964,12 @@ func main() {
 		log.Println("Finding producers started (eol, vulnerability, crypto)")
 	}
 
-	// Scheduled NetBox imports (Enterprise; nil hook in Core). The loop LOOKS
-	// for due work every five minutes — the per-connection cadence is the
-	// connection's own `schedule`. A stored schedule with no runner is worse
-	// than no schedule, because the tenant believes their inventory is being
-	// refreshed; this is the runner.
-	if hooks.StartNetBoxScheduler != nil {
-		go hooks.StartNetBoxScheduler(ctx, db, rawDB, bypassDB, assetService,
+	// Scheduled CMDB sync (Enterprise; nil hook in Core). The loop LOOKS for
+	// due profiles every five minutes, each profile's cadence
+	// is its own sync_config.schedule, and a run holds the profile's lock so a
+	// manual Sync/Pull and every replica see one run at a time.
+	if hooks.StartCMDBSyncScheduler != nil {
+		go hooks.StartCMDBSyncScheduler(ctx, db, rawDB, bypassDB, assetService,
 			os.Getenv("ENCRYPTION_MASTER_KEY"), 5*time.Minute)
 	}
 
@@ -986,6 +987,15 @@ func main() {
 	// runs from the cluster and a host only a sensor can reach is never scanned.
 	autoScanJob := jobs.NewAutoActiveScanJob(autoScanStore, discoveryService, sensorrouting.NewStore(db), bypassDB)
 	go jobs.StartIdentityEvidenceWorker(ctx, bypassDB, assetService, mergeProposalService)
+
+	// The same-device rule's merges ( Phase 4). The identification engine
+	// only STAMPS a verdict on the proposal — it never merges inside Resolve —
+	// and this executor turns it into a merge through the audited path, after
+	// re-checking the rule on current data. Kill switch
+	// IDENTITY_RULE_MERGE_WORKER_ENABLED=false; the tenant's own switch is
+	// Settings -> Identification rules. Pinned by
+	// TestRuleMergeExecutor_MainRegistersIt.
+	services.StartRuleMergeExecutor(ctx, db, bypassDB, mergeProposalService)
 
 	go jobs.StartIdentityEnrichmentWorker(ctx, bypassDB, &identityenrichment.Coordinator{
 		Store: &identityenrichment.Store{DB: db}, Backend: services.NewIdentityEnrichmentBackend(assetService, discoveryService),

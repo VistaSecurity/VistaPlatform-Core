@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/aws/smithy-go"
 	"github.com/google/uuid"
+	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 )
 
@@ -413,6 +418,79 @@ func TestSanitizeCloudFailure_PlainError(t *testing.T) {
 	}
 	if f.Message == "" {
 		t.Error("a plain error's message must survive")
+	}
+}
+
+func cloudErrorResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}
+}
+
+func TestSanitizeCloudFailure_AzureAndGCPStructuredErrors(t *testing.T) {
+	cases := []struct {
+		name        string
+		err         error
+		wantCode    string
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name: "azure oauth invalid client",
+			err: &azidentity.AuthenticationFailedError{RawResponse: cloudErrorResponse(http.StatusUnauthorized, `{
+				"error": "invalid_client",
+				"error_description": "client secret is invalid\nTrace ID: should-not-survive"
+			}`)},
+			wantCode:    "invalid_client",
+			wantReason:  CloudFailureCredentials,
+			wantMessage: "client secret is invalid",
+		},
+		{
+			name: "azure arm authorization",
+			err: &azcore.ResponseError{StatusCode: http.StatusForbidden, RawResponse: cloudErrorResponse(http.StatusForbidden, `{
+				"error": {
+					"code": "AuthorizationFailed",
+					"message": "caller does not have authorization to perform Microsoft.Compute/virtualMachines/read"
+				}
+			}`)},
+			wantCode:    "AuthorizationFailed",
+			wantReason:  CloudFailureAccessDenied,
+			wantMessage: "caller does not have authorization to perform Microsoft.Compute/virtualMachines/read",
+		},
+		{
+			name:        "gcp token invalid grant",
+			err:         &gcpclient.TokenError{StatusCode: http.StatusUnauthorized, Code: "invalid_grant", Description: "Invalid JWT Signature."},
+			wantCode:    "invalid_grant",
+			wantReason:  CloudFailureCredentials,
+			wantMessage: "Invalid JWT Signature.",
+		},
+		{
+			name:        "gcp api permission denied",
+			err:         &gcpclient.APIError{StatusCode: http.StatusForbidden, Status: "PERMISSION_DENIED", Message: "Permission denied on resource project/example."},
+			wantCode:    "PERMISSION_DENIED",
+			wantReason:  CloudFailureAccessDenied,
+			wantMessage: "Permission denied on resource project/example.",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := SanitizeCloudFailure("global", tc.err)
+			if f.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", f.Code, tc.wantCode)
+			}
+			if f.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", f.Reason, tc.wantReason)
+			}
+			if f.Message != tc.wantMessage {
+				t.Errorf("message = %q, want %q", f.Message, tc.wantMessage)
+			}
+			if strings.Contains(f.Message, "Trace ID") {
+				t.Errorf("Azure trace metadata survived sanitization: %q", f.Message)
+			}
+		})
 	}
 }
 

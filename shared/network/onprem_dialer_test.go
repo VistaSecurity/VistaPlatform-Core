@@ -61,14 +61,14 @@ func TestDefaultGuardStillRefusesRFC1918(t *testing.T) {
 
 // The opt-in client must still refuse loopback. This is the assertion that
 // makes the opt-in narrow rather than a blanket disable — mutate
-// onPremDialGuard to `return nil` and this is what goes red.
-func TestSafeHTTPClientAllowingPrivate_StillRefusesLoopback(t *testing.T) {
+// targetPolicy.checkIP's never-reachable branch and this is what goes red.
+func TestEgressClientAllowingPrivate_StillRefusesLoopback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	resp, err := SafeHTTPClientAllowingPrivate(2 * time.Second).Get(srv.URL)
+	resp, err := privateEgressClient(t, 2*time.Second).Get(srv.URL)
 	if err == nil {
 		_ = resp.Body.Close()
 		t.Fatal("the private-endpoint opt-in reached a loopback server; loopback is never reachable")
@@ -79,11 +79,11 @@ func TestSafeHTTPClientAllowingPrivate_StillRefusesLoopback(t *testing.T) {
 }
 
 // And the metadata endpoint, which is the address an SSRF is usually after.
-func TestSafeHTTPClientAllowingPrivate_RefusesCloudMetadata(t *testing.T) {
+func TestEgressClientAllowingPrivate_RefusesCloudMetadata(t *testing.T) {
 	// No server: the guard must refuse before any connection is attempted, so
 	// a refusal here is the guard and not a timeout. A 1s timeout keeps the
 	// test fast if the guard were removed.
-	resp, err := SafeHTTPClientAllowingPrivate(time.Second).Get("http://169.254.169.254/latest/meta-data/")
+	resp, err := privateEgressClient(t, time.Second).Get("http://169.254.169.254/latest/meta-data/")
 	if err == nil {
 		_ = resp.Body.Close()
 		t.Fatal("the private-endpoint opt-in reached the cloud metadata endpoint")
@@ -97,20 +97,21 @@ func TestSafeHTTPClientAllowingPrivate_RefusesCloudMetadata(t *testing.T) {
 // the two tests above while making the connector useless, which is the
 // over-strict polarity of the same bug.
 func TestOnPremGuardPermitsRFC1918(t *testing.T) {
+	privatePolicy := targetPolicy{allowPrivate: true}
 	for _, addr := range []string{"10.0.0.5:443", "192.168.1.10:8000", "172.16.9.9:80", "[fd00::1]:443"} {
-		if err := onPremDialGuard("tcp", addr, nil); err != nil {
-			t.Errorf("onPremDialGuard(%s) refused a private target the opt-in exists to allow: %v", addr, err)
+		if err := privatePolicy.control("tcp", addr, nil); err != nil {
+			t.Errorf("private policy (%s) refused a private target the opt-in exists to allow: %v", addr, err)
 		}
 	}
 	for _, addr := range []string{"127.0.0.1:443", "169.254.169.254:80", "[::1]:443", "0.0.0.0:80"} {
-		if err := onPremDialGuard("tcp", addr, nil); err == nil {
-			t.Errorf("onPremDialGuard(%s) permitted an address that is never reachable", addr)
+		if err := privatePolicy.control("tcp", addr, nil); err == nil {
+			t.Errorf("private policy (%s) permitted an address that is never reachable", addr)
 		}
 	}
 	// A public address is still fine: a hosted NetBox behind a real hostname
 	// is a legitimate configuration.
-	if err := onPremDialGuard("tcp", "93.184.216.34:443", nil); err != nil {
-		t.Errorf("onPremDialGuard refused a public target: %v", err)
+	if err := privatePolicy.control("tcp", "93.184.216.34:443", nil); err != nil {
+		t.Errorf("private policy refused a public target: %v", err)
 	}
 }
 
@@ -130,6 +131,35 @@ func TestConfiguredOnPremGuardRefusesPlatformInternalCIDRs(t *testing.T) {
 	}
 	if err := guard("tcp", "127.0.0.1:443", nil); err == nil || !strings.Contains(err.Error(), "never reachable") {
 		t.Errorf("loopback must retain the base refusal, got %v", err)
+	}
+}
+
+// The same guarantee through the PUBLIC constructor a connector actually
+// uses: the private-endpoint opt-in opens RFC1918, never the platform's own
+// pod/Service ranges. (This was pinned via SafeHTTPClientAllowingPrivate
+// before NewEgressClient replaced it.) No server is needed — the guard refuses
+// before any connection is attempted, so the error names the rule rather than
+// a timeout.
+func TestPrivateEgressClientRefusesPlatformInternalCIDRs(t *testing.T) {
+	t.Setenv(PlatformInternalCIDRsEnv, "10.42.0.0/16,10.43.0.0/16")
+	client := privateEgressClient(t, time.Second)
+	for _, target := range []string{"http://10.42.3.4:8080/", "http://10.43.0.10/"} {
+		resp, err := client.Get(target)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("the private-endpoint client reached platform-internal %s", target)
+		}
+		if !strings.Contains(err.Error(), "platform-internal") {
+			t.Errorf("%s: refusal did not come from the platform-CIDR rule: %v", target, err)
+		}
+	}
+	// Polarity: an RFC1918 address outside the list is NOT refused by the
+	// guard (it fails for an ordinary network reason, or not at all).
+	resp, err := client.Get("http://10.44.3.4:9/")
+	if err == nil {
+		_ = resp.Body.Close()
+	} else if strings.Contains(err.Error(), "ssrf guard") {
+		t.Errorf("an RFC1918 target outside the platform CIDRs was refused by the guard: %v", err)
 	}
 }
 

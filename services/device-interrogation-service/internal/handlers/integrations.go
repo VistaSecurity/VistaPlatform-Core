@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -13,6 +15,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	awsclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/aws"
+	azureclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/azure"
+	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
@@ -74,6 +79,10 @@ type UpdateIntegrationRequest struct {
 type IntegrationHandlers struct {
 	store         integrationStore
 	encryptionKey string
+	// azureOptions / gcpOptions are empty in production. A test sets them to
+	// point Test Connection's (real) provider clients at a local server.
+	azureOptions []azureclient.Option
+	gcpOptions   []gcpclient.Option
 }
 
 // NewIntegrationHandlers creates a new IntegrationHandlers backed by the SQL
@@ -223,6 +232,10 @@ func (h *IntegrationHandlers) CreateIntegration(c *gin.Context) {
 		Status:          "configured",
 		CreatedAt:       now,
 	}); err != nil {
+		if errors.Is(err, errIntegrationNameTaken) {
+			c.JSON(http.StatusConflict, gin.H{"error": integrationNameTakenMessage(req.IntegrationName)})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to create integration",
 		})
@@ -300,23 +313,18 @@ func (h *IntegrationHandlers) UpdateIntegration(c *gin.Context) {
 	}
 
 	if req.Config != nil {
-		// Merge new values into the decrypted existing config, validate, re-encrypt.
 		var existing map[string]interface{}
 		_ = json.Unmarshal([]byte(existingConfig), &existing)
-		decryptedExisting, _ := h.decryptConfig(existing)
-		for k, v := range req.Config {
-			decryptedExisting[k] = v
-		}
-		if err := validateIntegrationConfig(integrationType, decryptedExisting); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-			return
-		}
-		encryptedConfig, err := h.encryptConfig(decryptedExisting)
+		merged, stored, err := h.mergeConfigUpdate(existing, req.Config)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt credentials"})
 			return
 		}
-		configJSON, _ := json.Marshal(encryptedConfig)
+		if err := validateIntegrationConfig(integrationType, merged); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+		configJSON, _ := json.Marshal(stored)
 		fields["config"] = string(configJSON)
 	}
 
@@ -346,11 +354,21 @@ func (h *IntegrationHandlers) UpdateIntegration(c *gin.Context) {
 	}
 
 	if _, err := h.store.Update(c.Request.Context(), integrationID, tenantID, fields); err != nil {
+		if errors.Is(err, errIntegrationNameTaken) && req.IntegrationName != nil {
+			c.JSON(http.StatusConflict, gin.H{"error": integrationNameTakenMessage(*req.IntegrationName)})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update integration"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Integration updated successfully"})
+}
+
+// integrationNameTakenMessage is the 409 body for a create/rename that collides
+// with another of the caller's own integrations.
+func integrationNameTakenMessage(name string) string {
+	return fmt.Sprintf("An integration named %q already exists", name)
 }
 
 // DeleteIntegration deletes an integration (soft delete)
@@ -405,7 +423,7 @@ func (h *IntegrationHandlers) TestConnection(c *gin.Context) {
 	}
 
 	// Get integration details
-	configJSON, integrationType, found, err := h.store.GetConfigForTest(c.Request.Context(), integrationID, tenantID)
+	target, found, err := h.store.GetConfigForTest(c.Request.Context(), integrationID, tenantID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get integration"})
 		return
@@ -415,25 +433,23 @@ func (h *IntegrationHandlers) TestConnection(c *gin.Context) {
 		return
 	}
 
-	// Decrypt config
-	var encryptedConfig map[string]interface{}
-	_ = json.Unmarshal([]byte(configJSON), &encryptedConfig)
-	config, _ := h.decryptConfig(encryptedConfig)
+	// Every cloud provider is tested from the STORED row, through the same
+	// decryption and client construction its discovery uses. The handler used
+	// to decrypt leniently here — a credential that failed to decrypt was
+	// passed on as its own ciphertext — so a credential saved under a retired
+	// key reached AWS as a base64 blob and came back as an unexplained
+	// authentication failure, where discovery says "re-enter the credential".
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
 
-	// Test connection based on type
-	var testResult struct {
-		Success bool                   `json:"success"`
-		Message string                 `json:"message"`
-		Details map[string]interface{} `json:"details,omitempty"`
-	}
-
-	switch integrationType {
+	var testResult connectionTestResult
+	switch target.IntegrationType {
 	case "aws":
-		testResult = testAWSConnection(config)
+		testResult = h.testStoredAWSConnection(target)
 	case "azure":
-		testResult = testAzureConnection(config)
+		testResult = h.testStoredAzureConnection(ctx, integrationID, target)
 	case "gcp":
-		testResult = testGCPConnection(config)
+		testResult = h.testStoredGCPConnection(ctx, integrationID, target)
 	case "unifi", "ubiquiti", "fortinet", "cisco", "palo_alto", "f5":
 		testResult.Success = false
 		testResult.Message = "Network device types are no longer supported. Please create devices with embedded credentials."
@@ -467,18 +483,26 @@ func getTenantID(c *gin.Context) (uuid.UUID, bool) {
 }
 
 // sensitiveKeys is the single list of integration-config keys stored encrypted
-// and masked in responses. The AWS half comes from awsclient.SensitiveConfigKeys
-// so client construction and the handler cannot disagree about what is a secret
-// (they used to keep independent copies, which is how external_id came to be
-// encrypted in one place and plaintext in the other).
+// and masked in responses. Every cloud provider's half comes from that
+// provider's client package (awsclient/azureclient/gcpclient.SensitiveConfigKeys)
+// so client construction and the handler cannot disagree about what is a
+// secret. They used to keep independent copies, which is how external_id came
+// to be encrypted in one place and plaintext in the other, and how Azure's
+// client came to demand ciphertext for tenant_id/subscription_id that this
+// handler had always stored in plaintext (Azure discovery never ran).
 //
-// NOTE: assume_role_arn is intentionally absent — a role ARN is not a secret and
-// the UI displays it.
-var sensitiveKeys = append([]string{
-	"client_id", "client_secret",
-	"service_account_json", "api_key",
-	"password", // Network device credentials - username is NOT sensitive
-}, awsclient.SensitiveConfigKeys...)
+// NOTE: assume_role_arn, tenant_id and subscription_id are intentionally absent
+// — they are identifiers, not secrets, and the UI displays them.
+var sensitiveKeys = func() []string {
+	keys := []string{
+		"api_key",
+		"password", // Network device credentials - username is NOT sensitive
+	}
+	keys = append(keys, awsclient.SensitiveConfigKeys...)
+	keys = append(keys, azureclient.SensitiveConfigKeys...)
+	keys = append(keys, gcpclient.SensitiveConfigKeys...)
+	return keys
+}()
 
 func (h *IntegrationHandlers) encryptConfig(config map[string]interface{}) (map[string]interface{}, error) {
 	enc, err := encryption.NewService(h.encryptionKey)
@@ -514,6 +538,77 @@ func (h *IntegrationHandlers) encryptConfig(config map[string]interface{}) (map[
 	}
 
 	return encrypted, nil
+}
+
+// mergeConfigUpdate applies a partial config edit to a stored config. It
+// returns the merged config in the clear (for validation only) and the config
+// to store.
+//
+// A stored credential the edit does not touch is written back EXACTLY as it
+// was stored. The merge used to decrypt everything leniently — a value that
+// failed to decrypt was kept as its own ciphertext — and then encrypt
+// everything again, so an edit that only flipped "Enabled" turned a credential
+// saved under a retired key into a fresh, perfectly decryptable ciphertext OF
+// THE OLD CIPHERTEXT. From then on the platform handed the provider a base64
+// blob as the secret, and the honest "re-enter the credential" error became an
+// unexplained authentication failure.
+//
+// The one stored value that IS re-encrypted is legacy plaintext — a value in a
+// sensitive key that is not even base64, from before the key was classified
+// sensitive. Encrypting it on the next edit is the migration that has always
+// happened here; a base64 value that will not decrypt is ciphertext this key
+// cannot read, and re-encrypting it would be the bug above.
+func (h *IntegrationHandlers) mergeConfigUpdate(existing, changes map[string]interface{}) (merged, stored map[string]interface{}, err error) {
+	enc, err := encryption.NewService(h.encryptionKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged = make(map[string]interface{}, len(existing)+len(changes))
+	stored = make(map[string]interface{}, len(existing)+len(changes))
+	for key, value := range existing {
+		merged[key] = value
+		stored[key] = value
+		raw, ok := value.(string)
+		if !ok || raw == "" || !isSensitiveKey(key) {
+			continue
+		}
+		if plain, derr := enc.Decrypt(raw); derr == nil {
+			merged[key] = plain
+			continue
+		}
+		if _, b64err := base64.StdEncoding.DecodeString(raw); b64err != nil {
+			// Legacy plaintext: store it encrypted from now on.
+			ct, eerr := enc.Encrypt(raw)
+			if eerr != nil {
+				return nil, nil, eerr
+			}
+			stored[key] = ct
+		}
+		// Otherwise: ciphertext this key cannot read. Kept verbatim.
+	}
+	for key, value := range changes {
+		merged[key] = value
+		raw, ok := value.(string)
+		if !ok || raw == "" || !isSensitiveKey(key) {
+			stored[key] = value
+			continue
+		}
+		ct, eerr := enc.Encrypt(raw)
+		if eerr != nil {
+			return nil, nil, eerr
+		}
+		stored[key] = ct
+	}
+	return merged, stored, nil
+}
+
+func isSensitiveKey(key string) bool {
+	for _, sk := range sensitiveKeys {
+		if key == sk {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *IntegrationHandlers) decryptConfig(config map[string]interface{}) (map[string]interface{}, error) {
@@ -621,11 +716,7 @@ func validateIntegrationConfig(integrationType string, config map[string]interfa
 	return nil
 }
 
-type awsTestResult = struct {
-	Success bool                   `json:"success"`
-	Message string                 `json:"message"`
-	Details map[string]interface{} `json:"details,omitempty"`
-}
+type awsTestResult = connectionTestResult
 
 // testAWSConnection validates an AWS integration's credentials by calling STS
 // GetCallerIdentity.
@@ -671,7 +762,7 @@ func testAWSConnection(config map[string]interface{}) awsTestResult {
 	if err != nil {
 		return awsTestResult{
 			Success: false,
-			Message: fmt.Sprintf("AWS authentication failed: %v", err),
+			Message: "AWS authentication failed: " + providerFailureText(services.SanitizeCloudFailure("", err)),
 		}
 	}
 
@@ -683,127 +774,6 @@ func testAWSConnection(config map[string]interface{}) awsTestResult {
 			"account_id": aws.ToString(identity.Account),
 			"user_id":    aws.ToString(identity.UserId),
 			"arn":        aws.ToString(identity.Arn),
-		},
-	}
-}
-
-func testAzureConnection(config map[string]interface{}) struct {
-	Success bool                   `json:"success"`
-	Message string                 `json:"message"`
-	Details map[string]interface{} `json:"details,omitempty"`
-} {
-	tenantID, ok1 := config["tenant_id"].(string)
-	clientID, ok2 := config["client_id"].(string)
-	clientSecret, ok3 := config["client_secret"].(string)
-
-	if !ok1 || !ok2 || !ok3 || tenantID == "" || clientID == "" || clientSecret == "" {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
-			Success: false,
-			Message: "Missing Azure credentials",
-		}
-	}
-
-	// TODO: Actually test connection using Azure SDK
-	return struct {
-		Success bool                   `json:"success"`
-		Message string                 `json:"message"`
-		Details map[string]interface{} `json:"details,omitempty"`
-	}{
-		Success: true,
-		Message: "Azure credentials validated",
-		Details: map[string]interface{}{
-			"subscription_id": config["subscription_id"],
-		},
-	}
-}
-
-func testGCPConnection(config map[string]interface{}) struct {
-	Success bool                   `json:"success"`
-	Message string                 `json:"message"`
-	Details map[string]interface{} `json:"details,omitempty"`
-} {
-	// Get service account JSON from config (try all known field names)
-	serviceAccountJSON := ""
-	for _, key := range []string{"service_account_json", "service_account_key", "credentials_json"} {
-		if v, ok := config[key].(string); ok && v != "" {
-			serviceAccountJSON = v
-			break
-		}
-	}
-
-	if serviceAccountJSON == "" {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
-			Success: false,
-			Message: "Missing GCP service account credentials",
-		}
-	}
-
-	// Parse and validate the service account key JSON
-	var serviceKey struct {
-		Type        string `json:"type"`
-		ProjectID   string `json:"project_id"`
-		ClientEmail string `json:"client_email"`
-		PrivateKey  string `json:"private_key"`
-	}
-	if err := json.Unmarshal([]byte(serviceAccountJSON), &serviceKey); err != nil {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
-			Success: false,
-			Message: fmt.Sprintf("Invalid service account JSON: %v", err),
-		}
-	}
-
-	if serviceKey.Type != "service_account" {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
-			Success: false,
-			Message: fmt.Sprintf("Invalid credential type: expected 'service_account', got '%s'", serviceKey.Type),
-		}
-	}
-
-	if serviceKey.PrivateKey == "" || serviceKey.ClientEmail == "" {
-		return struct {
-			Success bool                   `json:"success"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
-			Success: false,
-			Message: "Service account key missing required fields (private_key, client_email)",
-		}
-	}
-
-	projectID := ""
-	if pid, ok := config["project_id"].(string); ok && pid != "" {
-		projectID = pid
-	}
-	if projectID == "" {
-		projectID = serviceKey.ProjectID
-	}
-
-	return struct {
-		Success bool                   `json:"success"`
-		Message string                 `json:"message"`
-		Details map[string]interface{} `json:"details,omitempty"`
-	}{
-		Success: true,
-		Message: "GCP credentials validated successfully",
-		Details: map[string]interface{}{
-			"project_id":            projectID,
-			"service_account_email": serviceKey.ClientEmail,
 		},
 	}
 }

@@ -13,7 +13,7 @@ import {
   closesOnKey, closesOnOutsidePointer,
   mapExportFilename, toCytoscape, toCytoscapeJSON, toGraphML, xmlEscape,
 } from './map-export';
-import type { MapEdge, MapGraph, MapNode } from './map-model';
+import { nodeRiskForExport, type MapEdge, type MapGraph, type MapNode } from './map-model';
 
 const node = (over: Partial<MapNode> & Pick<MapNode, 'id'>): MapNode => ({
   kind: 'asset',
@@ -175,6 +175,62 @@ describe('toGraphML', () => {
     expect(xml).toContain('<graph id="neighbourhood" edgedefault="directed">');
     expect(xml).toContain('</graph>');
     expect(xml.trimEnd().endsWith('</graphml>')).toBe(true);
+  });
+});
+
+// A risk score is only an assessment when something assessed it. A node the
+// server flags `risk_assessed: false` carries `risk_score: 0` meaning "nobody
+// looked"; exporting that 0 reads in yEd/Gephi as "assessed clean". Both
+// polarities, both formats, because a rule that drops every score is as broken
+// as one that keeps every zero.
+describe('risk in the exports is only ever an assessment', () => {
+  const RISK_GRAPH: MapGraph = {
+    rootId: 'unassessed',
+    nodes: [
+      node({ id: 'unassessed', isRoot: true, depth: 0, riskScore: 0, riskAssessed: false }),
+      node({ id: 'clean', riskScore: 0, riskAssessed: true }),
+      node({ id: 'scored', riskScore: 72, riskAssessed: true }),
+      // A payload from before the server sent the flag: a positive score can only
+      // have come from an assessment, so it stands.
+      node({ id: 'legacy-scored', riskScore: 40 }),
+      // ...but a bare 0 with no flag is not evidence of an assessment.
+      node({ id: 'legacy-zero', riskScore: 0 }),
+      node({ id: 'no-score' }),
+    ],
+    edges: [],
+  };
+  const cyRisk = (id: string) =>
+    toCytoscape(RISK_GRAPH).elements.nodes.find((n) => n.data.id === id)!.data.risk_score;
+
+  it('Cytoscape: omits risk_score for an unassessed node', () => {
+    expect(cyRisk('unassessed')).toBeUndefined();
+    expect('risk_score' in toCytoscape(RISK_GRAPH).elements.nodes[0].data).toBe(false);
+    expect(cyRisk('legacy-zero')).toBeUndefined();
+    expect(cyRisk('no-score')).toBeUndefined();
+  });
+
+  it('Cytoscape: keeps an assessed score, including an assessed-clean 0', () => {
+    expect(cyRisk('clean')).toBe(0);
+    expect(cyRisk('scored')).toBe(72);
+    expect(cyRisk('legacy-scored')).toBe(40);
+  });
+
+  it('GraphML: writes no risk element for an unassessed node, and does for the assessed ones', () => {
+    const xml = toGraphML(RISK_GRAPH);
+    const block = (id: string) => {
+      const start = xml.indexOf(`<node id="${id}">`);
+      return xml.slice(start, xml.indexOf('</node>', start));
+    };
+    expect(block('unassessed')).not.toContain('n_risk');
+    expect(block('legacy-zero')).not.toContain('n_risk');
+    expect(block('no-score')).not.toContain('n_risk');
+    expect(block('clean')).toContain('<data key="n_risk">0</data>');
+    expect(block('scored')).toContain('<data key="n_risk">72</data>');
+    expect(block('legacy-scored')).toContain('<data key="n_risk">40</data>');
+  });
+
+  it('nodeRiskForExport ignores a non-finite score', () => {
+    expect(nodeRiskForExport({ riskScore: Number.NaN, riskAssessed: true })).toBeUndefined();
   });
 });
 

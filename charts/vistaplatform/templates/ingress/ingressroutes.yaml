@@ -1780,6 +1780,62 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/audit-service/internal/`) || Path(`/api/v1/audit-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/audit-service/internal/`) || Path(`/api/v2/audit-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/inventory-service/internal/`) || Path(`/api/v1/inventory-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/inventory-service/internal/`) || Path(`/api/v2/inventory-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
   {{- if $tlsSecret }}
   tls:
     secretName: {{ $tlsSecret }}

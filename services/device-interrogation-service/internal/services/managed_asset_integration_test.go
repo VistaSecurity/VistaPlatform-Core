@@ -965,6 +965,145 @@ func TestIntegration_WeakIdentifiersAreScopedToTheSegment(t *testing.T) {
 	}
 }
 
+// TestIntegration_CreateDevice_ScopeIsTheFirstAddressInASegment pins B5
+// on the manual device path: the scope is that of the first address the form
+// carries that falls in a real segment, resolved through ScopeForAddress.
+//
+// Two shapes used to land on the tenant default while a segment covered the
+// appliance: an address typed into the NAME field (the IP field left empty),
+// and an IP field holding an address no segment covers while the management
+// URL's address is inside one. The sensor files that same address under its
+// segment, so the two records could never collide.
+func TestIntegration_CreateDevice_ScopeIsTheFirstAddressInASegment(t *testing.T) {
+	db := testdb.Connect(t)
+	tenant := testdb.NewTenant(t, db)
+	ctx := context.Background()
+
+	var segmentID uuid.UUID
+	if err := db.QueryRow(`
+		INSERT INTO network_segments (tenant_id, name, segment_type, value, environment)
+		VALUES ($1, 'mgmt', 'cidr', '198.51.100.0/24', 'production')
+		RETURNING id`, tenant).Scan(&segmentID); err != nil {
+		t.Fatalf("seed segment: %v", err)
+	}
+	svc := NewDeviceServiceWithKey(db, testMasterKey)
+
+	scopeOf := func(assetID uuid.UUID, kind, value string) string {
+		t.Helper()
+		var scope sql.NullString
+		if err := db.QueryRow(`
+			SELECT scope FROM asset_identifiers
+			WHERE tenant_id = $1 AND asset_id = $2 AND kind = $3 AND value = $4`,
+			tenant, assetID, kind, value).Scan(&scope); err != nil {
+			t.Fatalf("read %s %s: %v", kind, value, err)
+		}
+		return scope.String
+	}
+
+	// An address in the name field, nothing else.
+	named, err := svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{
+		DeviceType: "f5",
+		Hostname:   strptr("198.51.100.1"),
+	})
+	if err != nil {
+		t.Fatalf("CreateDevice (address as name): %v", err)
+	}
+	if got := scopeOf(named.ID, "ip_address", "198.51.100.1"); got != segmentID.String() {
+		t.Errorf("address typed as the name: ip_address scope = %q, want the segment %s", got, segmentID)
+	}
+
+	// The IP field holds a ULA no segment covers; the management URL's address
+	// is in the segment. The short name must follow the segment, not the ULA.
+	shortName := "edge" + uuid.New().String()[:6]
+	mixed, err := svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{
+		DeviceType:    "cisco",
+		Hostname:      &shortName,
+		IPAddress:     strptr("fd00::1"),
+		ManagementURL: strptr("https://198.51.100.2:8443"),
+	})
+	if err != nil {
+		t.Fatalf("CreateDevice (ULA first): %v", err)
+	}
+	if got := scopeOf(mixed.ID, "hostname", shortName); got != segmentID.String() {
+		t.Errorf("hostname scope = %q, want the segment %s (the first address that resolves)", got, segmentID)
+	}
+
+	// Negative polarity: nothing resolves, so the old rule — the tenant default —
+	// stands. Not "some segment".
+	lone := "lone" + uuid.New().String()[:6]
+	outside, err := svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{
+		DeviceType: "cisco",
+		Hostname:   &lone,
+		IPAddress:  strptr("203.0.113.9"),
+	})
+	if err != nil {
+		t.Fatalf("CreateDevice (outside): %v", err)
+	}
+	if got := scopeOf(outside.ID, "hostname", lone); got != identity.ScopeTenantDefault {
+		t.Errorf("outside every segment: hostname scope = %q, want %q", got, identity.ScopeTenantDefault)
+	}
+}
+
+// TestIntegration_ObservationSink_PeerSyntheticNamesAreAttributes pins D1
+// on the peer path: a UUID-form or IP-encoded name a collector reports is not
+// an identifier. It lands in the peer asset's `synthetic_names` attribute, and
+// a peer whose ONLY identifier was such a name is skipped rather than failing
+// the interrogation or becoming an asset held together by a rotating name.
+func TestIntegration_ObservationSink_PeerSyntheticNamesAreAttributes(t *testing.T) {
+	db := testdb.Connect(t)
+	tenant := testdb.NewTenant(t, db)
+	ctx := context.Background()
+
+	hostname := "ctrl-" + uuid.New().String()[:8] + ".corp.example.test"
+	dev, err := NewDeviceServiceWithKey(db, testMasterKey).CreateDevice(ctx, tenant, models.CreateDeviceRequest{
+		DeviceType: "unifi",
+		Hostname:   &hostname,
+	})
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+
+	const castName = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b.local"
+	peerMAC := "aa:bb:cc:dd:ee:21"
+	peer := di.PeerRef{DisplayName: "Living room"}
+	peer.AddIdentifier(di.IdentifierMACAddress, peerMAC)
+	for _, name := range []string{castName, "speaker-7", "192-0-2-5.local"} {
+		if !peer.AddIdentifier(di.IdentifierHostname, name) {
+			t.Fatalf("AddIdentifier rejected %q", name)
+		}
+	}
+	onlySynthetic := di.PeerRef{DisplayName: "rotating"}
+	onlySynthetic.AddIdentifier(di.IdentifierHostname, "a1b2c3d4-e5f6-4a5b-8c7d-9e0f1a2b3c4d.local")
+
+	if err := NewObservationSink(db).Persist(ctx, tenant, dev.ID, interrogationSource(uuid.New()), InterrogationObservations{
+		Relationships: []di.RelationshipObservation{
+			{Type: string(relationships.ConnectsTo), Direction: di.SubjectToPeer, Peer: peer},
+			{Type: string(relationships.ConnectsTo), Direction: di.SubjectToPeer, Peer: onlySynthetic},
+		},
+	}); err != nil {
+		t.Fatalf("Persist: %v (a synthetic-only peer must be skipped, not fail the job)", err)
+	}
+
+	var peerAsset uuid.UUID
+	var synthetic sql.NullString
+	if err := db.QueryRow(`
+		SELECT a.id, a.attributes->>'synthetic_names'
+		FROM assets a JOIN asset_identifiers i ON i.tenant_id = a.tenant_id AND i.asset_id = a.id
+		WHERE a.tenant_id = $1 AND i.kind = 'mac_address' AND i.value = $2`, tenant, peerMAC).Scan(&peerAsset, &synthetic); err != nil {
+		t.Fatalf("read peer asset: %v", err)
+	}
+	var got []string
+	if err := json.Unmarshal([]byte(synthetic.String), &got); err != nil || len(got) != 2 {
+		t.Errorf("synthetic_names = %q, want the UUID and the IP-encoded name (err %v)", synthetic.String, err)
+	}
+	assertCount(t, db, 1, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind IN ('hostname','fqdn')`, tenant, peerAsset)
+	assertCount(t, db, 1, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'hostname' AND value = 'speaker-7'`, tenant, peerAsset)
+	// Nothing anywhere holds a synthetic name as an identifier, and the
+	// synthetic-only peer created no asset.
+	assertCount(t, db, 0, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND kind IN ('hostname','fqdn') AND (value LIKE '%-%-%-%-%.local' OR value LIKE '192-0-2-5%')`, tenant)
+	assertCount(t, db, 2, `SELECT count(*) FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenant)
+}
+
 // TestIntegration_SubmitJobResult_PersistsObservationsWithoutCryptoAssets is the
 // guard for the agent-path gate.
 //

@@ -98,6 +98,76 @@ func TestIsMDNSLocalName(t *testing.T) {
 	}
 }
 
+// D1: one case per class that is NOT identity, and the 12-hex keep-case.
+func TestIsIdentityName(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		// UUID-form: rotating service instance names.
+		{"0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b.local", false},
+		{"0F1E2D3C-4B5A-6978-8A9B-0C1D2E3F4A5B.LOCAL.", false},
+		{"0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b", false},
+		{"0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b.example.test", false},
+		// IP-encoded: the lease written as a name.
+		{"192-0-2-5.local", false},
+		{"203-0-113-9.dyn.example.net", false},
+		{"198-51-100-7", false},
+		// Placeholders.
+		{"none", false},
+		{"none-3", false},
+		{"NONE-12.local", false},
+		// Not a name at all.
+		{"", false},
+		{"   ", false},
+		{".local", false},
+		// 12-hex .local: synthetic for display, but the only stable name some
+		// devices have. KEPT.
+		{"1f852cc29a96.local", true},
+		{"1F852CC29A96", true},
+		// Ordinary names.
+		{"acct-ws-14", true},
+		{"printer-2.local", true},
+		{"host.example.com", true},
+		// Near misses stay identity: not four octets, or octets out of range,
+		// or a word that merely starts with "none".
+		{"10-20-30.local", true},
+		{"300-1-1-1.local", true},
+		{"nonesuch", true},
+		{"0f1e2d3c-4b5a.local", true},
+	}
+	for _, tc := range cases {
+		if got := IsIdentityName(tc.name); got != tc.want {
+			t.Errorf("IsIdentityName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestMergeSyntheticNames_RecentFirstDedupedCapped(t *testing.T) {
+	got := MergeSyntheticNames([]string{"New.local.", "old.local"}, []string{"old.local", "older.local"})
+	want := []string{"new.local", "old.local", "older.local"}
+	if len(got) != len(want) {
+		t.Fatalf("merge = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("merge = %v, want %v", got, want)
+		}
+	}
+
+	var existing []string
+	for i := 0; i < MaxSyntheticNames; i++ {
+		existing = append(existing, "none-"+string(rune('a'+i)))
+	}
+	capped := MergeSyntheticNames([]string{"fresh"}, existing)
+	if len(capped) != MaxSyntheticNames {
+		t.Fatalf("len = %d, want the cap %d", len(capped), MaxSyntheticNames)
+	}
+	if capped[0] != "fresh" || capped[MaxSyntheticNames-1] != existing[MaxSyntheticNames-2] {
+		t.Fatalf("the newest name must be kept and the oldest dropped: %v", capped)
+	}
+}
+
 func TestNormalizeSource_EmptyIsPassive(t *testing.T) {
 	if NormalizeSource("") != SourceMeasuredPassive {
 		t.Fatal("empty stored kind must be measured-passive so hex .local rows can still promote")

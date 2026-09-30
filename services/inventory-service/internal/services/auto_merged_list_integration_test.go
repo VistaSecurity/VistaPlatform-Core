@@ -147,6 +147,11 @@ func TestIntegration_AutoMergedList_CoversEveryEngine(t *testing.T) {
 	if !row.AutoAccepted {
 		t.Error("the listed row does not say it was auto-accepted")
 	}
+	// A matcher accept written by ANOTHER service's engine is still the
+	// matcher's: the Approvals row label depends on it ( Phase 4).
+	if row.DecidedBy != DecidedByMatcher || len(row.RuleEvidence) != 0 {
+		t.Errorf("decided_by = %q (evidence %v), want %q with no rule evidence", row.DecidedBy, row.RuleEvidence, DecidedByMatcher)
+	}
 	if row.AcceptedAssetID == nil || row.AcceptedAssetID.String() != accepted.Asset.ID {
 		t.Errorf("accepted_asset_id = %v, want %s", row.AcceptedAssetID, accepted.Asset.ID)
 	}

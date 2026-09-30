@@ -9,6 +9,7 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
@@ -949,6 +950,263 @@ func TestClassHintForSelfReport_PassiveObservationStaysUnknownHost(t *testing.T)
 	ho := &hostobs.HostObservation{Platform: "linux", Profile: "datacenter_host"}
 	if got := classHintForSelfReport(ho); got != assetclass.KeyUnknownHost {
 		t.Errorf("classHintForSelfReport (no AgentID) = %q, want %q", got, assetclass.KeyUnknownHost)
+	}
+}
+
+// --- D1: synthetic names are attributes, not identifiers ---------------
+
+const (
+	testCastInstance  = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b.local"
+	testCastInstance2 = "a1b2c3d4-e5f6-4a5b-8c7d-9e0f1a2b3c4d.local"
+)
+
+// A rotating service-instance name (UUID-form) and the lease written as a name
+// (IP-encoded) are not identity. The one real name is the only hostname
+// identifier; the other two are the synthetic_names attribute.
+func TestHostObservationBuilder_SyntheticNamesAreNotIdentifiers(t *testing.T) {
+	ho := &hostobs.HostObservation{
+		Source:    hostobs.SourceMDNS,
+		MAC:       "28:cf:da:11:22:40",
+		Addresses: mustAddrs(t, "192.0.2.5"),
+		FQDNs:     []string{testCastInstance, "192-0-2-5.local"},
+		Hostnames: []string{"real-name"},
+	}
+	obs, err := buildHostObs(t, unscopedService(), ho)
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	var names []string
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindHostname || id.Kind == identity.KindFQDN {
+			names = append(names, id.Value)
+		}
+	}
+	if len(names) != 1 || names[0] != "real-name" {
+		t.Fatalf("name identifiers = %v, want exactly [real-name]", names)
+	}
+	synthetic := hostObservationSyntheticNames(ho)
+	if strings.Join(synthetic, ",") != strings.Join([]string{"192-0-2-5.local", testCastInstance}, ",") &&
+		strings.Join(synthetic, ",") != strings.Join([]string{testCastInstance, "192-0-2-5.local"}, ",") {
+		t.Fatalf("synthetic_names = %v, want the UUID and the IP-encoded name", synthetic)
+	}
+}
+
+// The same rule on the SHORT-name list: a DHCP client that sends option 12
+// `none`, or an instance id without a domain, carries no identity name.
+func TestHostObservationBuilder_SyntheticShortNamesAreNotIdentifiers(t *testing.T) {
+	ho := &hostobs.HostObservation{
+		Source:    hostobs.SourceDHCP,
+		MAC:       "28:cf:da:11:22:43",
+		Addresses: mustAddrs(t, "192.0.2.8"),
+		Hostnames: []string{"none", "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b", "198-51-100-8"},
+	}
+	obs, err := buildHostObs(t, unscopedService(), ho)
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindHostname || id.Kind == identity.KindFQDN {
+			t.Errorf("synthetic short name became an identifier: %s %q", id.Kind, id.Value)
+		}
+	}
+	if got := hostObservationSyntheticNames(ho); len(got) != 3 {
+		t.Errorf("synthetic_names = %v, want all three", got)
+	}
+}
+
+// The 12-hex `.local` name is the only stable name some devices announce; it
+// stays an identifier.
+func TestHostObservationBuilder_HexLocalNameStaysAnIdentifier(t *testing.T) {
+	ho := &hostobs.HostObservation{
+		Source:    hostobs.SourceMDNS,
+		Addresses: mustAddrs(t, "192.0.2.6"),
+		FQDNs:     []string{"1f852cc29a96.local"},
+	}
+	obs, err := buildHostObs(t, unscopedService(), ho)
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	found := false
+	for _, id := range obs.Identifiers {
+		if id.Kind == identity.KindHostname && id.Value == "1f852cc29a96.local" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("12-hex .local name was dropped: %v", obs.Identifiers)
+	}
+	if got := hostObservationSyntheticNames(ho); len(got) != 0 {
+		t.Fatalf("12-hex name filed as synthetic: %v", got)
+	}
+}
+
+// A sighting whose ONLY name is synthetic keeps every other identifier and its
+// display name, and one with nothing else is refused like any sighting that
+// carries nothing attachable — rather than creating an asset held together by
+// a name that will never be announced again.
+func TestHostObservationBuilder_SyntheticOnlyName(t *testing.T) {
+	obs, err := buildHostObs(t, unscopedService(), &hostobs.HostObservation{
+		Source:    hostobs.SourceMDNS,
+		Addresses: mustAddrs(t, "192.0.2.7"),
+		FQDNs:     []string{testCastInstance},
+	})
+	if err != nil {
+		t.Fatalf("hostObservationObservation: %v", err)
+	}
+	if len(obs.Identifiers) != 1 || obs.Identifiers[0].Kind != identity.KindIPAddress {
+		t.Fatalf("identifiers = %v, want only the address", obs.Identifiers)
+	}
+	if obs.DisplayName != testCastInstance {
+		t.Errorf("DisplayName = %q; the name is still the best LABEL we have", obs.DisplayName)
+	}
+
+	_, err = buildHostObs(t, unscopedService(), &hostobs.HostObservation{
+		Source: hostobs.SourceMDNS,
+		FQDNs:  []string{testCastInstance},
+	})
+	if !errors.Is(err, errNoIdentifiers) {
+		t.Fatalf("name-only synthetic sighting: err = %v, want errNoIdentifiers", err)
+	}
+}
+
+// B5 + D1 against a real database: the sighting's name scope follows the first
+// address that resolves to a real segment, and synthetic names land in the
+// attribute, capped and most recent first.
+func TestIntegration_HostObservation_NameScopeIsTheFirstAddressInASegment(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	segment := uuid.New()
+	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Office','cidr','192.0.2.0/24','production')`, segment, tenant); err != nil {
+		t.Fatal(err)
+	}
+	ho := &hostobs.HostObservation{
+		Source:    hostobs.SourceMDNS,
+		MAC:       "28:cf:da:11:22:41",
+		Addresses: mustAddrs(t, "fd00::1", "192.0.2.10"),
+		Hostnames: []string{"desk-9"},
+	}
+	ho.Finalize()
+	f := hostObsFinding(t, ho, nil)
+	payload, ok := hostObservationPayload(f)
+	if !ok {
+		t.Fatal("no payload")
+	}
+	obs, err := svc.hostObservationObservation(tenant, f, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Network.SegmentID != segment.String() {
+		t.Errorf("observation segment = %q, want %s (the first address that resolves)", obs.Network.SegmentID, segment)
+	}
+	for _, id := range obs.Identifiers {
+		switch {
+		case id.Kind == identity.KindHostname && id.Scope != segment.String():
+			t.Errorf("hostname %s scope = %q, want the segment %s", id.Value, id.Scope, segment)
+		case id.Kind == identity.KindIPAddress && id.Value == "fd00::1" && id.Scope != identity.ScopeTenantDefault:
+			// Each address keeps ITS OWN scope; only names follow the rule.
+			t.Errorf("fd00::1 scope = %q, want the tenant default", id.Scope)
+		}
+	}
+}
+
+func TestIntegration_HostObservation_SyntheticNamesBecomeAnAttribute(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Office','cidr','192.0.2.0/24','production')`, uuid.New(), tenant); err != nil {
+		t.Fatal(err)
+	}
+	// DHCP: a direct, device-binding sighting, so the second one matches the
+	// first by MAC and both land on one asset.
+	for _, name := range []string{testCastInstance, testCastInstance2} {
+		ho := &hostobs.HostObservation{
+			Source:    hostobs.SourceDHCP,
+			MAC:       "28:cf:da:11:22:42",
+			Addresses: mustAddrs(t, "192.0.2.11"),
+			FQDNs:     []string{name},
+			Hostnames: []string{"desk-10"},
+		}
+		if _, err := svc.IngestFindings(tenant, []IngestFinding{observationFinding(t, ho)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var assetID uuid.UUID
+	var synthetic string
+	if err := db.QueryRow(`SELECT id, COALESCE(attributes->>'synthetic_names','') FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant).Scan(&assetID, &synthetic); err != nil {
+		t.Fatalf("expected exactly one asset: %v", err)
+	}
+	var got []string
+	if err := json.Unmarshal([]byte(synthetic), &got); err != nil {
+		t.Fatalf("synthetic_names = %q: %v", synthetic, err)
+	}
+	if len(got) != 2 || got[0] != testCastInstance2 || got[1] != testCastInstance {
+		t.Errorf("synthetic_names = %v, want [%s %s] (most recent first)", got, testCastInstance2, testCastInstance)
+	}
+	var names []string
+	rows, err := db.Query(`SELECT value FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind IN ('hostname','fqdn') ORDER BY value`, tenant, assetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, v)
+	}
+	if len(names) != 1 || names[0] != "desk-10" {
+		t.Errorf("name identifiers = %v, want exactly [desk-10]", names)
+	}
+}
+
+// A sighting whose only name is synthetic must admit exactly as the same
+// sighting with a real name does: admission reads device and address bindings,
+// never names, so losing the name identifier changes what the asset carries,
+// not whether one is created. Relayed mDNS on a configured segment is the
+// provisional path; both variants must produce one provisional asset.
+func TestIntegration_HostObservation_SyntheticOnlyNameAdmitsLikeARealName(t *testing.T) {
+	outcome := func(name string) (int, string, int) {
+		svc, db, tenant := newHostObsFixture(t)
+		for _, q := range []string{
+			`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES(gen_random_uuid(),$1,'Office','cidr','192.0.2.0/24','production')`,
+			// Admission is only consulted in enforce mode; the default
+			// (disabled) creates a legacy asset from anything.
+			`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`,
+			`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason) SELECT $1,id,'{"quantity":10}','synthetic-name admission test' FROM billable_items WHERE key='max_assets'`,
+		} {
+			if _, err := db.Exec(q, tenant); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ho := &hostobs.HostObservation{
+			Source:     hostobs.SourceMDNS,
+			Addresses:  mustAddrs(t, "192.0.2.12"),
+			FQDNs:      []string{name},
+			ObservedAt: time.Now().UTC(),
+		}
+		if _, err := svc.IngestFindings(tenant, []IngestFinding{observationFinding(t, ho)}); err != nil {
+			t.Fatal(err)
+		}
+		var assets, nameIDs int
+		var status string
+		if err := db.QueryRow(`SELECT count(*), COALESCE(max(identity_status),'') FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant).Scan(&assets, &status); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND kind IN ('hostname','fqdn')`, tenant).Scan(&nameIDs); err != nil {
+			t.Fatal(err)
+		}
+		return assets, status, nameIDs
+	}
+	realAssets, realStatus, realNames := outcome("speaker-3.local")
+	synAssets, synStatus, synNames := outcome(testCastInstance)
+	t.Logf("real name: %d asset(s) %q; synthetic-only: %d asset(s) %q", realAssets, realStatus, synAssets, synStatus)
+	if realAssets != 1 || realStatus != "provisional" {
+		t.Fatalf("fixture no longer exercises the provisional path: %d asset(s) %q", realAssets, realStatus)
+	}
+	if synAssets != realAssets || synStatus != realStatus {
+		t.Errorf("synthetic-only sighting: %d asset(s) %q; the same sighting with a real name: %d asset(s) %q",
+			synAssets, synStatus, realAssets, realStatus)
+	}
+	if realNames != 1 || synNames != 0 {
+		t.Errorf("name identifiers: real=%d synthetic=%d, want 1 and 0", realNames, synNames)
 	}
 }
 

@@ -63,9 +63,16 @@ type Asset struct {
 	Zone           string
 	AssetStatus    string
 	AssetOwnership string
-	RiskScore      int
-	FirstSeenAt    time.Time
-	LastSeenAt     time.Time
+	// RiskScore is meaningful only when RiskAssessed is true. `assets.risk_score`
+	// is NOT NULL DEFAULT 0, so a never-assessed asset and an assessed-clean one
+	// both read 0; RiskAssessed is what tells them apart.
+	RiskScore int
+	// RiskAssessed is true when something has assessed the asset's risk: its
+	// `risk_assessed_by` is non-empty, or its score is positive (the same rule as
+	// the inventory UI's assetRisk). A false here means NOT ASSESSED, not "safe".
+	RiskAssessed bool
+	FirstSeenAt  time.Time
+	LastSeenAt   time.Time
 	// Tags is the flattened `tags` jsonb, string values only. A nested object
 	// under a tag key is skipped rather than stringified — "map[…]" in an
 	// evidence document is noise, not information.

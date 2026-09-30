@@ -9,6 +9,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// ReasonFrameworkNotActivated is the machine-readable `reason` a compliance
+// surface puts on the 403 it answers when a framework exists but the tenant has
+// no active subscription to it. Writer (compliance-engine) and reader
+// (mcp-service) share the constant so a rename cannot leave one green against a
+// platform that stopped saying it.
+const ReasonFrameworkNotActivated = "framework_not_activated"
+
 // ErrorResponse sends a standard error JSON response. Internal details are
 // logged but not exposed to clients.
 func ErrorResponse(c *gin.Context, status int, userMessage string, internalErr error) {

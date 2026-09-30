@@ -325,15 +325,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/siem/types": {
+    "/internal/export/events": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List supported SIEM integration types */
-        get: operations["getSiemTypes"];
+        /** Audit events stored after a cursor (internal) */
+        get: operations["getExportFeedEvents"];
         put?: never;
         post?: never;
         delete?: never;
@@ -342,7 +342,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/siem/integrations": {
+    "/internal/export/head": {
         parameters: {
             query?: never;
             header?: never;
@@ -350,55 +350,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List SIEM integrations
-         * @description `integrations` is null when none are configured.
+         * The cursor a new feed consumer starts from (internal)
+         * @description "Now" by the database clock — the consumer receives only events stored
+         *     from here on — or `backfill_seconds` ago, for a consumer that should
+         *     start with a bounded recent window.
          */
-        get: operations["getSiemIntegrations"];
+        get: operations["getExportFeedHead"];
         put?: never;
-        /** Create a SIEM integration */
-        post: operations["createSiemIntegration"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/siem/integrations/test": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Test a SIEM integration
-         * @description Sends a test event through the integration config. Returns 400 if the test fails.
-         */
-        post: operations["testSiemIntegration"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/siem/integrations/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description SIEM integration UUID. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        /** Update a SIEM integration */
-        put: operations["updateSiemIntegration"];
         post?: never;
-        /** Delete a SIEM integration */
-        delete: operations["deleteSiemIntegration"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -753,55 +713,58 @@ export interface components {
                 [key: string]: unknown;
             };
         };
-        /**
-         * @description A SIEM integration (services.SIEMIntegration). `config` and `filters` are
-         *     config blobs left loosely typed here.
-         */
-        SIEMIntegration: {
-            /** Format: uuid */
-            id: string;
-            name: string;
-            /** @description splunk / datadog / elastic / generic_webhook. */
-            type: string;
-            enabled: boolean;
-            config: {
-                [key: string]: unknown;
-            };
-            filters: {
-                [key: string]: unknown;
-            };
+        /** @description A position in the export feed. The next page starts strictly after it. */
+        ExportFeedCursor: {
             /** Format: date-time */
             created_at: string;
+            /** Format: uuid */
+            id: string;
+        };
+        /**
+         * @description The export projection of one audit entry: who, what, on what, from
+         *     where, and how it ended. Optional fields are omitted when absent.
+         */
+        ExportFeedEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id?: string;
+            /** Format: uuid */
+            user_id?: string;
+            user_type: string;
+            user_email?: string;
+            event_type: string;
+            event_category: string;
+            action: string;
+            resource_type?: string;
+            /** Format: uuid */
+            resource_id?: string;
+            ip_address?: string;
+            request_id?: string;
+            error_code?: string;
+            success: boolean;
+            requires_attention: boolean;
+            compliance_tags?: string[];
             /** Format: date-time */
-            updated_at: string;
+            occurred_at: string;
         };
-        /** @description Envelope `{ "integration": ... }`. */
-        SIEMIntegrationResponse: {
-            integration: components["schemas"]["SIEMIntegration"];
+        ExportFeedItem: {
+            cursor: components["schemas"]["ExportFeedCursor"];
+            event: components["schemas"]["ExportFeedEvent"];
         };
-        /** @description Envelope `{ "integrations": [...] }`. `integrations` is null when none are configured. */
-        SIEMIntegrationListResponse: {
-            integrations: components["schemas"]["SIEMIntegration"][] | null;
+        ExportFeedPage: {
+            items: components["schemas"]["ExportFeedItem"][];
+            next: components["schemas"]["ExportFeedCursor"];
+            /** @description The page was full; more settled events may follow. */
+            more: boolean;
+            /**
+             * Format: date-time
+             * @description The settle boundary the page was read against.
+             */
+            horizon: string;
         };
-        /** @description Envelope `{ "types": [...] }` — static catalog of supported integration types with their config fields. */
-        SIEMTypesResponse: {
-            types: {
-                [key: string]: unknown;
-            }[];
-        };
-        /** @description Body for POST/PUT/test SIEM integration (services.SIEMIntegration). Read-only fields are ignored. */
-        SIEMIntegrationInput: {
-            name?: string;
-            type?: string;
-            enabled?: boolean;
-            config?: {
-                [key: string]: unknown;
-            };
-            filters?: {
-                [key: string]: unknown;
-            };
-        } & {
-            [key: string]: unknown;
+        ExportFeedHeadResponse: {
+            cursor: components["schemas"]["ExportFeedCursor"];
         };
         /** @description Envelope `{ "summary": {...} }` for /compliance-reports/summary. `summary` is a loosely-typed blob. */
         ComplianceSummaryResponse: {
@@ -1489,148 +1452,59 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
-    getSiemTypes: {
+    getExportFeedEvents: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description The cursor's created_at (RFC 3339, microsecond precision). */
+                after_created_at: string;
+                /** @description The cursor's event id. Events at the same created_at sort by id. */
+                after_id: string;
+                /** @description Page size, 1–1000 (default 500). */
+                limit?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description The supported types (static catalog). */
+            /** @description One page of the feed, oldest first. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SIEMTypesResponse"];
-                };
-            };
-        };
-    };
-    getSiemIntegrations: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The configured integrations. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SIEMIntegrationListResponse"];
-                };
-            };
-        };
-    };
-    createSiemIntegration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SIEMIntegrationInput"];
-            };
-        };
-        responses: {
-            /** @description The created integration. */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SIEMIntegrationResponse"];
+                    "application/json": components["schemas"]["ExportFeedPage"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
     };
-    testSiemIntegration: {
+    getExportFeedHead: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Start this many seconds back, 0–604800 (7 days). Default 0. */
+                backfill_seconds?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SIEMIntegrationInput"];
-            };
-        };
-        responses: {
-            /** @description Test succeeded. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AuditMessageResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-        };
-    };
-    updateSiemIntegration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description SIEM integration UUID. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SIEMIntegrationInput"];
-            };
-        };
-        responses: {
-            /** @description The updated integration. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SIEMIntegrationResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    deleteSiemIntegration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description SIEM integration UUID. */
-                id: string;
-            };
-            cookie?: never;
-        };
         requestBody?: never;
         responses: {
-            /** @description Deletion confirmation. */
+            /** @description The starting cursor. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AuditMessageResponse"];
+                    "application/json": components["schemas"]["ExportFeedHeadResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
     };

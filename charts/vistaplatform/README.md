@@ -69,7 +69,12 @@ give admin-service those through `backends.admin-service.extraEnv` (and, if
 the proxy re-signs TLS, mount a CA bundle with `extraVolumes`/`extraVolumeMounts`
 and point `SSL_CERT_FILE` at it — the bundle replaces the system one, so
 include the public roots). Air-gapped installs leave the endpoint empty and
-upload the downloaded report instead.
+upload the downloaded report instead. The same proxy variables apply to every
+service that dials out (webhooks, SMTP, and the Enterprise NetBox/CMDB/SIEM
+integrations); which services those are, what `NO_PROXY` must contain, how
+the SSRF guard judges the target behind a proxy, `networkPolicy.egressEnabled`,
+and per-connection CA bundles are covered in
+`docsv4/core/operate/configuration/outbound-connections.md`.
 - Either `platform.existingSecretName` OR all three of `platform.{jwtSecret,internalAuthSecret,encryptionMasterKey}`
 
 See `examples/values-customer.yaml.example` (bundled with this chart) for the full annotated starter. After `helm pull --untar`, copy it into your own infrastructure repo, edit, and apply with `-f`.

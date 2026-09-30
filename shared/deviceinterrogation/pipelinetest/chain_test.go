@@ -41,6 +41,23 @@ func TestChain_EveryHopReadsTheGoldenBeforeIt(t *testing.T) {
 	}
 }
 
+// The scheduled-cloud chain gets the same drift check.
+func TestChain_CloudScheduledHopsReadTheGoldenBeforeThem(t *testing.T) {
+	cdir := filepath.Join(pipelinetest.Dir(t, dir), pipelinetest.CloudScheduledScenario)
+	var hop2 pipelinetest.CloudHop2Handoff
+	pipelinetest.ReadJSON(t, filepath.Join(cdir, pipelinetest.Hop2HandoffFile), &hop2)
+	if got := pipelinetest.Hash(t, filepath.Join(cdir, pipelinetest.Hop1HandoffFile)); hop2.InputSHA256 != got {
+		t.Errorf("cloud hop 2 was generated from a different hop-1 handoff (recorded %s, now %s): "+
+			"regenerate hop 2 (discovery-processor-service) and hop 3 with -update-golden", hop2.InputSHA256, got)
+	}
+	var hop3 pipelinetest.Hop3Inventory
+	pipelinetest.ReadJSON(t, filepath.Join(cdir, pipelinetest.Hop3InventoryFile), &hop3)
+	if got := pipelinetest.Hash(t, filepath.Join(cdir, pipelinetest.Hop2HandoffFile)); hop3.InputSHA256 != got {
+		t.Errorf("cloud hop 3 was generated from a different hop-2 handoff (recorded %s, now %s): "+
+			"regenerate hop 3 (inventory-service) with -update-golden", hop3.InputSHA256, got)
+	}
+}
+
 // TestChain_NoGoldenCarriesPlantedSecrets: the fixtures plant
 // MUST-NOT-BE-COLLECTED wherever a vendor returns material we must never
 // store. A golden is a copy of what the pipeline stored or forwarded, so the

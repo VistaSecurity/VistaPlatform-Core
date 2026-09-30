@@ -3,10 +3,24 @@ package email
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/google/uuid"
 )
+
+// ErrNotConfigured means no SMTP host has been configured anywhere the platform
+// looks: no tenant override, no platform_settings.email_config, and no SMTP_HOST
+// in the environment. It is a property of the deployment, not a transient
+// fault — retrying cannot make it succeed.
+//
+// ResolveEmailConfig / GetPlatformEmailConfig deliberately do NOT return it:
+// they fall back to localhost:587 (and other callers, e.g. auth-service, rely
+// on getting *a* config back). Callers that need to tell "unconfigured" from
+// "configured but unreachable" use ResolveDeliverableConfig.
+var ErrNotConfigured = errors.New("email delivery is not configured")
 
 // EmailConfigResolver resolves email configuration for tenants
 // Supports platform default with optional tenant overrides
@@ -63,6 +77,85 @@ func (r *EmailConfigResolver) ResolveEmailConfig(tenantID uuid.UUID) (*EmailConf
 	}
 
 	return config, nil
+}
+
+// ResolveDeliverableConfig returns the email configuration to send with, or
+// ErrNotConfigured when there is no SMTP host to send through.
+//
+// Order: the tenant's own override (tenantID != nil), then the platform's
+// admin-UI-managed email_config, then an explicit SMTP_HOST in the environment
+// (the dev/compose path). A blank smtp_host anywhere counts as "not set" — the
+// silent localhost:587 default that the older resolvers apply is exactly what
+// made an unconfigured deployment retry every alert email against a port
+// nothing listens on.
+//
+// Any other error is a lookup failure and is returned wrapped: the caller may
+// treat it as transient.
+func (r *EmailConfigResolver) ResolveDeliverableConfig(tenantID *uuid.UUID) (*EmailConfig, error) {
+	if tenantID != nil {
+		var configJSON []byte
+		// A NULL result (no platform config, no tenant override) scans to nil;
+		// a lookup error is not fatal here — the platform config is the fallback.
+		if err := r.db.QueryRow(`SELECT get_tenant_email_config($1)`, *tenantID).Scan(&configJSON); err == nil {
+			if cfg := r.configFromJSON(configJSON); cfg != nil {
+				return cfg, nil
+			}
+		}
+	}
+
+	var configJSON []byte
+	err := r.db.QueryRow(`SELECT setting_value FROM platform_settings WHERE setting_key = 'email_config'`).Scan(&configJSON)
+	switch {
+	case err == nil:
+		if cfg := r.configFromJSON(configJSON); cfg != nil {
+			return cfg, nil
+		}
+	case errors.Is(err, sql.ErrNoRows):
+		// fall through to the environment
+	default:
+		return nil, fmt.Errorf("failed to get platform email config: %w", err)
+	}
+
+	// Read through os.Getenv, not GetEmailConfigFromEnv's defaulting helper: that
+	// one turns an unset SMTP_HOST into "localhost", which would make every
+	// deployment look configured.
+	if strings.TrimSpace(os.Getenv("SMTP_HOST")) != "" {
+		envConfig := GetEmailConfigFromEnv()
+		envConfig.BrandName = r.PlatformBrandName()
+		return &envConfig, nil
+	}
+	return nil, ErrNotConfigured
+}
+
+// configFromJSON builds an EmailConfig from a stored email_config document, or
+// returns nil when the document is absent, unparseable, or names no smtp_host.
+func (r *EmailConfigResolver) configFromJSON(raw []byte) *EmailConfig {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	host := strings.TrimSpace(getStringFromMap(m, "smtp_host", ""))
+	if host == "" {
+		return nil
+	}
+	cfg := &EmailConfig{
+		SMTPHost:     host,
+		SMTPPort:     getStringFromMap(m, "smtp_port", "587"),
+		SMTPUsername: getStringFromMap(m, "smtp_username", ""),
+		SMTPPassword: getStringFromMap(m, "smtp_password", ""),
+		FromEmail:    getStringFromMap(m, "from_email", "noreply@vista.local"),
+		FromName:     getStringFromMap(m, "from_name", "Vista"),
+		BrandName:    r.PlatformBrandName(),
+	}
+	if cfg.SMTPPassword != "" && r.encryptionKey != "" {
+		if decrypted, err := r.decryptPassword(cfg.SMTPPassword); err == nil {
+			cfg.SMTPPassword = decrypted
+		}
+	}
+	return cfg
 }
 
 // PlatformBrandName reads the white-label platform display name

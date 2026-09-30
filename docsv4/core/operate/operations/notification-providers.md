@@ -11,10 +11,27 @@ This guide provides step-by-step instructions for integrating third-party notifi
 The unified notification service supports multiple notification channels:
 - **Slack** - Team collaboration and alerts
 - **Email** - SMTP-based email delivery
-- **Webhook** - Custom HTTP endpoints
+- **Webhook** - Custom HTTP endpoints (signed, with an idempotency key)
 - **PagerDuty** - Incident management
-- **SMS** - Text messaging (placeholder for future implementation)
 - **In-App** - Platform notification center
+
+There is no SMS channel, and **Microsoft Teams is not a supported channel** — see
+[Microsoft Teams](#microsoft-teams) below.
+
+### What the Test button tells you
+
+**Test** sends a real test notification through the connection and reports the
+real outcome. When it fails, the reason is shown — for example *"Address not
+allowed: the destination is a private, loopback or otherwise internal address"*,
+*"The receiving service says the endpoint does not exist (HTTP 404)"*, *"The
+destination did not respond in time"* or *"Email delivery isn't configured by the
+platform operator."* Reasons never include the connection's URL, tokens or
+headers, so it is safe to screenshot them into a ticket; the technical detail is in
+the notification service's log. The same reason appears in **Delivery History**
+(hover the channels cell of a failed row).
+
+A **PagerDuty** test opens a throwaway incident and resolves it immediately, so it
+does not leave anything open or page anyone for longer than the resolve takes.
 
 ## Slack Integration
 
@@ -237,6 +254,15 @@ Slack notifications are sent as formatted message blocks:
 
 ### Troubleshooting
 
+**"Email delivery isn't configured by the platform operator":**
+No SMTP host is set anywhere the platform looks — not in **Settings → Email**, not
+as a tenant override, and not through the `SMTP_HOST` environment variable. Email
+channels then fail immediately and are **not retried** (retrying cannot help), and
+the tenant's email connection card carries the same notice. Configure SMTP (Step 2
+above) and the channels start working with no other change. In a local
+compose development stack, set `SMTP_HOST` (for example to a mail catcher) for the
+notification service.
+
 **Emails not sending:**
 - Verify SMTP credentials are correct
 - Check SMTP port (587 for TLS, 465 for SSL)
@@ -287,15 +313,20 @@ app.post('/webhook/alerts', (req, res) => {
 2. Click **Add Channel**
 3. Configure:
    - **Channel Name**: "Custom Webhook"
-   - **Channel Type**: Webhook
+   - **Channel Type**: Generic webhook
    - **URL**: Your webhook endpoint URL
-   - **Headers** (optional): Custom HTTP headers
-   - **Authentication** (optional):
-     - **Type**: Bearer or Basic
-     - **Token/Credentials**: Authentication details
+   - **Authentication**: **None**, **Bearer token**, **Basic** (username +
+     password) or **Custom header** (one header name and value)
+   - **Signing secret** (optional): leave blank and Vista generates one
    - **Enabled**: ✓
-4. Click **Test** to send test notification
-5. Click **Create**
+4. Click **Add connection**. If Vista generated a signing secret it is shown
+   **once** — copy it into your receiver now.
+5. Click **Test** on the connection card to send a test notification.
+
+Every credential you enter (token, password, header value, signing secret) is
+encrypted at rest and **write-only**: the console never shows it again, only a
+masked form such as `••••wxyz`. Editing a connection and leaving a credential
+blank keeps the stored value; entering a new one replaces it.
 
 ### Step 3: Webhook Payload Format
 
@@ -303,9 +334,11 @@ Webhooks receive notifications in this format:
 
 ```json
 {
+  "event_id": "6f1c1c0e-3b0a-4c2e-9b1e-0a1b2c3d4e5f",
   "alert_source": "monitoring",
   "alert_type": "high_response_time",
   "severity": "high",
+  "title": "High response time",
   "message": "Service response time exceeded threshold",
   "timestamp": "2026-04-19T12:45:00Z",
   "metadata": {
@@ -316,28 +349,60 @@ Webhooks receive notifications in this format:
 }
 ```
 
-### Step 4: Authentication Options
+### Step 4: Verify the signature and de-duplicate
 
-**Bearer Token:**
-```json
-{
-  "auth": {
-    "type": "bearer",
-    "token": "your-api-token"
-  }
+Every delivery carries three headers:
+
+| Header | Meaning |
+|---|---|
+| `X-Vista-Event-Id` | A stable id for this notification. **Identical on every retry** of the same notification, so use it as your idempotency key and ignore a repeat. |
+| `X-Vista-Timestamp` | Unix time (seconds) when the request was sent. |
+| `X-Vista-Signature` | `sha256=` followed by the hex HMAC-SHA256 of `timestamp + "." + body`, keyed with the channel's signing secret. Present when the channel has a signing secret. |
+
+To verify: recompute the HMAC over the timestamp, a literal `.`, and the **raw
+request body bytes** (before any JSON parsing), compare it to the header in
+constant time, and reject requests whose timestamp is more than a few minutes
+old to defeat replay.
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, headers: dict, raw_body: bytes, tolerance: int = 300) -> bool:
+    timestamp = headers["X-Vista-Timestamp"]
+    if abs(time.time() - int(timestamp)) > tolerance:
+        return False
+    expected = "sha256=" + hmac.new(
+        secret.encode(), timestamp.encode() + b"." + raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, headers["X-Vista-Signature"])
+```
+
+```javascript
+const crypto = require('crypto');
+
+function verify(secret, headers, rawBody, toleranceSeconds = 300) {
+  const timestamp = headers['x-vista-timestamp'];
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceSeconds) return false;
+  const expected = 'sha256=' + crypto
+    .createHmac('sha256', secret)
+    .update(`${timestamp}.`)
+    .update(rawBody)
+    .digest('hex');
+  const given = Buffer.from(headers['x-vista-signature'] || '');
+  const want = Buffer.from(expected);
+  return given.length === want.length && crypto.timingSafeEqual(given, want);
 }
 ```
 
-**Basic Auth:**
-```json
-{
-  "auth": {
-    "type": "basic",
-    "username": "webhook-user",
-    "password": "webhook-password"
-  }
-}
-```
+**Rotating the secret:** open the connection, enter a new **Signing secret**
+(or click **Generate** and copy the value), and save. Update your receiver at
+the same time — deliveries are signed with the new secret from the moment you
+save. A connection created before signing existed has no secret until you enter
+one.
+
+**Retries:** a delivery that fails with a temporary error (a timeout, a 5xx, a 429)
+is retried with backoff and carries the **same** `X-Vista-Event-Id`. A 4xx other
+than 408, 425 and 429 is treated as permanent and is not retried.
 
 ### Troubleshooting
 
@@ -390,10 +455,31 @@ Webhooks receive notifications in this format:
    - **Channel Type**: PagerDuty
    - **Integration Key**: Paste the integration key from Step 1
    - **Enabled**: ✓
-4. Click **Test** to create a test incident
+4. Click **Test** — this opens a throwaway incident and resolves it straight
+   away, so nothing is left open
 5. Click **Create**
 
-### Step 3: Severity Mapping
+### Step 3: Incident identity (dedup) and auto-resolve
+
+Every event carries a `dedup_key` derived from the alert, so PagerDuty treats one
+alert as one incident:
+
+- the alert opening, and any later **escalation** of the same alert, update the
+  **same** incident (`dedup_key` = `vista-alert-<alert id>`);
+- when the platform observes the condition clear and auto-resolves the alert, it
+  sends a **resolve** event with the same key, closing the incident;
+- a notification that is not a stateful alert (for example a discovery job
+  result) gets its own key from its event id, which is stable across retries — so
+  a retried delivery never opens a second incident.
+
+Note that the auto-resolve notice is an *info*-severity notification. A routing
+rule whose **Severity Filter** is only "critical" and "high" will not route it, so
+the incident would stay open until you resolve it in PagerDuty. If you want
+automatic resolution, include **info** in the severity filter of the rule that
+feeds PagerDuty, or add a second rule for PagerDuty limited to auto-resolve
+notices.
+
+### Step 4: Severity Mapping
 
 PagerDuty severity mapping:
 - `critical` → PagerDuty "critical"
@@ -402,7 +488,7 @@ PagerDuty severity mapping:
 - `low` → PagerDuty "info"
 - `info` → PagerDuty "info"
 
-### Step 4: Create Rules for Critical Alerts
+### Step 5: Create Rules for Critical Alerts
 
 1. Navigate to **Settings → Notifications & Alerts → Routing Rules** (tenant
    app) or **Settings → Notification Delivery** (admin console)
@@ -426,14 +512,19 @@ PagerDuty severity mapping:
 - Check severity mapping in delivery service
 - Verify alert severity in notification request
 
-## SMS Integration (Placeholder)
+## Microsoft Teams
 
-SMS integration is planned for future implementation. When available, configuration will follow similar patterns to other channels.
+**Microsoft Teams is not a supported channel.** There is no Teams option in
+**Add connection**, and a Teams *Workflows* (or legacy Office 365 connector) URL
+pasted into a **Generic webhook** connection will **not post anything**: Teams
+expects an Adaptive Card payload, and a generic webhook sends the alert JSON
+described above. The delivery can look successful on Vista's side while nothing
+appears in the Teams channel. To reach Teams today, point a Generic webhook at a
+small relay that turns the alert JSON into an Adaptive Card and posts it.
 
-**Planned Providers:**
-- Twilio
-- AWS SNS
-- Other SMS gateways
+## SMS
+
+There is no SMS channel. It is not offered in either console.
 
 ## Best Practices
 

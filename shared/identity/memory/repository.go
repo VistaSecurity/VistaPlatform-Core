@@ -312,8 +312,25 @@ func (r *Repository) CreateAsset(_ context.Context, tenantID string, in identity
 
 func (a *asset) putIdentifier(id identity.Identifier) {
 	k := id.Key()
-	if _, ok := a.identifiers[k]; !ok {
+	prev, ok := a.identifiers[k]
+	if !ok {
 		a.identOrder = append(a.identOrder, k)
+	} else if prev.SeenAt.After(id.SeenAt) {
+		// Last-seen never moves backwards, exactly as the SQL upsert's
+		// GREATEST(last_seen_at, EXCLUDED.last_seen_at) says: an older
+		// sighting attached late is still evidence the identifier existed
+		// then, not evidence it has not been seen since.
+		// Repository.IdentifierLastSeen reads this, and the lease rule of
+		// 1b compares against it.
+		id.SeenAt = prev.SeenAt
+	}
+	if ok && id.Inferred() && !prev.Inferred() {
+		// A derived re-sighting of a value the asset holds natively does not
+		// demote it ( Phase 2): the SQL upsert keeps the native
+		// source_kind and source_ref the same way. The reverse — a native
+		// sighting of a value held as derived — upgrades it, which the plain
+		// assignment below already does.
+		id.Source = prev.Source
 	}
 	a.identifiers[k] = id
 }
@@ -489,6 +506,9 @@ func (r *Repository) OpenMergeProposal(_ context.Context, tenantID string, p ide
 			continue
 		}
 		if identity.MergeProposalFingerprint(r.props[k]) == fp {
+			// The same question re-asked: fold the new evidence in, with
+			// the same rule the SQL implementation applies ( A3).
+			r.props[k] = identity.FoldMergeProposal(r.props[k], p)
 			return identity.ProposalRef{TenantID: tenantID, ID: strings.TrimPrefix(k, tenantID+"|"), Reused: true}, nil
 		}
 	}
@@ -524,6 +544,28 @@ func (r *Repository) LastKeptSeparate(_ context.Context, tenantID string, assetI
 		}
 	}
 	return identity.PriorDecision{}, false, nil
+}
+
+// IdentifierLastSeen implements identity.Repository.
+func (r *Repository) IdentifierLastSeen(_ context.Context, tenantID string, id identity.Identifier) (time.Time, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if tenantID == "" {
+		return time.Time{}, false, fmt.Errorf("memory: IdentifierLastSeen: no tenant")
+	}
+	owner, ok := r.owners[ownerKey(tenantID, id)]
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	a, ok := r.assets[assetKey(tenantID, owner.ID)]
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	held, ok := a.identifiers[id.Key()]
+	if !ok {
+		return time.Time{}, false, nil
+	}
+	return held.SeenAt, true, nil
 }
 
 func priorDecisionOf(id string, p identity.MergeProposal, st proposalState) identity.PriorDecision {
@@ -592,6 +634,45 @@ func (r *Repository) RecordAnnouncement(_ context.Context, announcer, holder ide
 	return nil
 }
 
+// AddressAnnounced implements identity.Repository.
+func (r *Repository) AddressAnnounced(_ context.Context, holder identity.AssetRef, address string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if holder.TenantID == "" {
+		return false, fmt.Errorf("memory: AddressAnnounced: no tenant")
+	}
+	// The same two sources the SQL store reads: the latest announcement per
+	// announcer (the edge), and the holder's history entries the engine's
+	// floating-address path writes (append-only).
+	for _, rec := range r.announcements {
+		if rec.Holder == holder && containsString(rec.Latest.Addresses, address) {
+			return true, nil
+		}
+	}
+	for _, e := range r.history {
+		if e.TenantID != holder.TenantID || e.AssetID != holder.ID {
+			continue
+		}
+		fa, ok := e.Changes["floating_address"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if addrs, ok := fa["addresses"].([]string); ok && containsString(addrs, address) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
 // ── test accessors ─────────────────────────────────────────────────────────
 
 // History returns every recorded history entry, in order.
@@ -632,6 +713,22 @@ func (r *Repository) Announcements(ref identity.AssetRef) []identity.Announcemen
 		}
 	}
 	return out
+}
+
+// PendingProposal is identitytest.ProposalReader: the stored proposal, folds
+// included, while it is still pending.
+func (r *Repository) PendingProposal(ref identity.ProposalRef) (identity.MergeProposal, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := assetKey(ref.TenantID, ref.ID)
+	p, ok := r.props[k]
+	if !ok {
+		return identity.MergeProposal{}, false
+	}
+	if _, resolved := r.propState[k]; resolved {
+		return identity.MergeProposal{}, false
+	}
+	return p, true
 }
 
 // Proposals returns every merge proposal, in creation order.
@@ -941,6 +1038,29 @@ func (r *Repository) StatusOf(ref identity.AssetRef) string {
 		return a.status
 	}
 	return ""
+}
+
+// HostnameCardinality implements identity.Repository: the number of distinct
+// live assets in the tenant with a `hostname` identifier of this value, in any
+// scope. Archived and denied assets are not live, the same set the SQL store and
+// the merge approvals count.
+func (r *Repository) HostnameCardinality(_ context.Context, tenantID, value string) (int, error) {
+	want := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, a := range r.assets {
+		if a.ref.TenantID != tenantID || a.status == identity.StatusArchived || a.status == identity.StatusDenied {
+			continue
+		}
+		for _, id := range a.identifiers {
+			if id.Kind == identity.KindHostname && id.Value == want {
+				n++
+				break
+			}
+		}
+	}
+	return n, nil
 }
 
 func (a *asset) dropIdentifier(key string) {

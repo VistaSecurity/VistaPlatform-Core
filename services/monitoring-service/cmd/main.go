@@ -56,16 +56,19 @@ func main() {
 	healthService := services.NewHealthService(cfg)
 	metricsService := services.NewMetricsService(cfg)
 	alertingService := services.NewAlertingService(db)
-	notificationService := services.NewNotificationService(db)
+
+	// NATS: the discovery-metrics subscriber below consumes it, and security-
+	// incident notifications are published on it (notifications.send is the
+	// platform's one delivery path — this service delivers nothing itself).
+	natsClient, natsErr := events.NewNATSClient("")
+	if natsErr != nil {
+		log.Printf("WARNING: NATS unavailable (discovery subscriber and incident notifications disabled): %v", natsErr)
+	}
 
 	// Initialize log storage service and retention job
 	var logStorageService *services.LogStorageService
 	var retentionJob *jobs.LogRetentionJob
-	var incidentHook *services.IncidentResponseHook
-	if cfg.IncidentHooksEnabled && notificationService != nil {
-		incidentCreator := services.NewNotificationIncidentCreator(notificationService)
-		incidentHook = services.NewIncidentResponseHook(db, incidentCreator, true)
-	}
+	incidentHook := services.BuildIncidentResponseHook(db, natsClient, cfg.IncidentHooksEnabled)
 	if cfg.S3Bucket != "" && cfg.S3KMSKeyID != "" {
 		logStorageService, err = services.NewLogStorageService(db, bypassDB, cfg.S3Bucket, cfg.S3Region, cfg.S3KMSKeyID, incidentHook)
 		if err != nil {
@@ -101,7 +104,6 @@ func main() {
 	// Initialize alert evaluator (runs every 5 minutes)
 	alertEvaluator, err := jobs.NewAlertEvaluator(
 		alertingService,
-		notificationService,
 		metricsService,
 		cfg,
 		5*time.Minute, // Evaluate alerts every 5 minutes
@@ -112,10 +114,7 @@ func main() {
 
 	// Initialize NATS subscriber for real-time asset discovery metrics
 	var discoverySubscriber *subscribers.DiscoverySubscriber
-	natsClient, natsErr := events.NewNATSClient("")
-	if natsErr != nil {
-		log.Printf("WARNING: NATS unavailable for discovery subscriber: %v", natsErr)
-	} else {
+	if natsErr == nil {
 		discoverySubscriber = subscribers.NewDiscoverySubscriber(natsClient, metricsService)
 		if err := discoverySubscriber.Start(); err != nil {
 			log.Printf("WARNING: Failed to start NATS discovery subscriber: %v", err)

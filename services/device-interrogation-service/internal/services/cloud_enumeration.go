@@ -332,13 +332,13 @@ func (s *CloudDiscoveryService) enumerate(
 		}
 	case "azure":
 		var client *azureclient.Client
-		client, err = azureclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
+		client, err = azureclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey, s.azureOptions...)
 		if err == nil {
 			plan, err = s.enumerateAzure(ctx, client)
 		}
 	case "gcp":
 		var client *gcpclient.Client
-		client, err = gcpclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
+		client, err = gcpclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey, s.gcpOptions...)
 		if err == nil {
 			plan, err = s.enumerateGCP(ctx, client)
 		}

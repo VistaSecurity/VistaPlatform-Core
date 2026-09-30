@@ -68,6 +68,14 @@ type AssetService struct {
 	identityRepo *pgidentity.Repository
 	identityErr  error
 
+	// Decides which hostnames are generic for a tenant ( B2), with its
+	// per-tenant cardinality cache. Built lazily by genericNames() over the
+	// identity repository, because that only exists once identityEngine() has
+	// run. Shared by every host-observation build in the process, which is the
+	// point of the cache.
+	genericNamesOnce sync.Once
+	genericNamesVal  *identity.GenericNames
+
 	// The rule-based classifier (ADR-0004 D6) over the CURATED
 	// classification_rules table, reloaded on an interval so a rule an admin
 	// adds in the console becomes live without a restart. Built once, lazily,

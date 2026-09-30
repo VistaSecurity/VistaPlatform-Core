@@ -53,7 +53,7 @@
   },
   {
     "name": "vistaplatform_compare_cbom_artifacts",
-    "description": "Diff two CBOM artifacts of the same tenant. Components are matched by purl/OID/fingerprint and every change is categorized as improvement, regression, drift or neutral with a one-phrase reason — ideal for answering \"did our crypto posture regress since the last snapshot?\".",
+    "description": "Diff two CBOM artifacts of the same tenant. Components are matched by purl/OID/fingerprint and every change is categorized as improvement, regression, drift or neutral with a one-phrase reason — ideal for answering \"did our crypto posture regress since the last snapshot?\". Comparison is an Enterprise capability: where it is not included the tool answers {\"available\": false, \"reason\": \"edition\"} (the artifacts still exist) instead of a diff.",
     "read_only": true,
     "title": "Compare CBOM artifacts",
     "input_schema": {
@@ -227,7 +227,7 @@
   },
   {
     "name": "vistaplatform_get_compliance_summary",
-    "description": "Evaluate one licensed framework against the tenant's inventory: overall score, failing-control count, affected assets, per-family pass/warn/fail rollup and the per-control status list. Use vistaplatform_get_control_findings to drill into a failing control.",
+    "description": "Evaluate one licensed framework against the tenant's inventory: overall score, failing-control count, affected assets, per-family pass/warn/fail rollup and the per-control status list. Use vistaplatform_get_control_findings to drill into a failing control. A framework that is published but not activated for the tenant answers {\"available\": false, \"reason\": \"framework_not_activated\"} instead of a summary.",
     "read_only": true,
     "title": "Get compliance summary",
     "input_schema": {

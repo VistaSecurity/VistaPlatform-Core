@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,9 +16,13 @@ import (
 // caller can use. It deliberately runs on the bypass connection because shared
 // platform integrations are stored with tenant_id NULL and are not visible under
 // the tenant RLS policy.
+//
+// A disabled integration is refused. The "Enabled" switch on the integration
+// (is_enabled) used to be stored and shown and read by nothing, so turning an
+// integration off stopped neither its schedules nor a clicked Discover run.
 func authorizeCloudIntegration(ctx context.Context, bypassDB *sql.DB, tenantID, integrationID uuid.UUID, expectedType string) (string, error) {
 	query := `
-		SELECT integration_type
+		SELECT integration_type, COALESCE(is_enabled, true)
 		FROM platform_integrations
 		WHERE id = $1
 		  AND (tenant_id = $2 OR (tenant_id IS NULL AND is_shared = true))
@@ -31,14 +36,22 @@ func authorizeCloudIntegration(ctx context.Context, bypassDB *sql.DB, tenantID, 
 	}
 
 	var integrationType string
-	if err := bypassDB.QueryRowContext(ctx, query, args...).Scan(&integrationType); err != nil {
+	var enabled bool
+	if err := bypassDB.QueryRowContext(ctx, query, args...).Scan(&integrationType, &enabled); err != nil {
 		if err == sql.ErrNoRows {
 			return "", fmt.Errorf("integration not found")
 		}
 		return "", fmt.Errorf("failed to authorize integration: %w", err)
 	}
+	if !enabled {
+		return "", ErrCloudIntegrationDisabled
+	}
 	return integrationType, nil
 }
+
+// ErrCloudIntegrationDisabled is why a run of a switched-off integration is
+// refused. Its text is what the job shows.
+var ErrCloudIntegrationDisabled = errors.New("the integration is disabled; enable it under Discovery → Cloud to run discovery with it")
 
 // EnumerateComputeConfigKey is the integration-config key that turns compute /
 // network enumeration on or off for a cloud integration.

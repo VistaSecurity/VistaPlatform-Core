@@ -53,6 +53,15 @@ func (s *MergeProposalService) ExecuteMerge(ctx context.Context, tenant, proposa
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
+			if in.rule != nil && in.rule.recheck != nil {
+				// A rule merge re-evaluates its rule here, under the locks
+				// this merge holds, so it acts on current data ( Phase 4).
+				evidence, err := in.rule.recheck(ctx, tx)
+				if err != nil {
+					return err
+				}
+				in.rule.evidence = evidence
+			}
 			snap, err := readMergeSnapshot(ctx, tx, tenant, ids)
 			if err != nil {
 				return err
@@ -95,7 +104,11 @@ func (s *MergeProposalService) ExecuteMerge(ctx context.Context, tenant, proposa
 			if err := recomputeAssetRiskTx(tx, tenant, in.SurvivorAssetID); err != nil {
 				return err
 			}
-			if err := reconcileMergeProposals(ctx, tx, tenant, actor, in.SourceAssetIDs, in.SurvivorAssetID, snap.Proposals); err != nil {
+			var ruleStamp *ruleProposalStamp
+			if in.rule != nil {
+				ruleStamp = &ruleProposalStamp{proposal: proposal, evidence: in.rule.evidence}
+			}
+			if err := reconcileMergeProposals(ctx, tx, tenant, actor, in.SourceAssetIDs, in.SurvivorAssetID, snap.Proposals, ruleStamp); err != nil {
 				return err
 			}
 			// Snapshot the committed dispositions before archiving the sources. No raw
@@ -109,16 +122,33 @@ func (s *MergeProposalService) ExecuteMerge(ctx context.Context, tenant, proposa
 			if err := tx.QueryRowContext(ctx, `SELECT transaction_timestamp()`).Scan(&result.MergedAt); err != nil {
 				return err
 			}
+			historySource := mergeHistorySourceManual
+			if in.rule != nil {
+				historySource = mergeHistorySourceRule
+			}
 			for _, source := range in.SourceAssetIDs {
 				if _, err := tx.ExecContext(ctx, `UPDATE assets SET asset_status='archived',stale_status='archived',metadata=metadata||jsonb_build_object('merged_into',$3::text),updated_at=now() WHERE tenant_id=$1 AND id=$2`, tenant, source, in.SurvivorAssetID.String()); err != nil {
 					return err
 				}
-				if err := writeMergeHistory(ctx, tx, tenant, source, actor, "merged_into", map[string]any{"merge_id": result.ID, "merged_into": in.SurvivorAssetID, "reason": strings.TrimSpace(in.Reason)}); err != nil {
+				into := map[string]any{"merge_id": result.ID, "merged_into": in.SurvivorAssetID, "reason": strings.TrimSpace(in.Reason)}
+				if in.rule != nil {
+					into["decided_by"] = DecidedByRule
+				}
+				if err := writeMergeHistory(ctx, tx, tenant, source, actor, historySource, "merged_into", into); err != nil {
 					return err
 				}
 			}
 			history := map[string]any{"merge_id": result.ID, "proposal_id": proposal, "source_asset_ids": in.SourceAssetIDs, "reason": strings.TrimSpace(in.Reason), "source_snapshots": preview.Assets, "field_decisions": in.FieldResolutions, "selected_fields": preview.SelectedFields, "record_changes": changes, "revision": in.Revision, "management_profile_references": mergeManagementProfiles(snap), "enrichment_policy_before": snap.EnrichmentPolicy, "enrichment_policy_after": after.EnrichmentPolicy}
-			if err := writeMergeHistory(ctx, tx, tenant, in.SurvivorAssetID, actor, "merged_from", history); err != nil {
+			decidedBy := actor.String()
+			if in.rule != nil {
+				// Nobody clicked: the same-device rule decided ( Phase 4).
+				// The audit says so in its own key rather than leaving a NULL
+				// actor to be read as "someone we did not record".
+				history["decided_by"] = DecidedByRule
+				history["rule_evidence"] = in.rule.evidence
+				decidedBy = DecidedByRule
+			}
+			if err := writeMergeHistory(ctx, tx, tenant, in.SurvivorAssetID, actor, historySource, "merged_from", history); err != nil {
 				return err
 			}
 			// Preserve original child evidence for every moved/coalesced row. The
@@ -135,7 +165,7 @@ func (s *MergeProposalService) ExecuteMerge(ctx context.Context, tenant, proposa
 			}
 			pending := []invevents.Envelope{}
 			for _, source := range in.SourceAssetIDs {
-				pending = append(pending, invevents.Envelope{EventID: uuid.NewSHA1(result.ID, []byte(source.String())), EventType: invevents.EventTypeAssetMerged, TenantID: tenant, Timestamp: result.MergedAt, Source: "approvals", Payload: &invevents.AssetMergedPayload{SurvivorAssetID: in.SurvivorAssetID, MergedAssetID: source, ClassKey: mergeString(preview.SelectedFields["class_key"]), ProposalID: proposal, DecidedBy: actor.String()}})
+				pending = append(pending, invevents.Envelope{EventID: uuid.NewSHA1(result.ID, []byte(source.String())), EventType: invevents.EventTypeAssetMerged, TenantID: tenant, Timestamp: result.MergedAt, Source: "approvals", Payload: &invevents.AssetMergedPayload{SurvivorAssetID: in.SurvivorAssetID, MergedAssetID: source, ClassKey: mergeString(preview.SelectedFields["class_key"]), ProposalID: proposal, DecidedBy: decidedBy}})
 			}
 			pendingJSON, _ := json.Marshal(pending)
 			audit, _ := json.Marshal(history)
@@ -285,9 +315,26 @@ func mergeRecordChanges(before, after map[string][]mergeRecord) []mergeRecordCha
 	return out
 }
 
+// ruleProposalStamp names the proposal a rule merge was launched from and the
+// evidence it rests on (see reconcileMergeProposals).
+type ruleProposalStamp struct {
+	proposal uuid.UUID
+	evidence []string
+}
+
 // Refresh surviving questions; resolve only those whose explicit participants
 // now identify the same asset. A third candidate remains an independent task.
-func reconcileMergeProposals(ctx context.Context, tx *sqlx.Tx, tenant, actor uuid.UUID, sources []uuid.UUID, survivor uuid.UUID, proposals []json.RawMessage) error {
+//
+// "The same asset" is counted over LIVE participants (liveMergeParticipants):
+// a candidate that was archived, denied or deleted before this merge is not a
+// second record anyone can merge, so a question whose other side is gone is
+// answered by this merge rather than left pending on the survivor.
+//
+// `rule` is set on a rule merge: the proposal that launched it is closed in the
+// [DecidedByRule] storage contract's shape — `decided_by: rule` and the
+// evidence in the same patch as `status`/`merged_into`/`resolved_at`, and no
+// `resolved_by`. Every other proposal this merge answers is closed as before.
+func reconcileMergeProposals(ctx context.Context, tx *sqlx.Tx, tenant, actor uuid.UUID, sources []uuid.UUID, survivor uuid.UUID, proposals []json.RawMessage, rule *ruleProposalStamp) error {
 	moved := map[string]bool{}
 	for _, id := range sources {
 		moved[id.String()] = true
@@ -303,37 +350,21 @@ func reconcileMergeProposals(ctx context.Context, tx *sqlx.Tx, tenant, actor uui
 		if row.Changes["status"] != mergeStatusPending && row.Changes["status"] != mergeStatusKeptSeparate {
 			continue
 		}
-		ids := map[string]bool{}
-		if observation, ok := row.Changes["observation_asset_id"].(string); ok {
-			if moved[observation] {
-				observation = survivor.String()
-				row.Changes["observation_asset_id"] = observation
-			}
-			ids[observation] = true
+		ids := remapMergeParticipants(row.Changes, moved, survivor)
+		live, err := liveMergeParticipants(ctx, tx, tenant, survivor, ids)
+		if err != nil {
+			return err
 		}
-		candidates := []any{}
-		seen := map[string]bool{}
-		if cs, ok := row.Changes["candidates"].([]any); ok {
-			for _, c := range cs {
-				v, ok := c.(map[string]any)
-				if !ok {
-					continue
+		if live <= 1 && row.Changes["status"] == mergeStatusPending {
+			var extra map[string]any
+			if rule != nil && row.ID == rule.proposal {
+				evidence := rule.evidence
+				if evidence == nil {
+					evidence = []string{}
 				}
-				id, _ := v["asset_id"].(string)
-				if moved[id] {
-					id = survivor.String()
-					v["asset_id"] = id
-				}
-				ids[id] = true
-				if !seen[id] {
-					candidates = append(candidates, v)
-					seen[id] = true
-				}
+				extra = map[string]any{"decided_by": DecidedByRule, "rule_evidence": evidence}
 			}
-		}
-		row.Changes["candidates"] = candidates
-		if len(ids) <= 1 && row.Changes["status"] == mergeStatusPending {
-			if err := resolveProposal(ctx, tx, tenant, row.ID, mergeStatusMerged, survivor, actor); err != nil {
+			if err := resolveProposalWith(ctx, tx, tenant, row.ID, mergeStatusMerged, survivor, actor, extra); err != nil {
 				return err
 			}
 			continue
@@ -357,6 +388,76 @@ func reconcileMergeProposals(ctx context.Context, tx *sqlx.Tx, tenant, actor uui
 		}
 	}
 	return nil
+}
+
+// remapMergeParticipants rewrites a proposal's observation and candidates from
+// the merged sources onto the survivor (deduplicating candidates) and returns
+// the distinct participant ids.
+//
+// The floor path stores observation_asset_id as "" when the sighting created no
+// asset. "" is not a participant: counting it made {"", survivor} look like two
+// records, so the proposal that launched the merge stayed pending and the
+// survivor kept its "Identity conflict needs review" badge.
+func remapMergeParticipants(changes map[string]any, moved map[string]bool, survivor uuid.UUID) map[string]bool {
+	ids := map[string]bool{}
+	if observation, ok := changes["observation_asset_id"].(string); ok && observation != "" {
+		if moved[observation] {
+			observation = survivor.String()
+			changes["observation_asset_id"] = observation
+		}
+		ids[observation] = true
+	}
+	candidates := []any{}
+	seen := map[string]bool{}
+	if cs, ok := changes["candidates"].([]any); ok {
+		for _, c := range cs {
+			v, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			id, _ := v["asset_id"].(string)
+			if moved[id] {
+				id = survivor.String()
+				v["asset_id"] = id
+			}
+			ids[id] = true
+			if !seen[id] {
+				candidates = append(candidates, v)
+				seen[id] = true
+			}
+		}
+	}
+	changes["candidates"] = candidates
+	return ids
+}
+
+// liveMergeParticipants counts the distinct live records among a proposal's
+// participants once the merge has mapped every source onto the survivor. The
+// survivor is live by construction (this merge is writing into it); every other
+// participant is judged by mergeLiveAssetSQL, the same predicate the Approvals
+// queue and the conflict badge use.
+func liveMergeParticipants(ctx context.Context, tx *sqlx.Tx, tenant, survivor uuid.UUID, participants map[string]bool) (int, error) {
+	live := 0
+	others := []uuid.UUID{}
+	for raw := range participants {
+		id, err := uuid.Parse(raw)
+		if err != nil || id == uuid.Nil {
+			continue
+		}
+		if id == survivor {
+			live++
+			continue
+		}
+		others = append(others, id)
+	}
+	if len(others) == 0 {
+		return live, nil
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM assets lc WHERE lc.tenant_id=$1 AND lc.id=ANY($2) AND `+mergeLiveAssetSQL, tenant, pq.Array(others)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return live + n, nil
 }
 
 func reconciledProposalFingerprint(changes map[string]any) string {

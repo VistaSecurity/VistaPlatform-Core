@@ -47,6 +47,11 @@ does not establish complete discovery coverage.
 
 Approval records a decision, not another sighting: it never refreshes Last seen.
 
+A resource listed through a connected cloud account — including object storage,
+managed databases and key stores — establishes its asset from the provider's
+resource id (ARN, Azure resource id or GCP resource name), and a re-run matches the
+same asset on that id. A resource name alone, from any source, does not.
+
 Cloud job logs report identity outcomes separately from the resources enumerated.
 A retained cloud observation keeps encrypted provider context, including captured
 crypto evidence and enumeration facts. After linking and monitoring approval,

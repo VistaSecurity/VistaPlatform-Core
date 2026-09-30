@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -96,51 +95,23 @@ func SafeDialTimeout(network, addr string, timeout time.Duration) (net.Conn, err
 	return SafeDialer(timeout).Dial(network, addr)
 }
 
-// SafeHTTPClient returns an *http.Client whose transport refuses connections to
-// internal IPs at dial time. timeout bounds each request. Use it for outbound
-// calls to tenant-supplied hosts (CMDB connectors). The transport is otherwise
-// a clone of http.DefaultTransport (keep-alives, proxy-from-env, etc.).
-func SafeHTTPClient(timeout time.Duration) *http.Client {
-	return clientWithGuard(timeout, dialGuard)
-}
-
-// onPremDialGuard is dialGuard with the RFC1918 half lifted: an address in
-// private unicast space is permitted, everything [IsNeverReachable] covers —
-// loopback, link-local (and so the cloud metadata endpoints), unspecified,
-// multicast — is still refused.
-func onPremDialGuard(_, address string, _ syscall.RawConn) error {
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return fmt.Errorf("ssrf guard: unparseable address %q: %w", address, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("ssrf guard: %q did not resolve to an IP", host)
-	}
-	if IsNeverReachable(ip) {
-		return fmt.Errorf("ssrf guard: refusing to connect to %s — loopback, link-local and "+
-			"metadata addresses are never reachable, whatever the connector's private-endpoint setting says", ip)
-	}
-	return nil
-}
-
-// SafeHTTPClientAllowingPrivate returns a client for a connector whose target
-// system is ON-PREMISES BY CONSTRUCTION — a NetBox, a CMDB appliance, an
-// internal IPAM. It permits RFC1918/ULA/CGNAT targets and still refuses
-// loopback, link-local and the cloud metadata endpoints.
+// SafeHTTPClient returns an *http.Client that refuses internal targets:
+// loopback, link-local/metadata, RFC1918/ULA/CGNAT and the configured platform
+// CIDRs (PlatformInternalCIDRsEnv). timeout bounds each request.
 //
-// Use it ONLY behind a per-connection opt-in that the tenant set and that is
-// recorded in the audit log. The distinction it draws matters: pointing us at
-// 10.0.0.5 reaches the tenant's own network, which is the entire point of an
-// on-premises connector; pointing us at 127.0.0.1 or 169.254.169.254 reaches
-// OUR cluster, which is never the point.
-func SafeHTTPClientAllowingPrivate(timeout time.Duration) *http.Client {
-	return clientWithGuard(timeout, configuredOnPremDialGuard())
+// It is NewEgressClient(timeout, EgressOptions{}) — public targets, system
+// trust store — for the callers that predate the per-connection options. It
+// honours HTTP(S)_PROXY / NO_PROXY and, behind a proxy, judges the TARGET
+// rather than the proxy (see checkProxiedTarget). New integration code should
+// call [NewEgressClient] so the tenant's private-endpoint and CA-bundle
+// settings have somewhere to go.
+func SafeHTTPClient(timeout time.Duration) *http.Client {
+	return buildEgressClient(timeout, newTargetPolicy(false), nil, egressDeps{})
 }
 
-// OnPremDialContext is [SafeHTTPClientAllowingPrivate]'s guard as a bare
-// DialContext function, for a caller that must build its own http.Transport
-// rather than take the one above.
+// OnPremDialContext is the private-endpoint guard of [NewEgressClient]
+// (EgressOptions.AllowPrivateEndpoint) as a bare DialContext function, for a
+// caller that must build its own http.Transport rather than take that client.
 //
 // Device interrogation is that caller: every appliance client sets a per-device
 // TLSClientConfig (InsecureSkipVerify is a per-device opt-in for self-signed
@@ -155,31 +126,11 @@ func OnPremDialContext(timeout time.Duration) func(ctx context.Context, network,
 	return (&net.Dialer{Timeout: timeout, Control: configuredOnPremDialGuard()}).DialContext
 }
 
+// configuredOnPremDialGuard is the private-endpoint target policy, with the
+// platform CIDRs read from PlatformInternalCIDRsEnv now, as a Control hook. It
+// is the same targetPolicy the egress client uses, not a second copy of it.
 func configuredOnPremDialGuard() func(string, string, syscall.RawConn) error {
-	prefixes, configErr := platformInternalPrefixes(os.Getenv(PlatformInternalCIDRsEnv))
-	return func(network, address string, rawConn syscall.RawConn) error {
-		if configErr != nil {
-			return configErr
-		}
-		if err := onPremDialGuard(network, address, rawConn); err != nil {
-			return err
-		}
-		host, _, err := net.SplitHostPort(address)
-		if err != nil {
-			return fmt.Errorf("ssrf guard: unparseable address %q: %w", address, err)
-		}
-		addr, err := netip.ParseAddr(host)
-		if err != nil {
-			return fmt.Errorf("ssrf guard: %q did not resolve to an IP", host)
-		}
-		addr = addr.Unmap()
-		for _, prefix := range prefixes {
-			if prefix.Contains(addr) {
-				return fmt.Errorf("ssrf guard: refusing to connect to platform-internal address %s (matched %s)", addr, prefix)
-			}
-		}
-		return nil
-	}
+	return newTargetPolicy(true).control
 }
 
 func platformInternalPrefixes(value string) ([]netip.Prefix, error) {
@@ -196,20 +147,4 @@ func platformInternalPrefixes(value string) ([]netip.Prefix, error) {
 		prefixes = append(prefixes, prefix.Masked())
 	}
 	return prefixes, nil
-}
-
-func clientWithGuard(timeout time.Duration, guard func(string, string, syscall.RawConn) error) *http.Client {
-	base := http.DefaultTransport.(*http.Transport).Clone()
-	// NOTE: the transport keeps proxy-from-env, which is the behaviour every
-	// existing caller has had since. It is worth knowing that an
-	// HTTP(S)_PROXY in the environment makes the dialer connect to the PROXY,
-	// so the Control hook then inspects the proxy's address rather than the
-	// target's — the guard still runs, but on a different question. No
-	// deployment sets one today; changing it here would change egress for five
-	// shipped connectors, which is a decision of its own and not this one.
-	base.DialContext = (&net.Dialer{Timeout: timeout, Control: guard}).DialContext
-	return &http.Client{
-		Timeout:   timeout,
-		Transport: base,
-	}
 }

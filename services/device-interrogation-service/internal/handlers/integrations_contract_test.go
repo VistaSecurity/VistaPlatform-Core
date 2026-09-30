@@ -34,6 +34,7 @@ type stubIntegrationStore struct {
 	get        *CloudIntegration
 	getErr     error
 	createErr  error
+	updErr     error
 	updFound   bool
 	updType    string
 	updConfig  string
@@ -41,6 +42,13 @@ type stubIntegrationStore struct {
 	testFound  bool
 	testType   string
 	testConfig string
+	testAcct   string
+	testRegion string
+	// updFields records what the last Update was asked to write.
+	updFields map[string]interface{}
+	// testStatus / testMessage record the last UpdateTestStatus.
+	testStatus  string
+	testMessage *string
 }
 
 func (s *stubIntegrationStore) List(context.Context, uuid.UUID, string) ([]CloudIntegration, error) {
@@ -55,16 +63,21 @@ func (s *stubIntegrationStore) Create(context.Context, CreateIntegrationParams) 
 func (s *stubIntegrationStore) GetConfigForUpdate(context.Context, uuid.UUID, uuid.UUID) (string, string, bool, error) {
 	return s.updConfig, s.updType, s.updFound, nil
 }
-func (s *stubIntegrationStore) GetConfigForTest(context.Context, uuid.UUID, uuid.UUID) (string, string, bool, error) {
-	return s.testConfig, s.testType, s.testFound, nil
+func (s *stubIntegrationStore) GetConfigForTest(context.Context, uuid.UUID, uuid.UUID) (integrationTestTarget, bool, error) {
+	return integrationTestTarget{ConfigJSON: s.testConfig, IntegrationType: s.testType, AccountID: s.testAcct, Region: s.testRegion}, s.testFound, nil
 }
-func (s *stubIntegrationStore) Update(context.Context, uuid.UUID, uuid.UUID, map[string]interface{}) (int64, error) {
+func (s *stubIntegrationStore) Update(_ context.Context, _ uuid.UUID, _ uuid.UUID, fields map[string]interface{}) (int64, error) {
+	s.updFields = fields
+	if s.updErr != nil {
+		return 0, s.updErr
+	}
 	return 1, nil
 }
 func (s *stubIntegrationStore) Delete(context.Context, uuid.UUID, uuid.UUID) (int64, error) {
 	return s.delRows, nil
 }
-func (s *stubIntegrationStore) UpdateTestStatus(context.Context, uuid.UUID, uuid.UUID, string, *string) error {
+func (s *stubIntegrationStore) UpdateTestStatus(_ context.Context, _ uuid.UUID, _ uuid.UUID, status string, msg *string) error {
+	s.testStatus, s.testMessage = status, msg
 	return nil
 }
 

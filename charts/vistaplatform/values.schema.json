@@ -492,6 +492,10 @@
               "Recreate"
             ],
             "description": "Deployment update strategy. Defaults to RollingUpdate (Kubernetes default). Set to Recreate for services holding a ReadWriteOnce PVC, to avoid Multi-Attach deadlocks during upgrade. ~30s downtime per upgrade is the tradeoff. Switching an already-deployed service to Recreate under Helm's server-side apply needs a one-time kubectl patch first — see the production checklist, Single-node clusters."
+          },
+          "privateNetworkDialer": {
+            "type": "boolean",
+            "description": "The backend dials customer private (RFC1918) networks on purpose, so it is given VISTA_PLATFORM_INTERNAL_CIDRS from networkPolicy.clusterInternalCIDRs and its dial guard refuses the cluster's own pod and Service ranges; setting that variable through extraEnv is refused. device-interrogation-service and inventory-service always get it."
           }
         }
       }

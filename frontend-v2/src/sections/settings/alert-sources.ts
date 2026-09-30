@@ -9,15 +9,25 @@
 // tenant-track entries — unioned with the handful of tenant-scoped
 // AlertSource labels that exist outside the registry (they raise no
 // `alert_type`, so they have no catalog row to derive from):
-//   system           — notification-service's own delivery/config notices
-//   digest           — notification-service's periodic digest summaries
-//   billing-service  — admin-service's billing-webhook alerts
+//   system            — notification-service's own delivery/config notices
+//   digest            — notification-service's periodic digest summaries
+//   billing-service   — admin-service's billing-webhook alerts
+//   billing           — admin-service's subscription/invoice notifications
+//   discovery         — discovery job results (device-interrogation, cluster-sensor)
+//   ticketing         — compliance-engine's ticket assignment / status events
+//   remediation_plans — compliance-engine's remediation-plan events
+//
+// The four added last were real producers the dropdown did not offer, so a
+// routing rule scoped to them could never be created (integrations review M26).
+// alert-sources.test.ts now scans the Go producers for every AlertSource they
+// publish to notifications.send and fails when this list lacks one — add new
+// producer sources HERE.
 //
 // Kept DOM/network-free so both pieces — the option-list arithmetic and the
 // catalog fetch — are unit-testable independently of the modal.
 import { clients } from '../../lib/clients';
 
-export const NON_REGISTRY_ALERT_SOURCES = ['system', 'digest', 'billing-service'];
+export const NON_REGISTRY_ALERT_SOURCES = ['system', 'digest', 'billing-service', 'billing', 'discovery', 'ticketing', 'remediation_plans'];
 
 /** The routing-rule "Alert source" options: 'all' + every source that can
  *  actually appear on `alert_source`, plus whatever the rule being edited

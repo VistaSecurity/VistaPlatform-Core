@@ -1386,6 +1386,15 @@ bindings:
       minimum/maximum constraints; preserve current wire compatibility. The
       match_confidence concept declares the intended scale; this audit does not
       prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/MergeProposal/properties/pair_score:
+    concept: match_confidence
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+      minimum: 0
+      maximum: 1
   inventory-service.openapi.yaml#/components/schemas/RelationshipPeer/properties/risk_score:
     concept: risk
     delivery: implement

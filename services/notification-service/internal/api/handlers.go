@@ -1,14 +1,17 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/notification-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/notification-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/notification-service/internal/services"
 )
 
 // tenantIDFromContext resolves the tenant UUID regardless of whether an
@@ -44,6 +47,15 @@ func (s *Server) sendNotification(c *gin.Context) {
 
 // Tenant channel handlers
 
+// maskedChannel returns a copy of ch that is safe to put on the wire: every
+// credential in its config is masked (see services/channel_secrets.go). Every
+// tenant channel response goes through it — the manager hands back decrypted
+// configs because delivery needs them, so the HTTP boundary is where they stop.
+func maskedChannel(ch models.TenantNotificationChannel) models.TenantNotificationChannel {
+	ch.Config = services.MaskChannelConfig(ch.Config)
+	return ch
+}
+
 func (s *Server) listTenantChannels(c *gin.Context) {
 	tenantID, ok := tenantIDFromContext(c)
 	if !ok {
@@ -54,7 +66,11 @@ func (s *Server) listTenantChannels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, channels)
+	out := make([]models.TenantNotificationChannel, len(channels))
+	for i := range channels {
+		out[i] = maskedChannel(channels[i])
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (s *Server) getTenantChannel(c *gin.Context) {
@@ -73,7 +89,7 @@ func (s *Server) getTenantChannel(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Resource not found"})
 		return
 	}
-	c.JSON(http.StatusOK, channel)
+	c.JSON(http.StatusOK, maskedChannel(*channel))
 }
 
 func (s *Server) createTenantChannel(c *gin.Context) {
@@ -95,12 +111,34 @@ func (s *Server) createTenantChannel(c *gin.Context) {
 		return
 	}
 
+	// A generic webhook is signed. Give a new one a signing secret unless the
+	// caller supplied their own; the generated value is returned ONCE, in this
+	// response, and is write-only afterwards (masked like every credential).
+	generatedSecret := ""
+	if req.ChannelType == "webhook" {
+		if existing, _ := req.Config["webhook_secret"].(string); strings.TrimSpace(existing) == "" {
+			generatedSecret = services.GenerateSigningSecret()
+			req.Config["webhook_secret"] = generatedSecret
+		}
+	}
+
 	channel, err := s.channelManager.CreateTenantChannel(c.Request.Context(), tenantID, &req, createdBy)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusCreated, channel)
+	c.JSON(http.StatusCreated, createdChannelResponse{
+		TenantNotificationChannel: maskedChannel(*channel),
+		SigningSecret:             generatedSecret,
+	})
+}
+
+// createdChannelResponse is the create response: the (masked) channel, plus the
+// signing secret when the server generated one. It is the only place a signing
+// secret is ever returned in the clear.
+type createdChannelResponse struct {
+	models.TenantNotificationChannel
+	SigningSecret string `json:"signing_secret,omitempty"`
 }
 
 func (s *Server) updateTenantChannel(c *gin.Context) {
@@ -125,7 +163,7 @@ func (s *Server) updateTenantChannel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, channel)
+	c.JSON(http.StatusOK, maskedChannel(*channel))
 }
 
 func (s *Server) deleteTenantChannel(c *gin.Context) {
@@ -157,11 +195,53 @@ func (s *Server) testTenantChannel(c *gin.Context) {
 		return
 	}
 
-	if err := s.channelManager.TestTenantChannel(c.Request.Context(), tenantID, channelID); err != nil {
+	writeChannelTestResult(c, s.channelManager.TestTenantChannel(c.Request.Context(), tenantID, channelID))
+}
+
+// writeChannelTestResult answers a channel Test.
+//
+// A channel that did not deliver is NOT an internal error: it is the answer the
+// caller asked for. It gets a 422 with the sanitized reason (services.SafeFailureReason
+// — a fixed vocabulary that never carries the URL, query string, headers or
+// tokens; see failure_reasons.go), so the UI can say WHY instead of "Test
+// failed". `error` stays populated for clients that only read the legacy field.
+func writeChannelTestResult(c *gin.Context, err error) {
+	if err == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "test_sent"})
+		return
+	}
+	var failed *services.ChannelTestError
+	switch {
+	case errors.As(err, &failed):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"status":    "test_failed",
+			"error":     "Test failed",
+			"reason":    failed.Reason,
+			"permanent": failed.Permanent,
+		})
+	case errors.Is(err, services.ErrChannelNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "Resource not found"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+	}
+}
+
+// getTenantDeliveryStatus reports whether the platform can deliver each channel
+// transport that depends on operator configuration. Today that is email only:
+// with no SMTP host configured (platform email settings or SMTP_HOST) every
+// email channel is inert, and the tenant deserves to be told on the card rather
+// than discover it from a failed Test.
+func (s *Server) getTenantDeliveryStatus(c *gin.Context) {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		return
+	}
+	configured, err := s.emailStatus.EmailDeliveryConfigured(tenantID)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "test_sent"})
+	c.JSON(http.StatusOK, gin.H{"email": gin.H{"configured": configured}})
 }
 
 // Tenant rule handlers
@@ -375,13 +455,29 @@ func (s *Server) markAllPlatformNotificationsRead(c *gin.Context) {
 
 // Platform channel handlers
 
+// maskedPlatformChannel is maskedChannel for platform channels. The platform
+// endpoints used to return the DECRYPTED config to any platform admin holding
+// platform.notifications.manage — the same credential exposure the tenant
+// endpoints had before they were masked. Same policy, same masking.
+func maskedPlatformChannel(ch models.PlatformNotificationChannel) models.PlatformNotificationChannel {
+	ch.Config = services.MaskChannelConfig(ch.Config)
+	return ch
+}
+
 func (s *Server) listPlatformChannels(c *gin.Context) {
 	channels, err := s.channelManager.GetPlatformChannels()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, channels)
+	var out []models.PlatformNotificationChannel // stays nil (JSON null) when there are none
+	if channels != nil {
+		out = make([]models.PlatformNotificationChannel, len(channels))
+		for i := range channels {
+			out[i] = maskedPlatformChannel(channels[i])
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (s *Server) getPlatformChannel(c *gin.Context) {
@@ -396,7 +492,7 @@ func (s *Server) getPlatformChannel(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Resource not found"})
 		return
 	}
-	c.JSON(http.StatusOK, channel)
+	c.JSON(http.StatusOK, maskedPlatformChannel(*channel))
 }
 
 func (s *Server) createPlatformChannel(c *gin.Context) {
@@ -419,7 +515,7 @@ func (s *Server) createPlatformChannel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusCreated, channel)
+	c.JSON(http.StatusCreated, maskedPlatformChannel(*channel))
 }
 
 func (s *Server) updatePlatformChannel(c *gin.Context) {
@@ -448,7 +544,7 @@ func (s *Server) updatePlatformChannel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	c.JSON(http.StatusOK, channel)
+	c.JSON(http.StatusOK, maskedPlatformChannel(*channel))
 }
 
 func (s *Server) deletePlatformChannel(c *gin.Context) {
@@ -472,11 +568,7 @@ func (s *Server) testPlatformChannel(c *gin.Context) {
 		return
 	}
 
-	if err := s.channelManager.TestPlatformChannel(c.Request.Context(), channelID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "test_sent"})
+	writeChannelTestResult(c, s.channelManager.TestPlatformChannel(c.Request.Context(), channelID))
 }
 
 // Platform rule handlers

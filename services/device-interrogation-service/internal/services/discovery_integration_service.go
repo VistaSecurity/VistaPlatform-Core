@@ -17,6 +17,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -30,6 +31,38 @@ type DiscoveryIntegrationService struct {
 	// app.tenant_id. Pre-flip it resolves to the same connection as db.
 	bypassDB   *sql.DB
 	natsClient *events.NATSClient
+	// httpClient carries the NATS-down fallback POST to notification-service.
+	// nil means "build one from the process's mTLS settings" — see
+	// notificationHTTPClient. Tests inject their own.
+	httpClient *http.Client
+}
+
+// notificationHTTPClient returns the client for the HTTP fallback to
+// notification-service.
+//
+// Under USE_MTLS the peer URL is https://notification-service:8443 and the peer
+// DEMANDS a client certificate. The fallback used to use a bare http.Client, so
+// on an mTLS deployment — the only kind where it matters, since the fallback
+// runs exactly when NATS is down — the handshake failed and the notification was
+// lost with a log line nobody reads. Built the way every other producer's
+// fallback builds it (shared/http.NewMTLSClient with this service's own cert).
+func (s *DiscoveryIntegrationService) notificationHTTPClient() (*http.Client, error) {
+	if s.httpClient != nil {
+		return s.httpClient, nil
+	}
+	if !sharedconfig.MTLSEnabled() {
+		return &http.Client{Timeout: 10 * time.Second}, nil
+	}
+	client, err := sharedhttp.NewMTLSClient(
+		sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
+		sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
+		sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("mTLS client: %w", err)
+	}
+	client.Timeout = 10 * time.Second
+	return client, nil
 }
 
 // NewDiscoveryIntegrationService creates a new discovery integration service. db
@@ -343,7 +376,11 @@ func (s *DiscoveryIntegrationService) SendDiscoveryNotification(
 	req.Header.Set("Content-Type", "application/json")
 	serviceauth.SignRequestFromEnv(req)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client, err := s.notificationHTTPClient()
+	if err != nil {
+		log.Printf("[DiscoveryNotification] Cannot build a client for notification-service (type=%s): %v", alertType, err)
+		return
+	}
 	resp, err := client.Do(req) //nolint:gosec // intentional — internal service-to-service call, URL from trusted config not user input
 	if err != nil {
 		log.Printf("[DiscoveryNotification] Failed to send notification (type=%s): %v", alertType, err)

@@ -766,6 +766,34 @@ http:
       middlewares:
         - deny-internal-plane
       priority: 900
+    deny_internal_v1_audit_service_internal:
+      rule: (PathPrefix(`/api/v1/audit-service/internal/`) || Path(`/api/v1/audit-service/internal`))
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_v2_audit_service_internal:
+      rule: (PathPrefix(`/api/v2/audit-service/internal/`) || Path(`/api/v2/audit-service/internal`))
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_v1_inventory_service_internal:
+      rule: (PathPrefix(`/api/v1/inventory-service/internal/`) || Path(`/api/v1/inventory-service/internal`))
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_v2_inventory_service_internal:
+      rule: (PathPrefix(`/api/v2/inventory-service/internal/`) || Path(`/api/v2/inventory-service/internal`))
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
   services:
     auth_service:
       loadBalancer:

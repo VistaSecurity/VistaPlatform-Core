@@ -251,13 +251,17 @@ func main() {
 		scopeHandler.RegisterRoutes(api, sharedrbacmw.RequireTenantPermission(db.SQLDB(), rbac.PermissionComplianceUpdate))
 		cbomHandler.RegisterRoutes(api, sharedrbacmw.RequireTenantPermission(db.SQLDB(), rbac.PermissionReportsManage))
 		// Phase 3 comparison is Enterprise; the hook is nil in Core, so
-		// these routes are simply never mounted. The tenant entitlement gate is
+		// the real routes are never mounted and 402 stubs stand in. The tenant entitlement gate is
 		// still required in Enterprise builds so a Core-tier tenant cannot call
 		// the API directly around the UI lock card.
 		if hooks.RegisterComparisonRoutes != nil {
 			compare := api.Group("")
 			compare.Use(sharedmw.RequireFeature(db.SQLDB(), cbom.FeatureCBOMSigning))
 			hooks.RegisterComparisonRoutes(compare, cbomRepo, cbomArtifactStorage, aiAuditSink, db.SQLDB())
+		} else {
+			// Core: answer 402 "not included in your subscription" rather than
+			// a bare 404, which reads as "no such artifact" to a client.
+			cbom.RegisterUnavailableComparisonRoutes(api)
 		}
 	}
 

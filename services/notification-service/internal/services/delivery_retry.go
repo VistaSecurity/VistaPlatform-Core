@@ -169,12 +169,13 @@ func (s *NotificationService) enqueueFailedDelivery(ctx context.Context, req *mo
 
 // pendingDelivery is one claimed row being retried.
 type pendingDelivery struct {
-	id          uuid.UUID
-	tenantID    *uuid.UUID
-	channelID   uuid.UUID
-	channelType string
-	payload     []byte
-	retryCount  int
+	id             uuid.UUID
+	notificationID uuid.UUID
+	tenantID       *uuid.UUID
+	channelID      uuid.UUID
+	channelType    string
+	payload        []byte
+	retryCount     int
 }
 
 // RetryDueDeliveries drains one batch of due retries. Cross-tenant, so it runs
@@ -218,7 +219,7 @@ func (s *NotificationService) claimDueDeliveries(ctx context.Context, limit int)
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING q.id, q.tenant_id, q.channel_id, q.channel_type, q.payload, q.retry_count`,
+		RETURNING q.id, q.notification_id, q.tenant_id, q.channel_id, q.channel_type, q.payload, q.retry_count`,
 		limit, fmt.Sprintf("%d seconds", int(claimTimeout.Seconds())))
 	if err != nil {
 		return nil, fmt.Errorf("claim due deliveries: %w", err)
@@ -229,7 +230,7 @@ func (s *NotificationService) claimDueDeliveries(ctx context.Context, limit int)
 	for rows.Next() {
 		var d pendingDelivery
 		var tid uuid.NullUUID
-		if err := rows.Scan(&d.id, &tid, &d.channelID, &d.channelType, &d.payload, &d.retryCount); err != nil {
+		if err := rows.Scan(&d.id, &d.notificationID, &tid, &d.channelID, &d.channelType, &d.payload, &d.retryCount); err != nil {
 			return nil, err
 		}
 		if tid.Valid {
@@ -258,7 +259,7 @@ func (s *NotificationService) retryOneDelivery(ctx context.Context, d pendingDel
 	var req models.SendNotificationRequest
 	if err := json.Unmarshal(d.payload, &req); err != nil {
 		// The stored payload is unusable; no number of retries will parse it.
-		s.finishDelivery(ctx, d, "failed", attempt, "corrupt retry payload: "+err.Error())
+		s.finishDelivery(ctx, d, "failed", attempt, "corrupt retry payload: "+err.Error(), "The queued notification could not be read.")
 		return false
 	}
 	// The payload was serialized from the original request, whose TenantID is
@@ -266,11 +267,19 @@ func (s *NotificationService) retryOneDelivery(ctx context.Context, d pendingDel
 	// scoping uses. Keep them consistent.
 	req.TenantID = d.tenantID
 
+	if s.tenantBlocked(ctx, d.tenantID) {
+		// Suspended/canceled/deleted since the first attempt (RC-4): stop
+		// retrying, and say why on the history row.
+		s.finishDelivery(ctx, d, "failed", attempt, "tenant suspended, canceled or deleted",
+			"The organization is suspended, so notifications are not delivered.")
+		return false
+	}
+
 	ch, ok := s.loadOneChannel(ctx, d.tenantID, d.channelID)
 	if !ok {
 		// The channel was deleted or disabled between the failure and the retry.
 		// Delivering is impossible and will stay impossible.
-		s.finishDelivery(ctx, d, "failed", attempt, "channel no longer available or disabled")
+		s.finishDelivery(ctx, d, "failed", attempt, "channel no longer available or disabled", "The channel was removed or disabled before the retry ran.")
 		return false
 	}
 	channelID, channelType, _ := channelIDType(ch)
@@ -278,19 +287,19 @@ func (s *NotificationService) retryOneDelivery(ctx context.Context, d pendingDel
 
 	err := s.deliveryService.SendToOneChannel(ctx, d.tenantID, channelID, channelType, config, &req)
 	if err == nil {
-		s.finishDelivery(ctx, d, "sent", attempt, "")
+		s.finishDelivery(ctx, d, "sent", attempt, "", "")
 		return true
 	}
 
 	switch {
 	case IsPermanentDeliveryFailure(err):
-		s.finishDelivery(ctx, d, "failed", attempt, "permanent failure on retry: "+err.Error())
+		s.finishDelivery(ctx, d, "failed", attempt, "permanent failure on retry: "+err.Error(), SafeFailureReason(err))
 	case attempt >= maxAttempts:
 		// Terminal, and said so: a durable record beats a loop that quietly stops.
 		s.logger.Printf("delivery retry EXHAUSTED after %d attempt(s) (channel=%s type=%s tenant=%v): %v",
 			attempt, channelID, channelType, d.tenantID, err)
-		s.finishDelivery(ctx, d, "failed", attempt,
-			fmt.Sprintf("gave up after %d attempt(s): %s", attempt, err.Error()))
+		s.finishDeliveryOutcome(ctx, d, "failed", attempt,
+			fmt.Sprintf("gave up after %d attempt(s): %s", attempt, err.Error()), true, SafeFailureReason(err))
 	default:
 		s.rescheduleDelivery(ctx, d, attempt, err.Error())
 	}
@@ -298,7 +307,19 @@ func (s *NotificationService) retryOneDelivery(ctx context.Context, d pendingDel
 }
 
 // finishDelivery writes a terminal outcome ('sent' or 'failed').
-func (s *NotificationService) finishDelivery(ctx context.Context, d pendingDelivery, status string, attempt int, errMsg string) {
+func (s *NotificationService) finishDelivery(ctx context.Context, d pendingDelivery, status string, attempt int, errMsg, reason string) {
+	s.finishDeliveryOutcome(ctx, d, status, attempt, errMsg, false, reason)
+}
+
+// finishDeliveryOutcome is finishDelivery plus the one distinction the history
+// row cares about: whether a failure is retries running out (as opposed to a
+// permanent failure or an unusable payload).
+//
+// Recording the terminal state on the QUEUE row is not enough. The queue is an
+// operator's view; the notification_history row is what the tenant reads, and it
+// was written before any retry ran — so without the sync below a delivery that
+// finally landed (or was abandoned) stayed frozen at its first-attempt status.
+func (s *NotificationService) finishDeliveryOutcome(ctx context.Context, d pendingDelivery, status string, attempt int, errMsg string, exhausted bool, reason string) {
 	var msg interface{}
 	if errMsg != "" {
 		msg = errMsg
@@ -312,7 +333,9 @@ func (s *NotificationService) finishDelivery(ctx context.Context, d pendingDeliv
 		SET status = $1, retry_count = $2, next_retry_at = NULL, delivered_at = $3, error_message = $4
 		WHERE id = $5`, status, attempt, deliveredAt, msg, d.id); err != nil {
 		s.logger.Printf("delivery retry: failed to record terminal state for %s: %v", d.id, err)
+		return // the queue row is not terminal, so the history must not claim it is
 	}
+	s.syncHistoryAfterRetry(ctx, d, status == "sent", exhausted, reason)
 }
 
 // rescheduleDelivery schedules the next attempt with exponential backoff.

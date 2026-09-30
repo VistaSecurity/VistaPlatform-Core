@@ -240,6 +240,8 @@ func (s *ConfiguredSourceRefresh) statusTx(ctx context.Context, tx *sql.Tx, tena
 		var payload struct {
 			Metadata struct {
 				Materialized bool `json:"identity_refresh_materialized"`
+				// Outcome is a cloud run's verdict (CloudOutcomeRecorder).
+				Outcome string `json:"outcome"`
 			} `json:"metadata"`
 			Processing struct {
 				DiscoveryID       string `json:"discovery_job_id"`
@@ -258,6 +260,17 @@ func (s *ConfiguredSourceRefresh) statusTx(ctx context.Context, tx *sql.Tx, tena
 		}
 		out.State = "running"
 		out.Reason = "waiting_for_result_ingestion"
+		// A cloud refresh whose one collector failed outright completes as a
+		// job (the run itself did not error) but refreshed nothing: every
+		// attempted type failed. Reading "completed" off its empty, cleanly
+		// processed batch would report a refresh that never happened. A
+		// PARTIAL run is different — what it did collect is ingested below and
+		// completes the refresh.
+		if payload.Metadata.Outcome == CloudRunFailed {
+			out.State = "failed"
+			out.Reason = "configured_source_job_failed"
+			return out, nil
+		}
 		if payload.Processing.Finished != "" {
 			// Platform interrogation writes its discovery rows directly. Its
 			// empty returned Assets list is intentional, not a failed ingest.
@@ -422,7 +435,7 @@ func (s *ConfiguredSourceRefresh) planCloud(ctx context.Context, tenant, observa
 	// authorize automatic enrichment for every tenant.
 	var configured bool
 	err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM platform_integrations WHERE tenant_id=$1 AND id=$2 AND integration_type=$3 AND is_active AND deleted_at IS NULL AND config IS NOT NULL AND config<>'{}'::jsonb)`, tenant, *device.CredentialID, provider).Scan(&configured)
+		return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM platform_integrations WHERE tenant_id=$1 AND id=$2 AND integration_type=$3 AND is_active AND COALESCE(is_enabled, true) AND deleted_at IS NULL AND config IS NOT NULL AND config<>'{}'::jsonb)`, tenant, *device.CredentialID, provider).Scan(&configured)
 	})
 	if err != nil {
 		return plan, "", err
@@ -449,6 +462,16 @@ func boundedCloudResourceType(provider, deviceType string) string {
 	kind := strings.TrimPrefix(deviceType, provider+"_")
 	switch provider {
 	case "aws":
+		// The at-rest collectors name their devices after the resource
+		// (aws_s3_bucket, aws_rds_instance), not after the collector key, so
+		// without these two an observation of a bucket or a database was
+		// always "cloud_resource_refresh_unsupported".
+		switch kind {
+		case "s3_bucket":
+			return "s3"
+		case "rds_instance":
+			return "rds"
+		}
 		switch kind {
 		case "alb", "nlb", "elb", "api_gateway", "cloudfront", "kms", "s3", "rds":
 			return kind
@@ -467,6 +490,10 @@ func boundedCloudResourceType(provider, deviceType string) string {
 			return "load_balancer"
 		case "kms_crypto_key":
 			return "kms"
+		case "storage_bucket":
+			return "storage"
+		case "cloudsql_instance":
+			return "cloudsql"
 		}
 		switch kind {
 		case "load_balancer", "ssl_proxy", "kms", "storage", "cloudsql":

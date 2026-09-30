@@ -96,6 +96,13 @@ func (s *Service) Encrypt(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(out), nil
 }
 
+// ErrRetiredKeyVersion is what Decrypt returns for ciphertext written under a
+// retired key version. A caller that shows a user what to do matches it with
+// errors.Is rather than on the message.
+var ErrRetiredKeyVersion = errors.New(
+	"ciphertext was written under a retired key version and cannot be decrypted; " +
+		"re-enter the credential to store it under the current key")
+
 // Decrypt decrypts a base64-encoded ciphertext written under the current key
 // version. Ciphertext from a retired version is reported as such rather than
 // failing as a generic decrypt error.
@@ -113,9 +120,7 @@ func (s *Service) Decrypt(ciphertext string) (string, error) {
 		// Almost certainly v0/v1 ciphertext, whose keys no longer exist. Say so
 		// plainly: the value has to be re-entered, and an operator staring at
 		// "failed to decrypt" would otherwise go looking for a corrupted record.
-		return "", errors.New(
-			"ciphertext was written under a retired key version and cannot be decrypted; " +
-				"re-enter the credential to store it under the current key")
+		return "", ErrRetiredKeyVersion
 	}
 
 	pt, err := gcmOpen(s.keyV2, data[1:])

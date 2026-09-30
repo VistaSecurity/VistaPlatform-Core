@@ -5,7 +5,7 @@ render_macros: false
 # Platform Integrations Configuration Guide
 
 This guide explains how the Platform Integrations feature stores credentials
-(AWS, and in future Azure/GCP/SaaS), including the encryption key that
+(AWS, and in future Azure/GCP), including the encryption key that
 protects them at rest.
 
 ## Overview
@@ -161,9 +161,26 @@ Configuration form will be added in future release.
 
 Configuration form will be added in future release.
 
-### SaaS Integrations (Coming Soon)
+### Slack, PagerDuty, Datadog and Splunk
 
-Support for Slack, PagerDuty, Datadog, and other SaaS platforms will be added.
+These are **not** platform integrations. Creating, editing or testing one through
+this API returns `400`, because nothing ever acted on them:
+
+- **Slack and PagerDuty alerts** are notification channels — configure them under
+  **Settings → Integrations** in the tenant console, or **Settings → Notification
+  Delivery** in the admin console.
+- **Datadog and Splunk audit forwarding** is SIEM export, an Enterprise
+  capability configured on its own page (admin console → **Security & Trust →
+  SIEM Export**).
+
+A row of one of these types left over from an earlier version can still be listed
+and deleted, but it is never used.
+
+The same is true of the `custom`, `github`, `gitlab`, `bitbucket` and
+`hashicorp_vault` types: the schema accepts them (the integrations API also
+accepts `custom`), and nothing reads, runs or delivers through them. The
+connector catalogue in **Settings → Integrations** lists them as *Soon* /
+*Not yet available* for that reason.
 
 ## Security Considerations
 

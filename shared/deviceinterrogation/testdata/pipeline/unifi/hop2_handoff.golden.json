@@ -1,6 +1,6 @@
 {
   "vendor": "unifi",
-  "input_sha256": "0e542b2e7265d48fafa20417fa5be8ce365c4e5ac490ef4c9e8842f1f7ee062e",
+  "input_sha256": "329f462e581b659487ffe9162a2295bf3a85e2be206a195a30d1b059c3b1cb11",
   "imports": [
     {
       "asset_status": "pending_approval",
@@ -260,6 +260,20 @@
       "metadata": {
         "dhcp": "enabled",
         "dynamic": true,
+        "dynamic_by_source": {
+          "measured": {
+            "dynamic": true,
+            "evidence": {
+              "observed_at": "{{TIMESTAMP}}",
+              "source_asset_id": "{{DEVICE_ASSET_ID}}"
+            }
+          }
+        },
+        "dynamic_evidence": {
+          "observed_at": "{{TIMESTAMP}}",
+          "source_asset_id": "{{DEVICE_ASSET_ID}}"
+        },
+        "dynamic_source": "measured",
         "source": "interrogation",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_type": "unifi"
@@ -272,6 +286,20 @@
       "metadata": {
         "dhcp": "disabled",
         "dynamic": false,
+        "dynamic_by_source": {
+          "measured": {
+            "dynamic": false,
+            "evidence": {
+              "observed_at": "{{TIMESTAMP}}",
+              "source_asset_id": "{{DEVICE_ASSET_ID}}"
+            }
+          }
+        },
+        "dynamic_evidence": {
+          "observed_at": "{{TIMESTAMP}}",
+          "source_asset_id": "{{DEVICE_ASSET_ID}}"
+        },
+        "dynamic_source": "measured",
         "source": "interrogation",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_type": "unifi"

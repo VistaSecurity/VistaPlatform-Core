@@ -79,7 +79,7 @@ const NON_CLAIMS = [
   ['contract_vector.go:18-20', 'a line-number citation'],
   ['2 translation turns, 3 tool calls, 3 narration', 'singular "tool"; not a count of the surface'],
   ['the tool description teaches the language instead', 'prose about a description'],
-  ['15 of the 18-image release set', 'real sentence from product-descriptors/INDEX.md'],
+  ['16 of the 19-image release set', 'real sentence from product-descriptors/INDEX.md'],
 ];
 for (const [text, why] of NON_CLAIMS) {
   check(`no claim found in "${text.slice(0, 44)}" (${why})`, findCountClaims(text).length === 0);
@@ -197,16 +197,15 @@ for (const ref of REFERENCE_DOCS) {
 
 // The exclusions, checked against the ACTUAL text in the tree — the only way
 // to know they do not fire on the real thing.
+// Any "<N>-image release set" line: the set grows (18 → 19 when the first
+// Enterprise-only backend joined), and a filter keyed on one number
+// would go vacuous the day the docs caught up.
+const IMAGE_SET_LINE = /\b\d+-image\b/;
+const imageSetLines = realDocs.flatMap((d) => d.text.split('\n').filter((l) => IMAGE_SET_LINE.test(l)));
+check(`the tree has "<N>-image release set" lines to check (${imageSetLines.length})`, imageSetLines.length > 0);
 check(
-  'no "18-image release set" line in the tree is read as a tool count',
-  realDocs
-    .filter((d) => d.text.includes('18-image'))
-    .every((d) =>
-      d.text
-        .split('\n')
-        .filter((l) => l.includes('18-image'))
-        .every((l) => findCountClaims(l).length === 0),
-    ),
+  'no "<N>-image release set" line in the tree is read as a tool count',
+  imageSetLines.every((l) => findCountClaims(l).length === 0),
 );
 check(
   'the MCP protocol version 2025-06-18 is not read as a tool count',

@@ -51,6 +51,9 @@ tags:
 - name: activity-logs
   description: Tenant activity / audit log — list, get, summary, and user /
     resource pivots.
+- name: export-feed
+  description: Internal, service-to-service — the audit trail read forward from
+    a cursor.
 
 paths:
   /activity-logs:
@@ -629,142 +632,94 @@ paths:
           $ref: '#/components/responses/LegacyServerError'
 
   # ===========================================================================
-  # SIEM integrations (admin-ui audit SIEM). The /test endpoint's network probe
-  # lives in the service, so the handler is testable behind the service interface.
+  # Export feed — INTERNAL, service-to-service only.
   #
-  # Platform-global configuration: a PLATFORM token is required, and its role
-  # must hold platform.audit to list integrations and platform.audit.manage to
-  # create, update, delete or test one (platform_user_has_permission — the
-  # role name on the token is not consulted).
+  # The whole platform's audit trail read forward from a cursor, for a consumer
+  # that ships it elsewhere (the Enterprise SIEM exporter keeps its own durable
+  # cursor and pages forward from it — the audit log is the outbox). Mounted on
+  # the HMAC-gated internal group: an HMAC-signed service call is the only
+  # accepted credential (no tenant or platform user token), and the
+  # /audit-service/internal/ prefix is denied at the edge on every host. Under
+  # service-mesh mTLS the caller also presents its client certificate.
   #
-  # Every operation below is x-edition: enterprise — the routes are registered
-  # from services/audit-service/ee/siemexport, which the public-tree export
-  # deletes, so a Core build has no handler for any of them. See api/README.md
-  # for the convention and shared/api/spectest for the test that enforces it in
-  # both directions.
+  # Order is (created_at, id), created_at stamped by the database at insert.
+  # A page only reaches events stored at least the settle window (5s) ago, so
+  # a cursor can never pass an event whose transaction had not committed yet.
+  # Each event is the export projection: change diffs, metadata, user agent
+  # and session id are never included.
   # ===========================================================================
-  /siem/types:
+  /internal/export/events:
     get:
-      operationId: getSiemTypes
-      x-edition: enterprise
+      operationId: getExportFeedEvents
       tags:
-      - siem
-      summary: List supported SIEM integration types
-      responses:
-        '200':
-          description: The supported types (static catalog).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SIEMTypesResponse'
-  /siem/integrations:
-    get:
-      operationId: getSiemIntegrations
-      x-edition: enterprise
-      tags:
-      - siem
-      summary: List SIEM integrations
-      description: '`integrations` is null when none are configured.'
-      responses:
-        '200':
-          description: The configured integrations.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SIEMIntegrationListResponse'
-    post:
-      operationId: createSiemIntegration
-      x-edition: enterprise
-      tags:
-      - siem
-      summary: Create a SIEM integration
-      requestBody:
+      - export-feed
+      summary: Audit events stored after a cursor (internal)
+      parameters:
+      - name: after_created_at
+        in: query
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SIEMIntegrationInput'
+        description: The cursor's created_at (RFC 3339, microsecond precision).
+        schema:
+          type: string
+          format: date-time
+      - name: after_id
+        in: query
+        required: true
+        description: The cursor's event id. Events at the same created_at sort by id.
+        schema:
+          type: string
+          format: uuid
+      - name: limit
+        in: query
+        required: false
+        description: Page size, 1–1000 (default 500).
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 1000
       responses:
-        '201':
-          description: The created integration.
+        '200':
+          description: One page of the feed, oldest first.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SIEMIntegrationResponse'
+                $ref: '#/components/schemas/ExportFeedPage'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
-  /siem/integrations/test:
-    post:
-      operationId: testSiemIntegration
-      x-edition: enterprise
+  /internal/export/head:
+    get:
+      operationId: getExportFeedHead
       tags:
-      - siem
-      summary: Test a SIEM integration
-      description: Sends a test event through the integration config. Returns 400 if the test fails.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SIEMIntegrationInput'
+      - export-feed
+      summary: The cursor a new feed consumer starts from (internal)
+      description: |
+        "Now" by the database clock — the consumer receives only events stored
+        from here on — or `backfill_seconds` ago, for a consumer that should
+        start with a bounded recent window.
+      parameters:
+      - name: backfill_seconds
+        in: query
+        required: false
+        description: Start this many seconds back, 0–604800 (7 days). Default 0.
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 604800
       responses:
         '200':
-          description: Test succeeded.
+          description: The starting cursor.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuditMessageResponse'
+                $ref: '#/components/schemas/ExportFeedHeadResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
-  /siem/integrations/{id}:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: SIEM integration UUID.
-      schema:
-        type: string
-        format: uuid
-    put:
-      operationId: updateSiemIntegration
-      x-edition: enterprise
-      tags:
-      - siem
-      summary: Update a SIEM integration
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SIEMIntegrationInput'
-      responses:
-        '200':
-          description: The updated integration.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SIEMIntegrationResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    delete:
-      operationId: deleteSiemIntegration
-      x-edition: enterprise
-      tags:
-      - siem
-      summary: Delete a SIEM integration
-      responses:
-        '200':
-          description: Deletion confirmation.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AuditMessageResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
@@ -1475,93 +1430,118 @@ components:
         metrics:
           type: object
           additionalProperties: true
-    SIEMIntegration:
+    ExportFeedCursor:
+      type: object
+      additionalProperties: false
+      description: A position in the export feed. The next page starts strictly after it.
+      required:
+        - created_at
+        - id
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        id:
+          type: string
+          format: uuid
+    ExportFeedEvent:
       type: object
       additionalProperties: false
       description: |
-        A SIEM integration (services.SIEMIntegration). `config` and `filters` are
-        config blobs left loosely typed here.
+        The export projection of one audit entry: who, what, on what, from
+        where, and how it ended. Optional fields are omitted when absent.
       required:
         - id
-        - name
-        - type
-        - enabled
-        - config
-        - filters
-        - created_at
-        - updated_at
+        - event_type
+        - event_category
+        - action
+        - success
+        - user_type
+        - requires_attention
+        - occurred_at
       properties:
         id:
           type: string
           format: uuid
-        name:
+        tenant_id:
           type: string
-        type:
+          format: uuid
+        user_id:
           type: string
-          description: "splunk / datadog / elastic / generic_webhook."
-        enabled:
+          format: uuid
+        user_type:
+          type: string
+        user_email:
+          type: string
+        event_type:
+          type: string
+        event_category:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        ip_address:
+          type: string
+        request_id:
+          type: string
+        error_code:
+          type: string
+        success:
           type: boolean
-        config:
-          type: object
-          additionalProperties: true
-        filters:
-          type: object
-          additionalProperties: true
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-    SIEMIntegrationResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope `{ "integration": ... }`.'
-      required:
-        - integration
-      properties:
-        integration:
-          $ref: '#/components/schemas/SIEMIntegration'
-    SIEMIntegrationListResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope `{ "integrations": [...] }`. `integrations` is null when none are configured.'
-      required:
-        - integrations
-      properties:
-        integrations:
-          type: [array, 'null']
-          items:
-            $ref: '#/components/schemas/SIEMIntegration'
-    SIEMTypesResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope `{ "types": [...] }` — static catalog of supported integration types with their config fields.'
-      required:
-        - types
-      properties:
-        types:
+        requires_attention:
+          type: boolean
+        compliance_tags:
           type: array
           items:
-            type: object
-            additionalProperties: true
-    SIEMIntegrationInput:
+            type: string
+        occurred_at:
+          type: string
+          format: date-time
+    ExportFeedItem:
       type: object
-      additionalProperties: true
-      description: 'Body for POST/PUT/test SIEM integration (services.SIEMIntegration). Read-only fields are ignored.'
+      additionalProperties: false
+      required:
+        - cursor
+        - event
       properties:
-        name:
-          type: string
-        type:
-          type: string
-        enabled:
+        cursor:
+          $ref: '#/components/schemas/ExportFeedCursor'
+        event:
+          $ref: '#/components/schemas/ExportFeedEvent'
+    ExportFeedPage:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - next
+        - more
+        - horizon
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExportFeedItem'
+        next:
+          $ref: '#/components/schemas/ExportFeedCursor'
+        more:
           type: boolean
-        config:
-          type: object
-          additionalProperties: true
-        filters:
-          type: object
-          additionalProperties: true
+          description: The page was full; more settled events may follow.
+        horizon:
+          type: string
+          format: date-time
+          description: The settle boundary the page was read against.
+    ExportFeedHeadResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - cursor
+      properties:
+        cursor:
+          $ref: '#/components/schemas/ExportFeedCursor'
     ComplianceSummaryResponse:
       type: object
       additionalProperties: false

@@ -67,6 +67,12 @@ type maintenanceIface interface {
 	DeleteMaintenanceWindow(ctx context.Context, id uuid.UUID) (bool, error)
 }
 
+// emailStatusIface answers whether email channels can deliver for a tenant. The
+// concrete *services.ChannelManager satisfies it.
+type emailStatusIface interface {
+	EmailDeliveryConfigured(tenantID uuid.UUID) (bool, error)
+}
+
 type Server struct {
 	config              *config.Config
 	db                  *sqlx.DB
@@ -75,6 +81,7 @@ type Server struct {
 	ruleEngine          ruleEngineIface
 	maintenance         maintenanceIface
 	readStore           notificationReadStore
+	emailStatus         emailStatusIface
 }
 
 // NewServer wires the HTTP server. bypassDB is the BYPASSRLS handle
@@ -90,7 +97,14 @@ func NewServer(cfg *config.Config, db *sqlx.DB, bypassDB *sql.DB, notificationSe
 		ruleEngine:          notificationService.RuleEngine(),
 		maintenance:         notificationService,
 		readStore:           newNotificationReadStore(db, bypassDB),
+		emailStatus:         notificationService.ChannelManager(),
 	}
+}
+
+// newServerWithEmailStatus builds a Server with just the email-status surface,
+// for the contract tests.
+func newServerWithEmailStatus(e emailStatusIface) *Server {
+	return &Server{emailStatus: e}
 }
 
 // newServerWithManagers builds a Server from already-constructed channel/rule
@@ -176,20 +190,29 @@ func (s *Server) SetupRouter() *gin.Engine {
 		tenant.Use(middleware.RequireAuth(s.config.JWTSecret), middleware.StringifyUserID())
 		tenant.Use(middleware.RequireTenant())
 		// Write gate: channel/rule mutation is org notification
-		// configuration — settings.update. Reads stay open so any member can
-		// see where alerts route.
+		// configuration — settings.update. Rule reads stay open so any member
+		// can see where alerts route.
 		writeGate := sharedrbac.RequireTenantPermission(s.db.DB, rbac.PermissionSettingsUpdate)
+		// Channel read gate: a channel is a connection to an external system
+		// (Slack, PagerDuty, a webhook) — configuration, so settings.read, the
+		// same bar as the integrations list. Credentials are additionally
+		// masked in every response; the gate alone is not the defence.
+		channelReadGate := sharedrbac.RequireTenantPermission(s.db.DB, rbac.PermissionSettingsRead)
 		{
 			// Channels
 			channels := tenant.Group("/channels")
 			{
-				channels.GET("", s.listTenantChannels)
+				channels.GET("", channelReadGate, s.listTenantChannels)
 				channels.POST("", writeGate, s.createTenantChannel)
-				channels.GET("/:id", s.getTenantChannel)
+				channels.GET("/:id", channelReadGate, s.getTenantChannel)
 				channels.PUT("/:id", writeGate, s.updateTenantChannel)
 				channels.DELETE("/:id", writeGate, s.deleteTenantChannel)
 				channels.POST("/:id/test", writeGate, s.testTenantChannel)
 			}
+
+			// Which operator-configured transports can deliver (today: email).
+			// Same bar as the channel list it annotates.
+			tenant.GET("/delivery-status", channelReadGate, s.getTenantDeliveryStatus)
 
 			// Rules
 			rules := tenant.Group("/rules")

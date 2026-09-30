@@ -53,13 +53,19 @@ type ConnectorCatalogueEntry struct {
 	// Entitled is whether this tenant holds the entitlement. Always true for a
 	// Core connector.
 	Entitled bool `json:"entitled"`
-	// Addable is `status == live && entitled`. The single question the "Add"
-	// button asks.
+	// ConfiguredBy is who sets the connector up: "tenant" or
+	// "platform_operator". SIEM export is platform-global, so a tenant sees it
+	// in the catalogue and cannot add it.
+	ConfiguredBy string `json:"configured_by"`
+	// Addable is `status == live && entitled && configured by the tenant`. The
+	// single question the "Add" button asks.
 	Addable bool `json:"addable"`
 	// UnavailableReason says WHY, when Addable is false: "upgrade" (your plan
-	// or edition does not include it) or "unavailable" (nobody can use it yet,
-	// we have not built it). Different sentences — offering an upgrade for
-	// something that cannot be bought is the worse of the two mistakes.
+	// or edition does not include it), "unavailable" (nobody can use it yet,
+	// we have not built it) or "operator" (it works, but only the platform
+	// operator configures it). Different sentences — offering an upgrade for
+	// something that cannot be bought is the worse of the mistakes, and
+	// offering a button for something a tenant cannot configure is the same one.
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
@@ -154,6 +160,7 @@ func catalogueEntry(conn connectors.Connector, entitled map[string]bool) Connect
 		Description:     conn.Description,
 		Feature:         conn.Feature,
 		Edition:         string(entitlements.EditionFor(conn.Feature)),
+		ConfiguredBy:    conn.ConfiguredBy,
 	}
 	e.Entitled = conn.Feature == "" || entitled[conn.Feature]
 
@@ -162,6 +169,12 @@ func catalogueEntry(conn connectors.Connector, entitled map[string]bool) Connect
 		// Not built. Say so; do not offer an upgrade for something nobody can
 		// buy yet.
 		e.UnavailableReason = "unavailable"
+	case conn.ConfiguredBy == connectors.ConfiguredByPlatformOperator:
+		// Built, and possibly entitled — and still not something this tenant
+		// can add: SIEM export forwards the whole deployment's audit stream, so
+		// the platform operator configures it. `entitled` stays truthful so the
+		// page can still say whether the tenant's plan includes it.
+		e.UnavailableReason = "operator"
 	case !e.Entitled:
 		e.UnavailableReason = "upgrade"
 	default:

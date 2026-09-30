@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,89 @@ import (
 	auditlog "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
+// cloudJobDiscoverer is the slice of CloudDiscoveryService a cloud discovery
+// job executes through. *CloudDiscoveryService is the only production
+// implementation; the interface exists so a test can drive the REAL
+// executeCloudDiscovery and observe what it asks the collectors for.
+type cloudJobDiscoverer interface {
+	GetIntegrationCloudProvider(ctx context.Context, tenantID, integrationID uuid.UUID) (string, error)
+	DiscoverResources(ctx context.Context, tenantID, integrationID uuid.UUID, cloudProvider string, resourceTypes, regions, resourceGroups []string) (*CloudDiscoveryResult, error)
+	DiscoverResourceEvidence(ctx context.Context, tenantID, integrationID uuid.UUID, cloudProvider string, resourceTypes, regions, resourceGroups []string) (*CloudDiscoveryResult, error)
+}
+
+// cloudRunSink writes one cloud job's resources where inventory reads them and
+// answers which discovery job holds them. platformCloudRunSink is the only
+// production implementation; the interface lets a unit test drive the REAL
+// executeCloudDiscovery without a database.
+type cloudRunSink interface {
+	MaterializeCloudRun(ctx context.Context, job *models.DeviceJob, cloudProvider string, integrationID uuid.UUID, devices []models.Device) (discoveryJobID uuid.UUID, written int, err error)
+}
+
+// platformCloudRunSink materializes a scheduled (worker-executed) cloud run the
+// way the interactive handler does (api/router.go
+// discoverCloudResourcesHandler): a discovery job of its own, the rows written
+// by CloudDiscoveryService.WriteSensorDiscoveries with that job as the batch,
+// the job completed. It then stamps the discovery job on the device job so the
+// result processor reuses it — the RecordDiscoveryJob hand-off the in-cluster
+// interrogation already uses — instead of minting a second, empty one.
+type platformCloudRunSink struct {
+	cloud     *CloudDiscoveryService
+	discovery *DiscoveryIntegrationService
+	queue     *JobQueueService
+}
+
+// cloudPersistFailure is the reason stamped on a run whose rows could not be
+// written. The same words the interactive handler uses.
+const cloudPersistFailure = "Cloud evidence could not be persisted; retry discovery"
+
+// errCloudEvidenceNotPersisted is the run's error (and so the device job's
+// error message) when the rows could not be written.
+var errCloudEvidenceNotPersisted = errors.New("cloud evidence could not be persisted; retry discovery")
+
+func (s *platformCloudRunSink) MaterializeCloudRun(ctx context.Context, job *models.DeviceJob, cloudProvider string, integrationID uuid.UUID, devices []models.Device) (uuid.UUID, int, error) {
+	jobMetadata := map[string]interface{}{
+		"device_job_id":         job.ID.String(),
+		"source":                "cloud_discovery",
+		"integration_id":        integrationID.String(),
+		"source_integration_id": integrationID.String(),
+		"cloud_provider":        cloudProvider,
+	}
+	// uuid.Nil: a worker-run job has no user, and CreateDiscoveryJob stores
+	// NULL for it rather than a foreign key to nobody.
+	discoveryJobID, err := s.discovery.CreateDiscoveryJob(ctx, job.TenantID, uuid.Nil, "cloud_discovery", jobMetadata)
+	if err != nil {
+		return uuid.Nil, 0, fmt.Errorf("failed to create discovery job: %w", err)
+	}
+	// Started at once, as the interactive handler does, so cluster-sensor-
+	// service's poller for stale `queued` jobs never picks it up.
+	if err := s.discovery.MarkJobStarted(ctx, discoveryJobID); err != nil {
+		return uuid.Nil, 0, fmt.Errorf("failed to mark discovery job started: %w", err)
+	}
+
+	written, err := s.cloud.WriteSensorDiscoveries(ctx, job.TenantID, discoveryJobID.String(), integrationID, cloudProvider, devices)
+	if err != nil {
+		log.Printf("[PlatformAgentWorker] cloud job %s: writing sensor_discoveries failed: %v", job.ID, err)
+		markJobFailed(ctx, s.discovery, discoveryJobID, cloudPersistFailure)
+		return uuid.Nil, 0, errCloudEvidenceNotPersisted
+	}
+
+	// Without the stamp ProcessJobResults cannot find these rows, and would
+	// both mint an empty discovery job and report the run as materializing
+	// nothing. A refresh reads its completion off that processing block, so
+	// for a refresh the stamp is not optional (the same rule as
+	// executeDeviceInterrogation).
+	if err := s.queue.RecordDiscoveryJob(ctx, job.ID, discoveryJobID); err != nil {
+		if _, refresh := job.Parameters["identity_refresh_request_id"]; refresh {
+			return uuid.Nil, 0, err
+		}
+		log.Printf("Warning: failed to record discovery job %s on cloud device job %s: %v", discoveryJobID, job.ID, err)
+	}
+	if err := s.discovery.MarkJobCompleted(ctx, discoveryJobID); err != nil {
+		log.Printf("Warning: failed to mark cloud discovery job %s completed: %v", discoveryJobID, err)
+	}
+	return discoveryJobID, written, nil
+}
+
 // PlatformAgentWorker is a background worker that processes device jobs for the platform.
 // It listens for jobs via NATS JetStream (preferred) and falls back to DB polling.
 type PlatformAgentWorker struct {
@@ -24,7 +108,8 @@ type PlatformAgentWorker struct {
 	bypassDB            *sql.DB
 	redis               *redis.Client
 	jobQueue            *JobQueueService
-	cloudService        *CloudDiscoveryService
+	cloudService        cloudJobDiscoverer
+	cloudSink           cloudRunSink
 	deviceService       *DeviceService
 	deviceInterrogation *DeviceInterrogationService
 	resultProcessor     *ResultProcessor
@@ -61,12 +146,18 @@ func NewPlatformAgentWorker(
 		subscriber = events.NewSubscriber(nc)
 	}
 
+	jobQueue := NewJobQueueService(db, bypassDB, redis)
 	return &PlatformAgentWorker{
-		db:                  db,
-		bypassDB:            bypassDB,
-		redis:               redis,
-		jobQueue:            NewJobQueueService(db, bypassDB, redis),
-		cloudService:        cloudService,
+		db:           db,
+		bypassDB:     bypassDB,
+		redis:        redis,
+		jobQueue:     jobQueue,
+		cloudService: cloudService,
+		cloudSink: &platformCloudRunSink{
+			cloud:     cloudService,
+			discovery: NewDiscoveryIntegrationService(db, bypassDB),
+			queue:     jobQueue,
+		},
 		deviceService:       deviceService,
 		deviceInterrogation: deviceInterrogation,
 		resultProcessor:     NewResultProcessor(db, bypassDB),
@@ -201,31 +292,41 @@ func (w *PlatformAgentWorker) processNextJob() {
 	// Update job status and store results.
 	// Use background context for status updates to avoid context deadline issues.
 	updateCtx := context.Background()
+	w.storeJobOutcome(updateCtx, deviceJob, result, err)
 	if err != nil {
 		errorMsg := err.Error()
-		log.Printf("Job %s failed: %v", deviceJob.ID, err)
-		if updateErr := w.jobQueue.UpdateJobStatus(updateCtx, deviceJob.ID, models.JobStatusFailed, nil, &errorMsg); updateErr != nil {
-			log.Printf("ERROR: Failed to update job status to failed for job %s: %v", deviceJob.ID, updateErr)
-		}
 		if logErr := jobLogger.LogCompletion(updateCtx, "failed", 0, 0, 1, &errorMsg, nil); logErr != nil {
 			log.Printf("[PlatformAgentWorker] Warning: failed to log job failure for %s: %v", deviceJob.ID, logErr)
 		}
 	} else {
-		log.Printf("Job %s completed successfully", deviceJob.ID)
-		if updateErr := w.jobQueue.UpdateJobStatus(updateCtx, deviceJob.ID, models.JobStatusCompleted, result, nil); updateErr != nil {
-			log.Printf("ERROR: Failed to update job status to completed for job %s: %v", deviceJob.ID, updateErr)
-		}
 		assetsCount := jobResultAssetCount(result)
 		if logErr := jobLogger.LogCompletion(updateCtx, "completed", assetsCount, assetsCount, 0, nil, nil); logErr != nil {
 			log.Printf("[PlatformAgentWorker] Warning: failed to log job completion for %s: %v", deviceJob.ID, logErr)
 		}
+	}
+}
 
-		// Process results to create discovery findings.
-		if shouldProcessResults(result) {
-			err = w.resultProcessor.ProcessJobResults(updateCtx, deviceJob.ID, result)
-			if err != nil {
-				log.Printf("Warning: failed to process job results: %v", err)
-			}
+// storeJobOutcome finalises an executed job: its status and stored result, then
+// — for a result worth processing — the processing block ProcessJobResults
+// writes. Split out of processNextJob so a test can drive the same sequence the
+// worker runs instead of a copy of it.
+func (w *PlatformAgentWorker) storeJobOutcome(ctx context.Context, deviceJob *models.DeviceJob, result *models.JobResult, execErr error) {
+	if execErr != nil {
+		errorMsg := execErr.Error()
+		log.Printf("Job %s failed: %v", deviceJob.ID, execErr)
+		if updateErr := w.jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusFailed, nil, &errorMsg); updateErr != nil {
+			log.Printf("ERROR: Failed to update job status to failed for job %s: %v", deviceJob.ID, updateErr)
+		}
+		return
+	}
+	log.Printf("Job %s completed successfully", deviceJob.ID)
+	if updateErr := w.jobQueue.UpdateJobStatus(ctx, deviceJob.ID, models.JobStatusCompleted, result, nil); updateErr != nil {
+		log.Printf("ERROR: Failed to update job status to completed for job %s: %v", deviceJob.ID, updateErr)
+	}
+	// Process results to create discovery findings.
+	if shouldProcessResults(result) {
+		if err := w.resultProcessor.ProcessJobResults(ctx, deviceJob.ID, result); err != nil {
+			log.Printf("Warning: failed to process job results: %v", err)
 		}
 	}
 }
@@ -238,14 +339,7 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 	}
 	integrationID := *job.IntegrationID
 
-	resourceTypes := []string{}
-	if rt, ok := job.Parameters["resource_types"].([]interface{}); ok {
-		for _, r := range rt {
-			if str, ok := r.(string); ok {
-				resourceTypes = append(resourceTypes, str)
-			}
-		}
-	}
+	resourceTypes := stringListParam(job.Parameters, "resource_types")
 
 	regions := []string{}
 	if r, ok := job.Parameters["regions"].([]interface{}); ok {
@@ -289,20 +383,32 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		cloudProvider = detected
 	}
 
+	sourceOnly, _ := job.Parameters["source_refresh_only"].(bool)
+
+	// A job that names no resource types runs the same set a manual run of
+	// this integration would. A schedule stores whatever parameter map it was
+	// created with — the Discovery → Scheduled Scans modal sends none, and an
+	// API caller may send none — and TriggerSchedule copies it through. Read
+	// literally, "no types" dispatched zero collectors: every scheduled cloud
+	// run collected nothing but compute enumeration and still reported
+	// success. A source refresh is the exception: it names exactly the one
+	// collector it refreshes, and widening it would add account-wide
+	// collection it was never asked for.
+	if len(resourceTypes) == 0 && !sourceOnly {
+		resourceTypes = DefaultCloudResourceTypes(cloudProvider)
+	}
+
 	// Per-resource-type outcomes for this run ( slice E). The scheduled
 	// path built the same `Success: true` constant the interactive one did, so
 	// a recurring discovery whose KMS permission was revoked went on reporting
-	// success indefinitely. AWS only — see the same note in
-	// api/router.go's discoverCloudResourcesHandler.
-	var outcomes *CloudOutcomeRecorder
-	if cloudProvider == "aws" {
-		outcomes = NewCloudOutcomeRecorder(resourceTypes)
-		ctx = WithCloudOutcomes(ctx, outcomes)
-	}
+	// success indefinitely. Every provider records since Azure and GCP moved
+	// onto runCloudCollectors (integrations review M7).
+	outcomes := NewCloudOutcomeRecorder(resourceTypes)
+	ctx = WithCloudOutcomes(ctx, outcomes)
 
 	var discovery *CloudDiscoveryResult
 	var err error
-	if sourceOnly, _ := job.Parameters["source_refresh_only"].(bool); sourceOnly {
+	if sourceOnly {
 		// Enrichment refreshes the identified configured collector; it must not
 		// silently add account-wide compute enumeration.
 		discovery, err = w.cloudService.DiscoverResourceEvidence(ctx, job.TenantID, integrationID,
@@ -316,33 +422,24 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 	}
 	devices := discovery.Devices
 
-	// Convert devices to discovered assets.
+	// Deliver the run's resources through the SAME writer the interactive run
+	// uses (CloudDiscoveryService.WriteSensorDiscoveries), into a discovery job
+	// this run owns, before the device job is finalised.
 	//
-	// NOTE (divergence, deliberately not unified here): the interactive
-	// handler routes cloud discovery through
-	// CloudDiscoveryService.WriteSensorDiscoveries -> sensor_discoveries ->
-	// discovery-processor, which carries certificates, certificate quality
-	// flags, OCSP status, cloud_provider/cloud_region and the cloud
-	// device_type -> asset_type mapping. This scheduled path instead builds
-	// DiscoveredAssets, which carry none of that. Unifying them means
-	// changing what result_processor.ProcessJobResults does with an empty
-	// asset list (and risks the double-processing failure),
-	// which is outside this change's blast radius. Reported rather than
-	// half-done.
-	assets := []models.DiscoveredAsset{}
-	for i := range devices {
-		device := &devices[i]
-		// extractCryptoConfigs normalises the in-memory []map / pointer
-		// shape the discovery functions build; the old
-		// .([]interface{}) assertion never matched it, so this loop
-		// produced zero assets on every scheduled run.
-		for _, cfg := range extractCryptoConfigs(device.Metadata) {
-			asset := w.convertCryptoConfigToAsset(device, cfg)
-			if asset != nil {
-				annotateCloudAssetMetadata(asset, *device, cloudProvider, integrationID)
-				assets = append(assets, *asset)
-			}
-		}
+	// This path used to build DiscoveredAssets from each device's crypto
+	// configs and hand them to ProcessJobResults. That dropped every AT-REST
+	// resource outright — an S3 bucket, an RDS instance, an Azure storage
+	// account or SQL server, a GCP bucket or Cloud SQL instance, a KMS key
+	// store carries no crypto config, so it produced no asset — and the rows it
+	// did write carried no provider resource id, no certificate quality flags
+	// or OCSP, no region and no provider certificates. Without the resource id
+	// an enforce-mode tenant can never admit the row (inventory keys the
+	// platform collector's authority on it), so a scheduled run could not
+	// deliver an at-rest resource in any identity mode. One writer means a
+	// scheduled run and a clicked run now write byte-identical rows.
+	discoveryJobID, written, err := w.cloudSink.MaterializeCloudRun(ctx, job, cloudProvider, integrationID, devices)
+	if err != nil {
+		return nil, err
 	}
 
 	metadata := map[string]interface{}{
@@ -352,6 +449,12 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 		// Count resolved resources, independently of their crypto endpoints
 		// and of unresolved resources included in enumeration statistics.
 		"assets_count": len(devices),
+		// Where this run's rows went, and how many the writer inserted. The
+		// result processor reconciles its processing block against the
+		// discovery job instead of the (deliberately empty) asset list.
+		"discovery_job_id":          discoveryJobID.String(),
+		metaCloudDiscoveriesWritten: written,
+		metaMaterializedByExecutor:  true,
 	}
 	if !discovery.Enumeration.Empty() {
 		metadata["enumeration"] = discovery.Enumeration
@@ -365,9 +468,13 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 	cloudSuccess := outcomes.ApplyToJobResult(metadata)
 
 	result := &models.JobResult{
-		JobID:       job.ID,
-		Success:     cloudSuccess,
-		Assets:      assets,
+		JobID:   job.ID,
+		Success: cloudSuccess,
+		// Empty on purpose, exactly as executeDeviceInterrogation's: the rows
+		// are already written, and ProcessJobResults' per-asset loop is the
+		// only other writer for this job — handing it assets would write them
+		// a second time.
+		Assets:      []models.DiscoveredAsset{},
 		CompletedAt: time.Now(),
 		Metadata:    metadata,
 	}
@@ -384,8 +491,37 @@ func (w *PlatformAgentWorker) executeCloudDiscovery(ctx context.Context, job *mo
 // Success alone would throw away the assets that DID arrive — turning an
 // honest partial result into silent data loss. A run that produced nothing
 // still skips processing.
+//
+// `|| materializedByExecutor` is load-bearing the same way. A cloud run writes
+// its rows itself and hands over an empty asset list, so a PARTIAL run (KMS
+// denied, S3 answered) is Success=false with no assets — and skipping it would
+// write no processing block at all. That block is what the identity
+// source-refresh state machine waits on (configured_source_refresh.go), so the
+// refresh that dispatched the run would read "waiting for result ingestion"
+// forever, and the job list would show a count nothing reconciled.
 func shouldProcessResults(result *models.JobResult) bool {
-	return result != nil && (result.Success || len(result.Assets) > 0)
+	return result != nil && (result.Success || len(result.Assets) > 0 || materializedByExecutor(result))
+}
+
+// Result metadata keys a cloud run sets when it wrote its own rows.
+const (
+	// metaMaterializedByExecutor marks a result whose rows the executor wrote
+	// itself, into the discovery job it stamped on the device job.
+	metaMaterializedByExecutor = "materialized_by_executor"
+	// metaCloudDiscoveriesWritten is how many sensor_discoveries rows the
+	// cloud writer inserted for the run.
+	metaCloudDiscoveriesWritten = "sensor_discoveries_written"
+)
+
+// materializedByExecutor reports whether the executor wrote the result's rows
+// itself. Read only in-process, before the result is stored, so the in-memory
+// bool is the only shape it has to accept.
+func materializedByExecutor(result *models.JobResult) bool {
+	if result == nil {
+		return false
+	}
+	v, _ := result.Metadata[metaMaterializedByExecutor].(bool)
+	return v
 }
 
 // executeDeviceInterrogation executes a device interrogation job
@@ -463,107 +599,4 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 		result.Metadata["identity_refresh_materialized"] = true
 	}
 	return result, nil
-}
-
-// convertCryptoConfigToAsset converts a crypto config from device metadata to a DiscoveredAsset
-func (w *PlatformAgentWorker) convertCryptoConfigToAsset(device *models.Device, cfg map[string]interface{}) *models.DiscoveredAsset {
-	asset := &models.DiscoveredAsset{
-		Metadata: make(map[string]interface{}),
-	}
-
-	// Extract hostname
-	if hostname, ok := cfg["hostname"].(string); ok {
-		asset.Hostname = hostname
-	} else if device.Hostname != nil {
-		asset.Hostname = *device.Hostname
-	}
-
-	// Extract IP address
-	if ip, ok := cfg["ip_address"].(string); ok {
-		asset.IPAddress = ip
-	} else if device.IPAddress != nil {
-		asset.IPAddress = *device.IPAddress
-	}
-
-	// Extract port
-	if port, ok := cfg["port"].(float64); ok {
-		asset.Port = int(port)
-	} else {
-		asset.Port = 443 // Default
-	}
-
-	// Extract protocol
-	if protocol, ok := cfg["protocol"].(string); ok {
-		asset.Protocol = protocol
-	} else {
-		asset.Protocol = "TLS"
-	}
-
-	// Extract protocol version
-	if version, ok := cfg["protocol_version"].(string); ok {
-		asset.ProtocolVersion = version
-	}
-
-	// Extract cipher suite
-	if cipher, ok := cfg["cipher_suite"].(string); ok {
-		asset.CipherSuite = cipher
-	}
-
-	// Key exchange: the group a live handshake negotiated.
-	if kex, ok := cfg["key_exchange_algorithm"].(string); ok && kex != "" {
-		asset.KeyExchangeAlgorithm = kex
-	}
-	// And whether the endpoint also accepts a classical-only / hybrid-only
-	// offer, which buildSensorDiscoveryMetadata forwards from Metadata.
-	copyTLSKeyExchangeSupport(asset.Metadata, cfg)
-
-	// Extract key size
-	if keySize, ok := cfg["key_size"].(float64); ok {
-		asset.KeySize = int(keySize)
-	}
-
-	// Extract certificate info
-	if cert, ok := cfg["certificate"].(map[string]interface{}); ok {
-		certInfo := &models.CertificateInfo{}
-		if subject, ok := cert["subject_dn"].(string); ok {
-			certInfo.SubjectDN = subject
-		}
-		if issuer, ok := cert["issuer_dn"].(string); ok {
-			certInfo.IssuerDN = issuer
-		}
-		if serial, ok := cert["serial_number"].(string); ok {
-			certInfo.SerialNumber = serial
-		}
-		if fingerprint, ok := cert["fingerprint"].(string); ok {
-			certInfo.Fingerprint = fingerprint
-		}
-		asset.Certificate = certInfo
-	}
-
-	// Store device metadata
-	asset.Metadata["asset_id"] = device.ID.String()
-	// Deprecated alias, emitted for one release: the value IS the asset id.
-	asset.Metadata["device_id"] = device.ID.String()
-	asset.Metadata["device_type"] = device.DeviceType
-	if device.Vendor != nil {
-		asset.Metadata["vendor"] = *device.Vendor
-	}
-
-	return asset
-}
-
-func annotateCloudAssetMetadata(asset *models.DiscoveredAsset, device models.Device, cloudProvider string, integrationID uuid.UUID) {
-	if asset == nil {
-		return
-	}
-	if asset.Metadata == nil {
-		asset.Metadata = make(map[string]interface{})
-	}
-	if cloudProvider != "" {
-		asset.Metadata["cloud_provider"] = cloudProvider
-	}
-	if region := cloudRegionForDevice(device); region != "" {
-		asset.Metadata["cloud_region"] = region
-	}
-	asset.Metadata["integration_id"] = integrationID.String()
 }

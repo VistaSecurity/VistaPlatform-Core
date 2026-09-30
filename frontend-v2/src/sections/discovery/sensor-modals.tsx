@@ -10,6 +10,7 @@
 // pending-registrations query lives here as a local hook.
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CORE_RELEASES_URL, binaryUrl, installerUrl, releasePageUrl, usePlatformReleaseTag } from './agent-downloads';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { copyToClipboard } from '../../lib/clipboard';
@@ -133,13 +134,49 @@ function InstallCommandBlock({ command }: { command: string }) {
 // installer needs `--url` / `-Url` to know where to register — the server-side
 // command string omitted it, which left the installer falling back to its
 // built-in default. Profile is no longer surfaced (the installer defaults it).
-// install-sensor.sh / install-sensor.ps1 ship next to the sensor binary in the
-// release package, so the command invokes the local script (`./` / `.\`).
-function buildInstallCommands(key: string, ip: string, name: string): { linux: string; windows: string } {
+// The installers expect the sensor binary beside them as crypto-sensor /
+// crypto-sensor.exe. Both come from the public release matching this
+// platform's version (agent-downloads.ts): the binary is a release asset, the
+// installer lives in that tag's source. With no release tag (a dev build) the
+// steps point at the releases page instead of guessing a version.
+export function buildInstallCommands(key: string, ip: string, name: string, tag: string | null): { linux: string; windows: string } {
   const origin = window.location.origin;
+  const linuxDownload = tag
+    ? [
+        `# 1) Download the sensor (linux/amd64; use -arm64 on ARM) and its installer, release ${tag}:`,
+        `curl -fLo crypto-sensor ${binaryUrl(tag, 'crypto-sensor', 'linux')}`,
+        `curl -fLO ${installerUrl(tag, 'install-sensor.sh')}`,
+        `chmod +x crypto-sensor`,
+      ]
+    : [
+        `# 1) From ${CORE_RELEASES_URL}, take the release matching this platform's`,
+        `#    version (profile menu → About): save the crypto-sensor binary for this host`,
+        `#    as ./crypto-sensor (chmod +x), and scripts/install-sensor.sh from that tag.`,
+      ];
+  const windowsDownload = tag
+    ? [
+        `# 1) Download the sensor (windows/amd64) and its installer, release ${tag}:`,
+        `Invoke-WebRequest -Uri ${binaryUrl(tag, 'crypto-sensor', 'windows')} -OutFile crypto-sensor.exe`,
+        `Invoke-WebRequest -Uri ${installerUrl(tag, 'install-sensor.ps1')} -OutFile install-sensor.ps1`,
+      ]
+    : [
+        `# 1) From ${CORE_RELEASES_URL}, take the release matching this platform's`,
+        `#    version (profile menu → About): save the Windows sensor as crypto-sensor.exe`,
+        `#    and scripts/install-sensor.ps1 from that tag, in the same folder.`,
+      ];
   return {
-    linux: `sudo ./install-sensor.sh --url ${origin} --key ${key} --ip ${ip} --name "${name}"`,
-    windows: `.\\install-sensor.ps1 -Url ${origin} -Key ${key} -IP ${ip} -Name "${name}"`,
+    linux: [
+      ...linuxDownload,
+      ``,
+      `# 2) Install and register (the sensor needs libpcap):`,
+      `sudo bash install-sensor.sh --url ${origin} --key ${key} --ip ${ip} --name "${name}"`,
+    ].join('\n'),
+    windows: [
+      ...windowsDownload,
+      ``,
+      `# 2) Install and register (the sensor needs Npcap):`,
+      `.\\install-sensor.ps1 -Url ${origin} -Key ${key} -IP ${ip} -Name "${name}"`,
+    ].join('\n'),
   };
 }
 
@@ -170,16 +207,23 @@ function isDeviceAgentProfile(profile?: string): boolean {
 // (registration_key set, agent_id empty), saves its client cert, and then polls
 // outbound-only. Commands below mirror docsv4 partner/deployment/
 // device-agent-deployment.md using verified flags (-register/-config) and
-// config keys (platform_url/registration_key/poll_interval). The binary is
-// downloaded from the platform's device-agent downloads — described as a step
-// rather than a one-liner because that endpoint resolves a tenant-scoped,
-// auth'd artifact URL, not a raw file.
-function buildDeviceAgentCommands(key: string): { linux: string; windows: string } {
+// config keys (platform_url/registration_key/poll_interval). The binary comes
+// from the public release matching this platform's version (agent-downloads.ts);
+// the platform does not serve it. It is statically linked and needs nothing.
+export function buildDeviceAgentCommands(key: string, tag: string | null): { linux: string; windows: string } {
   const origin = window.location.origin;
   return {
     linux: [
-      `# 1) Download the device-agent binary for this host (linux/amd64) from the`,
-      `#    platform, then make it executable:`,
+      ...(tag
+        ? [
+            `# 1) Download the device agent (linux/amd64; use -arm64 on ARM), release ${tag}:`,
+            `curl -fLo device-agent ${binaryUrl(tag, 'device-agent', 'linux')}`,
+          ]
+        : [
+            `# 1) From ${CORE_RELEASES_URL}, take the release matching this platform's`,
+            `#    version (profile menu → About) and save its device-agent binary for this`,
+            `#    host as ./device-agent.`,
+          ]),
       `chmod +x device-agent`,
       ``,
       `# 2) Write its config:`,
@@ -194,8 +238,16 @@ function buildDeviceAgentCommands(key: string): { linux: string; windows: string
       `./device-agent -config device-agent.yaml`,
     ].join('\n'),
     windows: [
-      `# 1) Download device-agent.exe for this host (windows/amd64) from the`,
-      `#    platform.`,
+      ...(tag
+        ? [
+            `# 1) Download the device agent (windows/amd64), release ${tag}:`,
+            `Invoke-WebRequest -Uri ${binaryUrl(tag, 'device-agent', 'windows')} -OutFile device-agent.exe`,
+          ]
+        : [
+            `# 1) From ${CORE_RELEASES_URL}, take the release matching this platform's`,
+            `#    version (profile menu → About) and save its Windows device agent as`,
+            `#    device-agent.exe.`,
+          ]),
       ``,
       `# 2) Write its config:`,
       `@"`,
@@ -360,6 +412,8 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
   const [tags, setTags] = useState('');
   const [description, setDescription] = useState('');
   const [result, setResult] = useState<{ kind: AgentKind; key: string; name: string; ip: string; linux: string; windows: string } | null>(null);
+  // The platform's release, so the steps download matching agent binaries.
+  const releaseTag = usePlatformReleaseTag();
 
   // Reset on (re)open so a closed-then-reopened modal is fresh.
   useEffect(() => {
@@ -389,8 +443,8 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
       if (error || !data) throw new Error(`Failed to register ${isDevice ? 'device agent' : 'sensor'}`);
       const ps = data.pending_sensor;
       const cmds = isDevice
-        ? buildDeviceAgentCommands(ps.registration_key)
-        : buildInstallCommands(ps.registration_key, ps.ip_address, ps.name);
+        ? buildDeviceAgentCommands(ps.registration_key, releaseTag)
+        : buildInstallCommands(ps.registration_key, ps.ip_address, ps.name, releaseTag);
       return { kind, key: ps.registration_key, name: ps.name, ip: ps.ip_address, linux: cmds.linux, windows: cmds.windows };
     },
     onSuccess: (r) => {
@@ -428,6 +482,16 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
         {!deviceResult && <RegistrationStatusBadge status={regStatus.data} />}
         <ModalField label="Registration code" hint={deviceResult ? 'Paste this into the agent config (registration_key).' : 'Paste this into the installer prompt or pass it to the install script.'}>
           <RegistrationCodeField code={result.key} />
+        </ModalField>
+        <ModalField
+          label="Download"
+          hint={releaseTag
+            ? `Binaries for this platform's release (${releaseTag}), for every OS and architecture, with signed checksums.`
+            : "Pick the release matching this platform's version (profile menu → About)."}
+        >
+          <a href={releasePageUrl(releaseTag)} target="_blank" rel="noreferrer" style={{ fontSize: 13 }}>
+            {releaseTag ? `Vista Platform ${releaseTag} release` : 'Vista Platform releases'}
+          </a>
         </ModalField>
         <ModalField label={deviceResult ? 'Enrollment steps — Linux / macOS' : 'Installation command — Linux'} hint="Run on the target host (bash).">
           <InstallCommandBlock command={result.linux} />
@@ -714,6 +778,7 @@ export function PendingRegistrationsSection() {
   const pending = q.data ?? [];
   const [toDelete, setToDelete] = useState<{ registration_key: string; name: string } | null>(null);
   const [toShow, setToShow] = useState<{ name: string; linux: string; windows: string; isDevice: boolean } | null>(null);
+  const releaseTag = usePlatformReleaseTag();
 
   if (q.isLoading || q.isError || pending.length === 0) return null; // quiet when empty
 
@@ -727,8 +792,8 @@ export function PendingRegistrationsSection() {
         {pending.map((p, i) => {
           const isDevice = isDeviceAgentProfile(p.profile);
           const cmds = isDevice
-            ? buildDeviceAgentCommands(p.registration_key)
-            : buildInstallCommands(p.registration_key, p.ip_address, p.name);
+            ? buildDeviceAgentCommands(p.registration_key, releaseTag)
+            : buildInstallCommands(p.registration_key, p.ip_address, p.name, releaseTag);
           return (
             <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: i < pending.length - 1 ? '1px solid var(--app-border)' : 'none' }}>
               <span style={{ width: 8, height: 8, borderRadius: 50, flex: 'none', background: 'var(--warn)' }} />

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,33 @@ const (
 	mergeStatusMerged       = "merged"
 	mergeStatusKeptSeparate = "kept_separate"
 )
+
+// mergeLiveAssetSQL is the ONE definition of a live merge participant: a record
+// a reviewer could still merge. Deleted, archived (including merged away) and
+// denied records are not. The asset alias is `lc`. The Approvals row's
+// `canMerge` guard (frontend-v2 merge-proposal-row.tsx) counts the same thing
+// on the client as defence in depth.
+const mergeLiveAssetSQL = `lc.deleted_at IS NULL AND lc.asset_status NOT IN ('archived','denied')`
+
+// mergeProposalAnswerableSQL is true when the proposal row aliased `h` names at
+// least two distinct LIVE records across its candidates and its (non-empty)
+// observation asset. A proposal with fewer has only one available answer —
+// "keep separate" — so it is not a question: the Approvals queue does not list
+// it and no asset shows "Identity conflict needs review" because of it.
+//
+// Shared by MergeProposalService.ListPending (list and total) and
+// assetIdentityConflictSQL so the queue and the badge cannot disagree. The
+// CASE guards the uuid cast: a malformed id in one history row must not fail
+// every asset list in the tenant.
+const mergeProposalAnswerableSQL = `(SELECT count(*) FROM assets lc
+ WHERE lc.tenant_id=h.tenant_id AND ` + mergeLiveAssetSQL + `
+ AND lc.id IN (
+  SELECT CASE WHEN p.v ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN p.v::uuid END
+  FROM (
+   SELECT c->>'asset_id' AS v FROM jsonb_array_elements(CASE WHEN jsonb_typeof(h.changes_json->'candidates')='array' THEN h.changes_json->'candidates' ELSE '[]'::jsonb END) c
+   UNION SELECT h.changes_json->>'observation_asset_id'
+  ) p
+ )) >= 2`
 
 // MergeCandidateView is one candidate, decorated for display.
 type MergeCandidateView struct {
@@ -104,13 +132,65 @@ type MergeProposalView struct {
 	AcceptedScore     float64    `json:"accepted_score,omitempty"`
 	AcceptedModelID   string     `json:"accepted_model_id,omitempty"`
 	AcceptedSourceRef string     `json:"accepted_source_ref,omitempty"`
+	// PairScore is the matcher's score of the two top-ranked candidates
+	// against EACH OTHER ( Phase 5) — "the two records themselves score
+	// N%". PairAssetIDs names them in rank order and PairReason is the model's
+	// phrase. Absent when unscored. Advisory only: nothing merges on it.
+	PairScore    float64     `json:"pair_score,omitempty"`
+	PairAssetIDs []uuid.UUID `json:"pair_asset_ids,omitempty"`
+	PairReason   string      `json:"pair_reason,omitempty"`
 	// ResolvedAt and ResolvedBy are stamped when a human decides the proposal.
 	// On an auto-accepted row they stay empty until somebody settles the
 	// REMAINING candidates, which is what makes "merged by the matcher, not yet
 	// reviewed" a state the Approvals page can show.
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 	ResolvedBy string     `json:"resolved_by,omitempty"`
+	// MergedInto is the survivor of a proposal resolved by a merge.
+	MergedInto *uuid.UUID `json:"merged_into,omitempty"`
+	// DecidedBy and RuleEvidence are set on [MergeProposalService.ListAutoAccepted]
+	// rows only: who merged this without asking ("matcher" | "rule"), and — for
+	// a rule merge — the sentences the rule relied on. See [DecidedByRule] for
+	// the storage contract the rule-merge executor writes to.
+	DecidedBy    string   `json:"decided_by,omitempty"`
+	RuleEvidence []string `json:"rule_evidence,omitempty"`
 }
+
+// The `decided_by` values on an auto-accepted list row.
+const (
+	// DecidedByMatcher: a learned matcher scored the top candidate above the
+	// tenant's threshold and the engine wrote the observation into it
+	// (`changes_json.auto_accepted = true`).
+	DecidedByMatcher = "matcher"
+
+	// DecidedByRule: the same-device RULE merged two existing assets
+	// ( Phase 4, owner decisions D1/D4).
+	//
+	// # The storage contract (the rule-merge executor conforms to THIS)
+	//
+	// At the moment the executor resolves the proposal as merged, the
+	// proposal's `asset_history` row (`action = merge_proposed`,
+	// `changes_json.kind = merge_proposal`) must carry, in `changes_json`:
+	//
+	//	"status":        "merged"            (what resolveProposal already writes)
+	//	"merged_into":   "<survivor asset id>"
+	//	"resolved_at":   "<RFC 3339 UTC>"    (the MERGE time — the list's 30-day
+	//	                                      window is measured from it, not from
+	//	                                      when the proposal was opened)
+	//	"decided_by":    "rule"
+	//	"rule_evidence": ["<sentence>", ...] (plain strings, no lab identity, in
+	//	                                      the order the rule established them)
+	//
+	// and NO `resolved_by` — a rule merge has no user. All of it is one JSONB
+	// merge (`changes_json || patch`), which is exactly what resolveProposal
+	// does, so the executor extends that patch rather than writing a second
+	// UPDATE. `rule_evidence` is ALSO stamped on the still-pending proposal
+	// when the engine records its verdict (`rule_verdict: same_device`); the
+	// resolution-time write restates it so the merged row is self-contained.
+	//
+	// A row with `decided_by: "rule"` whose status is NOT merged is not listed:
+	// a rule that has decided but not yet merged has not done anything yet.
+	DecidedByRule = "rule"
+)
 
 // ErrMergeProposalNotFound is returned for an id that names no pending proposal
 // in this tenant.
@@ -184,23 +264,28 @@ func (s *MergeProposalService) ListPending(ctx context.Context, tenantID uuid.UU
 		total int
 	)
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		// Only answerable proposals (two live records) are questions; see
+		// mergeProposalAnswerableSQL. The count and the page share the filter
+		// so the total never promises rows the page cannot show.
 		if err := tx.QueryRowContext(ctx, `
 			SELECT count(*)
-			FROM asset_history
+			FROM asset_history h
 			WHERE tenant_id = $1
 			  AND action = $2
 			  AND changes_json->>'kind' = 'merge_proposal'
-			  AND COALESCE(changes_json->>'status', 'pending') = 'pending'`,
+			  AND COALESCE(changes_json->>'status', 'pending') = 'pending'
+			  AND `+mergeProposalAnswerableSQL,
 			tenantID, string(identity.ActionMergeProposed)).Scan(&total); err != nil {
 			return fmt.Errorf("count merge proposals: %w", err)
 		}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT id, asset_id, source, changes_json::text, created_at
-			FROM asset_history
+			FROM asset_history h
 			WHERE tenant_id = $1
 			  AND action = $2
 			  AND changes_json->>'kind' = 'merge_proposal'
 			  AND COALESCE(changes_json->>'status', 'pending') = 'pending'
+			  AND `+mergeProposalAnswerableSQL+`
 			ORDER BY created_at DESC, seq DESC
 			LIMIT $3 OFFSET $4`,
 			tenantID, string(identity.ActionMergeProposed), limit, offset)
@@ -260,15 +345,19 @@ func (s *MergeProposalService) ListPending(ctx context.Context, tenantID uuid.UU
 // workstream 4.6.
 const AutoAcceptedWindowDays = 30
 
-// ListAutoAccepted returns the merges the MATCHER made on the tenant's behalf
-// in the last [AutoAcceptedWindowDays] days, newest first.
+// ListAutoAccepted returns the merges the PLATFORM made on the tenant's behalf,
+// unasked, in the last [AutoAcceptedWindowDays] days, newest first: the
+// matcher's auto-accepts (`decided_by: matcher`) and the same-device rule's
+// merges of two existing assets (`decided_by: rule`, with its evidence).
+// See [DecidedByRule] for the storage contract the rule merge conforms to.
 //
 // # Why this exists at all
 //
-// A tenant who sets an auto-accept threshold above zero is telling the platform
-// it may merge two assets without asking. That is a real capability and the one
-// thing on the identification path with no human in it — so it must be VISIBLE
-// to a human afterwards, on the page where they already review identity
+// A tenant who sets an auto-accept threshold above zero — or leaves the
+// same-device rule merge at its default of ON — is telling the platform it may
+// merge two assets without asking. That is a real capability and the one thing
+// on the identification path with no human in it — so it must be VISIBLE to a
+// human afterwards, on the page where they already review identity
 // decisions, with the score and the model's reasons beside it. A capability
 // that acts unasked and reports nowhere is indistinguishable from a bug.
 //
@@ -278,6 +367,16 @@ const AutoAcceptedWindowDays = 30
 // REMAINING candidates are concerned. Both a pending and a resolved one are
 // included: the question this list answers is "what did the matcher do", and a
 // reviewer having since decided the leftovers does not unmake the merge.
+//
+// # Two kinds of row, two clocks
+//
+// A matcher row is `auto_accepted = true`, and the 30 days run from when the
+// proposal was opened: the sighting that was filed into a candidate IS the
+// merge. A rule row is `status = merged AND decided_by = rule`, and the 30 days
+// run from `resolved_at`, the moment the executor merged — because a rule can
+// merge a proposal that has been pending for weeks (a candidate changed and the
+// rule now holds), and measuring from when it was opened would hide a merge that
+// happened today.
 func (s *MergeProposalService) ListAutoAccepted(ctx context.Context, tenantID uuid.UUID, limit int) ([]MergeProposalView, error) {
 	if limit <= 0 || limit > MergeProposalMaxPageSize {
 		limit = MergeProposalPageSize
@@ -290,9 +389,15 @@ func (s *MergeProposalService) ListAutoAccepted(ctx context.Context, tenantID uu
 			WHERE tenant_id = $1
 			  AND action = $2
 			  AND changes_json->>'kind' = 'merge_proposal'
-			  AND (changes_json->>'auto_accepted')::boolean IS TRUE
-			  AND created_at >= now() - make_interval(days => $3)
-			ORDER BY created_at DESC, seq DESC
+			  AND (
+			        ((changes_json->>'auto_accepted')::boolean IS TRUE
+			          AND created_at >= now() - make_interval(days => $3))
+			     OR (changes_json->>'status' = 'merged'
+			          AND changes_json->>'decided_by' = 'rule'
+			          AND `+ruleMergedAtSQL+` >= now() - make_interval(days => $3))
+			      )
+			ORDER BY CASE WHEN changes_json->>'status' = 'merged' AND changes_json->>'decided_by' = 'rule'
+			              THEN `+ruleMergedAtSQL+` ELSE created_at END DESC, seq DESC
 			LIMIT $4`,
 			tenantID, string(identity.ActionMergeProposed), AutoAcceptedWindowDays, limit)
 		if err != nil {
@@ -326,6 +431,12 @@ func (s *MergeProposalService) ListAutoAccepted(ctx context.Context, tenantID uu
 		}
 		for i := range views {
 			decorateMergeProposal(&views[i], decor)
+			// The list has two producers; say which one made each row. A rule
+			// row already says so (scanMergeProposal); anything else here is
+			// there because the matcher auto-accepted it.
+			if views[i].DecidedBy == "" {
+				views[i].DecidedBy = DecidedByMatcher
+			}
 		}
 		return nil
 	})
@@ -337,6 +448,15 @@ func (s *MergeProposalService) ListAutoAccepted(ctx context.Context, tenantID uu
 	}
 	return views, nil
 }
+
+// ruleMergedAtSQL is when a rule merge happened: the proposal's `resolved_at`,
+// falling back to when it was opened for a row that lacks one or holds
+// something that is not a timestamp (a malformed value must not fail the whole
+// list). See [MergeProposalService.ListAutoAccepted].
+const ruleMergedAtSQL = `COALESCE(
+	CASE WHEN changes_json->>'resolved_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+	     THEN (changes_json->>'resolved_at')::timestamptz END,
+	created_at)`
 
 // ClampMergeProposalPage normalises a caller's page request. It is exported so
 // the handler can echo the page the server actually used rather than the one
@@ -533,19 +653,27 @@ func scanMergeProposal(rows rowScanner, tenantID uuid.UUID) (*MergeProposalView,
 		return nil, nil, fmt.Errorf("scan merge proposal: %w", err)
 	}
 	var body struct {
-		Status             string  `json:"status"`
-		Reason             string  `json:"reason"`
-		SourceKind         string  `json:"source_kind"`
-		ObservationAssetID string  `json:"observation_asset_id"`
-		ModelID            string  `json:"model_id"`
-		SourceRef          string  `json:"source_ref"`
-		AutoAccepted       bool    `json:"auto_accepted"`
-		AcceptedAssetID    string  `json:"accepted_asset_id"`
-		AcceptedScore      float64 `json:"accepted_score"`
-		AcceptedModelID    string  `json:"accepted_model_id"`
-		AcceptedSourceRef  string  `json:"accepted_source_ref"`
-		ResolvedAt         string  `json:"resolved_at"`
-		ResolvedBy         string  `json:"resolved_by"`
+		Status     string `json:"status"`
+		MergedInto string `json:"merged_into"`
+		DecidedBy  string `json:"decided_by"`
+		// Decoded tolerantly below: a malformed evidence value must cost the
+		// row its evidence line, not fail every list read for the tenant.
+		RuleEvidence       json.RawMessage `json:"rule_evidence"`
+		Reason             string          `json:"reason"`
+		SourceKind         string          `json:"source_kind"`
+		ObservationAssetID string          `json:"observation_asset_id"`
+		ModelID            string          `json:"model_id"`
+		SourceRef          string          `json:"source_ref"`
+		AutoAccepted       bool            `json:"auto_accepted"`
+		AcceptedAssetID    string          `json:"accepted_asset_id"`
+		AcceptedScore      float64         `json:"accepted_score"`
+		AcceptedModelID    string          `json:"accepted_model_id"`
+		AcceptedSourceRef  string          `json:"accepted_source_ref"`
+		ResolvedAt         string          `json:"resolved_at"`
+		ResolvedBy         string          `json:"resolved_by"`
+		PairScore          float64         `json:"pair_score"`
+		PairAssetIDs       []string        `json:"pair_asset_ids"`
+		PairReason         string          `json:"pair_reason"`
 		Candidates         []struct {
 			AssetID            string             `json:"asset_id"`
 			MatchedIdentifiers []map[string]any   `json:"matched_identifiers"`
@@ -586,6 +714,28 @@ func scanMergeProposal(rows rowScanner, tenantID uuid.UUID) (*MergeProposalView,
 	if acc, err := uuid.Parse(body.AcceptedAssetID); err == nil {
 		v.AcceptedAssetID = &acc
 	}
+	if into, err := uuid.Parse(body.MergedInto); err == nil {
+		v.MergedInto = &into
+	}
+	// A rule decision is only real once the proposal is merged: `decided_by`
+	// alone on a pending row is a verdict awaiting its executor, not an act.
+	if body.DecidedBy == DecidedByRule && v.Status == mergeStatusMerged {
+		v.DecidedBy = DecidedByRule
+		v.RuleEvidence = decodeRuleEvidence(body.RuleEvidence)
+	}
+	// The pair score travels only with BOTH of its ids: a score about "these
+	// two records" that cannot name them would be a number about nobody.
+	if body.PairScore > 0 && len(body.PairAssetIDs) == 2 {
+		ids := make([]uuid.UUID, 0, 2)
+		for _, raw := range body.PairAssetIDs {
+			if pid, err := uuid.Parse(raw); err == nil {
+				ids = append(ids, pid)
+			}
+		}
+		if len(ids) == 2 {
+			v.PairScore, v.PairAssetIDs, v.PairReason = body.PairScore, ids, body.PairReason
+		}
+	}
 	for _, c := range body.Candidates {
 		cid, err := uuid.Parse(c.AssetID)
 		if err != nil {
@@ -612,6 +762,26 @@ func scanMergeProposal(rows rowScanner, tenantID uuid.UUID) (*MergeProposalView,
 		candidateIDs = append(candidateIDs, c.AssetID)
 	}
 	return v, candidateIDs, nil
+}
+
+// decodeRuleEvidence reads `rule_evidence` best-effort: the strings in an array,
+// nothing else. Anything that is not an array of strings yields no evidence
+// rather than an error.
+func decodeRuleEvidence(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var all []any
+	if err := json.Unmarshal(raw, &all); err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range all {
+		if str, ok := e.(string); ok && strings.TrimSpace(str) != "" {
+			out = append(out, str)
+		}
+	}
+	return out
 }
 
 type mergeDecoration struct {
@@ -1029,7 +1199,20 @@ func moveAssetEdges(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid.UU
 	return nil
 }
 
-func writeMergeHistory(ctx context.Context, tx *sqlx.Tx, tenantID, assetID, actor uuid.UUID, action string, changes map[string]any) error {
+// mergeHistorySourceManual and mergeHistorySourceRule are the
+// `asset_history.source` of a merge's own history rows. `manual` is a person
+// merging in Approvals. A rule merge ( Phase 4) is not: it writes
+// `identity:same_device_rule`, in the `producer:detail` form rule-driven writers
+// already use (`classifier:rules`). The column has no constraint; what matters is
+// that the name-provenance readers (PromoteNames, the merge preview's
+// `_legacy_name_declared`) treat `source = 'manual'` as a DECLARATION on a row
+// that carries a name, and a rule merge must never be able to read as one.
+const (
+	mergeHistorySourceManual = "manual"
+	mergeHistorySourceRule   = "identity:same_device_rule"
+)
+
+func writeMergeHistory(ctx context.Context, tx *sqlx.Tx, tenantID, assetID, actor uuid.UUID, source, action string, changes map[string]any) error {
 	payload, err := json.Marshal(changes)
 	if err != nil {
 		return fmt.Errorf("marshal %s history: %w", action, err)
@@ -1040,8 +1223,8 @@ func writeMergeHistory(ctx context.Context, tx *sqlx.Tx, tenantID, assetID, acto
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO asset_history (asset_id, tenant_id, actor_user_id, source, action, changes_json)
-		VALUES ($1, $2, $3, 'manual', $4, $5::jsonb)`,
-		assetID, tenantID, actorArg, action, payload); err != nil {
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+		assetID, tenantID, actorArg, source, action, payload); err != nil {
 		return fmt.Errorf("record %s: %w", action, err)
 	}
 	return nil
@@ -1050,10 +1233,20 @@ func writeMergeHistory(ctx context.Context, tx *sqlx.Tx, tenantID, assetID, acto
 // resolveProposal stamps the outcome onto the proposal row itself, so the
 // Approvals queue stops returning it and the history says who decided and how.
 func resolveProposal(ctx context.Context, tx *sqlx.Tx, tenantID, proposalID uuid.UUID, status string, survivor, actor uuid.UUID) error {
-	patch := map[string]any{
-		"status":      status,
-		"resolved_at": time.Now().UTC().Format(time.RFC3339),
+	return resolveProposalWith(ctx, tx, tenantID, proposalID, status, survivor, actor, nil)
+}
+
+// resolveProposalWith is resolveProposal with extra keys in the SAME JSONB
+// merge — which is how a rule merge stamps `decided_by` and `rule_evidence`
+// (the [DecidedByRule] storage contract) without a second UPDATE. `extra`
+// cannot override the resolution's own keys.
+func resolveProposalWith(ctx context.Context, tx *sqlx.Tx, tenantID, proposalID uuid.UUID, status string, survivor, actor uuid.UUID, extra map[string]any) error {
+	patch := map[string]any{}
+	for k, v := range extra {
+		patch[k] = v
 	}
+	patch["status"] = status
+	patch["resolved_at"] = time.Now().UTC().Format(time.RFC3339)
 	if survivor != uuid.Nil {
 		patch["merged_into"] = survivor.String()
 	}

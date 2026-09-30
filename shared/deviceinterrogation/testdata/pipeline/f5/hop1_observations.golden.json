@@ -254,6 +254,20 @@
     ],
     "edges": [
       {
+        "from": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[ip_address=198.51.100.20]",
+        "type": "depends_on"
+      },
+      {
+        "from": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[ip_address=198.51.100.21]",
+        "type": "depends_on"
+      },
+      {
         "from": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
         "source_kind": "measured",
         "status": "pending",

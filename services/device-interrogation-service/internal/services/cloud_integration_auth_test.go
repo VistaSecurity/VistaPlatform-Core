@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,7 +10,29 @@ import (
 	"github.com/google/uuid"
 )
 
-const authorizeCloudIntegrationQuery = `(?s)SELECT integration_type\s+FROM platform_integrations.*tenant_id = \$2.*tenant_id IS NULL AND is_shared = true.*is_active = true.*deleted_at IS NULL`
+// The integration's "Enabled" switch used to be read by nothing: a disabled
+// integration's schedules and Discover runs went on collecting.
+//
+// MUTATION-VERIFIED: drop the `if !enabled` refusal and this goes red.
+func TestAuthorizeCloudIntegration_DisabledIntegrationIsRefused(t *testing.T) {
+	bypassDB, bypassMock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock bypass db: %v", err)
+	}
+	defer func() { _ = bypassDB.Close() }()
+	tenantID, integrationID := uuid.New(), uuid.New()
+	bypassMock.ExpectQuery(authorizeCloudIntegrationQuery+`.*integration_type = \$3`).
+		WithArgs(integrationID, tenantID, "aws").
+		WillReturnRows(sqlmock.NewRows([]string{"integration_type", "enabled"}).AddRow("aws", false))
+
+	svc := NewCloudDiscoveryService(nil, bypassDB, testMasterKey)
+	_, err = svc.DiscoverAWSResources(context.Background(), tenantID, integrationID, []string{"s3"}, nil)
+	if !errors.Is(err, ErrCloudIntegrationDisabled) {
+		t.Fatalf("a disabled integration ran: err = %v", err)
+	}
+}
+
+const authorizeCloudIntegrationQuery = `(?s)SELECT integration_type, COALESCE\(is_enabled, true\)\s+FROM platform_integrations.*tenant_id = \$2.*tenant_id IS NULL AND is_shared = true.*is_active = true.*deleted_at IS NULL`
 
 func TestGetIntegrationCloudProviderAuthorizesSharedIntegration(t *testing.T) {
 	bypassDB, bypassMock, err := sqlmock.New()
@@ -23,7 +46,7 @@ func TestGetIntegrationCloudProviderAuthorizesSharedIntegration(t *testing.T) {
 
 	bypassMock.ExpectQuery(authorizeCloudIntegrationQuery).
 		WithArgs(integrationID, tenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"integration_type"}).AddRow("aws"))
+		WillReturnRows(sqlmock.NewRows([]string{"integration_type", "enabled"}).AddRow("aws", true))
 
 	svc := NewCloudDiscoveryService(nil, bypassDB, testMasterKey)
 	got, err := svc.GetIntegrationCloudProvider(context.Background(), tenantID, integrationID)
@@ -50,7 +73,7 @@ func TestDiscoverAWSResourcesRejectsUnauthorizedIntegrationBeforeCredentialLooku
 
 	bypassMock.ExpectQuery(authorizeCloudIntegrationQuery+`.*integration_type = \$3`).
 		WithArgs(integrationID, tenantID, "aws").
-		WillReturnRows(sqlmock.NewRows([]string{"integration_type"}))
+		WillReturnRows(sqlmock.NewRows([]string{"integration_type", "enabled"}))
 
 	svc := NewCloudDiscoveryService(nil, bypassDB, testMasterKey)
 	_, err = svc.DiscoverAWSResources(context.Background(), tenantID, integrationID, []string{"s3"}, nil)
@@ -77,7 +100,7 @@ func TestDiscoverAWSKMSKeysRejectsUnauthorizedIntegrationBeforeCredentialLookup(
 
 	bypassMock.ExpectQuery(authorizeCloudIntegrationQuery+`.*integration_type = \$3`).
 		WithArgs(integrationID, tenantID, "aws").
-		WillReturnRows(sqlmock.NewRows([]string{"integration_type"}))
+		WillReturnRows(sqlmock.NewRows([]string{"integration_type", "enabled"}))
 
 	svc := NewKMSDiscoveryService(nil, bypassDB, testMasterKey)
 	_, err = svc.DiscoverAWSKMSKeys(context.Background(), tenantID, integrationID, nil, nil)

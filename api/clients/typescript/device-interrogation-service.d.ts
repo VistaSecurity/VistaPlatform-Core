@@ -2398,6 +2398,15 @@ export interface components {
                 "application/json": components["schemas"]["LegacyError"];
             };
         };
+        /** @description The caller already has a live integration of this type with this name. Names are unique per tenant. */
+        LegacyIntegrationNameTaken: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
     };
     parameters: {
         /** @description Schedule UUID. */
@@ -2459,6 +2468,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            409: components["responses"]["LegacyIntegrationNameTaken"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -2515,6 +2525,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyIntegrationNameTaken"];
             500: components["responses"]["LegacyServerError"];
         };
     };

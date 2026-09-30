@@ -26,6 +26,16 @@ import (
 // seed run), not a server fault.
 var ErrFrameworkNotFound = errors.New("framework not found")
 
+// ErrFrameworkNotLicensed is returned by EvaluateFramework when the framework
+// exists but the tenant has no active subscription to it — a published
+// framework the tenant never activated (or whose activation lapsed). It is a
+// well-formed request the tenant's state cannot satisfy, so the /summary
+// handler maps it to 403 rather than letting it surface as a 500 "Failed to
+// evaluate framework", which sends an operator hunting a server fault that does
+// not exist. Tenants activate the framework (Risk & Compliance → Posture) to
+// clear it.
+var ErrFrameworkNotLicensed = errors.New("framework not licensed: tenant does not have an active subscription for this framework")
+
 // EvaluationService handles compliance evaluation and scoring
 type EvaluationService struct {
 	db            *sqlx.DB
@@ -219,7 +229,7 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 		if licErr != nil {
 			log.Printf("WARN: License check failed for tenant %s framework %s: %v (allowing evaluation)", tenantID, frameworkID, licErr)
 		} else if !isLicensed {
-			return nil, fmt.Errorf("framework not licensed: tenant does not have an active subscription for this framework")
+			return nil, ErrFrameworkNotLicensed
 		}
 	} else {
 		// Try tenant_frameworks (custom policies).

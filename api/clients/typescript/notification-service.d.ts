@@ -11,7 +11,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List the tenant's notification channels */
+        /**
+         * List the tenant's notification channels
+         * @description Requires `settings.read`. Credentials in each channel's `config` are masked in the response — see `TenantNotificationChannel.config`.
+         */
         get: operations["listTenantChannels"];
         put?: never;
         /** Create a notification channel */
@@ -29,7 +32,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get one channel */
+        /**
+         * Get one channel
+         * @description Requires `settings.read`. Credentials in `config` are masked in the response — see `TenantNotificationChannel.config`.
+         */
         get: operations["getTenantChannel"];
         /** Update a channel */
         put: operations["updateTenantChannel"];
@@ -50,7 +56,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send a test notification through a channel */
+        /**
+         * Send a test notification through a channel
+         * @description Delivers a test notification through the channel and reports the real outcome. A channel that did not deliver answers 422 with a sanitized `reason` (see `ChannelTestFailure`). A PagerDuty test triggers and immediately resolves a throwaway incident, so it leaves nothing open.
+         */
         post: operations["testTenantChannel"];
         delete?: never;
         options?: never;
@@ -90,6 +99,26 @@ export interface paths {
         post?: never;
         /** Delete a rule */
         delete: operations["deleteTenantRule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tenant/delivery-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether operator-configured delivery transports can deliver
+         * @description Requires `settings.read`. Today this reports email only: with no SMTP host configured (tenant override, platform email settings, or SMTP_HOST) every email channel is inert, and the Settings card says so.
+         */
+        get: operations["getTenantDeliveryStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -406,6 +435,7 @@ export interface components {
             channel_name: string;
             /** @description email / slack / webhook / pagerduty / teams (delivery transport). */
             channel_type: string;
+            /** @description Delivery configuration with every credential MASKED: a URL keeps only its scheme and host (`https://hooks.example.test/••••`), any other secret keeps only its last four characters (`••••wxyz`, or just `••••` when short). Credentials are the `webhook_url`, `url`, `integration_key`, token/password-style keys, every value under `headers`, and `auth.token` / `auth.username` / `auth.password`. Recipients, `channel` and `auth.type` are returned as-is. The real values are never returned by this API. */
             config: {
                 [key: string]: unknown;
             } | null;
@@ -422,6 +452,8 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /** @description Present ONLY on the response to creating a generic webhook channel that has no signing secret of its own: the server-generated HMAC secret, shown once. It is write-only afterwards (masked like every other credential in `config.webhook_secret`); rotate it by sending a new `config.webhook_secret`. */
+            signing_secret?: string;
         };
         /**
          * @description A tenant alert-routing rule (models.TenantNotificationRule). `channel_ids`
@@ -467,6 +499,7 @@ export interface components {
         /** @description Body for PUT /tenant/channels/{id}. All fields optional. */
         UpdateChannelRequest: {
             channel_name?: string;
+            /** @description Replaces the channel's config. A credential that is omitted, empty, or equal to the masked form returned by GET keeps its stored value, so a client can echo a GET body back (or leave a secret field blank) without destroying the credential; only a new value replaces it. Omitting a whole nested object (`auth`, `headers`) removes it, and an omitted header is a removed header. */
             config?: {
                 [key: string]: unknown;
             };
@@ -501,6 +534,23 @@ export interface components {
         /** @description Bare status envelope for delete / test — e.g. `{ "status": "deleted" }`. */
         StatusResponse: {
             status: string;
+        };
+        /** @description A channel Test that did not deliver. `reason` is a sanitized sentence from a fixed vocabulary — it never contains the channel's URL, query string, headers, tokens or the remote's response body — so it is safe to show. */
+        ChannelTestFailure: {
+            /** @enum {string} */
+            status: "test_failed";
+            /** @description Legacy generic message, kept for clients that only read `error`. */
+            error: string;
+            /** @description Why the channel did not deliver, e.g. "Email delivery isn't configured by the platform operator." */
+            reason: string;
+            /** @description True when retrying cannot help (misconfiguration, rejected address), false when it may be transient. */
+            permanent?: boolean;
+        };
+        TenantDeliveryStatus: {
+            email: {
+                /** @description False when no SMTP host is configured anywhere — every email channel then fails with "not configured" instead of retrying. */
+                configured: boolean;
+            };
         };
         /** @description A platform-scoped delivery-suppression window (models.MaintenanceWindow; storm control §10.3). While one is active, notification-service suppresses delivery of all notifications. `created_by` is omitted when unset (the Go model tags it `omitempty`). */
         MaintenanceWindow: {
@@ -539,6 +589,7 @@ export interface components {
             id: string;
             channel_name: string;
             channel_type: string;
+            /** @description Delivery configuration with every credential MASKED, exactly as for tenant channels (see `TenantNotificationChannel.config`). On update a credential that is omitted, blank or still in its masked form keeps its stored value. */
             config: {
                 [key: string]: unknown;
             } | null;
@@ -608,8 +659,9 @@ export interface components {
             severity: string;
             message: string;
             channels_used: string[] | null;
-            /** @description sent / failed / pending / partial. */
+            /** @description `sent` — every attempted channel delivered. `partial` — at least one delivered and at least one did not (failed channels that are still queued for retry count as not delivered). `failed` — none delivered. `pending` — only queued for a digest. The delivery retry worker updates this row when a queued retry succeeds or is abandoned. */
             status: string;
+            /** @description The notification's own metadata plus delivery bookkeeping. `channel_results` is an array with one entry per attempted channel — `{ channel_id, channel_type, status: sent | retrying | failed, retries_exhausted? }` — and `last_retry_at` is set once the retry worker has touched the row. Delivery error text is deliberately not included. */
             metadata: {
                 [key: string]: unknown;
             } | null;
@@ -694,6 +746,15 @@ export interface operations {
                     "application/json": components["schemas"]["TenantChannelListResponse"];
                 };
             };
+            /** @description The caller lacks `settings.read`. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             /** @description Internal error. */
             500: {
                 headers: {
@@ -769,6 +830,15 @@ export interface operations {
             };
             /** @description Invalid channel ID. */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The caller lacks `settings.read`. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -898,6 +968,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description Channel not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The channel did not deliver the test. `reason` says why. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelTestFailure"];
                 };
             };
             /** @description Internal error. */
@@ -1097,6 +1185,44 @@ export interface operations {
             };
             /** @description Invalid rule ID. */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description Internal error. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+        };
+    };
+    getTenantDeliveryStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-transport delivery availability. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantDeliveryStatus"];
+                };
+            };
+            /** @description The caller lacks `settings.read`. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1597,6 +1723,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description Channel not found. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The channel did not deliver the test. `reason` says why. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelTestFailure"];
                 };
             };
             /** @description Internal error. */

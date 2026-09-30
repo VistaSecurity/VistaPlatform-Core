@@ -803,19 +803,11 @@ func discoverCloudResourcesHandler(db, bypassDB *sql.DB, discoveryIntegrationSer
 
 			// Per-resource-type outcomes for this run ( slice E). The
 			// recorder rides the context so a collector deep in the call tree
-			// records where the failure happened.
-			//
-			// AWS only for now: the Azure and GCP dispatch switches do not
-			// record yet, and seeding a recorder they never write to would
-			// report every requested type as "not collected" when it was in
-			// fact collected — a new lie in place of the old one. A provider
-			// with no recorder produces no outcomes and behaves exactly as
-			// before (nil recorder ⇒ Succeeded() true, Outcomes() empty).
-			var outcomes *services.CloudOutcomeRecorder
-			if cloudProvider == "aws" {
-				outcomes = services.NewCloudOutcomeRecorder(req.ResourceTypes)
-				ctx = services.WithCloudOutcomes(ctx, outcomes)
-			}
+			// records where the failure happened. Every provider dispatches
+			// through runCloudCollectors now (integrations review M7), so every
+			// provider records.
+			outcomes := services.NewCloudOutcomeRecorder(req.ResourceTypes)
+			ctx = services.WithCloudOutcomes(ctx, outcomes)
 
 			// One entry point for a cloud JOB: the crypto/at-rest collectors the
 			// request asked for, plus compute/network enumeration when the

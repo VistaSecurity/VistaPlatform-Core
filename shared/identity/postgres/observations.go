@@ -32,7 +32,20 @@ func (r *Repository) AdmissionMode(ctx context.Context, tenantID string) (string
 	return mode, err
 }
 
-func (r *Repository) FinishObservation(ctx context.Context, obs identity.Observation, observationID string, res identity.Resolution, decision identity.AdmissionDecision, establish bool) error {
+// FinishObservation records what the engine decided about a stored sighting,
+// and returns the id of the evidence row the sighting ended up on — the one
+// StoreObservation returned, unless that row was already linked to a
+// DIFFERENT asset, in which case [Repository.settleObservationRow] decides
+// whether the row moves with it or the sighting is split onto a row of its own.
+func (r *Repository) FinishObservation(ctx context.Context, obs identity.Observation, observationID string, res identity.Resolution, decision identity.AdmissionDecision, establish bool) (string, error) {
+	if err := r.finishObservation(ctx, obs, &observationID, res, decision, establish); err != nil {
+		return "", err
+	}
+	return observationID, nil
+}
+
+func (r *Repository) finishObservation(ctx context.Context, obs identity.Observation, rowID *string, res identity.Resolution, decision identity.AdmissionDecision, establish bool) error {
+	observationID := *rowID
 	if res.AdmissionReason != "" {
 		// APPEND, never replace. The reasons array already carries the
 		// admission decision StoreObservation wrote — `unverified_relayed_advertisement`
@@ -60,6 +73,19 @@ func (r *Repository) FinishObservation(ctx context.Context, obs identity.Observa
 		})
 	}
 	if res.Asset.Zero() {
+		return nil
+	}
+	// The row may already belong to another asset: identical evidence that
+	// resolved elsewhere before (a segment whose DHCP posture changed turns
+	// "address X is-at MAC M" from a floating-address observation of X's
+	// holder into a match on M's node). Settle which row this resolution
+	// writes to before any branch below links it.
+	settled, link, err := r.settleObservationRow(ctx, obs, observationID, res.Asset)
+	if err != nil {
+		return err
+	}
+	*rowID, observationID = settled, settled
+	if !link {
 		return nil
 	}
 	// D2/D3. Both new outcomes attach the observation to an asset
@@ -202,6 +228,7 @@ func (r *Repository) StoreObservation(ctx context.Context, obs identity.Observat
 		if err != nil {
 			return fmt.Errorf("store identity receipt: %w", err)
 		}
+		r.noteFreshReceipt(id, receipt)
 		_, err = tx.ExecContext(ctx, `UPDATE identity_observations o SET
 			first_seen_at=LEAST(first_seen_at,$3), last_seen_at=GREATEST(last_seen_at,$3),
 			evidence=CASE WHEN $3 >= last_seen_at THEN $4::jsonb ELSE evidence END,

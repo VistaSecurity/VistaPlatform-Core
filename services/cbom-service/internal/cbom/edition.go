@@ -2,7 +2,9 @@ package cbom
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -85,4 +87,32 @@ type ArtifactFormatter interface {
 	// format is a DownloadFormat value other than cyclonedx (Core serves the
 	// canonical bytes verbatim and never calls this for them).
 	Render(canonicalBytes []byte, format string) (body []byte, contentType string, err error)
+}
+
+// RegisterUnavailableComparisonRoutes mounts the Core-side 402 for artifact
+// comparison. Call it ONLY when the Enterprise comparison hook is nil.
+//
+// Comparison is Enterprise, and the Enterprise build mounts the real routes
+// behind RequireFeature(cbom_signing). A Core build used to mount nothing, so
+// `POST /cbom/compare` and `GET /cbom/compare/:base/:head` answered a bare 404
+// — indistinguishable from a typo'd URL and, worse, from "those artifacts do
+// not exist", which is what an MCP agent calling the compare tool concluded.
+// The documented answer (CLAUDE.md, the OpenAPI spec, the downloader's own
+// spdx/pdf refusal) is 402 Payment Required, with the same body shape
+// RequireFeature writes so a client handles "Core build" and "Core-tier tenant
+// on an Enterprise build" in one branch.
+//
+// Exactly one of this and the Enterprise routes is ever registered, so there is
+// no route conflict. Nothing about the comparison implementation leaks into
+// Core: what is mounted is two paths and a refusal.
+func RegisterUnavailableComparisonRoutes(rg *gin.RouterGroup) {
+	refuse := func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusPaymentRequired, gin.H{
+			"error":   "This capability is not included in your subscription",
+			"feature": FeatureCBOMSigning,
+			"detail":  "CBOM artifact comparison is an Enterprise capability and is not part of this build.",
+		})
+	}
+	rg.POST("/cbom/compare", refuse)
+	rg.GET("/cbom/compare/:base/:head", refuse)
 }

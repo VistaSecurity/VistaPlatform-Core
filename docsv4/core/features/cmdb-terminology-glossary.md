@@ -42,10 +42,10 @@ A digital certificate (X.509) discovered on an infrastructure asset, including T
 | **Platform (internal DB table)** | `certificates` |
 | **Platform (display name)** | Certificate |
 | **Platform (CI category)** | `certificate` |
-| **ServiceNow** | `cmdb_ci_certificate` |
-| **Device42** | Certificate (`/api/2.0/certificates/`) |
-| **SolarWinds** | Custom property on Node |
-| **Oomnitza** | Asset with certificate-specific custom fields |
+| **ServiceNow** | Not pushed — its posture goes on the asset's description ([why](cmdb-integrations.md#servicenow)) |
+| **Device42** | Not sent — a certificate is not a device |
+| **SolarWinds** | Not applicable — SolarWinds is pull only |
+| **Oomnitza** | Not sent — a certificate is not an asset in an asset register |
 | **Unified View** | `v_ci_inventory` (category: `certificate`) |
 
 ---
@@ -59,10 +59,10 @@ A cryptographic key discovered or tracked by the platform, including TLS private
 | **Platform (internal DB table)** | `keys` |
 | **Platform (display name)** | Cryptographic Key |
 | **Platform (CI category)** | `key` |
-| **ServiceNow** | `cmdb_ci_credential` |
-| **Device42** | Custom field on Device |
-| **SolarWinds** | Custom property on Node |
-| **Oomnitza** | Asset with key-specific custom fields |
+| **ServiceNow** | Not pushed — not a CI in ServiceNow's model |
+| **Device42** | Not sent — a key is not a device |
+| **SolarWinds** | Not applicable — SolarWinds is pull only |
+| **Oomnitza** | Not sent — a key is not an asset in an asset register |
 | **Unified View** | `v_ci_inventory` (category: `key`, cmdb_ci_type: `cmdb_ci_crypto_key`) |
 
 ---
@@ -76,13 +76,13 @@ A specific cryptographic protocol/cipher configuration observed on an infrastruc
 | **Platform (internal DB table)** | `crypto_implementations` |
 | **Platform (display name)** | Crypto Configuration |
 | **Platform (CI category)** | `crypto_configuration` |
-| **ServiceNow** | `u_crypto_configuration` (custom table) |
-| **Device42** | Custom field on Device |
-| **SolarWinds** | Custom property on Node |
-| **Oomnitza** | Asset with crypto config custom fields |
+| **ServiceNow** | Not pushed — its posture goes on the asset's description |
+| **Device42** | Not sent — a crypto configuration is not a device |
+| **SolarWinds** | Not applicable — SolarWinds is pull only |
+| **Oomnitza** | Not sent — a crypto configuration is not an asset in an asset register |
 | **Unified View** | `v_ci_inventory` (category: `crypto_configuration`) |
 
-> **Note:** ServiceNow requires creating the custom table `u_crypto_configuration` in your instance. The platform provides guidance on the schema for this table.
+> **Note:** No custom ServiceNow table is needed. Earlier documentation asked for a `u_crypto_configuration` table; nothing writes to it.
 
 ---
 
@@ -95,10 +95,10 @@ A software library that provides cryptographic functionality (e.g., OpenSSL, Bor
 | **Platform (internal DB table)** | `crypto_libraries` |
 | **Platform (display name)** | Crypto Library |
 | **Platform (CI category)** | `crypto_library` |
-| **ServiceNow** | `cmdb_ci_spkg` (software package) |
-| **Device42** | Custom field on Device |
-| **SolarWinds** | Custom property on Node |
-| **Oomnitza** | Asset with library-specific custom fields |
+| **ServiceNow** | Not pushed |
+| **Device42** | Not sent — a library is not a device |
+| **SolarWinds** | Not applicable — SolarWinds is pull only |
+| **Oomnitza** | Not sent — a library is not an asset in an asset register |
 | **Unified View** | `v_ci_inventory` (category: `crypto_library`) |
 
 ---
@@ -134,54 +134,53 @@ CI relationships describe how Configuration Items relate to each other. The plat
 | `runs_on` | Process runs on infrastructure | Service *runs_on* Server |
 | `hosts` | Infrastructure hosts a service | Server *hosts* Service |
 
-**Platform-specific mapping (ServiceNow `cmdb_rel_ci`):**
-
-| Platform Relationship | ServiceNow Relationship Type |
-|----------------------|------------------------------|
-| `uses` | `Used by::Uses` |
-| `installed_on` | `Installed on::Has installed` |
-| `runs_on` | `Runs on::Runs` |
-| `depends_on` | `Depends on::Used by` |
-| `contains` | `Contains::Contained by` |
+**ServiceNow:** approved relationships between synced assets are pushed as
+standard ServiceNow relationship types (`Runs on::Runs`, `Depends on::Used by`,
+`Members::Member of`, …) — the full table is in
+[CMDB Integrations → ServiceNow → Relationships](cmdb-integrations.md#servicenow-relationships).
 
 ### CMDB Class
 
 A CMDB class defines the schema (attributes and relationships) for a type of CI. Each CMDB platform has its own class hierarchy:
 
-**ServiceNow class hierarchy (relevant classes):**
+**ServiceNow classes Vista pushes:**
 
 ```
-cmdb_ci (base class)
-├── cmdb_ci_server         ← Infrastructure Asset (server)
-├── cmdb_ci_computer       ← Infrastructure Asset (endpoint)
-├── cmdb_ci_service        ← Infrastructure Asset (service)
-├── cmdb_ci_hardware       ← Infrastructure Asset (appliance)
-├── cmdb_ci_certificate    ← Certificate
-├── cmdb_ci_credential     ← Key
-├── cmdb_ci_spkg           ← Crypto Library
-└── u_crypto_configuration ← Crypto Configuration (custom)
+cmdb_ci_server          ← servers (Linux, Windows and other server subclasses are pulled too)
+cmdb_ci_computer        ← computers
+cmdb_ci_pc_hardware     ← workstations, laptops
+cmdb_ci_netgear         ← network devices
+cmdb_ci_ip_switch       ← switches
+cmdb_ci_ip_router       ← routers
+cmdb_ci_ip_firewall     ← firewalls
+cmdb_ci_lb              ← load balancers
+cmdb_ci_wap_network     ← access points
+cmdb_ci_storage_device  ← storage devices
+cmdb_ci_printer         ← printers
+cmdb_ci_hardware        ← any other hardware
 ```
+
+Certificates, keys, crypto configurations and crypto libraries are not pushed to
+ServiceNow. The full class table, including what a pull reads, is in
+[CMDB Integrations → ServiceNow](cmdb-integrations.md#servicenow).
 
 **Device42 entity types:**
 
 ```
-Device        ← Infrastructure Asset
-Certificate   ← Certificate
-Custom Fields ← Key, Crypto Configuration, Crypto Library
+Device        ← Infrastructure Asset (the only thing sent)
 ```
 
-**SolarWinds entity types:**
+**SolarWinds entity types** (pull only — nothing is sent):
 
 ```
-Orion.Nodes         ← Infrastructure Asset
-Custom Properties   ← Certificate, Key, Crypto Configuration, Crypto Library
+Orion.Nodes         → Infrastructure Asset
 ```
 
 **Oomnitza entity types:**
 
 ```
-Assets              ← All entity types (differentiated by custom fields)
-  ci_category field ← Distinguishes infrastructure_asset, certificate, key, etc.
+Assets              ← Infrastructure Asset (the only thing sent)
+  ci_category field ← always infrastructure_asset
 ```
 
 ### Sync Profile

@@ -49,7 +49,7 @@ func defaultModel(t *testing.T) *matcher.Model {
 func TestEmbeddedWeightsAreReproducibleFromTheFixtures(t *testing.T) {
 	samples := loadFixtures(t)
 	trained, _, err := matcher.Train(samples, matcher.TrainOptions{
-		ModelID:   "matcher-logreg-v1",
+		ModelID:   matcher.DefaultModelID,
 		TrainedOn: fmt.Sprintf("%d synthetic fixtures", len(samples)),
 	})
 	if err != nil {
@@ -230,12 +230,14 @@ func TestScoreIsCalibrated(t *testing.T) {
 
 // ── the individual features ────────────────────────────────────────────────
 
+// side builds a Side with one value per kind — the common case in these tests;
+// the multi-valued ones build their maps directly.
 func side(name, class, segment string, ids map[string]string) matcher.Side {
 	return matcher.Side{
 		Name:        name,
 		Class:       class,
 		Segment:     segment,
-		Identifiers: ids,
+		Identifiers: multi(ids),
 		SourceKind:  "measured",
 		SeenAt:      time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC),
 	}
@@ -343,6 +345,196 @@ func TestIdentifierFeatures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Several values per kind (v2): a kind agrees when ANY value agrees. v1 held one
+// value per kind and the engine's conversion kept whichever it met last, so a
+// candidate whose SECOND MAC was the observation's scored as a disagreement.
+func TestMultiValuedIdentifiers(t *testing.T) {
+	obs := side("", "server", "seg", nil)
+	obs.Identifiers = map[string][]string{matcher.KindMACAddress: {"0a:00:00:00:00:02"}}
+	cand := side("", "server", "seg", nil)
+	cand.Identifiers = map[string][]string{matcher.KindMACAddress: {"0a:00:00:00:00:01", "0a:00:00:00:00:02"}}
+	v := matcher.Features(matcher.Pair{Observation: obs, Candidate: cand})
+	if v.At(matcher.FeatureIDMatchStrong) != 1 || v.At(matcher.FeatureIDMatchBreadth) != 0.25 {
+		t.Errorf("the candidate's second MAC agrees: strong=%v breadth=%v, want 1 and 0.25",
+			v.At(matcher.FeatureIDMatchStrong), v.At(matcher.FeatureIDMatchBreadth))
+	}
+
+	// A singleton conflicts only when NO value agrees.
+	obs.Identifiers = map[string][]string{matcher.KindCMDBSysID: {"sys-1", "sys-2"}}
+	cand.Identifiers = map[string][]string{matcher.KindCMDBSysID: {"sys-2"}}
+	v = matcher.Features(matcher.Pair{Observation: obs, Candidate: cand})
+	if v.At(matcher.FeatureIDConflictSingleton) != 0 || v.At(matcher.FeatureIDMatchSingleton) != 1 {
+		t.Errorf("one shared CMDB id among two: conflict=%v match=%v, want 0 and 1",
+			v.At(matcher.FeatureIDConflictSingleton), v.At(matcher.FeatureIDMatchSingleton))
+	}
+	cand.Identifiers = map[string][]string{matcher.KindCMDBSysID: {"sys-3"}}
+	if got := matcher.Features(matcher.Pair{Observation: obs, Candidate: cand}).At(matcher.FeatureIDConflictSingleton); got != 1 {
+		t.Errorf("no CMDB id in common: conflict=%v, want 1", got)
+	}
+}
+
+func TestV2Features(t *testing.T) {
+	type ids = map[string][]string
+	mk := func(name string, i ids, derived ids, generic []string, vendor string) matcher.Side {
+		s := side(name, "server", "seg", nil)
+		s.Identifiers, s.Derived, s.GenericNames, s.Vendor = i, derived, generic, vendor
+		return s
+	}
+	// Two OUIs from the compiled table (Dell, Intel) and a locally administered
+	// MAC the table cannot know.
+	const dell, dell2, intel, local = "f8:bc:12:00:00:01", "f8:bc:12:00:00:02", "00:07:e9:00:00:01", "0a:00:00:00:00:01"
+	cases := []struct {
+		name      string
+		obs, cand matcher.Side
+		on, off   []string
+	}{
+		{
+			name: "same NIC vendor from the OUI",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {dell2}}, nil, nil, ""),
+			on:   []string{matcher.FeatureVendorOUIMatch},
+			off:  []string{matcher.FeatureVendorOUIConflict, matcher.FeatureVendorMatch},
+		},
+		{
+			name: "different NIC vendors",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {intel}}, nil, nil, ""),
+			on:   []string{matcher.FeatureVendorOUIConflict},
+			off:  []string{matcher.FeatureVendorOUIMatch},
+		},
+		{
+			name: "one of several NICs shares a vendor",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {intel, dell2}}, nil, nil, ""),
+			on:   []string{matcher.FeatureVendorOUIMatch},
+			off:  []string{matcher.FeatureVendorOUIConflict},
+		},
+		{
+			name: "falls back to the vendor attribute, compared by its first word",
+			obs:  mk("", ids{matcher.KindMACAddress: {local}}, nil, nil, "Dell Inc."),
+			cand: mk("", ids{matcher.KindMACAddress: {dell}}, nil, nil, ""),
+			on:   []string{matcher.FeatureVendorOUIMatch},
+			off:  []string{matcher.FeatureVendorOUIConflict},
+		},
+		{
+			name: "an unregistered MAC and no attribute is unknown, not a conflict",
+			obs:  mk("", ids{matcher.KindMACAddress: {local}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {dell}}, nil, nil, ""),
+			off:  []string{matcher.FeatureVendorOUIMatch, matcher.FeatureVendorOUIConflict},
+		},
+		{
+			name: "a dictionary-generic name: similarity stays, the name does not vote",
+			obs:  mk("iPhone", ids{matcher.KindHostname: {"iphone"}}, nil, nil, ""),
+			cand: mk("iPhone", ids{matcher.KindHostname: {"iphone"}}, nil, nil, ""),
+			on:   []string{matcher.FeatureNameGeneric, matcher.FeatureNameSimilarity},
+			off:  []string{matcher.FeatureIDMatchWeak, matcher.FeatureIDMatchBreadth, matcher.FeatureNameSynthetic},
+		},
+		{
+			name: "a name the intake marked generic (tenant frequency), on EITHER side",
+			obs:  mk("", ids{matcher.KindHostname: {"lobby-display"}}, nil, []string{"lobby-display"}, ""),
+			cand: mk("", ids{matcher.KindHostname: {"lobby-display"}}, nil, nil, ""),
+			on:   []string{matcher.FeatureNameGeneric},
+			off:  []string{matcher.FeatureIDMatchWeak},
+		},
+		{
+			name: "an ordinary name equally good as the generic one: not generic",
+			obs:  mk("iphone", ids{matcher.KindHostname: {"sams-phone"}}, nil, nil, ""),
+			cand: mk("iphone", ids{matcher.KindHostname: {"sams-phone"}}, nil, nil, ""),
+			on:   []string{matcher.FeatureIDMatchWeak},
+			off:  []string{matcher.FeatureNameGeneric},
+		},
+		{
+			name: "an address written as a name is synthetic and does not vote",
+			obs:  mk("", ids{matcher.KindHostname: {"198-51-100-23.local"}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindHostname: {"198-51-100-23.local"}}, nil, nil, ""),
+			on:   []string{matcher.FeatureNameSynthetic},
+			off:  []string{matcher.FeatureIDMatchWeak, matcher.FeatureNameGeneric},
+		},
+		{
+			name: "a hardware-derived .local name is identity, not synthetic",
+			obs:  mk("", ids{matcher.KindHostname: {"1f852cc29a96.local"}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindHostname: {"1f852cc29a96.local"}}, nil, nil, ""),
+			on:   []string{matcher.FeatureIDMatchWeak},
+			off:  []string{matcher.FeatureNameSynthetic},
+		},
+		{
+			name: "a MAC agreeing only through a derived value",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}}, ids{matcher.KindMACAddress: {dell}}, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {dell}}, nil, nil, ""),
+			on:   []string{matcher.FeatureIDMatchStrong, matcher.FeatureIDMatchDerived},
+		},
+		{
+			name: "one agreeing value observed on both sides: no discount",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell, intel}}, ids{matcher.KindMACAddress: {dell}}, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {dell, intel}}, nil, nil, ""),
+			on:   []string{matcher.FeatureIDMatchStrong},
+			off:  []string{matcher.FeatureIDMatchDerived},
+		},
+		{
+			name: "a shared address, different MACs",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}, matcher.KindIPAddress: {"198.51.100.4"}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {intel}, matcher.KindIPAddress: {"198.51.100.4"}}, nil, nil, ""),
+			on:   []string{matcher.FeatureBindingConflict, matcher.FeatureIDMatchWeak},
+		},
+		{
+			name: "a shared address and a shared MAC is no binding conflict",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}, matcher.KindIPAddress: {"198.51.100.4"}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindMACAddress: {intel, dell}, matcher.KindIPAddress: {"198.51.100.4"}}, nil, nil, ""),
+			off:  []string{matcher.FeatureBindingConflict},
+		},
+		{
+			name: "a shared address, one side's MAC unknown",
+			obs:  mk("", ids{matcher.KindMACAddress: {dell}, matcher.KindIPAddress: {"198.51.100.4"}}, nil, nil, ""),
+			cand: mk("", ids{matcher.KindIPAddress: {"198.51.100.4"}}, nil, nil, ""),
+			off:  []string{matcher.FeatureBindingConflict},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, p := range []matcher.Pair{
+				{Observation: tc.obs, Candidate: tc.cand},
+				{Observation: tc.cand, Candidate: tc.obs}, // and the same the other way round
+			} {
+				v := matcher.Features(p)
+				for _, n := range tc.on {
+					if v.At(n) == 0 {
+						t.Errorf("%s = 0, want it set", n)
+					}
+				}
+				for _, n := range tc.off {
+					if v.At(n) != 0 {
+						t.Errorf("%s = %v, want 0", n, v.At(n))
+					}
+				}
+			}
+		})
+	}
+}
+
+// A v1 decisions file spelled each identifier as a bare string; it must still
+// parse, as a one-value list.
+func TestSamplesAcceptBothIdentifierSpellings(t *testing.T) {
+	raw := `[{"name":"x","match":true,
+	  "observation":{"identifiers":{"mac_address":"0a:00:00:00:00:01"}},
+	  "candidate":{"identifiers":{"mac_address":["0a:00:00:00:00:02","0a:00:00:00:00:01"]},
+	               "derived_identifiers":{"mac_address":["0a:00:00:00:00:01"]}}}]`
+	s, err := matcher.ParseSamples([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, _ := s[0].Pair()
+	if got := p.Observation.Identifiers[matcher.KindMACAddress]; len(got) != 1 {
+		t.Errorf("a bare string parsed as %v, want a one-value list", got)
+	}
+	v := matcher.Features(p)
+	if v.At(matcher.FeatureIDMatchStrong) != 1 || v.At(matcher.FeatureIDMatchDerived) != 1 {
+		t.Errorf("strong=%v derived=%v, want both 1", v.At(matcher.FeatureIDMatchStrong), v.At(matcher.FeatureIDMatchDerived))
+	}
+	if _, err := matcher.ParseSamples([]byte(`[{"name":"x","observation":{"identifiers":{"mac_address":7}}}]`)); err == nil {
+		t.Error("a number as an identifier value was accepted")
 	}
 }
 
@@ -539,7 +731,19 @@ func TestAddingAMatchingIdentifierNeverLowersTheScore(t *testing.T) {
 			if _, taken := p.Candidate.Identifiers[e.kind]; taken {
 				continue
 			}
-			after := m.Score(withIdentifier(p, e.kind, e.value))
+			withIt := withIdentifier(p, e.kind, e.value)
+			after := m.Score(withIt)
+			// The one designed exception (v2): an ADDRESS agreeing between two
+			// sides whose MACs all differ is binding_conflict — the lease moved
+			// to another NIC — and that is evidence of two things, not one.
+			// Exempted only where the feature actually turned on, so the
+			// exemption cannot hide a regression anywhere else; what it may do
+			// instead is pinned by TestBindingConflictNeutralisesTheSharedAddress.
+			if e.kind == matcher.KindIPAddress &&
+				matcher.Features(p).At(matcher.FeatureBindingConflict) == 0 &&
+				matcher.Features(withIt).At(matcher.FeatureBindingConflict) == 1 {
+				continue
+			}
 			if after < before-1e-12 {
 				t.Errorf("%s: adding a matching %s lowered the score from %.6f to %.6f",
 					s.Name, e.kind, before, after)
@@ -548,13 +752,25 @@ func TestAddingAMatchingIdentifierNeverLowersTheScore(t *testing.T) {
 	}
 }
 
+// multi turns a one-value-per-kind map into the Side's multi-valued shape.
+func multi(ids map[string]string) map[string][]string {
+	if ids == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(ids))
+	for k, v := range ids {
+		out[k] = []string{v}
+	}
+	return out
+}
+
 func withIdentifier(p matcher.Pair, kind, value string) matcher.Pair {
 	add := func(s matcher.Side) matcher.Side {
-		ids := make(map[string]string, len(s.Identifiers)+1)
+		ids := make(map[string][]string, len(s.Identifiers)+1)
 		for k, v := range s.Identifiers {
 			ids[k] = v
 		}
-		ids[kind] = value
+		ids[kind] = []string{value}
 		s.Identifiers = ids
 		return s
 	}
@@ -575,11 +791,62 @@ func TestTrainedWeightSigns(t *testing.T) {
 			t.Errorf("%s has weight %v: evidence of sameness must not subtract", name, m.Weights[name])
 		}
 	}
-	nonPositive := []string{matcher.FeatureIDConflictSingleton, matcher.FeatureNameTrailingDigitsDiffer}
+	// The v2 features below are all evidence that an apparent agreement is
+	// hollow — a factory-default or generated name, an inference standing in
+	// for an observation, an address that has passed to another NIC — so none
+	// of them may ADD. Each sign is stated where the feature is defined.
+	nonPositive := []string{
+		matcher.FeatureIDConflictSingleton, matcher.FeatureNameTrailingDigitsDiffer,
+		matcher.FeatureNameGeneric, matcher.FeatureNameSynthetic,
+		matcher.FeatureIDMatchDerived, matcher.FeatureBindingConflict,
+	}
 	for _, name := range nonPositive {
 		if m.Weights[name] > 0 {
 			t.Errorf("%s has weight %v: evidence of difference must not add", name, m.Weights[name])
 		}
+	}
+}
+
+// A derived identifier VOTES (owner decision D3): the discount
+// id_match_derived applies to an inferred MAC must not outweigh the MAC
+// matching. A retrain that did would leave a derived match counting as evidence
+// of two things — the engine would still decide on it, and the reviewer would
+// be shown a model arguing against its own engine.
+func TestADerivedMatchIsStillEvidenceForTheMatch(t *testing.T) {
+	m := defaultModel(t)
+	if net := m.Weights[matcher.FeatureIDMatchStrong] + m.Weights[matcher.FeatureIDMatchDerived]; net < 0 {
+		t.Errorf("id_match_strong + id_match_derived = %v: a derived MAC agreeing counts AGAINST the match", net)
+	}
+}
+
+// binding_conflict must make an address shared across two different NICs worth
+// LESS than the same address shared where neither side's NIC is known. Without
+// it, the address agreeing is scored identically whether the hardware behind
+// it is unknown or known to differ, and the second is the lease-reuse shape the
+// engine's address-only link rule refuses outright.
+//
+// Locally administered MACs, so no OUI vendor feature fires and the only
+// difference between the two pairs is the binding.
+func TestBindingConflictDiscountsTheSharedAddress(t *testing.T) {
+	m := defaultModel(t)
+	unknownNIC := matcher.Pair{
+		Observation: side("", "laptop", "seg", map[string]string{matcher.KindIPAddress: "198.51.100.9"}),
+		Candidate:   side("", "laptop", "seg", map[string]string{matcher.KindIPAddress: "198.51.100.9"}),
+	}
+	otherNIC := matcher.Pair{
+		Observation: side("", "laptop", "seg", map[string]string{
+			matcher.KindIPAddress: "198.51.100.9", matcher.KindMACAddress: "0a:00:00:00:00:01"}),
+		Candidate: side("", "laptop", "seg", map[string]string{
+			matcher.KindIPAddress: "198.51.100.9", matcher.KindMACAddress: "0a:00:00:00:00:02"}),
+	}
+	if got := matcher.Features(otherNIC).At(matcher.FeatureBindingConflict); got != 1 {
+		t.Fatalf("binding_conflict = %v on an address shared across two different MACs, want 1", got)
+	}
+	if got := matcher.Features(unknownNIC).At(matcher.FeatureBindingConflict); got != 0 {
+		t.Fatalf("binding_conflict = %v with no MAC on either side, want 0: an unknown NIC contradicts nothing", got)
+	}
+	if a, b := m.Score(otherNIC), m.Score(unknownNIC); a >= b {
+		t.Errorf("an address shared across two different NICs scored %.4f, not below the same address with the NICs unknown (%.4f)", a, b)
 	}
 }
 
@@ -616,6 +883,9 @@ func TestAgreeingIsNeverWorseEvidenceThanDisagreeing(t *testing.T) {
 		{matcher.FeatureClassRelated, matcher.FeatureClassConflict},
 		{matcher.FeatureSegmentMatch, matcher.FeatureSegmentConflict},
 		{matcher.FeatureIDMatchSingleton, matcher.FeatureIDConflictSingleton},
+		// v2: the NIC vendor behind the MACs. Legitimately negative on its own
+		// for the same reason vendor_match is; never better when they differ.
+		{matcher.FeatureVendorOUIMatch, matcher.FeatureVendorOUIConflict},
 	} {
 		if m.Weights[pair.agree] < m.Weights[pair.conflict] {
 			t.Errorf("%s (%v) weighs LESS than %s (%v): the model says disagreeing is better evidence of sameness than agreeing",

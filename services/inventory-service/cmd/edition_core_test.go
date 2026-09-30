@@ -20,11 +20,8 @@ func TestCoreHasNoEnterpriseHooks(t *testing.T) {
 	if hooks.RegisterCMDBSyncRoutes != nil {
 		t.Error("Core has a CMDB sync hook; ee/ must not be linked into a Core build")
 	}
-	if hooks.RegisterNetBoxRoutes != nil {
-		t.Error("Core has a NetBox routes hook; ee/ must not be linked into a Core build")
-	}
-	if hooks.StartNetBoxScheduler != nil {
-		t.Error("Core has a NetBox scheduler hook; ee/ must not be linked into a Core build")
+	if hooks.StartCMDBSyncScheduler != nil {
+		t.Error("Core has a CMDB sync scheduler hook; ee/ must not be linked into a Core build")
 	}
 	if edition() != "core" {
 		t.Errorf("edition() = %q in a build without -tags ee", edition())

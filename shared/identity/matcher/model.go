@@ -292,6 +292,18 @@ func factorLabel(name string, value float64) string {
 		return "both came from the same kind of source"
 	case FeatureSourceCross:
 		return "two different kinds of source agree"
+	case FeatureVendorOUIMatch:
+		return "the network hardware comes from the same manufacturer"
+	case FeatureVendorOUIConflict:
+		return "the network hardware comes from different manufacturers"
+	case FeatureNameGeneric:
+		return "the names alike are generic defaults, like iphone or printer"
+	case FeatureNameSynthetic:
+		return "the names alike are generated, not chosen (a service id or an address written as a name)"
+	case FeatureIDMatchDerived:
+		return "a matching identifier was worked out from other evidence rather than observed"
+	case FeatureBindingConflict:
+		return "they share an address but no hardware address — the address may have passed to another device"
 	default:
 		return name
 	}

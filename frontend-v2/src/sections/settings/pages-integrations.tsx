@@ -1,8 +1,10 @@
 // Settings · Integrations + Notifications & Alerts pages — ported from the
 // mock's settings/sectionF.jsx. Configured connections = tenant notification
 // channels (notification-service, full CRUD + test); routing rules = tenant notification
-// rules (full CRUD + live enable toggle); alert rules = audit-service alert
-// rules (live enable toggle — creation needs the conditions/actions designer).
+// rules (full CRUD + live enable toggle); the Alert Rules page = the alert
+// catalog (which alert types the platform raises, and their severity ladders).
+// It used to ALSO list audit-service "alert rules" with an enable toggle; nothing
+// evaluated those rows, so the toggle was a no-op and the section is gone.
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -12,17 +14,15 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, relTime, GREEN, AMBER, RED } from './kit';
 import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal, isDigest } from './notification-modals';
-import { CmdbProfileModal, CmdbDeleteModal, CmdbJobsModal, PLATFORM_LABEL, jobTone, type CMDBProfile } from './cmdb-modals';
+import { ChannelTestButton, channelNotice } from './channel-test';
+import { CmdbProfileModal, CmdbDeleteModal, CmdbJobsModal, PLATFORM_LABEL, jobTone, serverError, canPushTo, canPullFrom, type CMDBProfile } from './cmdb-modals';
 import { cmdbProfilesQuery, editionSectionState } from './integrations-queries';
 import { CONNECTOR_KIND_LABEL } from '@vistasecurity/primitives/connectors';
 import {
-  connectorCatalogueQuery, connectorAction, connectorCaption, isSelectable,
-  netboxConnectionsQuery, type ConnectorEntry, type NetBoxConnection,
+  connectorCatalogueQuery, connectorAction, connectorBadge, connectorCaption, isSelectable, type ConnectorEntry,
 } from './connectors-queries';
-import {
-  NetBoxConnectionModal, NetBoxDeleteModal, NetBoxDriftModal, NetBoxRunsModal,
-  NetBoxRunButton, NetBoxTestButton, statusTone,
-} from './netbox-modals';
+import { enterpriseSettings } from './enterprise-slots';
+import { NetBoxUpgradeSection } from './netbox-upgrade';
 import type { SettingsNavItem } from './nav';
 import type { notificationServiceComponents as NC, complianceEngineComponents } from '@vistasecurity/api-contract';
 
@@ -34,13 +34,28 @@ type AlertCatalogFixedRung = complianceEngineComponents['schemas']['AlertCatalog
 type AlertCatalogPreferenceRung = complianceEngineComponents['schemas']['AlertCatalogPreferenceRung'];
 
 const CHANNEL_CAT: Record<string, string> = {
-  email: 'Messaging', slack: 'Messaging', teams: 'Messaging', pagerduty: 'Messaging', webhook: 'Generic webhook',
+  email: 'Messaging', slack: 'Messaging', pagerduty: 'Messaging', webhook: 'Generic webhook', in_app: 'In-app',
 };
 function testTone(status?: string): string {
   const s = (status || '').toLowerCase();
   if (s === 'success' || s === 'ok' || s === 'passed') return GREEN;
   if (s === 'failed' || s === 'error') return RED;
   return AMBER;
+}
+
+/** Which operator-configured transports can deliver (today: email). */
+function useDeliveryStatus() {
+  return useQuery({
+    queryKey: ['settings', 'delivery-status'],
+    queryFn: async () => {
+      const { data, response } = await clients.notifications.GET('/tenant/delivery-status', {});
+      if (!response.ok || !data) throw new Error('Failed to load delivery status');
+      return data;
+    },
+    // A failed lookup must not become a warning: the notice needs a definite "false".
+    retry: false,
+    staleTime: 60 * 1000,
+  });
 }
 
 function useChannels() {
@@ -62,28 +77,6 @@ type ChannelModalState =
   | { kind: 'edit'; channel: Channel }
   | { kind: 'delete'; channel: Channel };
 
-function ChannelTestButton({ channel }: { channel: Channel }) {
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: async () => {
-      const { error, response } = await clients.notifications.POST('/tenant/channels/{id}/test', { params: { path: { id: channel.id } } });
-      if (error || !response.ok) throw new Error('Test failed');
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] }),
-  });
-  return (
-    <button
-      className="ui-btn sm ghost"
-      disabled={mutation.isPending}
-      title="Send a test notification through this connection"
-      onClick={() => mutation.mutate()}
-      style={mutation.isError ? { color: 'var(--danger-text)' } : undefined}
-    >
-      {mutation.isPending ? 'Testing…' : mutation.isError ? 'Test failed' : mutation.isSuccess ? 'Test sent' : 'Test'}
-    </button>
-  );
-}
-
 type CmdbModalState =
   | { kind: 'closed' }
   | { kind: 'create' }
@@ -95,7 +88,9 @@ function CmdbTestButton({ profile }: { profile: CMDBProfile }) {
   const m = useMutation({
     mutationFn: async () => {
       const { data, error, response } = await clients.inventory.POST('/cmdb/profiles/{id}/test', { params: { path: { id: profile.id } } });
-      if (error || !response.ok) throw new Error('Connection failed');
+      // The server says WHY (sanitized): a private address without the
+      // opt-in, an untrusted internal CA, rejected credentials, a timeout.
+      if (error || !response.ok) throw new Error(serverError(error) ?? 'Connection failed');
       return data;
     },
     onSuccess: () => toast.success('Connection OK'),
@@ -113,7 +108,8 @@ function CmdbSyncButton({ profile }: { profile: CMDBProfile }) {
   const m = useMutation({
     mutationFn: async () => {
       const { error, response } = await clients.inventory.POST('/cmdb/profiles/{id}/sync', { params: { path: { id: profile.id } } });
-      if (error || !response.ok) throw new Error('Failed to start sync');
+      // "profile is disabled", "a sync for this profile is already running", …
+      if (error || !response.ok) throw new Error(serverError(error) ?? 'Failed to start sync');
     },
     onSuccess: () => {
       toast.success('Sync started');
@@ -127,6 +123,19 @@ function CmdbSyncButton({ profile }: { profile: CMDBProfile }) {
       {m.isPending ? 'Syncing…' : 'Sync'}
     </button>
   );
+}
+
+/**
+ * The Pull toast. It used to report only created and already-present, so a pull
+ * where half the records failed read as a clean one; failed and unresolved
+ * (kept for identity review rather than created) are said too, and the sync
+ * history has the per-record reasons.
+ */
+export function pullSummary(r: { created: number; skipped: number; failed: number; unresolved?: number }): string {
+  const parts = [`Pulled ${r.created} new asset${r.created === 1 ? '' : 's'}`, `${r.skipped} already present`];
+  if (r.unresolved) parts.push(`${r.unresolved} held for identity review`);
+  if (r.failed) parts.push(`${r.failed} failed — see Sync history`);
+  return parts.join(', ');
 }
 
 function CmdbPullButton({ profile }: { profile: CMDBProfile }) {
@@ -143,8 +152,11 @@ function CmdbPullButton({ profile }: { profile: CMDBProfile }) {
       return data;
     },
     onSuccess: (data) => {
-      toast.success(`Pulled ${data.created} new asset${data.created === 1 ? '' : 's'} (${data.skipped} already present)`);
+      const msg = pullSummary(data);
+      if (data.failed > 0) toast.error(msg); else toast.success(msg);
       void qc.invalidateQueries({ queryKey: ['inventory'] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-jobs', profile.id] });
+      void qc.invalidateQueries({ queryKey: ['settings', 'cmdb-profiles'] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Pull failed'),
   });
@@ -166,14 +178,18 @@ const kindLabel = (kind: string): string =>
 /**
  * One connector in the catalogue.
  *
- * Four states, and the difference between the last two is the whole point:
- * `upgrade` means "your plan does not include this", `soon` means "nobody can
- * use this yet". Offering an upgrade for something that cannot be bought is
- * the worse of the two mistakes, so a `registered` or `planned` connector is
- * rendered dimmed and inert — never with a call to action.
+ * Five states (connectorAction), and the difference between the last three is
+ * the whole point: `operator` means "it works, your platform operator
+ * configures it" (SIEM export — no button, whatever your plan), `upgrade`
+ * means "your plan does not include this", `soon` means "nobody can use this
+ * yet". Offering an upgrade for something that cannot be bought is the worse of
+ * the mistakes, so a `registered` or `planned` connector is rendered dimmed and
+ * inert — never with a call to action. The badge comes from the registry's
+ * edition, not from what this tenant holds (connectorBadge).
  */
 function ConnectorCard({ entry, onAdd }: { entry: ConnectorEntry; onAdd?: () => void }) {
   const action = connectorAction(entry);
+  const badge = connectorBadge(entry);
   const selectable = isSelectable(entry) && !!onAdd;
   const dimmed = action === 'soon';
   return (
@@ -185,8 +201,7 @@ function ConnectorCard({ entry, onAdd }: { entry: ConnectorEntry; onAdd?: () => 
           </div>
           <div style={{ fontSize: 11, color: 'var(--app-t3)' }}>{connectorCaption(entry)}</div>
         </div>
-        {action === 'upgrade' && <STag color="var(--accent)">Enterprise</STag>}
-        {action === 'soon' && <STag color="var(--app-t3)">Soon</STag>}
+        {badge && <STag color={badge.tone === 'soon' ? 'var(--app-t3)' : 'var(--accent)'}>{badge.label}</STag>}
       </div>
       {selectable ? (
         <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
@@ -197,19 +212,13 @@ function ConnectorCard({ entry, onAdd }: { entry: ConnectorEntry; onAdd?: () => 
   );
 }
 
-type NetBoxModalState =
-  | { kind: 'closed' }
-  | { kind: 'create' }
-  | { kind: 'edit'; connection: NetBoxConnection }
-  | { kind: 'delete'; connection: NetBoxConnection }
-  | { kind: 'runs'; connection: NetBoxConnection }
-  | { kind: 'drift'; connection: NetBoxConnection };
-
 export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const [modal, setModal] = useState<ChannelModalState>({ kind: 'closed' });
   const [cmdbModal, setCmdbModal] = useState<CmdbModalState>({ kind: 'closed' });
-  const [netboxModal, setNetboxModal] = useState<NetBoxModalState>({ kind: 'closed' });
-  const closeNetbox = () => setNetboxModal({ kind: 'closed' });
+  // The NetBox connector is an Enterprise section (enterprise-slots.ts): the
+  // catalogue below only asks it to open its "new connection" dialog.
+  const [netboxCreate, setNetboxCreate] = useState(false);
+  const NetBox = enterpriseSettings.NetBoxSection;
 
   // The connector CATALOGUE is Core and registry-driven: it answers from
   // standards/connectors.yaml, so what this page offers and what the platform
@@ -219,10 +228,6 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const catalogueQ = useQuery(connectorCatalogueQuery());
   const catalogue = catalogueQ.data ?? [];
 
-  const netboxEntitled = useFeature('connector_netbox');
-  const netboxQ = useQuery(netboxConnectionsQuery(netboxEntitled));
-  const netboxState = netboxEntitled ? editionSectionState(netboxQ) : 'unavailable';
-  const netboxConnections = netboxQ.data ?? [];
   // CMDB sync is an Enterprise-only route — see integrations-queries.ts. It is
   // edition-probed: an absent route resolves to `unavailable`, which renders an
   // upgrade card (and drops the Add button) instead of a red failure.
@@ -233,6 +238,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const cmdbProfiles = cmdbQ.data ?? [];
   const closeCmdb = () => setCmdbModal({ kind: 'closed' });
   const channelsQ = useChannels();
+  const deliveryStatusQ = useDeliveryStatus();
   // SIEM forwarders are no longer listed here (SECURITY H2, v1.0.0 audit).
   // `audit.siem_integrations` is platform-GLOBAL config: SendEvent fans EVERY
   // tenant's audit event out to every enabled integration, and the rows carry
@@ -247,7 +253,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const failed = channelsQ.isError;
   const close = () => setModal({ kind: 'closed' });
 
-  const cardShell = (key: string, name: string, cat: string, tone: string, enabled: boolean, detail: string, actions?: React.ReactNode) => (
+  const cardShell = (key: string, name: string, cat: string, tone: string, enabled: boolean, detail: string, actions?: React.ReactNode, notice?: string | null) => (
     <SCard key={key} pad={16}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 12 }}>
         <span style={{ width: 34, height: 34, borderRadius: 9, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', color: 'var(--app-t2)' }}>
@@ -265,6 +271,12 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         <div style={{ fontSize: 11.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{detail}</div>
         {actions}
       </div>
+      {notice && (
+        <div role="note" style={{ display: 'flex', alignItems: 'flex-start', gap: 6, marginTop: 10, fontSize: 11.5, color: AMBER }}>
+          <Icon name="alert-triangle" size={13} style={{ flex: 'none', marginTop: 1 }} />
+          <span>{notice}</span>
+        </div>
+      )}
     </SCard>
   );
 
@@ -288,7 +300,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: 12 }}>
             {channels.map((c) =>
               cardShell(`ch-${c.id}`, c.channel_name, CHANNEL_CAT[c.channel_type] ?? c.channel_type,
-                c.enabled ? testTone(c.test_status) : AMBER, c.enabled,
+                c.enabled ? (channelNotice(c.channel_type, deliveryStatusQ.data) ? AMBER : testTone(c.test_status)) : AMBER, c.enabled,
                 `${c.description || c.channel_type} · ${relTime(c.last_used_at ?? c.updated_at) === '—' ? 'never used' : `used ${relTime(c.last_used_at ?? c.updated_at)}`}`,
                 <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
                   <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
@@ -297,6 +309,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                     <button className="ui-btn sm ghost" title="Remove" style={{ color: 'var(--danger-text)' }} onClick={() => setModal({ kind: 'delete', channel: c })}><Icon name="x" size={14} /></button>
                   </div>
                 </PermissionGate>,
+                channelNotice(c.channel_type, deliveryStatusQ.data),
               ),
             )}
           </div>
@@ -305,13 +318,13 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
       <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 4 }}>
         <Icon name="lock" size={13} style={{ verticalAlign: '-2px', marginRight: 5, color: siemEntitled ? 'var(--app-t3)' : 'var(--accent)' }} />
         {siemEntitled
-          ? 'Outbound SIEM forwarding (Splunk, Datadog, Elastic) applies to the whole platform, so it is configured by your platform operator rather than per tenant. Audit events are recorded and searchable here either way.'
-          : 'Outbound SIEM forwarding (Splunk, Datadog, Elastic) is an Enterprise feature, configured platform-wide by your operator. Audit events are still recorded and searchable in every edition — only forwarding them to an external SIEM is gated.'}
+          ? 'Outbound SIEM forwarding of the audit event stream (Splunk, Datadog, Elasticsearch or a webhook) applies to the whole platform, so it is configured by your platform operator rather than per tenant. Audit events are recorded and searchable here either way.'
+          : 'Outbound SIEM forwarding of the audit event stream (Splunk, Datadog, Elasticsearch or a webhook) is an Enterprise feature, configured platform-wide by your operator. Audit events are still recorded and searchable in every edition — only forwarding them to an external SIEM is gated.'}
       </p>
 
       <SSection
         title="CMDB / ITSM sync"
-        desc="Push your discovered inventory — assets, certificates, keys and crypto configurations — into ServiceNow, Device42, SolarWinds or Oomnitza."
+        desc="Sync your inventory with ServiceNow, Device42 and Oomnitza (two-way), and pull monitored nodes in from SolarWinds (read-only)."
         style={{ marginTop: 22 }}
         action={
           cmdbState === 'unavailable' ? undefined : (
@@ -324,7 +337,7 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         {cmdbState === 'unavailable' ? (
           <SCard>
             <StateNote icon="lock" tone="var(--accent)" title="An Enterprise feature"
-              message="Bidirectional CMDB / ITSM sync pushes your cryptographic inventory into ServiceNow, Device42, SolarWinds or Oomnitza — and pulls their server inventory back in. The internal CMDB, and every discovery and inventory capability behind it, is included in every edition. Upgrade to Enterprise to connect an external CMDB." />
+              message="CMDB sync pushes your inventory into ServiceNow, Device42 or Oomnitza and pulls their records back in, and pulls monitored nodes in from SolarWinds. The internal CMDB, and every discovery and inventory capability behind it, is included in every edition. Upgrade to Enterprise to connect an external CMDB." />
           </SCard>
         ) : cmdbState === 'error' ? (
           <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load CMDB profiles" message="The CMDB sync profiles failed to load." /></SCard>
@@ -335,7 +348,9 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 12 }}>
             {cmdbProfiles.map((p) => {
-              const tone = !p.is_enabled ? AMBER : testTone(p.last_sync_status);
+              // A profile whose field mapping no longer validates is PAUSED by
+              // the server (mapping_error): nothing runs until it is fixed.
+              const tone = p.mapping_error ? RED : !p.is_enabled ? AMBER : testTone(p.last_sync_status);
               const last = p.last_sync_at ? `last sync ${relTime(p.last_sync_at)}` : 'never synced';
               return (
                 <SCard key={p.id} pad={16}>
@@ -347,11 +362,20 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                       <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
                       <div style={{ fontSize: 11, color: 'var(--app-t3)' }}>{PLATFORM_LABEL[p.platform_type] ?? p.platform_type}</div>
                     </div>
-                    <span title={p.is_enabled ? 'enabled' : 'disabled'}><SDot color={tone} /></span>
+                    <span title={p.mapping_error ? 'paused: mapping invalid' : p.is_enabled ? 'enabled' : 'disabled'}><SDot color={tone} /></span>
                   </div>
+                  {p.mapping_error && (
+                    <div role="alert" style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 10, fontSize: 11.5, color: 'var(--danger-text)' }}>
+                      <STag color={RED}>Mapping invalid</STag>
+                      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>Paused — nothing syncs until the field mapping is fixed: {p.mapping_error}</span>
+                    </div>
+                  )}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--app-t3)', minWidth: 0 }}>
-                      {p.last_sync_status && <STag color={jobTone(p.last_sync_status)}>{p.last_sync_status}</STag>}
+                      {/* sync_error says WHY the last sync failed or was
+                          partial (bad config, unreachable CMDB, per-item
+                          refusals); the tag alone only says that it did. */}
+                      {p.last_sync_status && <span title={p.sync_error}><STag color={jobTone(p.last_sync_status)}>{p.last_sync_status}</STag></span>}
                       <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{last}</span>
                     </div>
                     {/* Two gates, because the routes behind these buttons ask
@@ -366,10 +390,16 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                       <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
                         <CmdbTestButton profile={p} />
                       </PermissionGate>
+                      {/* Which buttons a platform gets is its registry direction
+                          (standards/connectors.yaml): SolarWinds is pull-only,
+                          so it has no Sync — which used to push certificates,
+                          keys and crypto configurations into Orion as nodes. */}
                       <PermissionGate permission={TENANT_PERMISSIONS.assets.manage}>
-                        <CmdbPullButton profile={p} />
-                        <CmdbSyncButton profile={p} />
+                        {canPullFrom(p.platform_type) && <CmdbPullButton profile={p} />}
+                        {canPushTo(p.platform_type) && <CmdbSyncButton profile={p} />}
                       </PermissionGate>
+                      {/* Job history needs settings.read — as does the profile
+                          list this card came from, so no gate of its own. */}
                       <button className="ui-btn sm ghost" title="Sync history" onClick={() => setCmdbModal({ kind: 'jobs', profile: p })}><Icon name="history" size={14} /></button>
                       <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
                         <button className="ui-btn sm ghost" title="Configure" onClick={() => setCmdbModal({ kind: 'edit', profile: p })}><Icon name="settings" size={14} /></button>
@@ -384,75 +414,16 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         )}
       </SSection>
 
-      <SSection
-        title="NetBox"
-        desc="Pull sites, prefixes, VLANs and devices from your network source of truth. Read-only towards NetBox — nothing is ever written back."
-        style={{ marginTop: 22 }}
-        action={
-          netboxState === 'unavailable' ? undefined : (
-            <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-              <button className="ui-btn sm accent" onClick={() => setNetboxModal({ kind: 'create' })}><Icon name="plus" size={14} />Connect NetBox</button>
-            </PermissionGate>
-          )
-        }
-      >
-        {netboxState === 'unavailable' ? (
-          <SCard>
-            <StateNote icon="lock" tone="var(--accent)" title="An Enterprise feature"
-              message="The NetBox connector reads your network source of truth — sites, prefixes, VLANs, device types and devices — so an address means something and a device arrives already classified. It also shows the drift between NetBox and what Vista discovered. Discovery and the whole inventory are included in every edition; reading a foreign source of truth is the paid part." />
-          </SCard>
-        ) : netboxState === 'error' ? (
-          <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load NetBox connections" message="The NetBox connections failed to load." /></SCard>
-        ) : netboxQ.isLoading ? (
-          <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading NetBox connections…" message="Fetching configured connections." /></SCard>
-        ) : netboxConnections.length === 0 ? (
-          <SCard><StateNote icon="plug" tone="var(--app-t3)" title="No NetBox connected" message="Connect a NetBox to import its sites, prefixes, VLANs and devices, and to see where it and your inventory disagree." /></SCard>
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: 12 }}>
-            {netboxConnections.map((c) => {
-              const tone = !c.is_enabled ? AMBER : statusTone(c.last_run_status);
-              const last = c.last_run_at ? `last import ${relTime(c.last_run_at)}` : 'never imported';
-              return (
-                <SCard key={c.id} pad={16}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 11, marginBottom: 12 }}>
-                    <span style={{ width: 34, height: 34, borderRadius: 9, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', color: 'var(--app-t2)' }}>
-                      <Icon name="network" size={15} />
-                    </span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.name}</div>
-                      <div style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.base_url}</div>
-                    </div>
-                    <span title={c.is_enabled ? 'enabled' : 'disabled'}><SDot color={tone} /></span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--app-t3)', minWidth: 0 }}>
-                      {c.last_run_status && <STag color={statusTone(c.last_run_status)}>{c.last_run_status}</STag>}
-                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{last}</span>
-                    </div>
-                    {/* Two gates, as for CMDB and for the same reason: managing
-                        the connection is settings.update, while running an
-                        import WRITES INVENTORY and is assets.manage. */}
-                    <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
-                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-                        <NetBoxTestButton connection={c} />
-                      </PermissionGate>
-                      <PermissionGate permission={TENANT_PERMISSIONS.assets.manage}>
-                        <NetBoxRunButton connection={c} />
-                      </PermissionGate>
-                      <button className="ui-btn sm ghost" title="Drift against NetBox" onClick={() => setNetboxModal({ kind: 'drift', connection: c })}><Icon name="git-compare" size={14} /></button>
-                      <button className="ui-btn sm ghost" title="Import history" onClick={() => setNetboxModal({ kind: 'runs', connection: c })}><Icon name="history" size={14} /></button>
-                      <PermissionGate permission={TENANT_PERMISSIONS.settings.update}>
-                        <button className="ui-btn sm ghost" title="Configure" onClick={() => setNetboxModal({ kind: 'edit', connection: c })}><Icon name="settings" size={14} /></button>
-                        <button className="ui-btn sm ghost" title="Remove" style={{ color: 'var(--danger-text)' }} onClick={() => setNetboxModal({ kind: 'delete', connection: c })}><Icon name="x" size={14} /></button>
-                      </PermissionGate>
-                    </div>
-                  </div>
-                </SCard>
-              );
-            })}
-          </div>
-        )}
-      </SSection>
+      {/* NetBox runs in an Enterprise-only service. Where that
+          section is not part of the build (Core), the upgrade card stands in
+          for it, decided without a request: the connector_netbox flag is
+          never granted in Core, and the catalogue below says "Included in
+          Enterprise" from the same registry. */}
+      {NetBox ? (
+        <NetBox createOpen={netboxCreate} onCreateClose={() => setNetboxCreate(false)} />
+      ) : (
+        <NetBoxUpgradeSection />
+      )}
 
       <SSection
         title="Available connectors"
@@ -474,9 +445,15 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                   <ConnectorCard
                     key={entry.key}
                     entry={entry}
+                    // Only a card that is `add` ever gets to call this
+                    // (isSelectable), and only NetBox and the four CMDB
+                    // platforms are `add`. The generic `custom` key used to be
+                    // kind `cmdb`; it is `generic` now, and nothing but the
+                    // keys in ADDABLE_HERE opens a modal — in particular no
+                    // card opens the notification-channel modal.
                     onAdd={
                       entry.key === 'netbox'
-                        ? () => setNetboxModal({ kind: 'create' })
+                        ? () => setNetboxCreate(true)
                         : entry.kind === 'cmdb'
                           ? () => setCmdbModal({ kind: 'create' })
                           : undefined
@@ -492,17 +469,6 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
       {(modal.kind === 'create' || modal.kind === 'edit') && (
         <ChannelModal key={modal.kind === 'edit' ? modal.channel.id : 'new'} channel={modal.kind === 'edit' ? modal.channel : null} open onClose={close} />
       )}
-      {(netboxModal.kind === 'create' || netboxModal.kind === 'edit') && (
-        <NetBoxConnectionModal
-          key={netboxModal.kind === 'edit' ? netboxModal.connection.id : 'new'}
-          connection={netboxModal.kind === 'edit' ? netboxModal.connection : null}
-          open
-          onClose={closeNetbox}
-        />
-      )}
-      {netboxModal.kind === 'delete' && <NetBoxDeleteModal connection={netboxModal.connection} open onClose={closeNetbox} />}
-      {netboxModal.kind === 'runs' && <NetBoxRunsModal connection={netboxModal.connection} open onClose={closeNetbox} />}
-      {netboxModal.kind === 'drift' && <NetBoxDriftModal connection={netboxModal.connection} open onClose={closeNetbox} />}
       {modal.kind === 'delete' && <ChannelDeleteModal channel={modal.channel} open onClose={close} />}
 
       {(cmdbModal.kind === 'create' || cmdbModal.kind === 'edit') && (
@@ -619,29 +585,6 @@ export function RoutingRulesPage({ meta }: { meta: SettingsNavItem }) {
 }
 
 const SEVERITY_TONE: Record<string, string> = { critical: RED, high: 'var(--warn-strong)', medium: AMBER, low: 'var(--info)', info: 'var(--neutral)' };
-
-type AlertRule = import('@vistasecurity/api-contract').auditServiceComponents['schemas']['AlertRule'];
-
-function AlertRuleToggle({ rule }: { rule: AlertRule }) {
-  const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: async (on: boolean) => {
-      // The backend's update overwrites every column from the body (no partial
-      // merge — filed as a backend issue), so send the full rule back.
-      const { error, response } = await clients.audit.PUT('/alert-rules/{id}', {
-        params: { path: { id: rule.id } },
-        body: {
-          name: rule.name, description: rule.description, rule_type: rule.rule_type,
-          severity: rule.severity, conditions: rule.conditions, actions: rule.actions,
-          is_enabled: on,
-        },
-      });
-      if (error || !response.ok) throw new Error('Failed to update the alert rule');
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['settings', 'alert-rules'] }),
-  });
-  return <SToggle key={`${rule.id}-${rule.is_enabled}`} on={rule.is_enabled} onChange={(v) => mutation.mutate(v)} />;
-}
 
 // --- Alert catalog (compliance-engine registry types) ----------------------
 
@@ -870,57 +813,9 @@ function AlertCatalogSection() {
 }
 
 export function AlertRulesPage({ meta }: { meta: SettingsNavItem }) {
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['settings', 'alert-rules'],
-    queryFn: async () => {
-      const { data, error } = await clients.audit.GET('/alert-rules', {});
-      if (error || !data) throw new Error('Failed to load alert rules');
-      return data.rules ?? [];
-    },
-  });
-  const rules = data ?? [];
-
   return (
     <SPage eyebrow="Notifications & Alerts" title="Alert Rules" job={meta.job} maxWidth={1000}>
       <AlertCatalogSection />
-      <SSection title="Audit alert rules" desc="Event-based rules evaluated by the audit pipeline — conditions and actions are tuned per rule." style={{ marginTop: 22 }}>
-      {isError ? (
-        <SCard><StateNote icon="alert-triangle" tone="var(--danger-text)" title="Couldn't load alert rules" message="The alert rule list failed to load." /></SCard>
-      ) : isLoading ? (
-        <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading alert rules…" message="Fetching the tenant's alert rules." /></SCard>
-      ) : rules.length === 0 ? (
-        <SCard><StateNote icon="bell-ring" tone="var(--app-t3)" title="No alert rules" message="No event-based alert rules are defined yet." /></SCard>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {rules.map((r) => {
-            const tone = SEVERITY_TONE[(r.severity || '').toLowerCase()] ?? 'var(--app-t3)';
-            return (
-              <SCard key={r.id} pad={16} style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                <span style={{ width: 32, height: 32, borderRadius: 8, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${tone} 11%, transparent)`, color: tone }}>
-                  <Icon name="bell-ring" size={15} />
-                </span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--app-t1)' }}>{r.name}</div>
-                  <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {r.description || `${r.rule_type} · ${r.severity}`}
-                  </div>
-                </div>
-                <STag color={tone}>{r.severity}</STag>
-                {/* audit.manage, not settings.update: this toggle PUTs
-                    /audit-service/alert-rules/:id, which audit-service gates on
-                    PermissionAuditManage (#1374). */}
-                <PermissionGate permission={TENANT_PERMISSIONS.audit.manage} fallback={<SDot color={r.is_enabled ? GREEN : 'var(--app-t3)'} />}>
-                  <AlertRuleToggle rule={r} />
-                </PermissionGate>
-              </SCard>
-            );
-          })}
-        </div>
-      )}
-      <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 13 }}>
-        Authoring new alert rules (conditions and actions) gets its own designer in a later pass; enable/disable is live.
-      </p>
-      </SSection>
     </SPage>
   );
 }

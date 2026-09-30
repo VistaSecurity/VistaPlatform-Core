@@ -1105,7 +1105,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            /** @description Artifact comparison requires the tenant's `cbom_signing` entitlement. */
+            /** @description Artifact comparison requires the tenant's `cbom_signing` entitlement, and is not part of a Core build — both answer 402 "not included in your subscription". */
             402: {
                 headers: {
                     [name: string]: unknown;
@@ -1141,7 +1141,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            /** @description Artifact comparison requires the tenant's `cbom_signing` entitlement. */
+            /** @description Artifact comparison requires the tenant's `cbom_signing` entitlement, and is not part of a Core build — both answer 402 "not included in your subscription". */
             402: {
                 headers: {
                     [name: string]: unknown;

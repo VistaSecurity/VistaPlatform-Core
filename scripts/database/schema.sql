@@ -1354,6 +1354,8 @@ CREATE TABLE IF NOT EXISTS audit.siem_integrations (
     total_events_failed bigint DEFAULT 0,
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
+    cursor_created_at timestamp with time zone,
+    cursor_event_id uuid,
     CONSTRAINT siem_integrations_health_status_check CHECK (((health_status)::text = ANY ((ARRAY['healthy'::character varying, 'degraded'::character varying, 'unhealthy'::character varying, 'unknown'::character varying])::text[]))),
     CONSTRAINT siem_integrations_type_check CHECK (((type)::text = ANY ((ARRAY['splunk'::character varying, 'datadog'::character varying, 'elastic'::character varying, 'generic_webhook'::character varying])::text[])))
 );
@@ -1972,7 +1974,7 @@ CREATE TABLE IF NOT EXISTS public.cmdb_entity_mappings (
     CONSTRAINT valid_cmdb_entity_type CHECK (((local_entity_type)::text = ANY ((ARRAY['infrastructure_asset'::character varying, 'certificate'::character varying, 'key'::character varying, 'crypto_library'::character varying, 'crypto_configuration'::character varying])::text[]))),
     CONSTRAINT valid_cmdb_mapping_platform CHECK (((cmdb_platform)::text = ANY ((ARRAY['servicenow'::character varying, 'device42'::character varying, 'solarwinds'::character varying, 'oomnitza'::character varying])::text[]))),
     CONSTRAINT valid_cmdb_mapping_status CHECK (((sync_status)::text = ANY ((ARRAY['pending'::character varying, 'synced'::character varying, 'error'::character varying, 'stale'::character varying, 'deleted'::character varying])::text[]))),
-    CONSTRAINT valid_cmdb_sync_direction CHECK (((sync_direction)::text = ANY ((ARRAY['push'::character varying, 'reconcile'::character varying])::text[])))
+    CONSTRAINT valid_cmdb_sync_direction CHECK (((sync_direction)::text = ANY ((ARRAY['push'::character varying, 'reconcile'::character varying, 'pull'::character varying])::text[])))
 );
 
 
@@ -2135,13 +2137,19 @@ CREATE TABLE IF NOT EXISTS public.connector_connections (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
     CONSTRAINT connector_connections_pkey PRIMARY KEY (id),
-    CONSTRAINT connector_connections_unique_name UNIQUE (tenant_id, connector_key, name),
     CONSTRAINT valid_connector_key CHECK (((connector_key)::text = ANY ((ARRAY['netbox'::character varying])::text[]))),
     CONSTRAINT valid_connector_schedule CHECK (((schedule)::text = ANY ((ARRAY['manual'::character varying, 'hourly'::character varying, 'daily'::character varying, 'weekly'::character varying])::text[]))),
     CONSTRAINT valid_connector_last_run_status CHECK (((last_run_status IS NULL) OR ((last_run_status)::text = ANY ((ARRAY['success'::character varying, 'partial'::character varying, 'failed'::character varying, 'in_progress'::character varying])::text[]))))
 );
 CREATE INDEX IF NOT EXISTS idx_connector_connections_tenant ON public.connector_connections USING btree (tenant_id, connector_key) WHERE (deleted_at IS NULL);
 CREATE INDEX IF NOT EXISTS idx_connector_connections_due ON public.connector_connections USING btree (schedule, last_run_at) WHERE (deleted_at IS NULL AND is_enabled = true);
+-- A connection name is unique among a tenant's LIVE connections of one kind.
+-- Partial on deleted_at IS NULL because deletion is soft: a whole-table UNIQUE
+-- counted the deleted rows, so a tenant who removed "Primary NetBox" could never
+-- call a new one that again. This replaces the inline
+-- connector_connections_unique_name constraint, which POST-MIGRATIONS drops
+-- from databases that still have it.
+CREATE UNIQUE INDEX IF NOT EXISTS connector_connections_live_name_key ON public.connector_connections USING btree (tenant_id, connector_key, name) WHERE (deleted_at IS NULL);
 
 
 -- TABLE: connector_runs
@@ -3516,24 +3524,6 @@ CREATE TABLE IF NOT EXISTS public.monitoring_alert_thresholds (
     CONSTRAINT valid_metric_type CHECK (((metric_type)::text = ANY ((ARRAY['response_time'::character varying, 'error_rate'::character varying, 'cpu_usage'::character varying, 'memory_usage'::character varying, 'uptime'::character varying, 'throughput'::character varying, 'custom'::character varying])::text[]))),
     CONSTRAINT valid_operator CHECK (((comparison_operator)::text = ANY ((ARRAY['gt'::character varying, 'lt'::character varying, 'eq'::character varying, 'gte'::character varying, 'lte'::character varying])::text[]))),
     CONSTRAINT valid_severity CHECK (((severity)::text = ANY ((ARRAY['low'::character varying, 'medium'::character varying, 'high'::character varying, 'critical'::character varying])::text[])))
-);
-
-
--- TABLE: monitoring_notification_channels
-CREATE TABLE IF NOT EXISTS public.monitoring_notification_channels (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    channel_name character varying(100) NOT NULL,
-    channel_type character varying(50) NOT NULL,
-    config jsonb NOT NULL,
-    enabled boolean DEFAULT true,
-    test_status character varying(20),
-    last_test_at timestamp with time zone,
-    description text,
-    created_by uuid,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    updated_by uuid,
-    CONSTRAINT valid_channel_type CHECK (((channel_type)::text = ANY ((ARRAY['email'::character varying, 'slack'::character varying, 'webhook'::character varying, 'pagerduty'::character varying, 'custom'::character varying])::text[])))
 );
 
 
@@ -6115,7 +6105,39 @@ CREATE TABLE IF NOT EXISTS public.user_workflow_progress (
 
 
 -- VIEW: v_ci_inventory
+--
+-- What a CMDB sync pushes: the tenant's CONFIGURATION ITEMS, not everything
+-- the platform has ever observed (integrations review M10 — on a real
+-- deployment 26 of 74 pushed rows were pending approval or archived).
+--
+--   * infrastructure assets: approved (`asset_status = 'monitoring'`) only.
+--     Never pending_approval (not yet a CI — a person has not said so), denied,
+--     archived (asset_status or the Stale lens's stale_status), merged away
+--     (`metadata ? 'merged_into'` — the survivor carries it) or deleted;
+--   * crypto configurations: live, on an in-scope asset;
+--   * certificates / keys: linked to a live crypto configuration on an
+--     in-scope asset (certificate_id, the crypto_implementation_certificates
+--     junction, implementation_keys), and not in the `destroyed` lifecycle
+--     state. Revoked / expired / compromised stay: an expired certificate still
+--     deployed is exactly what the CMDB should show.
+--
+-- The column list and types are unchanged, so CREATE OR REPLACE applies over
+-- every earlier definition (it cannot drop, reorder or retype a column).
 CREATE OR REPLACE VIEW public.v_ci_inventory AS
+ WITH ci_scope_assets AS (
+         SELECT sa.tenant_id,
+            sa.id
+           FROM public.assets sa
+          WHERE ((sa.deleted_at IS NULL) AND (sa.asset_status = 'monitoring'::text) AND (sa.stale_status IS DISTINCT FROM 'archived'::text) AND (NOT (sa.metadata ? 'merged_into'::text)))
+        ), ci_scope_configs AS (
+         SELECT sci.tenant_id,
+            sci.id,
+            sci.certificate_id
+           FROM public.crypto_implementations_partitioned sci
+          WHERE ((sci.deleted_at IS NULL) AND (EXISTS ( SELECT 1
+                   FROM ci_scope_assets csa
+                  WHERE ((csa.tenant_id = sci.tenant_id) AND (csa.id = sci.asset_id)))))
+        )
  SELECT a.id,
     a.tenant_id,
     'infrastructure_asset'::text AS ci_category,
@@ -6161,6 +6183,9 @@ CREATE OR REPLACE VIEW public.v_ci_inventory AS
     a.deleted_at
    FROM (public.assets a
      LEFT JOIN public.asset_classes ac ON (((ac.key = a.class_key) AND (ac.tenant_id IS NULL))))
+  WHERE (EXISTS ( SELECT 1
+           FROM ci_scope_assets csa
+          WHERE ((csa.tenant_id = a.tenant_id) AND (csa.id = a.id))))
 UNION ALL
  SELECT certificates.id,
     certificates.tenant_id,
@@ -6176,6 +6201,12 @@ UNION ALL
     certificates.updated_at,
     NULL::timestamp with time zone AS deleted_at
    FROM public.certificates
+  WHERE (((certificates.certificate_state)::text IS DISTINCT FROM 'destroyed'::text) AND ((EXISTS ( SELECT 1
+           FROM ci_scope_configs csc
+          WHERE ((csc.tenant_id = certificates.tenant_id) AND (csc.certificate_id = certificates.id)))) OR (EXISTS ( SELECT 1
+           FROM (public.crypto_implementation_certificates cic
+             JOIN ci_scope_configs csc ON ((csc.id = cic.crypto_implementation_id)))
+          WHERE ((csc.tenant_id = certificates.tenant_id) AND (cic.certificate_id = certificates.id))))))
 UNION ALL
  SELECT keys.id,
     keys.tenant_id,
@@ -6191,6 +6222,10 @@ UNION ALL
     keys.created_at AS updated_at,
     NULL::timestamp with time zone AS deleted_at
    FROM public.keys
+  WHERE (((keys.state)::text IS DISTINCT FROM 'destroyed'::text) AND (EXISTS ( SELECT 1
+           FROM (public.implementation_keys ik
+             JOIN ci_scope_configs csc ON ((csc.id = ik.implementation_id)))
+          WHERE ((csc.tenant_id = keys.tenant_id) AND (ik.key_id = keys.id)))))
 UNION ALL
  SELECT crypto_implementations_partitioned.id,
     crypto_implementations_partitioned.tenant_id,
@@ -6216,7 +6251,10 @@ UNION ALL
     crypto_implementations_partitioned.created_at,
     crypto_implementations_partitioned.updated_at,
     crypto_implementations_partitioned.deleted_at
-   FROM public.crypto_implementations_partitioned;
+   FROM public.crypto_implementations_partitioned
+  WHERE (EXISTS ( SELECT 1
+           FROM ci_scope_configs csc
+          WHERE ((csc.tenant_id = crypto_implementations_partitioned.tenant_id) AND (csc.id = crypto_implementations_partitioned.id))));
 
 
 -- VIEW: v_tenants
@@ -7754,32 +7792,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: monitoring_notification_channels monitoring_notification_channels_channel_name_key
-DO $$ BEGIN
-  IF to_regclass('public.monitoring_notification_channels') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'monitoring_notification_channels_channel_name_key' AND conrelid = to_regclass('public.monitoring_notification_channels')
-     ) THEN
-    ALTER TABLE ONLY public.monitoring_notification_channels
-        ADD CONSTRAINT monitoring_notification_channels_channel_name_key UNIQUE (channel_name);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: monitoring_notification_channels monitoring_notification_channels_pkey
-DO $$ BEGIN
-  IF to_regclass('public.monitoring_notification_channels') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'monitoring_notification_channels_pkey' AND conrelid = to_regclass('public.monitoring_notification_channels')
-     ) THEN
-    ALTER TABLE ONLY public.monitoring_notification_channels
-        ADD CONSTRAINT monitoring_notification_channels_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: crypto_implementations_partitioned crypto_implementations_partitioned_pkey
 -- HASH partitioned on tenant_id, so the PK must lead with the partition column,
 -- and the recursive (non-ONLY) form is required for it to be VALID and usable
@@ -9078,17 +9090,11 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: cmdb_sync_profiles unique_cmdb_profile_name
-DO $$ BEGIN
-  IF to_regclass('public.cmdb_sync_profiles') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'unique_cmdb_profile_name' AND conrelid = to_regclass('public.cmdb_sync_profiles')
-     ) THEN
-    ALTER TABLE ONLY public.cmdb_sync_profiles
-        ADD CONSTRAINT unique_cmdb_profile_name UNIQUE (tenant_id, name);
-  END IF;
-END $$;
+-- CONSTRAINT: cmdb_sync_profiles unique_cmdb_profile_name — RETIRED. Profile
+-- names are unique among LIVE profiles only; see the partial unique index
+-- cmdb_sync_profiles_live_name_unique in POST-MIGRATIONS, which also drops this
+-- constraint from databases that have it. Do not re-add it here: this body runs
+-- on every upgrade and would put the constraint straight back.
 
 
 -- CONSTRAINT: certificates unique_fingerprint_per_tenant
@@ -11147,8 +11153,17 @@ CREATE INDEX IF NOT EXISTS idx_platform_integrations_tenant_id ON public.platfor
 CREATE INDEX IF NOT EXISTS idx_platform_integrations_type ON public.platform_integrations USING btree (integration_type);
 
 
--- INDEX: idx_platform_integrations_unique_name
-CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_integrations_unique_name ON public.platform_integrations USING btree (integration_type, integration_name) WHERE (deleted_at IS NULL);
+-- INDEX: idx_platform_integrations_tenant_unique_name
+-- An integration's name is unique per OWNER, not platform-wide. The index it
+-- replaces (idx_platform_integrations_unique_name, dropped in POST-MIGRATIONS)
+-- had no tenant_id, so a tenant naming its AWS account "Production" blocked
+-- every other tenant from using that name — and the 500 it produced disclosed
+-- that some other tenant had one. NULLS NOT DISTINCT (PG15+) makes the
+-- platform-shared rows (tenant_id IS NULL) one owner among themselves, so two
+-- shared integrations still cannot share a name; with the default NULLS
+-- DISTINCT every shared row would be unique on its own and the rule would
+-- silently not apply to them at all.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_integrations_tenant_unique_name ON public.platform_integrations USING btree (tenant_id, integration_type, integration_name) NULLS NOT DISTINCT WHERE (deleted_at IS NULL);
 
 
 -- INDEX: idx_platform_log_metadata_compliance
@@ -23990,3 +24005,179 @@ ALTER TABLE public.catalog_feed_state ADD COLUMN IF NOT EXISTS ecosystem_status 
 -- (fresh installs); this drops it from a database that has it. Nothing
 -- (view, index, constraint) depends on it. IF EXISTS makes a re-run a no-op.
 ALTER TABLE IF EXISTS audit.retention_policies DROP COLUMN IF EXISTS cold_storage_days;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: connector connection names are reusable after a delete
+-- ----------------------------------------------------------------------------
+-- connector_connections_unique_name was a whole-table UNIQUE (tenant_id,
+-- connector_key, name), so a soft-deleted connection kept its name forever. The
+-- body above no longer declares it (fresh installs) and adds the partial unique
+-- index connector_connections_live_name_key instead; this drops the old
+-- constraint from a database that has it. Safe over populated data: every row
+-- set that satisfied the whole-table constraint also satisfies the partial one,
+-- so the index builds before this drop, and nothing references the constraint
+-- (no foreign key targets these columns). IF EXISTS makes a re-run a no-op.
+ALTER TABLE IF EXISTS public.connector_connections DROP CONSTRAINT IF EXISTS connector_connections_unique_name;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: integration names are unique per tenant, not platform-wide
+-- ----------------------------------------------------------------------------
+-- idx_platform_integrations_unique_name was (integration_type, integration_name)
+-- with no tenant_id, so one tenant's integration name blocked every other
+-- tenant. It is replaced in the body above by
+-- idx_platform_integrations_tenant_unique_name
+-- (tenant_id, integration_type, integration_name) NULLS NOT DISTINCT. The new
+-- rule is strictly looser than the old one — any set of rows unique on
+-- (type, name) is also unique on (tenant, type, name) — so every existing
+-- database already satisfies it and the CREATE above cannot fail on upgrade.
+-- IF EXISTS makes a re-run a no-op.
+DROP INDEX IF EXISTS public.idx_platform_integrations_unique_name;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: CMDB profile names are unique among live profiles only
+-- ----------------------------------------------------------------------------
+-- cmdb_sync_profiles is soft-deleted (deleted_at), but unique_cmdb_profile_name
+-- was UNIQUE (tenant_id, name) over EVERY row, deleted ones included. Deleting
+-- a profile and creating a new one with the same name therefore failed with a
+-- unique violation the tenant could neither see nor clear.
+--
+-- Order matters: the partial index is built FIRST, so live-name uniqueness is
+-- never unenforced between the two statements. It cannot fail on a populated
+-- database: the old constraint already made (tenant_id, name) unique across all
+-- rows, so it is certainly unique across the live subset. Then the old
+-- constraint is dropped; nothing references it (the FKs into this table target
+-- its primary key). Both statements are no-ops on a re-run. The pg_dump body
+-- above no longer adds the constraint, so it does not come back.
+CREATE UNIQUE INDEX IF NOT EXISTS cmdb_sync_profiles_live_name_unique
+    ON public.cmdb_sync_profiles USING btree (tenant_id, name) WHERE (deleted_at IS NULL);
+ALTER TABLE IF EXISTS public.cmdb_sync_profiles
+    DROP CONSTRAINT IF EXISTS unique_cmdb_profile_name;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: CMDB mapping layer + sync core (platform ADR-0002 D10/D11)
+-- ----------------------------------------------------------------------------
+-- cmdb_sync_profiles.mapping_error — why the profile's EFFECTIVE mapping
+-- (vendor template ⊕ its overrides in field_mapping_config / ci_type_mapping)
+-- does not validate. NULL means valid. A non-NULL value PAUSES the profile:
+-- the scheduler skips it and Sync / Pull refuse, with this text on the card,
+-- until the mapping is fixed. It is re-evaluated on every run, on every save
+-- of the mapping, and for every profile when the service starts — which is
+-- how a template change shipped in an upgrade reaches existing profiles.
+--
+-- cmdb_sync_profiles.sync_state — the engine's own per-profile state, kept
+-- apart from sync_config (which is the tenant's settings, and a PUT replaces
+-- it): the pull cursor (the vendor's last-modified watermark), and when the
+-- last full pull / push ran. Never written by the API.
+--
+-- cmdb_entity_mappings.sync_direction gains 'pull': a link row now records a
+-- CI a pull brought in, not only one a push created, so "which of their
+-- records do we hold, and is it still there" has one answer for both
+-- directions. sync_status 'deleted' on a link means the CI is retired or gone
+-- on the vendor's side (the asset is absent from that source); the engine
+-- never pushes to it again until it reappears. 'stale' means we retired it.
+--
+-- All three are natively idempotent (ADD COLUMN IF NOT EXISTS; the CHECK is
+-- re-created only while it lacks 'pull'). Every existing row keeps a value the
+-- widened CHECK admits, so a populated upgrade cannot fail here.
+ALTER TABLE IF EXISTS public.cmdb_sync_profiles
+    ADD COLUMN IF NOT EXISTS mapping_error text;
+ALTER TABLE IF EXISTS public.cmdb_sync_profiles
+    ADD COLUMN IF NOT EXISTS sync_state jsonb DEFAULT '{}'::jsonb NOT NULL;
+
+DO $$
+DECLARE
+  def text;
+BEGIN
+  IF to_regclass('public.cmdb_entity_mappings') IS NULL THEN
+    RETURN;
+  END IF;
+  SELECT pg_get_constraintdef(oid) INTO def
+    FROM pg_constraint
+   WHERE conname = 'valid_cmdb_sync_direction'
+     AND conrelid = to_regclass('public.cmdb_entity_mappings');
+  IF def IS NOT NULL AND position('''pull''' IN def) > 0 THEN
+    RETURN;
+  END IF;
+  IF def IS NOT NULL THEN
+    ALTER TABLE public.cmdb_entity_mappings DROP CONSTRAINT valid_cmdb_sync_direction;
+  END IF;
+  ALTER TABLE public.cmdb_entity_mappings ADD CONSTRAINT valid_cmdb_sync_direction
+    CHECK (((sync_direction)::text = ANY ((ARRAY['push'::character varying, 'reconcile'::character varying, 'pull'::character varying])::text[])));
+END $$;
+
+-- Echo suppression and retirement look links up by the vendor's id within a
+-- profile.
+CREATE INDEX IF NOT EXISTS idx_cmdb_entity_mappings_profile_ci
+    ON public.cmdb_entity_mappings USING btree (tenant_id, profile_id, cmdb_ci_id)
+    WHERE (cmdb_ci_id IS NOT NULL);
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: monitoring_notification_channels is retired
+-- ----------------------------------------------------------------------------
+-- monitoring-service used to deliver alerts and security-incident notices from
+-- this table. Nothing ever wrote to it (no API, no UI, no seed), so on a real
+-- deployment it held zero rows and every incident hook reached nobody. The
+-- delivery code is gone: monitoring-service now publishes incidents to
+-- notification-service on notifications.send, where the platform notification
+-- channels and rules (platform_notification_channels / _rules) do the routing.
+--
+-- The CREATE is removed from the body above, so a fresh install never has it.
+-- On an upgrade the table is dropped only while EMPTY: the old setup guide told
+-- operators to INSERT channels by hand, so a row may exist, and dropping it
+-- would destroy a webhook URL or PagerDuty key nobody else holds. A table that
+-- has rows is left in place, untouched and unread (the one-off
+-- migrate-to-unified-notifications.sql still reads it to fold those rows into
+-- platform_notification_channels). Re-running is a no-op either way.
+-- The emptiness probe is dynamic SQL on purpose: a static reference to the
+-- table is planned even when the to_regclass() guard is false, and fails on a
+-- fresh install where the table no longer exists.
+DO $$
+DECLARE
+  v_empty boolean;
+BEGIN
+  IF to_regclass('public.monitoring_notification_channels') IS NOT NULL THEN
+    EXECUTE 'SELECT NOT EXISTS (SELECT 1 FROM public.monitoring_notification_channels)' INTO v_empty;
+    IF v_empty THEN
+      DROP TABLE public.monitoring_notification_channels;
+    END IF;
+  END IF;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: SIEM export reads the audit log through a durable cursor
+-- ----------------------------------------------------------------------------
+-- Platform ADR-0002 M1. SIEM export no longer tees events in memory inside
+-- audit-service: the exporter reads audit.activity_logs forward through
+-- audit-service's internal export feed, from a cursor it keeps per destination,
+-- and advances the cursor only after the destination acknowledges. The audit
+-- log is the outbox.
+--
+-- 1. The feed's order is (created_at, id). This index serves it on every
+--    partition. Created on the partitioned parent (no ONLY), so it recurses to
+--    every attached partition, and a partition attached later — by the monthly
+--    partition job, or by the body above re-creating a missing month — gets a
+--    matching index automatically. IF NOT EXISTS makes a re-run a no-op. On a
+--    large audit log the first build takes a lock on each partition for the
+--    duration of that partition's build.
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created_id
+    ON audit.activity_logs USING btree (created_at, id);
+
+-- 2. Each destination's cursor. The body above declares both columns for a
+--    fresh install; these carry them to an existing one.
+ALTER TABLE IF EXISTS audit.siem_integrations
+    ADD COLUMN IF NOT EXISTS cursor_created_at timestamp with time zone;
+ALTER TABLE IF EXISTS audit.siem_integrations
+    ADD COLUMN IF NOT EXISTS cursor_event_id uuid;
+
+-- 3. Destinations that existed before this release start at the head of the
+--    feed ("now", after every stored event): they were delivered in memory up
+--    to the old audit-service's shutdown, and starting them anywhere earlier
+--    would flood their receivers with the whole retained trail. Events stored
+--    between this migration and the old pods stopping are delivered by both
+--    (duplicates, never loss — receivers de-duplicate on the event id). Only
+--    rows with no cursor are touched, so a re-run moves nothing: every row the
+--    new exporter creates carries a cursor from the moment it is saved.
+UPDATE audit.siem_integrations
+   SET cursor_created_at = clock_timestamp(),
+       cursor_event_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+ WHERE cursor_created_at IS NULL;

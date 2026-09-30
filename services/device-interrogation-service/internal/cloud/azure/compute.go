@@ -31,7 +31,7 @@ import (
 
 // GetVirtualMachinesClient returns an armcompute VirtualMachines client.
 func (c *Client) GetVirtualMachinesClient() (*armcompute.VirtualMachinesClient, error) {
-	client, err := armcompute.NewVirtualMachinesClient(c.subscriptionID, c.credential, nil)
+	client, err := armcompute.NewVirtualMachinesClient(c.subscriptionID, c.credential, c.armOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machines client: %w", err)
 	}
@@ -40,7 +40,7 @@ func (c *Client) GetVirtualMachinesClient() (*armcompute.VirtualMachinesClient, 
 
 // GetVirtualNetworksClient returns an armnetwork VirtualNetworks client.
 func (c *Client) GetVirtualNetworksClient() (*armnetwork.VirtualNetworksClient, error) {
-	client, err := armnetwork.NewVirtualNetworksClient(c.subscriptionID, c.credential, nil)
+	client, err := armnetwork.NewVirtualNetworksClient(c.subscriptionID, c.credential, c.armOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual networks client: %w", err)
 	}
@@ -49,7 +49,7 @@ func (c *Client) GetVirtualNetworksClient() (*armnetwork.VirtualNetworksClient, 
 
 // GetNetworkSecurityGroupsClient returns an armnetwork SecurityGroups client.
 func (c *Client) GetNetworkSecurityGroupsClient() (*armnetwork.SecurityGroupsClient, error) {
-	client, err := armnetwork.NewSecurityGroupsClient(c.subscriptionID, c.credential, nil)
+	client, err := armnetwork.NewSecurityGroupsClient(c.subscriptionID, c.credential, c.armOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network security groups client: %w", err)
 	}
@@ -58,7 +58,7 @@ func (c *Client) GetNetworkSecurityGroupsClient() (*armnetwork.SecurityGroupsCli
 
 // GetNetworkInterfacesClient returns an armnetwork Interfaces client.
 func (c *Client) GetNetworkInterfacesClient() (*armnetwork.InterfacesClient, error) {
-	client, err := armnetwork.NewInterfacesClient(c.subscriptionID, c.credential, nil)
+	client, err := armnetwork.NewInterfacesClient(c.subscriptionID, c.credential, c.armOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network interfaces client: %w", err)
 	}

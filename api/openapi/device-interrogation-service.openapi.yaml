@@ -124,6 +124,8 @@ paths:
                 $ref: '#/components/schemas/IntegrationResponse'
         '400':
           $ref: '#/components/responses/LegacyBadRequest'
+        '409':
+          $ref: '#/components/responses/LegacyIntegrationNameTaken'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /integrations/{id}:
@@ -170,6 +172,8 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '404':
           $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyIntegrationNameTaken'
         '500':
           $ref: '#/components/responses/LegacyServerError'
     delete:
@@ -1630,6 +1634,12 @@ components:
             $ref: '#/components/schemas/LegacyError'
     LegacyForbidden:
       description: Caller is not a platform admin.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
+    LegacyIntegrationNameTaken:
+      description: The caller already has a live integration of this type with this name. Names are unique per tenant.
       content:
         application/json:
           schema:

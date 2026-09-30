@@ -12,6 +12,7 @@ import {
   type PlatformChannel, type PlatformRule, type CreateChannelRequest, type UpdateChannelRequest,
   type CreateRuleRequest, type UpdateRuleRequest,
 } from './settings-notifications-queries';
+import { PLATFORM_CHANNEL_TYPES } from './notification-channel-types';
 
 /* ============================== Channels ================================= */
 
@@ -23,7 +24,7 @@ interface ChannelForm {
   config: string; // raw JSON text
 }
 
-const CHANNEL_TYPES = ['email', 'slack', 'webhook', 'pagerduty', 'sms'];
+const CHANNEL_TYPES: readonly string[] = PLATFORM_CHANNEL_TYPES;
 
 const DEFAULT_CHANNEL_FORM: ChannelForm = {
   channel_name: '', channel_type: 'email', enabled: true, description: '', config: '{}',
@@ -130,7 +131,7 @@ function ChannelsPanel() {
     mut.remove.mutate(c.id, { onSuccess: () => toast.success('Channel deleted'), onError: (e) => toast.error(errMsg(e)) });
   };
   const test = (c: PlatformChannel) => {
-    mut.test.mutate(c.id, { onSuccess: () => toast.success('Test dispatched'), onError: (e) => toast.error(errMsg(e, 'Test failed')) });
+    mut.test.mutate(c.id, { onSuccess: () => toast.success('Test dispatched'), onError: (e) => toast.error(errMsg(e, 'Test failed'), { duration: 9000 }) });
   };
 
   return (

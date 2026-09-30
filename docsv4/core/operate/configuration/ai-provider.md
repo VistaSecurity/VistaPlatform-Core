@@ -86,6 +86,20 @@ unless the endpoint really is yours.
 Write `baseUrl` as far as the server's own documentation does — `…`, `…/v1`, or
 the full path — and the client appends the rest.
 
+### With egress restricted
+
+Each service that owns a generative capability calls the provider from its own
+pod: `compliance-engine`, `cbom-service`, `inventory-service` and
+`admin-service`. All four are in the chart's
+`networkPolicy.externalEgressBackends`, so `networkPolicy.egressEnabled: true`
+lets them reach an endpoint outside the cluster.
+
+A model served **inside the cluster** is different: its address falls in
+`networkPolicy.clusterInternalCIDRs`, which that rule excludes. Add a
+NetworkPolicy of your own that lets those four services reach it, as for an
+in-cluster proxy — see
+[Outbound connections](outbound-connections.md#restricting-egress-with-networkpolicy).
+
 ### All the values
 
 | Value | Meaning |

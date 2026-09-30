@@ -70,15 +70,10 @@ func main() {
 	analyticsService := services.NewAnalyticsService(db.DB, bypassDB)
 
 	// Enterprise capabilities (nil in a Core build — see cmd/edition.go).
-	// Audit logging, ingestion, query, export, retention, alerting, analytics
-	// and on-demand compliance reports are Core and always present; only the
-	// outbound plumbing below is edition-gated.
+	// Audit logging, ingestion, query, export, retention, alerting, analytics,
+	// on-demand compliance reports and the export feed are Core and always
+	// present; only scheduled report delivery is edition-gated.
 	log.Printf("audit-service edition: %s", edition())
-
-	var siemExport siemExporter
-	if hooks.NewSIEMExporter != nil {
-		siemExport = hooks.NewSIEMExporter(db.DB, bypassDB)
-	}
 
 	var scheduledReports scheduledReportRunner
 	if hooks.NewScheduledReports != nil {
@@ -87,14 +82,9 @@ func main() {
 
 	// NATS client will be wired to alertService after initialization below
 
-	// Load alert rules and SIEM integrations
+	// Load alert rules
 	if err := alertService.LoadRules(context.Background()); err != nil {
 		log.Printf("WARNING: Failed to load alert rules: %v", err)
-	}
-	if siemExport != nil {
-		if err := siemExport.LoadIntegrations(context.Background()); err != nil {
-			log.Printf("WARNING: Failed to load SIEM integrations: %v", err)
-		}
 	}
 
 	// Start scheduled report scheduler
@@ -104,9 +94,16 @@ func main() {
 		}
 	}
 
-	// Initialize handlers. siemExport is passed as the SIEM tee: nil in Core,
-	// where ingestion writes the audit event and simply forwards it nowhere.
-	activityLogHandler := handlers.NewActivityLogHandlerWithMonitoring(activityLogService, alertService, siemExport)
+	// The stored-events doorbell (services/doorbell.go): rung after every
+	// stored entry on both ingestion paths, so export-feed consumers read
+	// forward promptly. Attached to NATS below, once NATS is reachable; until
+	// then — or without NATS at all — it rings nothing and consumers fall back
+	// to polling the feed.
+	doorbell := services.NewNATSDoorbell()
+
+	// Initialize handlers.
+	activityLogHandler := handlers.NewActivityLogHandlerWithMonitoring(activityLogService, alertService, doorbell)
+	exportFeedHandler := handlers.NewExportFeedHandler(activityLogService)
 	jobExecutionHandler := handlers.NewJobExecutionHandler(jobExecutionService)
 	complianceHandler := handlers.NewComplianceHandlerWithReportService(complianceService, complianceReportService)
 	retentionHandler := handlers.NewRetentionHandler(retentionService)
@@ -139,7 +136,7 @@ func main() {
 		alert:            alertHandler,
 		alertRule:        alertRuleHandler,
 		analytics:        analyticsHandler,
-		siemExport:       siemExport,
+		exportFeed:       exportFeedHandler,
 		scheduledReports: scheduledReports,
 	})
 
@@ -241,7 +238,8 @@ func main() {
 	if natsErr != nil {
 		log.Printf("WARNING: NATS unavailable, audit events will only be received via HTTP: %v", natsErr)
 	} else {
-		auditSubscriber = subscribers.NewAuditSubscriber(natsClient, activityLogService, alertService)
+		doorbell.Attach(natsClient)
+		auditSubscriber = subscribers.NewAuditSubscriber(natsClient, activityLogService, alertService, doorbell)
 		if err := auditSubscriber.Start(); err != nil {
 			log.Printf("WARNING: Failed to start NATS audit subscriber: %v", err)
 		} else {
@@ -280,11 +278,6 @@ func main() {
 		go postureSnapshotJob.Start(context.Background())
 	} else {
 		log.Println("POSTURE_SNAPSHOT_JOB_ENABLED=false; posture snapshot job disabled")
-	}
-
-	// Start SIEM batch flusher (Enterprise only)
-	if siemExport != nil {
-		siemExport.Start(context.Background())
 	}
 
 	// Wait for interrupt signal
@@ -328,7 +321,7 @@ type routerHandlers struct {
 	alert            *handlers.AlertHandler
 	alertRule        *handlers.AlertRuleHandler
 	analytics        *handlers.AnalyticsHandler
-	siemExport       siemExporter
+	exportFeed       *handlers.ExportFeedHandler
 	scheduledReports scheduledReportRunner
 }
 
@@ -384,6 +377,15 @@ func newRouter(
 		internal.POST("/audit-service/job-execution-logs/start", h.jobExecution.LogJobStart)
 		internal.POST("/audit-service/job-execution-logs/:id/progress", h.jobExecution.LogJobProgress)
 		internal.POST("/audit-service/job-execution-logs/:id/complete", h.jobExecution.LogJobCompletion)
+
+		// The export feed: the whole platform's audit trail read forward from
+		// a cursor, for the Enterprise SIEM exporter (a separate service; see
+		// services/export_feed.go). HMAC only, like the ingest routes above:
+		// no user token of any kind reaches this group, and the
+		// /audit-service/internal/ prefix is denied at the edge on every host
+		// (standards/service-registry.yaml internal_prefixes).
+		internal.GET("/audit-service/internal/export/events", h.exportFeed.GetEvents)
+		internal.GET("/audit-service/internal/export/head", h.exportFeed.GetHead)
 	}
 
 	// API routes with authentication (user-facing queries and management)
@@ -435,8 +437,8 @@ func newRouter(
 		// re-scoping the feature per tenant remains an open product option, and
 		// a larger change than a security fix should make.
 		//
-		// The consumer is admin-ui-v2 → Security → Retention / SIEM Export,
-		// which already exists and already authenticates with a platform token.
+		// The consumer is admin-ui-v2 → Security → Retention, which already
+		// authenticates with a platform token.
 		platformConfig := api.Group("")
 		platformConfig.Use(middleware.RequirePlatformIdentity())
 		{
@@ -445,21 +447,6 @@ func newRouter(
 			platformConfig.GET("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditRead), h.retention.GetRetentionPolicyByID)
 			platformConfig.POST("/audit-service/retention-policies", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.CreateRetentionPolicy)
 			platformConfig.PUT("/audit-service/retention-policies/:id", middleware.RequirePermission(db.DB, rbac.PermissionAuditManage), h.retention.UpdateRetentionPolicy)
-
-			// SIEM integration endpoints (Enterprise). Absent in a Core build.
-			// The exporter owns its own permission gating and secret redaction
-			// and repeats the platform-identity gate on each route; mounting it
-			// HERE is what makes that gate unskippable in the running service.
-			//
-			// SECURITY (H2): the SIEM tee at
-			// internal/handlers/activity_log_handlers.go fans every tenant's
-			// audit event to every enabled integration, so a tenant admin who
-			// could register one received the whole platform's audit stream.
-			// "The build boundary IS the gate" decided the EDITION, not the
-			// identity.
-			if h.siemExport != nil {
-				h.siemExport.RegisterRoutes(platformConfig)
-			}
 		}
 
 		// Built-in audit alert rules (read-only view of the in-memory engine).
@@ -503,9 +490,6 @@ func newRouter(
 		if h.scheduledReports != nil {
 			h.scheduledReports.RegisterRoutes(api)
 		}
-
-		// SIEM integration endpoints moved to the platformConfig group above
-		// (C4/H2) — they are platform-global config, not per-tenant data.
 
 		// Analytics endpoints
 		api.GET("/audit-service/analytics/user-activity", h.analytics.GetUserActivity)

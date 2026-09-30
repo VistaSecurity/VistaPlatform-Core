@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,19 +30,48 @@ type DeliveryService struct {
 	emailResolver *email.EmailConfigResolver
 	httpClient    *http.Client
 	logger        *log.Logger
+
+	// validateURL is the pre-flight URL policy check. It is network.ValidateWebhookURL
+	// in production; tests substitute a permissive one so a loopback httptest
+	// server can stand in for a receiver.
+	validateURL func(string) error
+	// pagerDutyURL is the Events API v2 endpoint (overridable for tests).
+	pagerDutyURL string
+	// emailConfigFn resolves the SMTP configuration to send with, returning
+	// email.ErrNotConfigured when there is none. Production: the resolver's
+	// ResolveDeliverableConfig; tests substitute a stub.
+	emailConfigFn func(tenantID *uuid.UUID) (*email.EmailConfig, error)
 }
+
+// pagerDutyEventsURL is PagerDuty's Events API v2 enqueue endpoint.
+const pagerDutyEventsURL = "https://events.pagerduty.com/v2/enqueue"
 
 // NewDeliveryService creates a new delivery service
 func NewDeliveryService(db *sqlx.DB, cfg *config.Config, emailResolver *email.EmailConfigResolver) *DeliveryService {
-	return &DeliveryService{
+	ds := &DeliveryService{
 		db:            db,
 		config:        cfg,
 		emailResolver: emailResolver,
 		// SSRF-guarded: every dial (incl. redirects) re-checks for internal IPs,
 		// closing the TOCTOU gap that ValidateWebhookURL alone leaves open
-		httpClient: network.SafeHTTPClient(10 * time.Second),
-		logger:     log.New(log.Writer(), "[DeliveryService] ", log.LstdFlags),
+		httpClient:   network.SafeHTTPClient(10 * time.Second),
+		logger:       log.New(log.Writer(), "[DeliveryService] ", log.LstdFlags),
+		validateURL:  network.ValidateWebhookURL,
+		pagerDutyURL: pagerDutyEventsURL,
 	}
+	ds.emailConfigFn = emailResolver.ResolveDeliverableConfig
+	return ds
+}
+
+// ensureEventID gives the request a stable identity. It is set ONCE, before any
+// send, and travels with the request into the retry queue's serialized payload —
+// so every attempt at delivering this notification, on every channel, carries
+// the same id. Receivers use it as an idempotency key.
+func ensureEventID(req *models.SendNotificationRequest) string {
+	if req.EventID == "" {
+		req.EventID = uuid.New().String()
+	}
+	return req.EventID
 }
 
 // ChannelFailure records one channel's failed delivery attempt, so the caller
@@ -66,6 +97,10 @@ func (ds *DeliveryService) SendToChannels(
 	var channelsUsed []string
 	var failures []ChannelFailure
 	var lastErr error
+
+	// Before the first send, so the id is on req when the retry queue
+	// serializes it.
+	ensureEventID(req)
 
 	for _, ch := range channels {
 		var channelType string
@@ -161,12 +196,25 @@ func (ds *DeliveryService) sendToChannel(
 	default:
 		// A channel row whose type we cannot deliver will never become
 		// deliverable by retrying.
-		return permanentf("unsupported channel type: %s", channelType)
+		return permanentReasonf(reasonUnsupported, "unsupported channel type: %s", channelType)
 	}
 }
 
 // sendEmail sends an email notification
 func (ds *DeliveryService) sendEmail(tenantID *uuid.UUID, config map[string]interface{}, req *models.SendNotificationRequest) error {
+	// Is there anywhere to send from? Decided FIRST and as an explicit outcome:
+	// with no SMTP host configured the resolvers used to fall back to
+	// localhost:587, so every alert to the seeded default email channels dialled
+	// a port nothing listened on, failed "transiently" and was retried five times.
+	// "Not configured" is a property of the deployment; retrying cannot fix it.
+	emailConfig, err := ds.emailConfigFn(tenantID)
+	if err != nil {
+		if errors.Is(err, email.ErrNotConfigured) {
+			return permanentReasonf(reasonEmailNotConfigured, "email delivery not configured: %w", err)
+		}
+		return fmt.Errorf("failed to get email config: %w", err)
+	}
+
 	// Get static recipients (optional when recipient_role resolves members)
 	var recipients []string
 	switch v := config["recipients"].(type) {
@@ -184,7 +232,7 @@ func (ds *DeliveryService) sendEmail(tenantID *uuid.UUID, config map[string]inte
 			recipients = []string{v}
 		}
 	default:
-		return permanentf("invalid recipients format")
+		return permanentReasonf(reasonNotConfigured, "invalid recipients format")
 	}
 
 	// Role-based recipients: config.recipient_role names a tenant role whose
@@ -214,41 +262,12 @@ func (ds *DeliveryService) sendEmail(tenantID *uuid.UUID, config map[string]inte
 
 	recipients = dedupeStrings(recipients)
 	if len(recipients) == 0 {
-		return permanentf("no valid recipients found")
+		return permanentReasonf("This email channel has no recipients — add addresses, or a recipient role with active members.", "no valid recipients found")
 	}
 
-	// Get email service for tenant or platform
-	var emailService *email.EmailService
-	if tenantID != nil {
-		// Get tenant email config
-		emailConfig, err := ds.emailResolver.ResolveEmailConfig(*tenantID)
-		if err != nil {
-			// Fall back to platform config
-			emailConfig, err = ds.emailResolver.GetPlatformEmailConfig()
-			if err != nil {
-				return fmt.Errorf("failed to get email config: %w", err)
-			}
-		}
-		emailService = email.NewEmailService(*emailConfig)
-	} else {
-		// Platform notification - use platform email config
-		emailConfig, err := ds.emailResolver.GetPlatformEmailConfig()
-		if err != nil {
-			return fmt.Errorf("failed to get platform email config: %w", err)
-		}
-		emailService = email.NewEmailService(*emailConfig)
-	}
+	emailService := email.NewEmailService(*emailConfig)
 
-	// Build email subject and body
-	subject := fmt.Sprintf("[%s] %s", req.Severity, req.AlertType)
-	body := fmt.Sprintf("%s\n\nSource: %s\nSeverity: %s", req.Message, req.AlertSource, req.Severity)
-
-	// Add metadata if present
-	if req.Metadata != nil {
-		metadataJSON, _ := json.MarshalIndent(req.Metadata, "", "  ")
-		body += fmt.Sprintf("\n\nDetails:\n%s", string(metadataJSON))
-	}
-
+	subject, body := composeEmail(req)
 	emailMsg := email.Email{
 		To:      recipients,
 		Subject: subject,
@@ -256,12 +275,96 @@ func (ds *DeliveryService) sendEmail(tenantID *uuid.UUID, config map[string]inte
 	}
 
 	// Send email
-	err := emailService.SendEmail(emailMsg)
-	if err != nil {
-		return fmt.Errorf("failed to send email: %w", err)
+	if err := emailService.SendEmail(emailMsg); err != nil {
+		return withReason(fmt.Errorf("failed to send email: %w", err), smtpFailureReason(err))
 	}
 
 	return nil
+}
+
+// composeEmail builds the subject and plain-text body of an alert email.
+//
+// The subject uses the producer's title (or its humanized alert_type), the same
+// headline the in-app bell shows — not the raw machine-cased alert_type, which
+// read "[high] control_noncompliant". The body lists the details as labelled
+// lines rather than dumping the metadata map as JSON.
+func composeEmail(req *models.SendNotificationRequest) (subject, body string) {
+	subject = fmt.Sprintf("[%s] %s", req.Severity, resolveInAppTitle(req))
+	body = fmt.Sprintf("%s\n\nSource: %s\nSeverity: %s", req.Message, req.AlertSource, req.Severity)
+	if lines := metadataLines(req.Metadata); len(lines) > 0 {
+		body += "\n\nDetails:\n" + strings.Join(lines, "\n")
+	}
+	return subject, body
+}
+
+// metadataLines renders metadata as "Label: value" lines in key order. Scalars
+// print as-is, lists of scalars are comma-joined, and anything nested collapses
+// to short JSON rather than an indented tree. Empty values are skipped.
+func metadataLines(meta map[string]interface{}) []string {
+	if len(meta) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	const maxLines, maxValue = 25, 300
+	var lines []string
+	for _, k := range keys {
+		val := metadataValueString(meta[k])
+		if val == "" {
+			continue
+		}
+		if len(val) > maxValue {
+			val = val[:maxValue-1] + "…"
+		}
+		lines = append(lines, fmt.Sprintf("%s: %s", humanizeKey(k), val))
+		if len(lines) == maxLines {
+			break
+		}
+	}
+	return lines
+}
+
+func metadataValueString(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(t)
+	case bool, float64, float32, int, int64, int32, uint, uint64:
+		return fmt.Sprintf("%v", t)
+	case []interface{}:
+		parts := make([]string, 0, len(t))
+		nested := false
+		for _, e := range t {
+			switch e.(type) {
+			case map[string]interface{}, []interface{}:
+				nested = true
+			}
+			parts = append(parts, fmt.Sprintf("%v", e))
+		}
+		if !nested {
+			return strings.Join(parts, ", ")
+		}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// humanizeKey turns "alert_id" / "first-seen" into "Alert id" / "First seen".
+func humanizeKey(k string) string {
+	words := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(k))
+	if len(words) == 0 {
+		return k
+	}
+	words[0] = strings.ToUpper(words[0][:1]) + words[0][1:]
+	return strings.Join(words, " ")
 }
 
 // resolveRoleRecipients returns the emails of active members holding the named
@@ -349,67 +452,14 @@ func dedupeStrings(in []string) []string {
 func (ds *DeliveryService) sendSlack(config map[string]interface{}, req *models.SendNotificationRequest) error {
 	webhookURL, ok := config["webhook_url"].(string)
 	if !ok || webhookURL == "" {
-		return permanentf("slack webhook_url not configured")
+		return permanentReasonf("This Slack connection has no webhook URL.", "slack webhook_url not configured")
 	}
 
-	if err := network.ValidateWebhookURL(webhookURL); err != nil {
+	if err := ds.validateURL(webhookURL); err != nil {
 		return classifyURLRejection("slack webhook URL rejected: %w", err)
 	}
 
-	channel := ""
-	if ch, ok := config["channel"].(string); ok {
-		channel = ch
-	}
-
-	// Build Slack message
-	slackPayload := map[string]interface{}{
-		"text": fmt.Sprintf("[%s] %s", req.Severity, req.AlertType),
-		"blocks": []map[string]interface{}{
-			{
-				"type": "section",
-				"text": map[string]interface{}{
-					"type": "mrkdwn",
-					"text": fmt.Sprintf("*%s*\n%s", req.AlertType, req.Message),
-				},
-			},
-			{
-				"type": "section",
-				"fields": []map[string]interface{}{
-					{
-						"type": "mrkdwn",
-						"text": fmt.Sprintf("*Source:*\n%s", req.AlertSource),
-					},
-					{
-						"type": "mrkdwn",
-						"text": fmt.Sprintf("*Severity:*\n%s", req.Severity),
-					},
-				},
-			},
-		},
-	}
-
-	if channel != "" {
-		slackPayload["channel"] = channel
-	}
-
-	// Add metadata if present
-	if req.Metadata != nil {
-		metadataText := ""
-		for k, v := range req.Metadata {
-			metadataText += fmt.Sprintf("%s: %v\n", k, v)
-		}
-		if metadataText != "" {
-			slackPayload["blocks"] = append(slackPayload["blocks"].([]map[string]interface{}), map[string]interface{}{
-				"type": "section",
-				"text": map[string]interface{}{
-					"type": "mrkdwn",
-					"text": fmt.Sprintf("*Details:*\n```%s```", metadataText),
-				},
-			})
-		}
-	}
-
-	jsonPayload, err := json.Marshal(slackPayload)
+	jsonPayload, err := json.Marshal(buildSlackPayload(config, req))
 	if err != nil {
 		return fmt.Errorf("failed to marshal Slack payload: %w", err)
 	}
@@ -428,144 +478,75 @@ func (ds *DeliveryService) sendSlack(config map[string]interface{}, req *models.
 	return nil
 }
 
-// sendWebhook sends a webhook notification
-func (ds *DeliveryService) sendWebhook(config map[string]interface{}, req *models.SendNotificationRequest) error {
-	url, ok := config["url"].(string)
-	if !ok || url == "" {
-		return permanentf("webhook url not configured")
-	}
-
-	if err := network.ValidateWebhookURL(url); err != nil {
-		return classifyURLRejection("webhook URL rejected: %w", err)
-	}
-
-	// Build webhook payload
-	payload := map[string]interface{}{
-		"alert_source": req.AlertSource,
-		"alert_type":   req.AlertType,
-		"severity":     req.Severity,
-		"message":      req.Message,
-		"timestamp":    time.Now().Format(time.RFC3339),
-	}
-
-	if req.Metadata != nil {
-		payload["metadata"] = req.Metadata
-	}
-
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal webhook payload: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonPayload))
-	if err != nil {
-		return fmt.Errorf("failed to create webhook request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	// Add custom headers if configured
-	if headers, ok := config["headers"].(map[string]interface{}); ok {
-		for k, v := range headers {
-			if headerValue, ok := v.(string); ok {
-				httpReq.Header.Set(k, headerValue)
-			}
-		}
-	}
-
-	// Add authentication if configured
-	if auth, ok := config["auth"].(map[string]interface{}); ok {
-		if authType, ok := auth["type"].(string); ok {
-			switch authType {
-			case "bearer":
-				if token, ok := auth["token"].(string); ok {
-					httpReq.Header.Set("Authorization", "Bearer "+token)
-				}
-			case "basic":
-				if username, ok := auth["username"].(string); ok {
-					if password, ok := auth["password"].(string); ok {
-						httpReq.SetBasicAuth(username, password)
-					}
-				}
-			}
-		}
-	}
-
-	resp, err := ds.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("failed to send webhook: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return classifyHTTPStatus(resp.StatusCode, "webhook returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+// escapeSlack escapes the three characters Slack treats as control characters
+// in message text (https://api.slack.com/reference/surfaces/formatting#escaping).
+// Unescaped, a "<" in an alert message swallows what follows as a link and a
+// "<!channel>" in attacker-influenced text (a certificate subject, a hostname)
+// would page the whole channel.
+func escapeSlack(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
-// sendPagerDuty sends a PagerDuty notification
-func (ds *DeliveryService) sendPagerDuty(config map[string]interface{}, req *models.SendNotificationRequest) error {
-	integrationKey, ok := config["integration_key"].(string)
-	if !ok || integrationKey == "" {
-		return permanentf("pagerduty integration_key not configured")
-	}
-
-	severityMap := map[string]string{
-		"critical": "critical",
-		"high":     "error",
-		"medium":   "warning",
-		"low":      "info",
-		"info":     "info",
-	}
-
-	pagerDutySeverity := severityMap[req.Severity]
-	if pagerDutySeverity == "" {
-		pagerDutySeverity = "warning"
-	}
-
-	payload := map[string]interface{}{
-		"routing_key":  integrationKey,
-		"event_action": "trigger",
-		"payload": map[string]interface{}{
-			"summary":  req.Message,
-			"severity": pagerDutySeverity,
-			"source":   req.AlertSource,
-			"custom_details": map[string]interface{}{
-				"alert_type": req.AlertType,
-				"severity":   req.Severity,
+// buildSlackPayload composes the incoming-webhook body. Every interpolated
+// value is escaped.
+func buildSlackPayload(config map[string]interface{}, req *models.SendNotificationRequest) map[string]interface{} {
+	alertType := escapeSlack(req.AlertType)
+	slackPayload := map[string]interface{}{
+		"text": fmt.Sprintf("[%s] %s", escapeSlack(req.Severity), alertType),
+		"blocks": []map[string]interface{}{
+			{
+				"type": "section",
+				"text": map[string]interface{}{
+					"type": "mrkdwn",
+					"text": fmt.Sprintf("*%s*\n%s", alertType, escapeSlack(req.Message)),
+				},
+			},
+			{
+				"type": "section",
+				"fields": []map[string]interface{}{
+					{
+						"type": "mrkdwn",
+						"text": fmt.Sprintf("*Source:*\n%s", escapeSlack(req.AlertSource)),
+					},
+					{
+						"type": "mrkdwn",
+						"text": fmt.Sprintf("*Severity:*\n%s", escapeSlack(req.Severity)),
+					},
+				},
 			},
 		},
 	}
 
-	if req.Metadata != nil {
-		payload["payload"].(map[string]interface{})["custom_details"].(map[string]interface{})["metadata"] = req.Metadata
+	if channel, ok := config["channel"].(string); ok && channel != "" {
+		slackPayload["channel"] = channel
 	}
 
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal pagerduty payload: %w", err)
+	// Add metadata if present (sorted, so the block is stable between sends).
+	if len(req.Metadata) > 0 {
+		keys := make([]string, 0, len(req.Metadata))
+		for k := range req.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var metadataText strings.Builder
+		for _, k := range keys {
+			fmt.Fprintf(&metadataText, "%s: %v\n", k, req.Metadata[k])
+		}
+		slackPayload["blocks"] = append(slackPayload["blocks"].([]map[string]interface{}), map[string]interface{}{
+			"type": "section",
+			"text": map[string]interface{}{
+				"type": "mrkdwn",
+				"text": fmt.Sprintf("*Details:*\n```%s```", escapeSlack(metadataText.String())),
+			},
+		})
 	}
-
-	resp, err := ds.httpClient.Post("https://events.pagerduty.com/v2/enqueue", "application/json", bytes.NewBuffer(jsonPayload))
-	if err != nil {
-		return fmt.Errorf("failed to send pagerduty notification: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return classifyHTTPStatus(resp.StatusCode, "pagerduty notification failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	return slackPayload
 }
 
 // sendSMS sends an SMS notification (placeholder for future implementation)
 func (ds *DeliveryService) sendSMS(config map[string]interface{}, req *models.SendNotificationRequest) error {
 	// TODO: Implement SMS delivery
-	return permanentf("SMS delivery not yet implemented")
+	return permanentReasonf("SMS delivery is not available.", "SMS delivery not yet implemented")
 }
 
 // knownAlertTitles maps a raw AlertType to the human headline shown in the
@@ -688,13 +669,27 @@ func (ds *DeliveryService) TestChannel(ctx context.Context, channel interface{},
 		TenantID:         req.TenantID,
 		AlertSource:      "system",
 		AlertType:        "test",
+		Title:            "Vista Platform test notification",
 		Severity:         "info",
 		Message:          "This is a test notification to verify channel connectivity.",
 		NotificationType: "system",
 		Metadata:         map[string]interface{}{"test": true},
 	}
+	ensureEventID(testReq)
 
-	return ds.sendToChannel(ctx, req.TenantID, uuid.Nil, channelType, config, testReq)
+	var err error
+	if channelType == "pagerduty" {
+		// A live trigger would open a real incident and page someone; the test
+		// triggers and immediately resolves a throwaway key instead.
+		err = ds.sendPagerDutyTest(config, testReq)
+	} else {
+		err = ds.sendToChannel(ctx, req.TenantID, uuid.Nil, channelType, config, testReq)
+	}
+	if err != nil {
+		// Carry the sanitized reason to the caller; the raw error stays in logs.
+		return newChannelTestError(err)
+	}
+	return nil
 }
 
 // updateChannelLastUsed updates the last_used_at timestamp for a channel

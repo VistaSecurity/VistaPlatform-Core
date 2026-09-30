@@ -7,7 +7,7 @@
 #     -f values-customer.yaml
 #
 # What this profile does:
-#   - Doubles every stateless workload (16 backends + web-ui + admin-ui) and
+#   - Doubles every stateless workload (every backend + web-ui + admin-ui) and
 #     spreads replicas across worker nodes via podAntiAffinity. The cluster
 #     ingress controller (Traefik in kube-system / ALB on EKS) handles
 #     routing — there is no in-cluster gateway pod to scale.

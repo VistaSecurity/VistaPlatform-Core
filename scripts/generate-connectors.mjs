@@ -7,10 +7,15 @@
 // Also generates the TypeScript mirror both UIs read:
 //   packages/primitives/src/connectors/registry.gen.ts
 //
-// --check additionally asserts that every `live` and `registered` connector key
-// still appears in the CHECK constraint that carries it in
-// scripts/database/schema.sql (platform_integrations.integration_type,
-// cmdb_sync_profiles.platform_type or connector_connections.connector_key).
+// --check additionally asserts, against scripts/database/schema.sql, that
+//   - every `live` and `registered` connector key still appears in the CHECK
+//     constraint that carries it (platform_integrations.integration_type,
+//     cmdb_sync_profiles.platform_type, connector_connections.connector_key,
+//     tenant_notification_channels.channel_type or audit.siem_integrations.type), and
+//   - the other direction: every value in each of those CHECKs is either a
+//     registry entry for it or a `retired_check_values` entry (a value the
+//     schema still accepts that nothing acts on), and every retired value is
+//     really still in its CHECK and is not also a registry entry for it.
 // The CHECKs stay hand-maintained in this phase — generating them is a later
 // workstream — so this assertion is the only thing keeping the registry and
 // the schema from drifting apart silently.
@@ -40,6 +45,15 @@ const STATUSES = ['live', 'registered', 'planned'];
 // Statuses whose key must appear in a schema.sql CHECK constraint.
 const STATUSES_IN_SCHEMA = ['live', 'registered'];
 
+// Who sets a connector up. `tenant` is the default.
+const CONFIGURED_BY = ['tenant', 'platform_operator'];
+
+// schema_source value for a LIVE connector that keeps no connection row at all:
+// an upload endpoint rather than a configured integration. It names no CHECK,
+// so there is nothing to audit — which is why it is refused for `registered`
+// (registered means "a row may carry this key", and a row needs a CHECK).
+const NO_SCHEMA_SOURCE = 'none';
+
 // Where a live connector key must appear in schema.sql, keyed by the
 // schema_source value in the YAML.
 const CHECK_CONSTRAINTS = {
@@ -54,6 +68,14 @@ const CHECK_CONSTRAINTS = {
   connector_connections: {
     constraint: 'valid_connector_key',
     column: 'connector_connections.connector_key',
+  },
+  tenant_notification_channels: {
+    constraint: 'valid_tenant_channel_type',
+    column: 'tenant_notification_channels.channel_type',
+  },
+  siem_integrations: {
+    constraint: 'siem_integrations_type_check',
+    column: 'audit.siem_integrations.type',
   },
 };
 
@@ -107,11 +129,20 @@ function validate(registry) {
     }
 
     if (STATUSES_IN_SCHEMA.includes(c.status)) {
-      if (!CHECK_CONSTRAINTS[c.schema_source]) {
-        fail(`${c.key}: ${c.status} connectors need schema_source (one of ${Object.keys(CHECK_CONSTRAINTS).join(', ')})`);
+      const noRow = c.schema_source === NO_SCHEMA_SOURCE;
+      if (!noRow && !CHECK_CONSTRAINTS[c.schema_source]) {
+        fail(`${c.key}: ${c.status} connectors need schema_source (one of ${Object.keys(CHECK_CONSTRAINTS).join(', ')}, or '${NO_SCHEMA_SOURCE}' for a live upload endpoint)`);
+      }
+      if (noRow && c.status !== 'live') {
+        fail(`${c.key}: schema_source '${NO_SCHEMA_SOURCE}' is only for live connectors — ` +
+          'registered means the schema accepts the key, which needs a CHECK to name');
       }
     } else if (c.schema_source) {
       fail(`${c.key}: schema_source is only meaningful for live and registered connectors`);
+    }
+
+    if (c.configured_by !== undefined && !CONFIGURED_BY.includes(c.configured_by)) {
+      fail(`${c.key}: invalid configured_by: ${c.configured_by} (one of ${CONFIGURED_BY.join(', ')})`);
     }
 
     // `feature` is an entitlement key (a billable_items key). It is optional:
@@ -127,6 +158,38 @@ function validate(registry) {
 
   for (const k of kinds) {
     if (!usedKinds.has(k)) fail(`kind '${k}' is declared but no connector uses it`);
+  }
+
+  validateRetired(registry);
+}
+
+// retired_check_values: { <schema_source>: { <value>: <reason> } }.
+function validateRetired(registry) {
+  const retired = registry.retired_check_values ?? {};
+  if (typeof retired !== 'object' || Array.isArray(retired)) {
+    fail('retired_check_values must be a map of schema_source to { value: reason }');
+  }
+  for (const [source, values] of Object.entries(retired)) {
+    if (!CHECK_CONSTRAINTS[source]) {
+      fail(`retired_check_values: unknown schema_source '${source}' (one of ${Object.keys(CHECK_CONSTRAINTS).join(', ')})`);
+    }
+    if (!values || typeof values !== 'object' || Array.isArray(values) || !Object.keys(values).length) {
+      fail(`retired_check_values.${source}: must be a non-empty map of value to reason`);
+    }
+    for (const [value, reason] of Object.entries(values)) {
+      if (!/^[a-z0-9_]+$/.test(value)) fail(`retired_check_values.${source}: bad value: ${value}`);
+      if (typeof reason !== 'string' || !reason.trim()) {
+        fail(`retired_check_values.${source}.${value}: a reason is required — the entry exists to say why the schema keeps a value nothing acts on`);
+      }
+      // Retired means "accepted, dead". A registry entry for the same CHECK
+      // says the opposite; one of the two is lying.
+      const clash = registry.connectors.find(
+        (c) => c.key === value && c.schema_source === source && STATUSES_IN_SCHEMA.includes(c.status));
+      if (clash) {
+        fail(`retired_check_values.${source}.${value}: '${value}' is also a ${clash.status} registry connector for ${source} — ` +
+          'a value cannot be both retired and offered; remove one');
+      }
+    }
   }
 }
 
@@ -170,11 +233,16 @@ async function auditAgainstSchema(registry) {
 
   const cache = {};
   const problems = [];
+  const checkValues = (source) => {
+    cache[source] ??= checkConstraintValues(schema, CHECK_CONSTRAINTS[source].constraint);
+    return cache[source];
+  };
+
+  // Registry -> schema: what we claim the database accepts, it accepts.
   for (const c of registry.connectors) {
-    if (!STATUSES_IN_SCHEMA.includes(c.status)) continue;
+    if (!STATUSES_IN_SCHEMA.includes(c.status) || c.schema_source === NO_SCHEMA_SOURCE) continue;
     const target = CHECK_CONSTRAINTS[c.schema_source];
-    cache[c.schema_source] ??= checkConstraintValues(schema, target.constraint);
-    if (!cache[c.schema_source].has(c.key)) {
+    if (!checkValues(c.schema_source).has(c.key)) {
       problems.push(
         `  ${c.key}: declared ${c.status} with schema_source '${c.schema_source}' but ` +
         `'${c.key}' is not in ${target.column}'s CHECK (${target.constraint})`);
@@ -187,8 +255,58 @@ async function auditAgainstSchema(registry) {
       '\nAdd the key to the CHECK in a schema change, or mark the connector planned. ' +
       'Do not edit the CHECK as a side effect of a registry edit.');
   }
+
+  // Schema -> registry: what the database accepts, the registry accounts for —
+  // as a connector, or as a value retired with a reason.
+  const retired = registry.retired_check_values ?? {};
+  const reverse = [];
+  for (const source of Object.keys(CHECK_CONSTRAINTS)) {
+    const target = CHECK_CONSTRAINTS[source];
+    const values = checkValues(source);
+    const entries = new Set(
+      registry.connectors
+        .filter((c) => c.schema_source === source && STATUSES_IN_SCHEMA.includes(c.status))
+        .map((c) => c.key));
+    const dead = retired[source] ?? {};
+    for (const v of values) {
+      if (!entries.has(v) && !(v in dead)) {
+        reverse.push(
+          `  ${target.column}'s CHECK (${target.constraint}) permits '${v}', which is neither a ` +
+          `registry connector for ${source} nor listed under retired_check_values.${source}`);
+      }
+    }
+    for (const v of Object.keys(dead)) {
+      if (!values.has(v)) {
+        reverse.push(
+          `  retired_check_values.${source}.${v}: '${v}' is no longer in ${target.column}'s CHECK ` +
+          `(${target.constraint}) — the entry is stale, remove it`);
+      }
+    }
+  }
+  if (reverse.length) {
+    fail(
+      'schema.sql CHECK values the connector registry does not account for:\n' +
+      reverse.join('\n') +
+      '\nAdd a connector entry (live/registered) or a retired_check_values entry with a reason.');
+  }
+
   const counts = Object.entries(cache).map(([k, v]) => `${k}=${v.size}`).join(', ');
   return counts;
+}
+
+// One gofmt-clean map literal entry per schema_source, values sorted so the
+// output does not depend on YAML order.
+function renderRetired(registry) {
+  const retired = registry.retired_check_values ?? {};
+  return Object.keys(retired).sort().map((source) => {
+    // gofmt aligns the values of consecutive key: value lines, so pad to the
+    // longest key or the generated file is not gofmt-clean.
+    const keys = Object.keys(retired[source]).sort();
+    const width = Math.max(...keys.map((v) => goStr(v).length));
+    const vals = keys.map(
+      (v) => `		${(goStr(v) + ':').padEnd(width + 1)} ${goStr(String(retired[source][v]).trim().replace(/\s+/g, ' '))},`);
+    return `	${goStr(source)}: {\n${vals.join('\n')}\n	},`;
+  }).join('\n');
 }
 
 function renderGo(registry) {
@@ -214,6 +332,7 @@ function renderGo(registry) {
 		ProducesClasses: ${classLiteral},
 		Status:          ${goStr(c.status)},
 		SchemaSource:    ${goStr(c.schema_source ?? '')},
+		ConfiguredBy:    ${goStr(c.configured_by ?? 'tenant')},
 		Feature:         ${goStr(c.feature ?? '')},
 		Description:     ${goStr(c.description.trim())},
 	},`;
@@ -252,6 +371,16 @@ const (
 	DirectionBoth = "both"
 )
 
+// ConfiguredBy values.
+const (
+	ConfiguredByTenant           = "tenant"
+	ConfiguredByPlatformOperator = "platform_operator"
+)
+
+// SchemaSourceNone is the SchemaSource of a live connector with no connection
+// row — an upload endpoint rather than a configured integration.
+const SchemaSourceNone = "none"
+
 // Status values.
 //
 // The three answer different questions and must not be collapsed:
@@ -282,8 +411,15 @@ type Connector struct {
 	ProducesClasses []string \`json:"produces_classes,omitempty"\`
 	Status          string   \`json:"status"\`
 	// SchemaSource names the CHECK constraint carrying this key while the
-	// CHECKs remain hand-maintained. Empty for planned connectors.
+	// CHECKs remain hand-maintained: platform_integrations, cmdb_sync_profiles,
+	// connector_connections, tenant_notification_channels or siem_integrations.
+	// "none" for a live connector that keeps no connection row (an upload
+	// endpoint); empty for planned connectors.
 	SchemaSource string \`json:"schema_source,omitempty"\`
+	// ConfiguredBy says who sets the connector up: [ConfiguredByTenant] (the
+	// default) or [ConfiguredByPlatformOperator]. A tenant sees a
+	// platform-operator connector in the catalogue and cannot add it.
+	ConfiguredBy string \`json:"configured_by"\`
 	// Feature is the entitlement key (a billable_items key) this connector is
 	// gated on, or empty for a Core connector. The EDITION is deliberately not
 	// stored here: shared/entitlements.EditionFor(Feature) is the single source
@@ -299,6 +435,14 @@ ${entries}
 
 // Kinds is the connector-kind vocabulary, in YAML order.
 var Kinds = []string{${registry.kinds.map((k) => goStr(k)).join(', ')}}
+
+// RetiredCheckValues are values a schema.sql CHECK still accepts that nothing
+// acts on and the catalogue does not offer, keyed by SchemaSource and then by
+// value, with the reason. The audit treats them as accounted for; it fails if
+// one is no longer in its CHECK.
+var RetiredCheckValues = map[string]map[string]string{
+${renderRetired(registry)}
+}
 
 var byKey = func() map[string]Connector {
 	m := make(map[string]Connector, len(All))
@@ -371,6 +515,7 @@ const KIND_LABELS = {
   edr_mdm: 'EDR / MDM',
   sbom_source: 'Software & SBOM',
   secrets_store: 'Secrets stores',
+  generic: 'Generic',
 };
 
 // --- TypeScript mirror -----------------------------------------------------
@@ -396,6 +541,7 @@ function renderTs(registry) {
         `    producesClasses: [${c.produces_classes.map((x) => tsStr(x)).join(', ')}],`,
         `    status: ${tsStr(c.status)},`,
       ];
+      lines.push(`    configuredBy: ${tsStr(c.configured_by ?? 'tenant')},`);
       if (c.feature) lines.push(`    feature: ${tsStr(c.feature)},`);
       lines.push(`    description: ${tsStr(c.description.trim())},`);
       lines.push('  },');
@@ -431,6 +577,13 @@ export type ConnectorDirection = 'pull' | 'push' | 'both';
  */
 export type ConnectorStatus = 'live' | 'registered' | 'planned';
 
+/**
+ * Who sets a connector up. \`tenant\` — the tenant's own admins. \`platform_operator\`
+ * — the deployment's operator, in the administration console: a tenant sees the
+ * connector in the catalogue and cannot add it (SIEM export is platform-global).
+ */
+export type ConnectorConfiguredBy = 'tenant' | 'platform_operator';
+
 /** Every registered connector key. */
 export type ConnectorKey =
 ${connectors.map((c) => `  | ${tsStr(c.key)}`).join('\n')};
@@ -443,6 +596,7 @@ export interface ConnectorDef {
   /** Asset-class keys this connector can create assets for. */
   producesClasses: readonly string[];
   status: ConnectorStatus;
+  configuredBy: ConnectorConfiguredBy;
   /**
    * Entitlement key (a billable_items key) this connector is gated on.
    * Absent means Core — free in every edition.

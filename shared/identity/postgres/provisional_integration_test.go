@@ -336,7 +336,7 @@ func TestIntegration_ProvisionalFinishObservationStates(t *testing.T) {
 			t.Fatalf("StoreObservation(%s): %v", host, err)
 		}
 		res := identity.Resolution{Outcome: outcome, Asset: asset}
-		if err := repo.FinishObservation(ctx, obs, id, res, decision, true); err != nil {
+		if _, err := repo.FinishObservation(ctx, obs, id, res, decision, true); err != nil {
 			t.Fatalf("FinishObservation(%s): %v", outcome, err)
 		}
 		return id

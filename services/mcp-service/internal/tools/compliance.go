@@ -2,9 +2,13 @@ package tools
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/vistasecurity/vistaplatform/mcp-service/internal/platform"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 )
 
 type complianceSummaryInput struct {
@@ -44,7 +48,8 @@ func registerComplianceTools(s *mcp.Server, d *Deps) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "vistaplatform_get_compliance_summary",
 		Description: "Evaluate one licensed framework against the tenant's inventory: overall score, failing-control count, affected assets, " +
-			"per-family pass/warn/fail rollup and the per-control status list. Use vistaplatform_get_control_findings to drill into a failing control.",
+			"per-family pass/warn/fail rollup and the per-control status list. Use vistaplatform_get_control_findings to drill into a failing control. " +
+			"A framework that is published but not activated for the tenant answers {\"available\": false, \"reason\": \"framework_not_activated\"} instead of a summary.",
 		Annotations: readOnly("Get compliance summary"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in complianceSummaryInput) (*mcp.CallToolResult, any, error) {
 		return d.run(ctx, req, "compliance.read", in, func() (any, error) {
@@ -56,7 +61,24 @@ func registerComplianceTools(s *mcp.Server, d *Deps) {
 			q.Set("framework_id", id)
 			set(q, "environment", in.Environment)
 			set(q, "severity", in.Severity)
-			return d.Client.Get(ctx, d.Client.ComplianceURL, "/api/v1/compliance-engine/summary", q)
+			v, err := d.Client.Get(ctx, d.Client.ComplianceURL, "/api/v1/compliance-engine/summary", q)
+			if err == nil {
+				return v, nil
+			}
+			// A published framework this tenant has not activated is a fact to
+			// report, not a server fault. The platform identifies it with a
+			// machine-readable `reason` (a 403 has other meanings — a role
+			// without the permission, a scope-narrowed token — and those must
+			// stay real errors), so match it positively.
+			if status, message, ok := platform.HTTPStatus(err); ok &&
+				status == http.StatusForbidden && platform.Reason(err) == sharedapi.ReasonFrameworkNotActivated {
+				return unavailableInstead(sharedapi.ReasonFrameworkNotActivated,
+					"framework not activated: "+message,
+					"vistaplatform_list_compliance_frameworks shows which frameworks this organization has activated "+
+						"(subscription state); a tenant administrator activates a framework in the Vista Platform UI under "+
+						"Risk & Compliance. Summarise one of the already-active frameworks in the meantime."), nil
+			}
+			return nil, err
 		})
 	})
 

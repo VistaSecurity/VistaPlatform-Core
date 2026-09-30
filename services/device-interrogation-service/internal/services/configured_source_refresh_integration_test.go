@@ -197,7 +197,13 @@ func TestIntegration_SourceRefreshNoGuessingAndBlockedCredentials(t *testing.T) 
 	}
 }
 func TestBoundedCloudResourceType(t *testing.T) {
-	for _, tc := range []struct{ provider, device, collector string }{{"gcp", "gcp_https_load_balancer", "load_balancer"}, {"gcp", "gcp_kms_crypto_key", "kms"}, {"azure", "azure_keyvault_key", "key_vault"}} {
+	for _, tc := range []struct{ provider, device, collector string }{{"gcp", "gcp_https_load_balancer", "load_balancer"}, {"gcp", "gcp_kms_crypto_key", "kms"}, {"azure", "azure_keyvault_key", "key_vault"},
+		// Every at-rest device type a collector emits maps back onto the
+		// collector that lists it (atRestDeviceTypes). These four used to map
+		// to nothing, so no bucket or database could ever be refreshed.
+		{"aws", "aws_s3_bucket", "s3"}, {"aws", "aws_rds_instance", "rds"}, {"aws", "aws_kms", "kms"},
+		{"azure", "azure_storage_account", "storage_account"}, {"azure", "azure_sql_database", "sql_database"},
+		{"gcp", "gcp_storage_bucket", "storage"}, {"gcp", "gcp_cloudsql_instance", "cloudsql"}} {
 		if got := boundedCloudResourceType(tc.provider, tc.device); got != tc.collector {
 			t.Errorf("%s maps to %q, want %q", tc.device, got, tc.collector)
 		}

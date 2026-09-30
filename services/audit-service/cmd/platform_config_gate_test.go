@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -75,21 +74,6 @@ func platformAdminToken(t *testing.T) string {
 	return mintToken(t, "platform_admin", "")
 }
 
-// probeSIEMExporter is a stand-in for the Enterprise exporter. It mounts one
-// route on whatever group main() hands RegisterRoutes, which is how this test
-// observes WHICH group that is: a 200 for a tenant admin means the SIEM CRUD
-// was mounted outside the platform gate, as it was before this fix.
-type probeSIEMExporter struct{}
-
-func (probeSIEMExporter) SendEvent(context.Context, map[string]interface{}) {}
-func (probeSIEMExporter) LoadIntegrations(context.Context) error            { return nil }
-func (probeSIEMExporter) Start(context.Context)                             {}
-func (p probeSIEMExporter) RegisterRoutes(api *gin.RouterGroup) {
-	api.GET("/audit-service/siem/integrations", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"integrations": []string{}})
-	})
-}
-
 func newGateTestRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	// Tenant state is not what this gate test is about, so switch the
@@ -104,7 +88,7 @@ func newGateTestRouter(t *testing.T) *gin.Engine {
 		JWT:                config.JWTConfig{Secret: testJWTSecret},
 		InternalAuthSecret: "test-internal-secret",
 	}
-	return newRouter(cfg, &database.DB{}, mw, routerHandlers{siemExport: probeSIEMExporter{}})
+	return newRouter(cfg, &database.DB{}, mw, routerHandlers{})
 }
 
 func doWithToken(t *testing.T, r *gin.Engine, method, path, token string) *httptest.ResponseRecorder {
@@ -169,23 +153,6 @@ func TestProductionRouter_RetentionPoliciesAllowPlatformAdmin(t *testing.T) {
 	}
 }
 
-// H2: the SIEM CRUD must be mounted INSIDE the platform gate. The probe
-// exporter answers 200 unconditionally, so a 200 here means the group main()
-// passed to RegisterRoutes was ungated.
-func TestProductionRouter_SIEMRoutesRejectTenantAdmin(t *testing.T) {
-	r := newGateTestRouter(t)
-	w := doWithToken(t, r, http.MethodGet, "/api/v1/audit-service/siem/integrations", tenantAdminToken(t))
-	assertPlatformGateRefused(t, w, "GET /siem/integrations")
-}
-
-func TestProductionRouter_SIEMRoutesAllowPlatformAdmin(t *testing.T) {
-	r := newGateTestRouter(t)
-	w := doWithToken(t, r, http.MethodGet, "/api/v1/audit-service/siem/integrations", platformAdminToken(t))
-	if w.Code != http.StatusOK {
-		t.Fatalf("platform admin GET /siem/integrations = %d (%s), want 200", w.Code, w.Body.String())
-	}
-}
-
 // The gate belongs to the platform-global group only. The rest of the tenant
 // API — the audit trail a tenant legitimately reads — must NOT have acquired
 // it, which a group-level Use() on the wrong group would do silently.
@@ -197,5 +164,3 @@ func TestProductionRouter_TenantAuditTrailStillReachable(t *testing.T) {
 		t.Fatalf("the platform gate leaked onto the tenant audit trail: %s", w.Body.String())
 	}
 }
-
-var _ siemExporter = probeSIEMExporter{}

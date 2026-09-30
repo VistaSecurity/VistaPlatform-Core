@@ -112,7 +112,17 @@ func Generation(o Observation) string {
 	seen := map[string]bool{}
 	canonical := e.Identifiers[:0]
 	for _, id := range e.Identifiers {
+		// Per-observation annotations, not evidence: when it was seen, the
+		// provenance the engine copies from the observation's own Source (which
+		// is hashed once, above, as part of the evidence), how much the builder
+		// trusted it, and whether the tenant currently finds the name generic
+		// ( B2 — a name crossing the frequency threshold, or a confidence
+		// tweak, is the same identifier and must not schedule another probe).
+		// ObservationFingerprint ignores all four for the same reason.
 		id.SeenAt = time.Time{}
+		id.Source = identity.Source{}
+		id.Confidence = 0
+		id.Generic = false
 		normalized, err := id.Normalized()
 		if err == nil {
 			id = normalized

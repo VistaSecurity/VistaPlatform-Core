@@ -7,6 +7,204 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0-rc.1] - 2026-09-30
+
+**Version 4.1.0 is the integrations release.** It follows a review of every way
+Vista Platform talks to another system — notification channels, SIEM export, CMDB
+and NetBox sync, cloud accounts, exports, and the AI-assistant (MCP) interface —
+and fixes what the review found. Several of those integrations looked configured
+and did nothing (a CMDB schedule nobody ran, an Azure account that could not run,
+a SIEM list lost on every restart), and two of them let any signed-in tenant member
+read credentials. Both product lines are cut from the same commit: `v4.1.0`
+(commercial) and `core-v4.1.0` (Core). Upgrade from 4.0.0.
+
+**Read Breaking / Upgrading first** — it includes credentials to rotate.
+
+### Highlights
+
+- **Credentials stop leaking to your own users.** Notification-channel credentials
+  (Slack webhook URL, PagerDuty routing key, webhook tokens) and CMDB profile
+  credentials are no longer returned to every signed-in member: reading them needs
+  View Settings, and the response only ever says whether a secret is stored. GCP
+  service-account keys are now encrypted at rest.
+
+- **SIEM export no longer loses events, and sends what each product accepts**
+  (Enterprise). Security → SIEM Export in the admin console now shows each
+  destination's status, last success, last error, events sent and failed, and
+  **Delivered through**. Integrations survive a restart, delivery resumes from a saved
+  position and is **at-least-once** across pod loss, and Splunk HEC, Datadog Logs v2,
+  Elasticsearch `_bulk` and a signed generic webhook each receive their own wire
+  format. It now runs in a new **integration service**.
+
+- **CMDB sync works** (Enterprise). A profile set to Hourly, Daily or Weekly actually
+  syncs; profiles can be created and edited; jobs finish and say why they failed.
+  Each platform ships a default field mapping, runs send only what changed, and a
+  record retired in the CMDB marks the asset absent instead of deleting it.
+  **ServiceNow** updates the server its Discovery already found instead of
+  duplicating it, sends standard CI classes and relationships, retires the CI when
+  you archive the asset, and OAuth2 sign-in now works. **Device42** and **Oomnitza**
+  push only infrastructure assets, correctly matched; **SolarWinds** is pull-only and
+  pulls every node. A CMDB on your own network is reachable, by opt-in.
+
+- **Notifications tell the truth.** Channel **Test** answers with the real reason;
+  a delivery that reached one channel and failed another is recorded as *partial*,
+  and Delivery History lists each channel's result; email with no SMTP host says so
+  once instead of retrying five times; webhooks can authenticate and are signed;
+  PagerDuty events de-duplicate and resolve; security-incident notifications from
+  monitoring finally reach a channel.
+
+- **Cloud accounts are inventoried as completely as you asked.** Azure integrations
+  run; scheduled runs collect buckets, databases and key stores (they used to drop
+  them); Azure and GCP **Test Connection** contacts the provider; every resource
+  type reports its own outcome; and cloud storage, databases and key stores become
+  assets under enforced identity admission (the default for new tenants) instead of
+  waiting in Discovery → Observations forever.
+
+- **NetBox reads every record and survives long imports** (Enterprise). Pagination no
+  longer stops at the first page when NetBox caps the page size, a long import no
+  longer reports "failed" while it succeeds, and a NetBox behind your own CA can be
+  reached by pasting the CA certificate.
+
+- **Fewer duplicate and wrongly-split assets.** Records the rules are sure are one
+  device — same MAC or serial seen directly, same network segment — are merged for
+  you (on by default, one switch to turn it off) and listed under Discovery →
+  Approvals → **Merged automatically**. A MAC hidden in an IPv6 address or a serial is
+  now used, DHCP segments are understood, generic names such as `iphone` never decide
+  a match, and merge proposals show how alike the two records are.
+
+- **The catalogue and exports say only what is true.** Settings → Integrations →
+  Available connectors is generated from what the code does (no claimed serverless
+  collectors, no phantom `custom` type). Exports no longer report a never-assessed
+  asset as risk score 0. The Register steps for sensors and agents download from a
+  release that exists. Core CBOM comparison answers "not included in your
+  subscription" instead of a 404.
+
+- **Commercial services no longer crash under load.** Enterprise and MSP backends were
+  obfuscated with an option that corrupted the Go scheduler; `inventory-service` could
+  exit with code 2 and print nothing during a large host-observation import.
+  Obfuscation of names and strings is unchanged. Core images were never affected.
+
+- **Outbound integrations work behind an egress proxy**, and with
+  `networkPolicy.egressEnabled=true`.
+
+### Breaking / Upgrading
+
+Back up your database first, as always.
+
+- **Rotate credentials.** Before 4.1.0 any signed-in tenant member could read
+  notification-channel credentials (Slack webhook URL, PagerDuty key, webhook tokens)
+  and CMDB profile credentials (password, API token, client secret), and GCP
+  service-account keys were stored in plaintext. Treat any that matter as exposed to
+  that tenant's users and rotate them; for GCP, save the integration again with the new
+  key. The upgrade does not rewrite stored keys.
+- **SIEM export (Enterprise) now runs in the new integration service.**
+  - The SIEM API moved to the integration service's own route prefix, with no compatibility
+    route. Only the admin console calls it, and it is served on the **admin host only** — it
+    is denied on the tenant host. The exact path, and the service and image names used
+    below, are in the Enterprise section of the release-notes document linked at the end.
+  - Delivery is **at-least-once across pod loss** (it was at-most-once). A batch in
+    flight when a pod dies is re-sent, so **receivers should de-duplicate on the event
+    `id`**. A receiver that is down or refuses events outright now holds the
+    destination's position instead of dropping events.
+  - A **new** destination starts at "now"; an optional **Start from** sends up to 168
+    hours of recent history first. **Existing destinations start at the head of the audit
+    log on upgrade**, so none re-sends the retained trail. While old audit-service pods
+    still run during the rollout, both paths deliver: expect a few duplicates, never a gap.
+  - **Creating a destination needs audit-service reachable** (otherwise 503, nothing
+    saved).
+  - The upgrade **builds an index on `audit.activity_logs (created_at, id)`**. On a large
+    audit log its first build holds a lock on each monthly partition while that partition
+    is indexed, which pauses audit writes to it for that long; later upgrades skip it.
+  - **`CONNECTOR_ALLOW_PRIVATE_ENDPOINTS` for SIEM is now read by the integration service**,
+    not the audit service; move any override there.
+  - The SIEM dial guard needs **`networkPolicy.clusterInternalCIDRs` set to your cluster's
+    real pod and Service ranges** — the chart default is the RKE2 range — so a
+    destination allowed onto a private network still cannot reach in-cluster addresses.
+  - With the egress NetworkPolicy on, the integration service is now in
+    `networkPolicy.externalEgressBackends`; the audit service stays there for S3 archival.
+  - The **Core admin console no longer shows SIEM Export**.
+- **NetBox (Enterprise) now runs in the integration service.** Nothing changes
+  on Settings → Integrations — connections, tokens, schedules and run history
+  carry over. Its API moved to the integration service's own route prefix (no
+  compatibility route; only the tenant UI calls it) and answers a tenant
+  session only. An import running during the rollout is closed about 20
+  minutes later as "interrupted (service restarted)" and runs again at its next
+  scheduled time (or on **Run now**); the same connection is never imported
+  twice at once. Move any NetBox proxy or `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS`
+  setting to the integration service. The old NetBox paths under the inventory
+  service, including Core's 402 answers, are gone; a Core install still shows
+  NetBox with its upgrade card.
+- **CMDB sync (Enterprise).**
+  - **Schedules now actually run.** A profile already set to Hourly, Daily or Weekly
+    starts syncing on that schedule after the upgrade. Review each profile's direction
+    (pull for SolarWinds; pull then push for ServiceNow, Device42 and Oomnitza) first.
+  - **A profile whose stored field mapping uses legacy keys the new mapper does not know
+    is paused as "Mapping invalid"** until you fix it (only the six keys the old engine
+    filled had any effect; no earlier UI wrote the column).
+  - **ServiceNow, Device42, SolarWinds and Oomnitza accept only the sign-in methods they
+    support**, checked at save: ServiceNow takes username and password or OAuth2 client
+    credentials (its "API token" option is gone); Device42 and SolarWinds take username and
+    password (an API token or key is refused). Edit any existing profile that uses another
+    method.
+  - **SolarWinds is pull-only**; Sync is refused for it.
+  - **Certificates, keys and crypto configurations are no longer pushed as CIs** to any CMDB.
+    Records an earlier version created that way are left as they are. ServiceNow pushes now
+    need a discovery-source value on the instance (see the CMDB guide).
+  - The CMDB profile's **On conflict** setting is removed; nothing ever read it.
+- **New Enterprise image for the integration service.** The commercial image set is now
+  **19 images**. It is deployed only by the commercial chart; Core installs do not have it.
+- **API tokens are for AI assistants (MCP) only.** Other REST endpoints answer 401 to a
+  personal token, as they always did; the documentation and My Profile → API Tokens now say
+  so and offer only the scopes an MCP tool uses.
+- **Same-device merging is on by default** and runs as a background worker in
+  `inventory-service`. Turn it off under Settings → Policies → Identification rules, or
+  set `IDENTITY_RULE_MERGE_WORKER_ENABLED=false` on `inventory-service` to stop the worker
+  for the deployment. The first identity-enrichment cycle after upgrade re-queues work once.
+- **Behaviour changes to be aware of.** Email with no SMTP host configured now fails once
+  with "Email delivery isn't configured by the platform operator" and is not retried. Channel
+  **Test** answers 422 with a `reason` instead of 500. Creating a platform integration of type
+  Slack, PagerDuty, Datadog or Splunk through the admin API answers 400 and names where the
+  job is done. The Audit alert rules list under Settings → Alert Rules, the SMS option in the
+  admin channel form, and monitoring-service's own notification senders are removed (the
+  `monitoring_notification_channels` table is dropped on upgrade when empty; a hand-filled
+  one is left, unread). Inventory CSV, CycloneDX xBOM and OCSF exports now omit the risk score
+  of an asset nobody has assessed instead of writing 0.
+
+### Editions
+
+**Core** includes everything in this release except the external-system connectors:
+notification channels (Slack, PagerDuty, email, generic webhook, in-app), cloud
+integrations, the identity and merge improvements, the corrected exports, the MCP interface
+and the egress-proxy support. **Enterprise** adds SIEM export, NetBox, and CMDB sync
+(ServiceNow, Device42, SolarWinds, Oomnitza), all served by the new integration service.
+Core answers `402 Payment Required` at the edge for an Enterprise capability rather than
+hiding that it exists. The authoritative list is generated, not asserted:
+[`docsv4/core/editions.md`](docsv4/core/editions.md).
+
+**How far each vendor is verified.** Splunk and Elasticsearch are verified end to end
+against the real products. Datadog, ServiceNow, Device42, SolarWinds and Oomnitza are
+contract-tested against their documented APIs only.
+
+### Verify
+
+Core — no key to trust; the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.1.0 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.1.0` for the image.
+Enterprise and MSP customers verify the commercial images and chart against a different signing
+workflow; the command is in the Enterprise section of the release-notes document below.
+
+**Full list of changes:** [`docsv4/core/releases/4.1.0.md`](docsv4/core/releases/4.1.0.md)
+— every Added, Changed, Fixed, Removed and Security entry, with the exact names and the
+commercial verification command for Enterprise and MSP.
+
+<!-- release-notes-end -->
+
 ## [4.0.0] - 2026-09-28
 
 **Version 4.0.0 aligns Core with the commercial editions.** Core was on the 1.x

@@ -240,8 +240,8 @@
           "value": "internal"
         },
         {
-          "name": "vista:asset:risk_score",
-          "value": "40"
+          "name": "vista:asset:risk_assessed",
+          "value": "false"
         },
         {
           "name": "vista:asset:status",

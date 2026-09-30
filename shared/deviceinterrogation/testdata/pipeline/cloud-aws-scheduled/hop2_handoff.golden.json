@@ -1,0 +1,202 @@
+{
+  "scenario": "cloud-aws-scheduled",
+  "input_sha256": "0749e7251b9c2056b07f4452a0b304fc4ddc72fd274a57cf19fb92e98f879d4a",
+  "runs": [
+    {
+      "imports": [
+        {
+          "asset_status": "pending_approval",
+          "findings": [
+            {
+              "asset_type": "service",
+              "cipher_suite": null,
+              "hash_algorithm": null,
+              "hostname": "example-audit-logs",
+              "ip_address": "0.0.0.0",
+              "key_exchange_algorithm": null,
+              "key_size": null,
+              "port": 0,
+              "protocol": "",
+              "protocol_version": null,
+              "raw_data": {
+                "algorithm": "AES-256",
+                "arn": "arn:aws:s3:::example-audit-logs",
+                "at_rest": true,
+                "batch_id": "{{BATCH_ID}}",
+                "cloud_provider": "aws",
+                "cloud_region": "us-east-1",
+                "confidence": 0.8,
+                "dest_hostname_source_kind": "measured",
+                "device_type": "aws_s3_bucket",
+                "discovery_id": "{{DISCOVERY_ID:0}}",
+                "discovery_method": "cloud_api",
+                "encrypted": true,
+                "encryption_type": "aws-kms",
+                "integration_id": "{{INTEGRATION_ID}}",
+                "network_ownership": "unknown",
+                "network_type": "private",
+                "pqc_kex_detected": false,
+                "region": "us-east-1",
+                "resource_type": "s3_bucket",
+                "sensor_id": "{{SENSOR_ID}}",
+                "source": "cloud_discovery",
+                "timestamp": "{{TIMESTAMP}}"
+              },
+              "source_sensor_id": "{{SENSOR_ID}}"
+            },
+            {
+              "asset_type": "server",
+              "cipher_suite": null,
+              "hash_algorithm": null,
+              "hostname": "orders-db",
+              "ip_address": "0.0.0.0",
+              "key_exchange_algorithm": null,
+              "key_size": null,
+              "port": 0,
+              "protocol": "",
+              "protocol_version": null,
+              "raw_data": {
+                "algorithm": "AES-256",
+                "arn": "arn:aws:rds:us-east-1:123456789012:db:orders-db",
+                "at_rest": true,
+                "batch_id": "{{BATCH_ID}}",
+                "cloud_provider": "aws",
+                "cloud_region": "us-east-1",
+                "confidence": 0.8,
+                "dest_hostname_source_kind": "measured",
+                "device_type": "aws_rds_instance",
+                "discovery_id": "{{DISCOVERY_ID:1}}",
+                "discovery_method": "cloud_api",
+                "encrypted": true,
+                "encryption_type": "aws-kms",
+                "integration_id": "{{INTEGRATION_ID}}",
+                "network_ownership": "unknown",
+                "network_type": "private",
+                "pqc_kex_detected": false,
+                "region": "us-east-1",
+                "resource_type": "rds_instance",
+                "sensor_id": "{{SENSOR_ID}}",
+                "source": "cloud_discovery",
+                "timestamp": "{{TIMESTAMP}}"
+              },
+              "source_sensor_id": "{{SENSOR_ID}}"
+            }
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "row": 0,
+          "approval_status": "pending",
+          "processed": true,
+          "forwarded": "import"
+        },
+        {
+          "row": 1,
+          "approval_status": "pending",
+          "processed": true,
+          "forwarded": "import"
+        }
+      ],
+      "process_error": ""
+    },
+    {
+      "imports": [
+        {
+          "asset_status": "pending_approval",
+          "findings": [
+            {
+              "asset_type": "service",
+              "cipher_suite": null,
+              "hash_algorithm": null,
+              "hostname": "example-audit-logs",
+              "ip_address": "0.0.0.0",
+              "key_exchange_algorithm": null,
+              "key_size": null,
+              "port": 0,
+              "protocol": "",
+              "protocol_version": null,
+              "raw_data": {
+                "algorithm": "AES-256",
+                "arn": "arn:aws:s3:::example-audit-logs",
+                "at_rest": true,
+                "batch_id": "{{BATCH_ID}}",
+                "cloud_provider": "aws",
+                "cloud_region": "us-east-1",
+                "confidence": 0.8,
+                "dest_hostname_source_kind": "measured",
+                "device_type": "aws_s3_bucket",
+                "discovery_id": "{{DISCOVERY_ID:0}}",
+                "discovery_method": "cloud_api",
+                "encrypted": true,
+                "encryption_type": "aws-kms",
+                "integration_id": "{{INTEGRATION_ID}}",
+                "network_ownership": "unknown",
+                "network_type": "private",
+                "pqc_kex_detected": false,
+                "region": "us-east-1",
+                "resource_type": "s3_bucket",
+                "sensor_id": "{{SENSOR_ID}}",
+                "source": "cloud_discovery",
+                "timestamp": "{{TIMESTAMP}}"
+              },
+              "source_sensor_id": "{{SENSOR_ID}}"
+            },
+            {
+              "asset_type": "server",
+              "cipher_suite": null,
+              "hash_algorithm": null,
+              "hostname": "orders-db",
+              "ip_address": "0.0.0.0",
+              "key_exchange_algorithm": null,
+              "key_size": null,
+              "port": 0,
+              "protocol": "",
+              "protocol_version": null,
+              "raw_data": {
+                "algorithm": "AES-256",
+                "arn": "arn:aws:rds:us-east-1:123456789012:db:orders-db",
+                "at_rest": true,
+                "batch_id": "{{BATCH_ID}}",
+                "cloud_provider": "aws",
+                "cloud_region": "us-east-1",
+                "confidence": 0.8,
+                "dest_hostname_source_kind": "measured",
+                "device_type": "aws_rds_instance",
+                "discovery_id": "{{DISCOVERY_ID:1}}",
+                "discovery_method": "cloud_api",
+                "encrypted": true,
+                "encryption_type": "aws-kms",
+                "integration_id": "{{INTEGRATION_ID}}",
+                "network_ownership": "unknown",
+                "network_type": "private",
+                "pqc_kex_detected": false,
+                "region": "us-east-1",
+                "resource_type": "rds_instance",
+                "sensor_id": "{{SENSOR_ID}}",
+                "source": "cloud_discovery",
+                "timestamp": "{{TIMESTAMP}}"
+              },
+              "source_sensor_id": "{{SENSOR_ID}}"
+            }
+          ]
+        }
+      ],
+      "rows": [
+        {
+          "row": 0,
+          "approval_status": "pending",
+          "processed": true,
+          "forwarded": "import"
+        },
+        {
+          "row": 1,
+          "approval_status": "pending",
+          "processed": true,
+          "forwarded": "import"
+        }
+      ],
+      "process_error": ""
+    }
+  ]
+}

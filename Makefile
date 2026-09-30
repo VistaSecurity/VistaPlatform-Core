@@ -314,6 +314,7 @@ _ALL_SVCS = auth-service inventory-service compliance-engine cbom-service \
 	device-interrogation-service discovery-processor-service notification-service \
 	pcap-processor mcp-service
 
+
 # Frontend images — distinct list because they don't have license-protected
 # Go code to obfuscate, so they build from Dockerfile.prod (not .dist) and
 # don't get -tags ee treatment. Still part of every customer release.
@@ -322,9 +323,10 @@ _ALL_SVCS = auth-service inventory-service compliance-engine cbom-service \
 # (build-and-swap, ADR-0013).
 _ALL_UIS = web-ui admin-ui
 
-# Full release-image set (18 total). The release-customer.yml workflow
-# iterates over this same set when promoting Harbor → Docker Hub, so keep
-# them in sync.
+# Full commercial release-image set (19 total: 17 backends, one of them
+# Enterprise-only and absent from a Core tree, + 2 UIs). The release-customer.yml
+# workflow iterates over this same set when promoting Harbor → Docker Hub, so
+# keep them in sync.
 _ALL_IMAGES = $(_ALL_SVCS) $(_ALL_UIS)
 
 .PHONY: build-licensed push-licensed \
@@ -339,14 +341,9 @@ _ALL_IMAGES = $(_ALL_SVCS) $(_ALL_UIS)
 build-licensed: ## Build licensed (dev-key, no obfuscation) images for all services
 	@if [ -z "$(IMAGE_REGISTRY)" ]; then echo "ERROR: IMAGE_REGISTRY is required. Run: make build-licensed LICENSED_TAG=<tag> IMAGE_REGISTRY=<registry>"; exit 1; fi
 	@echo "Building licensed images with tag $(LICENSED_TAG) ..."
-	@$(MAKE) -j$(shell nproc) \
-		build-licensed-auth-service build-licensed-inventory-service build-licensed-compliance-engine \
-		build-licensed-cbom-service build-licensed-sensor-manager build-licensed-admin-service \
-		build-licensed-monitoring-service build-licensed-cluster-sensor-service \
-		build-licensed-resource-tracker-service build-licensed-tenant-health-service \
-		build-licensed-audit-service \
-		build-licensed-device-interrogation-service build-licensed-discovery-processor-service \
-		build-licensed-notification-service build-licensed-pcap-processor build-licensed-mcp-service
+	@# Derived from _ALL_SVCS (not restated) so push-licensed and this target
+	@# cannot disagree about which images exist.
+	@$(MAKE) -j$(shell nproc) $(addprefix build-licensed-,$(_ALL_SVCS))
 	@echo "Licensed images built. Run: make push-licensed LICENSED_TAG=$(LICENSED_TAG) IMAGE_REGISTRY=$(IMAGE_REGISTRY)"
 
 build-licensed-auth-service:
@@ -424,13 +421,14 @@ push-licensed: ## Push licensed images to registry (requires LICENSED_TAG and IM
 # ---------------------------------------------------------------------------
 # Dist image targets — the full customer release set.
 #
-# Backends (16): garble-obfuscated Enterprise edition (-tags ee)
+# Backends (17): garble-obfuscated Enterprise edition (-tags ee)
 #                via per-service Dockerfile.dist. pcap-processor uses
 #                Dockerfile.prod because CGO can't be garble-obfuscated.
 # Frontends (2): web-ui + admin-ui from Dockerfile.prod. No license code to
 #                obfuscate; Vite already produces minified production assets.
 #
-# Total: 18 images, matching the matrix in .github/workflows/release-customer.yml.
+# Total: 19 images (_ALL_IMAGES), matching the matrix in
+# .github/workflows/release-customer.yml.
 # Use these when staging a release to Harbor for promotion to Docker Hub.
 # ---------------------------------------------------------------------------
 .PHONY: build-dist push-dist \
@@ -443,18 +441,12 @@ push-licensed: ## Push licensed images to registry (requires LICENSED_TAG and IM
 	build-dist-notification-service build-dist-pcap-processor build-dist-mcp-service \
 	build-dist-web-ui build-dist-admin-ui
 
-build-dist: ## Build the 18-image dist set (16 backends + web-ui + admin-ui). Requires DIST_TAG and IMAGE_REGISTRY.
+build-dist: ## Build the 19-image dist set (17 backends + web-ui + admin-ui). Requires DIST_TAG and IMAGE_REGISTRY.
 	@if [ -z "$(IMAGE_REGISTRY)" ]; then echo "ERROR: IMAGE_REGISTRY is required. Run: make build-dist DIST_TAG=<tag> IMAGE_REGISTRY=<registry>"; exit 1; fi
 	@echo "Building dist images with tag $(DIST_TAG) ..."
-	@$(MAKE) -j$(shell nproc) \
-		build-dist-auth-service build-dist-inventory-service build-dist-compliance-engine \
-		build-dist-cbom-service build-dist-sensor-manager build-dist-admin-service \
-		build-dist-monitoring-service build-dist-cluster-sensor-service \
-		build-dist-resource-tracker-service build-dist-tenant-health-service \
-		build-dist-audit-service \
-		build-dist-device-interrogation-service build-dist-discovery-processor-service \
-		build-dist-notification-service build-dist-pcap-processor build-dist-mcp-service \
-		build-dist-web-ui build-dist-admin-ui
+	@# Derived from _ALL_IMAGES (not restated) so push-dist, this target and the
+	@# release-customer.yml matrix share one list to keep in sync.
+	@$(MAKE) -j$(shell nproc) $(addprefix build-dist-,$(_ALL_IMAGES))
 	@echo "Dist images built. Run: make push-dist DIST_TAG=$(DIST_TAG) IMAGE_REGISTRY=$(IMAGE_REGISTRY)"
 
 build-dist-auth-service:
@@ -517,6 +509,7 @@ build-dist-mcp-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/mcp-service/Dockerfile.dist \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/mcp-service:$(DIST_TAG) .
 
+
 build-dist-pcap-processor: ## pcap-processor uses CGO — no garble, but included in dist release
 	docker build $(BASE_IMAGE_ARGS) -f services/pcap-processor/Dockerfile.prod \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/pcap-processor:$(DIST_TAG) .
@@ -539,7 +532,10 @@ build-dist-admin-ui: ## Admin console (VISTA Operations) — built from admin-ui
 		--build-arg VITE_BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/admin-ui:$(DIST_TAG) .
 
-push-dist: ## Push the 20-image dist set to registry (requires DIST_TAG and IMAGE_REGISTRY)
+print-release-images: ## Print the commercial release-image set (_ALL_IMAGES), one per line
+	@printf '%s\n' $(_ALL_IMAGES)
+
+push-dist: ## Push the 19-image dist set to registry (requires DIST_TAG and IMAGE_REGISTRY)
 	@if [ -z "$(IMAGE_REGISTRY)" ]; then echo "ERROR: IMAGE_REGISTRY is required."; exit 1; fi
 	@echo "Pushing dist images with tag $(DIST_TAG) ..."
 	@for img in $(_ALL_IMAGES); do \
@@ -1026,8 +1022,6 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/sensor-manager && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (audit-service/activity-logs + alert-rules + audit-batch)..."
 	@cd services/audit-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
-	@echo "==> API contract: running Go contract tests (audit-service EE SIEM export: integrations + types + test-connection)..."
-	@cd services/audit-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) sh -c 'if [ -d ee/siemexport ]; then go test ./ee/siemexport/ -run Contract; else echo "  (ee/ absent — open-source checkout, skipping)"; fi'
 	@echo "==> API contract: running Go contract tests (device-interrogation-service/jobs + device-action-validation)..."
 	@cd services/device-interrogation-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ -run Contract
 	@echo "==> API contract: running Go contract tests (notification-service/tenant-channels+rules + platform-channels+rules)..."
@@ -1047,6 +1041,7 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@echo "==> API contract: mcp-service tool-surface snapshot (JSON-RPC, so OpenAPI does not apply)..."
 	@cd services/mcp-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/server/ -run ToolSurface
 	@echo "✅ Contract tests pass — live handlers conform to the spec."
+
 
 chart-lint: ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
 	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-lint"; exit 1; }

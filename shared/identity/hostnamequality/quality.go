@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
 )
 
 // Rank is the quality of a host name. Higher is better. RankNone is "not a
@@ -187,6 +189,55 @@ func ShouldPromote(current, incoming, currentSrc, incomingSrc string) bool {
 	}
 	sr, irk := sourceRank(currentSrc), sourceRank(incomingSrc)
 	return irk >= sr
+}
+
+// IsIdentityName reports whether name may be recorded as a hostname / fqdn
+// IDENTIFIER — a value that says which device this is ( D1).
+//
+// Three label shapes are not identity, whatever domain follows them:
+//
+//   - UUID-form (`<uuid>.local`): a service instance name, and Google Cast
+//     rotates it. One device collected a thousand of them, each a value the
+//     matcher would never see again.
+//   - IP-encoded (`192-0-2-5.local`, `203-0-113-9.isp.example`): the lease
+//     written as a name. It identifies the address, not the thing holding it.
+//   - `none` / `none-N`: a placeholder a device sends when it has no name.
+//
+// A 12-hex label (`1f852cc29a96.local`) IS kept: it ranks synthetic for
+// DISPLAY ([Of]), but it is derived from the device's own hardware address and
+// is the only stable name some IoT devices ever announce.
+//
+// Only the first label is judged. A name that is not identity is still true:
+// callers keep it as the `synthetic_names` attribute ([MergeSyntheticNames]).
+func IsIdentityName(name string) bool {
+	n := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if n == "" {
+		return false
+	}
+	label, _, _ := strings.Cut(n, ".")
+	if label == "" {
+		return false
+	}
+	if uuidLike.MatchString(label) || isIPEncodedLabel(label) || noneN.MatchString(label) {
+		return false
+	}
+	return true
+}
+
+// MaxSyntheticNames bounds the `synthetic_names` attribute. A rotating
+// advertisement produces a new name per announcement; the attribute exists to
+// explain an asset, not to archive every rotation.
+const MaxSyntheticNames = 20
+
+// MergeSyntheticNames folds the names a sighting carried into the asset's
+// stored `synthetic_names`: normalised (trimmed, lower case, no trailing dot),
+// deduplicated, most recent first, capped at [MaxSyntheticNames]. incoming is
+// the newer evidence and goes in front, in its own order; existing follows.
+//
+// It is [attrlist.Merge] at this attribute's cap: the same fold the IPv6
+// attributes of D2 use, in one place.
+func MergeSyntheticNames(incoming, existing []string) []string {
+	return attrlist.Merge(incoming, existing, MaxSyntheticNames)
 }
 
 var (

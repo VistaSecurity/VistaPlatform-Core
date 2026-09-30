@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/cloudcredentials"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
 
@@ -47,12 +48,10 @@ const DefaultRegion = "us-east-1"
 // UI displays it. external_id IS here: it is a shared secret between us and the
 // customer's role trust policy, and possession of it is half of the assume-role
 // authorization decision.
-var SensitiveConfigKeys = []string{
-	"access_key_id",
-	"secret_access_key",
-	"session_token",
-	"external_id",
-}
+//
+// The list itself lives in shared/cloudcredentials so admin-service's
+// platform-integration writer uses the same one.
+var SensitiveConfigKeys = cloudcredentials.AWS
 
 // legacyPlaintextConfigKeys names the sensitive keys that were stored in
 // PLAINTEXT before they were classified as sensitive. Rows written before that
@@ -322,6 +321,15 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 		return nil, fmt.Errorf("failed to load AWS integration: %w", err)
 	}
 
+	return NewClientFromStoredConfig(ctx, integrationID, configJSON, accountID.String, region.String, masterKey)
+}
+
+// NewClientFromStoredConfig builds a Client from an integration row's stored
+// (encrypted-at-rest) config JSON plus its account_id and region columns.
+// NewClient is this plus the row lookup; it is split out so a test can feed it
+// exactly what the integrations handler writes and prove the two agree on what
+// is encrypted.
+func NewClientFromStoredConfig(ctx context.Context, integrationID uuid.UUID, configJSON, accountID, rowRegion, masterKey string) (*Client, error) {
 	// Decrypt credentials
 	enc, err := encryption.NewService(masterKey)
 	if err != nil {
@@ -342,8 +350,8 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 
 	// The integration row's region column wins over the config's; fall back to
 	// the config value, then the default.
-	if region.String != "" {
-		credCfg.Region = region.String
+	if rowRegion != "" {
+		credCfg.Region = rowRegion
 	}
 	if credCfg.Region == "" {
 		credCfg.Region = DefaultRegion
@@ -356,7 +364,7 @@ func NewClient(ctx context.Context, bypassDB *sql.DB, integrationID uuid.UUID, m
 
 	return &Client{
 		config:        cfg,
-		accountID:     accountID.String,
+		accountID:     accountID,
 		region:        credCfg.Region,
 		integrationID: integrationID,
 	}, nil

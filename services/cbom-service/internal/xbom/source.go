@@ -114,6 +114,7 @@ func (s *Source) loadAssets(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 		       COALESCE(owner_email, ''), COALESCE(site, ''),
 		       COALESCE(region, ''), COALESCE(zone, ''),
 		       asset_status, asset_ownership, risk_score,
+		       (COALESCE(cardinality(risk_assessed_by), 0) > 0 OR risk_score > 0),
 		       first_discovered_at, last_seen_at, tags
 		FROM public.assets
 		WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL
@@ -135,7 +136,7 @@ func (s *Source) loadAssets(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 			&a.Environment, &a.BusinessUnit,
 			&a.OwnerEmail, &a.Site,
 			&a.Region, &a.Zone,
-			&a.AssetStatus, &a.AssetOwnership, &a.RiskScore,
+			&a.AssetStatus, &a.AssetOwnership, &a.RiskScore, &a.RiskAssessed,
 			&a.FirstSeenAt, &a.LastSeenAt, &tagsJSON,
 		); err != nil {
 			return fmt.Errorf("xbom: scan asset: %w", err)

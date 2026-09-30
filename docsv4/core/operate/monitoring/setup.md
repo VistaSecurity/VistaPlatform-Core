@@ -30,10 +30,8 @@ Vista Platform includes comprehensive system monitoring and alerting capabilitie
 - **Service-Specific**: Configure alerts for specific services or platform-wide
 
 ### Multi-Channel Notifications
-- **Slack Integration**: Receive alerts in Slack channels
-- **Webhook Notifications**: Custom webhook endpoints for any integration
-- **PagerDuty Integration**: Critical alert escalation
-- **Email Notifications**: Email alerts (production integration ready)
+- **Delivered by the notification service**: threshold alerts go through the platform notification channels and routing rules (in-app, email, Slack, webhook, PagerDuty)
+- **Configured in one place**: admin console → **Settings → Notification Delivery**
 - **In-App Notifications**: Dashboard alerts
 
 ---
@@ -169,10 +167,10 @@ DELETE /api/v1/monitoring-service/alerting/thresholds/{id}
 | `critical_threshold` | float | Optional | Critical level threshold |
 | `severity` | string | Yes | `low`, `medium`, `high`, `critical` |
 | `enabled` | boolean | Yes | Whether threshold is active |
-| `notify_email` | boolean | Yes | Enable email notifications |
-| `notify_slack` | boolean | Yes | Enable Slack notifications |
-| `notify_webhook` | boolean | Yes | Enable webhook notifications |
-| `notify_in_app` | boolean | Yes | Enable in-app notifications |
+| `notify_email` | boolean | Yes | Stored only — delivery is decided by the platform notification rules |
+| `notify_slack` | boolean | Yes | Stored only (see above) |
+| `notify_webhook` | boolean | Yes | Stored only (see above) |
+| `notify_in_app` | boolean | Yes | Stored only (see above) |
 | `comparison_operator` | string | Yes | `gt`, `gte`, `lt`, `lte`, `eq` |
 | `duration_minutes` | integer | Yes | Duration threshold must be exceeded (prevents spam) |
 | `description` | string | Optional | Human-readable description |
@@ -245,149 +243,29 @@ GET /api/v1/monitoring-service/trends?metric_type=latency_p95&window=1h&service_
 
 ## 🔔 Notification Setup
 
-> **Note**: The platform now uses a unified notification service. For comprehensive notification setup, see [Notification Provider Integration Guide](../operations/notification-providers.md).
+monitoring-service does not send notifications itself. When a threshold is
+breached (and again when a security incident is raised from the log store) it
+publishes a **platform** notification to the notification service, which routes
+it through the platform notification channels and rules. There is nothing to
+configure in monitoring-service.
 
-### Legacy Notification Channels
+1. Open the admin console → **Settings → Notification Delivery**.
+2. Add a channel (in-app, email, Slack, webhook or PagerDuty) — provider steps are
+   in the [Notification Provider Integration Guide](../operations/notification-providers.md).
+3. Add a routing rule that sends the severities you want (for example
+   critical + high) to that channel, and use **Test** on the channel to confirm it
+   delivers.
 
-The following sections document the legacy notification system. For new deployments, use the unified notification service instead.
+A fresh install already has a default pack: an in-app channel plus an email
+channel to the `super_admin` platform users, with one rule for critical/high alerts
+and one for everything else.
 
-### Slack Integration
-
-1. **Create Slack Webhook**:
-   - Go to your Slack workspace settings
-   - Navigate to Apps → Incoming Webhooks
-   - Create a new webhook for your channel
-   - Copy the webhook URL
-
-2. **Create Notification Channel** (via database):
-   ```sql
-   INSERT INTO monitoring_notification_channels (
-     channel_name,
-     channel_type,
-     config,
-     enabled
-   ) VALUES (
-     'Production Alerts',
-     'slack',
-     '{"webhook_url": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"}'::jsonb,
-     true
-   );
-   ```
-
-3. **Enable Slack Notifications**:
-   - Set `notify_slack: true` in your alert thresholds
-   - Alerts will be sent as formatted Slack messages with severity colors
-
-### Webhook Integration
-
-1. **Create Notification Channel**:
-   ```sql
-   INSERT INTO monitoring_notification_channels (
-     channel_name,
-     channel_type,
-     config,
-     enabled
-   ) VALUES (
-     'Custom Webhook',
-     'webhook',
-     '{
-       "url": "https://your-webhook-endpoint.com/alerts",
-       "headers": {
-         "Authorization": "Bearer YOUR_TOKEN",
-         "X-Custom-Header": "value"
-       }
-     }'::jsonb,
-     true
-   );
-   ```
-
-2. **Webhook Payload Format**:
-   ```json
-   {
-     "alert": {
-       "threshold_name": "high_response_time",
-       "service_name": "api-gateway",
-       "metric_type": "response_time",
-       "severity": "critical",
-       "threshold": 500.0,
-       "actual_value": 850.5,
-       "message": "high_response_time exceeded threshold: 500.00 (actual: 850.50)",
-       "timestamp": "2026-04-18T12:00:00Z",
-       "metadata": {
-         "comparison_operator": "gt",
-         "service_status": "degraded"
-       }
-     },
-     "channel": {
-       "name": "Custom Webhook",
-       "type": "webhook"
-     },
-     "timestamp": 1736856000
-   }
-   ```
-
-### Legacy: PagerDuty Integration (Deprecated)
-
-> **Deprecated**: Use the unified notification service instead. This section is kept for reference only.
-
-1. **Create PagerDuty Integration Key**:
-   - Log into PagerDuty
-   - Create a new integration (Events API v2)
-   - Copy the integration key
-
-2. **Create Notification Channel**:
-   ```sql
-   INSERT INTO monitoring_notification_channels (
-     channel_name,
-     channel_type,
-     config,
-     enabled
-   ) VALUES (
-     'PagerDuty Critical',
-     'pagerduty',
-     '{"integration_key": "YOUR_PAGERDUTY_KEY"}'::jsonb,
-     true
-   );
-   ```
-
-3. **Enable PagerDuty Notifications**:
-   - Configure alert thresholds with `notify_pagerduty: true`
-   - Critical alerts will trigger PagerDuty incidents
-
-### Unified: Email Notifications
-
-Email notifications use the unified notification service. See [Notification Provider Integration Guide](../operations/notification-providers.md) for:
-- Gmail setup (development/testing)
-- SendGrid setup (recommended for production)
-- AWS SES setup (production)
-- Office 365 setup
-- Tenant email configuration
-
-**Legacy Email Configuration (Deprecated):**
-
-> **Deprecated**: The following describes the legacy email system. New deployments should use the unified notification service.
-
-Email notifications are now fully implemented with a hybrid approach:
-
-**Platform Default Configuration:**
-- Configured via `platform_settings` table (`email_config` setting)
-- Used by all tenants unless they configure their own SMTP
-- SMTP credentials stored encrypted in database
-
-**Tenant Override (Optional):**
-- Tenants can configure their own SMTP in `tenant_admin_settings.config.email_config`
-- Set `use_platform_default: false` and provide SMTP credentials
-- SMTP passwords encrypted using `ENCRYPTION_MASTER_KEY`
-
-**Configuration:**
-- Platform admins configure default SMTP via Admin UI or database
-- Tenant admins can override via Tenant Settings (if enabled)
-- Resolution: tenant override → platform default → environment variables
-
-**Implementation:**
-- Uses `shared/email` package with tenant-aware configuration
-- Supports multiple recipients per notification channel
-- Error handling: logs failures but doesn't block other notification channels
+> **Removed.** Earlier versions read channels from a `monitoring_notification_channels`
+> table that nothing ever populated through the product, and the `notify_email` /
+> `notify_slack` / `notify_webhook` flags on a threshold were never consulted. Both
+> are gone from the delivery path; routing is decided by the platform rules above.
+> If you inserted rows into that table by hand, they are not used — recreate those
+> channels in **Settings → Notification Delivery**.
 
 ---
 
@@ -456,7 +334,6 @@ ALERT_EVALUATION_INTERVAL=5m
 
 **monitoring_alert_thresholds**: Stores alert threshold configurations  
 **monitoring_alert_history**: Stores triggered alerts  
-**monitoring_notification_channels**: Stores notification channel configurations
 
 See database migration `23-monitoring-alerting-schema.sql` for full schema details.
 
@@ -473,11 +350,11 @@ See database migration `23-monitoring-alerting-schema.sql` for full schema detai
 
 ### Notifications Not Sending
 
-1. **Verify Channel Configuration**: Check `monitoring_notification_channels` table
-2. **Test Channel**: Use API to send test notification
-3. **Check Channel Status**: Ensure channel is `enabled: true`
-4. **Review Logs**: Check monitoring service logs for notification errors
-5. **Network Connectivity**: Verify webhook endpoints are accessible
+1. **Check the routing rules**: in **Settings → Notification Delivery**, confirm an enabled rule covers the alert's severity and points at an enabled channel
+2. **Test the channel**: use the channel's **Test** button — it reports why delivery failed (unreachable endpoint, rejected credential, email not configured)
+3. **Read the delivery history** on the same page: it shows which channels a notification went to, or that no rule matched
+4. **Review Logs**: monitoring-service logs `alerts.raise publish failed` / `NATS notification publish failed` when it cannot reach the message bus
+5. **Network Connectivity**: verify webhook endpoints are accessible
 
 ### Charts Not Displaying Data
 

@@ -1,7 +1,9 @@
 package services
 
-// The tenant's identification settings — today, one number: the learned
-// matcher's auto-accept threshold (workstream 4.6, ADR-0002 D3).
+// The tenant's identification settings — two today: the learned matcher's
+// auto-accept threshold (workstream 4.6, ADR-0002 D3), and whether a fixed rule
+// may merge two existing assets it is sure are one device ( Phase 4, owner
+// decision D1).
 //
 // It lives in `tenant_admin_settings.config` under the `identity` key, beside
 // `discovery_auto_scan` and `network_spaces`, because that is where this
@@ -14,6 +16,8 @@ package services
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -37,10 +41,15 @@ const (
 	IdentitySettingsKey        = identitysettings.Key
 	AutoAcceptThresholdKey     = identitysettings.AutoAcceptThresholdKey
 	DefaultAutoAcceptThreshold = identitysettings.DefaultAutoAcceptThreshold
+	AutoMergeExistingKey       = identitysettings.AutoMergeExistingKey
+	DefaultAutoMergeExisting   = identitysettings.DefaultAutoMergeExisting
 )
 
 // ErrInvalidAutoAcceptThreshold is returned for a threshold outside 0..1.
 var ErrInvalidAutoAcceptThreshold = identitysettings.ErrInvalidAutoAcceptThreshold
+
+// ErrEmptyIdentificationUpdate is returned for an update that names no field.
+var ErrEmptyIdentificationUpdate = errors.New("nothing to update: send auto_accept_threshold, auto_merge_existing, or both")
 
 // IdentificationSettings is the tenant's identification configuration as the
 // Settings page reads and writes it.
@@ -48,6 +57,12 @@ type IdentificationSettings struct {
 	// AutoAcceptThreshold is the matcher score at or above which the engine may
 	// accept a merge proposal on the tenant's behalf. 0 means never.
 	AutoAcceptThreshold float64 `json:"auto_accept_threshold"`
+
+	// AutoMergeExisting is whether a fixed rule may merge two EXISTING assets
+	// it is sure are one device, without a person deciding. It is the
+	// EFFECTIVE value — an absent setting reads TRUE (owner decision D1), and
+	// this field is what the page shows, so it never renders "unset".
+	AutoMergeExisting bool `json:"auto_merge_existing"`
 
 	// MatcherModelID names the model that will do the scoring, so the page can
 	// say what the threshold is a threshold ON. Empty when no matcher is
@@ -59,6 +74,23 @@ type IdentificationSettings struct {
 	// Version is `tenant_admin_settings.version` after the write, echoed so a
 	// caller can see its change landed.
 	Version int `json:"version,omitempty"`
+}
+
+// IdentificationSettingsUpdate is a PARTIAL write: a nil field is "leave it
+// alone", which is a different instruction from zero or false.
+//
+// The distinction is load-bearing on both fields. A nil threshold that was
+// written as 0 would turn the tenant's auto-accept OFF because they flipped an
+// unrelated toggle; a nil rule-merge switch written as false would turn a
+// default-ON rule off for a tenant who only touched the threshold.
+type IdentificationSettingsUpdate struct {
+	AutoAcceptThreshold *float64
+	AutoMergeExisting   *bool
+}
+
+// IsEmpty reports an update that changes nothing.
+func (u IdentificationSettingsUpdate) IsEmpty() bool {
+	return u.AutoAcceptThreshold == nil && u.AutoMergeExisting == nil
 }
 
 // IdentificationSettingsService reads and writes them.
@@ -74,13 +106,21 @@ func NewIdentificationSettingsService(db *database.DB) *IdentificationSettingsSe
 // Get returns the tenant's settings, or the defaults when they have never been
 // written.
 func (s *IdentificationSettingsService) Get(ctx context.Context, tenantID uuid.UUID) (IdentificationSettings, error) {
-	out := IdentificationSettings{AutoAcceptThreshold: DefaultAutoAcceptThreshold}
+	out := IdentificationSettings{
+		AutoAcceptThreshold: DefaultAutoAcceptThreshold,
+		AutoMergeExisting:   DefaultAutoMergeExisting,
+	}
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		threshold, err := identitysettings.ReadAutoAcceptThreshold(ctx, tx, tenantID)
 		if err != nil {
 			return err
 		}
 		out.AutoAcceptThreshold = threshold
+		merge, err := identitysettings.ReadAutoMergeExisting(ctx, tx, tenantID)
+		if err != nil {
+			return err
+		}
+		out.AutoMergeExisting = merge
 		return nil
 	})
 	if err != nil {
@@ -89,17 +129,48 @@ func (s *IdentificationSettingsService) Get(ctx context.Context, tenantID uuid.U
 	return out, nil
 }
 
-// Set writes the threshold, preserving every other key in the config.
-//
-// A value outside 0..1 is REFUSED rather than clamped. Clamping 1.5 to 1 would
-// store a threshold the tenant did not ask for on the one setting that decides
-// whether the platform may merge two assets unasked, and "we rounded your
-// number" is not an acceptable answer there.
+// Set writes the threshold alone, leaving the rule-merge switch as it was. It is
+// [IdentificationSettingsService.Update] for the caller that only ever had one
+// number to write.
 func (s *IdentificationSettingsService) Set(ctx context.Context, tenantID, actorUserID uuid.UUID, threshold float64) (IdentificationSettings, error) {
-	if threshold < 0 || threshold > 1 {
-		return IdentificationSettings{}, fmt.Errorf("%w (got %v)", ErrInvalidAutoAcceptThreshold, threshold)
+	return s.Update(ctx, tenantID, actorUserID, IdentificationSettingsUpdate{AutoAcceptThreshold: &threshold})
+}
+
+// Update applies a partial write, preserving every other key in the config —
+// including the identity block's own other key: sending only the rule-merge
+// switch leaves the threshold untouched, and the reverse.
+//
+// A threshold outside 0..1 is REFUSED rather than clamped. Clamping 1.5 to 1
+// would store a threshold the tenant did not ask for on the one setting that
+// decides whether the platform may merge two assets on a model's say-so, and
+// "we rounded your number" is not an acceptable answer there.
+//
+// The returned settings are the EFFECTIVE values after the write (both fields),
+// read on the writing transaction, not an echo of the request: a caller that
+// sent one field learns what the other one is.
+func (s *IdentificationSettingsService) Update(ctx context.Context, tenantID, actorUserID uuid.UUID, in IdentificationSettingsUpdate) (IdentificationSettings, error) {
+	if in.IsEmpty() {
+		return IdentificationSettings{}, ErrEmptyIdentificationUpdate
 	}
-	var version int
+	var threshold sql.NullFloat64
+	if in.AutoAcceptThreshold != nil {
+		if *in.AutoAcceptThreshold < 0 || *in.AutoAcceptThreshold > 1 {
+			return IdentificationSettings{}, fmt.Errorf("%w (got %v)", ErrInvalidAutoAcceptThreshold, *in.AutoAcceptThreshold)
+		}
+		threshold = sql.NullFloat64{Float64: *in.AutoAcceptThreshold, Valid: true}
+	}
+	var merge sql.NullBool
+	if in.AutoMergeExisting != nil {
+		merge = sql.NullBool{Bool: *in.AutoMergeExisting, Valid: true}
+	}
+
+	var (
+		version int
+		out     = IdentificationSettings{
+			AutoAcceptThreshold: DefaultAutoAcceptThreshold,
+			AutoMergeExisting:   DefaultAutoMergeExisting,
+		}
+	)
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		// Read-modify-write inside ONE transaction. `config` is a single jsonb
 		// document several features share (discovery_auto_scan, network_spaces,
@@ -110,20 +181,26 @@ func (s *IdentificationSettingsService) Set(ctx context.Context, tenantID, actor
 		// DIFFERENT key cannot be clobbered by this one re-serialising a
 		// document it read a moment ago.
 		//
-		// The `||` before the jsonb_set is NOT redundant, and leaving it out is
-		// a silent no-op. `jsonb_set(doc, ARRAY['identity','auto_accept_threshold'], …,
-		// create_if_missing => true)` creates only the LAST element of the path:
-		// if `identity` is absent, the whole call returns its input unchanged
-		// and reports success. That is the "a rewrite that matches nothing
-		// returns its input and says nothing" shape — the threshold simply never
-		// landed, on exactly the tenants who had OTHER settings and no identity
-		// block, which is every tenant who has ever touched a setting.
+		// # Why `config || jsonb_build_object('identity', <existing> || <patch>)`
+		//
+		// The obvious form is `jsonb_set(doc, ARRAY['identity','<key>'], …,
+		// create_if_missing => true)`, and it is a SILENT NO-OP: jsonb_set
+		// creates only the LAST element of the path, so when `identity` is
+		// absent the whole call returns its input unchanged and reports
+		// success. That is the "a rewrite that matches nothing returns its
+		// input and says nothing" shape — the value simply never landed, on
+		// exactly the tenants who had OTHER settings and no identity block,
+		// which is every tenant who has ever touched a setting.
 		// TestIntegration_IdentificationSettings_PreserveOtherKeys is what
 		// caught it and is what keeps it caught.
 		//
-		// The concatenation ensures `identity` exists first, carrying forward
-		// whatever it already held (COALESCE of the existing object, not an
-		// empty one — otherwise this would clobber future keys under it).
+		// So the identity object is rebuilt: what it already held (COALESCE of
+		// the existing OBJECT — a non-object value there is replaced, not
+		// concatenated into an array), then each field the caller actually
+		// sent. A field it did not send contributes an empty object, so the
+		// stored value survives — that is the partial-update guarantee, and
+		// TestIntegration_IdentificationSettings_PartialUpdates pins both
+		// directions of it.
 		var actor any
 		if actorUserID != uuid.Nil {
 			actor = actorUserID
@@ -137,8 +214,9 @@ func (s *IdentificationSettingsService) Set(ctx context.Context, tenantID, actor
 		// therefore writes NO audit row for a tenant who has no settings row yet
 		// — and the first save is precisely the one worth recording here: it is
 		// the save that first grants the platform permission to merge two of
-		// this tenant's assets without asking. "Nothing was recorded" and
-		// "nobody changed it" would be indistinguishable afterwards.
+		// this tenant's assets without asking, or first switches the rule merge
+		// off. "Nothing was recorded" and "nobody changed it" would be
+		// indistinguishable afterwards.
 		//
 		// So: seed the row if it is missing (a no-op if it is not), then UPDATE,
 		// which always fires the trigger because `version` always moves. The
@@ -155,24 +233,42 @@ func (s *IdentificationSettingsService) Set(ctx context.Context, tenantID, actor
 			tenantID, actor); err != nil {
 			return err
 		}
-		return tx.QueryRowContext(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			UPDATE tenant_admin_settings
-			SET config = jsonb_set(
-			        COALESCE(tenant_admin_settings.config, '{}'::jsonb)
-			          || jsonb_build_object($2::text,
-			               COALESCE(tenant_admin_settings.config -> $2::text, '{}'::jsonb)),
-			        ARRAY[$2::text, $3::text],
-			        to_jsonb($4::numeric),
-			        true),
+			SET config = COALESCE(tenant_admin_settings.config, '{}'::jsonb)
+			      || jsonb_build_object($2::text,
+			           (CASE WHEN jsonb_typeof(tenant_admin_settings.config -> $2::text) = 'object'
+			                 THEN tenant_admin_settings.config -> $2::text
+			                 ELSE '{}'::jsonb END)
+			           || (CASE WHEN $4::numeric IS NULL THEN '{}'::jsonb
+			                    ELSE jsonb_build_object($3::text, to_jsonb($4::numeric)) END)
+			           || (CASE WHEN $6::boolean IS NULL THEN '{}'::jsonb
+			                    ELSE jsonb_build_object($5::text, to_jsonb($6::boolean)) END)),
 			    version = tenant_admin_settings.version + 1,
-			    updated_by = $5,
+			    updated_by = $7,
 			    updated_at = NOW()
 			WHERE tenant_id = $1
 			RETURNING version`,
-			tenantID, IdentitySettingsKey, AutoAcceptThresholdKey, threshold, actor).Scan(&version)
+			tenantID, IdentitySettingsKey, AutoAcceptThresholdKey, threshold,
+			AutoMergeExistingKey, merge, actor).Scan(&version); err != nil {
+			return err
+		}
+		// The effective values, from the same readers the engines use, so what
+		// this returns is what the next observation will see.
+		t, err := identitysettings.ReadAutoAcceptThreshold(ctx, tx, tenantID)
+		if err != nil {
+			return err
+		}
+		m, err := identitysettings.ReadAutoMergeExisting(ctx, tx, tenantID)
+		if err != nil {
+			return err
+		}
+		out.AutoAcceptThreshold, out.AutoMergeExisting = t, m
+		return nil
 	})
 	if err != nil {
 		return IdentificationSettings{}, fmt.Errorf("save the identification settings: %w", err)
 	}
-	return IdentificationSettings{AutoAcceptThreshold: threshold, Version: version}, nil
+	out.Version = version
+	return out, nil
 }

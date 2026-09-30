@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/google/uuid"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
@@ -30,8 +31,21 @@ func TestIntegration_UniFiExistingDHCPAndPreparationFailure(t *testing.T) {
 	if err := db.QueryRow(`SELECT name,metadata::text FROM network_segments WHERE id=$1`, segment).Scan(&name, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if name != "Operator LAN" || !strings.Contains(metadata, "keep") || strings.Contains(metadata, "dynamic") {
+	// The operator's segment keeps its name and its own metadata — and, since
+	//learns what the controller MEASURED about DHCP on it. Before, it
+	// stayed silent and addresses kept deciding identity on a DHCP network.
+	if name != "Operator LAN" || !strings.Contains(metadata, "keep") {
 		t.Fatalf("operator segment overwritten: %s %s", name, metadata)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta["dynamic"] != true || meta["dynamic_source"] != "measured" {
+		t.Fatalf("the controller's answer did not reach the operator-declared segment: %s", metadata)
+	}
+	if ev, _ := meta["dynamic_evidence"].(map[string]any); ev["observed_at"] == nil || ev["source_asset_id"] == nil {
+		t.Fatalf("a measurement carries no evidence of where it came from: %s", metadata)
 	}
 	ctx = context.WithValue(ctx, observedDHCPKey{}, vlanSegmentSpecs(vlans))
 	peer := di.PeerRef{DisplayName: "Office Alias"}

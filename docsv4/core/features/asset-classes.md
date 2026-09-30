@@ -163,7 +163,7 @@ Two things are **never** auto-accepted, whatever the score:
 
 > ⚠️ **An auto-accepted merge cannot be undone from this page.** The sighting is
 > written into the asset the matcher chose, and putting it back is manual work.
-> Everything the threshold does is listed under **"Auto-merged by the matcher"**
+> Everything the threshold does is listed under **"Merged automatically"**
 > in **Discovery → Approvals**, with the score and the reasons — check its work
 > there. Turn this on only once you have watched the proposals the matcher raises
 > and agree with how it ranks them.
@@ -180,6 +180,39 @@ both, the card is read-only and says so.
 
 Full detail on how proposals are scored, and what approving one does, is in
 [Asset Approval](./asset-approval.md#letting-a-high-score-settle-it).
+
+### Merging records the rules are sure are one device
+
+Separate from the threshold, and **on by default**, is a switch under it:
+**"Merge records the rules are sure are one device"**.
+
+Where the threshold lets a matcher's *score* settle a question, this is a *rule*
+— fixed conditions, no score. When Vista Platform holds two records of what it is
+sure is one device — say one built from a network address and a name, another
+from the device's own hardware address — it merges them without asking. It is
+sure only when **all** of these hold:
+
+- the same MAC address, serial number or other hardware identifier was seen
+  **directly on the device** — or reported by a controller or system of record
+  that manages it — not relayed second-hand;
+- an **address alone never counts** — a record known by a name is not merged with
+  a device just because the device later used the same address;
+- both records are on the **same network segment** (or one has none, as a record
+  you typed in may not);
+- **nothing contradicts it** — different serial numbers, cloud resource IDs or
+  agent IDs are always different devices;
+- the two are not both still waiting for approval;
+- and neither has ever been marked **keep separate**. A decision you made is
+  never overridden.
+
+Values you typed always win. A record you entered is kept as the survivor —
+unless it is still waiting for approval and the other record is already
+approved; then the approved record is kept and your values are carried onto it. Every rule merge is listed under **Discovery → Approvals → Merged
+automatically**, marked **Merged by rule**, with the evidence in plain sentences.
+Switch it off and the same cases wait for a person as ordinary merge proposals.
+
+Like the threshold, changing it needs **both** settings-update and asset-update
+permission, and a rule merge cannot be undone from the UI.
 
 ---
 

@@ -14,7 +14,11 @@ export type ResourceTypeOutcome = deviceInterrogationComponents['schemas']['JobR
 export type CollectorFailure = deviceInterrogationComponents['schemas']['JobResultCollectorFailure'];
 export type RunOutcome = 'complete' | 'partial' | 'failed';
 
-/** Display names for the resource types the Cloud modal offers. */
+/**
+ * Display names for the resource types the Cloud modal offers (every provider —
+ * cloud-outcomes.test.ts checks each offered type has one), plus the AWS
+ * account-enumeration calls a run also reports.
+ */
 const TYPE_LABELS: Record<string, string> = {
   alb: 'Application load balancers',
   elb: 'Classic load balancers',
@@ -24,11 +28,19 @@ const TYPE_LABELS: Record<string, string> = {
   kms: 'KMS keys',
   s3: 'S3 buckets',
   rds: 'RDS instances',
-  key_vault: 'Key Vaults',
+  application_gateway: 'Application Gateways',
+  load_balancer: 'Load balancers',
+  key_vault: 'Key Vault keys',
   storage_account: 'Storage accounts',
-  app_gateway: 'Application Gateways',
-  cloud_sql: 'Cloud SQL instances',
-  cloud_storage: 'Cloud Storage buckets',
+  sql_database: 'SQL databases',
+  ssl_proxy: 'SSL proxies',
+  storage: 'Cloud Storage buckets',
+  cloudsql: 'Cloud SQL instances',
+  // AWS account enumeration (ec2:Describe*).
+  ec2_instances: 'EC2 instances',
+  vpcs: 'VPCs',
+  subnets: 'Subnets',
+  security_groups: 'Security group membership',
 };
 
 export function resourceTypeLabel(resourceType: string): string {

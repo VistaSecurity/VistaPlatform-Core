@@ -65,7 +65,7 @@ menu. This is the home for everything that isn't a lifecycle workspace:
 
 - **Getting Started** — the onboarding checklist (shown while onboarding is live)
 - **My Profile** — your personal identity, security/MFA, notification choices,
-  sessions, connected SSO accounts, and personal API tokens
+  sessions, connected SSO accounts, and personal API tokens (for AI assistants)
 - **Organization Settings** — all tenant-admin configuration (this guide's
   main subject)
 - **About** — version and platform information
@@ -315,7 +315,13 @@ Every connection you have authenticated, as a card. **Add connection** offers
 four channel types — **Email** (a recipient list), **Slack** (an incoming-webhook
 URL), **Generic webhook** (a POST endpoint that receives the alert JSON) and
 **PagerDuty** (an Events API v2 routing key) — and each card then offers
-**test**, **configure** and **remove**.
+**test**, **configure** and **remove**. If a test fails, the reason is shown.
+A **Generic webhook** can authenticate with a bearer token, basic credentials or
+one custom header, and signs every delivery — see
+[Notification Provider Integration](../operate/operations/notification-providers.md#webhook-integration).
+Microsoft Teams is not a supported channel. On a deployment where the platform
+operator has not configured email, the **Email** card says *"Email delivery isn't
+configured by the platform operator."* and its messages are not delivered.
 
 A connection is authenticated once here and then referenced wherever it is used,
 which is why the channels you add become the delivery targets in
@@ -346,14 +352,25 @@ which is why the channels you add become the delivery targets in
 The catalogue at the bottom of the page lists **everything the platform can
 integrate with**, grouped by kind, with each entry's real state:
 
-- an **Add** button — you can connect it now, here or on the page named under it;
-- an **Enterprise** tag — a real capability your plan does not include;
-- a **Soon** tag — declared but not built yet. The card is dimmed and has no
-  button. It is deliberately *not* offered as an upgrade: we do not sell
-  something that does not exist.
+- an **Add** button — you can connect it now, here (NetBox and the CMDB
+  platforms);
+- a line naming where to connect it — Slack, PagerDuty, email and webhook are
+  channels added with **Add connection**, cloud providers are under
+  **Discovery → Cloud**, and an SBOM is uploaded under **Discovery → Sources →
+  SBOM Upload**. In-app notifications need no setup;
+- an **Enterprise** tag — a capability that is not in Core, whether or not your
+  plan holds it. When it does not, the card says *Included in Enterprise*;
+- *Configured by your platform operator* — SIEM export. It works, it is
+  Enterprise, and there is nothing for a tenant to click;
+- a **Soon** tag — accepted by the database but not built (or declared but not
+  built). The card is dimmed and has no button. It is deliberately *not* offered
+  as an upgrade: we do not sell something that does not exist. This includes the
+  generic *Custom integration* type, which nothing acts on.
 
 The list is generated from the platform's connector registry, so it cannot drift
-from what the platform can actually do.
+from what the platform can actually do. That registry is also checked against
+the code: the asset classes a cloud, CMDB or NetBox connector claims to produce
+are compared with what its collector or mapping actually yields.
 
 ### AI assistant
 
@@ -423,9 +440,7 @@ immediate, or a digest (hourly / daily / weekly).
 
 ### Alert Rules
 
-This page has two parts.
-
-The top is the **alert catalog** — the platform's built-in library of stateful
+This page is the **alert catalog** — the platform's built-in library of stateful
 conditions it can raise a persistent alert for (see
 [Remediation → Alerts](../features/remediation.md#alerts) for what these look
 like once raised). For each entry you can:
@@ -449,11 +464,6 @@ like once raised). For each entry you can:
 
 Changing anything in the catalog needs the manage-alerts permission.
 
-Below it is the **audit alert rules** list — threshold- and pattern-based
-detection over the activity log (failed-login bursts, bulk exports, privileged
-actions). A separate, narrower mechanism from the catalog above; both feed the
-same routing rules and channels.
-
 ### Delivery History
 
 **Delivery History** shows every notification the platform tried to send — time,
@@ -463,6 +473,13 @@ Rows where **no routing rule matched** are tinted and say so in the channels
 column: the event was recorded but delivered nowhere. That is the page's main
 job — a misconfigured or missing rule is visible instead of silent. If those
 events should reach someone, add or widen a rule under **Routing Rules**.
+
+Rows routed only to a **digest** rule read **queued for digest** — nothing has
+been sent yet, by design; the digest delivers them on its schedule. When a
+channel failed, hover the channels cell for the reason (for example *"Email
+delivery isn't configured by the platform operator."*).
+
+Organizations that are suspended, canceled or deleted are not notified at all.
 
 The **bell icon** in the header gives every member a live view of their in-app
 notifications and a shortcut into the alert inbox
@@ -525,11 +542,26 @@ interrogation and cloud collectors.
 > are never auto-accepted whatever the score: a sighting whose serial number,
 > cloud resource ID, agent ID or CMDB sys_id *disagrees* with the candidate's,
 > and anything involving an asset still waiting for approval. Everything the
-> threshold does is listed under "Auto-merged by the matcher" in **Discovery →
+> threshold does is listed under "Merged automatically" in **Discovery →
 > Approvals**, with the score and the reasons.
 
 Changing it needs **both** settings-update and asset-update permission, because
 it authorizes the platform to merge two of your assets without asking.
+
+#### Merge records the rules are sure are one device
+
+Below the threshold is a second, **on-by-default** switch. Where the threshold
+lets a matcher's *score* settle a question, this lets fixed *rules* merge two
+records they are sure are one device: the same MAC address or serial number seen
+directly on the device (or reported by a controller that manages it), both
+records on the same network segment, never an address alone, nothing contradicting it, and neither ever
+marked **keep separate**. A record you typed in by hand is the survivor and keeps
+the values you entered — unless it is still waiting for approval while the other
+is already in your inventory, in which case the approved record survives and your
+values still win. Each rule merge is
+listed under **Discovery → Approvals → Merged automatically** as **Merged by
+rule**, with its evidence. Turn the switch off and those cases become ordinary
+merge proposals. It needs the same two permissions as the threshold.
 
 Full detail: [Asset Classes and Identification Rules](../features/asset-classes.md#when-the-evidence-is-ambiguous).
 
@@ -603,8 +635,8 @@ marked as such), **target**, and **when**. Three controls narrow the list:
 
 There is **no export control on this page**. To take events away — for an
 auditor, or to reach further back than the page holds — call the audit service's
-export endpoint with a personal API token
-(**My Profile → API Tokens**):
+export endpoint — open it in a browser tab where you are signed in
+(personal API tokens are not accepted there):
 
 ```
 GET /api/v1/audit-service/activity-logs/export?format=csv
@@ -654,6 +686,9 @@ pattern or cloud VPC — a **value** in that type's format (validated as you typ
 a **network type** and an **environment**. Location, business unit, owner email
 and description are optional.
 
+For a CIDR or IP-range segment the form also asks **This network hands out
+addresses (DHCP)** — see [DHCP on a segment](#dhcp-on-a-segment) below.
+
 Two switches sit at the bottom:
 
 - **Active** — whether Discovery scopes against it at all.
@@ -671,16 +706,50 @@ adds a segment for each VLAN or interface network the device reports with a
 prefix — a UniFi site's networks, a FortiGate's VLAN subinterfaces, an F5's
 self-IP networks. Under its name the row says where it came from and what is
 known about DHCP on it, for example *Learned from Fortinet · DHCP unknown*.
-**DHCP unknown** means the device did not say whether it hands out addresses
-there, so the platform treats the network as if it does: an IP address alone
-is never used to decide that two sightings on it are the same asset. The
-network type is set from the prefix: RFC 1918 and IPv6 ULA space is *private*,
+The network type is set from the prefix: RFC 1918 and IPv6 ULA space is *private*,
 anything else — carrier-grade NAT (100.64.0.0/10) included — is *public*. A
 learned public segment is used only to tell hosts apart; it does not make its
 range scannable, because a firewall's internet-facing network is where it
 connects, not something you own. To scan a public range you own, create the
 segment yourself. A segment you created with the same CIDR always wins, and
-interrogation never renames or retypes it.
+interrogation never renames or retypes it (it does still tell your segment what
+it measured about DHCP — see below).
+
+#### DHCP on a segment
+
+On a network that hands out addresses by DHCP, an IP address does not identify a
+device: it belongs to whoever holds the lease today, and tomorrow it may belong
+to something else. So on a DHCP network, Vista Platform never lets an address
+alone decide that two sightings are the same asset — a MAC address, a serial
+number or an agent id still can. On a network with fixed addresses an address is
+a perfectly good identifier, and treating every network as DHCP would leave
+those devices harder to recognise, which is why the platform wants to know which
+kind each of your networks is.
+
+Every segment row says what is known and **whose word it is**:
+
+| The row says | Where it came from |
+|---|---|
+| **DHCP on · measured by *device*** (or **DHCP off · measured by …**) | A device that serves the network — a UniFi controller, for example — reported it when you interrogated it (Discovery → Devices). This applies to a segment you drew yourself as well as to a learned one. |
+| **DHCP on · inferred from traffic** | A sensor watched a DHCP server hand out an address on the segment. It never says *off*: seeing no leases proves nothing. |
+| **DHCP on/off · set by you** | You chose it in the segment's form. |
+| **DHCP unknown** | Nobody has said. The platform treats an unknown network as dynamic where a device told it the network exists but not its DHCP posture (**DHCP unknown** on a learned segment), and as static for a segment nobody said anything about. |
+
+When sources disagree the order is **you, then a device's measurement, then
+traffic**: a lower source never overwrites a higher one, and a newer answer from
+the same source replaces the older. In particular a measurement never overwrites
+what you set.
+
+To set it yourself, edit the segment and choose under **This network hands out
+addresses (DHCP)**:
+
+- **Yes** or **No** — your answer, which nothing else overrides.
+- **Automatic** — hand it back: the segment goes to the best remaining answer
+  (a device's measurement, otherwise traffic), or to **DHCP unknown** if there is
+  none. Choosing Automatic on a segment you never set changes nothing.
+
+The choice is offered for CIDR and IP-range segments only; a domain or cloud VPC
+segment cannot hold a lease.
 
 Creating, editing and deleting need the settings-update permission; the list is
 readable without it.

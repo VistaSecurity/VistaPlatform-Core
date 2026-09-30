@@ -4,22 +4,31 @@ package main
 // decided by platform_role_permissions, not by the role name on the token.
 //
 // Drives newRouter — the router main() serves — against the real
-// platform_user_has_permission() on a schema-and-seed-loaded database. The
-// handler bundle is zero-valued, so a request that passes the gates panics
-// into gin's recovery (500); testdb.RefusedByPlatformGate reads the body to
-// tell that apart from a gate refusal. Skipped unless TEST_DATABASE_URL is set
-// (make test-integration-db).
+// platform_user_has_permission() on a schema-and-seed-loaded database, with
+// the Core handler bundle main() builds, so a request that passes the gates
+// reaches a real handler and gets that handler's own answer. Skipped unless
+// TEST_DATABASE_URL is set (make test-integration-db).
+//
+// The bundle used to be zero-valued: every admitted request dereferenced a nil
+// handler, gin's recovery turned the panic into a 500, and the gate verdicts
+// still came out right because testdb.RefusedByPlatformGate tells a gate's 500
+// from any other. That hid whether an admitted operator actually got an
+// answer. failOn5xx now fails any 5xx the gates did not produce.
 
 import (
 	"database/sql"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/vistasecurity/vistaplatform/audit-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/audit-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/audit-service/internal/handlers"
+	"github.com/vistasecurity/vistaplatform/audit-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -59,8 +68,46 @@ func newPermissionGateRouter(t *testing.T) (*gin.Engine, *sql.DB, func(uuid.UUID
 		JWT:                config.JWTConfig{Secret: testJWTSecret},
 		InternalAuthSecret: "test-internal-secret",
 	}
-	r := newRouter(cfg, &database.DB{DB: db}, newTestAuditMiddleware(t), routerHandlers{})
+	r := newRouter(cfg, &database.DB{DB: db}, newTestAuditMiddleware(t), coreRouterHandlers(db))
 	return r, db, func(u uuid.UUID, role string) string { return testdb.SignPlatformToken(t, testJWTSecret, u, role) }
+}
+
+// coreRouterHandlers builds the handler bundle main() builds in a Core build
+// (no SIEM exporter, no scheduled-report runner), on db for both the app and
+// the BYPASSRLS handle.
+func coreRouterHandlers(db *sql.DB) routerHandlers {
+	dbx := sqlx.NewDb(db, "postgres")
+	activityLog := services.NewActivityLogService(db, db)
+	alert := services.NewAlertService(db)
+	return routerHandlers{
+		activityLog:  handlers.NewActivityLogHandlerWithMonitoring(activityLog, alert, nil),
+		jobExecution: handlers.NewJobExecutionHandler(services.NewJobExecutionService(db, db)),
+		compliance: handlers.NewComplianceHandlerWithReportService(
+			services.NewComplianceService(db, db), services.NewComplianceReportService(db, db)),
+		retention: handlers.NewRetentionHandler(services.NewRetentionService(db, db)),
+		alert:     handlers.NewAlertHandler(alert),
+		alertRule: handlers.NewAlertRuleHandler(services.NewAlertRuleService(dbx, dbx)),
+		analytics: handlers.NewAnalyticsHandler(services.NewAnalyticsService(db, db)),
+	}
+}
+
+// failOn5xx wraps the router so that any 5xx a request gets, other than a
+// gate's own "could not check the permission" 500/503, fails the test. The
+// shared gate helpers only ask "refused or not", and a handler that panics or
+// errors counts as "not refused" — so without this an admitted operator could
+// be answered with a 500 on every route and both tests would stay green.
+func failOn5xx(t *testing.T, h http.Handler) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		h.ServeHTTP(w, req)
+		rec, ok := w.(*httptest.ResponseRecorder)
+		if !ok {
+			t.Fatalf("failOn5xx: %s %s was not served into a ResponseRecorder", req.Method, req.URL.Path)
+		}
+		if rec.Code >= http.StatusInternalServerError && !testdb.RefusedByPlatformGate(rec) {
+			t.Errorf("%s %s: the handler answered %d %s", req.Method, req.URL.Path, rec.Code, rec.Body.String())
+		}
+	})
 }
 
 // Custom role WITH the mapped platform permission → through; role WITHOUT it
@@ -69,7 +116,7 @@ func newPermissionGateRouter(t *testing.T) (*gin.Engine, *sql.DB, func(uuid.UUID
 // → 403 naming the permission.
 func TestIntegration_AuditRoutes_PlatformPermissionGates(t *testing.T) {
 	r, db, sign := newPermissionGateRouter(t)
-	testdb.CheckPlatformGates(t, db, r, sign, auditPlatformRoutes())
+	testdb.CheckPlatformGates(t, db, failOn5xx(t, r), sign, auditPlatformRoutes())
 }
 
 // The three seeded roles, before and after. super_admin passed every check by
@@ -82,7 +129,7 @@ func TestIntegration_AuditRoutes_PlatformPermissionGates(t *testing.T) {
 func TestIntegration_AuditRoutes_SeededRoles(t *testing.T) {
 	r, db, sign := newPermissionGateRouter(t)
 	routes := auditPlatformRoutes()
-	got := testdb.SeededRoleVerdicts(t, db, r, sign, routes)
+	got := testdb.SeededRoleVerdicts(t, db, failOn5xx(t, r), sign, routes)
 	for _, rt := range routes {
 		for _, role := range []string{"super_admin", "platform_admin"} {
 			if !got[role][rt.String()] {

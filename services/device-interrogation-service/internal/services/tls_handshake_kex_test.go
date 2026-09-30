@@ -17,8 +17,8 @@ import (
 // API gateway is a live-handshake site too. It records the negotiated group
 // and the support flags through the same shared code, and a config carrying
 // them delivers them to the sensor_discoveries row (top level, where the
-// converter reads a cloud row's crypto fields) and to the scheduled path's
-// DiscoveredAsset.
+// converter reads a cloud row's crypto fields), which the scheduled path now
+// writes through the same writer.
 func TestCloudHandshake_KeyExchangeReachesDiscoveryRowAndAsset(t *testing.T) {
 	for _, c := range tlskextest.Cases {
 		t.Run(c.Name, func(t *testing.T) {
@@ -52,26 +52,10 @@ func TestCloudHandshake_KeyExchangeReachesDiscoveryRowAndAsset(t *testing.T) {
 				t.Errorf("discovery row support flags = %v / %v, want %v / %v",
 					meta["tls_supports_classical_kex"], meta["tls_supports_pqc_hybrid_kex"], c.WantSupportsClassical, c.WantSupportsPQCHybrid)
 			}
+			// The scheduled (worker-run) path writes through this same
+			// WriteSensorDiscoveries, so the row above is its row too —
+			// TestScheduledCloudJob_WritesThroughTheInteractiveWriter pins that.
 			checkHybridGroup(t, "discovery row", c, meta)
-
-			configs := extractCryptoConfigs(map[string]interface{}{"crypto_configs": []map[string]interface{}{cfg}})
-			hostname := "lb.example.com"
-			asset := (&PlatformAgentWorker{}).convertCryptoConfigToAsset(&models.Device{Hostname: &hostname}, configs[0])
-			if asset == nil || asset.KeyExchangeAlgorithm != c.WantGroup {
-				t.Fatalf("scheduled-path asset key exchange = %+v, want %q", asset, c.WantGroup)
-			}
-
-			// The scheduled path's asset becomes a sensor_discoveries row
-			// through buildSensorDiscoveryMetadata. The support flags are what
-			// the "supports hybrid, negotiated classical" hint reads (
-			// W1.9); dropping them here silently removes the hint for every
-			// scheduled cloud discovery.
-			row := roundTripJSON(t, buildSensorDiscoveryMetadata(nil, nil, *asset))
-			if row["tls_supports_classical_kex"] != c.WantSupportsClassical || row["tls_supports_pqc_hybrid_kex"] != c.WantSupportsPQCHybrid {
-				t.Errorf("scheduled-path discovery row support flags = %v / %v, want %v / %v",
-					row["tls_supports_classical_kex"], row["tls_supports_pqc_hybrid_kex"], c.WantSupportsClassical, c.WantSupportsPQCHybrid)
-			}
-			checkHybridGroup(t, "scheduled-path discovery row", c, row)
 		})
 	}
 }

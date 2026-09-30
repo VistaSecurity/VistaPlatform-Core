@@ -2374,7 +2374,7 @@ paths:
 
   # ===========================================================================
   # API tokens (PATs) — bearer credentials for programmatic access. The v1
-  # consumer is mcp-service (Settings → API Tokens mints a token; an MCP
+  # consumer is mcp-service (My Profile → API Tokens mints a token; an MCP
   # client presents it as `Authorization: Bearer qvpat_...`). Tokens are
   # user-owned: every route operates on the caller's own tokens only, no
   # cross-user administration in v1. The plaintext token appears exactly once,
@@ -2413,9 +2413,16 @@ paths:
         subset of the allowed read-only set (`assets.read`, `compliance.read`,
         `reports.read`, `discovery.read`, `sensors.read`, `settings.read`);
         omitted means the default set (`assets.read`, `compliance.read`,
-        `reports.read`). `expires_in_days` defaults to 90, max 365. The
-        response's `plaintext_token` is shown exactly once and never
-        retrievable again.
+        `reports.read`). The My Profile → API Tokens page offers only those
+        three — the ones the MCP tools actually use — while the server still
+        accepts `discovery.read`, `sensors.read` and `settings.read` so tokens
+        minted before the UI narrowed keep working; no tool consumes them
+        today. `expires_in_days` defaults to 90, max 365. The response's
+        `plaintext_token` is shown exactly once and never retrievable again.
+
+        A personal API token is presented only to the MCP server. It is not
+        accepted as a bearer credential by the platform's REST API, which takes
+        a signed-in session access token.
       requestBody:
         required: true
         content:

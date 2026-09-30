@@ -27,6 +27,15 @@ const segments = [
     metadata: { source: 'unifi', dynamic: true } },
   { ...base, id: 'declared', name: 'Operator DMZ', value: '198.51.100.0/24', network_type: 'public',
     metadata: { operator: 'keep', dynamic: true } },
+  // What the server returns since: the effective posture and whose word it is.
+  { ...base, id: 'm', name: 'Measured LAN', value: '192.0.2.0/24', network_type: 'private', metadata: {},
+    dynamic: true, dynamic_source: 'measured', dynamic_source_name: 'edge-router' },
+  { ...base, id: 'i', name: 'Inferred LAN', value: '192.0.2.128/25', network_type: 'private', metadata: {},
+    dynamic: true, dynamic_source: 'inferred' },
+  { ...base, id: 'o', name: 'Static LAN', value: '203.0.113.0/24', network_type: 'private', metadata: {},
+    dynamic: false, dynamic_source: 'operator' },
+  { ...base, id: 'u', name: 'Silent LAN', value: '198.18.0.0/24', network_type: 'private', metadata: {},
+    dynamic: null, dynamic_source: null },
 ];
 
 let host: HTMLDivElement; let root: Root; let cache: QueryClient;
@@ -59,4 +68,15 @@ it('shows no provenance line for a declared segment', async () => {
   await render();
   expect(rowText('Operator DMZ')).not.toContain('Learned');
   expect(host.textContent?.match(/Learned from/g)?.length).toBe(2);
+});
+
+it('says on every row whose word the DHCP posture is', async () => {
+  await render();
+  expect(rowText('Measured LAN')).toContain('DHCP on · measured by edge-router');
+  expect(rowText('Inferred LAN')).toContain('DHCP on · inferred from traffic');
+  expect(rowText('Static LAN')).toContain('DHCP off · set by you');
+  // Nobody has said: the row says so instead of showing nothing.
+  expect(rowText('Silent LAN')).toContain('DHCP unknown');
+  // A declared row that predates the server fields still reads as its operator's.
+  expect(rowText('Operator DMZ')).toContain('DHCP on · set by you');
 });

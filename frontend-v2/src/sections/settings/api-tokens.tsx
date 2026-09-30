@@ -1,5 +1,6 @@
 // My Profile · API Tokens — personal access tokens for the read-only MCP
-// surface. Wired to auth-service /api-tokens (list / create / revoke) through the
+// surface. Tokens are for AI assistants (the MCP server) only: no other service
+// accepts one. Wired to auth-service /api-tokens (list / create / revoke) through the
 // typed client. The plaintext token is returned exactly once on create, so the
 // modal switches to a copy-once panel and never shows the value again.
 import { useState } from 'react';
@@ -14,9 +15,11 @@ import type { SettingsNavItem } from './nav';
 type APIToken = authServiceComponents['schemas']['APIToken'];
 type Perm = NonNullable<authServiceComponents['schemas']['APITokenCreateRequest']['permissions']>[number];
 
-// The allowed read-only scope set + the server's default subset (see the
-// createApiToken contract description). Labels keep the table/checkboxes terse.
-const ALL_PERMS: Perm[] = ['assets.read', 'compliance.read', 'reports.read', 'discovery.read', 'sensors.read', 'settings.read'];
+// The scopes offered when minting: only the ones an MCP tool actually requires
+// (assets.read / compliance.read / reports.read). The backend still accepts
+// discovery.read, sensors.read and settings.read so existing tokens stay valid,
+// but no MCP tool needs them, so the picker does not offer them.
+const ALL_PERMS: Perm[] = ['assets.read', 'compliance.read', 'reports.read'];
 const DEFAULT_PERMS: Perm[] = ['assets.read', 'compliance.read', 'reports.read'];
 const EXPIRY_OPTIONS = [30, 90, 180, 365];
 
@@ -72,7 +75,7 @@ export function ApiTokensPage({ meta }: { meta: SettingsNavItem }) {
       ) : q.isLoading ? (
         <SCard><StateNote icon="loader" tone="var(--app-t3)" title="Loading tokens…" message="Fetching your personal access tokens." /></SCard>
       ) : tokens.length === 0 ? (
-        <SCard><StateNote icon="key-round" tone="var(--app-t3)" title="No API tokens" message="Create a token to authenticate the read-only MCP server or scripts with the scopes you grant." /></SCard>
+        <SCard><StateNote icon="key-round" tone="var(--app-t3)" title="No API tokens" message="Create a token to let an AI assistant (Claude Code or another MCP client) use the read-only MCP server with the scopes you grant." /></SCard>
       ) : (
         <STable cols={cols}>
           {tokens.map((t, i) => {
@@ -103,7 +106,7 @@ export function ApiTokensPage({ meta }: { meta: SettingsNavItem }) {
       )}
 
       <p style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 14, lineHeight: 1.55, maxWidth: 680 }}>
-        Tokens carry a subset of read-only scopes and are owned by you. The full value is shown only once at creation — store it in a secret manager. Up to 25 active tokens per user.
+        Tokens work only with the MCP server for AI assistants — not with other Vista Platform APIs. They carry a subset of read-only scopes and are owned by you. The full value is shown only once at creation — store it in a secret manager. Up to 25 active tokens per user.
       </p>
 
       <ConnectAISection />
@@ -143,8 +146,9 @@ function ConnectAISection() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--app-t1)', marginBottom: 4 }}>Connect an AI assistant</div>
           <p style={{ fontSize: 12, color: 'var(--app-t2)', lineHeight: 1.6, margin: '0 0 12px' }}>
-            Paste the URL below into Claude.ai, ChatGPT, Gemini, or any MCP-capable client under connector or tool settings.
-            The AI client will open a Vista login page and ask you to approve read-only access — no token copy-paste required.
+            Use this URL with an MCP client that can send an <span className="mono">Authorization: Bearer &lt;token&gt;</span> header
+            — for example Claude Code, or a script that speaks MCP — and a personal token from <strong>New token</strong> above.
+            Hosted assistants such as Claude.ai, ChatGPT and Gemini can't connect yet: their connector sign-in isn't supported.
           </p>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <div className="mono" style={{ flex: 1, minWidth: 0, padding: '9px 12px', borderRadius: 9, background: 'var(--app-panel2)', border: '1px solid var(--app-border2)', fontSize: 11.5, color: 'var(--app-t2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mcpURL}</div>

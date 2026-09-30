@@ -26,36 +26,36 @@ import {
   ADDABLE_HERE,
   CONFIGURED_ELSEWHERE,
   connectorAction,
+  connectorBadge,
   connectorCaption,
   isSelectable,
-  roleMappingRecord,
-  roleMappingRows,
-  runSummaryLine,
-  runTone,
   type ConnectorEntry,
-  type ConnectorRun,
 } from './connectors-queries';
 
 const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 
-/** `key:` / `status:` pairs from standards/connectors.yaml, in file order. */
-function registryFromYaml(): Array<{ key: string; status: string }> {
+/**
+ * `key:` / `status:` / `configured_by:` from standards/connectors.yaml, in file
+ * order. `configured_by` defaults to `tenant`, as the generator does.
+ */
+function registryFromYaml(): Array<{ key: string; status: string; configuredBy: string }> {
   const src = readFileSync(repoRoot + 'standards/connectors.yaml', 'utf8');
   const body = src.slice(src.indexOf('\nconnectors:'));
   expect(body.length, 'could not find the `connectors:` list in standards/connectors.yaml').toBeGreaterThan(100);
-  const out: Array<{ key: string; status: string }> = [];
-  let current: string | null = null;
+  const out: Array<{ key: string; status: string; configuredBy: string }> = [];
+  let current: { key: string; status: string; configuredBy: string } | null = null;
   for (const line of body.split('\n')) {
     const key = /^\s*-\s+key:\s*([a-z0-9_]+)\s*$/.exec(line);
     if (key) {
-      current = key[1];
+      current = { key: key[1], status: '', configuredBy: 'tenant' };
+      out.push(current);
       continue;
     }
+    if (!current) continue;
     const status = /^\s*status:\s*([a-z]+)\s*$/.exec(line);
-    if (status && current) {
-      out.push({ key: current, status: status[1] });
-      current = null;
-    }
+    if (status) current.status = status[1];
+    const by = /^\s*configured_by:\s*([a-z_]+)\s*$/.exec(line);
+    if (by) current.configuredBy = by[1];
   }
   return out;
 }
@@ -71,6 +71,7 @@ function entry(over: Partial<ConnectorEntry> = {}): ConnectorEntry {
     description: 'Pulls sites, prefixes, VLANs, device types and devices.',
     edition: 'enterprise',
     entitled: true,
+    configured_by: 'tenant',
     addable: true,
     ...over,
   };
@@ -94,8 +95,22 @@ describe('connector registry parity', () => {
     expect(generated).toEqual(declared);
   });
 
-  it('carries the `registered` status for the four keys nothing implements', () => {
-    for (const key of ['hashicorp_vault', 'github', 'gitlab', 'bitbucket']) {
+  it('agrees about who configures every connector', () => {
+    const generated = Object.fromEntries(CONNECTORS.map((c) => [c.key, c.configuredBy]));
+    const declared = Object.fromEntries(yaml.map((c) => [c.key, c.configuredBy]));
+    expect(generated).toEqual(declared);
+    // SIEM export is the one platform-global, operator-configured family.
+    const operator = CONNECTORS.filter((c) => c.configuredBy === 'platform_operator').map((c) => c.key).sort();
+    expect(operator).toEqual(['datadog', 'elastic', 'generic_webhook', 'splunk']);
+    for (const key of operator) {
+      const c = getConnector(key)!;
+      expect(c.kind).toBe('siem');
+      expect(c.feature).toBe('siem_export');
+    }
+  });
+
+  it('carries the `registered` status for the keys nothing implements', () => {
+    for (const key of ['hashicorp_vault', 'github', 'gitlab', 'bitbucket', 'custom']) {
       const c = getConnector(key);
       expect(c, `${key} is missing from the registry`).toBeTruthy();
       expect(c!.status, `${key} must be registered, not live — nothing collects it`).toBe('registered');
@@ -196,95 +211,81 @@ describe('catalogue card rules', () => {
     }
   });
 
-  it('every "configured elsewhere" hint names a real registry key', () => {
+  it('every "configured elsewhere" hint names a live, tenant-configured registry key', () => {
+    expect(Object.keys(CONFIGURED_ELSEWHERE).length).toBeGreaterThan(0);
     for (const key of Object.keys(CONFIGURED_ELSEWHERE)) {
-      expect(getConnector(key), `${key} has a location hint but is not in the registry`).toBeTruthy();
+      const c = getConnector(key);
+      expect(c, `${key} has a location hint but is not in the registry`).toBeTruthy();
+      // A hint on a registered connector points at a place that cannot
+      // configure it (the old `custom` hint sent people to the channel modal);
+      // a hint on an operator-configured one points a tenant at a page they
+      // cannot use.
+      expect(c!.status, `${key} has a location hint but is not live`).toBe('live');
+      expect(c!.configuredBy, `${key} has a location hint but a tenant cannot configure it`).toBe('tenant');
     }
   });
-});
 
-describe('run summaries', () => {
-  const run = (over: Partial<ConnectorRun['summary']> = {}): ConnectorRun => ({
-    id: 'r1',
-    connection_id: 'c1',
-    status: 'success',
-    trigger_type: 'manual',
-    errors: [],
-    summary: {
-      sites: 0, prefixes: 0, vlans: 0, device_types: 0, devices: 0,
-      segments_created: 0, segments_matched: 0, assets_created: 0, assets_matched: 0,
-      assets_proposed: 0, assets_skipped: 0, unmapped_roles: 0, vlans_without_prefix: 0, errors: 0,
-      ...over,
-    },
+  // SIEM export: platform-global, so the operator configures it. A tenant sees
+  // the card and never a button, entitled or not — both polarities.
+  it('renders an operator-configured connector without a button, entitled or not', () => {
+    const entitled = entry({
+      key: 'splunk', label: 'Splunk', kind: 'siem', direction: 'push', edition: 'enterprise',
+      entitled: true, configured_by: 'platform_operator', addable: false, unavailable_reason: 'operator',
+    });
+    const not = entry({ ...entitled, entitled: false });
+    for (const e of [entitled, not]) {
+      expect(connectorAction(e)).toBe('operator');
+      expect(isSelectable(e)).toBe(false);
+      expect(connectorCaption(e)).toBe('Configured by your platform operator');
+      expect(connectorBadge(e)).toEqual({ label: 'Enterprise', tone: 'edition' });
+    }
   });
 
-  // "0 devices" is an answer. A summary that hid it would make a run that
-  // imported nothing look the same as one that was never asked to.
-  it('reports zeros rather than hiding them', () => {
-    expect(runSummaryLine(run())).toContain('0 devices');
-    expect(runSummaryLine(run())).toContain('0 created');
+  it('never lets a server flag make an operator-configured or unbuilt connector selectable', () => {
+    // A server that wrongly says addable must not make a button appear.
+    const wrongOperator = entry({ key: 'splunk', kind: 'siem', configured_by: 'platform_operator', addable: true });
+    expect(connectorAction(wrongOperator)).toBe('operator');
+    expect(isSelectable(wrongOperator)).toBe(false);
+    const wrongRegistered = entry({ key: 'custom', kind: 'generic', status: 'registered', addable: true });
+    expect(connectorAction(wrongRegistered)).toBe('soon');
+    expect(isSelectable(wrongRegistered)).toBe(false);
   });
 
-  it('mentions review, skips and unmapped roles only when there are any', () => {
-    expect(runSummaryLine(run())).not.toContain('needing review');
-    expect(runSummaryLine(run({ assets_proposed: 2 }))).toContain('2 needing review');
-    expect(runSummaryLine(run({ observations_retained: 2 }))).toContain('2 observations retained');
-    expect(runSummaryLine(run({ assets_skipped: 1 }))).toContain('1 skipped');
-    expect(runSummaryLine(run({ unmapped_roles: 1 }))).toContain('1 unmapped role');
-    expect(runSummaryLine(run({ unmapped_roles: 3 }))).toContain('3 unmapped roles');
+  // `custom` used to sit under CMDB / ITSM with a hint sending people to "Add
+  // connection", which opens the notification-channel modal. Nothing reads a
+  // custom row, so it is a registered, inert card.
+  it('renders `custom` as an inert, not-yet-available card that points nowhere', () => {
+    const custom = getConnector('custom')!;
+    expect(custom.status).toBe('registered');
+    expect(custom.kind).toBe('generic');
+    expect(ADDABLE_HERE.has('custom')).toBe(false);
+    expect('custom' in CONFIGURED_ELSEWHERE).toBe(false);
+    const e = entry({
+      key: 'custom', label: custom.label, kind: 'generic', direction: 'both', status: 'registered',
+      edition: 'core', addable: false, unavailable_reason: 'unavailable',
+    });
+    expect(connectorAction(e)).toBe('soon');
+    expect(isSelectable(e)).toBe(false);
+    expect(connectorCaption(e)).toBe('Not yet available');
   });
 
-  it('pluralises the device count', () => {
-    expect(runSummaryLine(run({ devices: 1 }))).toContain('1 device ');
-    expect(runSummaryLine(run({ devices: 2 }))).toContain('2 devices');
+  it('shows the Soon badge for registered and planned connectors and for nothing else', () => {
+    expect(connectorBadge(entry({ status: 'registered', edition: 'core' }))).toEqual({ label: 'Soon', tone: 'soon' });
+    expect(connectorBadge(entry({ status: 'planned', edition: 'enterprise' }))).toEqual({ label: 'Soon', tone: 'soon' });
+    // Live Core: no badge. Live Enterprise: the edition badge, entitled or not.
+    expect(connectorBadge(entry({ key: 'slack', kind: 'notification', edition: 'core' }))).toBeNull();
+    expect(connectorBadge(entry({ entitled: true }))).toEqual({ label: 'Enterprise', tone: 'edition' });
+    expect(connectorBadge(entry({ entitled: false, addable: false, unavailable_reason: 'upgrade' })))
+      .toEqual({ label: 'Enterprise', tone: 'edition' });
+    expect(connectorBadge(entry({ edition: 'msp' }))).toEqual({ label: 'MSP', tone: 'edition' });
   });
 
-  it('tones a run by its outcome', () => {
-    expect(runTone('success')).toBe('ok');
-    expect(runTone('partial')).toBe('warn');
-    expect(runTone('failed')).toBe('danger');
-    expect(runTone('in_progress')).toBe('muted');
-    expect(runTone('')).toBe('muted');
-  });
-});
-
-// The device-role mapping editor's conversion, both directions.
-//
-// The run summary reports how many roles it could not map, and this editor is
-// where a tenant answers that. The rules worth pinning are the ones a UI gets
-// wrong quietly: a stable order, and a half-filled row that is dropped rather
-// than sent — the server refuses a mapping naming no class, so sending one
-// would turn a row somebody was still typing into a failed save of everything
-// else on the form.
-describe('the device-role mapping editor', () => {
-  it('is empty for a connection with no overrides', () => {
-    expect(roleMappingRows(undefined)).toEqual([]);
-    expect(roleMappingRows(null)).toEqual([]);
-    expect(roleMappingRows({})).toEqual([]);
-  });
-
-  it('orders rows by role, so the list does not reshuffle between renders', () => {
-    expect(roleMappingRows({ zebra: 'switch', alpha: 'firewall' })).toEqual([
-      { role: 'alpha', classKey: 'firewall' },
-      { role: 'zebra', classKey: 'switch' },
-    ]);
-  });
-
-  it('round-trips a mapping', () => {
-    const stored = { 'edge-guard': 'firewall', 'top-of-rack': 'switch' };
-    expect(roleMappingRecord(roleMappingRows(stored))).toEqual(stored);
-  });
-
-  it('drops a half-filled row rather than sending it', () => {
-    expect(roleMappingRecord([
-      { role: 'edge-guard', classKey: 'firewall' },
-      { role: '', classKey: 'switch' },
-      { role: 'spare', classKey: '' },
-    ])).toEqual({ 'edge-guard': 'firewall' });
-  });
-
-  it('trims — a trailing space is not part of a role name', () => {
-    expect(roleMappingRecord([{ role: '  edge-guard ', classKey: ' firewall ' }]))
-      .toEqual({ 'edge-guard': 'firewall' });
+  it('gives every live tenant-configured non-page connector a location hint', () => {
+    // Otherwise its card would show an empty caption. Cloud, notification
+    // channels, in-app and the SBOM upload are all configured elsewhere.
+    for (const c of CONNECTORS) {
+      if (c.status !== 'live' || c.configuredBy !== 'tenant' || ADDABLE_HERE.has(c.key)) continue;
+      expect(CONFIGURED_ELSEWHERE[c.key], `${c.key} is live but has no location hint`).toBeTruthy();
+    }
   });
 });

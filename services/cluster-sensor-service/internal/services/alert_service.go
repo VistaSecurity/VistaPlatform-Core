@@ -17,7 +17,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
-	"github.com/vistasecurity/vistaplatform/shared/email"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
@@ -27,12 +26,10 @@ import (
 )
 
 type AlertService struct {
-	db            *sqlx.DB
-	emailService  *email.EmailService
-	emailResolver *email.EmailConfigResolver
-	httpClient    *http.Client
-	useMTLS       bool
-	natsClient    *events.NATSClient
+	db         *sqlx.DB
+	httpClient *http.Client
+	useMTLS    bool
+	natsClient *events.NATSClient
 	// cipher protects discovery_alert_configs.slack_webhook_url. A Slack
 	// incoming-webhook URL is a full posting credential — anyone holding it can
 	// post to the tenant's channel — but it lived in a plaintext text column.
@@ -50,14 +47,8 @@ func NewAlertService(db *sqlx.DB, cfg *config.Config) (*AlertService, error) {
 	// Get encryption key from environment
 	encryptionKey := sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", "")
 
-	// Initialize email resolver (sqlx.DB.DB gets underlying *sql.DB)
-	emailResolver := email.NewEmailConfigResolver(db.DB, encryptionKey)
-
-	// Email service will be initialized per-tenant when sending alerts
-	// For now, create a placeholder (will be created per tenant)
-	envConfig := email.GetEmailConfigFromEnv()
-	emailService := email.NewEmailService(envConfig)
-
+	// Delivery (email included) is notification-service's job: every alert goes
+	// out through notifications.send. This service holds no SMTP config of its own.
 	var httpClient *http.Client
 	var err error
 	if cfg.UseMTLS {
@@ -81,12 +72,10 @@ func NewAlertService(db *sqlx.DB, cfg *config.Config) (*AlertService, error) {
 	}
 
 	return &AlertService{
-		db:            db,
-		emailService:  emailService,
-		emailResolver: emailResolver,
-		httpClient:    httpClient,
-		useMTLS:       cfg.UseMTLS,
-		cipher:        cipher,
+		db:         db,
+		httpClient: httpClient,
+		useMTLS:    cfg.UseMTLS,
+		cipher:     cipher,
 	}, nil
 }
 

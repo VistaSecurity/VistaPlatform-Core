@@ -549,7 +549,7 @@ paths:
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
         "402":
-          description: Artifact comparison requires the tenant's `cbom_signing` entitlement.
+          description: Artifact comparison requires the tenant's `cbom_signing` entitlement, and is not part of a Core build — both answer 402 "not included in your subscription".
           content:
             application/json:
               schema:
@@ -589,7 +589,7 @@ paths:
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
         "402":
-          description: Artifact comparison requires the tenant's `cbom_signing` entitlement.
+          description: Artifact comparison requires the tenant's `cbom_signing` entitlement, and is not part of a Core build — both answer 402 "not included in your subscription".
           content:
             application/json:
               schema:

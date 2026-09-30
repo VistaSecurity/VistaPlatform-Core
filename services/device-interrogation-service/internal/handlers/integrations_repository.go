@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -27,7 +29,10 @@ type integrationStore interface {
 	// found=false when no such row exists for the tenant. They differ only in
 	// whether shared (tenant_id IS NULL) rows are visible.
 	GetConfigForUpdate(ctx context.Context, id, tenantID uuid.UUID) (configJSON, integrationType string, found bool, err error)
-	GetConfigForTest(ctx context.Context, id, tenantID uuid.UUID) (configJSON, integrationType string, found bool, err error)
+	// GetConfigForTest also reports the account_id and region columns: the
+	// provider clients read them, and a connection test must build its client
+	// from exactly what discovery builds from.
+	GetConfigForTest(ctx context.Context, id, tenantID uuid.UUID) (target integrationTestTarget, found bool, err error)
 	Update(ctx context.Context, id, tenantID uuid.UUID, fields map[string]interface{}) (rowsAffected int64, err error)
 	Delete(ctx context.Context, id, tenantID uuid.UUID) (rowsAffected int64, err error)
 	// UpdateTestStatus is keyed by id; tenantID is threaded from the caller so the
@@ -161,6 +166,28 @@ func (r *integrationRepository) Get(ctx context.Context, id, tenantID uuid.UUID)
 	return &integ, nil
 }
 
+// errIntegrationNameTaken is returned by Create/Update when the write would give
+// the owner two live integrations of the same type and name. The handler maps it
+// to 409 with the name, which is safe to say: the unique index is per owner
+// (idx_platform_integrations_tenant_unique_name), so the conflicting row is the
+// caller's own.
+var errIntegrationNameTaken = errors.New("an integration with this name already exists")
+
+// integrationNameUniqueIndex is the index whose violation means "name taken".
+// Matched by name rather than on any 23505, so a different unique violation is
+// never reported to the user as a naming clash.
+const integrationNameUniqueIndex = "idx_platform_integrations_tenant_unique_name"
+
+// mapIntegrationWriteErr turns the per-owner name uniqueness violation into
+// errIntegrationNameTaken and passes every other error through unchanged.
+func mapIntegrationWriteErr(err error) error {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "23505" && pqErr.Constraint == integrationNameUniqueIndex {
+		return fmt.Errorf("%w (%s)", errIntegrationNameTaken, pqErr.Constraint)
+	}
+	return err
+}
+
 func (r *integrationRepository) Create(ctx context.Context, p CreateIntegrationParams) error {
 	query := `
 		INSERT INTO platform_integrations (
@@ -170,14 +197,14 @@ func (r *integrationRepository) Create(ctx context.Context, p CreateIntegrationP
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	`
 	// RLS-scoped write on `platform_integrations`: tenant-owned row → WithTenantTx.
-	return shareddatabase.WithTenantTx(ctx, r.db, p.TenantID, func(tx *sql.Tx) error {
+	return mapIntegrationWriteErr(shareddatabase.WithTenantTx(ctx, r.db, p.TenantID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, query,
 			p.ID, p.TenantID, p.IntegrationType, p.IntegrationName,
 			p.Provider, p.ConfigJSON, p.AccountID, p.Region, p.Environment,
 			p.Description, p.TagsJSON, p.IsEnabled, p.Status, p.CreatedAt, p.CreatedAt,
 		)
 		return err
-	})
+	}))
 }
 
 func (r *integrationRepository) GetConfigForUpdate(ctx context.Context, id, tenantID uuid.UUID) (string, string, bool, error) {
@@ -204,21 +231,21 @@ func (r *integrationRepository) GetConfigForUpdate(ctx context.Context, id, tena
 	return configJSON, integrationType, found, nil
 }
 
-func (r *integrationRepository) GetConfigForTest(ctx context.Context, id, tenantID uuid.UUID) (string, string, bool, error) {
+func (r *integrationRepository) GetConfigForTest(ctx context.Context, id, tenantID uuid.UUID) (integrationTestTarget, bool, error) {
 	// RLS: includes SHARED (tenant_id IS NULL) integrations → bypass role; the
 	// explicit WHERE is the isolation control.
-	var configJSON, integrationType string
+	var t integrationTestTarget
 	err := r.bypassDB.QueryRowContext(ctx,
-		"SELECT config, integration_type FROM platform_integrations WHERE id = $1 AND (tenant_id = $2 OR (tenant_id IS NULL AND is_shared = true)) AND deleted_at IS NULL",
+		"SELECT config, integration_type, COALESCE(account_id, ''), COALESCE(region, '') FROM platform_integrations WHERE id = $1 AND (tenant_id = $2 OR (tenant_id IS NULL AND is_shared = true)) AND deleted_at IS NULL",
 		id, tenantID,
-	).Scan(&configJSON, &integrationType)
+	).Scan(&t.ConfigJSON, &t.IntegrationType, &t.AccountID, &t.Region)
 	if err == sql.ErrNoRows {
-		return "", "", false, nil
+		return integrationTestTarget{}, false, nil
 	}
 	if err != nil {
-		return "", "", false, err
+		return integrationTestTarget{}, false, err
 	}
-	return configJSON, integrationType, true, nil
+	return t, true, nil
 }
 
 func (r *integrationRepository) Update(ctx context.Context, id, tenantID uuid.UUID, fields map[string]interface{}) (int64, error) {
@@ -261,7 +288,7 @@ func (r *integrationRepository) Update(ctx context.Context, id, tenantID uuid.UU
 		return e
 	})
 	if err != nil {
-		return 0, err
+		return 0, mapIntegrationWriteErr(err)
 	}
 	return rowsAffected, nil
 }

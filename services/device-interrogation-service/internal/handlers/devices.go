@@ -827,8 +827,26 @@ func (h *DeviceHandlers) encryptCredentialsForJob(ctx context.Context, tenantID 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load credentials: %w", err)
 	}
+	return rekeyIntegrationCredentialsForJob(configJSON, masterKey)
+}
 
-	// Decrypt credentials using master key
+// rekeyIntegrationCredentialsForJob turns an integration row's stored config
+// into the legacy {_job_key, config} job payload.
+//
+// Two lists, one per side of the hand-off, and neither is a local copy:
+//
+//   - master-key decryption covers what the integrations handler encrypted
+//     (sensitiveKeys, built from the provider packages); a value that does not
+//     decrypt is legacy plaintext and is passed on as it is.
+//   - job-key encryption covers exactly what the reader,
+//     services.NormalizeJobCredentials, decrypts
+//     (services.SensitiveCredentialFields).
+//
+// This function used to keep one list of its own for both, and it disagreed
+// with the reader: it job-encrypted `username`, which the reader never
+// decrypts, so the agent was handed a ciphertext as the username; and it left
+// `token` in the clear while the reader insists on decrypting it.
+func rekeyIntegrationCredentialsForJob(configJSON, masterKey string) (map[string]interface{}, error) {
 	masterEnc, err := encryption.NewService(masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize encryption service: %w", err)
@@ -839,27 +857,21 @@ func (h *DeviceHandlers) encryptCredentialsForJob(ctx context.Context, tenantID 
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// Decrypt all sensitive fields
-	decryptedConfig := make(map[string]interface{})
-	sensitiveKeys := []string{"username", "password", "api_key", "api_token", "client_secret", "access_key_id", "secret_access_key"}
-
+	decryptedConfig := make(map[string]interface{}, len(encryptedConfig))
 	for key, value := range encryptedConfig {
-		if slices.Contains(sensitiveKeys, key) {
-			// Decrypt sensitive field
-			strValue, ok := value.(string)
-			if !ok {
-				strValue = fmt.Sprintf("%v", value)
-			}
-			decrypted, err := masterEnc.Decrypt(strValue)
-			if err != nil {
-				// If decryption fails, it might not be encrypted (legacy data)
-				decryptedConfig[key] = strValue
-			} else {
-				decryptedConfig[key] = decrypted
-			}
-		} else {
-			// Non-sensitive field, copy as-is
+		if !slices.Contains(sensitiveKeys, key) {
 			decryptedConfig[key] = value
+			continue
+		}
+		strValue, ok := value.(string)
+		if !ok {
+			strValue = fmt.Sprintf("%v", value)
+		}
+		if decrypted, derr := masterEnc.Decrypt(strValue); derr == nil {
+			decryptedConfig[key] = decrypted
+		} else {
+			// Not encrypted (legacy data).
+			decryptedConfig[key] = strValue
 		}
 	}
 
@@ -869,28 +881,23 @@ func (h *DeviceHandlers) encryptCredentialsForJob(ctx context.Context, tenantID 
 		return nil, fmt.Errorf("failed to generate job-specific key: %w", err)
 	}
 	jobKey := hex.EncodeToString(jobKeyBytes)
-
-	// Create job-specific encryption service
 	jobEnc, err := encryption.NewService(jobKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize job encryption service: %w", err)
 	}
 
-	// Re-encrypt sensitive fields with job-specific key
-	jobEncryptedConfig := make(map[string]interface{})
+	jobFields := services.SensitiveCredentialFields()
+	jobEncryptedConfig := make(map[string]interface{}, len(decryptedConfig))
 	for key, value := range decryptedConfig {
-		if slices.Contains(sensitiveKeys, key) {
-			// Encrypt with job-specific key
-			strValue := fmt.Sprintf("%v", value)
-			encrypted, err := jobEnc.Encrypt(strValue)
-			if err != nil {
-				return nil, fmt.Errorf("failed to encrypt %s with job key: %w", key, err)
-			}
-			jobEncryptedConfig[key] = encrypted
-		} else {
-			// Non-sensitive field, copy as-is
+		if !slices.Contains(jobFields, key) {
 			jobEncryptedConfig[key] = value
+			continue
 		}
+		encrypted, err := jobEnc.Encrypt(fmt.Sprintf("%v", value))
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt %s with job key: %w", key, err)
+		}
+		jobEncryptedConfig[key] = encrypted
 	}
 
 	// Encrypt the job-specific key with master key and include it in the credentials
@@ -898,8 +905,6 @@ func (h *DeviceHandlers) encryptCredentialsForJob(ctx context.Context, tenantID 
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt job key: %w", err)
 	}
-
-	// Return credentials with encrypted job key and re-encrypted sensitive fields
 	return map[string]interface{}{
 		"_job_key": encryptedJobKey,    // Encrypted job-specific key (encrypted with master key)
 		"config":   jobEncryptedConfig, // Credentials encrypted with job-specific key

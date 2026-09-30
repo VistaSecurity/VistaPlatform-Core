@@ -107,7 +107,7 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
   ] },
   { section: 'Notifications & Alerts', items: [
     { key: 'routing', label: 'Routing Rules', icon: 'route', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Match events to configured delivery channels, with severity/category filters and digest frequency.' },
-    { key: 'alert-rules', label: 'Alert Rules', icon: 'bell-ring', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Define event-based alerts — thresholds, severity, and the actions they trigger.' },
+    { key: 'alert-rules', label: 'Alert Rules', icon: 'bell-ring', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'See which alert types the platform raises, how their severity escalates, and turn individual alert types on or off.' },
     { key: 'notification-history', label: 'Delivery History', icon: 'mail', built: true, permission: TENANT_PERMISSIONS.settings.read, job: 'Review every notification the platform sent — or silently dropped — with the channels, status, and rule-match outcome for each.' },
   ] },
   { section: 'Policies', items: [

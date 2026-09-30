@@ -165,6 +165,15 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 	if reusedDiscoveryJob {
 		steps.ExistingFindings = s.countDiscoveryFindings(ctx, discoveryJobID)
 	}
+	// A cloud run writes no discovery_findings — only sensor_discoveries rows,
+	// through the same writer the interactive run uses — so counting findings
+	// alone would report "0 into inventory" for a run that delivered every
+	// bucket and database it found. Count the rows it actually wrote, and hold
+	// them against what the executor said it wrote.
+	if reusedDiscoveryJob && materializedByExecutor(result) && deviceJob.JobType == models.JobTypeCloudDiscovery {
+		steps.ExecutorDiscoveries = s.countBatchDiscoveries(ctx, discoveryJobID)
+		steps.ExecutorDiscoveriesExpected = intFromMetadata(result.Metadata, metaCloudDiscoveriesWritten)
+	}
 	defer func() {
 		if err := steps.persist(ctx, s.bypassDB, jobID); err != nil {
 			fmt.Printf("Warning: %v\n", err)
@@ -407,6 +416,37 @@ func (s *ResultProcessor) countDiscoveryFindings(ctx context.Context, discoveryJ
 		return 0
 	}
 	return n
+}
+
+// countBatchDiscoveries returns how many sensor_discoveries rows a discovery
+// job's batch holds. Same rules as countDiscoveryFindings: keyed by the
+// discovery job id with no tenant input, so the bypass role; a failure yields
+// -1 and a warning, which the processing log reports as "not reconciled"
+// rather than as zero rows.
+func (s *ResultProcessor) countBatchDiscoveries(ctx context.Context, discoveryJobID uuid.UUID) int {
+	var n int
+	if err := s.bypassDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM sensor_discoveries WHERE batch_id = $1`, discoveryJobID.String(),
+	).Scan(&n); err != nil {
+		fmt.Printf("Warning: failed to count sensor_discoveries for discovery job %s: %v\n", discoveryJobID, err)
+		return -1
+	}
+	return n
+}
+
+// intFromMetadata reads a count from a result's metadata in either shape it
+// can have: the in-memory int the executor set, or a float64 after a JSON
+// round-trip.
+func intFromMetadata(metadata map[string]interface{}, key string) int {
+	switch v := metadata[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }
 
 // buildFindingDetails constructs the enriched details map for a discovery finding,

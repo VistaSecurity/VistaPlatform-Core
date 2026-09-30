@@ -36,6 +36,24 @@ type MergeExecutionRequest struct {
 	MergeSelection
 	Revision string `json:"revision"`
 	Reason   string `json:"reason"`
+
+	// rule is set only by the rule-merge executor ( Phase 4), never from
+	// a request body: it is unexported, so no API caller can claim a merge
+	// was the rule's. See ruleMergeDecision.
+	rule *ruleMergeDecision
+}
+
+// ruleMergeDecision is what makes an ExecuteMerge a RULE merge.
+type ruleMergeDecision struct {
+	// evidence is the same-device rule's evidence as re-evaluated for this
+	// merge; it lands in the audit (`decided_by: rule`) and on the proposal row
+	// ([DecidedByRule]).
+	evidence []string
+	// recheck re-evaluates the rule INSIDE the merge transaction, after the
+	// selection's rows and identifiers are locked, so the merge acts on the
+	// records as they are at that moment and not as they were when the
+	// executor first looked. An error aborts the merge.
+	recheck func(ctx context.Context, tx *sqlx.Tx) ([]string, error)
 }
 type MergePreviewAsset struct {
 	AssetID        uuid.UUID      `json:"asset_id"`

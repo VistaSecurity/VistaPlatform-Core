@@ -357,12 +357,15 @@ class. Where the evidence was ambiguous you get **Candidates** to choose between
 before accepting. Accepting sets the class and records which rule — or which
 model — decided it. Rejecting stops that class being proposed again.
 
-**Auto-merged by the matcher.** If your organization has raised the auto-accept
-threshold above zero, this section lists merges that already happened inside the
-recent window, each with its score and the matcher's reasons. It is deliberately
-not a queue: there is nothing to decide, no buttons, and **no way to reverse one
-from here**. A **Change the threshold** link goes to the setting that allowed it.
-On the default threshold of zero the section does not appear at all.
+**Merged automatically.** Lists the merges that already happened inside the
+recent window without a person deciding — each marked **Auto-accepted by the
+matcher** (with its score and reasons; only if your organization has raised the
+auto-accept threshold above zero) or **Merged by rule** (two records fixed rules
+were sure are one device, with the evidence and a link to the asset they were
+merged into; on unless your organization turned it off). It is deliberately not a
+queue: there is nothing to decide, no buttons, and **no way to reverse one from
+here**. A **Change these settings** link goes to the settings that allowed it.
+When nothing has been merged the section says so.
 
 > If one of these reads fails, the page tells you so instead of showing an empty
 > section. "Nothing awaiting review" is a claim about the whole queue, and it is
@@ -1004,7 +1007,7 @@ them:
   class carries — which is what the New asset form is built from.
 - **Policies → Identification rules** shows how a new sighting is matched to an
   existing asset, and whether a high enough match may be accepted without you.
-  That setting is what fills the **Auto-merged by the matcher** section in
+  That page's settings are what fill the **Merged automatically** section in
   Approvals.
 
 Billing, retention, locations and network segments are administrator work; the
@@ -1061,7 +1064,9 @@ show.
 
 ### API Tokens
 
-Personal access tokens for scripts and for the read-only MCP server. **New token**
+Personal access tokens for connecting AI assistants to the read-only MCP server.
+They work only with the MCP server — not with Vista Platform's other REST
+endpoints. **New token**
 creates one: name it, choose its scopes, and copy the value — **the full value is
 shown only once**, so put it in a secret manager immediately.
 
@@ -1096,10 +1101,12 @@ to each from the asset form, and the next sighting should link them. See
 [Asset Approval](../features/asset-approval.md).
 
 **"An asset was merged and I did not approve it."**
-Check **Approvals → Auto-merged by the matcher**. If the section is there, your
-organization's auto-accept threshold is above zero. The **Change the threshold**
-link goes to the setting. There is no way to reverse a completed auto-merge from
-that page.
+Check **Approvals → Merged automatically**. A row marked **Auto-accepted by the
+matcher** means your organization's auto-accept threshold is above zero; a row
+marked **Merged by rule** means the same-device rule was sure the two records
+were one device, and shows the evidence. The **Change these settings** link goes
+to the settings. There is no way to reverse a completed automatic merge from that
+page.
 
 **"A sensor shows offline but the process is running."**
 Offline is decided by the heartbeat, not by the stored status. Check the sensor

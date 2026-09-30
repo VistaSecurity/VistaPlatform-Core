@@ -22,17 +22,30 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 )
 
+// Enumeration calls, recorded as per-type, per-region outcomes on the job
+// beside the crypto collectors' (see enumerateAWS).
+const (
+	EnumTypeAWSVPCs           = "vpcs"
+	EnumTypeAWSSubnets        = "subnets"
+	EnumTypeAWSSecurityGroups = "security_groups"
+	EnumTypeAWSInstances      = "ec2_instances"
+)
+
 // enumerateAWS runs the four calls in each region and builds the plan.
 //
-// A region that fails is LOGGED AND SKIPPED rather than failing the run: an
-// account with an opted-out region, or a credential scoped to a subset,
-// otherwise loses every other region's inventory to one AuthFailure. The error
-// is not swallowed silently — it names the region and the call.
+// A region that fails is skipped rather than failing the run: an account with
+// an opted-out region, or a credential scoped to a subset, otherwise loses
+// every other region's inventory to one AuthFailure. The failure is RECORDED
+// against the call and the region (the run's CloudOutcomeRecorder), so the job
+// shows "EC2 instances — could not collect in eu-west-1: UnauthorizedOperation".
+// It used to be only logged, so a credential missing ec2:DescribeInstances
+// produced a job that read exactly like an account with no instances.
 func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awsclient.Client, regions []string) (cloudEnumerationPlan, error) {
 	plan := cloudEnumerationPlan{Provider: "aws", Vendor: "AWS", SecurityGroupIDs: map[string]bool{}}
 	if len(regions) == 0 {
 		regions = []string{client.GetRegion()}
 	}
+	outcomes := cloudOutcomesFrom(ctx)
 	for _, region := range regions {
 		region = strings.TrimSpace(region)
 		if region == "" {
@@ -41,16 +54,19 @@ func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awscli
 		api := client.EC2ClientForRegion(region)
 
 		vpcs, err := awsclient.ListVPCs(ctx, api, region)
+		outcomes.Attempt(EnumTypeAWSVPCs, region, len(vpcs), err)
 		if err != nil {
 			log.Printf("[cloud enumeration] aws %s: %v", region, err)
 			continue
 		}
 		subnets, err := awsclient.ListSubnets(ctx, api, region)
+		outcomes.Attempt(EnumTypeAWSSubnets, region, len(subnets), err)
 		if err != nil {
 			log.Printf("[cloud enumeration] aws %s: %v", region, err)
 			continue
 		}
 		groups, err := awsclient.ListSecurityGroups(ctx, api, region)
+		outcomes.Attempt(EnumTypeAWSSecurityGroups, region, len(groups), err)
 		if err != nil {
 			// Group membership is an attribute, not the inventory. Losing it
 			// must not lose the instances.
@@ -58,6 +74,7 @@ func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awscli
 			groups = nil
 		}
 		instances, err := awsclient.ListInstances(ctx, api, region)
+		outcomes.Attempt(EnumTypeAWSInstances, region, len(instances), err)
 		if err != nil {
 			log.Printf("[cloud enumeration] aws %s: %v", region, err)
 			continue

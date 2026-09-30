@@ -24,6 +24,7 @@ const segment = {
   id: 'seg-1', tenant_id: 't', name: 'Everything', segment_type: 'cidr', value: '0.0.0.0/0', network_type: 'public',
   environment: 'production', location_id: null, is_active: true, auto_approve_discoveries: false, tags: null,
   metadata: {}, created_at: '2026-09-24T00:00:00Z', updated_at: '2026-09-24T00:00:00Z',
+  dynamic: null, dynamic_source: null,
 };
 
 let host: HTMLDivElement; let root: Root;

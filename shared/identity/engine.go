@@ -72,6 +72,12 @@ type Resolution struct {
 	// HIGHEST-precedence kind that resolved to the asset. Empty on create.
 	DecidedBy Kind `json:"decided_by,omitempty"`
 
+	// DecidedByInferred is true when the identifier that decided the match was
+	// one the intake DERIVED ([Identifier.Inferred]) rather than observed — a
+	// MAC worked out from an EUI-64 address or a serial. Such a match is still
+	// a match; it is not direct evidence, so it moves no lease.
+	DecidedByInferred bool `json:"decided_by_inferred,omitempty"`
+
 	// Candidates are the assets a conflict was between, ranked by matcher
 	// score when a matcher scored them (highest first), otherwise in
 	// precedence order of the identifier that matched them.
@@ -108,6 +114,14 @@ type Resolution struct {
 	// same kinds of evidence as `kept_separate`. Candidates carries the
 	// assets the proposal would have named. See floating.go.
 	Suppressed *SuppressedProposal `json:"suppressed_proposal,omitempty"`
+
+	// MergeRecommended is set on a conflict (or an auto-accept) for which the
+	// same-device rule held and the tenant lets rule merges run: the proposal
+	// carries `rule_verdict: same_device` and the evidence. The engine did NOT
+	// merge anything — it never does inside Resolve (guard rail 2). The
+	// rule-merge executor in inventory-service acts on the verdict later,
+	// outside this transaction, through the audited merge path.
+	MergeRecommended bool `json:"merge_recommended,omitempty"`
 }
 
 // Config configures an [Engine].
@@ -185,6 +199,11 @@ type Engine struct {
 	repo      Repository
 	matcher   seams.Matcher
 	threshold float64
+	// autoMerge is the tenant's `auto_merge_existing` setting for THIS
+	// observation ([Engine.WithAutoMergeExisting]). False on a freshly built
+	// engine: a caller that has not read the tenant's setting stamps no
+	// verdicts, the same "unset means never" the threshold has.
+	autoMerge bool
 	dynamic   map[string]bool
 	prec      func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
 	now       func() time.Time
@@ -281,6 +300,27 @@ func (e *Engine) WithAutoAcceptThreshold(threshold float64) *Engine {
 // AutoAcceptThreshold reports the threshold this engine is using.
 func (e *Engine) AutoAcceptThreshold() float64 { return e.threshold }
 
+// WithAutoMergeExisting returns a copy of the engine carrying this tenant's
+// `auto_merge_existing` setting ( Phase 4, owner decision D1), read per
+// observation on the resolving transaction exactly as the threshold is
+// (identitysettings.ReadAutoMergeExisting).
+//
+// On, a conflict for which the same-device rule holds opens its proposal as
+// always and stamps `rule_verdict: same_device` on it ([SameDeviceVerdict]);
+// the rule-merge executor merges it later, outside Resolve. Off, nothing is
+// stamped and the proposal is an ordinary question for a person — today's
+// behaviour.
+//
+// The engine is not mutated; the returned value is a shallow copy.
+func (e *Engine) WithAutoMergeExisting(on bool) *Engine {
+	cp := *e
+	cp.autoMerge = on
+	return &cp
+}
+
+// AutoMergeExisting reports whether this engine stamps same-device verdicts.
+func (e *Engine) AutoMergeExisting() bool { return e.autoMerge }
+
 // (Whether a scope is dynamic is per-observation, not per-engine: see
 // [Observation.DynamicScopes] and [Engine.kindVotes].)
 
@@ -319,7 +359,7 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		if err != nil {
 			return Resolution{}, fmt.Errorf("%w: %w", ErrInvalidObservation, err)
 		}
-		n.Source = obs.Source
+		n.Source = identifierSource(raw, obs.Source)
 		if n.SeenAt.IsZero() {
 			n.SeenAt = at
 		}
@@ -350,8 +390,12 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 	byKind := groupByKind(ids)
 
 	var (
-		decided      string
-		decidedBy    Kind
+		decided   string
+		decidedBy Kind
+		// decider is the identifier that decided: which one, not only which
+		// kind, because a match decided by an INFERRED identifier is not
+		// direct evidence and must not move a lease ( Phase 2).
+		decider      Identifier
 		conflicting  bool
 		corrupt      bool // one identifier value owned by several assets
 		conflictWhy  string
@@ -394,9 +438,13 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			}
 			switch {
 			case decided == "":
-				// The highest-precedence kind that matched. It decides.
+				// The highest-precedence kind that matched. It decides. Within
+				// the kind, groupByKind put native identifiers first, so an
+				// inferred one decides only when no native one of its kind
+				// matched anything (guard 2 of Phase 2).
 				decided = refs[0].ID
 				decidedBy = kind
+				decider = id
 			case decided != refs[0].ID:
 				conflicting = true
 				if conflictWhy == "" {
@@ -454,6 +502,12 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		// asset does, and with Config.ProvisionalInventory off the mode is
 		// always `none`.
 		changes := map[string]any{"decided_by": string(decidedBy)}
+		if decider.Inferred() {
+			// The timeline says the match was made through a DERIVED value and
+			// names the evidence, so a reviewer reading "decided by
+			// mac_address" knows the MAC was worked out, not seen.
+			changes["decided_by_inferred"] = decider.Source.Ref
+		}
 		mode, err := e.provisionalMatchMode(ctx, ref, evidence[decided])
 		if err != nil {
 			return Resolution{}, err
@@ -477,23 +531,44 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		// Identifiers owned by another asset cannot be written here: one
 		// identifier value, at most one asset.
 		attach, unattached := splitByOwner(ids, owners, decided)
+
+		// 1b — the address follows the MAC. A lease in a dynamic scope,
+		// still owned by whoever held it before, moves to the device this
+		// observation met there, when lease.go's conditions all hold. The moved
+		// addresses are then attached like any other, which is what stamps
+		// their last-seen with this observation.
+		moves, unattached, err := e.leaseMoves(ctx, obs, precedence, decider, decidedBy, owners, unattached)
+		if err != nil {
+			return Resolution{}, err
+		}
+		if len(moves) > 0 {
+			if err := e.applyLeaseMoves(ctx, obs, at, decidedBy, ref, moves); err != nil {
+				return Resolution{}, err
+			}
+			movedKeys := make([]string, 0, len(moves))
+			for _, m := range moves {
+				attach = append(attach, m.id)
+				movedKeys = append(movedKeys, m.id.Key())
+			}
+			changes["lease_moved"] = movedKeys
+		}
+
 		if err := e.applyToAsset(ctx, ref, obs, at, attach, unattached, ActionUpdated, changes); err != nil {
 			return Resolution{}, err
 		}
+		if err := e.retireEmptiedLeaseHolders(ctx, obs, at, moves); err != nil {
+			return Resolution{}, err
+		}
 		return Resolution{
-			Outcome:    OutcomeMatched,
-			Asset:      ref,
-			DecidedBy:  decidedBy,
-			Unattached: unattached,
+			Outcome:           OutcomeMatched,
+			Asset:             ref,
+			DecidedBy:         decidedBy,
+			DecidedByInferred: decider.Inferred(),
+			Unattached:        unattached,
 		}, nil
 	default:
 		if e.admissionDecision != nil && !e.admissionDecision.Established {
-			claimed := map[string]bool{}
-			for _, refs := range owners {
-				for _, ref := range refs {
-					claimed[ref.ID] = true
-				}
-			}
+			claimed := ownerSet(owners)
 			if len(claimed) > 1 {
 				return e.resolveContested(ctx, obs, at, ids, owners)
 			}
@@ -526,7 +601,11 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		// Nothing DECIDED. That is not the same as nothing being known, and the
 		// difference is the floor below.
 		attach, unattached := splitByOwner(ids, owners, "")
-		if len(attach) > 0 {
+		// An observation whose only NEW identifiers are derived ones creates
+		// nothing (guard 1, Phase 2): it falls through to the floor as if
+		// they were not there, so adding a derived MAC to a sighting can never
+		// turn "another sighting of X" into a new asset.
+		if len(attach) > 0 && !allInferred(attach) {
 			return e.resolveCreate(ctx, obs, at, attach, unattached)
 		}
 
@@ -538,7 +617,22 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		if len(unattached) > 0 {
 			// Every identifier we saw is owned by somebody else, but none of
 			// them was allowed to decide — a kind this class drops, or an IP in
-			// a dynamic segment. We know the observation is related to those
+			// a dynamic segment.
+			//
+			// When all of them belong to ONE asset ( A1) there is no
+			// question to ask: this is another sighting of a thing we already
+			// know about, and a proposal naming a single candidate is a work
+			// item a reviewer can only "keep separate" from nothing. It is
+			// supporting evidence, whatever Config.ProvisionalInventory says —
+			// the shortcut is about ownership, not about provisional inventory.
+			// Nothing new can be attached here: every identifier is already
+			// that asset's, which is how the floor was reached.
+			if claimed := ownerSet(owners); len(claimed) == 1 {
+				for only := range claimed {
+					return e.resolveSupporting(ctx, obs, at, ids, owners, AssetRef{TenantID: obs.TenantID, ID: only})
+				}
+			}
+			// Two or more owners: we know the observation is related to those
 			// assets and we do not know how. That is ADR-0002 D3's third
 			// outcome, so it opens a merge proposal against the owners; it does
 			// NOT create, because the thing it would create is the empty asset
@@ -673,6 +767,25 @@ func (e *Engine) resolveContested(
 			evidence[ref.ID] = append(evidence[ref.ID], id)
 		}
 	}
+	// B2: an asset whose ONLY link to this observation is a generic name
+	// is not a candidate. `iphone` on two records says nothing about whether
+	// either is the phone seen now, and a proposal built on it asks a reviewer
+	// to consider merging two phones because neither was renamed.
+	candidateSeq = withoutGenericOnly(candidateSeq, evidence)
+	if len(candidateSeq) == 0 {
+		// Every owner was linked by a generic name alone: nothing identifies
+		// the observation, and there is no question to ask. The evidence is
+		// retained by the caller; nothing is written to any asset.
+		return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
+	}
+	if len(candidateSeq) == 1 {
+		// Belt and braces for A1. A merge proposal with ONE candidate is
+		// not a question — the Approvals UI needs two live records to offer a
+		// merge, so the only answer a reviewer could give is "keep separate"
+		// from nothing. Both callers route a single owner to supporting
+		// evidence before reaching here; this holds for any future caller.
+		return e.resolveSupporting(ctx, obs, at, ids, owners, AssetRef{TenantID: obs.TenantID, ID: candidateSeq[0]})
+	}
 	candidates := make([]MergeCandidate, 0, len(candidateSeq))
 	for _, id := range candidateSeq {
 		candidates = append(candidates, MergeCandidate{
@@ -685,21 +798,26 @@ func (e *Engine) resolveContested(
 	// Decision memory, before ranking and before the auto-accept: a pair a
 	// human already kept separate is neither re-proposed nor auto-merged on a
 	// model's score.
-	if d, err := e.priorDecision(ctx, obs, candidates); err != nil {
+	prior, keptApart, err := e.keptSeparate(ctx, obs, candidates)
+	if err != nil {
 		return Resolution{}, err
-	} else if d != nil {
-		return e.resolveSuppressed(ctx, obs, at, ids, owners, candidates, *d, why)
+	}
+	if keptApart {
+		if d := prior.appliesTo(candidates); d != nil {
+			return e.resolveSuppressed(ctx, obs, at, ids, owners, candidates, *d, why)
+		}
 	}
 
 	r, err := e.rank(ctx, obs, at, candidates)
 	if err != nil {
 		return Resolution{}, err
 	}
+	r = e.withSameDeviceVerdict(obs, r, keptApart)
 
 	// An auto-accept threshold a tenant deliberately set still applies: the
 	// observation goes into the winner rather than nowhere.
 	if ok, _ := e.autoAcceptable(ids, r); ok {
-		return e.acceptMerge(ctx, obs, at, *r.top, r.candidates, ids, owners, why)
+		return e.acceptMerge(ctx, obs, at, r, ids, owners, why)
 	}
 	return e.proposeWithoutCreating(ctx, obs, at, ids, r, why)
 }
@@ -729,13 +847,15 @@ func (e *Engine) proposeWithoutCreating(
 		// work item naming nothing.
 		return Resolution{}, fmt.Errorf("%w: %s", ErrNoUsableIdentifier, why)
 	}
-	proposal, err := e.repo.OpenMergeProposal(ctx, obs.TenantID, MergeProposal{
-		Candidates: candidates,
-		Source:     obs.Source,
-		Reason:     why,
-		ProposedAt: at,
-		ModelID:    rankedBy(top).ModelID,
-		SourceRef:  rankedBy(top).SourceRef,
+	proposal, err := e.openMergeProposal(ctx, obs.TenantID, r, MergeProposal{
+		Candidates:   candidates,
+		Source:       obs.Source,
+		Reason:       why,
+		ProposedAt:   at,
+		ModelID:      rankedBy(top).ModelID,
+		SourceRef:    rankedBy(top).SourceRef,
+		RuleVerdict:  r.ruleVerdict(),
+		RuleEvidence: r.ruleEvidence,
 	})
 	if err != nil {
 		return Resolution{}, fmt.Errorf("identity: opening the merge proposal for a fully-owned observation: %w", err)
@@ -756,11 +876,12 @@ func (e *Engine) proposeWithoutCreating(
 		}
 	}
 	return Resolution{
-		Outcome:    OutcomeConflict,
-		Candidates: candidates,
-		Proposal:   proposal,
-		TopScore:   topScore(top),
-		Unattached: ids,
+		Outcome:          OutcomeConflict,
+		Candidates:       candidates,
+		Proposal:         proposal,
+		TopScore:         topScore(top),
+		Unattached:       ids,
+		MergeRecommended: r.mergeRecommended(),
 	}, nil
 }
 
@@ -773,6 +894,14 @@ func (e *Engine) proposeWithoutCreating(
 // silently, on one kind, in one intake path — was three assets for one host.
 func (e *Engine) kindVotes(obs Observation, id Identifier) bool {
 	if e.muted[id.Key()] {
+		return false
+	}
+	if id.Generic {
+		// B2: a name many unrelated devices carry (`iphone`, `printer`,
+		// or one the tenant already sees on three or more assets) is recorded —
+		// it is true — but it says nothing about WHICH device this is, so it
+		// never decides. Ingest marks it ([GenericNames.Mark]); the engine needs
+		// no lookup.
 		return false
 	}
 	if e.admissionDecision != nil && !e.admissionDecision.Established {
@@ -836,6 +965,16 @@ func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Tim
 	if len(attach) == 0 {
 		return Resolution{}, fmt.Errorf("%w: refusing to create an asset with no identifier", ErrNoUsableIdentifier)
 	}
+	// Guard 1 of Phase 2: an inferred identifier never CREATES. A value
+	// the intake worked out (a MAC read from an EUI-64 address or a serial) is
+	// evidence about a thing something else established; an asset held
+	// together by nothing else would be minted by a derivation. The emitters
+	// only add a derived MAC beside real evidence, so this is unreachable from
+	// them — it is here so no future caller can reach the INSERT around it.
+	if allInferred(attach) {
+		return Resolution{}, fmt.Errorf("%w: refusing to create an asset whose only identifiers are derived (%v)",
+			ErrNoUsableIdentifier, identifierKeys(attach))
+	}
 	classKey, classSource, classRef, classConf := e.classForCreate(obs)
 	newAsset := NewAsset{
 		ClassKey:        classKey,
@@ -893,6 +1032,21 @@ func (e *Engine) resolveConflict(
 	candidateSeq []string,
 	why string,
 ) (Resolution, error) {
+	// B2, the same pruning resolveContested does. The walk only notes
+	// identifiers that VOTED and a generic name never votes ([Engine.kindVotes]),
+	// so no candidate here should be linked by one alone; this keeps the rule
+	// in force for any evidence that reaches the conflict path another way.
+	if kept := withoutGenericOnly(candidateSeq, evidence); len(kept) < len(candidateSeq) {
+		switch len(kept) {
+		case 0:
+			return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
+		case 1:
+			// One candidate is not a question ( A1): supporting evidence,
+			// with the address-only link refusal (C1) that path applies.
+			return e.resolveSupporting(ctx, obs, at, ids, owners, AssetRef{TenantID: obs.TenantID, ID: kept[0]})
+		}
+		candidateSeq = kept
+	}
 	candidates := make([]MergeCandidate, 0, len(candidateSeq))
 	for _, id := range candidateSeq {
 		candidates = append(candidates, MergeCandidate{
@@ -904,10 +1058,14 @@ func (e *Engine) resolveConflict(
 	// Decision memory (floating.go), before the matcher sees the pair: a
 	// reviewer who already kept these apart is not asked again, and no score
 	// overrides their answer.
-	if d, err := e.priorDecision(ctx, obs, candidates); err != nil {
+	prior, keptApart, err := e.keptSeparate(ctx, obs, candidates)
+	if err != nil {
 		return Resolution{}, err
-	} else if d != nil {
-		return e.resolveSuppressed(ctx, obs, at, ids, owners, candidates, *d, why)
+	}
+	if keptApart {
+		if d := prior.appliesTo(candidates); d != nil {
+			return e.resolveSuppressed(ctx, obs, at, ids, owners, candidates, *d, why)
+		}
 	}
 
 	// The matcher seam ranks; it does not decide. A null matcher leaves every
@@ -916,9 +1074,10 @@ func (e *Engine) resolveConflict(
 	if err != nil {
 		return Resolution{}, err
 	}
+	r = e.withSameDeviceVerdict(obs, r, keptApart)
 
 	if ok, _ := e.autoAcceptable(ids, r); ok {
-		return e.acceptMerge(ctx, obs, at, *r.top, r.candidates, ids, owners, why)
+		return e.acceptMerge(ctx, obs, at, r, ids, owners, why)
 	}
 	return e.conflictOutcome(ctx, obs, at, ids, owners, r, why)
 }
@@ -953,8 +1112,9 @@ func (e *Engine) conflictOutcome(
 	// and serial on B — the "observation asset" this would create carries none
 	// at all, and an asset with no identifier can never be matched again. The
 	// proposal alone is the honest record: it names the candidates and the
-	// evidence, and a human settles it.
-	if len(attach) == 0 {
+	// evidence, and a human settles it. The same holds when the only unowned
+	// identifiers are derived ones: they never create (guard 1, Phase 2).
+	if len(attach) == 0 || allInferred(attach) {
 		return e.proposeWithoutCreating(ctx, obs, at, ids, r, why)
 	}
 
@@ -989,7 +1149,7 @@ func (e *Engine) conflictOutcome(
 		return Resolution{}, err
 	}
 
-	proposal, err := e.repo.OpenMergeProposal(ctx, obs.TenantID, MergeProposal{
+	proposal, err := e.openMergeProposal(ctx, obs.TenantID, r, MergeProposal{
 		ObservationAssetID: ref.ID,
 		Candidates:         candidates,
 		Source:             obs.Source,
@@ -997,6 +1157,8 @@ func (e *Engine) conflictOutcome(
 		ProposedAt:         at,
 		ModelID:            rankedBy(top).ModelID,
 		SourceRef:          rankedBy(top).SourceRef,
+		RuleVerdict:        r.ruleVerdict(),
+		RuleEvidence:       r.ruleEvidence,
 	})
 	if err != nil {
 		return Resolution{}, fmt.Errorf("identity: opening merge proposal: %w", err)
@@ -1015,12 +1177,13 @@ func (e *Engine) conflictOutcome(
 	}
 
 	return Resolution{
-		Outcome:    OutcomeConflict,
-		Asset:      ref,
-		Candidates: candidates,
-		Proposal:   proposal,
-		TopScore:   topScore(top),
-		Unattached: unattached,
+		Outcome:          OutcomeConflict,
+		Asset:            ref,
+		Candidates:       candidates,
+		Proposal:         proposal,
+		TopScore:         topScore(top),
+		Unattached:       unattached,
+		MergeRecommended: r.mergeRecommended(),
 	}, nil
 }
 
@@ -1037,12 +1200,12 @@ func (e *Engine) acceptMerge(
 	ctx context.Context,
 	obs Observation,
 	at time.Time,
-	top MergeCandidate,
-	candidates []MergeCandidate,
+	r ranking,
 	ids []Identifier,
 	owners map[string][]AssetRef,
 	why string,
 ) (Resolution, error) {
+	top, candidates := *r.top, r.candidates
 	// Only identifiers unowned or already the winner's may be written. The
 	// losing candidates keep theirs until the approvals path executes the
 	// merge.
@@ -1057,7 +1220,7 @@ func (e *Engine) acceptMerge(
 		return Resolution{}, err
 	}
 
-	proposal, err := e.repo.OpenMergeProposal(ctx, obs.TenantID, MergeProposal{
+	proposal, err := e.openMergeProposal(ctx, obs.TenantID, r, MergeProposal{
 		Candidates:        candidates,
 		Source:            obs.Source,
 		Reason:            why,
@@ -1069,6 +1232,11 @@ func (e *Engine) acceptMerge(
 		AcceptedScore:     top.Score,
 		AcceptedModelID:   top.modelID,
 		AcceptedSourceRef: top.sourceRef,
+		// The matcher filed the OBSERVATION into the winner; merging the two
+		// existing records is a different act, and the rule's verdict (if it
+		// held) is still the executor's work item.
+		RuleVerdict:  r.ruleVerdict(),
+		RuleEvidence: r.ruleEvidence,
 	})
 	if err != nil {
 		return Resolution{}, fmt.Errorf("identity: opening the accepted merge proposal: %w", err)
@@ -1093,13 +1261,14 @@ func (e *Engine) acceptMerge(
 	}
 
 	return Resolution{
-		Outcome:      OutcomeMatched,
-		Asset:        top.Ref,
-		Candidates:   candidates,
-		Proposal:     proposal,
-		AutoAccepted: true,
-		TopScore:     top.Score,
-		Unattached:   unattached,
+		Outcome:          OutcomeMatched,
+		Asset:            top.Ref,
+		Candidates:       candidates,
+		Proposal:         proposal,
+		AutoAccepted:     true,
+		TopScore:         top.Score,
+		Unattached:       unattached,
+		MergeRecommended: r.mergeRecommended(),
 	}, nil
 }
 
@@ -1187,6 +1356,119 @@ type ranking struct {
 	candidates []MergeCandidate
 	top        *MergeCandidate
 	summaries  map[string]AssetSummary
+
+	// ruleEvidence is set when the same-device rule held for these candidates
+	// and the tenant lets it merge ([Engine.withSameDeviceVerdict]); nil
+	// otherwise. It rides with the ranking because it is computed from the
+	// same summaries, and every tail that opens the proposal already takes one.
+	ruleEvidence []string
+
+	// pair is the matcher's score of the two top-ranked candidates against
+	// each other ( Phase 5). Zero when nothing scored it.
+	pair struct {
+		score  float64
+		ids    []string
+		reason string
+	}
+
+	// observed and context are the observation side exactly as the seam saw
+	// it, kept so the proposal can carry them (the lossless training export).
+	observed []Identifier
+	context  *MatcherSide
+}
+
+// ruleVerdict is the `rule_verdict` to stamp on the proposal: "" unless the
+// same-device rule held.
+func (r ranking) ruleVerdict() string {
+	if r.ruleEvidence == nil {
+		return ""
+	}
+	return RuleVerdictSameDevice
+}
+
+func (r ranking) mergeRecommended() bool { return r.ruleEvidence != nil }
+
+// withSameDeviceVerdict evaluates the same-device rule over a ranked conflict
+// ( Phase 4, owner decision D1) and records the verdict on the ranking
+// when it holds and the tenant has not turned rule merges off
+// ([Engine.WithAutoMergeExisting]).
+//
+// It decides nothing and writes nothing. The proposal is opened exactly as it
+// would have been; the verdict is stamped on it and Resolution.MergeRecommended
+// says so. Merging two existing assets is not something Resolve may do (guard
+// rail 2): inventory-service's rule-merge executor picks the verdict up,
+// re-evaluates the rule on the records as they are then, and merges through
+// the audited merge path.
+//
+// `keptApart` is the decision-memory lookup the caller already made: ANY
+// `kept_separate` decision about these candidates, whatever evidence it was
+// taken on, stops the rule (guard rail 4).
+func (e *Engine) withSameDeviceVerdict(obs Observation, r ranking, keptApart bool) ranking {
+	if !e.autoMerge {
+		return r
+	}
+	ok, evidence := SameDeviceVerdict(obs, r.candidates, r.summaries, SameDeviceLink{
+		Direct:       DirectEvidence(obs),
+		KeptSeparate: keptApart,
+	})
+	if ok {
+		r.ruleEvidence = evidence
+	}
+	return r
+}
+
+// annotate stamps what ranking learned onto a proposal about to be opened: the
+// pair score, the observation as the matcher saw it, and each candidate's
+// snapshot. It adds EVIDENCE only — every field it sets is advisory, and no
+// rule, threshold or auto-accept reads any of them (ADR-0008 D5).
+func (r ranking) annotate(p MergeProposal) MergeProposal {
+	if r.pair.score > 0 {
+		p.PairScore, p.PairReason = r.pair.score, r.pair.reason
+		p.PairAssetIDs = append([]string(nil), r.pair.ids...)
+	}
+	if len(r.observed) > 0 {
+		p.ObservationIdentifiers = append([]Identifier(nil), r.observed...)
+	}
+	if r.context != nil {
+		c := *r.context
+		p.ObservationContext = &c
+	}
+	if len(r.summaries) > 0 {
+		cs := make([]MergeCandidate, len(p.Candidates))
+		copy(cs, p.Candidates)
+		for i := range cs {
+			if s, ok := r.summaries[cs[i].Ref.ID]; ok && cs[i].Snapshot == nil {
+				cs[i].Snapshot = snapshotOf(s)
+			}
+		}
+		p.Candidates = cs
+	}
+	return p
+}
+
+// openMergeProposal opens (or folds into) a proposal carrying what the ranking
+// learned. Every engine path that opens a proposal goes through it, so the pair
+// score and the training snapshot cannot exist on one conflict path and not
+// another.
+func (e *Engine) openMergeProposal(ctx context.Context, tenantID string, r ranking, p MergeProposal) (ProposalRef, error) {
+	return e.repo.OpenMergeProposal(ctx, tenantID, r.annotate(p))
+}
+
+// snapshotOf is a candidate as the matcher compared it.
+func snapshotOf(s AssetSummary) *MatcherSide {
+	attrs := comparableAttributes(s.Attributes)
+	vendor, _ := attrs["vendor"].(string)
+	model, _ := attrs["model"].(string)
+	return &MatcherSide{
+		Name:        s.DisplayName,
+		Class:       s.ClassKey,
+		Segment:     s.NetworkSegment,
+		Vendor:      vendor,
+		Model:       model,
+		SourceKind:  summarySourceKind(s),
+		SeenAt:      s.LastSeenAt,
+		Identifiers: append([]Identifier(nil), s.Identifiers...),
+	}
 }
 
 // rank asks the matcher seam to score the candidates. The null matcher returns
@@ -1205,14 +1487,26 @@ func (e *Engine) rank(ctx context.Context, obs Observation, at time.Time, candid
 		summaries[s.Ref.ID] = s
 	}
 
-	scores, err := e.matcher.Match(ctx, toSeamObservation(obs, at), toSeamSummaries(loaded))
+	observed := seamIdentifiers(obs, at)
+	seamObs := toSeamObservation(obs, at, observed)
+	base := ranking{candidates: candidates, summaries: summaries, observed: observed, context: &MatcherSide{
+		Name:       seamObs.Name,
+		Class:      seamObs.Kind,
+		Segment:    seamObs.Segment,
+		Vendor:     attributeText(seamObs.Attributes, "vendor"),
+		Model:      attributeText(seamObs.Attributes, "model"),
+		SourceKind: seamObs.SourceKind,
+		SeenAt:     seamObs.ObservedAt,
+	}}
+
+	scores, err := e.matcher.Match(ctx, seamObs, toSeamSummaries(loaded))
 	if err != nil {
 		// A seam that fails is a seam that made no proposal. It must not fail
 		// identification: the rule-based outcome is complete without it.
-		return ranking{candidates: candidates, summaries: summaries}, nil
+		return base, nil
 	}
 	if len(scores) == 0 {
-		return ranking{candidates: candidates, summaries: summaries}, nil
+		return base, nil
 	}
 	byID := make(map[string]seams.MatchScore, len(scores))
 	for _, s := range scores {
@@ -1236,7 +1530,8 @@ func (e *Engine) rank(ctx context.Context, obs Observation, at time.Time, candid
 		out[i].sourceRef = p.SourceRef
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	r := ranking{candidates: out, summaries: summaries}
+	r := base
+	r.candidates = out
 	if out[0].Score > 0 {
 		top := out[0]
 		r.top = &top
@@ -1244,7 +1539,53 @@ func (e *Engine) rank(ctx context.Context, obs Observation, at time.Time, candid
 	// A top score of zero means nothing was actually scored: no top candidate
 	// is reported, so no threshold comparison can be made against a score
 	// nobody produced.
+	e.scorePair(ctx, &r, obs)
 	return r, nil
+}
+
+// scorePair asks the matcher about the two top-ranked candidates THEMSELVES
+// ( Phase 5): candidate A presented as the observation, candidate B as the
+// asset. Every feature is symmetric, so which is which does not matter.
+//
+// When a sighting links two records — one's MAC, the other's address — the
+// reviewer's real question is whether those two records are one thing, and the
+// per-candidate scores answer a different one (is the SIGHTING each of them).
+// The result is shown and stored; it never gates anything. A seam error, a
+// candidate that could not be read, or no score at all leaves it unscored.
+//
+// The observation's generic-name verdicts travel with it: they are about the
+// VALUE (the tenant sees it on many devices), whichever record carries it.
+func (e *Engine) scorePair(ctx context.Context, r *ranking, obs Observation) {
+	if len(r.candidates) < 2 {
+		return
+	}
+	a, okA := r.summaries[r.candidates[0].Ref.ID]
+	b, okB := r.summaries[r.candidates[1].Ref.ID]
+	if !okA || !okB {
+		return
+	}
+	as := toSeamSummaries([]AssetSummary{a})[0]
+	scores, err := e.matcher.Match(ctx, seams.Observation{
+		Kind:               as.Class,
+		Identifiers:        as.Identifiers,
+		DerivedIdentifiers: as.DerivedIdentifiers,
+		GenericNames:       genericNames(obs.Identifiers),
+		Attributes:         as.Attributes,
+		ObservedAt:         as.LastSeenAt,
+		Name:               as.Name,
+		Segment:            as.Segment,
+		SourceKind:         as.SourceKind,
+	}, toSeamSummaries([]AssetSummary{b}))
+	if err != nil {
+		return
+	}
+	for _, s := range scores {
+		if s.AssetID == b.Ref.ID && s.Score > 0 {
+			r.pair.score, r.pair.reason = s.Score, s.Reason
+			r.pair.ids = []string{a.Ref.ID, b.Ref.ID}
+			return
+		}
+	}
 }
 
 // autoAcceptable reports whether the engine may accept the top candidate on its
@@ -1392,6 +1733,37 @@ func classConfidence(obs Observation) float64 {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
+// identifierSource is the provenance an identifier is stored with: the
+// observation's, unless the caller marked the identifier as derived
+// ([Identifier.Inferred]) — the one per-identifier provenance the engine
+// honours, because it only ever WEAKENS the claim. A derived identifier with no
+// ref of its own falls back to the observation's ref, so it still names a
+// producer.
+func identifierSource(raw Identifier, obs Source) Source {
+	if !raw.Inferred() {
+		return obs
+	}
+	src := Source{Kind: SourceInferred, Ref: strings.TrimSpace(raw.Source.Ref), Mode: obs.Mode}
+	if src.Ref == "" {
+		src.Ref = obs.Ref
+	}
+	return src
+}
+
+// allInferred reports whether every identifier is a derived one. False for an
+// empty list: "nothing" is the floor's question, not this one.
+func allInferred(ids []Identifier) bool {
+	if len(ids) == 0 {
+		return false
+	}
+	for _, id := range ids {
+		if !id.Inferred() {
+			return false
+		}
+	}
+	return true
+}
+
 func dedupeIdentifiers(ids []Identifier) []Identifier {
 	seen := make(map[string]int, len(ids))
 	out := make([]Identifier, 0, len(ids))
@@ -1399,6 +1771,18 @@ func dedupeIdentifiers(ids []Identifier) []Identifier {
 		if i, ok := seen[id.Key()]; ok {
 			if id.Confidence > out[i].Confidence {
 				out[i].Confidence = id.Confidence
+			}
+			// Generic is a judgement about the VALUE ( B2), so one copy
+			// marked generic makes the name generic; keeping only the first
+			// copy's flag would let an unmarked duplicate vote.
+			out[i].Generic = out[i].Generic || id.Generic
+			if out[i].Generic && out[i].Confidence > GenericConfidence {
+				out[i].Confidence = GenericConfidence
+			}
+			// The same value observed AND derived is an observed value: keep
+			// the native provenance, whichever arrived first.
+			if out[i].Inferred() && !id.Inferred() {
+				out[i].Source = id.Source
 			}
 			continue
 		}
@@ -1408,12 +1792,33 @@ func dedupeIdentifiers(ids []Identifier) []Identifier {
 	return out
 }
 
+// groupByKind buckets identifiers by kind for the precedence walk. Within a
+// kind, NATIVE identifiers come before inferred ones (stable otherwise): the
+// walk's "first match decides" then gives guard 2 of Phase 2 — a derived
+// value decides only when no observed value of its kind matched anything, and
+// otherwise may only corroborate or conflict.
 func groupByKind(ids []Identifier) map[Kind][]Identifier {
 	out := make(map[Kind][]Identifier, len(ids))
 	for _, id := range ids {
 		out[id.Kind] = append(out[id.Kind], id)
 	}
+	for k, list := range out {
+		sort.SliceStable(list, func(i, j int) bool { return !list[i].Inferred() && list[j].Inferred() })
+		out[k] = list
+	}
 	return out
+}
+
+// ownerSet is the set of asset ids that own at least one of the observation's
+// identifiers.
+func ownerSet(owners map[string][]AssetRef) map[string]bool {
+	claimed := map[string]bool{}
+	for _, refs := range owners {
+		for _, ref := range refs {
+			claimed[ref.ID] = true
+		}
+	}
+	return claimed
 }
 
 // splitByOwner divides identifiers into the ones it is legal to write against
@@ -1574,11 +1979,65 @@ func rankedBy(top *MergeCandidate) (p struct{ ModelID, SourceRef string }) {
 	return p
 }
 
-func toSeamObservation(obs Observation, at time.Time) seams.Observation {
-	ids := make(map[string]string, len(obs.Identifiers))
-	for _, id := range obs.Identifiers {
-		ids[string(id.Kind)] = id.Value
+// seamIdentifiers is the observation's identifiers as the matcher is shown
+// them: normalised (so they compare equal to what a candidate stored — the
+// engine only ever stores normalised values), provenance resolved the way the
+// engine records it, duplicates folded. One that does not normalise is left
+// out: Resolve has already refused such an observation, so this only drops
+// what the rules would not have used either.
+func seamIdentifiers(obs Observation, at time.Time) []Identifier {
+	out := make([]Identifier, 0, len(obs.Identifiers))
+	for _, raw := range obs.Identifiers {
+		n, err := raw.Normalized()
+		if err != nil {
+			continue
+		}
+		n.Source = identifierSource(raw, obs.Source)
+		if n.SeenAt.IsZero() {
+			n.SeenAt = at
+		}
+		out = append(out, n)
 	}
+	return dedupeIdentifiers(out)
+}
+
+// seamIdentifierMaps spells identifiers the way the seam carries them: every
+// value per kind, plus the subset that was derived rather than observed.
+func seamIdentifierMaps(ids []Identifier) (all, derived map[string][]string) {
+	all = make(map[string][]string, len(ids))
+	for _, id := range ids {
+		k := string(id.Kind)
+		all[k] = append(all[k], id.Value)
+		if id.Inferred() {
+			if derived == nil {
+				derived = map[string][]string{}
+			}
+			derived[k] = append(derived[k], id.Value)
+		}
+	}
+	return all, derived
+}
+
+// genericNames lists the hostnames the intake marked generic ( B2).
+func genericNames(ids []Identifier) []string {
+	var out []string
+	for _, id := range ids {
+		if id.Generic && id.Kind == KindHostname {
+			out = append(out, id.Value)
+		}
+	}
+	return out
+}
+
+// attributeText reads one attribute as a string, "" for anything else — the
+// same reading the matcher's adapter makes.
+func attributeText(attrs map[string]any, key string) string {
+	s, _ := attrs[key].(string)
+	return s
+}
+
+func toSeamObservation(obs Observation, at time.Time, observed []Identifier) seams.Observation {
+	ids, derived := seamIdentifierMaps(observed)
 	observedAt := obs.ObservedAt
 	if observedAt.IsZero() {
 		// The engine already resolved "when" for every write it makes; handing
@@ -1588,33 +2047,37 @@ func toSeamObservation(obs Observation, at time.Time) seams.Observation {
 		observedAt = at
 	}
 	return seams.Observation{
-		Kind:        obs.ClassHint,
-		Identifiers: ids,
-		Attributes:  comparableAttributes(obs.Attributes),
-		ObservedAt:  observedAt,
-		Name:        displayNameFor(obs, obs.Identifiers),
-		Segment:     obs.Network.SegmentID,
-		SourceKind:  string(obs.Source.Kind),
+		Kind:               obs.ClassHint,
+		Identifiers:        ids,
+		DerivedIdentifiers: derived,
+		GenericNames:       genericNames(observed),
+		Attributes:         comparableAttributes(obs.Attributes),
+		ObservedAt:         observedAt,
+		Name:               displayNameFor(obs, obs.Identifiers),
+		Segment:            obs.Network.SegmentID,
+		SourceKind:         string(obs.Source.Kind),
 	}
 }
 
+// toSeamSummaries converts candidates for the seam. Every identifier value is
+// carried (v1 kept one per kind — whichever it met last — so a candidate whose
+// SECOND MAC agreed with the observation scored as a disagreement), and the ones
+// the asset holds as derived are named.
 func toSeamSummaries(in []AssetSummary) []seams.AssetSummary {
 	out := make([]seams.AssetSummary, 0, len(in))
 	for _, s := range in {
-		ids := make(map[string]string, len(s.Identifiers))
-		for _, id := range s.Identifiers {
-			ids[string(id.Kind)] = id.Value
-		}
+		ids, derived := seamIdentifierMaps(s.Identifiers)
 		out = append(out, seams.AssetSummary{
-			ID:          s.Ref.ID,
-			Class:       s.ClassKey,
-			Name:        s.DisplayName,
-			Identifiers: ids,
-			Attributes:  comparableAttributes(s.Attributes),
-			Segment:     s.NetworkSegment,
-			SourceKind:  summarySourceKind(s),
-			Status:      s.Status,
-			LastSeenAt:  s.LastSeenAt,
+			ID:                 s.Ref.ID,
+			Class:              s.ClassKey,
+			Name:               s.DisplayName,
+			Identifiers:        ids,
+			DerivedIdentifiers: derived,
+			Attributes:         comparableAttributes(s.Attributes),
+			Segment:            s.NetworkSegment,
+			SourceKind:         summarySourceKind(s),
+			Status:             s.Status,
+			LastSeenAt:         s.LastSeenAt,
 		})
 	}
 	return out

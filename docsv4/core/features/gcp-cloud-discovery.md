@@ -186,15 +186,25 @@ Store GCP credentials in platform integrations:
 **Required Fields:**
 - **Integration Type**: `gcp`
 - **Project ID**: GCP project ID (not project number)
-- **Service Account JSON**: Complete JSON key file for a service account
+- **Service Account JSON**: Complete JSON key file for a service account, exactly as Google issued it. Its `token_uri` must be Google's OAuth endpoint (`https://oauth2.googleapis.com/token`, as every Google-issued key says); a key naming any other token endpoint is refused rather than used.
 
 Credentials are encrypted at rest using the platform's master encryption key.
+
+#### Test the connection
+
+Discovery → Cloud → the plug icon on the integration contacts Google for real: it builds the same client discovery uses from the stored integration, exchanges the service-account key for an access token, and reads the project through the Compute API (listing at most one SSL policy). A green test therefore proves the key is live and the account can read the project with `roles/compute.viewer`.
+
+When it fails, it shows Google's own answer — `invalid_grant` for a revoked or deleted key, `PERMISSION_DENIED` with the missing permission when the account has no role on the project, or a *not found* that points at the project ID or a disabled Compute Engine API. A stored key the platform can no longer read (saved under a retired encryption key) is reported with an instruction to re-enter it, and is never sent to Google.
+
+The integration's **Enabled** switch stops it being used: Discover and scheduled runs of a disabled integration fail at once with *the integration is disabled*.
 
 ### 2. Discover GCP Resources
 
 Initiate cloud resource discovery:
 
-**UI:** Click "Discover" on the GCP integration card, then select resource types
+**UI:** Discovery → Cloud → the ▶ (play) icon on the integration. The dialog offers every type below — HTTPS Load Balancer, SSL Proxy, Cloud KMS keys, Cloud Storage encryption and Cloud SQL encryption — all ticked by default.
+
+A schedule for the integration (Discovery → Scheduled Scans) runs that same default set and delivers the same results, the at-rest bucket and Cloud SQL records included.
 
 **API:** `POST /api/v1/device-interrogation-service/cloud/discover`
 
@@ -371,10 +381,11 @@ For proxies with a reachable public IP (via Forwarding Rules), the service perfo
 
 ## Error Handling
 
-- **API Errors**: Logged but non-fatal — discovery continues for other resources
-- **Permission Errors**: Reported in job status with guidance on required roles
-- **Token Errors**: Service account key validation errors are surfaced in connection test results
-- **Compute API Disabled**: Detected during validation with a clear error message
+Each resource type is collected independently and its outcome is recorded on the job (Discovery → Discovery Jobs → the job → **Resource types**), the same way as for AWS — see [Reading the result](aws-cloud-discovery.md#5-reading-the-result-found-nothing-vs-could-not-look):
+
+- **Permission errors** — recorded against the type with Google's own status (`PERMISSION_DENIED`) and message, which names the missing permission. The type reads *Could not collect*, never "none found".
+- **One type failing never stops the others.** A load-balancer or SSL-proxy listing that is refused no longer abandons the run, and a Cloud KMS, Cloud Storage or Cloud SQL listing that is refused no longer reports success with zero found. A run where anything failed is *partly collected*, not a success.
+- **Token errors** — a key Google refuses fails every type with `invalid_grant`; the connection test shows the same.
 
 ---
 

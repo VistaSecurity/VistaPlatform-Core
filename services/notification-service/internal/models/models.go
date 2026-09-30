@@ -191,4 +191,10 @@ type SendNotificationRequest struct {
 	// "[medium] job_completed").
 	Title            string `json:"title,omitempty"`
 	NotificationType string `json:"notification_type,omitempty"` // Defaults to 'alert' if not provided
+	// EventID identifies this notification across every delivery attempt: the
+	// producer's NATS event id when there is one, else assigned on first send.
+	// It is serialized into the retry queue's payload, so a retry carries the
+	// same id — which is what makes it usable as a receiver-side idempotency key
+	// (the X-Vista-Event-Id header).
+	EventID string `json:"event_id,omitempty"`
 }

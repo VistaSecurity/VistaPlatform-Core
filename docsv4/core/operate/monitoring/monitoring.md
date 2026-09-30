@@ -34,7 +34,15 @@ curl https://api.example.com/api/v1/monitoring-service/health
 
 ### Platform Metrics API
 
-The monitoring service provides platform-wide metrics:
+The monitoring service provides platform-wide metrics.
+
+> **What `$TOKEN` is.** In this guide `$TOKEN` is a **signed-in session access
+> token** — the short-lived access token issued when a user signs in
+> (`POST /api/v1/auth-service/auth/login`; the web UI holds the same token in its
+> `access_token` cookie). It carries that user's role, so the calls below work
+> only for a user whose role allows them. A **personal API token**
+> (My Profile → API Tokens, `qvpat_…`) is *not* accepted here: those work only
+> with the MCP server.
 
 ```bash
 # Platform summary
@@ -73,59 +81,22 @@ curl -X POST \
 
 ### Notification Channels
 
-The platform supports multiple notification channels:
+monitoring-service does not deliver notifications itself. Threshold alerts and
+security-incident notices are published to the notification service, which
+applies the **platform** notification channels and routing rules — the same
+delivery path as every other platform alert (service down, tenant health, and so
+on).
 
-1. **Slack Webhooks**
-   ```bash
-   curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "channel_type": "slack",
-       "webhook_url": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
-       "enabled": true
-     }' \
-     https://api.example.com/api/v1/monitoring-service/notifications/channels
-   ```
+Configure delivery in the admin console under **Settings → Notification
+Delivery**: add a channel (in-app, email, Slack, webhook, PagerDuty), then a
+routing rule that sends the severities you care about to it. A fresh install
+already has a default pack: an in-app channel and an email channel to the
+`super_admin` platform users, with rules for critical/high alerts and for
+everything else. Per-channel setup (Slack app, PagerDuty routing key, SMTP) is in
+the [Notification Provider Integration Guide](../operations/notification-providers.md);
+the **Test** button on a channel reports why a delivery failed.
 
-2. **Email Notifications**
-   ```bash
-   curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "channel_type": "email",
-       "recipients": ["ops@yourcompany.com"],
-       "enabled": true
-     }' \
-     https://api.example.com/api/v1/monitoring-service/notifications/channels
-   ```
-
-3. **PagerDuty Integration**
-   ```bash
-   curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "channel_type": "pagerduty",
-       "integration_key": "YOUR_PAGERDUTY_KEY",
-       "enabled": true
-     }' \
-     https://api.example.com/api/v1/monitoring-service/notifications/channels
-   ```
-
-4. **Webhook Endpoints**
-   ```bash
-   curl -X POST \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "channel_type": "webhook",
-       "webhook_url": "https://your-monitoring-system.com/webhook",
-       "enabled": true
-     }' \
-     https://api.example.com/api/v1/monitoring-service/notifications/channels
-   ```
+monitoring-service exposes no notification-channel API.
 
 ## AWS CloudWatch Integration
 
@@ -288,11 +259,9 @@ Configure Grafana alert rules for:
      https://api.example.com/api/v1/monitoring-service/alerts/thresholds
    ```
 
-2. Check notification channels are enabled:
-   ```bash
-   curl -H "Authorization: Bearer $TOKEN" \
-     https://api.example.com/api/v1/monitoring-service/notifications/channels
-   ```
+2. Check the platform notification channels and routing rules are enabled
+   (admin console → **Settings → Notification Delivery**) and look at its
+   delivery history for the alert.
 
 3. Review alert evaluator job logs:
    ```bash

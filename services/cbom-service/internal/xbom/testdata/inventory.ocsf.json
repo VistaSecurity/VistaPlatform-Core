@@ -110,7 +110,6 @@
     "uid": "a0000000-0000-4000-8000-000000000004",
     "name": "reports-bucket",
     "desc": "Object storage",
-    "risk_score": 40,
     "first_seen_time": 1786617000000,
     "last_seen_time": 1789209000000
   }

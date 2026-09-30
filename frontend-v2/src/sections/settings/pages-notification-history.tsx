@@ -8,6 +8,7 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SCard, STable, STableRow, STag, StateNote, relTime, GREEN, AMBER, RED } from './kit';
 import type { SettingsNavItem } from './nav';
+import { deliverySummary } from './notification-history-summary';
 
 const SEVERITY_TONE: Record<string, string> = {
   critical: RED, high: 'var(--warn-strong)', medium: AMBER, low: 'var(--info)', info: 'var(--app-t3)',
@@ -15,6 +16,7 @@ const SEVERITY_TONE: Record<string, string> = {
 const STATUS_TONE: Record<string, string> = {
   sent: GREEN, failed: RED, pending: AMBER, partial: AMBER,
 };
+const SUMMARY_TONE = { ok: 'var(--app-t2)', warn: AMBER, bad: RED } as const;
 
 function useNotificationHistory() {
   return useQuery({
@@ -50,8 +52,8 @@ export function NotificationHistoryPage({ meta }: { meta: SettingsNavItem }) {
       <div className="panel" style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '12px 16px', marginBottom: 14, border: `1px solid color-mix(in srgb, ${AMBER} 35%, transparent)` }}>
         <Icon name="info" size={15} style={{ color: AMBER, flex: 'none', marginTop: 1 }} />
         <p style={{ margin: 0, fontSize: 12, lineHeight: 1.55, color: 'var(--app-t2)' }}>
-          Rows with an empty channels column matched <strong style={{ color: 'var(--app-t1)' }}>no routing rule</strong> — the event was recorded but not delivered anywhere.
-          Add or widen a rule under <strong style={{ color: 'var(--app-t1)' }}>Routing Rules</strong> if those events should reach a channel.
+          Rows marked <strong style={{ color: 'var(--app-t1)' }}>no rule matched</strong> were recorded but not delivered anywhere — add or widen a rule under <strong style={{ color: 'var(--app-t1)' }}>Routing Rules</strong> if those events should reach a channel.
+          A <strong style={{ color: 'var(--app-t1)' }}>partial</strong> or <strong style={{ color: 'var(--app-t1)' }}>failed</strong> row matched a rule but at least one channel did not deliver; failed channels are retried automatically and the row updates when a retry succeeds or is abandoned.
         </p>
       </div>
 
@@ -66,24 +68,20 @@ export function NotificationHistoryPage({ meta }: { meta: SettingsNavItem }) {
           {rows.map((r, i) => {
             const sev = (r.severity || '').toLowerCase();
             const status = (r.status || '').toLowerCase();
-            const undelivered = !r.channels_used || r.channels_used.length === 0;
+            const summary = deliverySummary(r);
             return (
               <STableRow
                 key={r.id}
                 first={i === 0}
                 cols={cols}
-                style={undelivered ? { background: `color-mix(in srgb, ${AMBER} 6%, transparent)` } : undefined}
+                style={summary.attention ? { background: `color-mix(in srgb, ${AMBER} 6%, transparent)` } : undefined}
                 cells={[
                   <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', whiteSpace: 'nowrap' }}>{relTime(r.created_at)}</span>,
                   <span style={{ fontSize: 12, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{r.alert_source || '—'}</span>,
                   <span className="mono" style={{ fontSize: 11.5, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{r.alert_type || r.notification_type || '—'}</span>,
                   <STag color={SEVERITY_TONE[sev] ?? 'var(--app-t3)'}>{r.severity || '—'}</STag>,
                   <span title={r.message} style={{ fontSize: 12.5, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{r.message}</span>,
-                  undelivered ? (
-                    <span style={{ fontSize: 11.5, color: AMBER, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>— (no rule matched)</span>
-                  ) : (
-                    <span style={{ fontSize: 12, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{(r.channels_used ?? []).join(', ')}</span>
-                  ),
+                  <span title={summary.detail ?? summary.text} style={{ fontSize: summary.tone === 'ok' ? 12 : 11.5, color: SUMMARY_TONE[summary.tone], whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }}>{summary.text}</span>,
                   <STag color={STATUS_TONE[status] ?? 'var(--app-t3)'}>{r.status || '—'}</STag>,
                 ]}
               />

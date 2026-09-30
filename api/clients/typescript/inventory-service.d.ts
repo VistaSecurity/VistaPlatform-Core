@@ -1114,10 +1114,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List the tenant's CMDB sync profiles */
+        /**
+         * List the tenant's CMDB sync profiles
+         * @description RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.
+         */
         get: operations["listCmdbProfiles"];
         put?: never;
-        /** Create a CMDB sync profile */
+        /**
+         * Create a CMDB sync profile
+         * @description Omitted `connection_config`, `field_mapping_config`, `sync_config` and `ci_type_mapping` are stored as `{}`. An unknown `platform_type` or a blank `name` is a 400; a name another live profile of the tenant uses is a 409.
+         */
         post: operations["createCmdbProfile"];
         delete?: never;
         options?: never;
@@ -1135,9 +1141,15 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get a CMDB sync profile by id */
+        /**
+         * Get a CMDB sync profile by id
+         * @description RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.
+         */
         get: operations["getCmdbProfile"];
-        /** Update a CMDB sync profile */
+        /**
+         * Update a CMDB sync profile
+         * @description Credentials are write-only: an omitted or empty `password`, `api_token` or `client_secret` (or `extra_headers` value) in `connection_config` KEEPS the stored one. An omitted `connection_config` keeps the stored config; an omitted `field_mapping_config`, `sync_config` or `ci_type_mapping` keeps the stored value (send `{}` to clear it).
+         */
         put: operations["updateCmdbProfile"];
         post?: never;
         /** Delete a CMDB sync profile (soft delete) */
@@ -1179,7 +1191,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Trigger a manual sync for a profile */
+        /**
+         * Trigger a manual push for a profile
+         * @description Starts a push of the tenant's in-scope inventory (approved assets and the crypto configurations, certificates and keys on them) and returns its job; the push runs in the background. RBAC-gated `assets.manage`. Refused with a message the UI shows verbatim: 400 when the profile is disabled or its platform is pull-only in the connector registry (SolarWinds), 409 when a run of this profile — manual or scheduled, on any replica — is already in progress.
+         */
         post: operations["triggerCmdbSync"];
         delete?: never;
         options?: never;
@@ -1201,9 +1216,36 @@ export interface paths {
         put?: never;
         /**
          * Pull server CIs from the CMDB into Vista as assets
-         * @description Fetches server/device CIs from the profile's CMDB (RBAC-gated `assets.manage`) and creates them as pending-approval infrastructure assets, reusing the bulk-import path (dedupe + partial-success). Returns the per-row BulkImportResult. A connector/transport failure returns 502.
+         * @description Fetches server/device CIs from the profile's CMDB (RBAC-gated `assets.manage`) and creates them as pending-approval infrastructure assets, reusing the bulk-import path (dedupe + partial-success). Returns the per-row BulkImportResult and records the run as a sync job (summary.direction `pull`). 400 when the profile is disabled or its platform cannot be pulled from; 409 when a run of this profile is already in progress; 502 (with the sanitized reason) when the CMDB could not be read.
          */
         post: operations["pullFromCmdb"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cmdb/profiles/{id}/mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CMDB sync profile id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Get a profile's field mapping
+         * @description The platform's default template, this profile's overrides, the effective mapping a run uses (template ⊕ overrides) and every validation problem. RBAC-gated `settings.read`. There is no editor UI yet; this is how a mapping is inspected.
+         */
+        get: operations["getCmdbMapping"];
+        /**
+         * Replace a profile's field-mapping overrides
+         * @description Replaces the overrides whole (send `{}` to return to the template). The effective mapping is validated first: an unknown class key, fact key, canonical field or enum value, an identity rule naming something that is not an identifier type, a dangling value map or two rules writing one vendor field is a 400 naming the entry, and nothing is stored. Unknown keys in the body are refused rather than ignored. A valid save clears `mapping_error`, which un-pauses the profile. RBAC-gated `settings.update`.
+         */
+        put: operations["putCmdbMapping"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1220,7 +1262,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List recent sync jobs for a profile */
+        /**
+         * List recent sync jobs for a profile
+         * @description RBAC-gated `settings.read`, like the profile reads: job summaries carry the CMDB's per-item error strings.
+         */
         get: operations["listCmdbSyncJobs"];
         put?: never;
         post?: never;
@@ -1259,7 +1304,87 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/connectors/netbox/connections": {
+    "/internal/sources/segments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Write a source's network segments (internal)
+         * @description In order, one result per item. A segment matching an existing
+         *     on-premises cidr segment by MASKED CIDR is not duplicated: its
+         *     provenance (`source_kind = imported`, `source_ref`) is stamped and
+         *     `match_metadata` is merged into its metadata — its name, environment,
+         *     auto-approval and tags stay the tenant's. A cloud segment with the
+         *     same CIDR is not a match. A new prefix too broad to be anybody's
+         *     segment is `too_broad` and is not written. Per-item failures are
+         *     results; the call fails only when the existing segments cannot be read.
+         */
+        post: operations["upsertSourceSegments"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/assets/admission": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * May a source import N assets for this tenant (internal)
+         * @description Asked once, BEFORE any asset is written. `prospective` is true when
+         *     the tenant's identity admission mode checks each create
+         *     transactionally; the plan's asset cap is then not checked in advance.
+         *     Otherwise `allowed` is false when importing `count` assets would
+         *     exceed the cap. A check that cannot be answered is a 500 naming its
+         *     `stage` (policy / limit) — never an allowance.
+         */
+        post: operations["sourceAssetAdmission"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create or resolve a source's assets through the identity engine (internal)
+         * @description Each item is resolved in order exactly as a single imported asset is
+         *     (`CreateAssetFromSource`): admission, identity evidence,
+         *     classification and the tenant's approval policy all apply, so two
+         *     items for one host resolve to one asset. On a resolved asset the
+         *     item's `claim_discovery_source` is stamped only where nothing has
+         *     claimed one, and its `facts` are written under the request's source
+         *     (producer `connector`). The fields accepted per item are an
+         *     allowlist; approval status is never among them. `source.kind` must be
+         *     `imported`.
+         */
+        post: operations["resolveSourceAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/sources/asset-classes/{key}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1267,109 +1392,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the tenant's NetBox connections
-         * @description Enterprise (`connector_netbox`). A Core build and an unentitled tenant
-         *     both answer 402, which is what lets the UI render one upgrade card for
-         *     either case.
+         * Does an asset class key exist for this tenant (internal)
+         * @description The compiled hierarchy or one of the tenant's own leaf subclasses.
          */
-        get: operations["listNetBoxConnections"];
-        put?: never;
-        /** Create a NetBox connection */
-        post: operations["createNetBoxConnection"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/connectors/netbox/connections/{id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Update a NetBox connection
-         * @description An EMPTY `api_token` leaves the stored token alone — an edit form that
-         *     did not re-send the secret must not wipe it. There is deliberately no
-         *     way to blank it: a NetBox connection without a token cannot do
-         *     anything.
-         */
-        put: operations["updateNetBoxConnection"];
-        post?: never;
-        /**
-         * Remove a NetBox connection
-         * @description Soft delete — the run history stays, so "what did this import, and when" keeps an answer.
-         */
-        delete: operations["deleteNetBoxConnection"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/connectors/netbox/connections/{id}/test": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check that the NetBox URL and token work
-         * @description Answers 200 with `success: false` when the CHECK fails — the request
-         *     succeeded, and what failed is the thing it was asked to check. A 4xx
-         *     here would have the UI render "couldn't run the test" for "your token
-         *     is wrong".
-         */
-        post: operations["testNetBoxConnection"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/connectors/netbox/connections/{id}/run": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Pull from NetBox now */
-        post: operations["runNetBoxImport"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/connectors/netbox/connections/{id}/runs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /** Run history for a NetBox connection */
-        get: operations["listNetBoxRuns"];
+        get: operations["sourceAssetClassExists"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1378,28 +1404,21 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/connectors/netbox/connections/{id}/drift": {
+    "/internal/sources/hardware-assets": {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
+            path?: never;
             cookie?: never;
         };
         /**
-         * What NetBox and the inventory disagree about
-         * @description READ-ONLY. The platform never writes to NetBox: the comparison is
-         *     valuable precisely because the two systems are maintained
-         *     independently, and it stops being so the moment we start answering it
-         *     ourselves. Reconciliation happens in NetBox, or in Discovery →
-         *     Approvals.
-         *
-         *     Matching is by serial then primary IPv4 — deliberately not by name, as
-         *     a NetBox device name is free text.
+         * Live hardware assets and unknown hosts, for reconciliation (internal)
+         * @description Assets in the hardware class subtree plus unknown hosts, monitoring or
+         *     pending approval, each with its first serial number — what a source of
+         *     physical and virtual infrastructure could be expected to list. Paged
+         *     in id order: pass the last id seen as `after` while `more` is true.
          */
-        get: operations["getNetBoxDrift"];
+        get: operations["listSourceHardwareAssets"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2325,12 +2344,12 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Merges the matcher made without asking
-         * @description What the learned matcher merged on the tenant's behalf in the last 30 days, newest first, each with the score and the model's reasons.
+         * Merges made without asking
+         * @description What the platform merged on the tenant's behalf in the last 30 days, newest first: matcher auto-accepts (`decided_by: matcher`, with the score and the model's reasons) and same-device rule merges (`decided_by: rule`, with the evidence the rule relied on).
          *
          *     It is not a queue: nothing here needs deciding and everything here already happened. It exists because a tenant who sets `auto_accept_threshold` above zero has granted the platform permission to merge two of their assets unasked, and a capability that acts with no human in the loop has to be visible to a human afterwards.
          *
-         *     A tenant on the default threshold of zero always gets an empty list, because nothing can have been auto-accepted.
+         *     A tenant with the threshold at zero and the rule merge switched off always gets an empty list, because nothing can have been merged unasked.
          */
         get: operations["listAutoAcceptedMerges"];
         put?: never;
@@ -2350,12 +2369,18 @@ export interface paths {
         };
         /**
          * The tenant's identification settings
-         * @description Today, one setting: the learned matcher's auto-accept threshold. A tenant who has never set one gets 0 — never auto-accept — which is ADR-0002 D3's default and the behaviour every install has had until now.
+         * @description Two settings. `auto_accept_threshold`: the learned matcher's auto-accept threshold. A tenant who has never set one gets 0 — never auto-accept — which is ADR-0002 D3's default and the behaviour every install has had until now.
+         *
+         * `auto_merge_existing`: whether a fixed rule (not a score) may merge two existing assets it is sure are one device. A tenant who has never set it gets TRUE — owner decision D1 of — and the response always carries the effective value, never "unset".
          */
         get: operations["getIdentificationSettings"];
         /**
-         * Set the auto-accept threshold
-         * @description Grants — or withdraws — the platform's permission to accept a merge proposal without asking. A value outside 0..1 is REFUSED rather than clamped: "we rounded your number" is not an acceptable answer on the one setting that decides whether two of a tenant's assets may be merged unasked.
+         * Set the identification settings
+         * @description A PARTIAL update: send `auto_accept_threshold`, `auto_merge_existing`, or both. A field that is not sent is left exactly as it was — so flipping the rule-merge toggle never resets the threshold, and setting the threshold never resets the toggle. `0` and `false` are real answers (turn it off), distinct from "not sent". A body carrying neither field is refused.
+         *
+         *     `auto_accept_threshold` grants — or withdraws — the platform's permission to accept a merge proposal on a matcher's score. A value outside 0..1 is REFUSED rather than clamped: "we rounded your number" is not an acceptable answer on a setting that decides whether two of a tenant's assets may be merged unasked.
+         *
+         *     `auto_merge_existing` turns the same-device rule merge off (or back on). Every rule merge is listed under the auto-accepted merges.
          */
         put: operations["updateIdentificationSettings"];
         post?: never;
@@ -3231,6 +3256,8 @@ export interface components {
             auto_approve_discoveries?: boolean | null;
             /** @description Which discovery sources auto-approval covers for this segment. Omitted/null keeps the current value on update and defaults to ["sensor"] on create, so cloud coverage is always an explicit opt-in. */
             auto_approve_sources?: ("sensor" | "cloud")[] | null;
+            /** @description The operator's statement about whether this network hands out addresses (DHCP). Omitted keeps whatever the segment has. true or false sets the operator's answer, which no device measurement or traffic inference overwrites. null withdraws the operator's answer, so the segment falls back to the best remaining source (a device's measurement, then traffic inference) or to unknown when there is none. Only cidr and ip_range segments take an answer; true or false on any other type is a 400. */
+            dhcp?: boolean | null;
             tags?: {
                 [key: string]: unknown;
             };
@@ -3287,6 +3314,15 @@ export interface components {
             auto_approve_discoveries: boolean;
             /** @description Which discovery sources this segment auto-approves ("sensor", "cloud"). A segment stored before the setting existed reads back as ["sensor"]. */
             auto_approve_sources?: string[] | null;
+            /** @description The effective DHCP posture: does this network hand out addresses. null means nobody has said, which is not the same as false — identity treats an address on such a network as a static one, so unknown is the case to look at. */
+            dynamic: boolean | null;
+            /**
+             * @description Whose statement `dynamic` is. operator (set on this page) outranks measured (a device that serves the network reported it), which outranks inferred (a sensor saw the network assign an address). null when `dynamic` is null.
+             * @enum {string|null}
+             */
+            dynamic_source: "operator" | "measured" | "inferred" | null;
+            /** @description Name of the device a measured posture came from. Omitted when the posture was not measured or the device is gone. */
+            dynamic_source_name?: string;
             tags: {
                 [key: string]: unknown;
             } | null;
@@ -4550,6 +4586,12 @@ export interface components {
             model_id?: string;
             /** @description The seam and implementation that produced the scores. */
             source_ref?: string;
+            /** @description The matcher's score of the two top-ranked candidates against EACH OTHER, 0..1 — "the two records themselves score N%". Each candidate's `score` compares the sighting with that record; this compares the records. Advisory: nothing merges or auto-accepts on it. Absent when unscored (no matcher, or fewer than two readable candidates). */
+            pair_score?: number;
+            /** @description The two candidates `pair_score` compares, in rank order. Present exactly when `pair_score` is. */
+            pair_asset_ids?: string[];
+            /** @description The matcher's one-phrase summary of `pair_score`. */
+            pair_reason?: string;
             /**
              * Format: date-time
              * @description When a person decided the proposal. Absent while it is pending — including on an auto-accepted proposal whose remaining candidates nobody has settled yet.
@@ -4560,6 +4602,18 @@ export interface components {
              * @description The user who decided it.
              */
             resolved_by?: string;
+            /**
+             * Format: uuid
+             * @description The asset the proposal's records were merged into. Present on a proposal that was resolved by a merge.
+             */
+            merged_into?: string;
+            /**
+             * @description Who made the merge unasked. Present on the auto-accepted list only. `matcher` — a learned matcher scored the top candidate above the tenant's threshold. `rule` — the same-device rule merged two existing assets (`auto_merge_existing`); a rule merge has no user, so `resolved_by` is absent.
+             * @enum {string}
+             */
+            decided_by?: "matcher" | "rule";
+            /** @description The reasons the rule was sure, as plain sentences, in the order they were established. Present only when `decided_by` is `rule`. */
+            rule_evidence?: string[];
         };
         AutoAcceptedMergeListResponse: {
             merges: components["schemas"]["MergeProposal"][];
@@ -4573,6 +4627,8 @@ export interface components {
              *     Auto-accepted merges are not reversible from the UI today, and a singleton identifier that disagrees (serial, cloud id, agent id, CMDB sys_id) is never auto-accepted whatever the score.
              */
             auto_accept_threshold: number;
+            /** @description Whether a fixed rule may merge two EXISTING assets it is sure are one device, without a person deciding ( Phase 4, owner decision D1). The EFFECTIVE value: a tenant who has never set it reads `true`. Distinct from `auto_accept_threshold`, which lets a model's score settle a question; this is a rule with fixed conditions and no score, and it never overrides a recorded "keep separate". */
+            auto_merge_existing: boolean;
             /** @description The model that does the scoring. Absent when no matcher is configured, in which case nothing is ever scored and the threshold cannot fire whatever it is set to. */
             matcher_model_id?: string;
             /** @description The settings row's version after a write. */
@@ -4581,8 +4637,10 @@ export interface components {
         IdentificationSettingsResponse: {
             identification: components["schemas"]["IdentificationSettings"];
         };
+        /** @description A partial update: every property is optional, at least one is required, and a property that is absent is left as it was. */
         IdentificationSettingsUpdateRequest: {
-            auto_accept_threshold: number;
+            auto_accept_threshold?: number;
+            auto_merge_existing?: boolean;
         };
         DriftSettings: {
             /** @description How many days of history the drift baseline covers. Read fresh on every pass, so a change takes effect on the next one. */
@@ -4686,6 +4744,8 @@ export interface components {
             /** @description The strongest identifier the peer carries, as `kind:value` — what a reviewer recognises when `display_name` is empty, which it is for most freshly discovered assets. */
             primary_identifier?: string;
             risk_score?: number;
+            /** @description True when something has assessed the peer's risk (risk_assessed_by is non-empty). A 0 score with this false is "not assessed", not safe. */
+            risk_assessed?: boolean;
             /** @description The peer was soft-deleted or merged away. Reported rather than dropped: an edge whose peer silently vanishes reads as a corrupt row, and "that thing is gone" is the actual answer. */
             deleted: boolean;
         };
@@ -4870,6 +4930,8 @@ export interface components {
             class_key?: string;
             asset_status?: string;
             risk_score?: number;
+            /** @description True when something has assessed the asset's risk (risk_assessed_by is non-empty). A 0 score with this false is "not assessed", not safe — consumers that export the score (GraphML, Cytoscape) must leave it out then. */
+            risk_assessed?: boolean;
             /** @description The cloud account, subscription or project the resource belongs to, from the `cloud.account_id` fact. A SCOPING ATTRIBUTE, not an asset class: there is no account asset, and the map renders it as a grouping node. ABSENT when nothing recorded one — never "", because an asset with no account must not be drawn under a fabricated one. */
             cloud_account?: string;
             /** @description The provider region as the provider names it, from the `cloud.region` fact. `global` is a legitimate value for a genuinely global resource such as a CDN distribution. ABSENT when nothing recorded one. */
@@ -6034,8 +6096,13 @@ export interface components {
         /**
          * @description A tenant CMDB sync integration profile (services.CMDBSyncProfile). The
          *     four `*_config` fields are raw JSON (object / array / null depending on
-         *     the platform) carried through verbatim. `last_sync_at`, `last_sync_status`
-         *     and `sync_error` are omitempty — present only after a sync has run.
+         *     the platform). `last_sync_at`, `last_sync_status` and `sync_error` are
+         *     omitempty — present only after a sync has run.
+         *
+         *     Credentials are WRITE-ONLY. `connection_config` never carries
+         *     `password`, `api_token` or `client_secret` in a response, and each
+         *     `extra_headers` value is blanked (names kept); `has_password`,
+         *     `has_api_token` and `has_client_secret` say whether each is stored.
          */
         CMDBSyncProfile: {
             id: string;
@@ -6043,25 +6110,33 @@ export interface components {
             name: string;
             /** @description servicenow / device42 / etc. (the target CMDB platform). */
             platform_type: string;
-            /** @description Raw connection settings (endpoint, auth). Opaque JSON; null until set. */
+            /** @description Raw connection settings. Opaque JSON; null until set. Besides the endpoint (`base_url` / `instance_url`) and auth fields it carries two non-secret egress settings, validated on save: `allow_private_endpoint` (boolean — reach a CMDB on a private RFC1918/ULA/CGNAT address; never loopback or link-local, and overridden by the operator's CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false) and `ca_bundle_pem` (PEM CA certificates trusted in addition to the system store). */
             connection_config: unknown;
-            /** @description Raw field-mapping rules. Opaque JSON; null until set. */
+            /** @description The profile's field-mapping OVERRIDES over its platform's default template (platform ADR-0002 D10) — fields, identity, value maps, pull and retire settings — as `{"version": 1, ...}`. A pre-template flat `{"<our field>": "<their field>"}` object is still read (as push rules). Read and replace it through GET/PUT /cmdb/profiles/{id}/mapping, which validate it; saving an invalid one here is a 400 naming the entry. */
             field_mapping_config: unknown;
-            /** @description Raw sync settings (cadence, scope). Opaque JSON; null until set. */
+            /** @description Raw sync settings. Opaque JSON; null until set. `schedule` is `manual` / `hourly` / `daily` / `weekly` (the scheduler runs the last three in the platform's registry direction); `batch_size` (1–1000, default 100) is how many CIs a push sends per batch; `include_crypto_summary` appends a crypto-posture line to pushed asset descriptions. */
             sync_config: unknown;
-            /** @description Raw CI-type mapping. Opaque JSON; null until set. */
+            /** @description The class-layer overrides (`{"version": 1, "classes": [...]}`). A pre-template flat `{"<our class>": "<their CI class>"}` object is still read. See /cmdb/profiles/{id}/mapping. */
             ci_type_mapping: unknown;
             is_enabled: boolean;
+            /** @description Whether a password is stored. The value itself is never returned. */
+            has_password: boolean;
+            /** @description Whether an API token is stored. The value itself is never returned. */
+            has_api_token: boolean;
+            /** @description Whether an OAuth2 client secret is stored. The value itself is never returned. */
+            has_client_secret: boolean;
             /** Format: date-time */
             last_sync_at?: string;
             last_sync_status?: string;
             sync_error?: string;
+            /** @description Present when the profile's effective mapping (template ⊕ overrides) does not validate — why, naming the entry. While it is set the profile is PAUSED: scheduled runs skip it and Sync / Pull answer 400 with it. Re-evaluated on every run, every mapping save and every service start; fixing the mapping clears it. */
+            mapping_error?: string;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description Body for POST/PUT /cmdb/profiles. Bound into services.CMDBSyncProfile; server-managed fields (id, timestamps, last_sync_*) are ignored. */
+        /** @description Body for POST/PUT /cmdb/profiles. Bound into services.CMDBSyncProfile; server-managed fields (id, timestamps, last_sync_*, has_*) are ignored. On PUT an omitted or empty credential keeps the stored one. */
         CMDBSyncProfileInput: {
             name?: string;
             platform_type?: string;
@@ -6082,7 +6157,7 @@ export interface components {
             id: string;
             tenant_id: string;
             profile_id: string;
-            /** @description pending / running / completed / failed. */
+            /** @description in_progress / success / partial / failed (a job a restart interrupted is closed as failed, "interrupted (service restarted)"). */
             status: string;
             /** @description manual / scheduled. */
             trigger_type: string;
@@ -6096,10 +6171,117 @@ export interface components {
             items_skipped: number;
             /** @description Raw error log. Opaque JSON; null when none. */
             error_log: unknown;
-            /** @description Raw run summary. Opaque JSON; null when none. */
+            /** @description Raw run summary: `direction` (`push` / `pull`), `mode` (`full` / `delta` for a platform on the mapping layer, empty otherwise), counts (`pushed`, `created`, `updated`, `reconciled`, `failed`, `skipped`, `unchanged` — not sent or not written again because nothing changed, `echo` — our own records coming back on a pull, `retired`, `absent`, `reappeared`, and for a pull `unresolved`), for a push to a platform that writes relationships `relations` (`{created, existing, unchanged, failed}` — relationships between CIs the profile links; `existing` = already held by the CMDB, `unchanged` = not sent because the set is unchanged since the last push) plus `errors` — the first 50 per-item failures as `{local_id, error}` (a pulled record, which has no Vista id yet, as `{external_id, error}`) — `errors_total` and `errors_omitted`. Opaque JSON; null when none. */
             summary: unknown;
             /** Format: date-time */
             created_at: string;
+        };
+        /** @description One class-layer rule: exactly one of `class` (a class key, standards/asset-classes.yaml) or `category` (a CI category: infrastructure_asset, certificate, key, crypto_configuration, crypto_library) ↔ `theirs` (their type / table). Category rules are push-only. */
+        CMDBMappingClassRule: {
+            class?: string;
+            category?: string;
+            theirs: string;
+            /** @enum {string} */
+            direction?: "push" | "pull" | "both";
+            disabled?: boolean;
+        };
+        /** @description The whole transform language: constant or join (`{a}.{b}` over source-side fields) or the field itself → value_map → default → coerce. No scripting. */
+        CMDBMappingTransform: {
+            value_map?: string;
+            default?: unknown;
+            constant?: unknown;
+            join?: string;
+            /** @enum {string} */
+            coerce?: "string" | "integer" | "number" | "boolean";
+        };
+        /** @description `ours` is canonical vocabulary — `asset:<field>`, `ci:<field>` or `fact:<fact key>` — never a table or column. `authority` says which side wins (platform: pushed on every update, pulled only for a record Vista does not hold; vendor: pulled always, pushed only when creating the CI). */
+        CMDBMappingFieldRule: {
+            ours: string;
+            theirs: string;
+            /** @enum {string} */
+            direction: "push" | "pull" | "both";
+            /** @enum {string} */
+            authority?: "platform" | "vendor";
+            transform?: components["schemas"]["CMDBMappingTransform"];
+            omit_empty?: boolean;
+            personal_data?: boolean;
+            disabled?: boolean;
+        };
+        /** @description One of their fields as one of our identifier kinds (cmdb_sys_id, serial_number, mac_address, fqdn, cloud_resource_id). The cmdb_sys_id rule is the record's own id. */
+        CMDBMappingIdentityRule: {
+            theirs: string;
+            identifier?: string;
+            disabled?: boolean;
+        };
+        CMDBMappingValueMap: {
+            entries: {
+                ours: string;
+                theirs: string[];
+            }[];
+        };
+        CMDBMappingPullSpec: {
+            type_fields?: string[];
+            default_class?: string;
+            cursor_field?: string;
+        };
+        CMDBMappingRetireSpec: {
+            status_field?: string;
+            retired_values?: string[];
+            push_value?: string;
+        };
+        /** @description One of our canonical relationship types (runs_on, hosted_on, virtualized_by, depends_on, connects_to, member_of, contains, manages, sends_data_to, impacts) ↔ the vendor's relationship type (ServiceNow: a cmdb_rel_type name such as `Runs on::Runs`). `reverse` sends the edge with its ends swapped (their parent is our to-asset). A type with no rule is not pushed. */
+        CMDBMappingRelationRule: {
+            ours: string;
+            theirs: string;
+            reverse?: boolean;
+            disabled?: boolean;
+        };
+        /** @description A profile's differences from its platform template. Field push rules replace the template's push rule for the same vendor field; pull rules replace the template's pull rule for the same vendor field and canonical field; identity rules merge by vendor field; value maps by name; `disabled: true` removes the rule it matches. Authoring guide: docsv4/internal/developer/architecture/cmdb-mapping-templates.md. */
+        CMDBMappingOverrides: {
+            classes?: components["schemas"]["CMDBMappingClassRule"][];
+            fields?: components["schemas"]["CMDBMappingFieldRule"][];
+            identity?: components["schemas"]["CMDBMappingIdentityRule"][];
+            value_maps?: {
+                [key: string]: components["schemas"]["CMDBMappingValueMap"];
+            };
+            pull?: components["schemas"]["CMDBMappingPullSpec"];
+            retire?: components["schemas"]["CMDBMappingRetireSpec"];
+            relations?: components["schemas"]["CMDBMappingRelationRule"][];
+            /** @description Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key. */
+            options?: {
+                [key: string]: string;
+            };
+        };
+        /** @description A complete mapping (a template, or template ⊕ overrides). */
+        CMDBMapping: {
+            platform?: string;
+            /** @description The template's version. */
+            version?: number;
+            classes?: components["schemas"]["CMDBMappingClassRule"][];
+            fields?: components["schemas"]["CMDBMappingFieldRule"][];
+            identity?: components["schemas"]["CMDBMappingIdentityRule"][];
+            value_maps?: {
+                [key: string]: components["schemas"]["CMDBMappingValueMap"];
+            };
+            pull?: components["schemas"]["CMDBMappingPullSpec"];
+            retire?: components["schemas"]["CMDBMappingRetireSpec"];
+            relations?: components["schemas"]["CMDBMappingRelationRule"][];
+            /** @description Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key. */
+            options?: {
+                [key: string]: string;
+            };
+        };
+        /** @description GET/PUT /cmdb/profiles/{id}/mapping. `template` is null for a platform that ships no template yet (its connector still runs its pre-template code; its overrides are kept for when the template lands). `effective` is null when the stored overrides cannot be read at all. */
+        CMDBMappingView: {
+            platform: string;
+            template: components["schemas"]["CMDBMapping"] | null;
+            overrides: components["schemas"]["CMDBMappingOverrides"];
+            effective: components["schemas"]["CMDBMapping"] | null;
+            valid: boolean;
+            problems: {
+                entry: string;
+                message: string;
+            }[];
         };
         /** @description CURRENT envelope for GET /cmdb/profiles — `{ "profiles": [...] }`. Always a non-null array (handler normalizes nil to []). */
         CMDBProfileListResponse: {
@@ -6129,7 +6311,7 @@ export interface components {
             key: string;
             label: string;
             /** @enum {string} */
-            kind: "cloud" | "cmdb" | "network_source_of_truth" | "itsm" | "siem" | "notification" | "edr_mdm" | "sbom_source" | "secrets_store";
+            kind: "cloud" | "cmdb" | "network_source_of_truth" | "itsm" | "siem" | "notification" | "edr_mdm" | "sbom_source" | "secrets_store" | "generic";
             /** @enum {string} */
             direction: "pull" | "push" | "both";
             /**
@@ -6151,13 +6333,22 @@ export interface components {
             entitled: boolean;
             addable: boolean;
             /**
+             * @description Who sets the connector up. `platform_operator` — the deployment's
+             *     operator, in the administration console (SIEM export is
+             *     platform-global): a tenant sees the connector and cannot add it,
+             *     so `addable` is false whatever its entitlement.
+             * @enum {string}
+             */
+            configured_by: "tenant" | "platform_operator";
+            /**
              * @description Why `addable` is false. `upgrade` — your plan or edition does not
              *     include it. `unavailable` — nobody can use it yet; we have not
-             *     built it. Different sentences, and offering an upgrade for
+             *     built it. `operator` — it works, but only the platform operator
+             *     configures it. Different sentences, and offering an upgrade for
              *     something nobody can buy is the worse mistake.
              * @enum {string}
              */
-            unavailable_reason?: "upgrade" | "unavailable";
+            unavailable_reason?: "upgrade" | "unavailable" | "operator";
         };
         ConnectorCatalogueGroup: {
             kind: string;
@@ -6168,172 +6359,126 @@ export interface components {
             kinds: string[];
             groups: components["schemas"]["ConnectorCatalogueGroup"][];
         };
-        /** @description Non-secret per-connection knobs. */
-        NetBoxConnectionOptions: {
+        /** @description One network segment a source declares. */
+        SourceSegment: {
+            /** @description The prefix. Masked on write, so 10.1.1.5/24 and 10.1.1.0/24 are one network. */
+            cidr: string;
+            /** @description Used only when the segment is created. */
+            name?: string;
             /**
-             * @description Stamped on segments imported from prefixes that do not say which
-             *     environment they are. NetBox has no environment concept, so this is
-             *     the tenant DECLARING one rather than the platform inferring it; a
-             *     prefix tagged with an environment name overrides it.
+             * @description Used only when the segment is created.
+             * @enum {string}
              */
-            default_environment?: string;
-            /** @description NetBox device-role slug to asset class key, extending the shipped mapping. */
-            role_class_overrides?: {
-                [key: string]: string;
+            environment?: "production" | "staging" | "development" | "test";
+            description?: string;
+            /** @description The created segment's metadata. */
+            metadata?: {
+                [key: string]: unknown;
             };
-        };
-        /**
-         * @description A configured NetBox connection. The API token is NEVER returned —
-         *     `has_token` is what an edit form actually needs to know.
-         */
-        NetBoxConnection: {
-            id: string;
-            tenant_id: string;
-            connector_key: string;
-            name: string;
-            base_url: string;
-            has_token: boolean;
-            options: components["schemas"]["NetBoxConnectionOptions"];
-            /**
-             * @description Whether this connection may target an RFC1918/ULA address. Defaults
-             *     true for this connector kind because a network source of truth is
-             *     on-premises by construction; loopback, link-local and cloud
-             *     metadata stay refused whatever it says.
-             */
-            allow_private_endpoint: boolean;
-            is_enabled: boolean;
-            /** @enum {string} */
-            schedule: "manual" | "hourly" | "daily" | "weekly";
-            /** Format: date-time */
-            last_run_at?: string | null;
-            last_run_status?: string;
-            last_error?: string;
-            /** Format: date-time */
-            last_tested_at?: string | null;
-            /** Format: date-time */
-            created_at: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        /** @description Body for POST/PUT /connectors/netbox/connections. */
-        NetBoxConnectionInput: {
-            name: string;
-            /** @description The NetBox root. HTTPS is required — the API token is a bearer credential. */
-            base_url: string;
-            /**
-             * @description Write-only. Required on create. On update an empty value leaves the
-             *     stored token alone.
-             */
-            api_token?: string;
-            default_environment?: string;
-            role_class_overrides?: {
-                [key: string]: string;
+            /** @description Merged into an EXISTING segment's metadata. */
+            match_metadata?: {
+                [key: string]: unknown;
             };
-            allow_private_endpoint?: boolean;
-            is_enabled?: boolean;
+            source_ref: string;
+        };
+        SourceSegmentsRequest: {
+            segments: components["schemas"]["SourceSegment"][];
+        };
+        SourceSegmentResult: {
+            cidr: string;
             /** @enum {string} */
-            schedule?: "manual" | "hourly" | "daily" | "weekly";
+            outcome: "created" | "matched" | "too_broad" | "error";
+            error?: string;
         };
-        /** @description Envelope for GET /connectors/netbox/connections — { "connections": [...] }. Always a non-null array. */
-        NetBoxConnectionListResponse: {
-            connections: components["schemas"]["NetBoxConnection"][];
+        SourceSegmentsResponse: {
+            results: components["schemas"]["SourceSegmentResult"][];
         };
-        /**
-         * @description The counts one pull produced. Every field is present, zeros included:
-         *     "0 devices" is an answer, and omitting it makes a run that imported
-         *     nothing indistinguishable from one that was never asked to.
-         */
-        ConnectorRunSummary: {
-            sites: number;
-            prefixes: number;
-            vlans: number;
-            device_types: number;
-            devices: number;
-            segments_created: number;
-            segments_matched: number;
-            assets_created: number;
-            assets_matched: number;
-            /** @description Devices whose identifiers matched more than one existing asset; each left a merge proposal in Approvals. */
-            assets_proposed: number;
-            /** @description Durable observations retained without creating an asset; absent on older servers. */
-            observations_retained?: number;
-            /** @description Devices carrying no identifier at all, which could never be recognised again. */
-            assets_skipped: number;
-            /** @description Devices whose NetBox role mapped to no asset class; each became unknown_host rather than a guess. */
-            unmapped_roles: number;
-            /** @description VLANs carrying no prefix. They scope no address, so they create no segment. */
-            vlans_without_prefix: number;
-            errors: number;
+        SourceAdmissionRequest: {
+            count: number;
         };
-        ConnectorRun: {
-            id: string;
-            connection_id: string;
+        SourceAdmissionResponse: {
+            prospective: boolean;
+            allowed: boolean;
+            message?: string;
+        };
+        SourceAdmissionError: {
+            error: string;
             /** @enum {string} */
-            status: "in_progress" | "success" | "partial" | "failed";
-            /** @enum {string} */
-            trigger_type: "manual" | "scheduled" | "test";
-            /** Format: date-time */
-            started_at?: string;
-            /** Format: date-time */
-            completed_at?: string | null;
-            summary: components["schemas"]["ConnectorRunSummary"];
-            errors: string[];
+            stage: "policy" | "limit";
         };
-        /** @description Envelope for GET /connectors/netbox/connections/{id}/runs — { "runs": [...] }. Always a non-null array. */
-        ConnectorRunListResponse: {
-            runs: components["schemas"]["ConnectorRun"][];
+        SourceIdentifier: {
+            kind: string;
+            value: string;
+            scope?: string;
         };
-        ConnectorMessageResponse: {
-            message: string;
+        SourceFact: {
+            /** @description A fact key registered for the `connector` producer. */
+            key: string;
+            /** @description The fact's value. */
+            value: unknown;
         };
-        /** @description Result of POST .../test. success:false is a 200 — the request worked, the thing it checked did not. */
-        ConnectorTestResult: {
-            success: boolean;
-            message: string;
-        };
-        /** @description A NetBox device the inventory has no asset for. */
-        NetBoxDriftDevice: {
-            netbox_id: number;
-            name: string;
-            serial?: string;
-            ip_address?: string;
-            role?: string;
-            site?: string;
-            status?: string;
-            /** @description Opens the record in the customer's own NetBox, because the action this view suggests is taken there. */
-            url: string;
-        };
-        /** @description An asset the platform holds that NetBox does not list. */
-        NetBoxDriftAsset: {
-            asset_id: string;
+        /** @description One asset observation from a source (an allowlist of fields). */
+        SourceAsset: {
+            class_key: string;
+            identifiers?: components["schemas"]["SourceIdentifier"][];
             display_name?: string;
             hostname?: string;
             ip_address?: string;
-            serial?: string;
+            site?: string;
+            region?: string;
+            tags?: {
+                [key: string]: unknown;
+            };
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** @description Stable across a replay of one run, new for the next run. */
+            observation_receipt_id?: string;
+            /** Format: date-time */
+            observed_at?: string;
+            facts?: components["schemas"]["SourceFact"][];
+            claim_discovery_source?: string;
+        };
+        SourceAssetsRequest: {
+            source: {
+                /** @enum {string} */
+                kind: "imported";
+                ref: string;
+            };
+            assets: components["schemas"]["SourceAsset"][];
+        };
+        SourceAssetResult: {
+            /** @description The identification engine's outcome (created, matched, conflict), or retained, or error. */
+            outcome: string;
+            /** Format: uuid */
+            asset_id?: string;
+            observation_id?: string;
+            proposed?: boolean;
+            error?: string;
+            discovery_source_error?: string;
+            facts_error?: string;
+        };
+        SourceAssetsResponse: {
+            results: components["schemas"]["SourceAssetResult"][];
+        };
+        SourceClassExistsResponse: {
+            key: string;
+            exists: boolean;
+        };
+        SourceHardwareAsset: {
+            /** Format: uuid */
+            id: string;
+            display_name: string;
+            hostname: string;
+            address: string;
             class_key: string;
             asset_status: string;
-            site?: string;
+            site: string;
+            serial: string;
         };
-        /**
-         * @description What NetBox and the inventory disagree about. Read-only: the platform
-         *     never writes to NetBox.
-         */
-        NetBoxDriftReport: {
-            generated_at?: string;
-            netbox_device_count: number;
-            inventory_asset_count: number;
-            missing_in_inventory: components["schemas"]["NetBoxDriftDevice"][];
-            missing_in_netbox: components["schemas"]["NetBoxDriftAsset"][];
-            missing_in_inventory_count: number;
-            missing_in_netbox_count: number;
-            /**
-             * @description The lists are capped. `truncated` says so outright rather than
-             *     letting a capped list read as a complete one — an inventory that
-             *     silently under-reports is the failure this initiative is about.
-             */
-            truncated: boolean;
-            /** @description Shown verbatim in the UI. The read-only promise is part of the product surface, not only the docs. */
-            note: string;
+        SourceHardwareAssetsResponse: {
+            assets: components["schemas"]["SourceHardwareAsset"][];
+            more: boolean;
         };
         /**
          * @description Body for POST /discovery/jobs. Mirrors models.CreateDiscoveryJobInput.
@@ -6723,6 +6868,8 @@ export interface components {
         };
     };
     parameters: {
+        /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+        SourceTenantHeader: string;
         /** @description Asset UUID. */
         AssetId: string;
         /** @description External connection UUID. */
@@ -8597,6 +8744,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8613,7 +8761,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The created profile. */
+            /** @description The created profile (credential values redacted). */
             201: {
                 headers: {
                     [name: string]: unknown;
@@ -8624,6 +8772,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8639,7 +8788,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The profile. */
+            /** @description The profile (credential values redacted). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -8649,6 +8798,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -8669,7 +8819,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The updated profile. */
+            /** @description The updated profile (credential values redacted). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -8680,6 +8830,8 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8705,6 +8857,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8729,7 +8882,7 @@ export interface operations {
                     "application/json": components["schemas"]["CMDBTestConnectionResult"];
                 };
             };
-            /** @description Connection failed — `{ "success": false, "error": "..." }`. */
+            /** @description Connection failed — `{ "success": false, "error": "<reason>" }`. The reason is the real one, sanitized: a plain-language cause where one is recognisable (private address without `allow_private_endpoint`, untrusted certificate, rejected credentials, timeout, DNS, refused redirect) followed by the detail — never a URL beyond scheme://host, a response body or a header. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -8739,11 +8892,16 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
     triggerCmdbSync: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day. */
+                full?: boolean;
+            };
             header?: never;
             path: {
                 /** @description CMDB sync profile id. */
@@ -8764,11 +8922,17 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
     pullFromCmdb: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day. */
+                full?: boolean;
+            };
             header?: never;
             path: {
                 /** @description CMDB sync profile id. */
@@ -8787,6 +8951,7 @@ export interface operations {
                     "application/json": components["schemas"]["BulkImportResult"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             /** @description The pull would exceed the tenant's subscription asset cap; nothing is created. */
             402: {
@@ -8797,7 +8962,10 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
-            /** @description The CMDB could not be reached or returned an error. */
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+            /** @description The CMDB could not be reached or returned an error (sanitized reason in `error`). */
             502: {
                 headers: {
                     [name: string]: unknown;
@@ -8806,6 +8974,65 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
+        };
+    };
+    getCmdbMapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CMDB sync profile id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The mapping view. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CMDBMappingView"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putCmdbMapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CMDB sync profile id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CMDBMappingOverrides"];
+            };
+        };
+        responses: {
+            /** @description The mapping view after the save. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CMDBMappingView"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
     listCmdbSyncJobs: {
@@ -8833,6 +9060,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -8857,244 +9085,161 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
         };
     };
-    listNetBoxConnections: {
+    upsertSourceSegments: {
         parameters: {
             query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The tenant's NetBox connections (wrapped under `connections`; always a non-null array). */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NetBoxConnectionListResponse"];
-                };
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
             };
-            401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    createNetBoxConnection: {
-        parameters: {
-            query?: never;
-            header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NetBoxConnectionInput"];
+                "application/json": components["schemas"]["SourceSegmentsRequest"];
             };
         };
         responses: {
-            /** @description The created connection. The API token is never returned. */
-            201: {
+            /** @description One result per submitted segment, in order. */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NetBoxConnection"];
+                    "application/json": components["schemas"]["SourceSegmentsResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };
-    updateNetBoxConnection: {
+    sourceAssetAdmission: {
         parameters: {
             query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
             };
+            path?: never;
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["NetBoxConnectionInput"];
+                "application/json": components["schemas"]["SourceAdmissionRequest"];
             };
         };
         responses: {
-            /** @description The updated connection. */
+            /** @description The admission answer. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NetBoxConnection"];
+                    "application/json": components["schemas"]["SourceAdmissionResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
+            /** @description The check could not be answered; `stage` says which half. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceAdmissionError"];
+                };
+            };
+        };
+    };
+    resolveSourceAssets: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SourceAssetsRequest"];
+            };
+        };
+        responses: {
+            /** @description One result per submitted asset, in order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceAssetsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+        };
+    };
+    sourceAssetClassExists: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path: {
+                /** @description Asset class key. */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether it exists. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceClassExistsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
     };
-    deleteNetBoxConnection: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Acknowledgement. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConnectorMessageResponse"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
-            500: components["responses"]["LegacyServerError"];
-        };
-    };
-    testNetBoxConnection: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The test result. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConnectorTestResult"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
-        };
-    };
-    runNetBoxImport: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The completed run, with its counts. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ConnectorRun"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            403: components["responses"]["LegacyForbidden"];
-            404: components["responses"]["LegacyNotFound"];
-            /** @description NetBox could not be read; nothing was imported. */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LegacyError"];
-                };
-            };
-        };
-    };
-    listNetBoxRuns: {
+    listSourceHardwareAssets: {
         parameters: {
             query?: {
-                /** @description Max runs to return (default 50, max 200). */
+                /** @description Return assets with an id greater than this one. */
+                after?: string;
+                /** @description Page size, 1–5000 (default 5000). */
                 limit?: number;
             };
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
             };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Recent runs (wrapped under `runs`; always a non-null array). */
+            /** @description One page. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConnectorRunListResponse"];
+                    "application/json": components["schemas"]["SourceHardwareAssetsResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
             500: components["responses"]["LegacyServerError"];
-        };
-    };
-    getNetBoxDrift: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description NetBox connection id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The comparison. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NetBoxDriftReport"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-            402: components["responses"]["EditionUnavailable"];
-            404: components["responses"]["LegacyNotFound"];
-            /** @description NetBox could not be read. */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LegacyError"];
-                };
-            };
         };
     };
     listExternalConnections: {
@@ -10502,7 +10647,7 @@ export interface operations {
                     "application/json": components["schemas"]["IdentificationSettingsResponse"];
                 };
             };
-            /** @description The threshold is outside 0..1, or was not supplied. */
+            /** @description The threshold is outside 0..1, a field has the wrong type, or the body named neither field. */
             400: {
                 headers: {
                     [name: string]: unknown;

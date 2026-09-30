@@ -257,9 +257,68 @@ Two things are **never** auto-accepted, whatever the score:
   licenses only the second.
 
 Everything the threshold does is listed on **Discovery → Approvals** under
-**"Auto-merged by the matcher (last 30 days)"**, with the score, the reasons and
-a link to the asset — so you can check its work. That section is absent while
-the threshold is Never, because nothing can have happened.
+**"Merged automatically (last 30 days)"**, with the score, the reasons and a link
+to the asset — so you can check its work. See
+[Merged automatically](#merged-automatically) below.
+
+#### Merged automatically
+
+Two things can merge two of your assets without a person deciding, and
+**Discovery → Approvals → Merged automatically (last 30 days)** lists both, so
+the one act nobody approved is always visible to somebody:
+
+- **Auto-accepted by the matcher** — a merge the matcher scored at or above your
+  auto-accept threshold. The row shows the score and the reasons behind it. Off
+  unless you set a threshold.
+- **Merged by rule** — two records that fixed rules (no score, no model) were
+  *sure* are one device. The row shows the evidence in plain sentences, for
+  example "same MAC address seen directly by a sensor" and "same network
+  segment", and a link to the asset the records were merged into, whose
+  **History** records what was folded in. **On by default.**
+
+**What "sure" means.** The rule merges two existing records only when *all* of
+these hold:
+
+- the same MAC address, serial number or other hardware identifier was seen
+  **directly on the device** — or reported by a controller or system of record
+  that manages it — not relayed second-hand from somewhere else;
+- an **address alone never counts**: a record known by a name is not merged with
+  a device just because the device later used the same address — addresses are
+  handed out again. (A record that is *nothing but* that address is merged: it
+  was only ever the device's address.)
+- both records are on the **same network segment**, or one of them (typically a
+  record you typed in) has none;
+- **nothing contradicts it** — two different serial numbers, cloud resource ids
+  or agent ids are always two devices;
+- the records are not both still waiting for approval — a pending duplicate of an
+  approved asset is a duplicate, but two pending records are left to you;
+- and you have never told the platform to **keep this pair separate**. A decision
+  you made is never overridden by a rule.
+
+**A record you entered by hand is kept.** When one of the two records is one you
+added yourself, the values you typed always win, and your record is the asset that
+survives — unless it is still waiting for approval and the other record is already
+approved; then the approved record is kept and your values are carried onto it.
+Anything new the platform learned is added.
+
+**When it happens.** The rule is checked whenever a sighting links the two
+records, and merges within about a minute. Just before merging it is checked
+again against the records as they are then; if anything has changed so that it
+no longer holds, nothing is merged and the question is left for you as an
+ordinary merge proposal.
+
+**Turning it off.** **Settings → Policies → Identification rules** has a switch,
+**"Merge records the rules are sure are one device"**. With it off, the same
+cases wait for you as ordinary merge proposals — today's behaviour. Changing it
+needs both settings-update and asset-update permission, like the threshold.
+
+> ⚠️ **A merge made automatically cannot be undone from the UI**, by the matcher
+> or by the rule. The list is there so you can check the work; nothing on it needs
+> deciding, and there are no buttons.
+
+When nothing has been merged, the section says **"Nothing has been merged
+automatically in the last 30 days."** If the list itself cannot be read the page
+says that instead, with a **Retry** button — an unreadable list is not an empty one.
 
 Two actions:
 
@@ -271,6 +330,15 @@ Two actions:
 
 Merging needs the same permission as approving an asset.
 
+**A proposal needs two records to be a question.** Approvals lists a merge
+proposal only while it names at least two records that still exist — not
+deleted, archived (including merged away) or denied. A proposal whose other
+side is gone could only be answered "keep separate", so it no longer appears in
+the queue, and the **Identity conflict needs review** badge on an asset is
+raised only by a proposal you can actually review. Merging two records also
+resolves every open proposal that is left naming only the survivor, so the
+badge clears when you merge.
+
 **Why this exists:** the same machine seen by a sensor, exported from your CMDB
 and typed in by hand should be one row, not three. The platform matches them on
 their identifiers automatically where it can (see
@@ -279,7 +347,7 @@ genuinely cannot tell.
 
 **Auto-accepted proposals.** If you have set an auto-accept threshold, a
 proposal the matcher settled still appears — marked **Auto-accepted into one**,
-and listed separately under "Auto-merged by the matcher". Its *remaining*
+and listed separately under "Merged automatically". Its *remaining*
 candidates are still yours to decide: the threshold settled where the sighting
 went, not whether every other candidate is the same thing.
 

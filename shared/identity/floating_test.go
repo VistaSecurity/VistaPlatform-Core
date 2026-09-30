@@ -11,6 +11,7 @@ package identity_test
 // times, because a reviewer's "kept separate" was never read back.
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -464,8 +465,10 @@ func TestKeptSeparateIsNeverAutoMerged(t *testing.T) {
 	}
 }
 
-// A single candidate is not a pair: decision memory does not apply, and the
-// floor's single-candidate proposal keeps today's behaviour.
+// A single candidate is not a pair. Since A1 a single-owner floor opens
+// no proposal at all — it is supporting evidence — but a LEGACY one-candidate
+// proposal (opened before A1, then kept separate by a reviewer) must still not
+// be read back as a decision about anything.
 func TestDecisionMemoryNeedsAPair(t *testing.T) {
 	e, repo := newEngine(t, identity.Config{})
 	cloud := mustResolve(t, e, obs(assetclass.KeyCloudResource,
@@ -474,18 +477,29 @@ func TestDecisionMemoryNeedsAPair(t *testing.T) {
 	))
 	macOnly := obs(assetclass.KeyCloudResource, id(identity.KindMACAddress, "aa:bb:cc:dd:ee:01"))
 	first := mustResolve(t, e, macOnly)
-	if first.Outcome != identity.OutcomeConflict || len(first.Candidates) != 1 {
-		t.Fatalf("fixture: outcome %s with %d candidates; want the single-candidate floor proposal", first.Outcome, len(first.Candidates))
+	if first.Outcome != identity.OutcomeSupporting || first.Proposal.ID != "" || proposalCount(repo) != 0 {
+		t.Fatalf("fixture: outcome %s, proposal %q, %d proposals; want supporting and no proposal",
+			first.Outcome, first.Proposal.ID, proposalCount(repo))
 	}
-	if err := repo.ResolveProposal(first.Proposal, "kept_separate", "", observedAt.Add(time.Hour)); err != nil {
+
+	// The legacy row, as a pre-A1 floor wrote it.
+	legacy, err := repo.OpenMergeProposal(context.Background(), tenant, identity.MergeProposal{
+		Candidates: []identity.MergeCandidate{{Ref: cloud.Asset, MatchedIdentifiers: []identity.Identifier{
+			id(identity.KindMACAddress, "aa:bb:cc:dd:ee:01")}}},
+		Source: macOnly.Source, Reason: "legacy single-candidate floor", ProposedAt: observedAt,
+	})
+	if err != nil {
+		t.Fatalf("OpenMergeProposal(legacy): %v", err)
+	}
+	if err := repo.ResolveProposal(legacy, "kept_separate", "", observedAt.Add(time.Hour)); err != nil {
 		t.Fatalf("ResolveProposal: %v", err)
 	}
 	res := mustResolve(t, e, macOnly)
 	if res.Suppressed != nil {
 		t.Errorf("a one-candidate proposal was treated as a pair decision and the observation was resolved to %s (the cloud resource is %s)", res.Asset.ID, cloud.Asset.ID)
 	}
-	if res.Outcome != identity.OutcomeConflict {
-		t.Errorf("outcome = %s, want conflict — nothing else can take this observation", res.Outcome)
+	if res.Outcome != identity.OutcomeSupporting {
+		t.Errorf("outcome = %s, want supporting — the MAC is the cloud resource's and nothing else claims it", res.Outcome)
 	}
 }
 
@@ -528,5 +542,233 @@ func TestPendingProposalIsNotRenoted(t *testing.T) {
 	}
 	if proposalCount(repo) != 1 {
 		t.Errorf("%d proposals, want 1", proposalCount(repo))
+	}
+}
+
+// ── B3: the announcer's own address in the frame ─────────────────────
+
+const nodeOwnAddr = "192.0.2.10" // the node's own address in floatingFixture
+
+// announcementWithOwnAddress is a node's frame that carries its OWN address
+// beside the VIP it holds — what a sensor aggregating one node's ARP claims
+// hands the engine.
+func announcementWithOwnAddress() identity.Observation {
+	o := arpAnnouncement()
+	o.Identifiers = append(o.Identifiers, scoped(identity.KindIPAddress, nodeOwnAddr, identity.ScopeTenantDefault))
+	return o
+}
+
+func ownerOfAddr(t *testing.T, repo *memory.Repository, addr, scope string) []identity.AssetRef {
+	t.Helper()
+	refs, err := repo.FindByIdentifier(context.Background(), tenant, identity.KindIPAddress, addr, scope)
+	if err != nil {
+		t.Fatalf("FindByIdentifier(%s): %v", addr, err)
+	}
+	return refs
+}
+
+// TestFloatingAddressWithTheAnnouncersOwnAddress is B3: node A's MAC announcing
+// A's own address AND a VIP held by B. Before, A's own address disqualified the
+// shape — every voting address had to be the holder's — so the frame was a
+// cross-kind conflict and a proposal to merge the node with the service. Now
+// it is the floating-address outcome: the observation lands on the VIP's
+// asset, A's own address stays A's (re-attached there, not reported as
+// declined), the announcement names the VIP only, and nobody is asked.
+//
+// Mutation check: make an announcer-owned address return false in
+// floatingAddress (the pre-B3 rule) → a conflict and a proposal, and this
+// fails.
+func TestFloatingAddressWithTheAnnouncersOwnAddress(t *testing.T) {
+	e, repo := newEngine(t, identity.Config{})
+	node, vip := floatingFixture(t, e)
+	before := proposalCount(repo)
+
+	o := announcementWithOwnAddress()
+	o.ObservedAt = observedAt.Add(time.Hour)
+	res := mustResolve(t, e, o)
+
+	if res.FloatingAddress == nil || res.Outcome != identity.OutcomeMatched {
+		t.Fatalf("outcome %s, floating %v: a node announcing its own address beside a VIP is still a floating address",
+			res.Outcome, res.FloatingAddress != nil)
+	}
+	if res.Asset.ID != vip.Asset.ID {
+		t.Fatalf("resolved to %s, want the VIP's asset %s", res.Asset.ID, vip.Asset.ID)
+	}
+	if res.Proposal.ID != "" || proposalCount(repo) != before {
+		t.Errorf("a proposal was opened (%d → %d)", before, proposalCount(repo))
+	}
+
+	// A's own address: still A's, not the VIP's, and written rather than declined.
+	if refs := ownerOfAddr(t, repo, nodeOwnAddr, identity.ScopeTenantDefault); len(refs) != 1 || refs[0].ID != node.Asset.ID {
+		t.Errorf("the node's own address is owned by %+v, want only the node %s", refs, node.Asset.ID)
+	}
+	for _, u := range res.Unattached {
+		if u.Kind == identity.KindIPAddress && u.Value == nodeOwnAddr {
+			t.Errorf("the node's own address is reported unattached; it was written to the node")
+		}
+	}
+	if !hasKind(res.Unattached, identity.KindMACAddress) {
+		t.Errorf("Unattached = %v, want the MAC reported, as before", res.Unattached)
+	}
+
+	// The VIP is recorded as hosted on A, and the announcement is about the
+	// VIP alone: the node's own address never floated.
+	recs := repo.Announcements(vip.Asset)
+	if len(recs) != 1 || recs[0].Announcer.ID != node.Asset.ID {
+		t.Fatalf("announcement records %+v, want one from the node", recs)
+	}
+	if got := recs[0].Latest.Addresses; len(got) != 1 || got[0] != vipAddr {
+		t.Errorf("announced addresses = %v, want only the VIP %s", got, vipAddr)
+	}
+	if res.FloatingAddress.AnnouncerAssetID != node.Asset.ID {
+		t.Errorf("announcer = %s, want %s", res.FloatingAddress.AnnouncerAssetID, node.Asset.ID)
+	}
+	var nodeNoted bool
+	for _, h := range repo.HistoryFor(node.Asset) {
+		if _, ok := h.Changes["announces"]; ok {
+			if keys, _ := h.Changes["identifiers"].([]string); len(keys) == 1 {
+				nodeNoted = true
+			}
+		}
+	}
+	if !nodeNoted {
+		t.Error("the node's history does not record the announcement with its own address re-attached")
+	}
+}
+
+// The L2-only qualifier holds with the announcer's own address in the frame:
+// any other kind beside the node's MAC is still a genuine conflict. This is
+// TestFloatingAddressL2OnlyIsExactlyMACAndIP on the widened shape.
+func TestFloatingAddressWithOwnAddressStillL2Only(t *testing.T) {
+	for _, kind := range identity.AllKinds() {
+		if kind == identity.KindMACAddress || kind == identity.KindIPAddress {
+			continue
+		}
+		t.Run(string(kind), func(t *testing.T) {
+			e, repo := newEngine(t, identity.Config{})
+			floatingFixture(t, e)
+			before := proposalCount(repo)
+			o := announcementWithOwnAddress()
+			extra := identity.Identifier{Kind: kind, Value: "extra-" + string(kind), Confidence: 1}
+			switch kind {
+			case identity.KindFQDN:
+				extra.Value = "extra.example.test"
+			case identity.KindHostname:
+				extra.Scope = identity.ScopeTenantDefault
+			case identity.KindName:
+				extra.Scope = assetclass.KeyUnknownHost
+			case identity.KindCMDBSysID:
+				extra.Scope = "profile-1"
+			}
+			o.Identifiers = append(o.Identifiers, extra)
+			res := mustResolve(t, e, o)
+			if res.FloatingAddress != nil {
+				t.Errorf("an observation also carrying %s was treated as L2-only", kind)
+			}
+			if proposalCount(repo) != before+1 {
+				t.Errorf("no proposal for the conflict an extra %s makes", kind)
+			}
+		})
+	}
+}
+
+// A frame whose every address is the announcer's own has nothing floating in
+// it: the node's MAC and its own address are plain corroboration, with no
+// announcement recorded.
+func TestFloatingAddressOwnAddressesAloneAreNotFloating(t *testing.T) {
+	e, repo := newEngine(t, identity.Config{})
+	node, vip := floatingFixture(t, e)
+	o := obs(assetclass.KeyUnknownHost,
+		id(identity.KindMACAddress, nodeMAC),
+		scoped(identity.KindIPAddress, nodeOwnAddr, identity.ScopeTenantDefault))
+	res := mustResolve(t, e, o)
+	if res.FloatingAddress != nil || res.Asset.ID != node.Asset.ID || res.Outcome != identity.OutcomeMatched {
+		t.Fatalf("outcome %s on %s (floating %v), want an ordinary match on the node %s",
+			res.Outcome, res.Asset.ID, res.FloatingAddress != nil, node.Asset.ID)
+	}
+	if len(repo.Announcements(vip.Asset)) != 0 {
+		t.Error("an announcement was recorded with no floating address in the frame")
+	}
+}
+
+// TestFloatingAddressOwnAddressOnADynamicSegment traces the widened frame
+// through a DHCP scope, where it meets the lease rule ( 1b) instead.
+//
+// In a dynamic scope neither address votes, so the walk never finds the
+// cross-kind conflict and floatingAddress is never consulted: the frame is a
+// match on the node by its MAC. The VIP must not follow that MAC. Two holders:
+//
+//   - a VIP record with a name and no device binding — holderLostALease
+//     refuses it at any time;
+//   - an IP-ONLY VIP record, which the lease rule WOULD move. What protects it
+//     is history: the frame was first seen while the segment was static, the
+//     widened rule recognised it as floating (before B3 it was a conflict and
+//     a proposal, and left no such history), and AddressAnnounced then honours
+//     that record after the segment is marked DHCP.
+//
+// Mutation check: revert the B3 widening → the static-phase frame opens a
+// proposal and this fails (and with no floating history recorded, the
+// dynamic-phase frame would then move the IP-only VIP to the node).
+func TestFloatingAddressOwnAddressOnADynamicSegment(t *testing.T) {
+	const seg = "seg-float"
+	nodeAddr := scoped(identity.KindIPAddress, "192.0.2.40", seg)
+	vip := scoped(identity.KindIPAddress, "192.0.2.240", seg)
+	frame := func(at time.Time, dynamic bool) identity.Observation {
+		o := obs(assetclass.KeyUnknownHost, id(identity.KindMACAddress, nodeMAC), nodeAddr, vip)
+		o.Admission = identity.AdmissionEvidence{Direct: true}
+		o.Attributes = map[string]any{"arp_gratuitous": true}
+		o.ObservedAt = at
+		if dynamic {
+			o.DynamicScopes = map[string]bool{seg: true}
+		}
+		return o
+	}
+
+	for _, tt := range []struct {
+		name       string
+		holderIDs  []identity.Identifier
+		staticSeen bool // the frame was seen while the segment was static
+	}{
+		{"a named VIP record", []identity.Identifier{id(identity.KindFQDN, "ingress.example.test"), vip}, false},
+		{"an IP-only VIP record first seen on a static segment", []identity.Identifier{vip}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e, repo := newEngine(t, identity.Config{})
+			node := mustResolve(t, e, obs(assetclass.KeyServer, id(identity.KindMACAddress, nodeMAC), nodeAddr))
+			holder := mustResolve(t, e, obs(assetclass.KeyUnknownHost, tt.holderIDs...))
+			if node.Asset.ID == holder.Asset.ID {
+				t.Fatal("setup: the node and the VIP resolved to one asset")
+			}
+
+			if tt.staticSeen {
+				res := mustResolve(t, e, frame(observedAt.Add(time.Hour), false))
+				if res.FloatingAddress == nil || proposalCount(repo) != 0 {
+					t.Fatalf("static phase: outcome %s, floating %v, %d proposals; want the floating outcome and no proposal",
+						res.Outcome, res.FloatingAddress != nil, proposalCount(repo))
+				}
+			}
+
+			res := mustResolve(t, e, frame(observedAt.Add(2*time.Hour), true))
+
+			if res.Outcome != identity.OutcomeMatched || res.Asset.ID != node.Asset.ID {
+				t.Fatalf("dynamic phase: outcome %s on %s, want a match on the node %s by its MAC",
+					res.Outcome, res.Asset.ID, node.Asset.ID)
+			}
+			if n := proposalCount(repo); n != 0 {
+				t.Errorf("%d proposals, want 0", n)
+			}
+			if refs := ownerOfAddr(t, repo, "192.0.2.240", seg); len(refs) != 1 || refs[0].ID != holder.Asset.ID {
+				t.Errorf("the VIP is owned by %+v, want still the VIP record %s: an announced address is not a lease",
+					refs, holder.Asset.ID)
+			}
+			if refs := ownerOfAddr(t, repo, "192.0.2.40", seg); len(refs) != 1 || refs[0].ID != node.Asset.ID {
+				t.Errorf("the node's own address is owned by %+v, want the node %s", refs, node.Asset.ID)
+			}
+			for _, h := range repo.History() {
+				if h.Action == identity.ActionIdentifierReassigned && h.Changes["reason"] == identity.ReasonLeaseMoved {
+					t.Errorf("a lease_moved entry was written on %s", h.AssetID)
+				}
+			}
+		})
 	}
 }

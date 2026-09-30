@@ -9,6 +9,8 @@ servers:
 - url: /api/v2/inventory-service
   description: inventory-service v2 (CMDB-aligned), mounted behind the API gateway.
 tags:
+- name: source-imports
+  description: Internal (HMAC service calls only) — how a connector running outside this service writes a system of record's objects through the identity engine (platform ADR-0002 D3).
 - name: infrastructure-assets
   description: Infrastructure asset (CMDB configuration item) read + management.
 - name: cmdb-integrations
@@ -2177,6 +2179,7 @@ paths:
       tags:
       - cmdb-integrations
       summary: List the tenant's CMDB sync profiles
+      description: 'RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.'
       responses:
         '200':
           description: 'The tenant''s CMDB sync profiles (wrapped under `profiles`; always a non-null array — the handler normalizes nil to []).'
@@ -2186,6 +2189,8 @@ paths:
                 $ref: '#/components/schemas/CMDBProfileListResponse'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
         '500':
           $ref: '#/components/responses/LegacyServerError'
     post:
@@ -2194,6 +2199,7 @@ paths:
       tags:
       - cmdb-integrations
       summary: Create a CMDB sync profile
+      description: 'Omitted `connection_config`, `field_mapping_config`, `sync_config` and `ci_type_mapping` are stored as `{}`. An unknown `platform_type` or a blank `name` is a 400; a name another live profile of the tenant uses is a 409.'
       requestBody:
         required: true
         content:
@@ -2202,7 +2208,7 @@ paths:
               $ref: '#/components/schemas/CMDBSyncProfileInput'
       responses:
         '201':
-          description: The created profile.
+          description: The created profile (credential values redacted).
           content:
             application/json:
               schema:
@@ -2211,6 +2217,8 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /cmdb/profiles/{id}:
@@ -2227,15 +2235,18 @@ paths:
       tags:
       - cmdb-integrations
       summary: Get a CMDB sync profile by id
+      description: 'RBAC-gated `settings.read`. Credential values are never returned — see CMDBSyncProfile.'
       responses:
         '200':
-          description: The profile.
+          description: The profile (credential values redacted).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CMDBSyncProfile'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
         '404':
           $ref: '#/components/responses/LegacyNotFound'
         '500':
@@ -2246,6 +2257,7 @@ paths:
       tags:
       - cmdb-integrations
       summary: Update a CMDB sync profile
+      description: 'Credentials are write-only: an omitted or empty `password`, `api_token` or `client_secret` (or `extra_headers` value) in `connection_config` KEEPS the stored one. An omitted `connection_config` keeps the stored config; an omitted `field_mapping_config`, `sync_config` or `ci_type_mapping` keeps the stored value (send `{}` to clear it).'
       requestBody:
         required: true
         content:
@@ -2254,7 +2266,7 @@ paths:
               $ref: '#/components/schemas/CMDBSyncProfileInput'
       responses:
         '200':
-          description: The updated profile.
+          description: The updated profile (credential values redacted).
           content:
             application/json:
               schema:
@@ -2263,6 +2275,10 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
         '500':
           $ref: '#/components/responses/LegacyServerError'
     delete:
@@ -2280,6 +2296,8 @@ paths:
                 $ref: '#/components/schemas/CMDBMessageResponse'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /cmdb/profiles/{id}/test:
@@ -2304,13 +2322,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/CMDBTestConnectionResult'
         '400':
-          description: 'Connection failed — `{ "success": false, "error": "..." }`.'
+          description: 'Connection failed — `{ "success": false, "error": "<reason>" }`. The reason is the real one, sanitized: a plain-language cause where one is recognisable (private address without `allow_private_endpoint`, untrusted certificate, rejected credentials, timeout, DNS, refused redirect) followed by the detail — never a URL beyond scheme://host, a response body or a header.'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /cmdb/profiles/{id}/sync:
     parameters:
     - name: id
@@ -2324,7 +2346,15 @@ paths:
       x-edition: enterprise
       tags:
       - cmdb-integrations
-      summary: Trigger a manual sync for a profile
+      summary: Trigger a manual push for a profile
+      parameters:
+      - name: full
+        in: query
+        required: false
+        description: '`true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day.'
+        schema:
+          type: boolean
+      description: 'Starts a push of the tenant''s in-scope inventory (approved assets and the crypto configurations, certificates and keys on them) and returns its job; the push runs in the background. RBAC-gated `assets.manage`. Refused with a message the UI shows verbatim: 400 when the profile is disabled or its platform is pull-only in the connector registry (SolarWinds), 409 when a run of this profile — manual or scheduled, on any replica — is already in progress.'
       responses:
         '202':
           description: The created sync job.
@@ -2336,6 +2366,12 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /cmdb/profiles/{id}/pull:
     parameters:
     - name: id
@@ -2350,7 +2386,14 @@ paths:
       tags:
       - cmdb-integrations
       summary: Pull server CIs from the CMDB into Vista as assets
-      description: 'Fetches server/device CIs from the profile''s CMDB (RBAC-gated `assets.manage`) and creates them as pending-approval infrastructure assets, reusing the bulk-import path (dedupe + partial-success). Returns the per-row BulkImportResult. A connector/transport failure returns 502.'
+      parameters:
+      - name: full
+        in: query
+        required: false
+        description: '`true` runs a FULL re-sync, ignoring the delta cursors (every in-scope record is sent / every listed record is written). A full run also happens on its own at least once a day.'
+        schema:
+          type: boolean
+      description: 'Fetches server/device CIs from the profile''s CMDB (RBAC-gated `assets.manage`) and creates them as pending-approval infrastructure assets, reusing the bulk-import path (dedupe + partial-success). Returns the per-row BulkImportResult and records the run as a sync job (summary.direction `pull`). 400 when the profile is disabled or its platform cannot be pulled from; 409 when a run of this profile is already in progress; 502 (with the sanitized reason) when the CMDB could not be read.'
       responses:
         '200':
           description: Per-row import result for the pulled CIs.
@@ -2358,6 +2401,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/BulkImportResult'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '402':
@@ -2366,12 +2411,78 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          $ref: '#/components/responses/LegacyConflict'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
         '502':
-          description: The CMDB could not be reached or returned an error.
+          description: The CMDB could not be reached or returned an error (sanitized reason in `error`).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LegacyError'
+  /cmdb/profiles/{id}/mapping:
+    parameters:
+    - name: id
+      in: path
+      required: true
+      description: CMDB sync profile id.
+      schema:
+        type: string
+    get:
+      operationId: getCmdbMapping
+      x-edition: enterprise
+      tags:
+      - cmdb-integrations
+      summary: Get a profile's field mapping
+      description: 'The platform''s default template, this profile''s overrides, the effective mapping a run uses (template ⊕ overrides) and every validation problem. RBAC-gated `settings.read`. There is no editor UI yet; this is how a mapping is inspected.'
+      responses:
+        '200':
+          description: The mapping view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CMDBMappingView'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+    put:
+      operationId: putCmdbMapping
+      x-edition: enterprise
+      tags:
+      - cmdb-integrations
+      summary: Replace a profile's field-mapping overrides
+      description: 'Replaces the overrides whole (send `{}` to return to the template). The effective mapping is validated first: an unknown class key, fact key, canonical field or enum value, an identity rule naming something that is not an identifier type, a dangling value map or two rules writing one vendor field is a 400 naming the entry, and nothing is stored. Unknown keys in the body are refused rather than ignored. A valid save clears `mapping_error`, which un-pauses the profile. RBAC-gated `settings.update`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CMDBMappingOverrides'
+      responses:
+        '200':
+          description: The mapping view after the save.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CMDBMappingView'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /cmdb/profiles/{id}/jobs:
     parameters:
     - name: id
@@ -2386,6 +2497,7 @@ paths:
       tags:
       - cmdb-integrations
       summary: List recent sync jobs for a profile
+      description: 'RBAC-gated `settings.read`, like the profile reads: job summaries carry the CMDB''s per-item error strings.'
       parameters:
       - name: limit
         in: query
@@ -2402,6 +2514,8 @@ paths:
                 $ref: '#/components/schemas/CMDBSyncJobListResponse'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
         '500':
           $ref: '#/components/responses/LegacyServerError'
 
@@ -2432,277 +2546,201 @@ paths:
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
 
-  /connectors/netbox/connections:
-    get:
-      operationId: listNetBoxConnections
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: List the tenant's NetBox connections
-      description: |
-        Enterprise (`connector_netbox`). A Core build and an unentitled tenant
-        both answer 402, which is what lets the UI render one upgrade card for
-        either case.
-      responses:
-        '200':
-          description: 'The tenant''s NetBox connections (wrapped under `connections`; always a non-null array).'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NetBoxConnectionListResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
+  # ===========================================================================
+  # Internal source imports (platform ADR-0002 D3)
+  #
+  # The write path a connector running OUTSIDE inventory-service uses to bring
+  # a system of record's objects into the inventory — through the identity
+  # engine, the approval policy and the segment tenant-wins rules, never
+  # through the tables. Served under /api/v1 (not the v2 prefix above) on an
+  # HMAC-gated group of its own: an HMAC-signed service call is the only
+  # accepted credential (a tenant or platform token is refused), the signed
+  # X-Tenant-ID header names the ONE tenant the call writes for, and the
+  # /inventory-service/internal/ prefix is denied at the edge on every host.
+  # Under service-mesh mTLS the caller also presents its client certificate.
+  # ===========================================================================
+  /internal/sources/segments:
     post:
-      operationId: createNetBoxConnection
-      x-edition: enterprise
+      operationId: upsertSourceSegments
       tags:
-      - connectors
-      summary: Create a NetBox connection
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NetBoxConnectionInput'
-      responses:
-        '201':
-          description: The created connection. The API token is never returned.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NetBoxConnection'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-
-  /connectors/netbox/connections/{id}:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: NetBox connection id.
-      schema:
-        type: string
-    put:
-      operationId: updateNetBoxConnection
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: Update a NetBox connection
+      - source-imports
+      summary: Write a source's network segments (internal)
       description: |
-        An EMPTY `api_token` leaves the stored token alone — an edit form that
-        did not re-send the secret must not wipe it. There is deliberately no
-        way to blank it: a NetBox connection without a token cannot do
-        anything.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/NetBoxConnectionInput'
-      responses:
-        '200':
-          description: The updated connection.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NetBoxConnection'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-    delete:
-      operationId: deleteNetBoxConnection
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: Remove a NetBox connection
-      description: Soft delete — the run history stays, so "what did this import, and when" keeps an answer.
-      responses:
-        '200':
-          description: Acknowledgement.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConnectorMessageResponse'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '500':
-          $ref: '#/components/responses/LegacyServerError'
-
-  /connectors/netbox/connections/{id}/test:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: NetBox connection id.
-      schema:
-        type: string
-    post:
-      operationId: testNetBoxConnection
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: Check that the NetBox URL and token work
-      description: |
-        Answers 200 with `success: false` when the CHECK fails — the request
-        succeeded, and what failed is the thing it was asked to check. A 4xx
-        here would have the UI render "couldn't run the test" for "your token
-        is wrong".
-      responses:
-        '200':
-          description: The test result.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConnectorTestResult'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-
-  /connectors/netbox/connections/{id}/run:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: NetBox connection id.
-      schema:
-        type: string
-    post:
-      operationId: runNetBoxImport
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: Pull from NetBox now
-      responses:
-        '200':
-          description: The completed run, with its counts.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConnectorRun'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '403':
-          $ref: '#/components/responses/LegacyForbidden'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '502':
-          description: NetBox could not be read; nothing was imported.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LegacyError'
-
-  /connectors/netbox/connections/{id}/runs:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: NetBox connection id.
-      schema:
-        type: string
-    get:
-      operationId: listNetBoxRuns
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: Run history for a NetBox connection
+        In order, one result per item. A segment matching an existing
+        on-premises cidr segment by MASKED CIDR is not duplicated: its
+        provenance (`source_kind = imported`, `source_ref`) is stamped and
+        `match_metadata` is merged into its metadata — its name, environment,
+        auto-approval and tags stay the tenant's. A cloud segment with the
+        same CIDR is not a match. A new prefix too broad to be anybody's
+        segment is `too_broad` and is not written. Per-item failures are
+        results; the call fails only when the existing segments cannot be read.
       parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceSegmentsRequest'
+      responses:
+        '200':
+          description: One result per submitted segment, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceSegmentsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/assets/admission:
+    post:
+      operationId: sourceAssetAdmission
+      tags:
+      - source-imports
+      summary: May a source import N assets for this tenant (internal)
+      description: |
+        Asked once, BEFORE any asset is written. `prospective` is true when
+        the tenant's identity admission mode checks each create
+        transactionally; the plan's asset cap is then not checked in advance.
+        Otherwise `allowed` is false when importing `count` assets would
+        exceed the cap. A check that cannot be answered is a 500 naming its
+        `stage` (policy / limit) — never an allowance.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceAdmissionRequest'
+      responses:
+        '200':
+          description: The admission answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceAdmissionResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          description: The check could not be answered; `stage` says which half.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceAdmissionError'
+
+  /internal/sources/assets:
+    post:
+      operationId: resolveSourceAssets
+      tags:
+      - source-imports
+      summary: Create or resolve a source's assets through the identity engine (internal)
+      description: |
+        Each item is resolved in order exactly as a single imported asset is
+        (`CreateAssetFromSource`): admission, identity evidence,
+        classification and the tenant's approval policy all apply, so two
+        items for one host resolve to one asset. On a resolved asset the
+        item's `claim_discovery_source` is stamped only where nothing has
+        claimed one, and its `facts` are written under the request's source
+        (producer `connector`). The fields accepted per item are an
+        allowlist; approval status is never among them. `source.kind` must be
+        `imported`.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceAssetsRequest'
+      responses:
+        '200':
+          description: One result per submitted asset, in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceAssetsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+
+  /internal/sources/asset-classes/{key}:
+    get:
+      operationId: sourceAssetClassExists
+      tags:
+      - source-imports
+      summary: Does an asset class key exist for this tenant (internal)
+      description: The compiled hierarchy or one of the tenant's own leaf subclasses.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      - name: key
+        in: path
+        required: true
+        description: Asset class key.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Whether it exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceClassExistsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+
+  /internal/sources/hardware-assets:
+    get:
+      operationId: listSourceHardwareAssets
+      tags:
+      - source-imports
+      summary: Live hardware assets and unknown hosts, for reconciliation (internal)
+      description: |
+        Assets in the hardware class subtree plus unknown hosts, monitoring or
+        pending approval, each with its first serial number — what a source of
+        physical and virtual infrastructure could be expected to list. Paged
+        in id order: pass the last id seen as `after` while `more` is true.
+      parameters:
+      - $ref: '#/components/parameters/SourceTenantHeader'
+      - name: after
+        in: query
+        required: false
+        description: Return assets with an id greater than this one.
+        schema:
+          type: string
+          format: uuid
       - name: limit
         in: query
         required: false
-        description: Max runs to return (default 50, max 200).
+        description: Page size, 1–5000 (default 5000).
         schema:
           type: integer
+          minimum: 1
+          maximum: 5000
       responses:
         '200':
-          description: 'Recent runs (wrapped under `runs`; always a non-null array).'
+          description: One page.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ConnectorRunListResponse'
+                $ref: '#/components/schemas/SourceHardwareAssetsResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
         '500':
           $ref: '#/components/responses/LegacyServerError'
-
-  /connectors/netbox/connections/{id}/drift:
-    parameters:
-    - name: id
-      in: path
-      required: true
-      description: NetBox connection id.
-      schema:
-        type: string
-    get:
-      operationId: getNetBoxDrift
-      x-edition: enterprise
-      tags:
-      - connectors
-      summary: What NetBox and the inventory disagree about
-      description: |
-        READ-ONLY. The platform never writes to NetBox: the comparison is
-        valuable precisely because the two systems are maintained
-        independently, and it stops being so the moment we start answering it
-        ourselves. Reconciliation happens in NetBox, or in Discovery →
-        Approvals.
-
-        Matching is by serial then primary IPv4 — deliberately not by name, as
-        a NetBox device name is free text.
-      responses:
-        '200':
-          description: The comparison.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NetBoxDriftReport'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-        '402':
-          $ref: '#/components/responses/EditionUnavailable'
-        '404':
-          $ref: '#/components/responses/LegacyNotFound'
-        '502':
-          description: NetBox could not be read.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LegacyError'
 
   /external-connections:
     post:
@@ -4321,10 +4359,12 @@ paths:
     get:
       operationId: listAutoAcceptedMerges
       tags: [approvals]
-      summary: Merges the matcher made without asking
+      summary: Merges made without asking
       description: >
-        What the learned matcher merged on the tenant's behalf in the last 30
-        days, newest first, each with the score and the model's reasons.
+        What the platform merged on the tenant's behalf in the last 30 days,
+        newest first: matcher auto-accepts (`decided_by: matcher`, with the score
+        and the model's reasons) and same-device rule merges (`decided_by: rule`,
+        with the evidence the rule relied on).
 
 
         It is not a queue: nothing here needs deciding and everything here
@@ -4334,8 +4374,8 @@ paths:
         human in the loop has to be visible to a human afterwards.
 
 
-        A tenant on the default threshold of zero always gets an empty list,
-        because nothing can have been auto-accepted.
+        A tenant with the threshold at zero and the rule merge switched off always
+        gets an empty list, because nothing can have been merged unasked.
       parameters:
         - name: limit
           in: query
@@ -4360,9 +4400,16 @@ paths:
       tags: [settings]
       summary: The tenant's identification settings
       description: >
-        Today, one setting: the learned matcher's auto-accept threshold. A
-        tenant who has never set one gets 0 — never auto-accept — which is
-        ADR-0002 D3's default and the behaviour every install has had until now.
+        Two settings. `auto_accept_threshold`: the learned matcher's auto-accept
+        threshold. A tenant who has never set one gets 0 — never auto-accept —
+        which is ADR-0002 D3's default and the behaviour every install has had
+        until now.
+
+
+        `auto_merge_existing`: whether a fixed rule (not a score) may merge two
+        existing assets it is sure are one device. A tenant who has never set it
+        gets TRUE — owner decision D1 of #2081 — and the response always carries
+        the effective value, never "unset".
       responses:
         '200':
           description: The settings, with the model that would do the scoring.
@@ -4377,13 +4424,25 @@ paths:
     put:
       operationId: updateIdentificationSettings
       tags: [settings]
-      summary: Set the auto-accept threshold
+      summary: Set the identification settings
       description: >
-        Grants — or withdraws — the platform's permission to accept a merge
-        proposal without asking. A value outside 0..1 is REFUSED rather than
-        clamped: "we rounded your number" is not an acceptable answer on the one
-        setting that decides whether two of a tenant's assets may be merged
-        unasked.
+        A PARTIAL update: send `auto_accept_threshold`, `auto_merge_existing`, or
+        both. A field that is not sent is left exactly as it was — so flipping
+        the rule-merge toggle never resets the threshold, and setting the
+        threshold never resets the toggle. `0` and `false` are real answers (turn
+        it off), distinct from "not sent". A body carrying neither field is
+        refused.
+
+
+        `auto_accept_threshold` grants — or withdraws — the platform's permission
+        to accept a merge proposal on a matcher's score. A value outside 0..1 is
+        REFUSED rather than clamped: "we rounded your number" is not an
+        acceptable answer on a setting that decides whether two of a tenant's
+        assets may be merged unasked.
+
+
+        `auto_merge_existing` turns the same-device rule merge off (or back on).
+        Every rule merge is listed under the auto-accepted merges.
       requestBody:
         required: true
         content:
@@ -4398,7 +4457,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/IdentificationSettingsResponse'
         '400':
-          description: The threshold is outside 0..1, or was not supplied.
+          description: >
+            The threshold is outside 0..1, a field has the wrong type, or the
+            body named neither field.
           content:
             application/json:
               schema:
@@ -5848,6 +5909,14 @@ paths:
           $ref: '#/components/responses/LegacyUnauthorized'
 components:
   parameters:
+    SourceTenantHeader:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      description: The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing.
+      schema:
+        type: string
+        format: uuid
     AssetId:
       name: id
       in: path
@@ -6389,6 +6458,19 @@ components:
           description: 'Which discovery sources auto-approval covers for this segment.
             Omitted/null keeps the current value on update and defaults to ["sensor"]
             on create, so cloud coverage is always an explicit opt-in.'
+        dhcp:
+          type:
+          - boolean
+          - 'null'
+          description: >-
+            The operator's statement about whether this network hands out
+            addresses (DHCP). Omitted keeps whatever the segment has. true or
+            false sets the operator's answer, which no device measurement or
+            traffic inference overwrites. null withdraws the operator's answer,
+            so the segment falls back to the best remaining source (a device's
+            measurement, then traffic inference) or to unknown when there is
+            none. Only cidr and ip_range segments take an answer; true or false
+            on any other type is a 400.
         tags:
           type: object
           additionalProperties: true
@@ -6476,6 +6558,8 @@ components:
       - location_id
       - is_active
       - auto_approve_discoveries
+      - dynamic
+      - dynamic_source
       - tags
       - metadata
       - created_at
@@ -6523,6 +6607,34 @@ components:
           description: 'Which discovery sources this segment auto-approves ("sensor",
             "cloud"). A segment stored before the setting existed reads back as
             ["sensor"].'
+        dynamic:
+          type:
+          - boolean
+          - 'null'
+          description: >-
+            The effective DHCP posture: does this network hand out addresses.
+            null means nobody has said, which is not the same as false — identity
+            treats an address on such a network as a static one, so unknown is
+            the case to look at.
+        dynamic_source:
+          type:
+          - string
+          - 'null'
+          enum:
+          - operator
+          - measured
+          - inferred
+          - null
+          description: >-
+            Whose statement `dynamic` is. operator (set on this page) outranks
+            measured (a device that serves the network reported it), which
+            outranks inferred (a sensor saw the network assign an address).
+            null when `dynamic` is null.
+        dynamic_source_name:
+          type: string
+          description: >-
+            Name of the device a measured posture came from. Omitted when the
+            posture was not measured or the device is gone.
         tags:
           type:
           - object
@@ -9140,6 +9252,26 @@ components:
         source_ref:
           type: string
           description: The seam and implementation that produced the scores.
+        pair_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: >
+            The matcher's score of the two top-ranked candidates against EACH
+            OTHER, 0..1 — "the two records themselves score N%". Each
+            candidate's `score` compares the sighting with that record; this
+            compares the records. Advisory: nothing merges or auto-accepts on
+            it. Absent when unscored (no matcher, or fewer than two readable
+            candidates).
+        pair_asset_ids:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: string, format: uuid }
+          description: The two candidates `pair_score` compares, in rank order. Present exactly when `pair_score` is.
+        pair_reason:
+          type: string
+          description: The matcher's one-phrase summary of `pair_score`.
         resolved_at:
           type: string
           format: date-time
@@ -9151,6 +9283,27 @@ components:
           type: string
           format: uuid
           description: The user who decided it.
+        merged_into:
+          type: string
+          format: uuid
+          description: >
+            The asset the proposal's records were merged into. Present on a
+            proposal that was resolved by a merge.
+        decided_by:
+          type: string
+          enum: [matcher, rule]
+          description: >
+            Who made the merge unasked. Present on the auto-accepted list only.
+            `matcher` — a learned matcher scored the top candidate above the
+            tenant's threshold. `rule` — the same-device rule merged two existing
+            assets (`auto_merge_existing`); a rule merge has no user, so
+            `resolved_by` is absent.
+        rule_evidence:
+          type: array
+          items: { type: string }
+          description: >
+            The reasons the rule was sure, as plain sentences, in the order they
+            were established. Present only when `decided_by` is `rule`.
     AutoAcceptedMergeListResponse:
       type: object
       additionalProperties: false
@@ -9168,7 +9321,7 @@ components:
     IdentificationSettings:
       type: object
       additionalProperties: false
-      required: [auto_accept_threshold]
+      required: [auto_accept_threshold, auto_merge_existing]
       properties:
         auto_accept_threshold:
           type: number
@@ -9183,6 +9336,15 @@ components:
             Auto-accepted merges are not reversible from the UI today, and a
             singleton identifier that disagrees (serial, cloud id, agent id,
             CMDB sys_id) is never auto-accepted whatever the score.
+        auto_merge_existing:
+          type: boolean
+          description: >
+            Whether a fixed rule may merge two EXISTING assets it is sure are one
+            device, without a person deciding (#2081 Phase 4, owner decision D1).
+            The EFFECTIVE value: a tenant who has never set it reads `true`.
+            Distinct from `auto_accept_threshold`, which lets a model's score
+            settle a question; this is a rule with fixed conditions and no score,
+            and it never overrides a recorded "keep separate".
         matcher_model_id:
           type: string
           description: >
@@ -9202,12 +9364,17 @@ components:
     IdentificationSettingsUpdateRequest:
       type: object
       additionalProperties: false
-      required: [auto_accept_threshold]
+      minProperties: 1
+      description: >
+        A partial update: every property is optional, at least one is required,
+        and a property that is absent is left as it was.
       properties:
         auto_accept_threshold:
           type: number
           minimum: 0
           maximum: 1
+        auto_merge_existing:
+          type: boolean
     DriftSettings:
       type: object
       additionalProperties: false
@@ -9384,6 +9551,9 @@ components:
             reviewer recognises when `display_name` is empty, which it is for
             most freshly discovered assets.
         risk_score: { type: integer }
+        risk_assessed:
+          type: boolean
+          description: True when something has assessed the peer's risk (risk_assessed_by is non-empty). A 0 score with this false is "not assessed", not safe.
         deleted:
           type: boolean
           description: >
@@ -9721,6 +9891,9 @@ components:
         class_key: { type: string }
         asset_status: { type: string }
         risk_score: { type: integer }
+        risk_assessed:
+          type: boolean
+          description: True when something has assessed the asset's risk (risk_assessed_by is non-empty). A 0 score with this false is "not assessed", not safe — consumers that export the score (GraphML, Cytoscape) must leave it out then.
         cloud_account:
           type: string
           description: >
@@ -11770,8 +11943,13 @@ components:
       description: |
         A tenant CMDB sync integration profile (services.CMDBSyncProfile). The
         four `*_config` fields are raw JSON (object / array / null depending on
-        the platform) carried through verbatim. `last_sync_at`, `last_sync_status`
-        and `sync_error` are omitempty — present only after a sync has run.
+        the platform). `last_sync_at`, `last_sync_status` and `sync_error` are
+        omitempty — present only after a sync has run.
+
+        Credentials are WRITE-ONLY. `connection_config` never carries
+        `password`, `api_token` or `client_secret` in a response, and each
+        `extra_headers` value is blanked (names kept); `has_password`,
+        `has_api_token` and `has_client_secret` say whether each is stored.
       required:
       - id
       - tenant_id
@@ -11782,6 +11960,9 @@ components:
       - sync_config
       - ci_type_mapping
       - is_enabled
+      - has_password
+      - has_api_token
+      - has_client_secret
       - created_at
       - updated_at
       properties:
@@ -11795,15 +11976,26 @@ components:
           type: string
           description: "servicenow / device42 / etc. (the target CMDB platform)."
         connection_config:
-          description: Raw connection settings (endpoint, auth). Opaque JSON; null until set.
+          description: 'Raw connection settings. Opaque JSON; null until set. Besides the endpoint (`base_url` / `instance_url`) and auth fields it carries two non-secret egress settings, validated on save: `allow_private_endpoint` (boolean — reach a CMDB on a private RFC1918/ULA/CGNAT address; never loopback or link-local, and overridden by the operator''s CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false) and `ca_bundle_pem` (PEM CA certificates trusted in addition to the system store).'
         field_mapping_config:
-          description: Raw field-mapping rules. Opaque JSON; null until set.
+          description: 'The profile''s field-mapping OVERRIDES over its platform''s default template (platform ADR-0002 D10) — fields, identity, value maps, pull and retire settings — as `{"version": 1, ...}`. A pre-template flat `{"<our field>": "<their field>"}` object is still read (as push rules). Read and replace it through GET/PUT /cmdb/profiles/{id}/mapping, which validate it; saving an invalid one here is a 400 naming the entry.'
+
         sync_config:
-          description: Raw sync settings (cadence, scope). Opaque JSON; null until set.
+          description: 'Raw sync settings. Opaque JSON; null until set. `schedule` is `manual` / `hourly` / `daily` / `weekly` (the scheduler runs the last three in the platform''s registry direction); `batch_size` (1–1000, default 100) is how many CIs a push sends per batch; `include_crypto_summary` appends a crypto-posture line to pushed asset descriptions.'
         ci_type_mapping:
-          description: Raw CI-type mapping. Opaque JSON; null until set.
+          description: 'The class-layer overrides (`{"version": 1, "classes": [...]}`). A pre-template flat `{"<our class>": "<their CI class>"}` object is still read. See /cmdb/profiles/{id}/mapping.'
+
         is_enabled:
           type: boolean
+        has_password:
+          type: boolean
+          description: Whether a password is stored. The value itself is never returned.
+        has_api_token:
+          type: boolean
+          description: Whether an API token is stored. The value itself is never returned.
+        has_client_secret:
+          type: boolean
+          description: Whether an OAuth2 client secret is stored. The value itself is never returned.
         last_sync_at:
           type: string
           format: date-time
@@ -11811,6 +12003,9 @@ components:
           type: string
         sync_error:
           type: string
+        mapping_error:
+          type: string
+          description: 'Present when the profile''s effective mapping (template ⊕ overrides) does not validate — why, naming the entry. While it is set the profile is PAUSED: scheduled runs skip it and Sync / Pull answer 400 with it. Re-evaluated on every run, every mapping save and every service start; fixing the mapping clears it.'
         created_at:
           type: string
           format: date-time
@@ -11820,7 +12015,7 @@ components:
     CMDBSyncProfileInput:
       type: object
       additionalProperties: true
-      description: 'Body for POST/PUT /cmdb/profiles. Bound into services.CMDBSyncProfile; server-managed fields (id, timestamps, last_sync_*) are ignored.'
+      description: 'Body for POST/PUT /cmdb/profiles. Bound into services.CMDBSyncProfile; server-managed fields (id, timestamps, last_sync_*, has_*) are ignored. On PUT an omitted or empty credential keeps the stored one.'
       properties:
         name:
           type: string
@@ -11861,7 +12056,7 @@ components:
           type: string
         status:
           type: string
-          description: "pending / running / completed / failed."
+          description: "in_progress / success / partial / failed (a job a restart interrupted is closed as failed, \"interrupted (service restarted)\")."
         trigger_type:
           type: string
           description: "manual / scheduled."
@@ -11882,10 +12077,237 @@ components:
         error_log:
           description: Raw error log. Opaque JSON; null when none.
         summary:
-          description: Raw run summary. Opaque JSON; null when none.
+          description: 'Raw run summary: `direction` (`push` / `pull`), `mode` (`full` / `delta` for a platform on the mapping layer, empty otherwise), counts (`pushed`, `created`, `updated`, `reconciled`, `failed`, `skipped`, `unchanged` — not sent or not written again because nothing changed, `echo` — our own records coming back on a pull, `retired`, `absent`, `reappeared`, and for a pull `unresolved`), for a push to a platform that writes relationships `relations` (`{created, existing, unchanged, failed}` — relationships between CIs the profile links; `existing` = already held by the CMDB, `unchanged` = not sent because the set is unchanged since the last push) plus `errors` — the first 50 per-item failures as `{local_id, error}` (a pulled record, which has no Vista id yet, as `{external_id, error}`) — `errors_total` and `errors_omitted`. Opaque JSON; null when none.'
         created_at:
           type: string
           format: date-time
+    CMDBMappingClassRule:
+      type: object
+      additionalProperties: false
+      description: 'One class-layer rule: exactly one of `class` (a class key, standards/asset-classes.yaml) or `category` (a CI category: infrastructure_asset, certificate, key, crypto_configuration, crypto_library) ↔ `theirs` (their type / table). Category rules are push-only.'
+      required: [theirs]
+      properties:
+        class:
+          type: string
+        category:
+          type: string
+        theirs:
+          type: string
+        direction:
+          type: string
+          enum: [push, pull, both]
+        disabled:
+          type: boolean
+    CMDBMappingTransform:
+      type: object
+      additionalProperties: false
+      description: 'The whole transform language: constant or join (`{a}.{b}` over source-side fields) or the field itself → value_map → default → coerce. No scripting.'
+      properties:
+        value_map:
+          type: string
+        default: {}
+        constant: {}
+        join:
+          type: string
+        coerce:
+          type: string
+          enum: [string, integer, number, boolean]
+    CMDBMappingFieldRule:
+      type: object
+      additionalProperties: false
+      description: '`ours` is canonical vocabulary — `asset:<field>`, `ci:<field>` or `fact:<fact key>` — never a table or column. `authority` says which side wins (platform: pushed on every update, pulled only for a record Vista does not hold; vendor: pulled always, pushed only when creating the CI).'
+      required: [ours, theirs, direction]
+      properties:
+        ours:
+          type: string
+        theirs:
+          type: string
+        direction:
+          type: string
+          enum: [push, pull, both]
+        authority:
+          type: string
+          enum: [platform, vendor]
+        transform:
+          $ref: '#/components/schemas/CMDBMappingTransform'
+        omit_empty:
+          type: boolean
+        personal_data:
+          type: boolean
+        disabled:
+          type: boolean
+    CMDBMappingIdentityRule:
+      type: object
+      additionalProperties: false
+      description: 'One of their fields as one of our identifier kinds (cmdb_sys_id, serial_number, mac_address, fqdn, cloud_resource_id). The cmdb_sys_id rule is the record''s own id.'
+      required: [theirs]
+      properties:
+        theirs:
+          type: string
+        identifier:
+          type: string
+        disabled:
+          type: boolean
+    CMDBMappingValueMap:
+      type: object
+      additionalProperties: false
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [ours, theirs]
+            properties:
+              ours:
+                type: string
+              theirs:
+                type: array
+                items:
+                  type: string
+    CMDBMappingPullSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        type_fields:
+          type: array
+          items:
+            type: string
+        default_class:
+          type: string
+        cursor_field:
+          type: string
+    CMDBMappingRetireSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        status_field:
+          type: string
+        retired_values:
+          type: array
+          items:
+            type: string
+        push_value:
+          type: string
+    CMDBMappingRelationRule:
+      type: object
+      additionalProperties: false
+      description: 'One of our canonical relationship types (runs_on, hosted_on, virtualized_by, depends_on, connects_to, member_of, contains, manages, sends_data_to, impacts) ↔ the vendor''s relationship type (ServiceNow: a cmdb_rel_type name such as `Runs on::Runs`). `reverse` sends the edge with its ends swapped (their parent is our to-asset). A type with no rule is not pushed.'
+      required: [ours, theirs]
+      properties:
+        ours:
+          type: string
+        theirs:
+          type: string
+        reverse:
+          type: boolean
+        disabled:
+          type: boolean
+    CMDBMappingOverrides:
+      type: object
+      additionalProperties: false
+      description: 'A profile''s differences from its platform template. Field push rules replace the template''s push rule for the same vendor field; pull rules replace the template''s pull rule for the same vendor field and canonical field; identity rules merge by vendor field; value maps by name; `disabled: true` removes the rule it matches. Authoring guide: docsv4/internal/developer/architecture/cmdb-mapping-templates.md.'
+      properties:
+        classes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingClassRule'
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingFieldRule'
+        identity:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingIdentityRule'
+        value_maps:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/CMDBMappingValueMap'
+        pull:
+          $ref: '#/components/schemas/CMDBMappingPullSpec'
+        retire:
+          $ref: '#/components/schemas/CMDBMappingRetireSpec'
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingRelationRule'
+        options:
+          type: object
+          description: 'Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key.'
+          additionalProperties:
+            type: string
+    CMDBMapping:
+      type: object
+      additionalProperties: false
+      description: A complete mapping (a template, or template ⊕ overrides).
+      properties:
+        platform:
+          type: string
+        version:
+          type: integer
+          description: The template's version.
+        classes:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingClassRule'
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingFieldRule'
+        identity:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingIdentityRule'
+        value_maps:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/CMDBMappingValueMap'
+        pull:
+          $ref: '#/components/schemas/CMDBMappingPullSpec'
+        retire:
+          $ref: '#/components/schemas/CMDBMappingRetireSpec'
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CMDBMappingRelationRule'
+        options:
+          type: object
+          description: 'Connector settings a profile may override, by name; a template declares every option it has (ServiceNow: `discovery_source`). An override may change a value, never add a key.'
+          additionalProperties:
+            type: string
+    CMDBMappingView:
+      type: object
+      additionalProperties: false
+      description: 'GET/PUT /cmdb/profiles/{id}/mapping. `template` is null for a platform that ships no template yet (its connector still runs its pre-template code; its overrides are kept for when the template lands). `effective` is null when the stored overrides cannot be read at all.'
+      required: [platform, template, overrides, effective, valid, problems]
+      properties:
+        platform:
+          type: string
+        template:
+          oneOf:
+          - $ref: '#/components/schemas/CMDBMapping'
+          - type: 'null'
+        overrides:
+          $ref: '#/components/schemas/CMDBMappingOverrides'
+        effective:
+          oneOf:
+          - $ref: '#/components/schemas/CMDBMapping'
+          - type: 'null'
+        valid:
+          type: boolean
+        problems:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [entry, message]
+            properties:
+              entry:
+                type: string
+              message:
+                type: string
     CMDBProfileListResponse:
       type: object
       additionalProperties: false
@@ -11947,6 +12369,7 @@ components:
       - description
       - edition
       - entitled
+      - configured_by
       - addable
       properties:
         key:
@@ -11955,7 +12378,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [cloud, cmdb, network_source_of_truth, itsm, siem, notification, edr_mdm, sbom_source, secrets_store]
+          enum: [cloud, cmdb, network_source_of_truth, itsm, siem, notification, edr_mdm, sbom_source, secrets_store, generic]
         direction:
           type: string
           enum: [pull, push, both]
@@ -11983,13 +12406,22 @@ components:
           type: boolean
         addable:
           type: boolean
+        configured_by:
+          type: string
+          enum: [tenant, platform_operator]
+          description: |
+            Who sets the connector up. `platform_operator` — the deployment's
+            operator, in the administration console (SIEM export is
+            platform-global): a tenant sees the connector and cannot add it,
+            so `addable` is false whatever its entitlement.
         unavailable_reason:
           type: string
-          enum: [upgrade, unavailable]
+          enum: [upgrade, unavailable, operator]
           description: |
             Why `addable` is false. `upgrade` — your plan or edition does not
             include it. `unavailable` — nobody can use it yet; we have not
-            built it. Different sentences, and offering an upgrade for
+            built it. `operator` — it works, but only the platform operator
+            configures it. Different sentences, and offering an upgrade for
             something nobody can buy is the worse mistake.
     ConnectorCatalogueGroup:
       type: object
@@ -12020,295 +12452,262 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ConnectorCatalogueGroup'
-    NetBoxConnectionOptions:
+    SourceSegment:
       type: object
       additionalProperties: false
-      description: Non-secret per-connection knobs.
-      properties:
-        default_environment:
-          type: string
-          description: |
-            Stamped on segments imported from prefixes that do not say which
-            environment they are. NetBox has no environment concept, so this is
-            the tenant DECLARING one rather than the platform inferring it; a
-            prefix tagged with an environment name overrides it.
-        role_class_overrides:
-          type: object
-          additionalProperties:
-            type: string
-          description: NetBox device-role slug to asset class key, extending the shipped mapping.
-    NetBoxConnection:
-      type: object
-      additionalProperties: false
-      description: |
-        A configured NetBox connection. The API token is NEVER returned —
-        `has_token` is what an edit form actually needs to know.
+      description: One network segment a source declares.
       required:
-      - id
-      - tenant_id
-      - connector_key
-      - name
-      - base_url
-      - has_token
-      - options
-      - allow_private_endpoint
-      - is_enabled
-      - schedule
-      - created_at
-      - updated_at
+      - cidr
+      - source_ref
       properties:
-        id:
+        cidr:
           type: string
-        tenant_id:
-          type: string
-        connector_key:
-          type: string
+          description: The prefix. Masked on write, so 10.1.1.5/24 and 10.1.1.0/24 are one network.
         name:
           type: string
-        base_url:
+          description: Used only when the segment is created.
+        environment:
           type: string
-        has_token:
-          type: boolean
-        options:
-          $ref: '#/components/schemas/NetBoxConnectionOptions'
-        allow_private_endpoint:
-          type: boolean
-          description: |
-            Whether this connection may target an RFC1918/ULA address. Defaults
-            true for this connector kind because a network source of truth is
-            on-premises by construction; loopback, link-local and cloud
-            metadata stay refused whatever it says.
-        is_enabled:
-          type: boolean
-        schedule:
+          enum: [production, staging, development, test]
+          description: Used only when the segment is created.
+        description:
           type: string
-          enum: [manual, hourly, daily, weekly]
-        last_run_at:
-          type: [string, 'null']
-          format: date-time
-        last_run_status:
-          type: string
-        last_error:
-          type: string
-        last_tested_at:
-          type: [string, 'null']
-          format: date-time
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-    NetBoxConnectionInput:
-      type: object
-      additionalProperties: false
-      description: Body for POST/PUT /connectors/netbox/connections.
-      required:
-      - name
-      - base_url
-      properties:
-        name:
-          type: string
-          minLength: 1
-          maxLength: 255
-        base_url:
-          type: string
-          description: The NetBox root. HTTPS is required — the API token is a bearer credential.
-        api_token:
-          type: string
-          description: |
-            Write-only. Required on create. On update an empty value leaves the
-            stored token alone.
-        default_environment:
-          type: string
-        role_class_overrides:
+        metadata:
           type: object
-          additionalProperties:
-            type: string
-        allow_private_endpoint:
+          additionalProperties: true
+          description: The created segment's metadata.
+        match_metadata:
+          type: object
+          additionalProperties: true
+          description: Merged into an EXISTING segment's metadata.
+        source_ref:
+          type: string
+          maxLength: 200
+    SourceSegmentsRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - segments
+      properties:
+        segments:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/SourceSegment'
+    SourceSegmentResult:
+      type: object
+      additionalProperties: false
+      required:
+      - cidr
+      - outcome
+      properties:
+        cidr:
+          type: string
+        outcome:
+          type: string
+          enum: [created, matched, too_broad, error]
+        error:
+          type: string
+    SourceSegmentsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceSegmentResult'
+    SourceAdmissionRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - count
+      properties:
+        count:
+          type: integer
+          minimum: 0
+    SourceAdmissionResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - prospective
+      - allowed
+      properties:
+        prospective:
           type: boolean
-        is_enabled:
-          type: boolean
-        schedule:
-          type: string
-          enum: [manual, hourly, daily, weekly]
-    NetBoxConnectionListResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope for GET /connectors/netbox/connections — { "connections": [...] }. Always a non-null array.'
-      required:
-      - connections
-      properties:
-        connections:
-          type: array
-          items:
-            $ref: '#/components/schemas/NetBoxConnection'
-    ConnectorRunSummary:
-      type: object
-      additionalProperties: false
-      description: |
-        The counts one pull produced. Every field is present, zeros included:
-        "0 devices" is an answer, and omitting it makes a run that imported
-        nothing indistinguishable from one that was never asked to.
-      required:
-      - sites
-      - prefixes
-      - vlans
-      - device_types
-      - devices
-      - segments_created
-      - segments_matched
-      - assets_created
-      - assets_matched
-      - assets_proposed
-      - assets_skipped
-      - unmapped_roles
-      - vlans_without_prefix
-      - errors
-      properties:
-        sites:
-          type: integer
-        prefixes:
-          type: integer
-        vlans:
-          type: integer
-        device_types:
-          type: integer
-        devices:
-          type: integer
-        segments_created:
-          type: integer
-        segments_matched:
-          type: integer
-        assets_created:
-          type: integer
-        assets_matched:
-          type: integer
-        assets_proposed:
-          type: integer
-          description: Devices whose identifiers matched more than one existing asset; each left a merge proposal in Approvals.
-        observations_retained:
-          type: integer
-          description: Durable observations retained without creating an asset; absent on older servers.
-        assets_skipped:
-          type: integer
-          description: Devices carrying no identifier at all, which could never be recognised again.
-        unmapped_roles:
-          type: integer
-          description: Devices whose NetBox role mapped to no asset class; each became unknown_host rather than a guess.
-        vlans_without_prefix:
-          type: integer
-          description: VLANs carrying no prefix. They scope no address, so they create no segment.
-        errors:
-          type: integer
-    ConnectorRun:
-      type: object
-      additionalProperties: false
-      required:
-      - id
-      - connection_id
-      - status
-      - trigger_type
-      - summary
-      - errors
-      properties:
-        id:
-          type: string
-        connection_id:
-          type: string
-        status:
-          type: string
-          enum: [in_progress, success, partial, failed]
-        trigger_type:
-          type: string
-          enum: [manual, scheduled, test]
-        started_at:
-          type: string
-          format: date-time
-        completed_at:
-          type: [string, 'null']
-          format: date-time
-        summary:
-          $ref: '#/components/schemas/ConnectorRunSummary'
-        errors:
-          type: array
-          items:
-            type: string
-    ConnectorRunListResponse:
-      type: object
-      additionalProperties: false
-      description: 'Envelope for GET /connectors/netbox/connections/{id}/runs — { "runs": [...] }. Always a non-null array.'
-      required:
-      - runs
-      properties:
-        runs:
-          type: array
-          items:
-            $ref: '#/components/schemas/ConnectorRun'
-    ConnectorMessageResponse:
-      type: object
-      additionalProperties: false
-      required:
-      - message
-      properties:
-        message:
-          type: string
-    ConnectorTestResult:
-      type: object
-      additionalProperties: false
-      description: 'Result of POST .../test. success:false is a 200 — the request worked, the thing it checked did not.'
-      required:
-      - success
-      - message
-      properties:
-        success:
+        allowed:
           type: boolean
         message:
           type: string
-    NetBoxDriftDevice:
+    SourceAdmissionError:
       type: object
       additionalProperties: false
-      description: A NetBox device the inventory has no asset for.
       required:
-      - netbox_id
-      - name
-      - url
+      - error
+      - stage
       properties:
-        netbox_id:
-          type: integer
-        name:
+        error:
           type: string
-        serial:
+        stage:
           type: string
-        ip_address:
-          type: string
-        role:
-          type: string
-        site:
-          type: string
-        status:
-          type: string
-        url:
-          type: string
-          description: Opens the record in the customer's own NetBox, because the action this view suggests is taken there.
-    NetBoxDriftAsset:
+          enum: [policy, limit]
+    SourceIdentifier:
       type: object
       additionalProperties: false
-      description: An asset the platform holds that NetBox does not list.
       required:
-      - asset_id
+      - kind
+      - value
+      properties:
+        kind:
+          type: string
+        value:
+          type: string
+        scope:
+          type: string
+    SourceFact:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - value
+      properties:
+        key:
+          type: string
+          description: A fact key registered for the `connector` producer.
+        value:
+          description: The fact's value.
+    SourceAsset:
+      type: object
+      additionalProperties: false
+      description: One asset observation from a source (an allowlist of fields).
+      required:
       - class_key
-      - asset_status
       properties:
-        asset_id:
+        class_key:
           type: string
+        identifiers:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceIdentifier'
         display_name:
           type: string
         hostname:
           type: string
         ip_address:
           type: string
-        serial:
+        site:
+          type: string
+        region:
+          type: string
+        tags:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+        observation_receipt_id:
+          type: string
+          description: Stable across a replay of one run, new for the next run.
+        observed_at:
+          type: string
+          format: date-time
+        facts:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceFact'
+        claim_discovery_source:
+          type: string
+    SourceAssetsRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - assets
+      properties:
+        source:
+          type: object
+          additionalProperties: false
+          required:
+          - kind
+          - ref
+          properties:
+            kind:
+              type: string
+              enum: [imported]
+            ref:
+              type: string
+        assets:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/SourceAsset'
+    SourceAssetResult:
+      type: object
+      additionalProperties: false
+      required:
+      - outcome
+      properties:
+        outcome:
+          type: string
+          description: The identification engine's outcome (created, matched, conflict), or retained, or error.
+        asset_id:
+          type: string
+          format: uuid
+        observation_id:
+          type: string
+        proposed:
+          type: boolean
+        error:
+          type: string
+        discovery_source_error:
+          type: string
+        facts_error:
+          type: string
+    SourceAssetsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SourceAssetResult'
+    SourceClassExistsResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - exists
+      properties:
+        key:
+          type: string
+        exists:
+          type: boolean
+    SourceHardwareAsset:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - display_name
+      - hostname
+      - address
+      - class_key
+      - asset_status
+      - site
+      - serial
+      properties:
+        id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        hostname:
+          type: string
+        address:
           type: string
         class_key:
           type: string
@@ -12316,49 +12715,21 @@ components:
           type: string
         site:
           type: string
-    NetBoxDriftReport:
+        serial:
+          type: string
+    SourceHardwareAssetsResponse:
       type: object
       additionalProperties: false
-      description: |
-        What NetBox and the inventory disagree about. Read-only: the platform
-        never writes to NetBox.
       required:
-      - netbox_device_count
-      - inventory_asset_count
-      - missing_in_inventory
-      - missing_in_netbox
-      - missing_in_inventory_count
-      - missing_in_netbox_count
-      - truncated
-      - note
+      - assets
+      - more
       properties:
-        generated_at:
-          type: string
-        netbox_device_count:
-          type: integer
-        inventory_asset_count:
-          type: integer
-        missing_in_inventory:
+        assets:
           type: array
           items:
-            $ref: '#/components/schemas/NetBoxDriftDevice'
-        missing_in_netbox:
-          type: array
-          items:
-            $ref: '#/components/schemas/NetBoxDriftAsset'
-        missing_in_inventory_count:
-          type: integer
-        missing_in_netbox_count:
-          type: integer
-        truncated:
+            $ref: '#/components/schemas/SourceHardwareAsset'
+        more:
           type: boolean
-          description: |
-            The lists are capped. `truncated` says so outright rather than
-            letting a capped list read as a complete one — an inventory that
-            silently under-reports is the failure this initiative is about.
-        note:
-          type: string
-          description: Shown verbatim in the UI. The read-only promise is part of the product surface, not only the docs.
     CreateDiscoveryJobRequest:
       type: object
       additionalProperties: false

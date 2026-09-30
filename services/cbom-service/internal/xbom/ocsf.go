@@ -282,8 +282,14 @@ func deviceInventoryEvent(doc *formatters.CDXDocument, c *formatters.CDXComponen
 	if fqdn := propertyValue(c.Properties, propIDPrefix+"fqdn"); strings.Contains(fqdn, ".") {
 		device.Domain = fqdn[strings.Index(fqdn, ".")+1:]
 	}
-	if score, err := strconv.Atoi(propertyValue(c.Properties, propAssetRisk)); err == nil {
-		device.RiskScore = &score
+	// `device.risk_score` only for an assessed asset. The CycloneDX component
+	// carries no risk_score property when nobody assessed the asset (and says
+	// `risk_assessed=false`); both are checked so a 0 is never invented for an
+	// asset with no assessment behind it.
+	if propertyValue(c.Properties, propAssetRAsmt) != "false" {
+		if score, err := strconv.Atoi(propertyValue(c.Properties, propAssetRisk)); err == nil {
+			device.RiskScore = &score
+		}
 	}
 	device.FirstSeenTime = epochMillisPtr(propertyValue(c.Properties, propAssetFirst))
 	device.LastSeenTime = epochMillisPtr(propertyValue(c.Properties, propAssetLast))

@@ -493,13 +493,15 @@ export function useMergeProposals(enabled = true, offset = 0) {
 }
 
 /**
- * What the matcher merged WITHOUT asking, in the last thirty days.
+ * What the platform merged WITHOUT asking, in the last thirty days: the
+ * matcher's auto-accepts and the same-device rule's merges (each row's
+ * `decided_by` says which).
  *
  * Not a queue — nothing here needs deciding, and everything here already
  * happened. It is the record that makes an unattended capability visible to the
- * human who enabled it. A tenant on the default threshold of zero always gets
- * an empty list, because nothing can have been auto-accepted, so the section it
- * feeds renders only when there is something in it.
+ * human who enabled it. The rule merge is on by default, so an empty list is a
+ * real answer ("nothing was merged"), not the absence of the capability, and
+ * the section it feeds says so.
  */
 export interface AutoAcceptedMerges {
   merges: MergeProposal[];
@@ -524,11 +526,13 @@ export function useAutoAcceptedMerges(enabled = true) {
 }
 
 /**
- * The tenant's identification settings — today, the auto-accept threshold.
+ * The tenant's identification settings — the auto-accept threshold and the
+ * same-device rule-merge switch.
  *
- * Read on Settings → Identification rules, and nowhere else: the threshold is
- * not a display preference, it is a permission, and scattering reads of it
- * would make "who can see what this is set to" a question with several answers.
+ * Read on Settings → Identification rules, and nowhere else: these are not
+ * display preferences, they are permissions for the platform to merge assets
+ * unasked, and scattering reads of them would make "who can see what this is set
+ * to" a question with several answers.
  */
 export function useIdentificationSettings(enabled = true) {
   return useQuery({
@@ -568,6 +572,43 @@ export function useSetAutoAcceptThreshold() {
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to save the threshold'),
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['settings', 'identification'] });
+    },
+  });
+}
+
+/**
+ * Turn the same-device rule merge on or off ( Phase 4, owner decision D1).
+ *
+ * Sends ONLY `auto_merge_existing`. The endpoint is a partial update, so the
+ * tenant's auto-accept threshold is left exactly as it was — and this mutation
+ * must never start carrying the threshold "to be safe": a stale copy of it from
+ * an unsaved draft would then be written by an unrelated toggle.
+ *
+ * `false` is a real act — it turns the rule OFF — so the body always carries
+ * the boolean rather than omitting a falsy one.
+ *
+ * The response is the EFFECTIVE settings, written straight into the cache so the
+ * card shows what the server now holds rather than what was clicked.
+ */
+export function useSetAutoMergeExisting() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const { data, error } = await clients.inventory.PUT('/settings/identification', {
+        body: { auto_merge_existing: enabled },
+      });
+      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to save this setting');
+      return data.identification;
+    },
+    onSuccess: (s) => {
+      qc.setQueryData(['settings', 'identification'], s);
+      toast.success('Saved');
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to save this setting'),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['settings', 'identification'] });
+      // The Approvals section reads the same setting's consequences.
+      void qc.invalidateQueries({ queryKey: ['discovery', 'auto-accepted-merges'] });
     },
   });
 }

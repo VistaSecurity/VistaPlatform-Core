@@ -10,11 +10,20 @@ import (
 )
 
 // sensitiveCredentialFields are the credential keys the platform stores
-// encrypted. Kept in sync with encryptCredentialsForJob in handlers/devices.go,
-// which is what writes the legacy nested shape.
+// encrypted, and the ONLY keys normalizeLegacyJobKeyShape decrypts with the job
+// key. handlers/devices.go's rekeyIntegrationCredentialsForJob, which writes
+// that legacy nested shape, encrypts exactly this list (through
+// SensitiveCredentialFields) — it used to keep its own copy, which encrypted
+// `username` too, so the agent was handed a job-key ciphertext as the username.
 var sensitiveCredentialFields = []string{
 	"password", "api_key", "api_token", "client_secret",
 	"access_key_id", "secret_access_key", "token",
+}
+
+// SensitiveCredentialFields returns a copy of the keys a job's legacy
+// credential payload carries job-key encrypted.
+func SensitiveCredentialFields() []string {
+	return append([]string(nil), sensitiveCredentialFields...)
 }
 
 // masterEncryptedFlag is the marker the embedded-device-credential producer sets

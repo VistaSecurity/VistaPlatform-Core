@@ -46,6 +46,10 @@ type CloudDiscoveryService struct {
 	// page uses, so a bucket found here and the same bucket named anywhere else
 	// resolve to one asset.
 	devices *DeviceService
+	// azureOptions / gcpOptions are empty in production. A test sets them to
+	// point the real provider clients at a local server.
+	azureOptions []azureclient.Option
+	gcpOptions   []gcpclient.Option
 }
 
 // NewCloudDiscoveryService creates a new cloud discovery service. db is the
@@ -1328,55 +1332,48 @@ func (s *CloudDiscoveryService) DiscoverAzureResources(ctx context.Context, tena
 	}
 
 	// Create Azure client
-	azureClient, err := azureclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
+	azureClient, err := azureclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey, s.azureOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client: %w", err)
 	}
 
-	var discoveredDevices []models.Device
+	// Every requested type is collected independently and its outcome
+	// recorded, as the AWS dispatch does (integrations review M7). This used
+	// to be a switch wrong in both directions at once: an Application Gateway
+	// or Load Balancer error returned and abandoned the whole run, losing
+	// every type that had worked; a Key Vault, storage or SQL error was logged
+	// and dropped, so an AccessDenied read as "success, 0 found". Azure
+	// resource-manager listings are subscription-wide, so each type is one
+	// "global" scope.
+	return runCloudCollectors(ctx, resourceTypes, nil, azureCloudCollectors(s, tenantID, integrationID, azureClient, resourceGroups)), nil
+}
 
-	// Discover resources by type
-	for _, resourceType := range resourceTypes {
-		switch resourceType {
-		case "application_gateway", "appgw":
-			devices, err := s.discoverApplicationGateways(ctx, tenantID, azureClient, integrationID, resourceGroups)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover Application Gateways: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "load_balancer", "lb":
-			devices, err := s.discoverAzureLoadBalancers(ctx, tenantID, azureClient, integrationID, resourceGroups)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover Load Balancers: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "key_vault", "keyvault", "kms":
-			devices, err := s.discoverAzureKeyVaultKeys(ctx, tenantID, integrationID, azureClient)
-			if err != nil {
-				log.Printf("Warning: Azure Key Vault discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		case "storage_account", "storage", "blob":
-			storageService := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
-			devices, err := storageService.DiscoverAzureStorageAccounts(ctx, tenantID, azureClient)
-			if err != nil {
-				log.Printf("Warning: Azure Storage account discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		case "sql_database", "sql", "cloudsql":
-			storageService := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
-			devices, err := storageService.DiscoverAzureSQLDatabases(ctx, tenantID, azureClient)
-			if err != nil {
-				log.Printf("Warning: Azure SQL database discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
+// azureCloudCollectors is the Azure dispatch table, including the alias
+// spellings the switch it replaced accepted.
+func azureCloudCollectors(s *CloudDiscoveryService, tenantID, integrationID uuid.UUID, azureClient *azureclient.Client, resourceGroups []string) map[string]cloudCollector {
+	storage := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
+	collectors := map[string]cloudCollector{}
+	add := func(c cloudCollector, names ...string) {
+		for _, n := range names {
+			collectors[n] = c
 		}
 	}
-
-	return discoveredDevices, nil
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return s.discoverApplicationGateways(ctx, tenantID, azureClient, integrationID, resourceGroups)
+	}}, "application_gateway", "appgw")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return s.discoverAzureLoadBalancers(ctx, tenantID, azureClient, integrationID, resourceGroups)
+	}}, "load_balancer", "lb")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return s.discoverAzureKeyVaultKeys(ctx, tenantID, integrationID, azureClient)
+	}}, "key_vault", "keyvault", "kms")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return storage.DiscoverAzureStorageAccounts(ctx, tenantID, azureClient)
+	}}, "storage_account", "storage", "blob")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return storage.DiscoverAzureSQLDatabases(ctx, tenantID, azureClient)
+	}}, "sql_database", "sql", "cloudsql")
+	return collectors
 }
 
 // discoverAzureKeyVaultKeys discovers Key Vault keys, persists them to the
@@ -1684,12 +1681,10 @@ func (s *CloudDiscoveryService) DiscoverGCPResources(ctx context.Context, tenant
 		return nil, fmt.Errorf("GCP integration not authorized: %w", err)
 	}
 
-	gcpCli, err := gcpclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
+	gcpCli, err := gcpclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey, s.gcpOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCP client: %w", err)
 	}
-
-	var discoveredDevices []models.Device
 
 	var wantLB, wantSSL bool
 	for _, rt := range resourceTypes {
@@ -1712,47 +1707,38 @@ func (s *CloudDiscoveryService) DiscoverGCPResources(ctx context.Context, tenant
 		}
 	}
 
-	for _, resourceType := range resourceTypes {
-		switch resourceType {
-		case "load_balancer":
-			devices, err := s.discoverGCPLoadBalancers(ctx, tenantID, gcpCli, integrationID, sharedForwardingRules)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover GCP load balancers: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "ssl_proxy":
-			devices, err := s.discoverGCPSSLProxies(ctx, tenantID, gcpCli, integrationID, sharedForwardingRules)
-			if err != nil {
-				return nil, fmt.Errorf("failed to discover GCP SSL proxies: %w", err)
-			}
-			discoveredDevices = append(discoveredDevices, devices...)
-		case "kms", "cloudkms":
-			devices, err := s.discoverGCPKMSKeys(ctx, tenantID, integrationID, gcpCli)
-			if err != nil {
-				log.Printf("Warning: GCP KMS discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		case "storage", "gcs", "cloud_storage":
-			storageService := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
-			devices, err := storageService.DiscoverGCPStorageBuckets(ctx, tenantID, gcpCli)
-			if err != nil {
-				log.Printf("Warning: GCP Cloud Storage discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
-		case "cloudsql", "sql", "cloud_sql":
-			storageService := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
-			devices, err := storageService.DiscoverGCPCloudSQLInstances(ctx, tenantID, gcpCli)
-			if err != nil {
-				log.Printf("Warning: GCP Cloud SQL discovery failed: %v", err)
-			} else {
-				discoveredDevices = append(discoveredDevices, devices...)
-			}
+	// Independent, recorded per type — see DiscoverAzureResources for the
+	// switch this replaced and what it got wrong. GCP's listings are
+	// project-wide, so each type is one "global" scope.
+	return runCloudCollectors(ctx, resourceTypes, nil, gcpCloudCollectors(s, tenantID, integrationID, gcpCli, sharedForwardingRules)), nil
+}
+
+// gcpCloudCollectors is the GCP dispatch table, including the alias spellings
+// the switch it replaced accepted.
+func gcpCloudCollectors(s *CloudDiscoveryService, tenantID, integrationID uuid.UUID, gcpCli *gcpclient.Client, sharedForwardingRules map[string]gcpclient.ForwardingRule) map[string]cloudCollector {
+	storage := NewStorageEncryptionService(s.db, s.bypassDB, s.masterKey)
+	collectors := map[string]cloudCollector{}
+	add := func(c cloudCollector, names ...string) {
+		for _, n := range names {
+			collectors[n] = c
 		}
 	}
-
-	return discoveredDevices, nil
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return s.discoverGCPLoadBalancers(ctx, tenantID, gcpCli, integrationID, sharedForwardingRules)
+	}}, "load_balancer")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return s.discoverGCPSSLProxies(ctx, tenantID, gcpCli, integrationID, sharedForwardingRules)
+	}}, "ssl_proxy")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return s.discoverGCPKMSKeys(ctx, tenantID, integrationID, gcpCli)
+	}}, "kms", "cloudkms")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return storage.DiscoverGCPStorageBuckets(ctx, tenantID, gcpCli)
+	}}, "storage", "gcs", "cloud_storage")
+	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
+		return storage.DiscoverGCPCloudSQLInstances(ctx, tenantID, gcpCli)
+	}}, "cloudsql", "sql", "cloud_sql")
+	return collectors
 }
 
 // discoverGCPKMSKeys discovers Cloud KMS keys, persists them to the kms_keys

@@ -73,20 +73,20 @@ func TestWithRepositoryKeepsEverySetting(t *testing.T) {
 		t.Fatalf("first outcome = %s, want created", first.Outcome)
 	}
 	second := mustResolve(t, bound, obs("server", scoped(identity.KindIPAddress, "10.0.0.5", segment)))
-	// Conflict, not matched: the address may not decide inside a dynamic scope,
-	// and it already belongs to the first asset, so there is nothing left to
-	// attach and nothing is created (the floor). A copy that had LOST
-	// DynamicScopes would report `matched` here.
-	if second.Outcome != identity.OutcomeConflict {
-		t.Fatalf("second outcome = %s, want conflict: an ip_address inside a DYNAMIC scope must not "+
+	// Unresolved, not matched: the address may not decide inside a dynamic
+	// scope, it already belongs to the first asset alone so there is nothing
+	// to create and no question to ask ( A1), and a lease alone does not
+	// say this is that asset ( C1). A copy that had LOST DynamicScopes
+	// would report `matched` here.
+	if second.Outcome != identity.OutcomeUnresolved {
+		t.Fatalf("second outcome = %s, want unresolved: an ip_address inside a DYNAMIC scope must not "+
 			"decide a match, so the copy lost Config.DynamicScopes", second.Outcome)
 	}
 	if !second.Asset.Zero() {
-		t.Errorf("resolution names asset %s; the only identifier is owned by %s, so nothing may be created",
-			second.Asset.ID, first.Asset.ID)
+		t.Errorf("resolution names asset %q; a lease alone is not a link a caller may write to", second.Asset.ID)
 	}
-	if second.Proposal.ID == "" {
-		t.Error("no merge proposal: a human has to say whether this is the same host on the same lease")
+	if second.Proposal.ID != "" || len(repo.Proposals()) != 0 {
+		t.Error("a merge proposal naming one candidate: nobody can answer it")
 	}
 }
 
