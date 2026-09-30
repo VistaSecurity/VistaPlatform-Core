@@ -47,22 +47,6 @@ function gateUses(tsxFile: string, permPath: string, mustNotUse?: string[]) {
   }
 }
 
-/**
- * The permission named by the nearest `TENANT_PERMISSIONS.x.y` at or above the
- * line holding `anchor` — i.e. the gate the anchored element sits inside.
- * Line-scanning rather than one regex because a gate's `fallback` attribute
- * contains `>` and JSX, which no reasonable single pattern survives.
- */
-function gateEnclosing(src: string, anchor: string): string {
-  const lines = src.split('\n');
-  const at = lines.findIndex((l) => l.includes(anchor));
-  expect(at, `could not locate "${anchor}"`).toBeGreaterThan(-1);
-  for (let i = at; i >= 0 && i > at - 12; i--) {
-    const m = /TENANT_PERMISSIONS\.(\w+\.\w+)/.exec(lines[i]);
-    if (m) return m[1];
-  }
-  throw new Error(`no enclosing PermissionGate found within 12 lines above "${anchor}"`);
-}
 
 const FE = 'frontend-v2/src/';
 
