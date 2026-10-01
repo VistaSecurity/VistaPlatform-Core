@@ -10,10 +10,10 @@ CycloneDX **Cryptographic Bill of Materials** you can hand to an auditor.
 It is a self-hosted platform, not a SaaS. Your inventory never leaves your
 infrastructure.
 
-> **Beta — use at your own risk.** Vista Platform is pre-1.0. It discovers,
-> assesses and generates a CBOM today, but interfaces, schema and chart values
-> change between 0.x releases without notice, there is no guaranteed upgrade
-> path, and there is no SLA. **The software is provided "AS IS", without
+> **Use at your own risk.** Vista Platform discovers, assesses and generates a
+> CBOM today, but there is no SLA and no support commitment, and an upgrade can
+> carry breaking changes — back up before every one and read the
+> [CHANGELOG](CHANGELOG.md). **The software is provided "AS IS", without
 > warranty of any kind, and is used entirely at your own risk.** Evaluate it
 > before you depend on it, and read [DISCLAIMER.md](DISCLAIMER.md) before you
 > point it at anything.
@@ -113,11 +113,16 @@ On a machine with Kubernetes — including a one-line k3s on a bare VM:
 
 ```bash
 helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
-  --namespace vista --create-namespace --wait
+  --namespace vista --create-namespace --wait \
+  --set agentMtls.enabled=false
 ```
 
 No values file. The chart generates its own secrets and a self-signed
-certificate on first install, so it comes up without being told anything.
+certificate on first install, so it comes up without being told anything else.
+(`agentMtls.enabled=false` opts out of agent/sensor client-certificate
+authentication, which needs hostnames and a Traefik passthrough entrypoint a
+single VM doesn't have — fine for an evaluation, not for production. Without
+the flag the install stops with an error naming what's missing.)
 
 **On a bare k3s VM this needs two prerequisites first** (cert-manager and
 Stakater Reloader — internal traffic is mTLS-encrypted by default) or the

@@ -101,7 +101,22 @@ platform:
   # Recommended: create this Secret yourself, out of band, and name it here.
   # Otherwise the chart generates these on first install and keeps them.
   existingSecretName: vista-platform-secrets
+
+agentMtls:
+  # Required by default: sensors and discovery agents authenticate with client
+  # certificates over a TLS-passthrough listener, one hostname per service.
+  # Each must differ from the other and from tls.dnsName, and resolve to a
+  # Traefik passthrough entrypoint (agentMtls.entryPoint, port 8444) you provide.
+  backends:
+    sensor-manager:
+      dnsName: sensors.vista.example.com
+    device-interrogation-service:
+      dnsName: agents.vista.example.com
 ```
+
+The install **fails** without the two `agentMtls` hostnames (or an explicit
+`agentMtls.enabled: false`) — see
+[Agent and sensor mTLS](../security/service-mesh-mtls.md#agent-and-sensor-mtls-agentmtls--on-by-default-and-a-breaking-upgrade).
 
 There is no separate "start infrastructure, then services, then gateway"
 sequence to run by hand — `helm install` reconciles everything (Postgres,

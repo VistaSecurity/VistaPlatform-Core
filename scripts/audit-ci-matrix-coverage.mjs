@@ -34,17 +34,134 @@ import fs from 'fs-extra';
 import path from 'path';
 import YAML from 'yaml';
 import { fileURLToPath } from 'url';
+import { allLegs } from './ci-backend-matrix.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, '..');
 
-// The workflows whose `service:` matrix must cover every shipping module, and
+// The workflows whose backend matrix must cover every shipping module, and
 // what each is for. Both are per-module fan-outs over the same name space.
+//
+// The PR gate's matrix is DYNAMIC: detect-changes emits it from go.work via
+// scripts/ci-backend-matrix.mjs, so ci.yml has no `service:` list to parse.
+// Its "entries" are that script's full leg list, which is what a
+// workflow_dispatch or a shared/ change runs. The audit also checks that
+// ci.yml still reads the emitted matrix. A job that went back to a static
+// list, or stopped passing the output through, would be a second source
+// that drifts. nightly.yml keeps a static list.
 export const MATRIX_WORKFLOWS = [
-  { file: '.github/workflows/ci.yml', label: 'PR gate' },
+  { file: '.github/workflows/ci.yml', label: 'PR gate', dynamic: true },
   { file: '.github/workflows/nightly.yml', label: 'nightly' },
 ];
+
+// Go modules on disk that are deliberately OUTSIDE go.work, and therefore
+// outside the PR gate's dynamic backend matrix. Every other go.mod in the tree
+// must be in go.work. The dynamic matrix IS go.work, so a module dropped
+// from go.work (or never added) would lose its leg with nothing to notice.
+// Keep the reasons honest: an entry here is a claim that no PR-gate leg is owed.
+export const OUTSIDE_WORKSPACE = new Map([
+  ['tools/qa-platform', 'QA harness with its own module graph; deliberately not a go.work member (its UI has the qa-platform-ui leg; govulncheck must scan it with GOWORK=off).'],
+  ['scripts/database', 'one-off operator script (trigger-compliance-evaluation.go); ships nothing.'],
+]);
+
+/** Every directory holding a go.mod, repo-relative, excluding vendored/tooling trees. */
+export function discoverGoModules(rootDir = root) {
+  const found = [];
+  const skip = new Set(['node_modules', '.git', '.claude', 'testdata', 'vendor', 'dist', 'bin']);
+  const walk = (abs, rel) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    if (rel && entries.some((e) => e.isFile() && e.name === 'go.mod')) found.push(rel);
+    for (const e of entries) {
+      if (!e.isDirectory() || skip.has(e.name)) continue;
+      walk(path.join(abs, e.name), rel ? `${rel}/${e.name}` : e.name);
+    }
+  };
+  walk(rootDir, '');
+  return found.sort();
+}
+
+/** Errors for go.mod directories that are neither in the dynamic leg list nor exempted. */
+export function workspaceMembershipErrors(legPaths, { rootDir = root, exemptions = OUTSIDE_WORKSPACE } = {}) {
+  const errors = [];
+  const inWork = new Set(legPaths);
+  for (const dir of discoverGoModules(rootDir)) {
+    if (inWork.has(dir)) {
+      if (exemptions.has(dir)) errors.push(`OUTSIDE_WORKSPACE lists "${dir}", but it IS in go.work — remove the stale exemption.`);
+      continue;
+    }
+    if (!exemptions.has(dir)) {
+      errors.push(
+        `${dir}/go.mod is not in go.work, so the PR gate's backend matrix (derived from go.work) has no leg for it — ` +
+          `nothing builds, vets, lints or tests it on a PR. Add it to go.work, or to OUTSIDE_WORKSPACE with why it is owed no leg.`
+      );
+    }
+  }
+  // An exemption whose directory is absent is NOT an error: the public-tree
+  // export deletes both of today's (prepare-public-tree.sh removes
+  // tools/qa-platform/ and scripts/database/go.mod), and this audit ships.
+  return errors;
+}
+
+/** Errors if a workflow does not consume the dynamic backend matrix end to end. */
+export function dynamicMatrixWiringErrors(file, rootDir = root) {
+  const errors = [];
+  const abs = path.join(rootDir, file);
+  if (!fs.existsSync(abs)) return [`${file} not found — the dynamic backend matrix wiring cannot be audited.`];
+  let doc;
+  try {
+    doc = YAML.parse(fs.readFileSync(abs, 'utf8'));
+  } catch (e) {
+    return [`${file}: could not be parsed (${e.message}).`];
+  }
+  const jobs = (doc && doc.jobs) || {};
+  const detect = jobs['detect-changes'];
+  const backend = jobs['backend-check'];
+  if (!detect) errors.push(`${file}: no detect-changes job — nothing emits the backend matrix.`);
+  if (!backend) errors.push(`${file}: no backend-check job — the backend matrix is not consumed.`);
+  if (!detect || !backend) return errors;
+
+  const emitter = (detect.steps || []).find((st) => /scripts\/ci-backend-matrix\.mjs/.test(String(st?.run || '')));
+  if (!emitter) {
+    errors.push(`${file}: detect-changes never runs scripts/ci-backend-matrix.mjs, so backend_matrix is never computed.`);
+  } else {
+    if (!emitter.id) {
+      errors.push(`${file}: the detect-changes step running ci-backend-matrix.mjs has no \`id\`, so its outputs cannot be exported.`);
+    }
+    if (!/>>\s*"?\$GITHUB_OUTPUT"?/.test(String(emitter.run))) {
+      errors.push(`${file}: ci-backend-matrix.mjs output is not appended to $GITHUB_OUTPUT.`);
+    }
+    const outs = detect.outputs || {};
+    for (const key of ['backend_matrix', 'backend_count']) {
+      const want = new RegExp(`steps\\.${emitter.id}\\.outputs\\.${key}\\b`);
+      if (!want.test(String(outs[key] || ''))) {
+        errors.push(`${file}: detect-changes does not export \`${key}\` from steps.${emitter.id}, so backend-check reads an empty string.`);
+      }
+    }
+  }
+  const matrix = backend.strategy && backend.strategy.matrix;
+  if (typeof matrix !== 'string' || !/fromJSON\(\s*needs\.detect-changes\.outputs\.backend_matrix\s*\)/.test(matrix)) {
+    errors.push(
+      `${file}: backend-check's matrix is not \`\${{ fromJSON(needs.detect-changes.outputs.backend_matrix) }}\` — ` +
+        `a static or hand-edited matrix is a second list that drifts from go.work.`
+    );
+  }
+  if (!/^\s*needs\.detect-changes\.outputs\.backend_count\s*!=\s*'0'\s*$/.test(String(backend.if || ''))) {
+    errors.push(
+      `${file}: backend-check's if: must be exactly \`needs.detect-changes.outputs.backend_count != '0'\`. ` +
+        `fromJSON of an empty matrix is an error, and anything looser (e.g. also skipping on '') lets a wiring mistake skip the job silently.`
+    );
+  }
+  if ((matrixEntries(file, rootDir) || []).length > 0) {
+    errors.push(`${file}: still carries a static \`service:\` list alongside the dynamic matrix — remove it; go.work is the one source.`);
+  }
+  return errors;
+}
 
 // Matrix names that are NOT services/<name> directories. These are resolved by
 // the `case` in each workflow's "Resolve path" step; keep in step with it.
@@ -308,8 +425,23 @@ export function auditCiMatrixCoverage({
     return { errors, notes, shippingModules };
   }
 
-  for (const { file, label } of workflows) {
-    const entries = matrixEntries(file, rootDir);
+  for (const { file, label, dynamic } of workflows) {
+    let entries;
+    let entryPaths = new Map();
+    if (dynamic) {
+      errors.push(...dynamicMatrixWiringErrors(file, rootDir));
+      try {
+        const legs = allLegs(rootDir);
+        entries = legs.map((l) => l.service);
+        entryPaths = new Map(legs.map((l) => [l.service, l.path]));
+        errors.push(...workspaceMembershipErrors(legs.map((l) => l.path), { rootDir }));
+      } catch (e) {
+        errors.push(`${file}: the dynamic ${label} matrix could not be derived from go.work: ${e.message}`);
+        continue;
+      }
+    } else {
+      entries = matrixEntries(file, rootDir);
+    }
     if (entries === null) {
       errors.push(`${file} not found — the ${label} matrix cannot be audited.`);
       continue;
@@ -332,7 +464,7 @@ export function auditCiMatrixCoverage({
     // Every entry must resolve to a real module, or the leg silently self-skips
     // ("go.mod not found — skipping"), which reads as a pass.
     for (const e of entries) {
-      const rel = nonServiceEntries.get(e) ?? `services/${e}`;
+      const rel = entryPaths.get(e) ?? nonServiceEntries.get(e) ?? `services/${e}`;
       if (!fs.existsSync(path.join(rootDir, rel, 'go.mod'))) {
         errors.push(
           `${file}: matrix entry "${e}" resolves to ${rel}, which has no go.mod — ` +

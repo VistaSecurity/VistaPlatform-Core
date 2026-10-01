@@ -12,7 +12,7 @@ each takes longer and looks more like production than the one above it.
 Everything is free under [FSL-1.1-ALv2](LICENSE.md). No licence key, no
 registration, no phone-home.
 
-> **Beta software, provided "AS IS", used at your own risk.** Before you deploy
+> **Provided "AS IS", used at your own risk.** Before you deploy
 > a sensor or agent, read [DISCLAIMER.md](DISCLAIMER.md) — in particular
 > [authorized use](DISCLAIMER.md#authorized-use-only), which covers scanning
 > only what you own and the caution around probing OT/ICS networks.
@@ -120,8 +120,19 @@ helm install reloader stakater/reloader \
 ```bash
 # 3. Vista Platform
 helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
-  --namespace vista --create-namespace --wait
+  --namespace vista --create-namespace --wait \
+  --set agentMtls.enabled=false
 ```
+
+**Why `agentMtls.enabled=false`.** Sensors and discovery agents authenticate to
+the platform with client certificates, over a dedicated TLS-passthrough
+listener (port 8444) with its own hostname per service. A single k3s VM has
+neither, and the chart is secure by default: with no hostnames and no explicit
+opt-out, `helm install` stops with an error rather than come up with
+unauthenticated agent routes. For an evaluation you opt out. That is a real
+weakening — until you enable it, the agent or sensor ID in the URL is the whole
+credential for that agent's routes — so it is fine for a throwaway VM and not
+for anything else. [Run it](#run-it) shows the production setup.
 
 **Why step 2.** Internal traffic — service-to-service, and the connections to
 PostgreSQL and NATS — is mTLS-encrypted by default. cert-manager issues those
@@ -138,6 +149,7 @@ throwaway look:
 ```bash
 helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
   --namespace vista --create-namespace --wait \
+  --set agentMtls.enabled=false \
   --set serviceMtls.enabled=false \
   --set datastores.postgres.tls.enabled=false \
   --set datastores.nats.tls.enabled=false
@@ -173,20 +185,19 @@ the evaluation install exposes the tenant UI only.
 
 ## Run it
 
-> **Upgrading from a Core v0.x release? There is no upgrade path — 1.0.0 needs
-> a fresh install.** The general asset inventory release dropped the old
-> port-as-asset tables (`network_assets`, `devices`) and the `asset_type` enum
-> rather than migrating them — there's no backfill and no compatibility view.
-> Credential encryption also moved to v2 with new key-derivation constants, so
-> anything encrypted under the old ones — integration credentials, device
-> credentials, sensor certificates — is undecryptable: re-enter credentials and
-> re-enroll every sensor and device agent after the upgrade. `pg_dump` your
-> existing database first if you want to keep it for reference; the chart
-> cannot carry its data forward regardless. From 1.0.0 onward the chart
-> re-applies the schema on every `helm upgrade` as before, and `NOTES.txt`
-> reminds you to `pg_dump` on every run. A **new install** (no prior Core
-> deployment) is unaffected — this only applies when upgrading an existing
-> `core-v0.x` deployment in place.
+> **Upgrading an existing install? Back up first, and read the release notes.**
+> `pg_dump` your database before every `helm upgrade` — the chart ships no
+> backup tooling, and a schema statement that fails against your data leaves the
+> migration half-applied, with a restore as the only way back. Each release's
+> **Upgrading** section in the [CHANGELOG](CHANGELOG.md) lists what you have to
+> do, including breaking changes. A **new install** is unaffected.
+>
+> **Releases before 1.0.0 have no upgrade path** — a `core-v0.x` deployment
+> needs a fresh install. The 1.0.0 inventory model replaced the old
+> port-as-asset tables rather than migrating them, and credential encryption
+> moved to new key-derivation constants, so anything encrypted under the old
+> ones (integration credentials, device credentials, sensor certificates) is
+> undecryptable: re-enter credentials and re-enroll every sensor and agent.
 
 ```bash
 helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
@@ -209,6 +220,16 @@ platform:
   # Recommended: create this Secret yourself, out of band, and name it here.
   # Otherwise the chart generates these on first install and keeps them.
   existingSecretName: vista-platform-secrets
+
+agentMtls:
+  # Sensors and discovery agents authenticate with client certificates over a
+  # TLS-passthrough listener, one hostname per service. Both are required; the
+  # install fails without them (see "Prerequisites" below).
+  backends:
+    sensor-manager:
+      dnsName: sensors.vista.example.com
+    device-interrogation-service:
+      dnsName: agents.vista.example.com
 ```
 
 ### Prerequisites the chart does not install
@@ -227,6 +248,16 @@ platform:
   (k3s ships Traefik by default, which is why "Evaluate it" installs only the
   two above.)
 - **A StorageClass** for the PostgreSQL, InfluxDB and upload volumes.
+- **A Traefik TLS-passthrough entrypoint for agents** — `agent-mtls` on port
+  `8444` by default (`agentMtls.entryPoint` / `agentMtls.port`), plus DNS for
+  the two `agentMtls` hostnames above pointing at it. Traefik must pass this
+  traffic through untouched: if it terminates TLS, the agent's client
+  certificate never reaches the backend. The chart creates the
+  `IngressRouteTCP` but not Traefik's static entrypoint. The two hostnames must
+  differ from each other and from `tls.dnsName`. Don't want agent mTLS yet?
+  `agentMtls.enabled: false` opts out of it — see
+  [`docsv4/core/operate/security/service-mesh-mtls.md`](docsv4/core/operate/security/service-mesh-mtls.md#agent-and-sensor-mtls-agentmtls--on-by-default-and-a-breaking-upgrade)
+  for what that costs.
 
 Full detail on the internal-mTLS options — what each toggle covers, how to
 stage them across upgrades, and how to run against a managed PostgreSQL — is in
@@ -435,6 +466,11 @@ workloads are not.
 
 Common first-install problems:
 
+- **`helm install` fails immediately with "agentMtls.enabled is true … entries
+  have no dnsName"** — agent/sensor authentication is on by default and needs a
+  hostname for `sensor-manager` and for `device-interrogation-service`. Set both
+  (see [Run it](#run-it)), or add `--set agentMtls.enabled=false` for a
+  throwaway evaluation.
 - **`helm install` fails immediately with "cert-manager is not installed in
   this cluster"** — encrypted internal transport is on by default and needs
   cert-manager (and Reloader). Install both, or turn the three toggles off;

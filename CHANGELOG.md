@@ -7,7 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.2.0-rc.1] - 2026-09-30
+## [4.3.0-rc.1] - 2026-09-30
+
+**Version 4.3.0 brings Core level with the commercial line and starts publishing
+release verification.** Core 4.2.0 shipped only as a release candidate, so for Core
+this is the first final release since 4.1.0, and it contains everything in 4.2.0.
+**If you are upgrading Core from 4.1.0, read the 4.2.0 Breaking / Upgrading notes
+first.** Commercial installs upgrade from 4.2.0. Both product lines are cut from the same
+commit: `v4.3.0` (commercial) and `core-v4.3.0` (Core).
+
+### Highlights
+
+- **Each release's verification is published.** The results of the maintainers'
+  end-to-end verification of a release are published as a machine-readable feed on the
+  `release-status` branch of the Core repository (`latest.json` and
+  `releases/<tag>.json`), which the project website's release-status page reads. Each
+  result says whether that exact release passed a check — installation, sensor
+  collection, discovery, inventory, crypto assessment, PQC exposure, compliance findings,
+  CBOM generation and more. It is a statement about the release, not about uptime or
+  any particular deployment. A capability without end-to-end coverage yet is reported as
+  not checked rather than assumed.
+- **A bare `helm install` now has documented prerequisites.** The chart enables agent
+  mTLS by default, which needs hostnames for `sensor-manager` and
+  `device-interrogation-service` plus a Traefik TLS-passthrough route. README and INSTALL
+  now say so, and give the evaluation path (`--set agentMtls.enabled=false`) with its
+  trade-off. The documentation no longer describes the product as beta or pre-1.0.
+- **Three input-handling tightenings from code scanning.** None was exploitable. Ports
+  read from `/proc/net` and `\u` escapes in the query language are parsed as 16-bit
+  values, so a wider value is rejected as malformed instead of truncated, and a
+  build-audit script escapes every regex metacharacter in the target names it matches.
+
+### Breaking / Upgrading
+
+Back up your database (`pg_dump`) first, as always. This release does not change the
+database schema.
+
+- **Commercial, from 4.2.0:** nothing to do beyond the upgrade itself.
+- **Core, from 4.1.0:** the 4.2.0 notes apply in full, in particular **every upgrade
+  that changes the schema waits for its migration**. A backend on
+  `strategy: Recreate` is down for the migration, and `helm upgrade --wait` needs a
+  `--timeout` that covers it. The CMDB and NetBox items in those notes are Enterprise
+  only.
+
+### Editions
+
+Everything in this release is in **Core**. Enterprise and MSP carry it unchanged.
+
+### Verify
+
+Core: there is no key to trust, because the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.3.0 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.3.0` for the image.
+Enterprise and MSP customers verify the commercial images and chart against the commercial
+release workflow's identity, exactly as for 4.2.0.
+
+<!-- release-notes-end -->
+
+## [4.2.0] - 2026-09-30
 
 **Version 4.2.0 makes CMDB sync safe to switch on.** 4.1.0 made CMDB sync work; this
 release lets you see what a sync will do before it does it, edit how records map, undo a

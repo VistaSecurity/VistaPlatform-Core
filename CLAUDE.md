@@ -213,7 +213,8 @@ Registry: `frontend-v2/src/app/nav.ts`. New pages should be added within one
 of these sections, not as a new top-level nav item.
 
 The Inventory page uses **lenses** (not separate pages) to reshape the same
-underlying data — `?lens=infrastructure|certificate|keys|configuration|network|connections|stale|tls|ssh`.
+underlying data — `?lens=assets|map|software|certificate|keys|configuration|tls|ssh|data-protection|connections|stale`.
+(`infrastructure` and `network` are old aliases that redirect to `assets`.)
 Registry: `frontend-v2/src/sections/inventory/lenses.ts`.
 
 ## User-facing vocabulary

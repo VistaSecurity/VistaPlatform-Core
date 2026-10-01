@@ -55,11 +55,29 @@ DOCKER_COMPOSE := $(shell docker compose version >/dev/null 2>&1 && echo "docker
 node_modules_check:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is required"; exit 1; }
 
+# scripts/ npm dependencies (fs-extra, yaml, … for the generators and audits),
+# installed once rather than once per target. Every target that runs a
+# scripts/*.mjs used to start with its own `cd scripts && npm install` — 32 of
+# them, 23 inside `make standards-check`, each ~0.35s even when there was
+# nothing to do. Now they depend on this stamp, which make rebuilds only when
+# scripts/package.json or scripts/package-lock.json is newer than it (a
+# checkout that changes either bumps its mtime) or when node_modules is gone
+# (the stamp lives inside it).
+#
+# The install keeps the old semantics exactly: output hidden, failure
+# tolerated (`|| true`) so an offline run with an existing node_modules still
+# proceeds. A failed install does not touch the stamp, so the next run retries.
+SCRIPTS_NPM_STAMP := scripts/node_modules/.install-stamp
+$(SCRIPTS_NPM_STAMP): scripts/package.json scripts/package-lock.json
+	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 && touch node_modules/.install-stamp || true
+
+.PHONY: scripts-deps
+scripts-deps: $(SCRIPTS_NPM_STAMP)
+
 .PHONY: generate generate-docker-compose generate-k8s-ingress cluster-suspend cluster-resume cluster-status verify-generated verify-db-files \
 	sign-content-bundle verify-content-bundle stage-content-bundle unstage-content-bundle \
 	build-catalog-bundle
-generate: node_modules_check generate-k8s-ingress ## Generate shared docs/config from standards registry
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+generate: node_modules_check scripts-deps generate-k8s-ingress ## Generate shared docs/config from standards registry
 	node ./scripts/generate-from-registry.mjs
 	node ./scripts/generate-docker-compose.mjs
 	node ./scripts/generate-alert-registry.mjs
@@ -154,12 +172,10 @@ validate-db-init: ## Validate database initialization readiness (checks critical
 		exit 1; \
 	fi'
 
-generate-docker-compose: node_modules_check ## Generate docker-compose services from registry
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+generate-docker-compose: node_modules_check scripts-deps ## Generate docker-compose services from registry
 	node ./scripts/generate-docker-compose.mjs | cat
 
-generate-gateway: node_modules_check ## Generate Traefik gateway configurations from registry
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+generate-gateway: node_modules_check scripts-deps ## Generate Traefik gateway configurations from registry
 	@echo "Generating Traefik gateway configurations from registry..."
 	@[ -f .env ] && export $$(grep -v '^#' .env | grep -E '^(DEV_CORS_ALLOW_ANY|TRAEFIK_DEV_EXTRA_CORS_ORIGINS)=' | xargs) 2>/dev/null || true; \
 	  DEPLOY_ENV=development node scripts/generate-traefik-config.mjs
@@ -167,8 +183,7 @@ generate-gateway: node_modules_check ## Generate Traefik gateway configurations 
 	@DEPLOY_ENV=production node scripts/generate-traefik-config.mjs
 	@echo "✅ Traefik gateway configs generated"
 
-generate-k8s-ingress: node_modules_check ## Generate Kubernetes Traefik CRDs (Middleware + IngressRoute) into the Helm chart
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+generate-k8s-ingress: node_modules_check scripts-deps ## Generate Kubernetes Traefik CRDs (Middleware + IngressRoute) into the Helm chart
 	@node ./scripts/generate-k8s-ingress.mjs
 
 KUBE ?= $(HOME)/.kube/config
@@ -967,16 +982,13 @@ format: ## Format all code
 	cd frontend-v2 && npm run format
 
 # Standards Enforcement
-edition-matrix: ## Regenerate docsv4/core/editions.md from editions.go + seed.sql + standards/editions.yaml
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+edition-matrix: scripts-deps ## Regenerate docsv4/core/editions.md from editions.go + seed.sql + standards/editions.yaml
 	node ./scripts/generate-edition-matrix.mjs
 
-asset-classes: ## Audit the asset-class registry (alias for the --check run in 'make audit')
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+asset-classes: scripts-deps ## Audit the asset-class registry (alias for the --check run in 'make audit')
 	node ./scripts/generate-asset-classes.mjs --check
 
-classification-rules: ## Audit the classification-rule registry (alias for the --check run in 'make audit')
-	@cd scripts && npm install --no-fund --no-audit >/dev/null 2>&1 || true
+classification-rules: scripts-deps ## Audit the classification-rule registry (alias for the --check run in 'make audit')
 	node ./scripts/generate-classification-rules.mjs --check
 
 .PHONY: api-contract

@@ -104,3 +104,25 @@ func TestBoundUDPSockets_PreserveUnknownRoleWithoutListenerClaim(t *testing.T) {
 		t.Fatalf("UDP role = %v, want explicit unknown", projected[0]["role"])
 	}
 }
+
+// A /proc/net port field is a uint16. A wider value is a malformed row and is
+// refused, not truncated into some other port.
+func TestParseProcHexAddr_PortIsSixteenBits(t *testing.T) {
+	for _, tc := range []struct {
+		in       string
+		wantAddr string
+		wantPort int
+		wantOK   bool
+	}{
+		{"0100007F:01BB", "127.0.0.1", 443, true},
+		{"0100007F:FFFF", "127.0.0.1", 65535, true},
+		{"0100007F:10000", "", 0, false},
+		{"0100007F:FFFFFFFF", "", 0, false},
+	} {
+		addr, port, ok := parseProcHexAddr(tc.in)
+		if addr != tc.wantAddr || port != tc.wantPort || ok != tc.wantOK {
+			t.Errorf("parseProcHexAddr(%q) = (%q, %d, %v), want (%q, %d, %v)",
+				tc.in, addr, port, ok, tc.wantAddr, tc.wantPort, tc.wantOK)
+		}
+	}
+}

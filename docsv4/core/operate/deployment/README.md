@@ -29,7 +29,7 @@ Production installs use the Helm chart, not Docker Compose — there is no
 `docker-compose.prod.yml` in this repository. See:
 
 1. [Production Checklist](./production-checklist.md)
-2. `helm install vista oci://ghcr.io/vistasecurity/vistaplatform` directly against any Kubernetes cluster — see [INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#run-it) ("Run it") and, if you're staging internal service-mesh mTLS on an existing cluster, [Service-mesh mTLS](../security/service-mesh-mtls.md).
+2. `helm install vista oci://ghcr.io/vistasecurity/vistaplatform` directly against any Kubernetes cluster. It needs either the two `agentMtls` hostnames or `--set agentMtls.enabled=false` (evaluation only), or it stops with an error — see [INSTALL.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/INSTALL.md#run-it) ("Run it") and, if you're staging internal service-mesh mTLS on an existing cluster, [Service-mesh mTLS](../security/service-mesh-mtls.md).
 
 ## Deployment Environments
 

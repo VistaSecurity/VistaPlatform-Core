@@ -273,7 +273,7 @@ func (l *Lexer) scanString() Token {
 					return l.badEscape(start, "\\u needs four hex digits")
 				}
 				hex := l.src[l.pos+1 : l.pos+5]
-				n, err := strconv.ParseUint(hex, 16, 32)
+				n, err := strconv.ParseUint(hex, 16, 16) // four hex digits: a UTF-16 code unit
 				if err != nil {
 					return l.badEscape(start, "\\u needs four hex digits")
 				}

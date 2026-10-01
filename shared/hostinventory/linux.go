@@ -784,7 +784,9 @@ func parseProcHexAddr(s string) (string, int, bool) {
 	if !ok {
 		return "", 0, false
 	}
-	port64, err := strconv.ParseUint(hexPort, 16, 32)
+	// 16 bits: a TCP/UDP port is a uint16, so a wider value is a malformed row,
+	// not a port to truncate.
+	port64, err := strconv.ParseUint(hexPort, 16, 16)
 	if err != nil {
 		return "", 0, false
 	}

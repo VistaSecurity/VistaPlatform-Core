@@ -7,23 +7,21 @@ you. It is not a substitute for the licence — see [LICENSE.md](LICENSE.md) for
 the terms that actually govern your use, including the warranty disclaimer and
 limitation of liability.
 
-## Beta software
+## Stability and support
 
-**Vista Platform is beta software.** It is pre-1.0 and the version numbers say so.
-
-- **Interfaces will change without notice** across 0.x releases — APIs, chart
-  values, database schema, configuration, and the shape of the data model.
-- **There is no supported upgrade path between arbitrary 0.x versions.** We do
-  not promise that a release will upgrade cleanly from the one before it, or
-  that your data survives the attempt.
+- **Interfaces can change between releases** — APIs, chart values, database
+  schema, configuration, and the shape of the data model. Breaking changes are
+  called out in the CHANGELOG's **Upgrading** section for the release that makes
+  them; read it before you upgrade.
+- **We do not promise that a release will upgrade cleanly from the one before
+  it, or that your data survives the attempt.** The chart ships no backup
+  tooling. Back up before every upgrade, and expect a restore — not a rollback —
+  to be the way back from a failed schema migration. Releases before 1.0.0 have
+  no upgrade path at all.
 - **There is no service-level agreement and no support commitment.** Issues are
   addressed as time allows.
 - **Evaluate it before you depend on it.** Run it against a representative
   environment, confirm it does what you need, and keep your own backups.
-
-None of this means it is unfinished as a product — it discovers, assesses, and
-generates a CBOM today. It means the seams are still moving, and you should plan
-for that rather than be surprised by it.
 
 ## No warranty, and use at your own risk
 

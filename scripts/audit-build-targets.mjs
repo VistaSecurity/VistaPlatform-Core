@@ -93,13 +93,18 @@ const built = new Set([...recipe.matchAll(/-o \.\.\/\.\.\/bin\/([a-z][a-z0-9-]*)
 // the fence. Credit such a prerequisite only when its own `build-<svc>:` recipe
 // really builds bin/<svc>, so naming a target that builds nothing (or
 // something else) does not count as coverage.
+//
+// Target names are interpolated into regexes, so every regex metacharacter is
+// escaped, not just `-`: an unescaped `.` or `\` in a name would match (or
+// break) something other than that target.
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
 const recipeOf = (target) =>
-  makefile.split(new RegExp(`^${target.replace(/[-]/g, '\\-')}:`, 'm'))[1]?.split(/^\w[\w-]*:/m)[0] ?? '';
+  makefile.split(new RegExp(`^${escapeRegExp(target)}:`, 'm'))[1]?.split(/^\w[\w-]*:/m)[0] ?? '';
 for (const m of makefile.matchAll(/^build-services:([^\n#]*)$/gm)) {
   for (const dep of m[1].trim().split(/\s+/).filter(Boolean)) {
     const svc = dep.replace(/^build-/, '');
     if (dep === svc) continue;
-    if (new RegExp(`-o \\.\\./\\.\\./bin/${svc}\\s`).test(recipeOf(dep))) built.add(svc);
+    if (new RegExp(`-o \\.\\./\\.\\./bin/${escapeRegExp(svc)}\\s`).test(recipeOf(dep))) built.add(svc);
   }
 }
 const uncovered = registryServices.filter((s) => !BUILD_EXEMPT.has(s) && !built.has(s));

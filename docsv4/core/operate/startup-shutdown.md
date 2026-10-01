@@ -101,8 +101,12 @@ for staging internal mTLS on an existing production cluster.
 ### Startup / Shutdown
 
 ```bash
+# Evaluation only: --set agentMtls.enabled=false opts out of agent/sensor
+# client-certificate authentication. A real install sets the two
+# agentMtls.backends.<svc>.dnsName hostnames instead (see INSTALL.md "Run it").
 helm install vista oci://ghcr.io/vistasecurity/vistaplatform \
-  --namespace vista --create-namespace --wait
+  --namespace vista --create-namespace --wait \
+  --set agentMtls.enabled=false
 
 helm uninstall vista --namespace vista
 ```
