@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.3.0-rc.1] - 2026-09-30
+## [4.3.0] - 2026-09-30
 
 **Version 4.3.0 brings Core level with the commercial line and starts publishing
 release verification.** Core 4.2.0 shipped only as a release candidate, so for Core
