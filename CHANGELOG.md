@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.3.1-rc.1] - 2026-10-01
+## [4.3.1] - 2026-10-01
 
 **Version 4.3.1 publishes a feature status list for each release.** The project
 website's release-status page now lists the capabilities customers look for:
