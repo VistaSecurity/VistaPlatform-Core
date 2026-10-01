@@ -1,54 +1,35 @@
-# Publish the release-status feed for one release.
+# Publish the feature-status feed for a release.
 #
-# The project website shows, for the latest stable release, which product
-# capabilities were verified end to end for that exact version. It reads a
-# small JSON document from the `release-status` branch of this repository:
+# The project website's release-status page lists the capabilities customers
+# look for and where each stands. It reads features/latest.json from the
+# `release-status` branch of this repository. This workflow writes it, from
+# standards/feature-status.yaml as that file stands at the release tag.
 #
-#   latest.json          the latest STABLE release's verification
-#   releases/<tag>.json  every verified release, kept as history
+#   features/latest.json      the latest STABLE release
+#   features/<tag>.json       every release, kept as history
 #
-# The schema, the check catalogue and the validator live in
-# scripts/release-status-feed.mjs. This workflow is the only writer.
+# WHEN. After Release Core succeeds for a tag, so a feature marked `available`
+# is in a release that passed its gates. A dispatch republishes one tag (from
+# that tag's catalogue) — the way to repair a run that failed part-way.
 #
-# WHERE THE RESULTS COME FROM. Verification is not run here. It runs on the
-# maintainers' own deployment of the release, which exercises the product the
-# way a customer does — sensors registered, discoveries submitted, the tenant
-# UI driven in a browser — and needs a live installation that a hosted runner
-# does not have. When that run finishes it sends this repository a
-# `release-verification` dispatch carrying exactly three things: the tag it
-# verified, when, and one result per check. Everything that describes the
-# RELEASE (its commit, publication time and URL) is read from GitHub below and
-# never taken from the payload.
-#
-# THE GATE. A feed is published only for a tag whose GitHub Release exists, is
-# not a draft, and carries the signed checksum files the Release Core `release`
-# job uploads as its final step — so a tag push alone, or a release run that
-# failed part-way, never gets a status. A payload that fails validation is
-# rejected, not repaired.
-#
-# ORDERING. The versioned file is committed and pushed before latest.json is
-# advanced, in two pushes. latest.json only ever names the release GitHub
-# itself reports as latest, and never a prerelease: an RC may get a versioned
-# file but cannot replace the stable pointer, and republishing an older tag
-# (a correction) leaves latest.json alone.
-#
-# RERUNS AND CORRECTIONS. A second dispatch for the same tag replaces that
-# tag's file. The sender dispatches only after its full verification suite
-# completed, and a correction is a fresh verification run, never a hand-edited
-# result. Every publication is a commit on the branch and a run of this
-# workflow, so the history is auditable from both ends. Pushes are
-# fast-forward only; nothing here force-pushes.
+# ORDERING. The versioned file is pushed before latest.json is advanced, in two
+# fast-forward pushes. latest.json only ever names the release GitHub reports as
+# latest, and never a prerelease.
 name: Release Status
 
 on:
-  repository_dispatch:
-    types: [release-verification]
+  workflow_run:
+    workflows: ["Release Core"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)publish, e.g. v4.4.0'
+        required: true
 
 permissions:
   contents: read
 
-# One publication at a time: two dispatches racing on the branch would turn
-# the second push into a non-fast-forward rejection.
 concurrency:
   group: release-status
   cancel-in-progress: false
@@ -58,95 +39,98 @@ env:
 
 jobs:
   publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push to the release-status branch
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      # This workflow also exists in the private tree this repository is
-      # exported from. Same test Release Core uses: Core is precisely the tree
-      # with no services/*/ee.
-      - name: Only in the Core tree
-        id: guard
-        run: |
-          if compgen -G "services/*/ee" > /dev/null; then
-            echo "Not the Core tree — nothing to publish here."
-            echo "is_core=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_core=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      # The payload goes to a file through an env var, never through `${{ }}`
-      # inside a script: it is data, and interpolating it would make it code.
-      - name: Validate the payload
-        if: steps.guard.outputs.is_core == 'true'
-        id: payload
+      # Also present in the private tree this repository is exported from; Core is
+      # precisely the tree with no services/*/ee.
+      - name: Resolve the release
+        id: tag
         env:
-          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          EVENT: ${{ github.event_name }}
+          RUN_HEAD: ${{ github.event.workflow_run.head_branch }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
-          P="$RUNNER_TEMP/payload.json"
-          printf '%s' "$PAYLOAD" > "$P"
-          node scripts/release-status-feed.mjs validate-payload "$P"
-          echo "file=$P" >> "$GITHUB_OUTPUT"
-          echo "tag=$(jq -r .tag "$P")" >> "$GITHUB_OUTPUT"
+          if compgen -G "services/*/ee" > /dev/null; then
+            echo "Not the Core tree — nothing to publish here."
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          TAG="${INPUT_TAG:-$RUN_HEAD}"
+          # [[ =~ ]] anchors the whole string, so no newline reaches $GITHUB_OUTPUT.
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            if [ "$EVENT" = "workflow_dispatch" ]; then echo "::error::'$TAG' is not a release tag"; exit 1; fi
+            echo "::notice::Release Core ran for '$TAG', not a release tag — nothing to publish"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          { echo "run=true"; echo "tag=$TAG"; } >> "$GITHUB_OUTPUT"
 
       - name: Gate on the published release
-        if: steps.guard.outputs.is_core == 'true'
+        if: steps.tag.outputs.run == 'true'
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.payload.outputs.tag }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           if ! rel="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"; then
-            echo "::error::no GitHub Release for ${TAG} — the release job has not published it; nothing to report on"
-            exit 1
+            echo "::error::no GitHub Release for ${TAG}"; exit 1
           fi
-          if [ "$(jq -r .draft <<<"$rel")" != "false" ]; then
-            echo "::error::the ${TAG} release is a draft"
-            exit 1
-          fi
-          # The release job uploads these last. All three present means it
-          # finished; any missing means it failed or is still running.
+          if [ "$(jq -r .draft <<<"$rel")" != "false" ]; then echo "::error::the ${TAG} release is a draft"; exit 1; fi
+          # The release job uploads these last: all three present means it finished.
           for a in SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem; do
             if ! jq -e --arg a "$a" 'any(.assets[]; .name == $a)' <<<"$rel" >/dev/null; then
-              echo "::error::the ${TAG} release has no ${a} — its release job did not complete"
-              exit 1
+              echo "::error::the ${TAG} release has no ${a} — its release job did not complete"; exit 1
             fi
           done
-          commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)"
-          latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
           {
-            echo "commit=${commit}"
+            echo "commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)"
             echo "published_at=$(jq -r .published_at <<<"$rel")"
             echo "url=$(jq -r .html_url <<<"$rel")"
             echo "prerelease=$(jq -r .prerelease <<<"$rel")"
-            echo "latest=${latest}"
+            echo "latest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
           } >> "$GITHUB_OUTPUT"
-          echo "${TAG}: commit ${commit}, prerelease $(jq -r .prerelease <<<"$rel"); GitHub latest is '${latest:-none}'"
+
+      # The catalogue and generator as they stand AT THE TAG — the feed describes
+      # that release, not whatever the default branch holds later.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.tag.outputs.run == 'true'
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          path: release
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        if: steps.tag.outputs.run == 'true'
+        with:
+          node-version: '24'
 
       - name: Build the feed
-        if: steps.guard.outputs.is_core == 'true'
+        if: steps.tag.outputs.run == 'true'
+        working-directory: release
         env:
-          PAYLOAD_FILE: ${{ steps.payload.outputs.file }}
+          TAG: ${{ steps.tag.outputs.tag }}
           COMMIT: ${{ steps.release.outputs.commit }}
           PUBLISHED_AT: ${{ steps.release.outputs.published_at }}
           RELEASE_URL: ${{ steps.release.outputs.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          node scripts/release-status-feed.mjs build --payload "$PAYLOAD_FILE" \
-            --commit "$COMMIT" --published-at "$PUBLISHED_AT" \
-            --release-url "$RELEASE_URL" --run-url "$RUN_URL" \
-            --out "$RUNNER_TEMP/feed.json"
-          cat "$RUNNER_TEMP/feed.json"
+          if [ ! -f scripts/feature-status.mjs ] || [ ! -f standards/feature-status.yaml ]; then
+            echo "::error::${TAG} predates the feature-status catalogue — nothing to publish for it"; exit 1
+          fi
+          (cd scripts && npm ci --no-fund --no-audit)
+          node scripts/feature-status.mjs build --tag "$TAG" --commit "$COMMIT" \
+            --published-at "$PUBLISHED_AT" --release-url "$RELEASE_URL" --run-url "$RUN_URL" \
+            --out "$RUNNER_TEMP/features.json"
 
       - name: Publish to the status branch
-        if: steps.guard.outputs.is_core == 'true'
+        if: steps.tag.outputs.run == 'true'
         env:
-          TAG: ${{ steps.payload.outputs.tag }}
+          TAG: ${{ steps.tag.outputs.tag }}
           PRERELEASE: ${{ steps.release.outputs.prerelease }}
           LATEST: ${{ steps.release.outputs.latest }}
         run: |
@@ -158,67 +142,43 @@ jobs:
             git fetch --no-tags --depth=1 origin "$STATUS_BRANCH"
             git worktree add --detach "$DIR" FETCH_HEAD
           else
-            # First publication: an orphan branch holding only the feed.
             git worktree add --detach "$DIR"
             git -C "$DIR" checkout --quiet --orphan status-init
             git -C "$DIR" rm -r --quiet --force .
-            {
-              echo '# Release status'
-              echo
-              echo 'Machine-readable verification results for each release, written only by'
-              echo 'the `Release Status` workflow (`.github/workflows/release-status.yml` on'
-              echo 'the default branch). Schema and check catalogue:'
-              echo '`scripts/release-status-feed.mjs`.'
-              echo
-              echo '- `latest.json` — the latest stable release'
-              echo '- `releases/<tag>.json` — every verified release'
-              echo
-              echo 'A result describes a verification run against that exact release. It is'
-              echo 'not a statement about service uptime or about any particular deployment.'
-            } > "$DIR/README.md"
+            printf '# Release status\n\nFeature status for each release, written only by the Release Status workflow.\n' > "$DIR/README.md"
             git -C "$DIR" add README.md
           fi
           cd "$DIR"
 
           publish() {  # publish <path> <message>
             mkdir -p "$(dirname "$1")"
-            cp "$RUNNER_TEMP/feed.json" "$1"
+            cp "$RUNNER_TEMP/features.json" "$1"
             git add "$1"
-            if git diff --cached --quiet; then
-              echo "$1 unchanged"
-              return 0
-            fi
+            if git diff --cached --quiet; then echo "$1 unchanged"; return 0; fi
             git commit --quiet -m "$2"
-            # Fast-forward only. A rejection means another writer got there
-            # first, and the right response is a failed run, not a force-push.
+            # Fast-forward only; a rejection means another writer got there first.
             git push origin "HEAD:refs/heads/${STATUS_BRANCH}"
             echo "published $1"
           }
 
-          publish "releases/${TAG}.json" "status: ${TAG} verification (run ${GITHUB_RUN_ID})"
-
+          publish "features/${TAG}.json" "features: ${TAG} (run ${GITHUB_RUN_ID})"
           if [ "$PRERELEASE" = "true" ] || [[ "$TAG" == *-* ]]; then
-            echo "::notice::${TAG} is a prerelease — versioned file only; latest.json unchanged"
+            echo "::notice::${TAG} is a prerelease — versioned file only"
           elif [ "$TAG" != "$LATEST" ]; then
-            echo "::notice::${TAG} is not GitHub's latest release ('${LATEST:-none}') — versioned file only; latest.json unchanged"
+            echo "::notice::${TAG} is not GitHub's latest release ('${LATEST:-none}') — versioned file only"
           else
-            publish latest.json "status: latest → ${TAG}"
+            publish features/latest.json "features: latest → ${TAG}"
           fi
 
       - name: Summary
-        if: always() && steps.guard.outputs.is_core == 'true'
+        if: always() && steps.tag.outputs.run == 'true'
         run: |
-          F="$RUNNER_TEMP/feed.json"
-          if [ ! -s "$F" ]; then
-            echo "## Release status — nothing published" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          F="$RUNNER_TEMP/features.json"
+          [ -s "$F" ] || { echo "## Feature status — nothing published" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           {
-            echo "## Release status — $(jq -r .release.tag "$F")"
+            echo "## Feature status — $(jq -r .release.tag "$F")"
             echo
-            echo "Verified at $(jq -r .verified_at "$F") against release commit \`$(jq -r .release.commit "$F")\`."
-            echo
-            echo "| Check | Result |"
-            echo "|---|---|"
-            jq -r '.checks | to_entries[] | "| \(.key) | \(.value.result) |"' "$F"
+            echo "| Feature | Status | Edition |"
+            echo "|---|---|---|"
+            jq -r '.features[] | "| \(.name) | \(.status) | \(.edition) |"' "$F"
           } >> "$GITHUB_STEP_SUMMARY"

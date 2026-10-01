@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.3.1-rc.1] - 2026-10-01
+
+**Version 4.3.1 publishes a feature status list for each release.** The project
+website's release-status page now lists the capabilities customers look for:
+discovery, inventory, crypto assessment, compliance, CBOM, integrations, and
+security and trust. Each shows whether it is available, in progress or planned,
+which edition includes it, and a link to its user documentation. Nothing in the
+product changes: the services, user interfaces, chart and database schema are the
+same as 4.3.0. Both product lines are cut from the same commit: `v4.3.1`
+(commercial) and `core-v4.3.1` (Core).
+
+### Highlights
+
+- **Feature status, published per release.** `standards/feature-status.yaml` is the
+  curated list. After each Core release it is published as
+  `features/latest.json` on the `release-status` branch of the Core repository,
+  alongside a copy per release (`features/<tag>.json`). It replaces the 4.3.0
+  release-verification feed: that file (`latest.json`) is no longer updated.
+
+### Breaking / Upgrading
+
+Nothing to do. The upgrade from 4.3.0 changes no service, configuration or schema.
+
+### Editions
+
+The status list covers every edition and names the smallest edition that includes
+each capability. The publishing pipeline is in **Core**.
+
+### Verify
+
+Core: there is no key to trust, because the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.3.1 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.3.1` for the image.
+Enterprise and MSP customers verify the commercial images and chart against the commercial
+release workflow's identity, exactly as for 4.3.0.
+
+<!-- release-notes-end -->
+
 ## [4.3.0] - 2026-09-30
 
 **Version 4.3.0 brings Core level with the commercial line and starts publishing
