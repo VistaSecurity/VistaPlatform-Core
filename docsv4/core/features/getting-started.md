@@ -1,5 +1,8 @@
 # Getting Started checklist
 
+> Prefer a single start-to-finish walkthrough? See the
+> [Quick Start](../quick-start.md).
+
 When you first sign in, the platform shows a short **Getting Started** checklist
 that walks you through the few steps that make discovery and compliance useful.
 Until you finish (or hide) it, you'll see a gentle reminder each time you log in.

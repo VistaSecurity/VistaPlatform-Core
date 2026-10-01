@@ -6,6 +6,7 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 
 | I want to… | Start here |
 |------------|-----------|
+| Go from first sign-in to a populated inventory | [Quick Start](./quick-start.md) |
 | Get an overview of the platform | [Platform Overview](./platform-overview.md) |
 | Learn the vocabulary (asset, endpoint, class, relationship, …) | [Concepts](./concepts.md) |
 | Understand how the platform itself is secured | [Security Posture](./security-posture.md) |
@@ -24,6 +25,9 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 
 ### Security
 - [Security Posture](./security-posture.md) — tenant isolation, supply chain, scanning, and the guarantees behind them
+
+### Start here
+- [Quick Start](./quick-start.md) — first sign-in, then a sensor, a device and a cloud account, to your first populated inventory
 
 ### Guides
 - [Tenant User Guide](./guides/tenant-user-guide.md) — the console section by section: Dashboard, Discovery, Inventory, Risk & Compliance, Remediation, search, notifications and your profile

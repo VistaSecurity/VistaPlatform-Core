@@ -145,6 +145,10 @@ the first account creates the organization.
 **[INSTALL.md](INSTALL.md)** covers all three paths — laptop, single VM, and a
 real cluster with your own certificates — plus how to verify the images.
 
+Once it is running, **[QUICKSTART.md](QUICKSTART.md)** takes you from first
+sign-in to a populated inventory — a sensor, a network device and a cloud
+account — in about half an hour.
+
 ## Downloads
 
 Prebuilt sensor and device-agent binaries for Linux, Windows, and macOS,

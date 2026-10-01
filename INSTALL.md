@@ -428,6 +428,7 @@ command and a minimal `values.yaml`.
 
 1. **Sign up** at the web UI — the first account creates the organization, and
    sign-up then closes. Invite the rest of your team from **Settings → Members**.
+   The [**Quick Start**](QUICKSTART.md) walks through this and the steps below.
 2. **Deploy a sensor** so there's something to inventory. Sensors are standalone
    Go binaries you run inside your own network — see
    [`docsv4/core/features/SENSOR_REGISTRATION.md`](docsv4/core/features/SENSOR_REGISTRATION.md).
