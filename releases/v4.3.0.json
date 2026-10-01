@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "edition": "core",
+  "release": {
+    "tag": "v4.3.0",
+    "commit": "5b40940db7780b1e94bdd7fb494283d26f73b0cc",
+    "published_at": "2026-10-01T02:06:55Z",
+    "url": "https://github.com/VistaSecurity/VistaPlatform-Core/releases/tag/v4.3.0"
+  },
+  "verified_at": "2026-10-01T02:09:52Z",
+  "run_url": "https://github.com/VistaSecurity/VistaPlatform-Core/actions/runs/36804523995",
+  "checks": {
+    "self_hosted_install": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "sensor_collection": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "access_control": {
+      "result": "not_run",
+      "evidence_url": null
+    },
+    "audit_log": {
+      "result": "not_run",
+      "evidence_url": null
+    },
+    "passive_discovery": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "selected_asset_scan": {
+      "result": "not_run",
+      "evidence_url": null
+    },
+    "cloud_discovery": {
+      "result": "not_run",
+      "evidence_url": null
+    },
+    "canonical_inventory": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "software_inventory": {
+      "result": "not_run",
+      "evidence_url": null
+    },
+    "crypto_inventory": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "coverage_freshness": {
+      "result": "not_run",
+      "evidence_url": null
+    },
+    "crypto_assessment": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "pqc_exposure": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "compliance_findings": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "cbom_generation": {
+      "result": "passed",
+      "evidence_url": null
+    },
+    "cbom_cyclonedx": {
+      "result": "not_run",
+      "evidence_url": null
+    }
+  }
+}
