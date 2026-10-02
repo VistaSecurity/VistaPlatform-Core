@@ -3,7 +3,7 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-10-01T11:17:01Z
+- **Generated**: 2026-10-02T10:49:22Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
@@ -44,4 +44,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/36854235741).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/36997453869).</sub>
