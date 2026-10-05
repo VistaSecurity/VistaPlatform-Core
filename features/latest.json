@@ -1,13 +1,13 @@
 {
   "schema_version": 2,
   "release": {
-    "tag": "v4.3.1",
-    "commit": "070e6d8ea3cc2f3eab315982697712abd05fd427",
-    "published_at": "2026-10-01T13:19:40Z",
-    "url": "https://github.com/VistaSecurity/VistaPlatform-Core/releases/tag/v4.3.1"
+    "tag": "v4.4.0",
+    "commit": "e8389150e4c784007678e3616aefbb683ffd6cb7",
+    "published_at": "2026-10-05T17:16:54Z",
+    "url": "https://github.com/VistaSecurity/VistaPlatform-Core/releases/tag/v4.4.0"
   },
-  "generated_at": "2026-10-01T13:19:59Z",
-  "run_url": "https://github.com/VistaSecurity/VistaPlatform-Core/actions/runs/36867879331",
+  "generated_at": "2026-10-05T17:17:15Z",
+  "run_url": "https://github.com/VistaSecurity/VistaPlatform-Core/actions/runs/37347259315",
   "groups": [
     {
       "id": "deploy_operate",
@@ -147,6 +147,15 @@
       "status": "available",
       "edition": "core",
       "docs_url": "https://vistasecurity.io/docs/features/inventory-and-lenses/"
+    },
+    {
+      "id": "identity_intake",
+      "group": "discover_inventory",
+      "name": "One identity for every sighting",
+      "summary": "Every discovery path identifies a device the same way, explains key and address changes, and lets you link or pin what it cannot tell.",
+      "status": "available",
+      "edition": "core",
+      "docs_url": "https://vistasecurity.io/docs/features/identity-evidence/"
     },
     {
       "id": "network_map",
