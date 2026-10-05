@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.4.0-rc.1] - 2026-10-05
+## [4.4.0] - 2026-10-05
 
 **Version 4.4.0 makes discovery and inventory trustworthy at the scale of a real estate.**
 Every way Vista learns about a device now decides *which asset this is* in one place, so
