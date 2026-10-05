@@ -1193,7 +1193,10 @@ func TestResolveIsTenantScoped(t *testing.T) {
 func TestHistoryCarriesProvenanceOnEveryPath(t *testing.T) {
 	e, repo := newEngine(t, identity.Config{})
 	res := mustResolve(t, e, obs(assetclass.KeyServer, id(identity.KindSerialNumber, "SN-1")))
-	mustResolve(t, e, obs(assetclass.KeyServer, id(identity.KindSerialNumber, "SN-1")))
+	// The second observation brings an identifier the asset lacks: a match that
+	// changed nothing writes no `updated` row at all, so only a changing match
+	// has a provenance to carry.
+	mustResolve(t, e, obs(assetclass.KeyServer, id(identity.KindSerialNumber, "SN-1"), id(identity.KindMACAddress, "aa:bb:cc:dd:ee:01")))
 
 	entries := repo.HistoryFor(res.Asset)
 	if len(entries) != 2 {

@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -274,7 +275,7 @@ func TestSSHProbeFallbackStopsAtTheIdentificationLine(t *testing.T) {
 	trailing := string(sshWrapPacket(sshBuildKexInitPayload()))
 	host, port := serveRawBanner(t, version+"\r\n"+trailing)
 
-	res, err := sshprobeBannerOnly(NewProber(3*time.Second), net.JoinHostPort(host, strconv.Itoa(port)), port)
+	res, err := sshprobeBannerOnly(context.Background(), NewProber(3*time.Second), nil, net.JoinHostPort(host, strconv.Itoa(port)), port)
 	if err != nil {
 		t.Fatalf("sshprobeBannerOnly: %v", err)
 	}

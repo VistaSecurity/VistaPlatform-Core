@@ -36,6 +36,24 @@ func TestIntegration_PostgresIdentityRepository_Contract(t *testing.T) {
 	})
 }
 
+// TestIntegration_PostgresIdentityRepository_Intake runs identity.Intake over
+// the SQL store: SegmentSnapshot must agree with ScopeForAddress row
+// for row, and segment posture must read as what the one-statement precedence
+// rule in segment_posture.go STORED — which only a real database can say,
+// because the precedence lives in SQL.
+//
+// Mutation check: swap the `operator` and `measured` WHEN branches of
+// postureUpdateSQL's effective-source CASE and the "operator=static must
+// outrank measured=dynamic" step fails.
+func TestIntegration_PostgresIdentityRepository_Intake(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+
+	identitytest.RunIntakeContract(t, func() identity.Repository {
+		return newContractRepo(t, admin)
+	})
+}
+
 // TestIntegration_PostgresIdentityRepository_SingletonGuard runs the engine's
 // singleton rule against real SQL.
 //
@@ -49,6 +67,32 @@ func TestIntegration_PostgresIdentityRepository_SingletonGuard(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, admin)
 
 	identitytest.RunSingletonGuardContract(t, func() identity.Repository {
+		return newContractRepo(t, admin)
+	})
+}
+
+// TestIntegration_PostgresIdentityRepository_PinnedAddress runs's
+// pinned-address rule against real SQL. Not redundant with the in-memory run:
+// the rule reads the owner's `address_assignment` back through LoadSummaries,
+// and the upsert decides whether a declaration ever sets it.
+func TestIntegration_PostgresIdentityRepository_PinnedAddress(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+
+	identitytest.RunPinnedAddressContract(t, func() identity.Repository {
+		return newContractRepo(t, admin)
+	})
+}
+
+// TestIntegration_PostgresIdentityRepository_ClaimedAddress runs's
+// claimed-address rule against real SQL: the move goes through the store's
+// ReassignIdentifier under the unique index, the pin through the upsert's
+// address_assignment rule, and the holder's status through LoadSummaries.
+func TestIntegration_PostgresIdentityRepository_ClaimedAddress(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+
+	identitytest.RunClaimedAddressContract(t, func() identity.Repository {
 		return newContractRepo(t, admin)
 	})
 }
@@ -554,12 +598,16 @@ func (c *contractRepo) CreateAsset(ctx context.Context, tenantID string, a ident
 	return c.out(ref), nil
 }
 
-func (c *contractRepo) AttachIdentifiers(ctx context.Context, asset identity.AssetRef, ids []identity.Identifier) error {
+func (c *contractRepo) AttachIdentifiers(ctx context.Context, asset identity.AssetRef, ids []identity.Identifier) (int, error) {
 	return c.inner.AttachIdentifiers(ctx, c.ref(asset), ids)
 }
 
-func (c *contractRepo) UpsertEndpoints(ctx context.Context, asset identity.AssetRef, eps []identity.EndpointObservation) error {
+func (c *contractRepo) UpsertEndpoints(ctx context.Context, asset identity.AssetRef, eps []identity.EndpointObservation) (int, error) {
 	return c.inner.UpsertEndpoints(ctx, c.ref(asset), eps)
+}
+
+func (c *contractRepo) HistoryHasChange(ctx context.Context, asset identity.AssetRef, action identity.HistoryAction, subset map[string]any) (bool, error) {
+	return c.inner.HistoryHasChange(ctx, c.ref(asset), action, subset)
 }
 
 func (c *contractRepo) Touch(ctx context.Context, asset identity.AssetRef, seenAt time.Time) error {
@@ -833,6 +881,56 @@ func (c *contractRepo) ScopeForAddress(ctx context.Context, tenantID string, add
 	return scope, dynamic, nil
 }
 
+// SegmentSnapshot maps the real snapshot back into the contract's logical
+// vocabulary — tenant name, scope names — the same way ScopeForAddress does.
+func (c *contractRepo) SegmentSnapshot(ctx context.Context, tenantID string) (identity.SegmentSnapshot, error) {
+	snap, err := c.inner.SegmentSnapshot(ctx, c.tenantID(tenantID))
+	if err != nil {
+		return identity.SegmentSnapshot{}, err
+	}
+	snap.TenantID = tenantID
+	for i := range snap.Segments {
+		if name, ok := c.segmentName(snap.Segments[i].ID); ok {
+			snap.Segments[i].ID = name
+		}
+	}
+	return snap, nil
+}
+
+// AddDomainSegment implements identitytest.DomainSegmentWriter with a real
+// `domain` row.
+func (c *contractRepo) AddDomainSegment(tenantID, pattern, scope string) error {
+	var id string
+	err := c.db.QueryRow(`
+		INSERT INTO public.network_segments
+			(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
+		VALUES ($1, $2, 'domain', $3, 'private', 'production', true, '{}'::jsonb)
+		RETURNING id::text`, c.tenantID(tenantID), scope, pattern).Scan(&id)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.segments[id] = scope
+	return nil
+}
+
+// StateSegmentPosture implements identitytest.SegmentPostureWriter through the
+// product's own posture writer, so the contract reads back what the deployed
+// precedence rule stored.
+func (c *contractRepo) StateSegmentPosture(tenantID, scope, source string, dynamic *bool) error {
+	id := c.segmentIDFor(scope)
+	tid := c.tenantID(tenantID)
+	ctx := context.Background()
+	var err error
+	if dynamic == nil {
+		_, err = pgrepo.ClearSegmentPosture(ctx, c.db, tid, id, pgrepo.PostureSource(source))
+	} else {
+		_, err = pgrepo.RecordSegmentPosture(ctx, c.db, tid, id, pgrepo.PostureSource(source), *dynamic, pgrepo.PostureEvidence{})
+	}
+	return err
+}
+
 // AddSegment implements identitytest.SegmentWriter: it writes a real
 // network_segments row, so the SQL ScopeForAddress is exercised against the
 // table it actually reads rather than a stub.
@@ -914,6 +1012,14 @@ func (c *contractRepo) ArchiveAsset(ctx context.Context, asset identity.AssetRef
 	return c.inner.ArchiveAsset(ctx, c.ref(asset))
 }
 
+func (c *contractRepo) RetireIdentifier(ctx context.Context, asset identity.AssetRef, id identity.Identifier) error {
+	return c.inner.RetireIdentifier(ctx, c.ref(asset), id)
+}
+
+func (c *contractRepo) DriftMaterial(ctx context.Context, asset identity.AssetRef) (identity.StoredDriftMaterial, error) {
+	return c.inner.DriftMaterial(ctx, c.ref(asset))
+}
+
 func (c *contractRepo) LastSeen(ref identity.AssetRef) time.Time {
 	return c.inner.LastSeen(c.ref(ref))
 }
@@ -969,7 +1075,7 @@ func TestIntegration_PostgresIdentityRepository_ZonedLinkLocalEndpoint(t *testin
 		{Address: "192.0.2.10", Port: 443, Transport: "tcp",
 			Source: identity.Source{Kind: identity.SourceMeasured, Ref: "host-inventory"}},
 	}
-	if err := repo.UpsertEndpoints(ctx, ref, eps); err != nil {
+	if _, err := repo.UpsertEndpoints(ctx, ref, eps); err != nil {
 		t.Fatalf("UpsertEndpoints with a zoned link-local address: %v\n"+
 			"A host's own socket table is where zoned addresses come from; rejecting the "+
 			"batch loses every endpoint on the host, not just this one.", err)
@@ -994,5 +1100,23 @@ func TestIntegration_PostgresIdentityRepository_ZonedLinkLocalEndpoint(t *testin
 	}
 	if total != 2 {
 		t.Errorf("endpoint count = %d, want 2 — the ordinary endpoint in the batch must survive", total)
+	}
+}
+
+// TestIntegration_SourceRankSQLMatchesGo holds the identifier upsert's SQL
+// rank ladder to identity.SourceRank for every source kind the column
+// accepts, evaluated by Postgres rather than compared as text: the upsert and
+// the in-memory store must order provenance identically, or the contract
+// passes one and not the other.
+func TestIntegration_SourceRankSQLMatchesGo(t *testing.T) {
+	db := testdb.Connect(t)
+	for _, k := range []identity.SourceKind{identity.SourceDeclared, identity.SourceMeasured, identity.SourceImported, identity.SourceInferred} {
+		var got int
+		if err := db.QueryRow(`SELECT `+pgrepo.SourceRankSQL("$1::text"), string(k)).Scan(&got); err != nil {
+			t.Fatalf("rank(%s): %v", k, err)
+		}
+		if want := identity.SourceRank(k); got != want {
+			t.Errorf("SQL rank(%s) = %d, Go = %d", k, got, want)
+		}
 	}
 }

@@ -262,10 +262,13 @@ func (e *Engine) resolveFloating(ctx context.Context, obs Observation, at time.T
 	// Only addresses the announcer ALONE owns: anything else stays where
 	// splitByOwner put it.
 	own := announcerOwnAddresses(ids, owners, announcer.ID)
+	ownAdded := 0
 	if len(own) > 0 {
-		if err := e.repo.AttachIdentifiers(ctx, announcer, own); err != nil {
+		n, err := e.repo.AttachIdentifiers(ctx, announcer, own)
+		if err != nil {
 			return Resolution{}, fmt.Errorf("identity: attaching announcer %s's own addresses: %w", announcer.ID, err)
 		}
+		ownAdded = n
 		unattached = withoutKeys(unattached, keySet(own))
 	}
 	if err := e.repo.Touch(ctx, announcer, at); err != nil {
@@ -282,7 +285,9 @@ func (e *Engine) resolveFloating(ctx context.Context, obs Observation, at time.T
 	if len(own) > 0 {
 		announcerChanges["identifiers"] = identifierKeys(own)
 	}
-	if err := e.history(ctx, announcer, obs, at, ActionUpdated, announcerChanges); err != nil {
+	// The same announcement repeated (a gratuitous ARP every few seconds) is
+	// one row, not one per packet; a newly attached address is a change.
+	if err := e.recordIfChanged(ctx, announcer, obs, at, ActionUpdated, announcerChanges, ownAdded > 0); err != nil {
 		return Resolution{}, err
 	}
 

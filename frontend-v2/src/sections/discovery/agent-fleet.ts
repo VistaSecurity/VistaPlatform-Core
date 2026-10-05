@@ -112,6 +112,29 @@ export function isPlatformManaged(row: { platform?: string | null; tags?: string
   return (row.tags ?? []).includes('system');
 }
 
+/** The capability a sensor reports when it can run scans on the current engine. */
+export const SCAN_ENGINE_CAPABILITY = 'scan_plan_v1';
+
+/**
+ * Does this tenant sensor need upgrading to run scans on the current engine?
+ *
+ * A sensor reports what its binary supports on every heartbeat
+ * (`reported_capabilities`). One without `scan_plan_v1` still runs automatic
+ * scans, identity checks and Active Scans, as the older protocols × ports job
+ * the platform falls back to for it — slower, and going away in a later
+ * release. Platform-managed sensors are the platform's to upgrade, and a sensor
+ * still waiting to enrol has reported nothing yet, so neither is flagged.
+ */
+export function needsScanEngineUpgrade(row: {
+  platform?: string | null;
+  tags?: string[] | null;
+  status?: string | null;
+  reported_capabilities?: string[] | null;
+}): boolean {
+  if (isPlatformManaged(row) || row.status === 'pending') return false;
+  return !(row.reported_capabilities ?? []).includes(SCAN_ENGINE_CAPABILITY);
+}
+
 /** The subset of a `sensors` row this module's partition needs. */
 export interface SensorFleetRow {
   platform?: string | null;

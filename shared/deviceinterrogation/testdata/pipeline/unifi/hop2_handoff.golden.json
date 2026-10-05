@@ -1,6 +1,6 @@
 {
   "vendor": "unifi",
-  "input_sha256": "329f462e581b659487ffe9162a2295bf3a85e2be206a195a30d1b059c3b1cb11",
+  "input_sha256": "24070f8dacff70629061233cdba5b5fcda8bcd31bb3da53a05d7ffdbbdd7efbd",
   "imports": [
     {
       "asset_status": "pending_approval",
@@ -39,7 +39,7 @@
             "pqc_kex_detected": false,
             "profile_name": "customized",
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
@@ -72,10 +72,13 @@
             "network_type": "public",
             "pqc_kex_detected": false,
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
+            "unmeasured_components": [
+              "protocol_version"
+            ],
             "version": ""
           },
           "source_sensor_id": "{{SENSOR_ID}}"
@@ -104,10 +107,13 @@
             "network_type": "public",
             "pqc_kex_detected": false,
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
+            "unmeasured_components": [
+              "protocol_version"
+            ],
             "version": ""
           },
           "source_sensor_id": "{{SENSOR_ID}}"
@@ -163,7 +169,7 @@
             "network_type": "private",
             "pqc_kex_detected": true,
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
@@ -207,7 +213,7 @@
             "network_type": "public",
             "pqc_kex_detected": false,
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
@@ -324,6 +330,18 @@
           "value": "{{APPLIANCE_IP}}",
           "scope": "tenant",
           "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.1",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.1",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
         }
       ]
     },

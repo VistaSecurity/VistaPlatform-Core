@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
 
@@ -24,6 +25,8 @@ type networkSegmentService interface {
 	BulkCreate(tenantID uuid.UUID, inputs []models.NetworkSegmentInput) *models.BulkImportResult
 	Update(tenantID, id uuid.UUID, input models.NetworkSegmentInput) (*models.NetworkSegment, error)
 	Delete(tenantID, id uuid.UUID) error
+	Claim(tenantID, id, userID uuid.UUID, fallbackName string) (*models.NetworkSegment, bool, error)
+	RevokeClaim(tenantID, id uuid.UUID) (*models.NetworkSegment, map[string]interface{}, error)
 	ManageAutoApprovalRules(tenantID, userID uuid.UUID) error
 	GetSegmentForIP(tenantID uuid.UUID, ipAddress *string, hostname *string) (*models.NetworkSegment, error)
 	ClassifyAsset(tenantID uuid.UUID, ipAddress *string, hostname *string, fqdns []string) (string, error)
@@ -91,6 +94,10 @@ func (h *NetworkSegmentHandler) CreateNetworkSegment(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, services.ErrSegmentTooBroad) || errors.Is(err, services.ErrDHCPNotApplicable) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, services.ErrSegmentExists) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
 		if err.Error() == "location not found" {
@@ -293,6 +300,115 @@ func (h *NetworkSegmentHandler) DeleteNetworkSegment(c *gin.Context) {
 		)
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// ClaimNetworkSegment handles POST /inventory-service/network-segments/:id/claim.
+//
+// A person states that a PUBLIC range learned from an interrogated device is
+// the tenant's (owner decision D8). From then on it is in scope for a
+// scan a person asks for and sensors treat it as owned — exactly as if they had
+// declared it — still bound by the breadth cap and by sensitive /
+// active-probes-disabled exclusions. Idempotent: a second claim keeps the first
+// one's who and when and writes no second audit entry.
+func (h *NetworkSegmentHandler) ClaimNetworkSegment(c *gin.Context) {
+	tenantID, ok := getTenantID(c)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid segment ID"})
+		return
+	}
+	userID := getOptionalUserID(c)
+	if userID == uuid.Nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "A claim is a person's statement and needs a signed-in user"})
+		return
+	}
+	email, _ := c.Get("email")
+	fallbackName, _ := email.(string)
+	seg, changed, err := h.segmentService.Claim(tenantID, id, userID, fallbackName)
+	if h.claimError(c, err) {
+		return
+	}
+	if seg == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Network segment not found"})
+		return
+	}
+	if changed {
+		auditSegmentClaim(c, audithelpers.EventTypeNetworkSegmentClaimed, seg, seg.Metadata[dispatchguard.SegmentClaimKey])
+	}
+	c.JSON(http.StatusOK, seg)
+}
+
+// RevokeNetworkSegmentClaim handles DELETE /inventory-service/network-segments/:id/claim.
+// The segment goes back to being a learned public range: identity scoping
+// only, never scan scope. Idempotent; only an actual withdrawal is audited.
+func (h *NetworkSegmentHandler) RevokeNetworkSegmentClaim(c *gin.Context) {
+	tenantID, ok := getTenantID(c)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid segment ID"})
+		return
+	}
+	seg, revoked, err := h.segmentService.RevokeClaim(tenantID, id)
+	if h.claimError(c, err) {
+		return
+	}
+	if seg == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Network segment not found"})
+		return
+	}
+	if revoked != nil {
+		auditSegmentClaim(c, audithelpers.EventTypeNetworkSegmentClaimRevoked, seg, revoked)
+	}
+	c.JSON(http.StatusOK, seg)
+}
+
+// claimError writes the response for a failed claim or revocation and reports
+// whether it did. A segment the action does not apply to is a 409 — the
+// request is well-formed, the segment's state is what refuses it — and a
+// range too broad to be anybody's is the same 400 a too-broad declaration gets.
+func (h *NetworkSegmentHandler) claimError(c *gin.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, services.ErrSegmentTooBroad):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, services.ErrSegmentNotClaimable):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update the network segment's claim"})
+	}
+	return true
+}
+
+// auditSegmentClaim records who claimed (or withdrew the claim on) which
+// range, learned from which device. The actor, tenant and request come from
+// the context via logAuditActivity; the claim itself is the who/when the
+// segment row now carries (or carried, for a revocation).
+func auditSegmentClaim(c *gin.Context, eventType string, seg *models.NetworkSegment, claim interface{}) {
+	resourceType := "network_segment"
+	action := "claim"
+	summary := "Learned network range claimed as the organization's own: " + seg.Value
+	if eventType == audithelpers.EventTypeNetworkSegmentClaimRevoked {
+		action = "revoke_claim"
+		summary = "Claim withdrawn on learned network range: " + seg.Value
+	}
+	logAuditActivity(c, eventType, audithelpers.EventCategoryAsset, action, &resourceType, &seg.ID, nil, nil, nil,
+		map[string]interface{}{
+			"resource_name":      seg.Name,
+			"change_summary":     summary,
+			"cidr":               seg.Value,
+			"network_type":       seg.NetworkType,
+			"source":             seg.Metadata["source"],
+			"source_device_type": seg.Metadata["source_device_type"],
+			"source_asset_id":    seg.Metadata["source_asset_id"],
+			"claim":              claim,
+		})
 }
 
 // ClassifyAsset handles POST /inventory-service/network-segments/classify-asset

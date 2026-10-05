@@ -1,6 +1,6 @@
 {
   "vendor": "cisco",
-  "input_sha256": "6ad0e06a9c16ff361f44712a67a1ef49ceba565d8a2bbe407d0e30edce9066e3",
+  "input_sha256": "633a71bae9157b511de6e3de2ddd08a3c68facbcbb113a29d2fea0844dc10409",
   "inventory": {
     "assets": [
       {
@@ -118,7 +118,9 @@
         "key_size": null,
         "risk_score": 78,
         "risk_level": "High",
-        "risk_factors": [],
+        "risk_factors": [
+          "Outdated SSH version"
+        ],
         "algorithm_links": {
           "protocol_version": [
             "SSH-1.99"

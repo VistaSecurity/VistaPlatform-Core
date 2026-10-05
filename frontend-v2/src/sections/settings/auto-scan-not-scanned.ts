@@ -79,7 +79,7 @@ const REASONS: Record<string, ReasonCopy> = {
   imported_without_scan_consent: {
     label: 'Imported, not cleared for scanning',
     detail:
-      'Known only from a connected system of record, and that connection does not allow its assets to be actively scanned. Turn the setting on in the connection, or scan them yourself in Active Scan.',
+      'Known only from a connected system of record, that connection does not allow its assets to be actively scanned, and the address is not in a network segment you registered. Turn the setting on in the connection, register the range as a network segment, or scan them yourself from Inventory → All assets.',
   },
 };
 

@@ -1,0 +1,159 @@
+{
+  "deviceinterrogation.CryptoAsset": {
+    "AssetType": "string=",
+    "CertValidationError": "string=x509: cannot validate certificate for 192.0.2.10 because it doesn't contain any IP SANs",
+    "CertValidationStatus": "string=hostname_mismatch",
+    "Certificate": {
+      "*certificates.CertificateInfo": {
+        "certificates.CertificateInfo": {
+          "CertificatePEM": "string={{rsa_leaf.pem}}",
+          "ChainOrder": "int=0",
+          "ExtendedKeyUsage": {
+            "[]string": [
+              "string=ServerAuth"
+            ]
+          },
+          "FingerprintSHA1": "string={{rsa_leaf.sha1}}",
+          "FingerprintSHA256": "string={{rsa_leaf.sha256}}",
+          "IsCA": "bool=false",
+          "Issuer": "string=CN=Example Test RSA CA,O=Example Test",
+          "IssuerDN": "string=CN=Example Test RSA CA,O=Example Test",
+          "KeyAlgorithm": "string=RSA",
+          "KeySize": "int=2048",
+          "KeyUsage": {
+            "[]string": [
+              "string=DigitalSignature",
+              "string=KeyEncipherment"
+            ]
+          },
+          "NotAfter": "time.Time=2125-01-01T00:00:00Z",
+          "NotBefore": "time.Time=2020-01-01T00:00:00Z",
+          "Serial": "string=",
+          "SerialNumber": "string=1002",
+          "Signature": "string=",
+          "SignatureAlg": "string=SHA256-RSA",
+          "Subject": "string=CN=device.example.test,O=Example Test",
+          "SubjectAlternativeNames": {
+            "[]string": [
+              "string=device.example.test"
+            ]
+          },
+          "SubjectDN": "string=CN=device.example.test,O=Example Test",
+          "ValidFrom": "time.Time=0001-01-01T00:00:00Z",
+          "ValidTo": "time.Time=0001-01-01T00:00:00Z"
+        }
+      }
+    },
+    "Certificates": {
+      "[]certificates.CertificateInfo": [
+        {
+          "certificates.CertificateInfo": {
+            "CertificatePEM": "string={{rsa_leaf.pem}}",
+            "ChainOrder": "int=0",
+            "ExtendedKeyUsage": {
+              "[]string": [
+                "string=ServerAuth"
+              ]
+            },
+            "FingerprintSHA1": "string={{rsa_leaf.sha1}}",
+            "FingerprintSHA256": "string={{rsa_leaf.sha256}}",
+            "IsCA": "bool=false",
+            "Issuer": "string=CN=Example Test RSA CA,O=Example Test",
+            "IssuerDN": "string=CN=Example Test RSA CA,O=Example Test",
+            "KeyAlgorithm": "string=RSA",
+            "KeySize": "int=2048",
+            "KeyUsage": {
+              "[]string": [
+                "string=DigitalSignature",
+                "string=KeyEncipherment"
+              ]
+            },
+            "NotAfter": "time.Time=2125-01-01T00:00:00Z",
+            "NotBefore": "time.Time=2020-01-01T00:00:00Z",
+            "Serial": "string=",
+            "SerialNumber": "string=1002",
+            "Signature": "string=",
+            "SignatureAlg": "string=SHA256-RSA",
+            "Subject": "string=CN=device.example.test,O=Example Test",
+            "SubjectAlternativeNames": {
+              "[]string": [
+                "string=device.example.test"
+              ]
+            },
+            "SubjectDN": "string=CN=device.example.test,O=Example Test",
+            "ValidFrom": "time.Time=0001-01-01T00:00:00Z",
+            "ValidTo": "time.Time=0001-01-01T00:00:00Z"
+          }
+        },
+        {
+          "certificates.CertificateInfo": {
+            "CertificatePEM": "string={{rsa_ca.pem}}",
+            "ChainOrder": "int=1",
+            "ExtendedKeyUsage": "[]string=nil",
+            "FingerprintSHA1": "string={{rsa_ca.sha1}}",
+            "FingerprintSHA256": "string={{rsa_ca.sha256}}",
+            "IsCA": "bool=true",
+            "Issuer": "string=CN=Example Test RSA CA,O=Example Test",
+            "IssuerDN": "string=CN=Example Test RSA CA,O=Example Test",
+            "KeyAlgorithm": "string=RSA",
+            "KeySize": "int=2048",
+            "KeyUsage": {
+              "[]string": [
+                "string=CertSign",
+                "string=CRLSign"
+              ]
+            },
+            "NotAfter": "time.Time=2125-01-01T00:00:00Z",
+            "NotBefore": "time.Time=2020-01-01T00:00:00Z",
+            "Serial": "string=",
+            "SerialNumber": "string=1001",
+            "Signature": "string=",
+            "SignatureAlg": "string=SHA256-RSA",
+            "Subject": "string=CN=Example Test RSA CA,O=Example Test",
+            "SubjectAlternativeNames": {
+              "[]string": []
+            },
+            "SubjectDN": "string=CN=Example Test RSA CA,O=Example Test",
+            "ValidFrom": "time.Time=0001-01-01T00:00:00Z",
+            "ValidTo": "time.Time=0001-01-01T00:00:00Z"
+          }
+        }
+      ]
+    },
+    "CipherSuite": {
+      "*string": "string=TLS_AES_128_GCM_SHA256"
+    },
+    "HashAlgorithm": "*string=nil",
+    "Hostname": "string=192.0.2.10",
+    "IPAddress": "string=",
+    "KeyExchangeAlg": {
+      "*string": "string=X25519"
+    },
+    "KeySize": {
+      "*int": "int=2048"
+    },
+    "Metadata": {
+      "map[string]interface {}": {
+        "key_exchange_algorithm": "string=X25519",
+        "key_exchange_group_raw": "uint16=29",
+        "key_exchange_key_size": "int=256",
+        "negotiated_protocol": "string=",
+        "tls_supports_classical_kex": "bool=true",
+        "tls_supports_pqc_hybrid_kex": "bool=false"
+      }
+    },
+    "Port": "int=443",
+    "Protocol": "string=TLS",
+    "ProtocolVersion": {
+      "*string": "string=TLS 1.3"
+    },
+    "SSHInfo": "*deviceinterrogation.SSHInfo=nil",
+    "ServiceHints": "*deviceinterrogation.ServiceHints=nil",
+    "SupportedCiphers": "[]string=nil",
+    "TLSVersions": {
+      "[]string": [
+        "string=TLS 1.3"
+      ]
+    }
+  }
+}

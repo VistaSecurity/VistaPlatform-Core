@@ -9,18 +9,41 @@
 //   422 external_targets_unconfirmed → ask: "N targets are outside…" / Scan anyway
 //   403 external_targets_disabled    → the operator switched it off; explain
 //   400 targets_refused              → list each target and why it can never be scanned
+// 422 scan_target_too_large → the scanner cannot fully expand a target; show the
+//                                      server's sentence, which names the target, its count and the limit
+//   422 scan_budget_exceeded         → the plan's addresses × ports is over the installation's budget
+//the server's sentence plus the biggest target
+//   422 scan_plan_unavailable        → this deployment does not run depth-based scans (switched off,
+//                                      or an older platform); a calm notice, not the person's mistake
+//   409 sensor_scan_plan_unsupported → the chosen tenant sensor's software cannot run a scan by depth
+// ( WP2b); the server's sentence, and the platform as the way out
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 
 export type ExternalTarget = inventoryComponents['schemas']['DiscoveryExternalTarget'];
 export type RefusedTarget = inventoryComponents['schemas']['DiscoveryRefusedTarget'];
+export type OversizeTarget = inventoryComponents['schemas']['DiscoveryOversizeTarget'];
+export type BudgetLargestTarget = inventoryComponents['schemas']['DiscoveryBudgetLargestTarget'];
 // Loosely typed on purpose: a failed response may be any 4xx/5xx body, not
 // only a DiscoveryTargetVerdictError.
-type VerdictBody = { error?: unknown; details?: unknown; external_targets?: ExternalTarget[]; refused_targets?: RefusedTarget[] };
+type VerdictBody = {
+  error?: unknown;
+  details?: unknown;
+  external_targets?: ExternalTarget[];
+  refused_targets?: RefusedTarget[];
+  oversize_targets?: OversizeTarget[];
+  largest_target?: BudgetLargestTarget;
+};
 
 export type TargetVerdict =
   | { kind: 'unconfirmed'; targets: ExternalTarget[]; message: string }
   | { kind: 'disabled'; targets: ExternalTarget[]; message: string }
   | { kind: 'refused'; refused: RefusedTarget[]; message: string }
+  // `oversize` is empty when only the job's total is over the limit.
+  | { kind: 'too_large'; oversize: OversizeTarget[]; message: string }
+  // `largest` is absent when the server did not name one.
+  | { kind: 'budget'; largest?: BudgetLargestTarget; message: string }
+  | { kind: 'plan_unavailable'; message: string }
+  | { kind: 'sensor_unsupported'; message: string }
   | { kind: 'error'; message: string };
 
 /** Classify a failed create-job response. */
@@ -36,6 +59,32 @@ export function targetVerdict(status: number, body: unknown): TargetVerdict {
   if (b.error === 'targets_refused' && Array.isArray(b.refused_targets)) {
     return { kind: 'refused', refused: b.refused_targets, message: details };
   }
+  if (b.error === 'scan_target_too_large') {
+    return {
+      kind: 'too_large',
+      oversize: Array.isArray(b.oversize_targets) ? b.oversize_targets : [],
+      message: details || 'A scan target names more addresses than one scan can cover. Split it into smaller blocks.',
+    };
+  }
+  if (b.error === 'scan_budget_exceeded') {
+    return {
+      kind: 'budget',
+      largest: b.largest_target && typeof b.largest_target.target === 'string' ? b.largest_target : undefined,
+      message: details || 'This scan is larger than one scan may be. Choose a lower depth or split the targets across scans.',
+    };
+  }
+  // Not the person's input: the deployment cannot run a depth-based scan yet.
+  // The server's own sentence names the old fields, which nobody in the
+  // dialog can act on, so the dialog says it in its own words.
+  if (b.error === 'scan_plan_unavailable') {
+    return { kind: 'plan_unavailable', message: PLAN_UNAVAILABLE_EXPLANATION };
+  }
+  if (b.error === 'sensor_scan_plan_unsupported') {
+    return {
+      kind: 'sensor_unsupported',
+      message: details || "This sensor's software does not support scan depth — upgrade it, or run the scan from the platform; nothing was scanned.",
+    };
+  }
   const fallback = typeof b.error === 'string' && b.error !== 'validation_error' ? b.error : '';
   return { kind: 'error', message: details || fallback || `Failed to start discovery (${status})` };
 }
@@ -50,6 +99,10 @@ export function describeExternal(t: ExternalTarget): string {
   const addrs = (t.addresses ?? []).filter((a) => a && a !== t.target);
   return addrs.length ? `${t.target} → ${addrs.join(', ')}` : t.target;
 }
+
+export const PLAN_UNAVAILABLE_EXPLANATION =
+  'Scans by depth are not available on this installation right now, so nothing was started. ' +
+  'You can still scan known assets from Inventory → All assets, and your platform operator can tell you more.';
 
 export const DISABLED_EXPLANATION =
   'Your platform operator has turned off scanning targets outside your registered networks. ' +

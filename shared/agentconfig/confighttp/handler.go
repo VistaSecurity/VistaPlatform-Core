@@ -72,6 +72,10 @@ type Setting struct {
 	Min         int64              `json:"min,omitempty"`
 	Max         int64              `json:"max,omitempty"`
 	Allowed     []string           `json:"allowed,omitempty"`
+	// BuiltInPorts, on a port-list setting, names the ports the device
+	// already watches, keyed by port number, so the console can say "already
+	// monitored as HTTPS" from the platform's table rather than its own.
+	BuiltInPorts map[int]string `json:"built_in_ports,omitempty"`
 }
 
 // Status is the convergence answer.
@@ -92,6 +96,7 @@ func Describe(rs []agentconfig.Resolved) []Setting {
 			Kind: r.Field.Kind, Apply: r.Field.Apply,
 			Label: r.Field.Label, Description: r.Field.Description, Confirm: r.Field.Confirm,
 			Min: r.Field.Min, Max: r.Field.Max, Allowed: r.Field.Allowed,
+			BuiltInPorts: r.Field.BuiltInPorts,
 		})
 	}
 	return out

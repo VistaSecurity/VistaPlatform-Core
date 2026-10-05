@@ -136,6 +136,10 @@ type configSubject struct {
 
 	pqcVulnerable bool
 	pqcCodes      []string
+
+	// versionUnmeasured: no protocol version, and the producer said it did not
+	// measure one (raw_data.unmeasured_components, W1.2).
+	versionUnmeasured bool
 }
 
 // certSubject is one certificate and everything judged about it.
@@ -474,7 +478,9 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
              COALESCE((SELECT jsonb_build_object('score',f.score,'evidence',f.evidence)::text FROM findings f
               WHERE f.tenant_id=ci.tenant_id AND f.producer='crypto' AND f.kind='weak_configuration'
                AND f.subject_type='crypto_configuration' AND f.subject_id=ci.id AND f.detection_state='ACTIVE'
-              ORDER BY f.last_seen DESC,f.id LIMIT 1),'null')
+              ORDER BY f.last_seen DESC,f.id LIMIT 1),'null'),
+			       (ci.protocol_version IS NULL
+			        AND COALESCE(ci.raw_data->'unmeasured_components', '[]'::jsonb) ? 'protocol_version')
 			  FROM cfg
 			  JOIN crypto_implementations ci ON ci.id = cfg.id
 			  LEFT JOIN cat ON cat.impl_id = cfg.id
@@ -499,7 +505,7 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 			if err := rows.Scan(&c.id, &c.assetID, &c.protocol, &c.version, &c.suite,
 				&c.keyAlg, &c.keyBits, &c.hashAlg, &c.sigAlg, &c.symmetric,
 				&c.storedRisk, &c.catalogueRisk, &c.linked, &components,
-				&c.pqcVulnerable, &codes, &addr, &port, &previous); err != nil {
+				&c.pqcVulnerable, &codes, &addr, &port, &previous, &c.versionUnmeasured); err != nil {
 				return fmt.Errorf("scan crypto configuration: %w", err)
 			}
 			c.components = []byte(components)

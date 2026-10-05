@@ -246,7 +246,7 @@ func (s *JobQueueService) validateRefreshClaimTx(ctx context.Context, tx *sql.Tx
 	}
 	executor, _ := job.Parameters["identity_refresh_executor"].(string)
 	if executor == "platform" {
-		if job.AgentID != nil || device.Metadata["identity_enrichment_executor"] != "platform" {
+		if job.AgentID != nil || !platformReinterrogationAllowed(device.Metadata) {
 			return fmt.Errorf("%w: configured executor changed", errSourceRefreshDenied)
 		}
 	} else if job.AgentID == nil || executor != job.AgentID.String() {

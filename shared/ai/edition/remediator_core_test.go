@@ -30,7 +30,7 @@ func TestNewRemediator_IsTheNullSeamInCore(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			t.Setenv("AI_PROVIDER", kind)
 
-			rem, desc := NewRemediator(nil)
+			rem, desc := NewRemediator(nil, nil)
 			if _, isNull := rem.(seams.NullRemediator); !isNull {
 				t.Fatalf("Core resolved AI_PROVIDER=%s to %T, want seams.NullRemediator", kind, rem)
 			}

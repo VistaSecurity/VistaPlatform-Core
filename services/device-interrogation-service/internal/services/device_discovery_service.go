@@ -223,26 +223,35 @@ func (s *DeviceDiscoveryService) identify(ctx context.Context, device di.DeviceI
 //     Cisco collector reaches a device by its record's IP or hostname, not by
 //     its management URL.
 func (d *DiscoveredDeviceInfo) ApplyTo(req *models.CreateDeviceRequest, sshManaged bool) {
-	set := func(dst **string, v string) {
+	set := func(dst **string, v string) bool {
 		if *dst == nil && strings.TrimSpace(v) != "" {
 			value := strings.TrimSpace(v)
 			*dst = &value
+			return true
 		}
+		return false
 	}
 	set(&req.Vendor, d.Vendor)
 	set(&req.Model, d.Model)
-	set(&req.SerialNumber, d.SerialNumber)
+	// Which identity fields the probe READ (rather than the operator typed or
+	// dialled) is recorded, so the sighting stores them measured.
+	if set(&req.SerialNumber, d.SerialNumber) {
+		req.ProbeRead.SerialNumber = *req.SerialNumber
+	}
 	set(&req.FirmwareVersion, d.FirmwareVersion)
 
 	ip := d.IPAddress
 	if net.ParseIP(ip) == nil {
 		ip = ""
 	}
+	readIP := ip != ""
 	targetIsIP := net.ParseIP(d.TargetHost) != nil
 	if ip == "" && targetIsIP {
 		ip = d.TargetHost
 	}
-	set(&req.IPAddress, ip)
+	if set(&req.IPAddress, ip) && readIP {
+		req.ProbeRead.IPAddress = *req.IPAddress
+	}
 
 	if req.Metadata == nil {
 		req.Metadata = map[string]interface{}{}
@@ -251,7 +260,9 @@ func (d *DiscoveredDeviceInfo) ApplyTo(req *models.CreateDeviceRequest, sshManag
 	case sshManaged && !targetIsIP && d.TargetHost != "":
 		set(&req.Hostname, d.TargetHost)
 	case d.Hostname != "" && !strings.ContainsFunc(d.Hostname, unicode.IsSpace):
-		set(&req.Hostname, d.Hostname)
+		if set(&req.Hostname, d.Hostname) {
+			req.ProbeRead.Hostname = *req.Hostname
+		}
 	}
 	if d.Hostname != "" && (req.Hostname == nil || *req.Hostname != d.Hostname) {
 		// The device's own name, kept where a display name can live when it
@@ -260,6 +271,13 @@ func (d *DiscoveredDeviceInfo) ApplyTo(req *models.CreateDeviceRequest, sshManag
 	}
 	if d.MacAddress != "" {
 		req.Metadata["mac_address"] = d.MacAddress
+		// And as evidence: the probe read it from the device, so it is an
+		// identifier of the device rather than a note about it.
+		req.ProbeMACAddress = strings.TrimSpace(d.MacAddress)
+	}
+	if fp := strings.TrimSpace(d.SSHHostKeyFingerprint); fp != "" {
+		req.ProbeSSHHostKeyFingerprint = fp
+		req.ProbeSSHHostKeyType = strings.TrimSpace(d.SSHHostKeyType)
 	}
 	if sshManaged && d.TargetPort != 0 && d.TargetPort != 22 {
 		// The Cisco collector reads a non-default SSH port from here.

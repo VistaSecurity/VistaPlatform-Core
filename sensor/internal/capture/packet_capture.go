@@ -69,7 +69,8 @@ type PacketCapture struct {
 	enipAssembler      *tcpassembly.Assembler
 	hartipFactory      *HARTIPStreamFactory
 	hartipAssembler    *tcpassembly.Assembler
-	starttlsPorts      []int // resolved list (defaults applied) for routing + factory parity
+	starttlsPorts      []int         // resolved list (defaults applied) for routing + factory parity
+	extraTLSPorts      extraTLSPorts // capture.extraPortsToMonitor, classified as TLS (never overrides a built-in port)
 	// hostObs decodes ARP/DHCP/mDNS/NetBIOS/DNS/LLDP/CDP into host
 	// observations on its own goroutine. nil when the feature is off, which
 	// is the only condition the capture path checks — see Offer.
@@ -95,7 +96,9 @@ func NewPacketCapture(cfg *config.Config) *PacketCapture {
 		starttlsPorts = []int{25, 143, 110, 5432, 3306, 21, 5222, 389}
 	}
 
-	streamFactory := NewTLSStreamFactory(discoveries, cfg.SensorID, connCache, cfg.Capture.EnableSTARTTLS, starttlsPorts)
+	extraPorts := newExtraTLSPorts(cfg.Capture.ExtraPortsToMonitor)
+
+	streamFactory := NewTLSStreamFactory(discoveries, cfg.SensorID, connCache, cfg.Capture.EnableSTARTTLS, starttlsPorts, extraPorts)
 	pool := tcpassembly.NewStreamPool(streamFactory)
 	assembler := tcpassembly.NewAssembler(pool)
 	assembler.MaxBufferedPagesPerConnection = 16
@@ -230,6 +233,7 @@ func NewPacketCapture(cfg *config.Config) *PacketCapture {
 		hartipFactory:      hartipFactory,
 		hartipAssembler:    hartipAssembler,
 		starttlsPorts:      starttlsPorts,
+		extraTLSPorts:      extraPorts,
 		hostObs:            hostObs,
 	}
 }
@@ -526,6 +530,9 @@ func buildBPFFilter(cfg *config.Config) string {
 	filterParts = append(filterParts, udpParts...)
 	filterParts = append(filterParts, tcpExtra...)
 	for _, p := range cfg.Capture.ExtraPortsToMonitor {
+		if !validCapturePort(p) {
+			continue // reported by newExtraTLSPorts; a bad term would fail the whole filter compile
+		}
 		filterParts = append(filterParts, fmt.Sprintf("tcp port %d", p))
 	}
 	// STARTTLS ports for plaintext protocols that may upgrade to TLS
@@ -658,6 +665,21 @@ func (pc *PacketCapture) runWorker() {
 	}
 }
 
+// dedupVPNDiscovery keeps one discovery per VPN endpoint per dedup TTL. The
+// WireGuard decoder fires on every transport-data datagram, and the sensor
+// buffers at most retryCapLimit discoveries before evicting the oldest, so an
+// undeduplicated busy tunnel would push real findings out. The check runs
+// after a successful decode so unrelated bytes on the port use up nothing.
+func (pc *PacketCapture) dedupVPNDiscovery(d *models.CryptoDiscovery, protocol string) *models.CryptoDiscovery {
+	if d == nil {
+		return nil
+	}
+	if shouldReport, _ := pc.cache.ShouldReport(d.DestIP, d.Port, protocol); !shouldReport {
+		return nil
+	}
+	return d
+}
+
 // analyzePacket analyzes a captured packet for crypto information
 func (pc *PacketCapture) analyzePacket(packet gopacket.Packet, iface string) {
 	// Host observation runs FIRST and unconditionally, because ARP, LLDP and
@@ -689,12 +711,42 @@ func (pc *PacketCapture) analyzePacket(packet gopacket.Packet, iface string) {
 	// Analyze based on port
 	port := getPortNumber(dstPort)
 	protocol := getProtocolFromPort(port, pc.config.Capture.EnableSTARTTLS, pc.starttlsPorts)
+	if protocol == "" && packet.Layer(layers.LayerTypeTCP) != nil {
+		// Operator-declared non-standard TLS ports (TCP only; the UDP
+		// paths have their own tables).
+		protocol = pc.tcpProtocolForPort(port)
+	}
+	if protocol == "" && packet.Layer(layers.LayerTypeTCP) != nil {
+		// A server -> client TLS segment: its destination is the client's
+		// ephemeral port, so only its SOURCE port names the service. Those
+		// segments carry the ServerHello — the negotiated version and cipher
+		// suite, and the TLS <= 1.2 certificate chain — which no client ->
+		// server packet ever does; dropping them here left every passively
+		// captured TLS connection with a ClientHello and nothing else. The TLS
+		// stream factory orients the flow itself and joins both directions.
+		//
+		// TLS only: the other TCP assemblers were written for (and are tested
+		// against) client -> server bytes and are not handed replies.
+		if p := pc.tcpProtocolForPort(getPortNumber(srcPort)); p == "TLS" {
+			protocol = p
+		}
+	}
 
-	if protocol == "" {
+	// A datagram is classified by the UDP table too: 51820 (WireGuard) and
+	// 1194 (OpenVPN) have no entry in the TCP-oriented getProtocolFromPort, so
+	// returning on its empty result here dropped them before the UDP branch
+	// below ever ran. Destination port only, as with TCP: decoders report the
+	// destination as the service, so a reply (service port as source) would be
+	// recorded against the client's ephemeral port.
+	var udpDstProto string
+	if udp, ok := packet.Layer(layers.LayerTypeUDP).(*layers.UDP); ok {
+		udpDstProto = getUDPProtocolFromPort(int(udp.DstPort))
+	}
+	if protocol == "" && udpDstProto == "" {
 		return
 	}
 
-	// Handle UDP packets (QUIC, IKE/IPsec)
+	// Handle UDP packets (QUIC, IKE/IPsec, VPN)
 	if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
 		if udp, ok := udpLayer.(*layers.UDP); ok {
 			udpSrcPort := int(udp.SrcPort)
@@ -723,9 +775,13 @@ func (pc *PacketCapture) analyzePacket(packet gopacket.Packet, iface string) {
 						}
 						discovery = parseIKEHeader(ikePkt, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface)
 					case "WireGuard":
-						discovery = parseWireGuardPacket(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface)
+						if pc.config.Capture.EnableWireGuard {
+							discovery = pc.dedupVPNDiscovery(parseWireGuardPacket(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface), udpProto)
+						}
 					case "OpenVPN":
-						discovery = parseOpenVPNPacket(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface)
+						if pc.config.Capture.EnableOpenVPN {
+							discovery = pc.dedupVPNDiscovery(parseOpenVPNPacket(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface), udpProto)
+						}
 					case "Kerberos":
 						discovery = parseKerberosPacket(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface)
 					case "DNP3":
@@ -1338,6 +1394,16 @@ func tlsCipherName(suite uint16) string {
 }
 
 // Helper functions
+// tcpProtocolForPort is the TCP port -> protocol decision: the built-in table,
+// then operator-declared extra TLS ports. Same order as
+// TLSStreamFactory.classifyPort, so dispatch and the stream agree.
+func (pc *PacketCapture) tcpProtocolForPort(port int) string {
+	if p := getProtocolFromPort(port, pc.config.Capture.EnableSTARTTLS, pc.starttlsPorts); p != "" {
+		return p
+	}
+	return pc.extraTLSPorts.protocol(port, pc.starttlsPorts)
+}
+
 func getPortNumber(portStr string) int {
 	n, err := strconv.Atoi(portStr)
 	if err != nil {

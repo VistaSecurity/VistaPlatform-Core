@@ -47,34 +47,23 @@ escalate at **30**, **90** and **180** days.
 Each row shows the asset, its class, its network segment, its status and how many
 days it has been quiet. Click a row to open the asset's page.
 
-**On each row**, at the right:
+**Tick rows** — or tick the header to select the page, then **Select all *N*
+matching** to select every stale asset — and use the bar above the table:
+**Scan** to check whether they are still alive, **Archive**, **Restore**,
+**Delete**, **Edit** or **Export**. See
+[Working with many assets at once](./inventory-and-lenses.md#working-with-many-assets-at-once).
 
-- **Rescan** — queue a revalidation job for that one asset.
-- **Archive** — move it to archived.
+Actions that change assets need the **update assets** permission (**Delete**
+needs **delete assets**); without it they are not shown.
 
-**Above the table**, a bar that acts on every stale asset on the page you are
-looking at:
+### Scanning stale assets
 
-- **Revalidate all** — queue revalidation for all of them.
-- **Archive all** — archive all of them, after a confirmation that spells out how
-  many and what archiving does.
+**Scan** re-probes the selected assets with an ordinary active scan. If
+something answers, `last seen` moves forward and the asset drops out of the lens
+on the next pass. If nothing answers, the asset stays where it is — which is
+itself an answer, and the second one you get for free.
 
-There is no row-selection checkbox. The bar acts on the current page — up to 50
-assets — which is why it tells you how many that is before you click. To work
-through a long list, act on a page and move to the next one.
-
-Both bars require the **update assets** permission; without it they are not
-shown.
-
-### Rescan and revalidate
-
-Both queue the same work: the platform re-probes the asset's endpoints using the
-ordinary discovery machinery. If something answers, `last seen` moves forward and
-the asset drops out of the lens on the next pass. If nothing answers, the asset
-stays where it is — which is itself an answer, and the second one you get for
-free.
-
-A rescan becomes an ordinary discovery job, so it turns up under **Discovery →
+A scan becomes an ordinary discovery job, so it turns up under **Discovery →
 Discovery Jobs** with everything else and you can watch it run there. A large
 selection may be dispatched as several jobs.
 

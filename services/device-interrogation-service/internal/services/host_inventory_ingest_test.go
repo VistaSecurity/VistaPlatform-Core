@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -811,5 +812,34 @@ func TestHostInventoryObservationsFromResult_CarriesTheThreePiecesTheConsumerRea
 	}
 	if hostInventoryObservationsFromResult(nil) != nil {
 		t.Error("a nil result produced a non-nil observation")
+	}
+}
+
+// TestHostAddresses_TwoInterfacesCarryTheirOwnAssignment: one ip_address per
+// real address, each with the assignment the collector read — static,
+// dynamic, or none when the OS said nothing. Loopback, link-local, a virtual
+// interface's address and a temporary IPv6 privacy address are not offered.
+//
+// Mutation check: drop the attrlist.AddressAttribute filter → the temporary
+// address is offered and this fails.
+func TestHostAddresses_TwoInterfacesCarryTheirOwnAssignment(t *testing.T) {
+	obs := &di.InterrogateResult{Facts: []di.FactObservation{{
+		Key: facts.KeyNetInterfaces,
+		Value: []map[string]any{
+			{"name": "lo", "addresses": []string{"127.0.0.1/8"}, "static_addresses": []string{"127.0.0.1/8"}},
+			{"name": "veth9a1b", "addresses": []string{"10.244.1.3/24"}, "virtual": true, "static_addresses": []string{"10.244.1.3/24"}},
+			{"name": "lan", "addresses": []string{"192.0.2.1/24", "fe80::1/64"}, "static_addresses": []string{"192.0.2.1/24", "fe80::1/64"}},
+			{"name": "wan", "addresses": []string{"198.51.100.2/24", "2001:db8::a1b2:c3d4:e5f6:789a/64", "203.0.113.9/24"},
+				"dynamic_addresses": []string{"198.51.100.2/24", "2001:db8::a1b2:c3d4:e5f6:789a/64"}},
+		},
+	}}}
+	got := (hostInventoryMetadata{}).hostAddresses(obs)
+	want := []hostAddress{
+		{"192.0.2.1", identity.AssignmentStatic},
+		{"198.51.100.2", identity.AssignmentDynamic},
+		{"203.0.113.9", ""},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host addresses = %+v, want %+v", got, want)
 	}
 }

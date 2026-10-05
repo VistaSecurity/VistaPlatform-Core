@@ -164,7 +164,7 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 		isCloudDiscovery = true
 		rawData["source"] = "cloud_discovery"
 	} else {
-		rawData["source"] = "sensor_discovery"
+		rawData["source"] = sensorRowSource(rawData)
 	}
 
 	// Convert sensor_id to string for SourceSensorID
@@ -257,4 +257,43 @@ func mapCloudDeviceTypeToAssetType(deviceType string) string {
 	default:
 		return "server" // Default for unknown cloud resources
 	}
+}
+
+// Sources a sensor_discoveries row may carry that name a producer other than
+// the passive sensor. inventory-service's findingSource maps each of them to
+// its own Source (Ref + Mode); every value NOT in this set is replaced by
+// "sensor_discovery", because the envelope is sensor-controlled and an
+// arbitrary string must not reach the provenance the identity engine ranks on.
+var preservedRowSources = map[string]bool{
+	"active_scan":          true,
+	"discovery_jobs":       true,
+	"device_interrogation": true,
+	"pcap":                 true,
+	"pcap_upload":          true,
+	"sensor_discoveries":   true,
+}
+
+// sensorRowSource decides RawData["source"] for a non-cloud row.
+//
+// It used to be the literal "sensor_discovery" for every row, which made an
+// active-scan finding reach inventory-service as a PASSIVE sensor observation
+// and left findingSource's scan / device_interrogation cases unreachable. An
+// explicit source on the row is kept; otherwise the markers the producers
+// really write are read: the sensor and cluster-sensor-service stamp
+// discovery_source "active_scan" on a scan's rows, and device-interrogation
+// stamps discovery_method "device_interrogation". Anything else is a passive
+// sensor observation.
+func sensorRowSource(rawData map[string]interface{}) string {
+	if v, ok := rawData["source"].(string); ok {
+		if v = strings.ToLower(strings.TrimSpace(v)); preservedRowSources[v] {
+			return v
+		}
+	}
+	if v, _ := rawData["discovery_source"].(string); strings.EqualFold(strings.TrimSpace(v), "active_scan") {
+		return "active_scan"
+	}
+	if v, _ := rawData["discovery_method"].(string); strings.EqualFold(strings.TrimSpace(v), "device_interrogation") {
+		return "device_interrogation"
+	}
+	return "sensor_discovery"
 }

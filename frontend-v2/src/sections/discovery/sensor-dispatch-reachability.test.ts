@@ -28,40 +28,45 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-const activeScanPage = read('./active-scan-page.tsx');
+// Discovery → Active Scan was folded into Inventory: "Run from" lives
+// in the scan dialog the Inventory bulk bar, the asset drawer and the asset
+// page open, and the job feedback under the bar.
+const scanDialog = read('../inventory/scan-dialog.tsx');
+const bulkBar = read('../inventory/bulk-action-bar.tsx');
+const assetsLens = read('../inventory/assets-lens.tsx');
 const panel = read('./active-scan-jobs-panel.tsx');
 const queries = read('./queries.ts');
 const settingsPage = read('../settings/pages-auto-scan.tsx');
 
 describe('Active Scan → Run from', () => {
   it('renders the select and sends the chosen executor with the scan', () => {
-    expect(activeScanPage).toMatch(/aria-label="Run from"/);
-    expect(activeScanPage).toMatch(/runFromOptions\(/);
-    expect(activeScanPage).toMatch(/scanRequestBody\(ids, choice\)/);
+    expect(scanDialog).toMatch(/aria-label="Run from"/);
+    expect(scanDialog).toMatch(/runFromOptions\(/);
+    expect(scanDialog).toMatch(/body: scanBody\(sel, choice, confirmed\)/);
   });
 
   it('says every state out loud: loading disables, error and no-sensors fall back to the platform', () => {
-    expect(activeScanPage).toMatch(/disabled=\{runFrom\.loading/);
-    expect(activeScanPage).toMatch(/runFrom\.error &&/);
-    expect(activeScanPage).toMatch(/runFrom\.noTenantSensors &&/);
-    expect(activeScanPage).toMatch(/Sensors &amp; Agents/);
+    expect(scanDialog).toMatch(/disabled=\{runFrom\.loading/);
+    expect(scanDialog).toMatch(/runFrom\.error &&/);
+    expect(scanDialog).toMatch(/runFrom\.noTenantSensors &&/);
+    expect(scanDialog).toMatch(/Sensors &amp; Agents/);
   });
 
   it('names the executor in the toast rather than a bare "started"', () => {
-    expect(activeScanPage).toMatch(/describeScanResult\(r\)/);
+    expect(scanDialog).toMatch(/describeScanResult\(r\)/);
   });
 
   it('is gated on assets.update — the permission follows the action, not the executor', () => {
-    expect(activeScanPage).toMatch(/TENANT_PERMISSIONS\.assets\.update/);
-    expect(activeScanPage).not.toMatch(/TENANT_PERMISSIONS\.sensors\./);
+    expect(bulkBar).toMatch(/permission=\{TENANT_PERMISSIONS\.assets\.update\}>\s*<button[^>]*onClick=\{\(\) => setScanOpen\(true\)\}/);
+    expect(scanDialog + bulkBar).not.toMatch(/TENANT_PERMISSIONS\.sensors\./);
   });
 });
 
-describe("Active Scan → the page's own job feedback", () => {
-  it('keeps every job the scan started and renders the panel', () => {
-    expect(activeScanPage).toMatch(/setStarted\(/);
-    expect(activeScanPage).toMatch(/setSkipped\(/);
-    expect(activeScanPage).toMatch(/<ActiveScanJobsPanel scans=\{started\} skipped=\{skipped\} \/>/);
+describe("Active Scan → the lens's own job feedback", () => {
+  it('keeps every job the scan started and renders the panel under the bar', () => {
+    expect(bulkBar).toMatch(/onStarted=\{\(r\) => \{ onScanStarted\(r\)/);
+    expect(assetsLens).toMatch(/onScanStarted=\{feed\.record\}/);
+    expect(assetsLens).toMatch(/<ActiveScanJobsPanel\s+scans=\{feed\.scans\}\s+skipped=\{feed\.skipped\}/);
   });
 
   it('polls the job, and renders executor, state and the dispatch timeline from the existing job route', () => {

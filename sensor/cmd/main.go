@@ -28,13 +28,13 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/api"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/capture"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
-	"github.com/vistasecurity/vistaplatform/sensor/internal/discovery"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/enrichment"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/hostid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/testmode"
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
@@ -71,7 +71,6 @@ type Sensor struct {
 	packetCapture *capture.PacketCapture
 	apiClient     *api.OutboundClient
 	sensorManager *api.SensorManagerClient
-	jobExecutor   *discovery.JobExecutor
 	tlsEnricher   *enrichment.TLSEnricher
 	testLogger    *testmode.TestLogger
 	discoveries   []*models.CryptoDiscovery
@@ -98,8 +97,16 @@ type Sensor struct {
 	// worker. Bounded: a platform that queues more than the sensor can hold
 	// gets a failed acknowledgement for the overflow rather than an
 	// unbounded backlog of scans the operator never asked to run at once.
-	jobQueue           chan models.Command
-	identityDNSQueue   chan models.Command
+	jobQueue         chan models.Command
+	identityDNSQueue chan models.Command
+	// planJobs is the planned discovery job running on the worker and the
+	// queued ones a cancel arrived for ( WP2b, discovery_job.go).
+	planJobs planJobState
+	// planClient reports a planned job's hosts and its completion; nil uses
+	// apiClient. planDialer is the network a planned scan dials (nil: the
+	// system's). Both are test seams.
+	planClient         planJobClient
+	planDialer         shareddisc.Dialer
 	identityDNSPending map[string]bool
 
 	// lastHostHash and lastHostSentAt are the heartbeat's own host-block
@@ -656,10 +663,9 @@ func (s *Sensor) initialize() error {
 	sensorManager := api.NewSensorManagerClient(s.config)
 	s.sensorManager = sensorManager
 
-	// Initialize discovery job executor (sensor ID may be updated after registration)
-	jobExecutor := discovery.NewJobExecutor(30*time.Second, s.config.SensorID)
-	s.jobExecutor = jobExecutor
-	//...and the worker that runs dispatched jobs one at a time.
+	// The worker that runs dispatched (planned) jobs one at a time on the
+	// shared engine (WP2b; no protocols × ports executor since
+	// WP5).
 	s.startDiscoveryJobWorker()
 
 	// Initialize TLS enricher — uses the packet capture discoveries channel
@@ -745,11 +751,6 @@ func (s *Sensor) register() error {
 		// Continue anyway - sensor ID is in memory and will work for this session
 	} else {
 		log.Printf("💾 Configuration saved to file with sensor ID")
-	}
-
-	// Update job executor with the confirmed sensor ID from registration
-	if s.jobExecutor != nil {
-		s.jobExecutor.SetSensorID(s.config.SensorID)
 	}
 
 	log.Printf("✅ Sensor registered successfully with ID: %s", s.config.SensorID)
@@ -1159,7 +1160,7 @@ func (s *Sensor) sendHeartbeat() {
 		SensorID:            s.config.SensorID,
 		Status:              status,
 		Version:             Version,
-		Capabilities:        []string{sensordispatch.IdentityDNSCapability},
+		Capabilities:        []string{sensordispatch.IdentityDNSCapability, sensordispatch.ScanPlanCapability},
 		DNSInterfaces:       s.reportedDNSInterfaces(),
 		LastHeartbeat:       time.Now(),
 		Uptime:              uptime,
@@ -1403,6 +1404,10 @@ func (s *Sensor) processCommand(command models.Command) {
 		// by the worker when the job finishes. A nil result here means "not
 		// yet" — a malformed command is acknowledged as failed immediately.
 		result = s.handleDiscoveryJob(command)
+	case sensordispatch.CancelCommandType:
+		// Stop a planned discovery job ( WP2b): the one running stops at
+		// once, one still queued is dropped when its turn comes.
+		result = s.handleCancelDiscoveryJob(command)
 	default:
 		log.Printf("⚠️ Unknown command type: %s", command.Type)
 		result = &models.CommandResponse{

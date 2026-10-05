@@ -204,18 +204,6 @@ func TestIntegration_HostInventoryRetainedReplayPreservesSnapshotTime(t *testing
 			t.Fatal(err)
 		}
 	}
-	enable := func(h *HostInventoryIngest) {
-		t.Helper()
-		_, repo, err := h.sink.engine()
-		if err != nil {
-			t.Fatal(err)
-		}
-		h.sink.eng, err = identity.New(identity.Config{Repo: repo, AdmissionEnabled: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	enable(ingest)
 	mode("paused")
 	report.Collected = report.Collected.Add(time.Hour)
 	report.Packages = report.Packages[:1]
@@ -232,7 +220,6 @@ func TestIntegration_HostInventoryRetainedReplayPreservesSnapshotTime(t *testing
 		t.Fatal(err)
 	}
 	restarted := NewHostInventoryIngest(app, owner)
-	enable(restarted)
 	if err = restarted.ReplayRetainedHostInventories(ctx, tenant); err != nil {
 		t.Fatal(err)
 	}

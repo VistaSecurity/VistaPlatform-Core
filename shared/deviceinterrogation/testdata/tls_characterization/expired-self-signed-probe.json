@@ -1,0 +1,126 @@
+{
+  "deviceinterrogation.CryptoAsset": {
+    "AssetType": "string=",
+    "CertValidationError": "string=x509: certificate has expired or is not yet valid: current time NOW is after 2020-01-01T00:00:00Z",
+    "CertValidationStatus": "string=expired",
+    "Certificate": {
+      "*certificates.CertificateInfo": {
+        "certificates.CertificateInfo": {
+          "CertificatePEM": "string={{expired_self_signed.pem}}",
+          "ChainOrder": "int=0",
+          "ExtendedKeyUsage": {
+            "[]string": [
+              "string=ServerAuth"
+            ]
+          },
+          "FingerprintSHA1": "string={{expired_self_signed.sha1}}",
+          "FingerprintSHA256": "string={{expired_self_signed.sha256}}",
+          "IsCA": "bool=false",
+          "Issuer": "string=CN=device.example.test",
+          "IssuerDN": "string=CN=device.example.test",
+          "KeyAlgorithm": "string=RSA",
+          "KeySize": "int=2048",
+          "KeyUsage": {
+            "[]string": [
+              "string=DigitalSignature",
+              "string=KeyEncipherment"
+            ]
+          },
+          "NotAfter": "time.Time=2020-01-01T00:00:00Z",
+          "NotBefore": "time.Time=2015-01-01T00:00:00Z",
+          "Serial": "string=",
+          "SerialNumber": "string=3001",
+          "Signature": "string=",
+          "SignatureAlg": "string=SHA256-RSA",
+          "Subject": "string=CN=device.example.test",
+          "SubjectAlternativeNames": {
+            "[]string": [
+              "string=device.example.test"
+            ]
+          },
+          "SubjectDN": "string=CN=device.example.test",
+          "ValidFrom": "time.Time=0001-01-01T00:00:00Z",
+          "ValidTo": "time.Time=0001-01-01T00:00:00Z"
+        }
+      }
+    },
+    "Certificates": {
+      "[]certificates.CertificateInfo": [
+        {
+          "certificates.CertificateInfo": {
+            "CertificatePEM": "string={{expired_self_signed.pem}}",
+            "ChainOrder": "int=0",
+            "ExtendedKeyUsage": {
+              "[]string": [
+                "string=ServerAuth"
+              ]
+            },
+            "FingerprintSHA1": "string={{expired_self_signed.sha1}}",
+            "FingerprintSHA256": "string={{expired_self_signed.sha256}}",
+            "IsCA": "bool=false",
+            "Issuer": "string=CN=device.example.test",
+            "IssuerDN": "string=CN=device.example.test",
+            "KeyAlgorithm": "string=RSA",
+            "KeySize": "int=2048",
+            "KeyUsage": {
+              "[]string": [
+                "string=DigitalSignature",
+                "string=KeyEncipherment"
+              ]
+            },
+            "NotAfter": "time.Time=2020-01-01T00:00:00Z",
+            "NotBefore": "time.Time=2015-01-01T00:00:00Z",
+            "Serial": "string=",
+            "SerialNumber": "string=3001",
+            "Signature": "string=",
+            "SignatureAlg": "string=SHA256-RSA",
+            "Subject": "string=CN=device.example.test",
+            "SubjectAlternativeNames": {
+              "[]string": [
+                "string=device.example.test"
+              ]
+            },
+            "SubjectDN": "string=CN=device.example.test",
+            "ValidFrom": "time.Time=0001-01-01T00:00:00Z",
+            "ValidTo": "time.Time=0001-01-01T00:00:00Z"
+          }
+        }
+      ]
+    },
+    "CipherSuite": {
+      "*string": "string=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+    },
+    "HashAlgorithm": "*string=nil",
+    "Hostname": "string=device.example.test",
+    "IPAddress": "string=",
+    "KeyExchangeAlg": {
+      "*string": "string=X25519"
+    },
+    "KeySize": {
+      "*int": "int=2048"
+    },
+    "Metadata": {
+      "map[string]interface {}": {
+        "key_exchange_algorithm": "string=X25519",
+        "key_exchange_group_raw": "uint16=29",
+        "key_exchange_key_size": "int=256",
+        "negotiated_protocol": "string=",
+        "tls_supports_classical_kex": "bool=true",
+        "tls_supports_pqc_hybrid_kex": "bool=false"
+      }
+    },
+    "Port": "int=443",
+    "Protocol": "string=TLS",
+    "ProtocolVersion": {
+      "*string": "string=TLS 1.2"
+    },
+    "SSHInfo": "*deviceinterrogation.SSHInfo=nil",
+    "ServiceHints": "*deviceinterrogation.ServiceHints=nil",
+    "SupportedCiphers": "[]string=nil",
+    "TLSVersions": {
+      "[]string": [
+        "string=TLS 1.2"
+      ]
+    }
+  }
+}

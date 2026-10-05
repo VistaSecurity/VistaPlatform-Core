@@ -19,6 +19,9 @@ type Configuration struct {
 	KeyBits, StoredRisk                                      int
 	CatalogueRisk                                            *int
 	Components                                               []byte
+	// VersionUnmeasured: the producer stated it did not measure the protocol
+	// version ( W1.2). The judgment is then partial, never clean.
+	VersionUnmeasured bool
 }
 
 // Judgment keeps the reason for a qualitative title separate from the
@@ -119,6 +122,11 @@ func (c Configuration) Judge() Judgment {
 	if partial, unexpanded := cryptoparse.CipherStringAssessment(c.Suite); partial {
 		j.Limitations = append(j.Limitations, fmt.Sprintf(
 			"cipher string %q is only partially assessed: %s could not be expanded", c.Suite, strings.Join(unexpanded, ", ")))
+	}
+	// So is one whose protocol version was never measured: no weak version
+	// found is not the same as a version that is not weak.
+	if c.VersionUnmeasured && c.Version == "" {
+		j.Limitations = append(j.Limitations, "protocol version was not measured")
 	}
 	var components []Component
 	if len(c.Components) > 0 {

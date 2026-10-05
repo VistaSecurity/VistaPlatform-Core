@@ -44,7 +44,6 @@ func TestEditionFor_PaidCapabilities(t *testing.T) {
 		"cbom_signing":        entitlements.EditionEnterprise,
 		"sso_saml":            entitlements.EditionEnterprise,
 		"custom_branding":     entitlements.EditionEnterprise,
-		"ot_active_probing":   entitlements.EditionEnterprise,
 		"ot_primary_lens":     entitlements.EditionEnterprise,
 		// MSP-only (owner decision: billing is for a provider
 		// billing its own customers; an Enterprise licence does not cover it.
@@ -57,6 +56,27 @@ func TestEditionFor_PaidCapabilities(t *testing.T) {
 		if !entitlements.IsEditionGated(key) {
 			t.Errorf("IsEditionGated(%q) = false, want true", key)
 		}
+	}
+}
+
+// OT active probing is Core (owner decision): a switch every
+// tier ships on, not a paid capability. Its neighbour, the OT inventory lens,
+// was NOT part of that decision and stays Enterprise — pinned here so moving
+// one OT key cannot quietly move the other.
+func TestEditionFor_OTActiveProbingIsCoreAndLensIsNot(t *testing.T) {
+	if got := entitlements.EditionFor("ot_active_probing"); got != entitlements.EditionCore {
+		t.Errorf("EditionFor(ot_active_probing) = %q, want %q — OT active probing is a Core capability", got, entitlements.EditionCore)
+	}
+	if entitlements.IsEditionGated("ot_active_probing") {
+		t.Error("IsEditionGated(ot_active_probing) = true, want false")
+	}
+	for _, k := range entitlements.EditionGatedKeys() {
+		if k == "ot_active_probing" {
+			t.Error("EditionGatedKeys() still lists ot_active_probing")
+		}
+	}
+	if got := entitlements.EditionFor("ot_primary_lens"); got != entitlements.EditionEnterprise {
+		t.Errorf("EditionFor(ot_primary_lens) = %q, want %q — only OT active probing moved to Core", got, entitlements.EditionEnterprise)
 	}
 }
 

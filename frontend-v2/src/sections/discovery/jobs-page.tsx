@@ -1,8 +1,12 @@
 import { useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon } from '../../components/ui';
+import { Icon, MiniBar } from '../../components/ui';
+import { jobActionError } from './job-action-error';
+import { RESUME_TOOLTIP, ResumeScanDialog } from './resume-scan-dialog';
+import { isResumable } from './scan-plan-view';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, durationFmt, shortId } from './kit';
 import { useDiscoveryJobs, useJobs } from './queries';
 import { JobDetailModal } from './job-detail-modal';
@@ -49,6 +53,8 @@ const INTERROGATION_CANCELLABLE = new Set(['pending', 'queued', 'assigned', 'in_
 const INTERROGATION_RETRYABLE = new Set(['failed', 'error', 'cancelled', 'canceled']);
 // Discovery-job write surface (queued/awaiting_sensor/running are cancellable).
 const DISCOVERY_CANCELLABLE = new Set(['queued', 'pending', 'awaiting_sensor', 'running', 'in_progress', 'processing']);
+// Resume re-queues a failed or queued scan; the server answers 409 for
+// anything else, so the action is offered only where it can work.
 
 function RowBtn({ icon, title, onClick, disabled }: { icon: string; title: string; onClick: () => void; disabled?: boolean }) {
   return (
@@ -91,7 +97,29 @@ export function JobsPage() {
   const executorOptions = useMemo(() => distinctExecutors(allRows), [allRows]);
 
   const [selectedInterrogation, setSelectedInterrogation] = useState<InterrogationJob | null>(null);
-  const [selectedDiscovery, setSelectedDiscovery] = useState<ScanJob | null>(null);
+  const [pickedDiscovery, setSelectedDiscovery] = useState<ScanJob | null>(null);
+  const [resumeJob, setResumeJob] = useState<ScanJob | null>(null);
+
+  // ?job=<id> opens that discovery job's detail — how the Discover wizard's
+  // "track it in Discovery Jobs" link lands on the scan it started. A job not
+  // on the first page still opens: the detail reads the job itself.
+  const [params, setParams] = useSearchParams();
+  const linkedJobId = params.get('job');
+  const linkedJob = useMemo<ScanJob | null>(
+    () => (linkedJobId ? discoveryJobs.find((j) => j.id === linkedJobId) ?? { id: linkedJobId, status: '' } : null),
+    [linkedJobId, discoveryJobs],
+  );
+  const selectedDiscovery = pickedDiscovery ?? linkedJob;
+  const closeDiscovery = () => {
+    setSelectedDiscovery(null);
+    if (linkedJobId) {
+      setParams((p) => {
+        const next = new URLSearchParams(p);
+        next.delete('job');
+        return next;
+      }, { replace: true });
+    }
+  };
 
   const invalidateInterrogation = () => qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
   const invalidateDiscovery = () => qc.invalidateQueries({ queryKey: ['discovery', 'scan-jobs'] });
@@ -114,10 +142,12 @@ export function JobsPage() {
     onSettled: invalidateInterrogation,
   });
 
+  // A refused cancel says why — 409 "job already completed", 403 — in the
+  // server's words (job-action-error.ts). It used to fail silently here.
   const cancelDiscovery = useMutation({
     mutationFn: async (id: string) => {
       const { data, error } = await clients.inventory.POST('/discovery/jobs/{id}/cancel', { params: { path: { id } } });
-      if (error || !data) throw new Error('Failed to cancel job');
+      if (error || !data) throw jobActionError(error, 'Failed to cancel job');
       return data;
     },
     onSettled: invalidateDiscovery,
@@ -128,7 +158,7 @@ export function JobsPage() {
   const note = queryNote([interrogationQ, discoveryQ], allRows.length === 0, {
     thing: 'jobs',
     emptyTitle: 'No jobs yet',
-    emptyMessage: 'Start a scan from Discovery → Active Scan or run Discover to see jobs here.',
+    emptyMessage: 'Start a scan from Inventory (tick assets, then Scan) or run Discover to see jobs here.',
   });
 
   return (
@@ -170,6 +200,16 @@ export function JobsPage() {
         </label>
       </div>
 
+      {cancelDiscovery.isError && (
+        <div role="alert" className="panel" style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 10, marginBottom: 12, fontSize: 12.5, color: 'var(--danger-text)' }}>
+          <Icon name="alert-triangle" size={14} />
+          <span style={{ flex: 1 }}>
+            Could not cancel job {shortId(cancelDiscovery.variables ?? '')}: {cancelDiscovery.error.message}
+          </span>
+          <button className="ui-btn sm ghost" onClick={() => cancelDiscovery.reset()}>Dismiss</button>
+        </div>
+      )}
+
       {note ?? (
         <DTable
           cols={COLS}
@@ -186,11 +226,39 @@ export function JobsPage() {
                   <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{shortId(r.id)}</div>
                 </div>
                 <CellMono v={r.target} c="var(--app-t2)" />
-                <CellTxt v={r.executor} />
+                {r.depth ? (
+                  <div style={{ minWidth: 0 }}>
+                    <CellTxt v={r.executor} />
+                    <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{r.depth} depth</div>
+                  </div>
+                ) : (
+                  <CellTxt v={r.executor} />
+                )}
                 <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: r.statusColor }}>
                     <span style={{ width: 6, height: 6, borderRadius: 50, background: r.statusColor }} />{r.statusLabel}
                   </span>
+                  {r.progress && (
+                    <span
+                      role="progressbar"
+                      aria-label={`Scan progress, job ${shortId(r.id)}`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={r.progress.pct}
+                      aria-valuetext={r.progress.line ? `${r.progress.pct}% — ${r.progress.line}` : `${r.progress.pct}%`}
+                      style={{ display: 'flex', flexDirection: 'column', gap: 2, maxWidth: 220 }}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <MiniBar pct={r.progress.pct} h={4} />
+                        <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t2)', flex: 'none' }}>{r.progress.pct}%</span>
+                      </span>
+                      {r.progress.line && (
+                        <span style={{ fontSize: 10, color: 'var(--app-t3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.progress.line}>
+                          {r.progress.line}
+                        </span>
+                      )}
+                    </span>
+                  )}
                   {r.statusDetail && (
                     <span style={{ fontSize: 10, color: 'var(--app-t3)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.statusDetail}>
                       {r.statusDetail}
@@ -201,8 +269,8 @@ export function JobsPage() {
                 <CellMono right v={r.found} />
                 <CellTxt v={relTime(r.startedAt)} c="var(--app-t3)" />
                 <CellMono right v={durationFmt(r.durationSec)} c="var(--app-t3)" />
-                <PermissionGate permission={TENANT_PERMISSIONS.discovery.update} fallback={<span />}>
-                  <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                  <PermissionGate permission={TENANT_PERMISSIONS.discovery.update} fallback={null}>
                     {r.kind === 'interrogation' && INTERROGATION_RETRYABLE.has(s) && (
                       <RowBtn icon="history" title="Retry job" onClick={() => retryInterrogation.mutate(r.id)} disabled={busy} />
                     )}
@@ -212,15 +280,22 @@ export function JobsPage() {
                     {r.kind !== 'interrogation' && DISCOVERY_CANCELLABLE.has(s) && (
                       <RowBtn icon="x-circle" title="Cancel job" onClick={() => cancelDiscovery.mutate(r.id)} disabled={busy} />
                     )}
-                  </span>
-                </PermissionGate>
+                  </PermissionGate>
+                  {/* The rerun route is gated on discovery.create in inventory-service (see resume-scan-dialog.tsx for the downstream check). */}
+                  {r.raw.source === 'discovery' && isResumable(r.raw.job.status) && (
+                    <PermissionGate permission={TENANT_PERMISSIONS.discovery.create} fallback={null}>
+                      <RowBtn icon="play" title={RESUME_TOOLTIP} onClick={() => r.raw.source === 'discovery' && setResumeJob(r.raw.job)} disabled={busy} />
+                    </PermissionGate>
+                  )}
+                </span>
               </>
             );
           }}
         />
       )}
       <JobDetailModal job={selectedInterrogation} onClose={() => setSelectedInterrogation(null)} />
-      <DiscoveryJobDetailModal job={selectedDiscovery} onClose={() => setSelectedDiscovery(null)} />
+      <DiscoveryJobDetailModal job={selectedDiscovery} onClose={closeDiscovery} />
+      <ResumeScanDialog job={resumeJob} onClose={() => setResumeJob(null)} />
     </PageWrap>
   );
 }

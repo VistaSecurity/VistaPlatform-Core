@@ -1,0 +1,26 @@
+[
+  {
+    "ifindex": 1, "ifname": "lo", "flags": ["LOOPBACK", "UP", "LOWER_UP"], "operstate": "UNKNOWN",
+    "link_type": "loopback", "address": "00:00:00:00:00:00",
+    "addr_info": [
+      { "family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host", "label": "lo",
+        "valid_life_time": 4294967295, "preferred_life_time": 4294967295 }
+    ]
+  },
+  {
+    "ifindex": 2, "ifname": "eth0", "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "operstate": "UP",
+    "link_type": "ether", "address": "b4:96:91:1a:2b:3c",
+    "addr_info": [
+      { "family": "inet", "local": "198.51.100.1", "prefixlen": 24, "scope": "global", "label": "eth0",
+        "valid_life_time": 4294967295, "preferred_life_time": 4294967295 },
+      { "family": "inet", "local": "198.51.100.77", "prefixlen": 24, "scope": "global", "dynamic": true,
+        "noprefixroute": true, "label": "eth0", "valid_life_time": 85723, "preferred_life_time": 85723 },
+      { "family": "inet6", "local": "2001:db8:aa::5", "prefixlen": 64, "scope": "global", "dynamic": true,
+        "mngtmpaddr": true, "valid_life_time": 2591998, "preferred_life_time": 604798 },
+      { "family": "inet6", "local": "2001:db8:aa::1", "prefixlen": 64, "scope": "global",
+        "valid_life_time": 4294967295, "preferred_life_time": 4294967295 },
+      { "family": "inet", "local": "198.51.100.9", "prefixlen": 24, "scope": "global", "label": "eth0:old",
+        "valid_life_time": 3600, "preferred_life_time": 3600 }
+    ]
+  }
+]

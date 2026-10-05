@@ -3,16 +3,24 @@
 // that shares its network segment, or the platform sensor in the cluster.
 //
 // The decision is pure (this file) and the inputs come from the database
-// (store.go), so every rule — observing sensor first, segment second, platform
-// last, offline sensors skipped rather than substituted — is a table test.
+// (store.go), so every rule is a table test:
+//
+//  1. the live tenant sensor that most recently observed the host;
+//  2. else a DIFFERENT live tenant sensor bound to the host's segment;
+//  3. else the platform sensor — but only when no tenant sensor observed the
+//     host. A host whose observer is offline and that no live segment sensor
+//     covers is SKIPPED, never handed to the platform.
 //
 // The point of the rule: a host that only a tenant's sensor can reach is one
 // the platform sensor will scan forever with nothing to show for it. The
 // sensor that SAW the host is the best evidence anything can reach it, so it
-// goes first. A sensor bound to the same segment is the next best. And when
-// the best candidate is offline the target is SKIPPED — not handed to the
-// platform, which would be exactly the wrong-executor scan this exists to
-// prevent — and stays eligible for the next pass.
+// goes first. A sensor bound to the same segment is the next best — both when
+// nothing observed the host and when its observer is offline, because a sensor
+// that is stopped but still registered would otherwise strand every host it
+// ever saw even while another live sensor sits on the same network. The
+// observer's absence never makes the platform a candidate, though: that would
+// be exactly the wrong-executor scan this exists to prevent. Such a target is
+// skipped and stays eligible for the next pass.
 package sensorrouting
 
 import (
@@ -83,12 +91,14 @@ type Reason string
 const (
 	// ReasonObserved: the tenant sensor that most recently saw the host.
 	ReasonObserved Reason = "observing_sensor"
-	// ReasonSegment: a live tenant sensor bound to the host's network.
+	// ReasonSegment: a live tenant sensor bound to the host's network — either
+	// nothing observed the host, or its observer is offline.
 	ReasonSegment Reason = "same_segment"
 	// ReasonPlatform: no tenant sensor is a better executor.
 	ReasonPlatform Reason = "platform"
-	// ReasonObserverOffline: the observing sensor exists but is not live, so
-	// the target was not routed anywhere this pass.
+	// ReasonObserverOffline: the observing sensor exists but is not live and
+	// no other live tenant sensor covers the host, so the target was not
+	// routed anywhere this pass.
 	ReasonObserverOffline Reason = "observing_sensor_offline"
 )
 
@@ -99,7 +109,9 @@ type Group struct {
 	Reasons map[string]Reason
 }
 
-// Skip is a target the router refused to route this pass, and why.
+// Skip is a target the router refused to route this pass, and why. Sensor is
+// the offline observer; a skip is only produced once no other live tenant
+// sensor covers the target, which is what keeps Message true.
 type Skip struct {
 	Target string
 	Sensor Sensor
@@ -128,7 +140,9 @@ type Plan struct {
 // Route plans the targets. `observedBy` maps a target address to the id of the
 // TENANT sensor that most recently observed it (the store excludes the
 // platform's own sensors before it gets here); `sensors` is the tenant's
-// fleet. Unknown observer ids fall through to the segment rule.
+// fleet. Unknown observer ids fall through to the segment rule. An offline
+// observer also falls through to the segment rule, but NOT on to the
+// platform: with no live segment sensor the target is skipped.
 func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, now time.Time) Plan {
 	byID := make(map[uuid.UUID]Sensor, len(sensors))
 	for _, s := range sensors {
@@ -162,6 +176,32 @@ func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, 
 		plan.Groups[idx].Reasons[target] = reason
 	}
 
+	// segmentSensor is the same-segment rule: the first live tenant sensor, in
+	// the stable order above, whose networks contain the target and whose own
+	// host it is not. Only IP literals can be inside a network; a hostname has
+	// no segment sensor. An offline sensor is never returned, because
+	// segmentCandidates holds only dispatchable ones — which is also what keeps
+	// an offline observer from being picked here for its own target.
+	segmentSensor := func(target string) (Sensor, bool) {
+		addr, err := netip.ParseAddr(target)
+		if err != nil {
+			return Sensor{}, false
+		}
+		addr = addr.Unmap()
+		for _, s := range segmentCandidates {
+			if s.IsSelf(target) {
+				// Never scan yourself, even when the target falls inside
+				// a segment this very sensor is bound to (which it
+				// usually is, being on that segment).
+				continue
+			}
+			if s.Covers(addr) {
+				return s, true
+			}
+		}
+		return Sensor{}, false
+	}
+
 	seen := map[string]bool{}
 	for _, raw := range targets {
 		target := strings.TrimSpace(raw)
@@ -176,6 +216,17 @@ func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, 
 					assign(observer, target, ReasonObserved)
 					continue
 				}
+				// The observer is offline. A different live sensor on the
+				// host's network is still a place that can reach it, so it
+				// takes the host rather than leaving it stranded for as long
+				// as the observer stays registered. The platform is NOT the
+				// next fallback here: a host a tenant sensor saw is the
+				// evidence that it may only be reachable from inside, so
+				// with no live segment sensor it is skipped and stays due.
+				if s, ok := segmentSensor(target); ok {
+					assign(s, target, ReasonSegment)
+					continue
+				}
 				plan.Skipped = append(plan.Skipped, Skip{Target: target, Sensor: observer, Reason: ReasonObserverOffline})
 				continue
 			}
@@ -188,25 +239,9 @@ func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, 
 			// scanning one sensor's host.
 		}
 
-		if addr, err := netip.ParseAddr(target); err == nil {
-			addr = addr.Unmap()
-			routed := false
-			for _, s := range segmentCandidates {
-				if s.IsSelf(target) {
-					// Never scan yourself, even when the target falls inside
-					// a segment this very sensor is bound to (which it
-					// usually is, being on that segment).
-					continue
-				}
-				if s.Covers(addr) {
-					assign(s, target, ReasonSegment)
-					routed = true
-					break
-				}
-			}
-			if routed {
-				continue
-			}
+		if s, ok := segmentSensor(target); ok {
+			assign(s, target, ReasonSegment)
+			continue
 		}
 
 		plan.Platform = append(plan.Platform, target)
@@ -217,26 +252,12 @@ func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, 
 // PrefixesFor builds a sensor's coverage from what it reported. Bound
 // addresses with a prefix length are exact; the primary address alone is
 // widened to the conventional LAN size (/24 for IPv4, /64 for IPv6), which is
-// a guess and is ranked BELOW the observing-sensor rule for that reason.
+// a guess and is ranked BELOW the observing-sensor rule for that reason. It is
+// still the coverage the segment rule reads when an observer is offline, so a
+// sensor known only by its primary address can take a neighbour's host on that
+// guess; a sensor that reports its interfaces is matched exactly. The
+// rule lives in shared/sensordispatch so the Discover job's Auto executor
+// (cluster-sensor-service) reads a sensor's networks the same way.
 func PrefixesFor(bound []string, primary string) []netip.Prefix {
-	var out []netip.Prefix
-	for _, raw := range bound {
-		if p, err := netip.ParsePrefix(strings.TrimSpace(raw)); err == nil {
-			out = append(out, p.Masked())
-		}
-	}
-	if len(out) > 0 {
-		return out
-	}
-	if addr, err := netip.ParseAddr(strings.TrimSpace(primary)); err == nil {
-		addr = addr.Unmap()
-		bits := 24
-		if addr.Is6() {
-			bits = 64
-		}
-		if p, err := addr.Prefix(bits); err == nil {
-			out = append(out, p)
-		}
-	}
-	return out
+	return sensordispatch.CoveragePrefixes(bound, primary)
 }

@@ -13,8 +13,10 @@ package services
 //
 // The rules, stated once:
 //
-//   - Every identifier a person adds goes through the engine's
-//     AttachIdentifiers, which is the only writer that respects the uniqueness
+//   - Every identifier a person adds is a DECLARATION resolved by the engine
+//     for this asset (Engine.ResolveDeclaredFor): scoped by the one identity
+//     intake like any other declaration, locked, ownership re-checked and the
+//     history recorded — the only writer that respects the uniqueness
 //     invariant of DATA_MODEL §2.
 //   - An identifier that already belongs to ANOTHER asset is a merge question,
 //     not an error: the edit is refused (409) and a merge proposal is opened so
@@ -38,12 +40,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
-	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
@@ -102,74 +104,87 @@ var ErrIdentifierFloor = errors.New("an asset must keep at least one identifier;
 // segment a different service from the same one next door, which is not what a
 // declared service is.
 func (s *AssetService) declaredIdentifiers(tenantID uuid.UUID, classKey string, in models.AssetInput) ([]identity.Identifier, error) {
-	segmentID, _ := s.observationScope(tenantID, in.IPAddress, in.Hostname)
-
-	var out []identity.Identifier
-	add := func(id identity.Identifier) error {
-		n, err := id.Normalized()
-		if err != nil {
-			return err
-		}
-		for _, have := range out {
-			if have.Key() == n.Key() {
-				return nil
-			}
-		}
-		out = append(out, n)
-		return nil
-	}
-
+	// Validate what the form sent before anything is scoped: an edit is an
+	// API call, and a kind or an assignment nobody can store is a 400, not a
+	// row quietly left out.
+	pinned := map[string]bool{} // kind|value of each address declared static
 	for _, raw := range in.Identifiers {
 		kind := identity.Kind(strings.TrimSpace(strings.ToLower(raw.Kind)))
 		if !kind.Valid() {
 			return nil, fmt.Errorf("identifier kind %q is not one of the known kinds", raw.Kind)
 		}
-		scope := strings.TrimSpace(derefString(raw.Scope))
-		if kind.RequiresScope() && scope == "" {
-			scope = defaultScopeForKind(kind, classKey, segmentID)
-		}
-		if err := add(identity.Identifier{
-			Kind: kind, Value: strings.TrimSpace(raw.Value), Scope: scope, Confidence: 1,
-		}); err != nil {
-			return nil, err
+		assignment := identity.AddressAssignment(strings.TrimSpace(strings.ToLower(raw.AddressAssignment)))
+		switch {
+		case assignment == "":
+		case assignment != identity.AssignmentStatic:
+			// A person pins an address; a lease is something only the host's
+			// own agent can report, so "dynamic" is not a thing to declare.
+			return nil, fmt.Errorf("address_assignment %q: only \"static\" can be declared", raw.AddressAssignment)
+		case kind != identity.KindIPAddress:
+			return nil, fmt.Errorf("address_assignment applies to ip_address identifiers only, not %s", kind)
+		default:
+			if v, err := identity.Normalize(kind, raw.Value); err == nil {
+				pinned[string(kind)+"|"+v] = true
+			}
 		}
 	}
 
-	if host := strings.TrimSpace(derefString(in.Hostname)); host != "" {
-		kind, scope := identity.KindHostname, segmentID
-		if strings.Contains(strings.TrimSuffix(host, "."), ".") {
-			kind, scope = identity.KindFQDN, ""
-		}
-		if err := add(identity.Identifier{Kind: kind, Value: host, Scope: scope, Confidence: 1}); err != nil {
-			return nil, err
+	// The SAME declaration manualObservation makes of a create — one intake
+	// for every path — so an edit scopes a hostname and an address exactly as
+	// creating the asset with them would have. An identifier the form sent
+	// with its own scope (every held one is sent back that way) keeps it.
+	scoped := in
+	scoped.ClassKey = classKey
+	sg, explicit, err := declaredSighting(tenantID, scoped, identity.Source{Kind: identity.SourceDeclared, Ref: "manual"}, "")
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.assessSighting(context.Background(), "identifier edit", sg)
+	if err != nil && !errors.Is(err, identity.ErrNoUsableIdentifier) {
+		return nil, err
+	}
+	if len(res.Rejected) > 0 {
+		r := res.Rejected[0]
+		return nil, fmt.Errorf("identifier %s=%q: %w", r.Identifier.Kind, r.Identifier.Value, r.Err)
+	}
+	obs, rejected := withExplicitScopes(res, explicit)
+	if len(rejected) > 0 {
+		r := rejected[0]
+		return nil, fmt.Errorf("identifier %s=%q: %w", r.Identifier.Kind, r.Identifier.Value, r.Err)
+	}
+	// In the order the form listed them, then the column aliases: the edit
+	// refuses on the FIRST identifier another asset owns, and which one it
+	// names should follow what the operator wrote, not the intake's internal
+	// order (addresses first).
+	order := map[string]int{}
+	for i, raw := range in.Identifiers {
+		kind := identity.Kind(strings.TrimSpace(strings.ToLower(raw.Kind)))
+		if v, err := identity.Normalize(kind, raw.Value); err == nil {
+			if _, seen := order[string(kind)+"|"+v]; !seen {
+				order[string(kind)+"|"+v] = i
+			}
 		}
 	}
-	if ip := strings.TrimSpace(derefString(in.IPAddress)); ip != "" {
-		if err := add(identity.Identifier{
-			Kind: identity.KindIPAddress, Value: ip, Scope: segmentID, Confidence: 1,
-		}); err != nil {
-			return nil, err
+	rank := func(id identity.Identifier) int {
+		if i, ok := order[string(id.Kind)+"|"+id.Value]; ok {
+			return i
 		}
+		return len(in.Identifiers)
 	}
-	if name := strings.TrimSpace(derefString(in.DisplayName)); name != "" &&
-		assetclass.IsAncestor(assetclass.KeyService, classKey) {
-		if err := add(identity.Identifier{
-			Kind: identity.KindName, Value: name, Scope: classKey, Confidence: 1,
-		}); err != nil {
-			return nil, err
+	sort.SliceStable(obs.Identifiers, func(i, j int) bool { return rank(obs.Identifiers[i]) < rank(obs.Identifiers[j]) })
+	out := make([]identity.Identifier, 0, len(obs.Identifiers))
+	for _, id := range obs.Identifiers {
+		// What the edit compares and attaches is the identifier's KEY and its
+		// declared assignment; the intake's markings (Pinned, derived
+		// provenance) are re-derived by the engine from the declaration.
+		id.Pinned = false
+		id.Confidence = 1
+		if id.Kind == identity.KindIPAddress && pinned[string(id.Kind)+"|"+id.Value] {
+			id.Assignment = identity.AssignmentStatic
 		}
+		out = append(out, id)
 	}
 	return out, nil
-}
-
-// defaultScopeForKind is the scope a scoped kind carries when the caller
-// supplied none: the class key for `name`, the resolved network segment for
-// hostname and ip_address.
-func defaultScopeForKind(kind identity.Kind, classKey, segmentID string) string {
-	if kind == identity.KindName {
-		return classKey
-	}
-	return segmentID
 }
 
 // updateAssetIdentifiers is the identity half of UpdateAsset, run on the
@@ -213,8 +228,18 @@ func (s *AssetService) updateAssetIdentifiers(
 	}
 	var attach []identity.Identifier
 	for _, id := range want {
-		if _, mine := haveKeys[id.Key()]; mine {
-			continue // already this asset's; AttachIdentifiers would only refresh last-seen
+		if held, mine := haveKeys[id.Key()]; mine {
+			// Already this asset's, so AttachIdentifiers would only refresh
+			// last-seen — except when the operator PINS an address the asset
+			// holds unpinned. Re-declaring it is what upgrades a
+			// measured row to declared and pins it. It is opt-in per row
+			// because the form sends every identifier back on every save, and
+			// pinning each address a sensor happened to see would turn every
+			// save into a declaration.
+			if id.Assignment == identity.AssignmentStatic && derefString(held.AddressAssignment) != string(identity.AssignmentStatic) {
+				attach = append(attach, id)
+			}
+			continue
 		}
 		if id.Kind == identity.KindDeclarationID {
 			return nil, fmt.Errorf("declaration identifiers are issued only by identity confirmation")
@@ -282,14 +307,28 @@ func (s *AssetService) updateAssetIdentifiers(
 	// 3. Write. One transaction: an attach that landed without its matching
 	//    removal would leave the asset carrying both spellings with nothing
 	//    saying which the operator meant.
+	//
+	// The attach goes through the engine (platform ADR-0003): a
+	//    declaration FOR this asset, resolved with ResolveDeclaredFor, which
+	//    takes the identifier locks Resolve takes, re-checks ownership under
+	//    them, runs the singleton guard and records the history entry. Step 1
+	//    already refused a held identifier; one claimed by a concurrent ingest
+	//    BETWEEN step 1 and here is refused by the engine instead, and gets the
+	//    same proposal step 1 would have opened.
+	engine, err := s.identityEngine()
+	if err != nil {
+		return nil, fmt.Errorf("identification engine unavailable: %w", err)
+	}
+	declared := identity.Observation{
+		TenantID:    tenantID.String(),
+		Source:      identity.Source{Kind: identity.SourceDeclared, Ref: "manual"},
+		Identifiers: attach,
+	}
+	asset := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	err = s.identityRepo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
 		if len(attach) > 0 {
-			for i := range attach {
-				attach[i].Source = identity.Source{Kind: identity.SourceDeclared, Ref: "manual"}
-			}
-			if aerr := r.AttachIdentifiers(ctx,
-				identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}, attach); aerr != nil {
-				return aerr
+			if _, rerr := engine.WithRepository(r).ResolveDeclaredFor(ctx, declared, asset); rerr != nil {
+				return rerr
 			}
 		}
 		for _, e := range remove {
@@ -301,6 +340,18 @@ func (s *AssetService) updateAssetIdentifiers(
 		}
 		return nil
 	})
+	var conflict *identity.DeclaredTargetConflict
+	if errors.As(err, &conflict) && !conflict.Singleton {
+		proposalID, perr := s.proposeIdentifierConflict(ctx, tenantID, assetID, conflict.Owner, conflict.Identifier, actorUserID)
+		if perr != nil {
+			return nil, perr
+		}
+		ownerID, _ := uuid.Parse(conflict.Owner.ID)
+		return nil, &IdentifierConflictError{
+			Kind: string(conflict.Identifier.Kind), Value: conflict.Identifier.Value, Scope: conflict.Identifier.Scope,
+			OwnerAssetID: ownerID, ProposalID: proposalID,
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

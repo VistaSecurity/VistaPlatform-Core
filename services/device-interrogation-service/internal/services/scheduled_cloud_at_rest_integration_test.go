@@ -355,7 +355,10 @@ func TestIntegration_ScheduledCloudRefresh_CompletesForFullPartialAndFailed(t *t
 			// hand-created device instead of creating it.
 			enableSourceRefresh(t, owner, tenant)
 			refresh := NewConfiguredSourceRefresh(owner, NewJobQueueService(owner, owner, nil), devices, nil)
-			req := refreshObservation(t, owner, tenant, "cloud:aws", &device.ID)
+			// The retained (asset-less) shape: a cloud refresh is dispatched
+			// only for an observation that has not resolved to an asset — a
+			// linked one completes as the source's own answer.
+			req := retainedCloudRefresh(t, owner, devices, tenant, *device)
 			status, err := refresh.Refresh(ctx, req)
 			if err != nil || status.State != "queued" {
 				t.Fatalf("an S3 bucket's refresh was not dispatched: %+v, %v", status, err)

@@ -99,12 +99,90 @@
     "edges": [],
     "assets": [
       {
+        "asset": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
+        "class_key": "load_balancer",
+        "status": "pending_approval"
+      },
+      {
+        "asset": "asset[hostname=vs_web_443,ip_address=198.51.100.10]",
+        "class_key": "load_balancer",
+        "status": "pending_approval"
+      },
+      {
         "asset": "device",
         "class_key": "load_balancer",
         "status": "pending_approval"
       }
     ],
     "retained_observations": [
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "claimed": true,
+            "confidence": 1,
+            "kind": "ip_address",
+            "pinned": true,
+            "scope": "segment:192.0.2.0/24",
+            "value": "192.0.2.5"
+          },
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "lb-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "claimed": true,
+            "confidence": 1,
+            "kind": "ip_address",
+            "pinned": true,
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.5"
+          },
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "lb-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
       {
         "admission_reasons": "{dynamic_address_without_device_binding}",
         "identifiers": [
@@ -138,6 +216,32 @@
             "kind": "hostname",
             "scope": "segment:198.51.100.0/24",
             "value": "vs_legacy_443"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "unresolved"
+      },
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.20"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "unresolved"
+      },
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.21"
           }
         ],
         "source_kind": "measured",

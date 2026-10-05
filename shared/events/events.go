@@ -314,6 +314,32 @@ type AssetMergedPayload struct {
 	DecidedBy       string    `json:"decided_by,omitempty"`
 }
 
+// IdentityMaterialChange is one kind of identifying material that changed, as
+// an asset.identity_drift event carries it.
+type IdentityMaterialChange struct {
+	Kind     string   `json:"kind"`
+	Previous []string `json:"previous,omitempty"`
+	Current  []string `json:"current,omitempty"`
+	Retired  bool     `json:"retired,omitempty"`
+}
+
+// AssetIdentityDriftPayload is the payload for asset.identity_drift events: the
+// identification engine matched a sighting to an asset whose identifying
+// material changed, and classified the change ( Decision 4) — `rotated`
+// (a new SSH host key), `moved` (a new address, the old one released),
+// `reimaged` (same hardware, new keys and name) or `unverified` (a key change
+// nothing else could confirm; NeedsReview). Previous and Current carry the
+// old and new values — for a host key, its fingerprints.
+type AssetIdentityDriftPayload struct {
+	AssetID     uuid.UUID                `json:"asset_id"`
+	AssetName   string                   `json:"asset_name,omitempty"`
+	Verdict     string                   `json:"verdict"`
+	Rule        string                   `json:"rule"`
+	Explanation string                   `json:"explanation"`
+	NeedsReview bool                     `json:"needs_review,omitempty"`
+	Changes     []IdentityMaterialChange `json:"changes,omitempty"`
+}
+
 // AssetRiskChangedPayload is the payload for asset.risk_changed events.
 type AssetRiskChangedPayload struct {
 	AssetID      uuid.UUID `json:"asset_id"`
@@ -390,6 +416,7 @@ const (
 	SubjectLifecycleAssetMerged         = "inventory.lifecycle.asset.merged"
 	SubjectLifecycleCryptoConfigAdded   = "inventory.lifecycle.crypto.configuration_added"
 	SubjectLifecycleCertificateExpiring = "inventory.lifecycle.certificate.expiring"
+	SubjectLifecycleAssetIdentityDrift  = "inventory.lifecycle.asset.identity_drift"
 )
 
 // --- Factory Functions ---

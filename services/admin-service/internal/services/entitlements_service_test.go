@@ -296,17 +296,28 @@ func TestGetTierEntitlements_SeededTier(t *testing.T) {
 	} else {
 		t.Error("pro tier missing max_sensors entitlement")
 	}
-	// ot_active_probing is edition-gated, and every seeded tier ships every
+	// ot_primary_lens is edition-gated, and every seeded tier ships every
 	// gated capability disabled (scripts/generate-edition-matrix.mjs fails on a
 	// seeded grant). Whether a tenant actually gets it is the licence's call
 	// (shared/entitlements/license.go): Enterprise grants it to everyone, MSP
 	// lets the MSP's own plans grant it. The row must still exist so the tier
 	// editor can display it.
+	if lens, ok := byKey["ot_primary_lens"]; ok {
+		var v struct{ Enabled bool }
+		_ = json.Unmarshal(lens.IncludedValue, &v)
+		if v.Enabled {
+			t.Error("pro.ot_primary_lens must be false: no tier may grant an edition-gated capability")
+		}
+	} else {
+		t.Error("pro tier missing ot_primary_lens entitlement")
+	}
+	// ot_active_probing is Core and on by default: every seeded tier grants it,
+	// and the plan editor is where an operator switches it off.
 	if ot, ok := byKey["ot_active_probing"]; ok {
 		var v struct{ Enabled bool }
 		_ = json.Unmarshal(ot.IncludedValue, &v)
-		if v.Enabled {
-			t.Error("pro.ot_active_probing must be false: no tier may grant an edition-gated capability")
+		if !v.Enabled {
+			t.Error("pro.ot_active_probing must be true: OT active probing is a Core capability, on by default")
 		}
 	} else {
 		t.Error("pro tier missing ot_active_probing entitlement")

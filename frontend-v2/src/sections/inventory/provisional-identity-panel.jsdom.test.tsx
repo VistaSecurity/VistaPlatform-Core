@@ -40,6 +40,7 @@ const base: Observation = {
   enrichment_reason: 'no_eligible_collector_in_target_network',
   last_attempt_at: null,
   next_attempt_at: '2026-09-21T10:00:00Z',
+  network_name: null, source_name: 'Sensor', needs: 'needs_sensor', suggested_action: 'sensor_options', explanation_code: 'relayed_advertisement', suggested_reason: '', summary: [], link_asset: null, evidence_held: false,
   collector: {
     observer: { sensor_id: '11111111-1111-1111-1111-111111111111', name: 'xps16-sensor-1', reachable: false, reason: 'collector_has_no_interface_in_target_network' },
     executor: null,

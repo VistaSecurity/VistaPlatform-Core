@@ -893,7 +893,7 @@ func TestIntegration_MergePreview_PreservesDistinctEndpointCertificatesAndFindin
 	for index, id := range []uuid.UUID{survivor, source} {
 		finding := leafCertFinding("stable.example.test", "198.51.100.70", 443+index*400, strings.Repeat(string(rune('a'+index)), 64))
 		finding.RawData["observed_at"] = seen.Format(time.RFC3339Nano)
-		if err := f.svc.processDiscoveryCryptoData(f.tenant, id, finding, nil, nil, nil); err != nil {
+		if err := materializeForTest(f.svc, f.tenant, id, finding, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -927,7 +927,7 @@ func TestIntegration_MergePreview_PreservesDistinctEndpointCertificatesAndFindin
 		t.Fatalf("merge fabricated freshness: %s %v", lastSeen, err)
 	}
 	repo := identitypg.New(f.db.DB.DB)
-	err = repo.UpsertEndpoints(ctx, identity.AssetRef{TenantID: f.tenant.String(), ID: source.String()}, []identity.EndpointObservation{{Address: "198.51.100.71", Port: 443, Transport: "tcp"}})
+	_, err = repo.UpsertEndpoints(ctx, identity.AssetRef{TenantID: f.tenant.String(), ID: source.String()}, []identity.EndpointObservation{{Address: "198.51.100.71", Port: 443, Transport: "tcp"}})
 	if !errors.Is(err, identity.ErrAssetNotFound) {
 		t.Fatalf("late endpoint attached to archived source: %v", err)
 	}
@@ -953,7 +953,8 @@ func TestIntegration_MergePreview_ConcurrentEvidenceInvalidatesRevision(t *testi
 			result <- err
 		}()
 		waitForIdentityReplayLock(t, ctx, f, identitypg.AssetLifecycleLockKey(f.tenant, source), "ExclusiveLock", false)
-		return identitypg.New(f.db.DB.DB).UpsertEndpoints(ctx, identity.AssetRef{TenantID: f.tenant.String(), ID: source.String()}, []identity.EndpointObservation{{Address: "198.51.100.78", Port: 8443, Transport: "tcp", SeenAt: time.Now().UTC()}})
+		_, uerr := identitypg.New(f.db.DB.DB).UpsertEndpoints(ctx, identity.AssetRef{TenantID: f.tenant.String(), ID: source.String()}, []identity.EndpointObservation{{Address: "198.51.100.78", Port: 8443, Transport: "tcp", SeenAt: time.Now().UTC()}})
+		return uerr
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -984,7 +985,7 @@ func TestIntegration_MergePreview_SharedCertificateAndAlgorithmRowsKeepDistinctA
 	source := seedAsset(t, f.db, f.tenant, "shared-cert-source.example.test", "server", "hardware.computer.server", "production", 0, 0)
 	for index, id := range []uuid.UUID{survivor, source} {
 		finding := leafCertFinding("shared-cert.example.test", "198.51.100.74", 443+index*400, strings.Repeat("d", 64))
-		if err := f.svc.processDiscoveryCryptoData(f.tenant, id, finding, nil, nil, nil); err != nil {
+		if err := materializeForTest(f.svc, f.tenant, id, finding, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

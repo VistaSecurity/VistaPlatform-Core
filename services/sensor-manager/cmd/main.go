@@ -267,6 +267,12 @@ func main() {
 		// travelled through /discoveries above.
 		sensors.POST("/discovery-jobs/:job_id/complete", handler.CompleteDiscoveryJob)
 
+		// A planned scan's per-host reports ( WP2b): each host the
+		// sensor finishes, stored as the job's work unit, and an empty batch
+		// as the progress ping that keeps the job's lease. The answer tells
+		// the sensor to stop when the job was cancelled or has ended.
+		sensors.POST("/discovery-jobs/:job_id/units", handler.ReportDiscoveryJobUnits)
+
 		// Autonomous certificate rotation (sensor renews its own cert before
 		// expiry). Sensor-authenticated, NOT tenant-JWT — this is what the sensor
 		// binary's pre-expiry renewal loop calls. Was previously mis-registered on

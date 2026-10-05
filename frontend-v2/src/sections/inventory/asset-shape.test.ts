@@ -10,7 +10,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import {
   assetIdentity, assetLocation, assetRisk, assetService, attr, classDeclares,
-  classIcon, classLabel, confidenceLabel, endpointCount, identifierKindLabel,
+  classIcon, classLabel, confidenceLabel, endpointCount, handshakeRefusal, identifierKindLabel,
   operatingSystem, primaryAddress, primaryAddressPort, primaryEndpoint,
   relativeSeen, sourceKindLabel, stripMask,
   type AssetLike,
@@ -326,5 +326,19 @@ describe('relativeSeen', () => {
     expect(relativeSeen(null)).toBe('');
     expect(relativeSeen('0001-01-01T00:00:00Z')).toBe('');
     expect(relativeSeen('not a date')).toBe('');
+  });
+});
+
+describe('handshakeRefusal', () => {
+  it('names a refused endpoint, with the hint that says what to do', () => {
+    const r = handshakeRefusal({ protocol: 'TLS', tls_handshake_outcome: 'refused' });
+    expect(r?.label).toBe('TLS, handshake refused');
+    expect(r?.hint).toBe('The server ended the TLS handshake. It may require a server name; scan it by name to see its configuration.');
+  });
+  it('says nothing for an endpoint with no outcome, or another value', () => {
+    expect(handshakeRefusal({ protocol: 'TLS' })).toBeNull();
+    expect(handshakeRefusal({ protocol: 'TLS', tls_handshake_outcome: null })).toBeNull();
+    expect(handshakeRefusal({ protocol: 'TLS', tls_handshake_outcome: 'negotiated' })).toBeNull();
+    expect(handshakeRefusal(null)).toBeNull();
   });
 });

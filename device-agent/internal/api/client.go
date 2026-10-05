@@ -22,6 +22,7 @@ import (
 	// Aliased: the device-agent has its own `certificates` package, above.
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
@@ -295,6 +296,10 @@ func (c *OutboundClient) GetNextJob() (*models.Job, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	// The job types this build runs beyond device_interrogation. The platform
+	// hands a newer job type only to an agent that declares it, so an agent
+	// that predates one is never given a job it would strand.
+	req.Header.Set(di.AgentCapabilitiesHeader, strings.Join(di.AgentCapabilities(), ","))
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

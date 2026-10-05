@@ -9,13 +9,16 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
+	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 )
@@ -117,7 +120,16 @@ func mergeSegmentTags(existing, newTags map[string]interface{}) map[string]inter
 }
 
 // EnrichAssetByID looks up segment by IP/hostname and updates the asset row with segment context (environment, location_id, etc.).
+//
+// A device that routes networks is the exception ( §3.4): it has an
+// address on each of them, and a finding arriving on any one of those would
+// otherwise move it to that segment. Its segment is the segment of its home
+// address — the address it is interrogated at (homeAddress) — whichever
+// address the finding was on.
 func (s *NetworkSegmentService) EnrichAssetByID(tenantID, assetID uuid.UUID, ipAddress, hostname *string) error {
+	if home, ok := s.homeAddress(tenantID, assetID); ok {
+		ipAddress, hostname = &home, nil
+	}
 	seg, err := s.GetSegmentForIP(tenantID, ipAddress, hostname)
 	if err != nil || seg == nil {
 		return err
@@ -191,7 +203,10 @@ func (s *NetworkSegmentService) List(tenantID uuid.UUID, filters models.NetworkS
 		for i := range list {
 			list[i].HydratePosture()
 		}
-		return hydratePostureNames(tx, tenantID, list)
+		if e := hydratePostureNames(tx, tenantID, list); e != nil {
+			return e
+		}
+		return hydrateSegmentGateways(context.Background(), tx, tenantID, list, time.Now())
 	})
 	if err != nil {
 		return nil, 0, err
@@ -215,6 +230,9 @@ func (s *NetworkSegmentService) GetByID(tenantID, id uuid.UUID) (*models.Network
 		one := []models.NetworkSegment{seg}
 		one[0].HydratePosture()
 		if e := hydratePostureNames(tx, tenantID, one); e != nil {
+			return e
+		}
+		if e := hydrateSegmentGateways(context.Background(), tx, tenantID, one, time.Now()); e != nil {
 			return e
 		}
 		seg = one[0]
@@ -251,7 +269,7 @@ func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkS
 	}
 	tags := toJSONB(input.Tags)
 	// New segments default to sensor-only unless the caller names sources.
-	meta := withAutoApproveSources(input.Metadata, models.NormalizeAutoApproveSources(input.AutoApproveSources))
+	meta := withAutoApproveSources(withoutClaim(input.Metadata), models.NormalizeAutoApproveSources(input.AutoApproveSources))
 	isActive := input.IsActive
 	if isActive == nil {
 		defaultActive := true
@@ -278,6 +296,9 @@ func (s *NetworkSegmentService) Create(tenantID uuid.UUID, input models.NetworkS
 		}
 		return applyOperatorPosture(context.Background(), tx, tenantID, id, input.DHCP)
 	})
+	if isUniqueViolation(err) {
+		return nil, s.duplicateSegmentError(tenantID, input.Value, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -436,6 +457,10 @@ func (s *NetworkSegmentService) Update(tenantID, id uuid.UUID, input models.Netw
 		// existed — would otherwise erase a measurement or the operator's
 		// answer on an unrelated edit.
 		baseMeta = withPostureKeys(baseMeta, seg.Metadata)
+		// Nor is a claim, or the learned provenance it qualifies: only the
+		// audited claim action changes whether this segment is the tenant's
+		// (network_segment_claim.go).
+		baseMeta = withServerOwnedKeys(baseMeta, seg.Metadata)
 	}
 	if err := validatePostureApplies(input.SegmentType, input.DHCP); err != nil {
 		return nil, err
@@ -556,6 +581,11 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 		}
 		if a.Hostname.Valid {
 			host = &a.Hostname.String
+		}
+		// A device that routes networks is placed by its home address, as in
+		// EnrichAssetByID ( §3.4).
+		if home, ok := s.homeAddress(tenantID, a.ID); ok {
+			ip, host = &home, nil
 		}
 		seg, err := s.GetSegmentForIP(tenantID, ip, host)
 		if err != nil {
@@ -1057,4 +1087,55 @@ func (s *NetworkSegmentService) GetByValue(tenantID uuid.UUID, value string) (*m
 	seg.HydrateAutoApproveSources()
 	seg.HydratePosture()
 	return &seg, nil
+}
+
+// homeAddress returns the address a device that ROUTES networks was
+// interrogated at: its management address, when that is an IP address and the
+// device reports the networks it serves (a `net.vlans` fact). It is the device's
+// home ( §3.4): device-interrogation-service sets network_segment_id from
+// it on every interrogation, and the segment writers here read it too, so a
+// multi-homed router's segment does not depend on which of its addresses the
+// last finding happened to arrive on.
+//
+// Any other asset — no management row, a management address that is a name,
+// no net.vlans fact — answers false and is placed by its own address as before.
+// A read failure also answers false: placement then falls back to the
+// finding's address, which is what it always did.
+func (s *NetworkSegmentService) homeAddress(tenantID, assetID uuid.UUID) (string, bool) {
+	var managementURL sql.NullString
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		return tx.QueryRow(`
+			SELECT m.management_url FROM asset_management m
+			WHERE m.tenant_id = $1 AND m.asset_id = $2
+			  AND EXISTS (SELECT 1 FROM asset_facts f
+			              WHERE f.tenant_id = m.tenant_id AND f.asset_id = m.asset_id AND f.key = $3)`,
+			tenantID, assetID, facts.KeyNetVlans).Scan(&managementURL)
+	})
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[NetworkSegmentService] home address of asset %s unreadable; placing it by the finding's address: %v", assetID, err)
+		}
+		return "", false
+	}
+	addr, err := netip.ParseAddr(managementURLHost(managementURL.String))
+	if err != nil {
+		return "", false
+	}
+	return addr.Unmap().WithZone("").String(), true
+}
+
+// managementURLHost is the host part of a management URL ("https://203.0.113.1:8443"
+// gives "203.0.113.1"), or the value itself when it is a bare host.
+func managementURLHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return strings.Trim(u.Hostname(), "[]")
+	}
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.Trim(h, "[]")
+	}
+	return strings.Trim(raw, "[]")
 }

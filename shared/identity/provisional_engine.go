@@ -334,7 +334,7 @@ func (e *Engine) resolveSupporting(
 		if len(unattached) > 0 {
 			changes["unattached"] = identifierKeys(unattached)
 		}
-		if err := e.history(ctx, ref, obs, at, ActionUpdated, changes); err != nil {
+		if err := e.recordIfChanged(ctx, ref, obs, at, ActionUpdated, changes, false); err != nil {
 			return Resolution{}, err
 		}
 		return Resolution{Outcome: OutcomeUnresolved, Unattached: unattached}, nil
@@ -350,10 +350,10 @@ func (e *Engine) resolveSupporting(
 		if len(unattached) > 0 {
 			changes["unattached"] = identifierKeys(unattached)
 		}
-		if err := e.history(ctx, ref, obs, at, ActionUpdated, changes); err != nil {
+		if err := e.recordIfChanged(ctx, ref, obs, at, ActionUpdated, changes, false); err != nil {
 			return Resolution{}, err
 		}
-		return Resolution{Outcome: OutcomeSupporting, Asset: ref, Unattached: unattached}, nil
+		return Resolution{Outcome: OutcomeSupporting, Asset: ref, Unattached: unattached, EvidenceHeld: true}, nil
 	}
 	if summaries[0].IdentityStatus == string(IdentityProvisional) {
 		// A provisional asset is a sketch, and later hearsay may legitimately
@@ -373,6 +373,12 @@ func (e *Engine) resolveSupporting(
 	//
 	// Last-seen still moves. The advert IS evidence the thing was there, which
 	// is the one claim hearsay can make on its own.
+	//
+	// The endpoints are held too, and so is everything a caller would hang off
+	// them (platform ADR-0003 D2): EvidenceHeld tells every intake path not to
+	// write service identification, crypto or a deferred finding onto this
+	// asset from this observation. The sockets stay in the observation's
+	// evidence until an operator links or confirms it.
 	unattached = append(unattached, attach...)
 	if err := e.repo.Touch(ctx, ref, at); err != nil {
 		return Resolution{}, fmt.Errorf("identity: touching %s: %w", ref.ID, err)
@@ -380,10 +386,15 @@ func (e *Engine) resolveSupporting(
 	if len(unattached) > 0 {
 		changes["unattached"] = identifierKeys(unattached)
 	}
-	if err := e.history(ctx, ref, obs, at, ActionUpdated, changes); err != nil {
+	if eps := stampEndpoints(obs.Endpoints, obs.Source, at); len(eps) > 0 {
+		changes["held_endpoints"] = endpointKeys(eps)
+	}
+	// Last-seen moved and nothing else did, so the timeline hears of it only
+	// the first time these identifiers are held back.
+	if err := e.recordIfChanged(ctx, ref, obs, at, ActionUpdated, changes, false); err != nil {
 		return Resolution{}, err
 	}
-	return Resolution{Outcome: OutcomeSupporting, Asset: ref, Unattached: unattached}, nil
+	return Resolution{Outcome: OutcomeSupporting, Asset: ref, Unattached: unattached, EvidenceHeld: true}, nil
 }
 
 // provisionalPlacement is the segment a provisional asset would be created in,
@@ -562,7 +573,9 @@ func (e *Engine) resolveProvisional(
 // since A1 with an address-only sighting inside a DHCP range, and
 //     ADR-0002 D3 already says such an address decides nothing — today's
 //     lease is tomorrow's other host. Letting it move last-seen would keep
-//     the previous holder fresh for as long as anything holds the lease.
+//     the previous holder fresh for as long as anything holds the lease. An
+// address its owner holds PINNED is not a lease (pinned.go) and
+//     does not count as dynamic here.
 //
 // An empty link is not a lease link; it is no link, and the callers never
 // reach here without one.
@@ -575,7 +588,7 @@ func (e *Engine) leaseOnlyLink(obs Observation, ids, linking []Identifier) bool 
 		if id.Kind != KindIPAddress {
 			return false
 		}
-		if !e.dynamic[id.Scope] && !obs.DynamicScopes[id.Scope] {
+		if !e.dynamicAddress(obs, id) {
 			allDynamic = false
 		}
 	}

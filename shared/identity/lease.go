@@ -123,7 +123,9 @@ func holderDeclaredAddress(holder AssetSummary, addr Identifier) bool {
 		if held.Kind == KindDeclarationID {
 			return true
 		}
-		if held.Key() == addr.Key() && held.Source.Kind == SourceDeclared {
+		if held.Key() == addr.Key() && (held.Source.Kind == SourceDeclared || held.Assignment == AssignmentStatic) {
+			// Declared, or pinned by the holder's own agent: either
+			// way not a lease the holder can lose to whoever answers there.
 			return true
 		}
 	}
@@ -187,7 +189,10 @@ func (e *Engine) leaseMoves(
 		// Condition 3. It also keeps this rule off the hearsay-yields path's
 		// addresses: those are muted because they VOTED for the provisional
 		// asset, and an address votes only outside a dynamic scope.
-		if !e.dynamic[id.Scope] && !obs.DynamicScopes[id.Scope] {
+		if !e.dynamicAddress(obs, id) {
+			// Not in a dynamic scope, or pinned by its holder (pinned.go):
+			// either way not a lease, and a pinned address does not follow
+			// anybody's MAC.
 			continue
 		}
 		// Exactly one previous holder. An address the store says two assets

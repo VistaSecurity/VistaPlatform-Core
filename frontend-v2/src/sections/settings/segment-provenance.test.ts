@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dhcpBody, initialDhcpChoice, segmentPosture, segmentProvenance } from './segment-provenance';
+import { claimChipText, dhcpBody, initialDhcpChoice, isClaimableSegment, segmentClaim, segmentPosture, segmentProvenance } from './segment-provenance';
 
 describe('segmentProvenance', () => {
   it('names the device a learned segment came from', () => {
@@ -96,5 +96,33 @@ describe('the dialog control', () => {
     expect(dhcpBody('on', 'off')).toEqual({ dhcp: false });
     expect(dhcpBody('on', 'auto')).toEqual({ dhcp: null });
     expect(dhcpBody('off', 'auto')).toEqual({ dhcp: null });
+  });
+});
+
+describe('claiming a learned public range', () => {
+  const learned = { source: 'interrogation', source_device_type: 'fortinet' };
+
+  it('is offered only on a learned public CIDR range', () => {
+    expect(isClaimableSegment({ segment_type: 'cidr', network_type: 'public', metadata: learned })).toBe(true);
+    expect(isClaimableSegment({ segment_type: 'cidr', network_type: 'public', metadata: { source: 'unifi' } })).toBe(true);
+    // Declared: already the organization's. Private: already counts. Not a range: nothing to scope.
+    expect(isClaimableSegment({ segment_type: 'cidr', network_type: 'public', metadata: {} })).toBe(false);
+    expect(isClaimableSegment({ segment_type: 'cidr', network_type: 'private', metadata: learned })).toBe(false);
+    expect(isClaimableSegment({ segment_type: 'domain', network_type: 'public', metadata: learned })).toBe(false);
+  });
+
+  it('reads a standing claim, and nothing else, as a claim', () => {
+    expect(segmentClaim({ ...learned, claimed: { by: 'u', by_name: 'Ada Admin', at: '2026-10-01T12:00:00Z' } }))
+      .toEqual({ byName: 'Ada Admin', at: '2026-10-01T12:00:00Z' });
+    expect(segmentClaim(learned)).toBeNull();
+    expect(segmentClaim({ ...learned, claimed: true })).toBeNull();
+    expect(segmentClaim(null)).toBeNull();
+    // A claim whose name was not recorded still says it is one.
+    expect(segmentClaim({ claimed: { by: 'u', at: '2026-10-01T12:00:00Z' } })?.byName).toBe('someone in your organization');
+  });
+
+  it('says who claimed it and when', () => {
+    expect(claimChipText({ byName: 'Ada Admin', at: '2026-10-01T12:00:00Z' })).toMatch(/^Claimed by Ada Admin · .*2026$/);
+    expect(claimChipText({ byName: 'Ada Admin', at: '' })).toBe('Claimed by Ada Admin');
   });
 });

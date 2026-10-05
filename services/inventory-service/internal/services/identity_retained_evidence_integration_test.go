@@ -112,3 +112,44 @@ func TestIntegration_IdentityRetainedEvidenceDetailIsBoundedTenantScopedAndSafe(
 
 	})
 }
+
+// TestIntegration_IdentityRetainedEvidence_RetiredPeerContextIsHistorical: a
+// retained peer context that device-interrogation-service retired (superseded
+// by a newer run, or expired after a day) is shown as superseded historical
+// evidence, not as evidence still waiting for identity.
+//
+// MUTATION: project NULL instead of retired_at for the peer branch of
+// retainedEvidence and the retired row reads "retrying" (it carries its
+// reason in last_error).
+func TestIntegration_IdentityRetainedEvidence_RetiredPeerContextIsHistorical(t *testing.T) {
+	db, tenant := getTestDBAndTenant(t)
+	testdb.WithSchemaShareLock(t, db.DB.DB, func() {
+		service := NewAssetService(db)
+		observation := uuid.New()
+		seen := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+		if _, err := db.Exec(`INSERT INTO identity_observations(tenant_id,id,fingerprint,source_kind,source_ref,evidence,first_seen_at,last_seen_at) VALUES($1,$2,$3,'measured','interrogation:test','{}',$4,$4)`, tenant, observation, observation.String(), seen); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range []struct {
+			id      string
+			retired bool
+		}{{"open", false}, {"retired", true}} {
+			if _, err := db.Exec(`INSERT INTO identity_observation_peer_contexts(tenant_id,observation_id,context_id,origin_asset_id,payload,observed_at,retired_at,last_error)
+				VALUES($1,$2,$3,$4,'{"observations":{"Facts":[{"key":"hw.model","value":"Example"}]}}',$5,CASE WHEN $6 THEN now() END,CASE WHEN $6 THEN 'retired: superseded by a newer run from the same source' ELSE '' END)`,
+				tenant, observation, row.id, uuid.New(), seen, row.retired); err != nil {
+				t.Fatal(err)
+			}
+		}
+		detail, err := service.GetIdentityObservation(context.Background(), tenant, observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		states := map[string]int{}
+		for _, item := range detail.RetainedEvidence.Items {
+			states[item.MaterializationState]++
+		}
+		if states["superseded"] != 1 || states["pending"] != 1 {
+			t.Fatalf("retired peer context not shown as historical: %+v", states)
+		}
+	})
+}

@@ -44,9 +44,16 @@ capture:
   # Default 60. Override with env DEDUP_TTL_MINUTES or tenant Sensor Configuration UI.
   dedupTTLMinutes: 60
 
-  # extraPortsToMonitor: Additional TCP ports to include in passive capture
-  # beyond the built-in list (22, 443, 465, 587, 636, 993, 995, 5671, 8443).
-  # Use this for non-standard TLS deployments without rebuilding the sensor.
+  # extraPortsToMonitor: Additional TCP ports the sensor captures AND decodes
+  # as TLS, beyond its built-in ports (the TLS, SSH, SMB, RDP, Kerberos and
+  # STARTTLS ports, plus the OT ports you enable). Use this for TLS on a
+  # non-standard port without rebuilding the sensor. A listed port is always
+  # treated as TLS; it never changes what a built-in or STARTTLS port means
+  # (22 stays SSH, 445 stays SMB). Values outside 1-65535 are ignored.
+  # Managed from the console as "Additional TLS ports" (the sensor's Control
+  # tab, or Sensor defaults): this list is reported on the sensor's first
+  # check-in and kept as its own setting; after that the console's value wins
+  # and is written back here. Takes effect when the capture reopens (restart).
   # extraPortsToMonitor: [8444, 9443]
 
   # deepScan: When true, discovery jobs perform additional probe connections per

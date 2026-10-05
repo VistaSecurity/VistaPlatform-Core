@@ -84,7 +84,7 @@ tenant does day-to-day lives in one of these:
 
 | Section | What it's for |
 |---------|---------------|
-| **Dashboard** | Priority-based health overview — cryptographic posture and inventory health, and what needs attention. |
+| **Dashboard** | Priority-based health overview — cryptographic posture and assets monitored, and what needs attention. |
 | **Discovery** | Command Center, sensors & agents, discovery jobs, devices, active and scheduled scans, **Approvals**, job logs, and the three intake sources — Cloud, PCAP Upload and SBOM Upload. |
 | **Inventory** | Your unified asset inventory, viewed through switchable **lenses**. |
 | **Risk & Compliance** | **Posture** (scores, framework transparency, algorithm reference), **Findings**, and **Bills of Materials**. |
@@ -710,10 +710,56 @@ The network type is set from the prefix: RFC 1918 and IPv6 ULA space is *private
 anything else — carrier-grade NAT (100.64.0.0/10) included — is *public*. A
 learned public segment is used only to tell hosts apart; it does not make its
 range scannable, because a firewall's internet-facing network is where it
-connects, not something you own. To scan a public range you own, create the
-segment yourself. A segment you created with the same CIDR always wins, and
+connects, not necessarily something you own. Its row says *Public range · not
+treated as yours*. If the range is yours, press **Claim as mine** on the row
+(needs `settings.update`): after you confirm, the range is treated exactly like a
+public segment you created — scannable when someone asks, never automatically —
+and the row shows *Claimed by … · date* with a **Revoke claim** action. The claim
+is your own statement; the platform does not verify it, and it records each claim
+and revocation in the audit log. Do not claim a range you do not control. See
+[Public ranges learned from your devices](../features/active-scanning.md#public-ranges-learned-from-your-devices).
+A segment you created with the same CIDR always wins, and
 interrogation never renames or retypes it (it does still tell your segment what
 it measured about DHCP — see below).
+
+#### Gateway and coverage
+
+Two columns say how each network is served and how well you can see it.
+
+**Gateway** names the device that routes the network, with its own address on
+it — for example *edge-router (192.0.2.1)*. The name links to that device's
+asset page, and hovering it says when an interrogation last reported it.
+
+You never type a gateway in. It is recorded when you **interrogate the router**
+(Discovery → Devices → **Interrogate**, or a schedule): a router reports its own
+address on each network it serves, and every segment where it holds that
+address gets it as its gateway — a segment you created as well as a learned
+one. The next interrogation keeps it current: a network the router stops
+reporting loses it as its gateway, and another device's gateway is never
+removed. See
+[What interrogating a gateway records](./device-interrogation-user-guide.md#what-interrogating-a-gateway-records).
+
+A **—** in the column means **no device has reported being this network's
+gateway** (hover it for the reason). That is the case until you interrogate the
+router that serves the network, for a device type that does not report its
+networks with a prefix, and after the device that was the gateway is deleted.
+To fill it in, add the router under **Discovery → Devices** and interrogate it.
+
+When two devices both report routing a network — a high-availability pair, for
+example — the one reported most recently is shown. The platform never guesses a
+gateway from a network's addresses: a network whose router you have not
+interrogated says so, rather than naming its first address.
+
+**Coverage** says whether one of your sensors sees the network directly:
+
+| The column says | What it means |
+|---|---|
+| **Sensor: *name*** | That sensor is live and has recently reported an interface on this network, so it observes the network first-hand. |
+| **No sensor on this network** | No sensor of yours reaches it. Hosts here are known only from the gateway's interrogation and from traffic relayed to other networks — enough to list them, not to measure what they do. To cover it, deploy a sensor with an interface on this network (**Discovery → Sensors & Agents**). This is a fact about the network, not an error. |
+| **—** | Coverage is worked out for CIDR segments only; an IP range, domain or cloud VPC segment has nothing to show here. |
+
+A sensor that goes quiet, or stops reporting an interface on the network, stops
+covering it.
 
 #### DHCP on a segment
 

@@ -43,10 +43,12 @@ const MaxPorts = 64
 
 // SupportedProtocols is what an automatic scan may request, and it is the same
 // narrow pair Active Scan allows: both scan runtimes have a prober registered
-// for TLS and SSH on any port. OT/ICS protocols are deliberately absent — those
-// are gated by the `ot_active_probing` tier flag through a discovery job's
-// separate ot_probe_protocols field, and letting them in here would be a way to
-// probe a PLC unattended, on a schedule, past that gate.
+// for TLS and SSH on any port. OT/ICS protocols are deliberately absent: a
+// discovery job's `protocols` field refuses them outright
+// (shareddisc.ValidateJobProtocols), and a PLC may only be probed through the
+// separate, explicit ot_probe_protocols opt-in — never unattended, on a
+// schedule. This list stays narrower than that allowlist (no SMB, no
+// TLS-wrapped names) on purpose.
 var SupportedProtocols = []string{"SSH", "TLS"}
 
 // Policy is a tenant's automatic-scanning policy.

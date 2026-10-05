@@ -122,12 +122,12 @@ Assets are discovered through:
 - Network segment classification applied automatically
 - Auto-approval rules evaluated automatically
 - Assets created with `monitoring` (if on an auto-approving segment) or `pending_approval` status
-- No manual import required — the Discover wizard's results step reports where
-  the findings went and links to Discovery → Approvals
+- No manual import required — the job's detail on Discovery → Discovery Jobs
+  reports where the findings went and links to Discovery → Approvals
 
 ### 2. Where the findings went
 
-The Discover wizard's final step reports the split — how many were
+A discovery job's detail (**Discovery → Discovery Jobs** → the job) reports the split — how many were
 auto-approved, how many are awaiting approval, and how many the pipeline is
 still processing — and links to the Approvals queue. It is a report, not a
 decision: no client chooses an asset's approval status.
@@ -135,8 +135,8 @@ decision: no client chooses an asset's approval status.
 Two counts appear because they answer different questions. **Found** is what the
 scan saw; the split is what reached your inventory. They can differ: external
 endpoints are recorded under Inventory → Connections rather than as assets, and
-a finding with no resolvable address cannot be anchored to one. The wizard says
-so rather than presenting one number as if it answered both.
+a finding with no resolvable address cannot be anchored to one. The job's detail
+says so rather than presenting one number as if it answered both.
 
 ### 3. Review Pending Assets
 

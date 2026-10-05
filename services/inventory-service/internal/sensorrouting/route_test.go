@@ -1,9 +1,10 @@
 package sensorrouting
 
 // The routing rule, one polarity at a time: observing sensor beats segment
-// beats platform; an OFFLINE observer skips the target rather than handing it
-// to the platform; the platform's own sensor never gets a job; unknown
-// observers fall through to the segment rule.
+// beats platform; an OFFLINE observer hands the target to a different live
+// segment sensor, and skips it when there is none — never to the platform; the
+// platform's own sensor never gets a job; unknown observers fall through to
+// the segment rule.
 
 import (
 	"errors"
@@ -169,26 +170,231 @@ func TestRoute_PlatformSensorNeverGetsAJob(t *testing.T) {
 	}
 }
 
-// The guard the spec names: an offline observing sensor SKIPS the target. It
-// is not handed to the platform (a scan from the wrong place), and it is not
-// handed to a segment sensor (the observer is the better evidence and will be
-// back). Flip Dispatchable to true for a stale sensor and this goes red.
-func TestRoute_OfflineObserverSkipsRatherThanSubstitutes(t *testing.T) {
-	xps := offline("xps16-sensor", "198.51.100.0/24")
-	branch := live("branch-sensor", "198.51.100.0/24") // covers the same segment
-	plan := Route([]string{"198.51.100.42"}, map[string]uuid.UUID{"198.51.100.42": xps.ID}, []Sensor{xps, branch}, now)
+// TestRoute_OfflineObserver pins what happens to a host whose observing
+// sensor is registered but not live: a DIFFERENT live tenant sensor covering
+// the host's network takes it (same_segment); with none, it is skipped. In no
+// case is it handed to the platform — a host a tenant sensor saw may only be
+// reachable from inside, and the platform would scan it from the wrong place.
+//
+// Mutation checks (both polarities):
+//   - drop the segment fall-through in Route's offline-observer branch and
+//     "another live sensor covers it" (and the tie case) go red;
+//   - append the offline-observer target to plan.Platform instead of
+//     plan.Skipped and every "skipped" row goes red.
+func TestRoute_OfflineObserver(t *testing.T) {
+	const target = "198.51.100.42"
+	type want struct {
+		sensor string // the sensor's name the target is assigned to; "" for none
+		reason Reason
+		skip   bool // skipped, naming the offline observer
+		plat   bool // handed to the platform
+	}
+	selfHost := func(s Sensor, addr string) Sensor {
+		s.SelfAddresses = map[string]bool{addr: true}
+		return s
+	}
+	airGapped := func(s Sensor) Sensor { s.AirGapped = true; return s }
+	system := func(s Sensor) Sensor { s.System = true; return s }
 
-	if len(plan.Groups) != 0 || len(plan.Platform) != 0 {
-		t.Fatalf("an offline observer's target was routed elsewhere: %+v", plan)
+	cases := []struct {
+		name     string
+		target   string
+		observer Sensor
+		others   []Sensor
+		want     want
+	}{
+		{
+			name:     "observer live: it wins over a live segment sensor, unchanged",
+			observer: live("xps16-sensor", "203.0.113.0/24"),
+			others:   []Sensor{live("branch-sensor", "198.51.100.0/24")},
+			want:     want{sensor: "xps16-sensor", reason: ReasonObserved},
+		},
+		{
+			name:     "observer offline, another live sensor covers it: routed there",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others:   []Sensor{live("branch-sensor", "198.51.100.0/24")},
+			want:     want{sensor: "branch-sensor", reason: ReasonSegment},
+		},
+		{
+			name:     "observer offline, the covering sensor is offline too: skipped",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others:   []Sensor{offline("branch-sensor", "198.51.100.0/24")},
+			want:     want{skip: true},
+		},
+		{
+			name:     "observer offline, nobody covers it: skipped, never the platform",
+			observer: offline("xps16-sensor", "203.0.113.0/24"),
+			others:   []Sensor{live("branch-sensor", "10.20.0.0/16")},
+			want:     want{skip: true},
+		},
+		{
+			name:     "observer offline and alone: skipped, never the platform",
+			observer: offline("xps16-sensor"),
+			want:     want{skip: true},
+		},
+		{
+			name:     "observer offline, only it covers its target: the offline observer is not chosen",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others:   []Sensor{live("branch-sensor", "10.20.0.0/16")},
+			want:     want{skip: true},
+		},
+		{
+			name:     "observer offline, the only covering live sensor is the target's own host: skipped",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others:   []Sensor{selfHost(live("branch-sensor", "198.51.100.0/24"), target)},
+			want:     want{skip: true},
+		},
+		{
+			name:     "observer offline, own-host sensor skipped in favour of a later live one",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others: []Sensor{
+				selfHost(live("alpha-sensor", "198.51.100.0/24"), target),
+				live("branch-sensor", "198.51.100.0/24"),
+			},
+			want: want{sensor: "branch-sensor", reason: ReasonSegment},
+		},
+		{
+			name:     "observer offline, air-gapped and system sensors cover it: never chosen, skipped",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others: []Sensor{
+				airGapped(live("vault-sensor", "198.51.100.0/24")),
+				system(live("Platform Discovery Sensor", "198.51.100.0/24")),
+			},
+			want: want{skip: true},
+		},
+		{
+			name:     "hostname target with an offline observer: skipped as before (no segment for a name)",
+			target:   "db.internal",
+			observer: offline("xps16-sensor", "198.51.100.0/24"),
+			others:   []Sensor{live("branch-sensor", "198.51.100.0/24")},
+			want:     want{skip: true},
+		},
+		{
+			name:     "observer offline and the target is its OWN host: falls through exactly as before",
+			observer: selfHost(offline("xps16-sensor", "198.51.100.0/24"), target),
+			others:   []Sensor{live("branch-sensor", "10.20.0.0/16")},
+			want:     want{plat: true},
+		},
 	}
-	if len(plan.Skipped) != 1 || plan.Skipped[0].Reason != ReasonObserverOffline || plan.Skipped[0].Sensor.ID != xps.ID {
-		t.Fatalf("skipped = %+v", plan.Skipped)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tgt := tc.target
+			if tgt == "" {
+				tgt = target
+			}
+			fleet := append([]Sensor{tc.observer}, tc.others...)
+			plan := Route([]string{tgt}, map[string]uuid.UUID{tgt: tc.observer.ID}, fleet, now)
+
+			if got := len(plan.Platform) == 1 && plan.Platform[0] == tgt; got != tc.want.plat || len(plan.Platform) > 1 {
+				t.Fatalf("platform = %v, want handed to the platform: %v", plan.Platform, tc.want.plat)
+			}
+			skipped := len(plan.Skipped) == 1 && plan.Skipped[0].Target == tgt
+			if skipped != tc.want.skip || len(plan.Skipped) > 1 {
+				t.Fatalf("skipped = %+v, want skipped: %v", plan.Skipped, tc.want.skip)
+			}
+			if skipped {
+				sk := plan.Skipped[0]
+				if sk.Reason != ReasonObserverOffline || sk.Sensor.ID != tc.observer.ID {
+					t.Errorf("skip = %+v, want observing_sensor_offline naming the observer", sk)
+				}
+				msg := sk.Message()
+				for _, w := range []string{tc.observer.Name, "offline", tgt, "not scanned"} {
+					if !strings.Contains(msg, w) {
+						t.Errorf("skip message %q lacks %q", msg, w)
+					}
+				}
+			}
+			if tc.want.sensor == "" {
+				if len(plan.Groups) != 0 {
+					t.Fatalf("groups = %+v, want no sensor job", plan.Groups)
+				}
+				return
+			}
+			if len(plan.Groups) != 1 || plan.Groups[0].Sensor.Name != tc.want.sensor ||
+				len(plan.Groups[0].Targets) != 1 || plan.Groups[0].Targets[0] != tgt {
+				t.Fatalf("groups = %+v, want %s alone with %s", plan.Groups, tc.want.sensor, tgt)
+			}
+			// Whatever was chosen is a live, non-system, non-air-gapped
+			// tenant sensor that is not the target's own host — and, when
+			// chosen by segment, one whose networks contain the target.
+			chosen := plan.Groups[0].Sensor
+			if !chosen.Dispatchable(now) || chosen.System || chosen.AirGapped || chosen.IsSelf(tgt) {
+				t.Errorf("chosen sensor %+v is not a live, non-system, non-air-gapped, non-self tenant sensor", chosen)
+			}
+			if tc.want.reason == ReasonSegment && !chosen.Covers(netip.MustParseAddr(tgt)) {
+				t.Errorf("chosen segment sensor %+v does not cover %s", chosen, tgt)
+			}
+			if got := plan.Groups[0].Reasons[tgt]; got != tc.want.reason {
+				t.Errorf("reason = %q, want %q", got, tc.want.reason)
+			}
+		})
 	}
-	msg := plan.Skipped[0].Message()
-	for _, want := range []string{"xps16-sensor", "offline", "198.51.100.42", "not scanned"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("skip message %q lacks %q", msg, want)
+}
+
+// An offline observer's target, two live sensors covering it: the choice is
+// the stable name order, whatever order the fleet arrives in. The PrefixesFor
+// widening makes this fall-through reachable on a guess, so the tie must at
+// least resolve the same way every pass.
+func TestRoute_OfflineObserverSegmentTieIsDeterministic(t *testing.T) {
+	xps := offline("xps16-sensor", "10.1.0.0/16")
+	a := live("alpha", "10.1.0.0/16")
+	b := live("beta", "10.1.0.0/16")
+	for i, fleet := range [][]Sensor{{xps, b, a}, {a, xps, b}, {b, a, xps}} {
+		plan := Route([]string{"10.1.0.1"}, map[string]uuid.UUID{"10.1.0.1": xps.ID}, fleet, now)
+		if len(plan.Groups) != 1 || plan.Groups[0].Sensor.Name != "alpha" || plan.Groups[0].Reasons["10.1.0.1"] != ReasonSegment {
+			t.Fatalf("fleet order %d: groups = %+v, want alpha by same_segment", i, plan.Groups)
 		}
+		if len(plan.Skipped) != 0 || len(plan.Platform) != 0 {
+			t.Fatalf("fleet order %d: plan = %+v", i, plan)
+		}
+	}
+}
+
+// Routing only ever partitions the targets it was given: a mixed batch under
+// the new fall-through comes back with every target in exactly one of Groups,
+// Platform or Skipped, and nothing added. The consent and dispatch guards
+// downstream judge exactly the targets the caller selected.
+func TestRoute_PartitionsTheTargetsItWasGiven(t *testing.T) {
+	gone := offline("xps16-sensor", "198.51.100.0/24")
+	branch := live("branch-sensor", "198.51.100.0/24")
+	edge := live("edge-sensor", "203.0.113.0/24")
+	targets := []string{"198.51.100.42", "203.0.113.9", "10.9.9.9", "192.0.2.1", "db.internal"}
+	observed := map[string]uuid.UUID{
+		"198.51.100.42": gone.ID, // offline observer, live segment sensor → branch
+		"203.0.113.9":   edge.ID, // live observer → edge
+		"192.0.2.1":     gone.ID, // offline observer, nobody covers → skipped
+		// 10.9.9.9 and db.internal: nobody observed, nobody covers → platform
+	}
+	plan := Route(targets, observed, []Sensor{gone, branch, edge}, now)
+
+	count := map[string]int{}
+	for _, g := range plan.Groups {
+		for _, tg := range g.Targets {
+			count[tg]++
+		}
+	}
+	for _, tg := range plan.Platform {
+		count[tg]++
+	}
+	for _, sk := range plan.Skipped {
+		count[sk.Target]++
+	}
+	if len(count) != len(targets) {
+		t.Fatalf("plan covers %v, want exactly %v", count, targets)
+	}
+	for _, tg := range targets {
+		if count[tg] != 1 {
+			t.Errorf("%s appears %d times in the plan", tg, count[tg])
+		}
+	}
+	if got := targetsOf(plan, branch.ID); strings.Join(got, ",") != "198.51.100.42" {
+		t.Errorf("branch-sensor = %v", got)
+	}
+	if strings.Join(plan.Platform, ",") != "10.9.9.9,db.internal" {
+		t.Errorf("platform = %v", plan.Platform)
+	}
+	if len(plan.Skipped) != 1 || plan.Skipped[0].Target != "192.0.2.1" {
+		t.Errorf("skipped = %+v", plan.Skipped)
 	}
 }
 

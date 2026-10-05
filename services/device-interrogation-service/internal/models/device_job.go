@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 )
 
 // DeviceJobType represents the type of device job
@@ -22,6 +24,13 @@ const (
 	// Both are the same job_type in the database — the `mode` parameter is what
 	// tells them apart, and it is on the row either way.
 	JobTypeHostInventory DeviceJobType = "host_inventory"
+	// JobTypeDeviceDiscovery is an Add device identification routed to the
+	// device agent the operator named as able to reach the device (
+	// slice B). Always agent-assigned at creation — valid_job_assignment
+	// requires it — so the in-cluster worker never sees one. The device does
+	// not exist yet: the job carries the operator's four fields, and the
+	// device is created from what the agent reports.
+	JobTypeDeviceDiscovery DeviceJobType = di.JobTypeDeviceDiscovery
 )
 
 // Valid reports whether t is one of the job types the database enum accepts.
@@ -31,7 +40,7 @@ const (
 // enum fails at INSERT with a message no operator can act on.
 func (t DeviceJobType) Valid() bool {
 	switch t {
-	case JobTypeDeviceInterrogation, JobTypeCloudDiscovery, JobTypeHostInventory:
+	case JobTypeDeviceInterrogation, JobTypeCloudDiscovery, JobTypeHostInventory, JobTypeDeviceDiscovery:
 		return true
 	default:
 		return false

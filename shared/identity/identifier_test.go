@@ -291,3 +291,27 @@ func FuzzNormalize(f *testing.F) {
 		}
 	})
 }
+
+func TestNormalizeSSHKeyAlgorithm(t *testing.T) {
+	for in, want := range map[string]string{
+		"ssh-ed25519": "ed25519", "SSH-ED25519": "ed25519",
+		"ssh-rsa": "rsa", "rsa-sha2-256": "rsa", "rsa-sha2-512": "rsa",
+		"ecdsa-sha2-nistp256": "ecdsa-p256", "ecdsa-sha2-nistp384": "ecdsa-p384",
+		"ssh-ed25519-cert-v01@openssh.com": "ed25519",
+		"ecdsa":                            "", "": "", "  ": "",
+		"x-vendor-key": "x-vendor-key",
+	} {
+		if got := NormalizeSSHKeyAlgorithm(in); got != want {
+			t.Errorf("NormalizeSSHKeyAlgorithm(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Normalized applies it to host keys only.
+	n, err := Identifier{Kind: KindSSHHostKeyFingerprint, Value: "SHA256:abc", KeyAlgorithm: "rsa-sha2-512"}.Normalized()
+	if err != nil || n.KeyAlgorithm != "rsa" {
+		t.Errorf("Normalized host key algorithm = %q (%v), want rsa", n.KeyAlgorithm, err)
+	}
+	m, err := Identifier{Kind: KindMACAddress, Value: "00:00:5e:00:53:01", KeyAlgorithm: "rsa"}.Normalized()
+	if err != nil || m.KeyAlgorithm != "" {
+		t.Errorf("a MAC kept a key algorithm %q (%v)", m.KeyAlgorithm, err)
+	}
+}

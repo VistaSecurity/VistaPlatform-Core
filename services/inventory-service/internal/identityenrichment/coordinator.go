@@ -169,12 +169,21 @@ func (c *Coordinator) enrich(ctx context.Context, tenant uuid.UUID, o Observatio
 			return c.Store.Summary(ctx, tenant, o.ID, "completed", "dns_did_not_provide_authorized_address", now, now.Add(time.Duration(p.Scan.RescanIntervalHours)*time.Hour))
 		}
 	}
-	job, err := c.Store.Ensure(ctx, tenant, o, plan, now)
+	// One probe per (executor, address), however many observations want it
+	// (Store.EnsureProbe). A probe completed within the rescan interval is as
+	// fresh as the policy asks for.
+	rescan := time.Duration(p.Scan.RescanIntervalHours) * time.Hour
+	job, err := c.Store.EnsureProbe(ctx, tenant, o, plan, now, now.Add(-rescan))
 	if err != nil {
 		return err
 	}
-	job, err = c.advance(ctx, job, o, now)
-	if err != nil {
+	if job.ObservationID != o.ID {
+		// Another observation's probe. Never advanced from here: its lease,
+		// its authorization re-check and its retries belong to its owner.
+		if job.State != "completed" {
+			return c.Store.Summary(ctx, tenant, o.ID, "running", ReasonProbeCoalesced, now, now.Add(time.Minute))
+		}
+	} else if job, err = c.advance(ctx, job, o, now); err != nil {
 		return err
 	}
 	if job.State == "completed" {

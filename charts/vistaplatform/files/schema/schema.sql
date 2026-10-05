@@ -57,7 +57,7 @@ DO $$ BEGIN CREATE TYPE public.device_job_status AS ENUM (
 -- POST-MIGRATIONS is what carries it to an existing database. Both edits,
 -- always.
 DO $$ BEGIN CREATE TYPE public.device_job_type AS ENUM (
-    'device_interrogation', 'cloud_discovery', 'host_inventory'
+    'device_interrogation', 'cloud_discovery', 'host_inventory', 'device_discovery'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 
@@ -294,9 +294,11 @@ $$;
 -- auto_license_best_practices() pattern.
 --
 -- Tier choice: this targets the `enterprise` tier as a stand-in for an
--- explicit Energy/Utility tier that doesn't exist yet — Enterprise is
--- the only tier today that has `ot_active_probing` enabled, so it's the
--- closest match for "tenants who paid to do OT discovery." When an
+-- explicit Energy/Utility tier that doesn't exist yet. It was chosen when
+-- Enterprise was the only tier with `ot_active_probing` enabled; OT
+-- active probing has since moved to Core and is on for every tier, so
+-- the tier is no longer a proxy for "does OT discovery" — it remains the
+-- paid tier the regulated-content framework belongs with. When an
 -- explicit Energy/Utility tier is added to subscription_tiers, update
 -- the WHERE clause below to include it.
 --
@@ -582,27 +584,6 @@ CREATE OR REPLACE FUNCTION public.generate_tenant_slug(tenant_name text) RETURNS
     AS $$
 BEGIN
     RETURN lower(regexp_replace(trim(tenant_name), '[^a-zA-Z0-9]+', '-', 'g'));
-END;
-$$;
-
-
--- FUNCTION: get_api_usage_stats(timestamp with time zone, timestamp with time zone)
-CREATE OR REPLACE FUNCTION public.get_api_usage_stats(p_start_time timestamp with time zone, p_end_time timestamp with time zone) RETURNS TABLE(endpoint character varying, method character varying, total_requests bigint, avg_response_time numeric, error_count bigint, success_rate numeric)
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        aul.endpoint,
-        aul.method,
-        COUNT(*) as total_requests,
-        AVG(aul.response_time_ms) as avg_response_time,
-        COUNT(*) FILTER (WHERE aul.status_code >= 400) as error_count,
-        (COUNT(*) FILTER (WHERE aul.status_code < 400) * 100.0 / COUNT(*)) as success_rate
-    FROM api_usage_logs aul
-    WHERE aul.timestamp BETWEEN p_start_time AND p_end_time
-    GROUP BY aul.endpoint, aul.method
-    ORDER BY total_requests DESC;
 END;
 $$;
 
@@ -1483,23 +1464,6 @@ CREATE TABLE IF NOT EXISTS public.algorithms (
     CONSTRAINT valid_primitive CHECK (((primitive IS NULL) OR ((primitive)::text = ANY ((ARRAY['ae'::character varying, 'signature'::character varying, 'hash'::character varying, 'kem'::character varying, 'key-agree'::character varying, 'pke'::character varying, 'key-wrap'::character varying, 'combiner'::character varying, 'mac'::character varying, 'block-cipher'::character varying, 'stream-cipher'::character varying, 'kdf'::character varying, 'xof'::character varying, 'drbg'::character varying, 'other'::character varying])::text[])))),
     CONSTRAINT valid_risk_score CHECK (((risk_score >= 0) AND (risk_score <= 100))),
     CONSTRAINT valid_strength CHECK (((strength)::text = ANY ((ARRAY['weak'::character varying, 'acceptable'::character varying, 'strong'::character varying, 'recommended'::character varying])::text[])))
-);
-
-
--- TABLE: api_usage_logs
-CREATE TABLE IF NOT EXISTS public.api_usage_logs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    endpoint character varying(255) NOT NULL,
-    method character varying(10) NOT NULL,
-    status_code integer NOT NULL,
-    response_time_ms integer NOT NULL,
-    user_id uuid,
-    tenant_id uuid,
-    ip_address inet,
-    user_agent text,
-    request_size_bytes integer,
-    response_size_bytes integer,
-    "timestamp" timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -2916,7 +2880,7 @@ CREATE TABLE IF NOT EXISTS public.device_jobs (
     expires_at timestamp with time zone,
     updated_at timestamp with time zone DEFAULT now(),
     deleted_at timestamp with time zone,
-    CONSTRAINT valid_job_assignment CHECK ((((agent_id IS NULL) AND (job_type = 'cloud_discovery'::public.device_job_type)) OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type)) OR ((agent_id IS NULL) AND (job_type = 'device_interrogation'::public.device_job_type) AND (asset_id IS NOT NULL)) OR ((agent_id IS NOT NULL) AND (job_type = 'host_inventory'::public.device_job_type))))
+    CONSTRAINT valid_job_assignment CHECK ((((agent_id IS NULL) AND (job_type = 'cloud_discovery'::public.device_job_type)) OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type)) OR ((agent_id IS NULL) AND (job_type = 'device_interrogation'::public.device_job_type) AND (asset_id IS NOT NULL)) OR ((agent_id IS NOT NULL) AND (job_type = 'host_inventory'::public.device_job_type)) OR ((agent_id IS NOT NULL) AND ((job_type)::text = 'device_discovery'::text))))
 );
 
 
@@ -3694,6 +3658,12 @@ CREATE TABLE IF NOT EXISTS public.assets (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
+    -- The connection source refs (`cmdb:<id>`, `netbox:<id>`) that created this
+    -- asset while it is known ONLY from them; NULL once anything independent
+    -- has vouched for it (platform ADR-0002 D10, shared/identity/postgres
+    -- import_only.go). Upgraded databases get it, backfilled, from the
+    -- POST-MIGRATIONS block "assets.import_only_sources".
+    import_only_sources text[],
     CONSTRAINT assets_pkey PRIMARY KEY (tenant_id, id),
     CONSTRAINT assets_class_source_kind_check CHECK (class_source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text, 'rule'::text])),
     CONSTRAINT assets_asset_status_check CHECK (asset_status = ANY (ARRAY['pending_approval'::text, 'monitoring'::text, 'denied'::text, 'archived'::text])),
@@ -3790,6 +3760,13 @@ CREATE TABLE IF NOT EXISTS public.asset_endpoints (
     last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     last_scanned_at timestamp with time zone,
     last_scan_status text,
+    -- What the endpoint's last measurement said about its TLS handshake, where
+    -- that was NOT a negotiation: 'refused' = the server answered the
+    -- ClientHello with a TLS alert (usually it needs a server name an address
+    -- scan cannot offer). NULL = nothing to report, which is also what a
+    -- successful negotiation leaves. Written only by ingest of a scan finding
+    -- (services/inventory-service asset_service.go recordHandshakeOutcome).
+    tls_handshake_outcome text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT asset_endpoints_pkey PRIMARY KEY (tenant_id, id),
@@ -4023,6 +4000,16 @@ CREATE TABLE IF NOT EXISTS public.network_segments (
     -- install and an upgraded one end up with the same column order.
     source_kind character varying(20),
     source_ref character varying(200),
+    -- The device that is this network's gateway (D1): the asset that
+    -- reported, over a session to itself, holding `gateway_address` on this
+    -- network. Measured only, written by the gateway-links route
+    -- (shared/identity/postgres ReconcileGatewayLinks), NULL when no device
+    -- has said so. Appended after the provenance columns for the same column
+    -- order reason; the foreign key and the index are in POST-MIGRATIONS.
+    gateway_asset_id uuid,
+    gateway_address inet,
+    gateway_source_ref character varying(200),
+    gateway_observed_at timestamp with time zone,
     CONSTRAINT network_segments_source_kind_check CHECK ((source_kind IS NULL OR (source_kind)::text = ANY ((ARRAY['measured'::character varying, 'imported'::character varying, 'declared'::character varying, 'inferred'::character varying])::text[]))),
     CONSTRAINT network_segments_network_type_check CHECK (((network_type)::text = ANY ((ARRAY['private'::character varying, 'public'::character varying, 'vpn'::character varying, 'cloud'::character varying])::text[]))),
     CONSTRAINT network_segments_segment_type_check CHECK (((segment_type)::text = ANY ((ARRAY['cidr'::character varying, 'ip_range'::character varying, 'domain'::character varying, 'cloud_vpc'::character varying])::text[])))
@@ -6798,19 +6785,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.algorithms
         ADD CONSTRAINT algorithms_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: api_usage_logs api_usage_logs_pkey
-DO $$ BEGIN
-  IF to_regclass('public.api_usage_logs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'api_usage_logs_pkey' AND conrelid = to_regclass('public.api_usage_logs')
-     ) THEN
-    ALTER TABLE ONLY public.api_usage_logs
-        ADD CONSTRAINT api_usage_logs_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -10132,14 +10106,6 @@ CREATE INDEX IF NOT EXISTS idx_algorithms_risk_score ON public.algorithms USING 
 
 -- INDEX: idx_algorithms_strength
 CREATE INDEX IF NOT EXISTS idx_algorithms_strength ON public.algorithms USING btree (strength, deprecation_status);
-
-
--- INDEX: idx_api_usage_endpoint_time
-CREATE INDEX IF NOT EXISTS idx_api_usage_endpoint_time ON public.api_usage_logs USING btree (endpoint, "timestamp" DESC);
-
-
--- INDEX: idx_api_usage_tenant_time
-CREATE INDEX IF NOT EXISTS idx_api_usage_tenant_time ON public.api_usage_logs USING btree (tenant_id, "timestamp" DESC);
 
 
 -- INDEX: idx_asset_lifecycle_policies_tenant
@@ -15972,6 +15938,11 @@ ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS 'PPTP' BEFORE 'Modbus';
 -- one.
 ALTER TYPE public.device_job_type ADD VALUE IF NOT EXISTS 'host_inventory';
 
+-- device_discovery ( slice B): an Add device identification routed to the
+-- device agent that can reach the device. Same two-edit rule, same reason; also
+-- LAST in the CREATE TYPE list, so no BEFORE clause either.
+ALTER TYPE public.device_job_type ADD VALUE IF NOT EXISTS 'device_discovery';
+
 
 
 
@@ -16798,11 +16769,6 @@ DROP POLICY IF EXISTS api_tokens_tenant_isolation ON public.api_tokens;
 CREATE POLICY api_tokens_tenant_isolation ON public.api_tokens
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.api_usage_logs ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS api_usage_logs_tenant_isolation ON public.api_usage_logs;
-CREATE POLICY api_usage_logs_tenant_isolation ON public.api_usage_logs
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.asset_history ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS asset_history_tenant_isolation ON public.asset_history;
 CREATE POLICY asset_history_tenant_isolation ON public.asset_history
@@ -17528,7 +17494,18 @@ CREATE TABLE IF NOT EXISTS public.alerts (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT alerts_severity_check CHECK (((severity)::text = ANY ((ARRAY['critical'::character varying, 'high'::character varying, 'medium'::character varying, 'low'::character varying, 'info'::character varying])::text[]))),
     CONSTRAINT alerts_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'acknowledged'::character varying, 'snoozed'::character varying, 'resolved'::character varying])::text[]))),
-    CONSTRAINT alerts_resolution_check CHECK ((resolution IS NULL OR (resolution)::text = ANY ((ARRAY['manual'::character varying, 'auto'::character varying])::text[])))
+    CONSTRAINT alerts_resolution_check CHECK ((resolution IS NULL OR (resolution)::text = ANY ((ARRAY['manual'::character varying, 'auto'::character varying])::text[]))),
+    -- tenant_id is the tenant, OR the platform-alert sentinel
+    -- (events.PlatformAlertTenantID), which deliberately has no tenants row.
+    -- A plain FK on tenant_id would reject every platform-track alert, so the
+    -- tenants FK (alerts_tenant_ref_id_fkey, added in POST-MIGRATIONS "tenant-
+    -- scoped tables cascade from tenants") sits on this derived column instead:
+    -- the tenant for tenant alerts, NULL for platform alerts (a NULL FK value is
+    -- never checked). Purging a tenant therefore cascades its alerts (and,
+    -- through alerts.id, their alert_events) while platform alerts are
+    -- untouched. The literal must match events.PlatformAlertTenantID. Never
+    -- written by application code (a generated column cannot be).
+    tenant_ref_id uuid GENERATED ALWAYS AS (NULLIF(tenant_id, '11111111-1111-1111-1111-111111111111'::uuid)) STORED
 );
 
 
@@ -18526,10 +18503,22 @@ CREATE TABLE IF NOT EXISTS public.asset_identifiers (
     last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    address_assignment text,
     CONSTRAINT asset_identifiers_pkey PRIMARY KEY (id),
     CONSTRAINT asset_identifiers_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
-    CONSTRAINT asset_identifiers_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1)
+    CONSTRAINT asset_identifiers_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
+    CONSTRAINT asset_identifiers_address_assignment_check CHECK (address_assignment IS NULL OR address_assignment = ANY (ARRAY['static'::text, 'dynamic'::text]))
 );
+
+-- The key algorithm of an `ssh_host_key_fingerprint` row (`ed25519`, `rsa`,
+-- `ecdsa-p256`, …), NULL for every other kind and for a key whose algorithm
+-- nobody reported. Metadata, not identity: the fingerprint is already unique,
+-- so it is not part of the unique index. The identification engine's drift
+-- classifier ( Decision 4) reads it to tell a ROTATED key (same algorithm,
+-- new fingerprint) from ANOTHER key of the same host (a new algorithm). The
+-- attach upsert fills it in on the next sighting that carries it, so rows
+-- stored before it existed need no backfill.
+ALTER TABLE public.asset_identifiers ADD COLUMN IF NOT EXISTS key_algorithm text;
 
 CREATE UNIQUE INDEX IF NOT EXISTS asset_identifiers_value_uniq
     ON public.asset_identifiers (tenant_id, kind, value, coalesce(scope, ''));
@@ -20013,7 +20002,9 @@ DECLARE
       'edge_accepted', 'edge_rejected', 'archived',
       'sbom_imported',
       'class_proposed', 'class_accepted', 'class_rejected',
-      'identifier_reassigned'];
+      'identifier_reassigned',
+      'ssh_host_key_rotated', 'address_moved', 'identity_material_rotated',
+      'identity_drift_flagged'];
   def  text;
   list text;
 BEGIN
@@ -20392,6 +20383,30 @@ END $$;
 -- A host_inventory job is ALWAYS agent-assigned: local collections are
 -- agent-originated (the agent posts them; there is no queued job) and remote
 -- ones are executed by an agent that can reach the target.
+--
+-- A device_discovery job ( slice B) is ALWAYS agent-assigned too: it
+-- exists only to identify a device from the agent the operator named as able
+-- to reach it, and is created with that agent already set. A platform-reachable
+-- device is identified synchronously by Add device and never queued. There is
+-- therefore no unassigned device_discovery row for the in-cluster worker and
+-- the agents to race over, and this arm is what makes that structural. The
+-- guard below keys on the NEWEST arm, so a database missing either it or the
+-- host_inventory arm before it is converged in one pass.
+--
+-- The block's name keeps saying "host_inventory" because that is what it was
+-- added for; it now carries every agent-only arm.
+--
+-- The device_discovery arm compares as TEXT, unlike its neighbours, and must.
+-- The value is added by ALTER TYPE ... ADD VALUE above, in this same file, and
+-- Postgres refuses to use an enum value in the transaction that added it
+-- ("unsafe use of new value", 55P04). psql -f commits each statement, so the
+-- chart's migration Job would cope with an enum cast here — but an apply that
+-- sends the file as one batch (the upgrade-path integration tests, any
+-- operator running it with --single-transaction) is one transaction, and the
+-- cast would abort it. Comparing the label as text never calls the enum's
+-- input function, so the new value is not "used". The same spelling is in the
+-- CREATE TABLE above so a fresh install and an upgraded one carry one
+-- definition.
 DO $$
 BEGIN
     IF to_regclass('public.device_jobs') IS NOT NULL
@@ -20399,7 +20414,7 @@ BEGIN
          SELECT 1 FROM pg_constraint
           WHERE conname = 'valid_job_assignment'
             AND conrelid = to_regclass('public.device_jobs')
-            AND pg_get_constraintdef(oid) LIKE '%host_inventory%'
+            AND pg_get_constraintdef(oid) LIKE '%device_discovery%'
        ) THEN
         ALTER TABLE public.device_jobs DROP CONSTRAINT IF EXISTS valid_job_assignment;
         ALTER TABLE public.device_jobs
@@ -20408,6 +20423,7 @@ BEGIN
          OR ((agent_id IS NOT NULL) AND (job_type = 'device_interrogation'::public.device_job_type))
          OR ((agent_id IS NULL)     AND (job_type = 'device_interrogation'::public.device_job_type) AND (asset_id IS NOT NULL))
          OR ((agent_id IS NOT NULL) AND (job_type = 'host_inventory'::public.device_job_type))
+         OR ((agent_id IS NOT NULL) AND ((job_type)::text = 'device_discovery'::text))
           ) NOT VALID;
     END IF;
 END $$;
@@ -21711,6 +21727,23 @@ END $$;
 -- this pass exists for.
 ALTER TABLE public.identity_observations
     ADD COLUMN IF NOT EXISTS materialized_at timestamptz;
+-- POST-MIGRATIONS: identity_observations.resolution_outcome (
+-- platform ADR-0003 D2)
+--
+-- What last attached this row to its asset: the identity engine's outcome
+-- (`matched`, `created`, `provisional`, `supporting`, `conflict`) or an
+-- operator's decision (`operator_linked`, `operator_confirmed`), or
+-- `operator_scan_request`: the engine linked it because a person's Active
+-- Scan of that asset produced it (only that scan's receipts materialise).
+-- `state` alone cannot tell them apart — supporting evidence for an established
+-- asset is stored `linked` exactly like a match — and the difference is the
+-- whole of D2: a match attaches the sighting's endpoints, supporting evidence
+-- leaves them on the observation, so the retained-evidence worker must not
+-- materialise a `supporting` row's payload until somebody links or confirms
+-- it. NULL is a row resolved before the column existed; the worker treats it
+-- as it always did.
+ALTER TABLE public.identity_observations
+    ADD COLUMN IF NOT EXISTS resolution_outcome text;
 CREATE INDEX IF NOT EXISTS idx_identity_observations_state
     ON public.identity_observations (tenant_id, state, last_seen_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_identity_observations_asset
@@ -22285,23 +22318,35 @@ CREATE TABLE IF NOT EXISTS public.license_cap_grace (
 -- (crypto_bypass), or the privileges of the table's owner (superusers,
 -- installs without the RLS roles). SECURITY INVOKER, so current_user is the
 -- caller.
+--
+-- The 'ai.*' keys are guarded the same way and for the same kind of reason.
+-- 'ai.provider' is the model provider every tenant's prompts are sent to when
+-- the tenant has none of its own, and the two 'ai.tenant_*' switches decide
+-- whether tenants may connect their own and whether theirs may be on a private
+-- address. An app-pool write to any of them could repoint the platform's model
+-- at a host of the writer's choosing, or let a tenant aim the platform at the
+-- cluster's own network. The one legitimate writer is admin-service's
+-- /admin/ai routes, on the bypass pool. Every service READS them from here
+-- (shared/ai), on the app pool, which the guard does not touch.
 CREATE OR REPLACE FUNCTION public.guard_platform_retention_setting() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 DECLARE
-    touches boolean := false;
+    guarded text := NULL;
 BEGIN
-    IF TG_OP IN ('UPDATE', 'DELETE') AND OLD.setting_key = 'retention.max_days' THEN
-        touches := true;
+    IF TG_OP IN ('UPDATE', 'DELETE')
+       AND (OLD.setting_key = 'retention.max_days' OR OLD.setting_key LIKE 'ai.%') THEN
+        guarded := OLD.setting_key;
     END IF;
-    IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.setting_key = 'retention.max_days' THEN
-        touches := true;
+    IF TG_OP IN ('INSERT', 'UPDATE')
+       AND (NEW.setting_key = 'retention.max_days' OR NEW.setting_key LIKE 'ai.%') THEN
+        guarded := NEW.setting_key;
     END IF;
-    IF touches
+    IF guarded IS NOT NULL
        AND NOT COALESCE((SELECT rolbypassrls FROM pg_catalog.pg_roles WHERE rolname = current_user), false)
        AND NOT pg_catalog.pg_has_role(current_user,
               (SELECT relowner FROM pg_catalog.pg_class WHERE oid = TG_RELID), 'USAGE') THEN
-        RAISE EXCEPTION 'platform_settings retention.max_days can only be changed by a platform administrator'
+        RAISE EXCEPTION 'platform_settings % can only be changed by a platform administrator', guarded
             USING ERRCODE = 'insufficient_privilege';
     END IF;
     IF TG_OP = 'DELETE' THEN
@@ -22530,6 +22575,91 @@ DROP POLICY IF EXISTS source_scan_consents_tenant_isolation ON public.source_sca
 CREATE POLICY source_scan_consents_tenant_isolation ON public.source_scan_consents
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: discovery job work units ( WP2)
+-- ----------------------------------------------------------------------------
+-- A scan-plan job (metadata.scan_plan) runs as one durable unit per address its
+-- targets expand to. The unit is what makes a long scan honest: progress is
+-- finished units over total, a Retry or a hand-back on shutdown resumes only
+-- the units that are not done, findings are stored as each host finishes, and
+-- the coverage summary ("254 addresses, 31 responded, 223 no answer") is the
+-- sum of the per-unit counts below. Legacy protocols × ports jobs do not use it.
+--
+-- Every address becomes a unit only after the target-authorization guard
+-- cleared it; one it refused is a `failed` unit carrying the reason, never a
+-- probe. `attempts` fences the commit: a unit's findings, their ingestion-queue
+-- mirror and its `done` transition are one transaction guarded on the attempt
+-- that claimed it, so a stale owner of an earlier attempt can never store a
+-- second copy. (job_id, target_id, address) is unique, so creating the units
+-- again on a resumed run adds nothing.
+--
+-- The per-unit counts follow the scan engine: ports_requested = open + closed
+-- + filtered + local errors + not probed, for every unit that has run.
+--
+-- discovery_findings.unit_id names the unit a finding came from (NULL for a
+-- legacy job's findings). A unit's commit deletes then inserts by it, a second
+-- line of defence behind the attempt fence.
+--
+-- Natively idempotent: CREATE TABLE / INDEX IF NOT EXISTS with the constraints
+-- inline, ADD COLUMN IF NOT EXISTS, a guarded FK, and the policy created in an
+-- EXCEPTION block. Every existing row gets a NULL unit_id, which is correct.
+CREATE TABLE IF NOT EXISTS public.discovery_job_units (
+    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    job_id uuid NOT NULL REFERENCES public.discovery_jobs(id) ON DELETE CASCADE,
+    target_id uuid NOT NULL REFERENCES public.discovery_targets(id) ON DELETE CASCADE,
+    address text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    error_message text,
+    liveness_state text,
+    liveness_evidence text,
+    ports_requested integer DEFAULT 0 NOT NULL,
+    open_count integer DEFAULT 0 NOT NULL,
+    closed_count integer DEFAULT 0 NOT NULL,
+    filtered_count integer DEFAULT 0 NOT NULL,
+    local_error_count integer DEFAULT 0 NOT NULL,
+    not_probed_count integer DEFAULT 0 NOT NULL,
+    responds_on_all_ports boolean DEFAULT false NOT NULL,
+    ot_suspect boolean DEFAULT false NOT NULL,
+    udp_answered_count integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT discovery_job_units_pkey PRIMARY KEY (id),
+    CONSTRAINT discovery_job_units_address_unique UNIQUE (job_id, target_id, address),
+    CONSTRAINT discovery_job_units_status_check CHECK (status = ANY (ARRAY['pending'::text, 'running'::text, 'done'::text, 'failed'::text, 'cancelled'::text]))
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_job_units_job_status
+    ON public.discovery_job_units USING btree (job_id, status);
+CREATE INDEX IF NOT EXISTS idx_discovery_job_units_target
+    ON public.discovery_job_units USING btree (target_id);
+
+CREATE OR REPLACE TRIGGER update_discovery_job_units_updated_at BEFORE UPDATE ON public.discovery_job_units FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.discovery_job_units ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY discovery_job_units_tenant_isolation ON public.discovery_job_units
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+ALTER TABLE IF EXISTS public.discovery_findings
+    ADD COLUMN IF NOT EXISTS unit_id uuid;
+CREATE INDEX IF NOT EXISTS idx_discovery_findings_unit_id
+    ON public.discovery_findings USING btree (unit_id) WHERE (unit_id IS NOT NULL);
+DO $$ BEGIN
+  IF to_regclass('public.discovery_findings') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'discovery_findings_unit_id_fkey' AND conrelid = to_regclass('public.discovery_findings')) THEN
+    ALTER TABLE ONLY public.discovery_findings
+        ADD CONSTRAINT discovery_findings_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.discovery_job_units(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
@@ -24262,3 +24392,453 @@ UPDATE audit.siem_integrations
        cursor_event_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
  WHERE cursor_created_at IS NULL;
 
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: asset_identifiers.address_assignment — a pinned address
+-- ----------------------------------------------------------------------------
+--owner decision 1 (ADR-0002 D3 erratum, asset-inventory). A segment's
+-- DHCP flag is a statement about the RANGE; `address_assignment` is a statement
+-- about ONE address: 'static' when an operator declared it on the asset or the
+-- host's own agent reported the interface as statically configured, 'dynamic'
+-- when the agent reported a DHCP lease, NULL when nobody said (every address a
+-- sensor merely saw). An address its owner holds as 'static' still decides a
+-- match for that owner inside a segment flagged dynamic.
+--
+-- 1. The column. The body above declares it for a fresh install; this carries
+--    it to an existing one. ADD COLUMN IF NOT EXISTS skips the whole clause,
+--    CHECK included, when the column is already there.
+ALTER TABLE IF EXISTS public.asset_identifiers
+    ADD COLUMN IF NOT EXISTS address_assignment text
+    CONSTRAINT asset_identifiers_address_assignment_check
+    CHECK (address_assignment IS NULL OR address_assignment = ANY (ARRAY['static'::text, 'dynamic'::text]));
+
+-- 2. Repair rows the old upsert left contradicting themselves. Before this
+--    release a declaration of an identifier a collector had already measured
+--    kept `source_kind = 'measured'` and overwrote `source_ref` with the
+--    declaration's ref. `manual` is the ref both declaration paths (the asset
+--    edit form and the Devices form) write, and only those paths, so a
+--    non-declared row carrying it is a declaration the upsert failed to
+--    record. Only rows still in that state match, so a re-run moves nothing.
+UPDATE public.asset_identifiers
+   SET source_kind = 'declared', updated_at = now()
+ WHERE source_ref = 'manual' AND source_kind IN ('measured', 'imported');
+
+-- 3. Every address a person declared is pinned. Only NULLs are filled, so a
+--    re-run moves nothing and a later 'dynamic' (which a declaration outranks
+--    and so cannot exist here) is never overwritten.
+UPDATE public.asset_identifiers
+   SET address_assignment = 'static', updated_at = now()
+ WHERE kind = 'ip_address' AND source_kind = 'declared' AND address_assignment IS NULL;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: tenant-scoped tables cascade from tenants
+-- ----------------------------------------------------------------------------
+-- Purging a tenant is `DELETE FROM tenants` and nothing else (admin-service's
+-- PurgeTenant, qa-platform's DeleteTenant): every table it should empty must be
+-- reachable from tenants through ON DELETE CASCADE / SET NULL. Fourteen
+-- tenant-scoped tables had no foreign key at all, so a purged tenant's alerts
+-- (some still `active`, which nothing will ever resolve), scopes, CBOM
+-- artifacts, invitations, saved views, entitlement overrides, audit rows and
+-- terms/privacy acceptances outlived it indefinitely.
+--
+-- The FKs live ONLY here, for fresh installs and existing ones alike, not in
+-- the CREATE TABLE literals or the pg_dump body's FK CONSTRAINT section. Both
+-- of those run before this block: on an existing database with orphan rows the
+-- body's ADD CONSTRAINT would abort the apply before the cleanup below ever
+-- ran, and an inline REFERENCES fails a fresh install outright because
+-- tenants_pkey is only added further down the body. On a fresh install every
+-- step below runs against empty tables and costs nothing.
+--
+-- Deliberately NOT given a cascade, and listed in the allowlist of
+-- TestIntegration_TenantPurge_LeavesNoTenantRows (shared/testdb):
+--   * license_usage_events / license_usage_daily: the MSP metering ledger keeps
+--     no FK on purpose (see "LICENSING: MSP usage metering" above): a purged
+--     tenant must still be reported for the month it existed in.
+--
+-- legal_acceptances (the ToS/Privacy evidence trail) DOES cascade, by owner
+-- decision: the acceptances are the organization's proof that its people
+-- agreed, and once the organization itself is purged they go with it. This is
+-- not the single-person DSR erasure, which anonymizes the user in place and
+-- deliberately RETAINS that person's acceptances (auth-service EraseUser,
+-- retainedCategories); that path deletes no tenant and is unchanged. Every row
+-- carries its tenant_id (NOT NULL; a platform admin records no acceptance
+-- here), so the cascade removes exactly the purged tenant's rows.
+--
+-- The order inside each table's step is the whole of its correctness:
+--   1. LOCK tenants, then the child. tenants first, because a concurrent purge
+--      takes tenants before it cascades into the child, and the opposite order
+--      can deadlock against it. SHARE ROW EXCLUSIVE also stops a writer
+--      inserting a row for an already-deleted tenant between steps 2 and 3,
+--      which would make the VALIDATE below fail.
+--   2. DELETE the orphans. An ADD CONSTRAINT that existing rows violate aborts
+--      the whole apply under ON_ERROR_STOP=1, and every database on which a
+--      tenant was ever purged has them.
+--   3. ADD the FK NOT VALID: enforced for every row written from then on,
+--      without scanning the table while tenants is locked.
+-- After all of them, VALIDATE runs separately; it takes only SHARE UPDATE
+-- EXCLUSIVE, so it blocks no writer while it scans. On a re-apply every
+-- constraint already exists and is valid, so every step is skipped.
+--
+-- alerts is the one table whose FK is not on tenant_id: platform-track alerts
+-- are raised under a sentinel tenant id that has no tenants row (see the
+-- tenant_ref_id column in its CREATE TABLE), so the FK is on that derived
+-- column, and the sentinel's alerts are neither orphans nor cascaded.
+-- alert_events cascades from alerts(id) and needs no FK of its own: its orphan
+-- rows go with their alert, and the rare event whose own tenant is gone while
+-- its alert survives is removed here as well.
+
+-- 1. alerts: the derived column (a table rewrite under ACCESS EXCLUSIVE, once;
+--    alerts is a small table) and the index the cascade's
+--    `WHERE tenant_ref_id = $1` uses.
+ALTER TABLE IF EXISTS public.alerts
+    ADD COLUMN IF NOT EXISTS tenant_ref_id uuid
+    GENERATED ALWAYS AS (NULLIF(tenant_id, '11111111-1111-1111-1111-111111111111'::uuid)) STORED;
+CREATE INDEX IF NOT EXISTS idx_alerts_tenant_ref_id ON public.alerts USING btree (tenant_ref_id);
+
+DO $$ BEGIN
+  IF to_regclass('public.alerts') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'alerts_tenant_ref_id_fkey' AND conrelid = to_regclass('public.alerts')) THEN
+    LOCK TABLE public.tenants, public.alerts, public.alert_events IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.alerts a
+     WHERE a.tenant_ref_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = a.tenant_ref_id);
+    DELETE FROM public.alert_events e
+     WHERE e.tenant_id <> '11111111-1111-1111-1111-111111111111'::uuid
+       AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = e.tenant_id);
+    ALTER TABLE public.alerts
+        ADD CONSTRAINT alerts_tenant_ref_id_fkey FOREIGN KEY (tenant_ref_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+-- 2. Every other table: the FK is on tenant_id and named
+--    <table>_tenant_id_fkey. One DO block (one transaction) per table keeps each
+--    lock window to that table's own cleanup. tenant_id NULL (the platform
+--    scope of notification_digest_queue) is never an orphan and is kept.
+DO $$ BEGIN
+  IF to_regclass('public.agent_config_audit') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'agent_config_audit_tenant_id_fkey' AND conrelid = to_regclass('public.agent_config_audit')) THEN
+    LOCK TABLE public.tenants, public.agent_config_audit IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.agent_config_audit c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.agent_config_audit ADD CONSTRAINT agent_config_audit_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.alert_framework_score_snapshots') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'alert_framework_score_snapshots_tenant_id_fkey' AND conrelid = to_regclass('public.alert_framework_score_snapshots')) THEN
+    LOCK TABLE public.tenants, public.alert_framework_score_snapshots IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.alert_framework_score_snapshots c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.alert_framework_score_snapshots ADD CONSTRAINT alert_framework_score_snapshots_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.cbom_artifacts') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'cbom_artifacts_tenant_id_fkey' AND conrelid = to_regclass('public.cbom_artifacts')) THEN
+    LOCK TABLE public.tenants, public.cbom_artifacts IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.cbom_artifacts c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.cbom_artifacts ADD CONSTRAINT cbom_artifacts_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.cbom_subscriptions') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'cbom_subscriptions_tenant_id_fkey' AND conrelid = to_regclass('public.cbom_subscriptions')) THEN
+    LOCK TABLE public.tenants, public.cbom_subscriptions IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.cbom_subscriptions c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.cbom_subscriptions ADD CONSTRAINT cbom_subscriptions_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.invitations') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'invitations_tenant_id_fkey' AND conrelid = to_regclass('public.invitations')) THEN
+    LOCK TABLE public.tenants, public.invitations IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.invitations c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.invitations ADD CONSTRAINT invitations_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.legal_acceptances') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'legal_acceptances_tenant_id_fkey' AND conrelid = to_regclass('public.legal_acceptances')) THEN
+    LOCK TABLE public.tenants, public.legal_acceptances IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.legal_acceptances c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.legal_acceptances ADD CONSTRAINT legal_acceptances_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.notification_digest_queue') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'notification_digest_queue_tenant_id_fkey' AND conrelid = to_regclass('public.notification_digest_queue')) THEN
+    LOCK TABLE public.tenants, public.notification_digest_queue IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.notification_digest_queue c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.notification_digest_queue ADD CONSTRAINT notification_digest_queue_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.saved_views') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'saved_views_tenant_id_fkey' AND conrelid = to_regclass('public.saved_views')) THEN
+    LOCK TABLE public.tenants, public.saved_views IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.saved_views c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.saved_views ADD CONSTRAINT saved_views_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.scopes') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'scopes_tenant_id_fkey' AND conrelid = to_regclass('public.scopes')) THEN
+    LOCK TABLE public.tenants, public.scopes IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.scopes c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.scopes ADD CONSTRAINT scopes_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.scopes_audit') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'scopes_audit_tenant_id_fkey' AND conrelid = to_regclass('public.scopes_audit')) THEN
+    LOCK TABLE public.tenants, public.scopes_audit IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.scopes_audit c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.scopes_audit ADD CONSTRAINT scopes_audit_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.tenant_alert_settings') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'tenant_alert_settings_tenant_id_fkey' AND conrelid = to_regclass('public.tenant_alert_settings')) THEN
+    LOCK TABLE public.tenants, public.tenant_alert_settings IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.tenant_alert_settings c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.tenant_alert_settings ADD CONSTRAINT tenant_alert_settings_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.tenant_entitlements') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'tenant_entitlements_tenant_id_fkey' AND conrelid = to_regclass('public.tenant_entitlements')) THEN
+    LOCK TABLE public.tenants, public.tenant_entitlements IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.tenant_entitlements c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.tenant_entitlements ADD CONSTRAINT tenant_entitlements_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.tenant_geographic_data') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'tenant_geographic_data_tenant_id_fkey' AND conrelid = to_regclass('public.tenant_geographic_data')) THEN
+    LOCK TABLE public.tenants, public.tenant_geographic_data IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.tenant_geographic_data c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.tenant_geographic_data ADD CONSTRAINT tenant_geographic_data_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+-- 3. VALIDATE whatever steps 1-2 added NOT VALID. The rows are already clean,
+--    so this only scans; a constraint that is already valid (every re-apply)
+--    is not touched.
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT conrelid::regclass AS tbl, conname
+      FROM pg_constraint
+     WHERE contype = 'f' AND NOT convalidated
+       AND conrelid::regclass::text IN (
+             'alerts', 'agent_config_audit', 'alert_framework_score_snapshots',
+             'cbom_artifacts', 'cbom_subscriptions', 'invitations', 'legal_acceptances',
+             'notification_digest_queue', 'saved_views', 'scopes', 'scopes_audit',
+             'tenant_alert_settings', 'tenant_entitlements', 'tenant_geographic_data')
+       AND conname IN (
+             'alerts_tenant_ref_id_fkey', 'agent_config_audit_tenant_id_fkey',
+             'alert_framework_score_snapshots_tenant_id_fkey', 'cbom_artifacts_tenant_id_fkey',
+             'cbom_subscriptions_tenant_id_fkey', 'invitations_tenant_id_fkey',
+             'legal_acceptances_tenant_id_fkey',
+             'notification_digest_queue_tenant_id_fkey', 'saved_views_tenant_id_fkey',
+             'scopes_tenant_id_fkey', 'scopes_audit_tenant_id_fkey',
+             'tenant_alert_settings_tenant_id_fkey', 'tenant_entitlements_tenant_id_fkey',
+             'tenant_geographic_data_tenant_id_fkey')
+  LOOP
+    EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT %I', r.tbl, r.conname);
+  END LOOP;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: drop api_usage_logs and get_api_usage_stats()
+-- ----------------------------------------------------------------------------
+-- A per-request log (endpoint, user id, client IP, user agent) that nothing
+-- ever wrote to and nothing read except get_api_usage_stats(), which itself had
+-- no caller. Keeping it meant a tenant-scoped table of personal data with no
+-- purge path, so it is dropped rather than given a cascade. The pg_dump body no
+-- longer creates either, so a fresh install never has them and this is a no-op
+-- there and on every re-apply. Plain DROP, not CASCADE: no view, foreign key or
+-- other object depends on the table (its indexes, primary key and RLS policy
+-- go with it), and a dependency nobody expected should fail the apply loudly
+-- rather than be dropped silently. The function goes first: a plpgsql body is
+-- not tracked as a dependency, so it would otherwise survive, broken.
+DROP FUNCTION IF EXISTS public.get_api_usage_stats(timestamp with time zone, timestamp with time zone);
+DROP TABLE IF EXISTS public.api_usage_logs;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: a network segment records its gateway (slice B)
+-- ----------------------------------------------------------------------------
+-- Owner decision D1: the segment → gateway link is columns on the segment, not
+-- an asset relationship (segments are not assets) and not a stored per-host
+-- default gateway (a host's gateway is derived when read: its segment's).
+-- The body above declares the columns for a fresh install; this carries them
+-- to an existing one. All four are nullable with no default, so an upgraded
+-- database needs no backfill: the next interrogation of a gateway fills them.
+ALTER TABLE IF EXISTS public.network_segments
+    ADD COLUMN IF NOT EXISTS gateway_asset_id uuid,
+    ADD COLUMN IF NOT EXISTS gateway_address inet,
+    ADD COLUMN IF NOT EXISTS gateway_source_ref character varying(200),
+    ADD COLUMN IF NOT EXISTS gateway_observed_at timestamp with time zone;
+
+-- The gateway is an asset reference like any other. `assets` is partitioned by
+-- tenant, which rules out a foreign key on `id` alone but not the composite
+-- (tenant_id, id) one every other asset reference here uses. ON DELETE SET NULL
+-- on the asset column only: deleting the device unlinks it from the network
+-- and leaves the segment (a soft delete is covered by the reads, which join
+-- live assets only). Being a declared foreign key, it is also on the merge's
+-- re-point list by construction (TestMergeMovesEveryForeignKeyToAssets).
+-- The column is new, so no stored row can violate it; the clear is the guard
+-- every asset-reference constraint in this file carries, inside the guard so
+-- it runs on the one converging apply only.
+DO $$ BEGIN
+  IF to_regclass('public.network_segments') IS NOT NULL
+     AND to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conname = 'network_segments_tenant_gateway_asset_fkey' AND conrelid = to_regclass('public.network_segments')
+     ) THEN
+    UPDATE public.network_segments t SET gateway_asset_id = NULL
+     WHERE t.gateway_asset_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.id = t.gateway_asset_id);
+    ALTER TABLE ONLY public.network_segments
+        ADD CONSTRAINT network_segments_tenant_gateway_asset_fkey FOREIGN KEY (tenant_id, gateway_asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE SET NULL (gateway_asset_id);
+  END IF;
+END $$;
+
+-- "Networks routed" reads a gateway's segments; most segments have none.
+CREATE INDEX IF NOT EXISTS idx_network_segments_gateway_asset
+    ON public.network_segments USING btree (tenant_id, gateway_asset_id)
+    WHERE gateway_asset_id IS NOT NULL;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: assets.import_only_sources (platform ADR-0002 D10)
+-- ----------------------------------------------------------------------------
+-- Whether an asset is known ONLY from a connection's import (a CMDB profile, a
+-- NetBox connection) used to be derived on every automatic-scan check from the
+-- asset's `created` history row and every identifier, fact and endpoint it
+-- carries. It is now stored on the asset: set when a connection creates it,
+-- cleared when independent evidence arrives (shared/identity/postgres
+-- import_only.go). The body above declares the column for a fresh install.
+--
+-- An upgraded database gets the column AND a one-time backfill from the old
+-- derivation, in one guarded block: it runs only while the column does not yet
+-- exist, so re-applying this file never re-sets a state the platform has since
+-- cleared. The predicate is the derived rule's first two clauses, spelled as
+-- they were: created by a connection, with no measured identifier, fact or
+-- endpoint from a source other than an active scan, and not listed by a
+-- spreadsheet upload since. Consent is NOT part of it — it is read when the
+-- check runs. An asset a merge gave several `created` rows carries every
+-- connection that created any of them, which is what the derived rule read.
+DO $$ BEGIN
+  IF to_regclass('public.assets') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = to_regclass('public.assets') AND attname = 'import_only_sources' AND NOT attisdropped
+     ) THEN
+    ALTER TABLE public.assets ADD COLUMN import_only_sources text[];
+    UPDATE public.assets a SET import_only_sources = c.refs
+      FROM (SELECT ch.tenant_id, ch.asset_id, array_agg(DISTINCT ch.source ORDER BY ch.source) AS refs
+              FROM public.asset_history ch
+             WHERE ch.action = 'created' AND ch.changes_json->>'source_kind' = 'imported'
+               AND (ch.source LIKE 'cmdb:%' OR ch.source LIKE 'netbox:%')
+             GROUP BY ch.tenant_id, ch.asset_id) c
+     WHERE a.tenant_id = c.tenant_id AND a.id = c.asset_id
+       AND NOT EXISTS (SELECT 1 FROM public.asset_identifiers mi
+                        WHERE mi.tenant_id = a.tenant_id AND mi.asset_id = a.id AND mi.source_kind = 'measured'
+                          AND COALESCE(mi.source_ref, '') <> 'scan' AND COALESCE(mi.source_ref, '') NOT LIKE 'scan:%')
+       AND NOT EXISTS (SELECT 1 FROM public.asset_facts mf
+                        WHERE mf.tenant_id = a.tenant_id AND mf.asset_id = a.id AND mf.source_kind = 'measured'
+                          AND mf.source_ref <> 'scan' AND mf.source_ref NOT LIKE 'scan:%')
+       AND NOT EXISTS (SELECT 1 FROM public.asset_endpoints me
+                        WHERE me.tenant_id = a.tenant_id AND me.asset_id = a.id AND me.source_kind = 'measured'
+                          AND COALESCE(me.source_ref, '') <> 'scan' AND COALESCE(me.source_ref, '') NOT LIKE 'scan:%')
+       AND NOT EXISTS (SELECT 1 FROM public.asset_history sh
+                        WHERE sh.tenant_id = a.tenant_id AND sh.asset_id = a.id AND sh.source = 'import'
+                          AND sh.action <> 'created');
+  END IF;
+END $$;
+
+-- "Does this tenant have any import-only asset?" is asked before every
+-- automatic-scan authorization, and the answer is almost always no.
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_import_only
+    ON public.assets USING btree (tenant_id)
+    WHERE import_only_sources IS NOT NULL;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: retained peer contexts back off, expire and are superseded
+-- ( items 25–27)
+-- ----------------------------------------------------------------------------
+-- device-interrogation-service retries a retained interrogation context until
+-- every peer in it resolves. It used to retry every five minutes for ever, and
+-- most holds never clear from the same evidence. `attempts` drives an
+-- exponential backoff (5 minutes doubling to 4 hours); `retired_at` marks a
+-- context retired without being materialized — superseded by a newer run of
+-- the same source for the same device, or still unresolved 24 hours after it
+-- was observed — with the reason in `last_error`. A retired row is kept: the
+-- identity review page shows it as historical evidence. Both columns are new,
+-- with a constant default or none, so an existing row needs no backfill and
+-- every re-apply is a no-op.
+ALTER TABLE IF EXISTS public.identity_observation_peer_contexts
+    ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS retired_at timestamp with time zone;
+
+-- A newer run retires the older open contexts of its device.
+CREATE INDEX IF NOT EXISTS idx_identity_peer_contexts_origin_open
+    ON public.identity_observation_peer_contexts USING btree (tenant_id, origin_asset_id, observed_at)
+    WHERE materialized_at IS NULL AND retired_at IS NULL;
+
+-- ----------------------------------------------------------------------------
+-- asset_endpoints.tls_handshake_outcome ( item 8): a TLS port that refused
+-- the handshake is shown on the asset as "TLS, handshake refused" instead of a
+-- bare TLS endpoint. Nullable text, no default: NULL is "nothing to report",
+-- and existing rows stay NULL, which is true. The column is also in the CREATE
+-- TABLE above for fresh installs; this statement carries it to existing ones.
+ALTER TABLE public.asset_endpoints ADD COLUMN IF NOT EXISTS tls_handshake_outcome text;
+
+-- ----------------------------------------------------------------------------
+-- assets: look an asset up by its address text
+-- ----------------------------------------------------------------------------
+-- Every address lookup in the services compares host(primary_address) with a
+-- text value (a scan target's input, a source IP, a finding's address), because
+-- casting inet to text renders the netmask and never equals a bare address. A
+-- btree on the inet column cannot serve that predicate -- the function sits on
+-- the column side -- so the index is on the expression the queries actually
+-- write. host() is immutable, which is what lets it be indexed.
+--
+-- Without it the automatic-scan job adoption query hash-joins a sweep's target
+-- list against every live asset of the tenant.
+--
+-- Deliberately NOT partial (no WHERE deleted_at IS NULL, unlike its
+-- idx_assets_tenant_* neighbours): the planner takes the n_distinct of an
+-- indexed expression from the index's own statistics and ignores a partial
+-- index for that. Without it the join is estimated at the 1-in-200 default
+-- selectivity, which on a tenant of any size prices every probe at thousands of
+-- rows, and the planner keeps the hash join over the whole tenant even though
+-- the index is there and 100x faster. Soft-deleted rows are a small fraction.
+CREATE INDEX IF NOT EXISTS idx_assets_tenant_primary_host
+    ON public.assets USING btree (tenant_id, host(primary_address));

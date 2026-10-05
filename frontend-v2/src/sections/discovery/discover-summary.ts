@@ -28,8 +28,19 @@ export interface DiscoverySummary {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+/**
+ * What a finding count is, in the job's own terms: "15 open ports on 10
+ * hosts" — every finding is a port that answered on a host — so it is never
+ * read as 15 new assets. Without the host count (an older server, or
+ * unknown) it stays "15 findings".
+ */
+export function findingsLabel(count: number, hosts?: number | null): string {
+  if (typeof hosts !== 'number') return plural(count, 'finding');
+  return `${plural(count, 'open port')} on ${plural(hosts, 'host')}`;
+}
+
 export function describeMaterialization(count: number, m?: Materialization): DiscoverySummary {
-  const parts: SummaryPart[] = [{ text: `Found ${plural(count, 'finding')}`, tone: 'neutral' }];
+  const parts: SummaryPart[] = [{ text: `Found ${findingsLabel(count, m?.finding_hosts)}`, tone: 'neutral' }];
 
   if (!m) {
     return {
@@ -44,6 +55,7 @@ export function describeMaterialization(count: number, m?: Materialization): Dis
   const awaiting = m.awaiting_processing ?? 0;
   const queued = m.queued ?? 0;
   const suppressed = m.suppressed ?? 0;
+  const observed = m.observed ?? 0;
 
   if (auto > 0) parts.push({ text: `${auto} auto-approved`, tone: 'ok' });
   if (pending > 0) parts.push({ text: `${pending} awaiting approval`, tone: 'warn' });
@@ -57,6 +69,10 @@ export function describeMaterialization(count: number, m?: Materialization): Dis
   if (suppressed > 0) {
     parts.push({ text: `${plural(suppressed, 'finding')} on denied or archived assets — not shown in Approvals`, tone: 'muted' });
   }
+  // Kept as evidence with no asset and no approval to come — see
+  // observationsNotice for where they went. "0 added to inventory" still
+  // follows when nothing else landed: that is exactly what happened.
+  if (observed > 0) parts.push({ text: `${observed} kept as observations`, tone: 'muted' });
   if (auto === 0 && pending === 0 && awaiting === 0 && suppressed === 0) {
     parts.push({ text: '0 added to inventory', tone: 'muted' });
   }
@@ -70,4 +86,37 @@ export function describeMaterialization(count: number, m?: Materialization): Dis
       : rule;
 
   return { parts, note, settling: awaiting > 0 };
+}
+
+export interface ObservationsNotice {
+  text: string;
+  /** "Review it in" / "Review them in", before the link. */
+  review: string;
+  /** Where the person reviews them: Discovery → Observations. */
+  href: string;
+}
+
+/**
+ * Where findings that could not become assets went. A row the
+ * pipeline kept as an observation was not added and is not awaiting approval,
+ * so without this the job read "0 pending approval" with no explanation.
+ *
+ * `observed` also covers benign rows — a host observation, a third-party
+ * endpoint recorded as a connection — so the wording claims only what is true
+ * of all of them: kept as observations, not tied to an asset yet. DHCP is an
+ * example, never the stated reason. Undefined when the count is unknown or
+ * zero: an unknown is not a zero, and a zero needs no notice.
+ */
+export function observationsNotice(m?: Materialization): ObservationsNotice | undefined {
+  const n = m?.observed;
+  if (typeof n !== 'number' || n <= 0) return undefined;
+  const hosts = m?.observed_hosts;
+  const what = typeof hosts === 'number' && hosts > 0 ? `${plural(n, 'finding')} on ${plural(hosts, 'host')}` : plural(n, 'finding');
+  return {
+    text:
+      `${what} ${n === 1 ? 'was' : 'were'} kept as observations — ${n === 1 ? 'it' : 'they'} could not be tied to an asset yet ` +
+      '(for example, on a network that uses DHCP an address alone does not identify a device).',
+    review: n === 1 ? 'Review it in' : 'Review them in',
+    href: '/discovery/observations',
+  };
 }

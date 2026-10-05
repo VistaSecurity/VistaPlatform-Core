@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -82,7 +83,7 @@ func TestDecideSensorDispatch(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := decideSensorDispatch(tc.mode, tc.sensorIDs, lookup, fixedNow())
+			got, err := decideSensorDispatch(tc.mode, tc.sensorIDs, false, lookup, fixedNow())
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("decideSensorDispatch(%q, %v) = %v, want %v", tc.mode, tc.sensorIDs, err, tc.wantErr)
@@ -116,7 +117,7 @@ func TestDecideSensorDispatch_OfflineMessageNamesTheSensorAndItsLastHeartbeat(t 
 	lookup := func(uuid.UUID) (dispatchSensor, bool) {
 		return dispatchSensor{ID: id, Name: "branch-sensor", Status: "active", LastHeartbeat: &beat}, true
 	}
-	_, err := decideSensorDispatch("sensors", []string{id.String()}, lookup, fixedNow())
+	_, err := decideSensorDispatch("sensors", []string{id.String()}, false, lookup, fixedNow())
 	if !errors.Is(err, ErrSensorOffline) {
 		t.Fatalf("err = %v", err)
 	}
@@ -124,6 +125,64 @@ func TestDecideSensorDispatch_OfflineMessageNamesTheSensorAndItsLastHeartbeat(t 
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q lacks %q", err, want)
 		}
+	}
+}
+
+// WP2b: a scan-plan job goes only to a sensor whose software reports
+// sensordispatch.ScanPlanCapability. Without it the job is refused (409) with
+// the upgrade-or-run-from-the-platform message; with it, the same sensor is
+// accepted. A protocols × ports job is not affected either way — every
+// deployed sensor runs those.
+func TestDecideSensorDispatch_ScanPlanNeedsTheCapability(t *testing.T) {
+	id := uuid.New()
+	old := liveSensor(id, "branch-01")
+	old.Capabilities = []string{sensordispatch.IdentityDNSCapability}
+	capable := old
+	capable.Capabilities = []string{sensordispatch.IdentityDNSCapability, sensordispatch.ScanPlanCapability}
+	lookupOf := func(s dispatchSensor) func(uuid.UUID) (dispatchSensor, bool) {
+		return func(uuid.UUID) (dispatchSensor, bool) { return s, true }
+	}
+
+	got, err := decideSensorDispatch("sensors", []string{id.String()}, true, lookupOf(old), fixedNow())
+	if !errors.Is(err, ErrSensorScanPlanUnsupported) || got != nil {
+		t.Fatalf("scan-plan job on a sensor without %s = %+v, %v; want ErrSensorScanPlanUnsupported", sensordispatch.ScanPlanCapability, got, err)
+	}
+	for _, want := range []string{"branch-01", "does not support scan depth", "upgrade", "platform"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
+	}
+	if got, err := decideSensorDispatch("sensors", []string{id.String()}, true, lookupOf(capable), fixedNow()); err != nil || got == nil || got.Name != "branch-01" {
+		t.Fatalf("scan-plan job on a capable sensor = %+v, %v; want it accepted", got, err)
+	}
+	if got, err := decideSensorDispatch("sensors", []string{id.String()}, false, lookupOf(old), fixedNow()); err != nil || got == nil {
+		t.Fatalf("protocols × ports job on a sensor without the capability = %+v, %v; want it accepted as before", got, err)
+	}
+}
+
+// WP5, the other direction: a sensor that reports scan plans has no
+// protocols × ports executor and is never handed that payload — refused at
+// creation and failed at dispatch, both through this rule — while a sensor
+// without the capability still is (D3, through the 4.5 line).
+func TestDecideSensorDispatch_LegacyJobNeverGoesToACapableSensor(t *testing.T) {
+	id := uuid.New()
+	capable := liveSensor(id, "branch-02")
+	capable.Capabilities = []string{sensordispatch.ScanPlanCapability}
+	old := liveSensor(id, "branch-02")
+	lookupOf := func(s dispatchSensor) func(uuid.UUID) (dispatchSensor, bool) {
+		return func(uuid.UUID) (dispatchSensor, bool) { return s, true }
+	}
+	got, err := decideSensorDispatch("sensors", []string{id.String()}, false, lookupOf(capable), fixedNow())
+	if !errors.Is(err, ErrSensorLegacyJobUnsupported) || got != nil {
+		t.Fatalf("legacy job on a capable sensor = %+v, %v; want ErrSensorLegacyJobUnsupported", got, err)
+	}
+	for _, want := range []string{"branch-02", "scan plan", "run the scan again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
+	}
+	if got, err := decideSensorDispatch("sensors", []string{id.String()}, false, lookupOf(old), fixedNow()); err != nil || got == nil {
+		t.Fatalf("legacy job on a sensor without the capability = %+v, %v; want it accepted (D3)", got, err)
 	}
 }
 
@@ -135,7 +194,7 @@ func TestDecideSensorDispatch_OfflineMessageNamesTheSensorAndItsLastHeartbeat(t 
 func TestProcessDiscoveryJob_FailsSensorExecutionMode(t *testing.T) {
 	jp := &JobProcessor{}
 
-	err := jp.processDiscoveryJob(&models.DiscoveryJob{
+	err := jp.processDiscoveryJob(context.Background(), &models.DiscoveryJob{
 		ID:            "8a2c4e10-9b3d-4f52-8e71-0d6a9c3b1f42",
 		TenantID:      "1c9e7a05-4d2b-4a63-9f18-7e5c2b0a3d64",
 		ExecutionMode: "sensors",

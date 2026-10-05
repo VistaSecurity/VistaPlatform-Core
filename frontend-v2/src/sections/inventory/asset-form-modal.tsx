@@ -51,7 +51,25 @@ export function identifiersToRows(asset: Asset | null | undefined): IdentifierDr
     value: i.value,
     sourceKind: i.source_kind,
     scope: i.scope,
+    addressAssignment: i.address_assignment,
+    storedAssignment: i.address_assignment,
   }));
+}
+
+/**
+ * One identifier as the save sends it. `address_assignment: 'static'` goes
+ * only with an `ip_address` the person pinned on THIS save: an address
+ * already pinned needs no repeat, and every other row is sent bare, because
+ * the form echoes every identifier back and an echo is not a declaration.
+ */
+export function identifierInputFor(i: IdentifierDraft): { kind: string; value: string; scope?: string; address_assignment?: 'static' } {
+  const pin = i.kind === 'ip_address' && i.addressAssignment === 'static' && i.storedAssignment !== 'static';
+  return {
+    kind: i.kind,
+    value: i.value.trim(),
+    ...(i.scope ? { scope: i.scope } : {}),
+    ...(pin ? { address_assignment: 'static' as const } : {}),
+  };
 }
 
 export type IdentifierChange = { kind: string; value: string; reason?: string };
@@ -183,7 +201,7 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
         // to rather than being re-scoped by whatever segment this edit resolves.
         identifiers: identifiers
           .filter((i) => i.value.trim() !== '')
-          .map((i) => ({ kind: i.kind, value: i.value.trim(), ...(i.scope ? { scope: i.scope } : {}) })),
+          .map(identifierInputFor),
         attributes: buildAttributes(classKey, attributes),
         support_group: supportGroup.trim() || undefined,
         environment: environment || undefined,

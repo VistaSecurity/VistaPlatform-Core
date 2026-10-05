@@ -2,29 +2,44 @@ package services
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
-	"crypto/sha1" //nolint:gosec // intentional — SHA-1 cert fingerprint is the standard X.509 identifier (see line 135), not a security primitive
-	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/pem"
 	"fmt"
 	"log"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/jobunits"
 )
 
 // TLSHandshakeService performs TLS handshakes against cloud-discovered endpoints
 // to extract certificate chains and negotiated TLS parameters.
 type TLSHandshakeService struct {
 	timeout time.Duration
+
+	// dial opens every connection a handshake makes (the handshake and its
+	// key-exchange support handshakes). A plain net.Dialer: the endpoints are
+	// the tenant's own load balancers / CDNs / gateways as its cloud API
+	// reported them, and this dial has never been address-guarded. A field so
+	// a test can count connections.
+	dial discovery.ContextDialFunc
+
+	// prober is the shared TLS probe. Its OCSP query — the responder URL is in
+	// the probed server's certificate — goes through the platform fetch guard:
+	// this service runs inside the cluster, so a certificate must not point
+	// it at loopback, the metadata service or an in-cluster address.
+	prober *discovery.Prober
 }
+
+// platformFetchGuard is the address rule for fetches a probed server's data
+// asks for (the OCSP responder), built once so the platform's own addresses
+// are read when the process is up. The same guard platformOCSPClient uses.
+var platformFetchGuard = sync.OnceValue(func() discovery.AddressGuard {
+	return dispatchguard.PlatformFetchGuard()
+})
 
 // TLSHandshakeResult contains the results of a TLS handshake
 type TLSHandshakeResult struct {
@@ -40,6 +55,34 @@ type TLSHandshakeResult struct {
 	// other TLS probe. applyHandshakeKeyExchange copies it onto a crypto
 	// config.
 	KeyExchange discovery.TLSKeyExchange
+
+	// Validation is what the probe measured about whether the certificate can
+	// be trusted: chain validation outcome, quality flags, OCSP status — under
+	// the canonical top-level keys scan-engine TLS findings use
+	// (jobunits.TLSValidationMetadata). applyHandshakeValidation copies it
+	// onto a crypto config. Nil when the handshake did not succeed.
+	Validation map[string]interface{}
+}
+
+// applyHandshakeValidation writes a handshake's certificate validation onto a
+// cloud crypto config, where WriteSensorDiscoveries forwards it to the
+// finding. Without it the probe's chain validation and OCSP answer — the
+// slowest part of the handshake — were measured and discarded.
+func applyHandshakeValidation(cfg map[string]interface{}, r *TLSHandshakeResult) {
+	if cfg == nil || r == nil {
+		return
+	}
+	for k, v := range r.Validation {
+		cfg[k] = v
+	}
+}
+
+// applyHandshakeMeasurements is what every cloud collector site applies from a
+// successful handshake onto its crypto config beyond the cipher and
+// certificates: the key-exchange measurement and the certificate validation.
+func applyHandshakeMeasurements(cfg map[string]interface{}, r *TLSHandshakeResult) {
+	applyHandshakeKeyExchange(cfg, r)
+	applyHandshakeValidation(cfg, r)
 }
 
 // applyHandshakeKeyExchange writes a handshake's key-exchange measurement onto
@@ -59,6 +102,8 @@ func NewTLSHandshakeService(timeout time.Duration) *TLSHandshakeService {
 	}
 	return &TLSHandshakeService{
 		timeout: timeout,
+		dial:    (&net.Dialer{Timeout: timeout}).DialContext,
+		prober:  discovery.NewProber(timeout).WithOutboundAddressGuard(platformFetchGuard()),
 	}
 }
 
@@ -86,73 +131,56 @@ var cloudTLSHandshake = func(ctx context.Context, hostname string, port int) (*T
 }
 
 // handshakeTo is PerformHandshake with the dial address given separately from
-// the SNI name.
+// the SNI name. It is the shared TLS probe (discovery.ProbeTLSEndpoint),
+// mapped onto TLSHandshakeResult.
 func (s *TLSHandshakeService) handshakeTo(ctx context.Context, hostname, address string) (*TLSHandshakeResult, error) {
-
-	// Create a dialer with context support and timeout
-	dialer := &net.Dialer{
-		Timeout: s.timeout,
-	}
-
-	conn, err := dialer.DialContext(ctx, "tcp", address)
+	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
-		// Network unreachable is expected for private/internal resources
-		log.Printf("TLS handshake: connection to %s failed (likely private endpoint): %v", address, err)
-		return &TLSHandshakeResult{
-			Success: false,
-			Error:   fmt.Sprintf("connection failed: %v", err),
-		}, nil
+		return &TLSHandshakeResult{Success: false, Error: fmt.Sprintf("connection failed: %v", err)}, nil
 	}
-	defer func() { _ = conn.Close() }()
-
-	// Configure TLS with SNI
-	tlsConfig := &tls.Config{
-		ServerName:         hostname,
-		InsecureSkipVerify: true, //nolint:gosec // intentional — discovery probes any TLS endpoint regardless of certificate validity
-	}
-
-	tlsConn := tls.Client(conn, tlsConfig)
-	defer func() { _ = tlsConn.Close() }()
-
-	// Set connection deadline
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(s.timeout)
-	}
-	if err := tlsConn.SetDeadline(deadline); err != nil {
-		log.Printf("TLS handshake: could not set deadline for %s, handshake may block until the dialer timeout: %v", address, err)
-	}
-
-	// Perform TLS handshake
-	err = tlsConn.Handshake()
+	port, err := strconv.Atoi(portText)
 	if err != nil {
+		return &TLSHandshakeResult{Success: false, Error: fmt.Sprintf("connection failed: invalid port %q", portText)}, nil
+	}
+
+	// Every connection — the handshake and the key-exchange support
+	// handshakes — goes through s.dial. The support handshakes redial the
+	// ADDRESS the first connection reached, not the hostname: a CDN or
+	// load-balancer name resolves to many addresses and a re-resolution could
+	// land on a different one. They keep the same SNI.
+	connected := false
+	dial := discovery.PinToReachedAddress(func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := s.dial(ctx, network, address)
+		if err == nil {
+			connected = true
+		}
+		return conn, err
+	})
+
+	res, err := s.prober.ProbeTLSEndpoint(ctx, host, port, discovery.TLSEndpointOptions{Hostname: hostname, Dial: dial})
+	if err != nil {
+		if !connected {
+			// Network unreachable is expected for private/internal resources
+			log.Printf("TLS handshake: connection to %s failed (likely private endpoint): %v", address, err)
+			return &TLSHandshakeResult{Success: false, Error: fmt.Sprintf("connection failed: %v", err)}, nil
+		}
 		log.Printf("TLS handshake: handshake with %s failed: %v", address, err)
-		return &TLSHandshakeResult{
-			Success: false,
-			Error:   fmt.Sprintf("handshake failed: %v", err),
-		}, nil
+		return &TLSHandshakeResult{Success: false, Error: fmt.Sprintf("handshake failed: %v", err)}, nil
 	}
-
-	// Extract TLS information
-	state := tlsConn.ConnectionState()
 
 	result := &TLSHandshakeResult{
 		Success:      true,
-		TLSVersion:   tlsVersionToString(state.Version),
-		CipherSuite:  cipherSuiteToString(state.CipherSuite),
-		ALPN:         state.NegotiatedProtocol,
-		Certificates: convertX509ToPipelineFormat(state.PeerCertificates),
+		CipherSuite:  res.SelectedCipher,
+		Certificates: pipelineCertificateMaps(res.Certificates),
+		// The negotiated group and the classical / hybrid support the probe
+		// measured, as the struct applyHandshakeKeyExchange writes.
+		KeyExchange: discovery.TLSKeyExchangeFromMetadata(res.Metadata),
+		Validation:  jobunits.TLSValidationMetadata(res),
 	}
-
-	// The negotiated group, plus at most two extra handshakes (classical-only,
-	// hybrid-only offers) for what it did not answer. They redial the ADDRESS
-	// this connection reached, not the hostname — a CDN or load-balancer name
-	// resolves to many addresses and a re-resolution could land on a different
-	// one — and keep the same SNI (they clone tlsConfig).
-	reached := conn.RemoteAddr().String()
-	result.KeyExchange = discovery.MeasureTLSKeyExchange(state, tlsConfig, func(t time.Duration) (net.Conn, error) {
-		return (&net.Dialer{Timeout: t}).DialContext(ctx, "tcp", reached)
-	}, s.timeout)
+	if len(res.TLSVersions) > 0 {
+		result.TLSVersion = res.TLSVersions[0]
+	}
+	result.ALPN, _ = res.Metadata["negotiated_protocol"].(string)
 
 	log.Printf("TLS handshake: successfully connected to %s -- TLS %s, cipher %s, %d certificates",
 		address, result.TLSVersion, result.CipherSuite, len(result.Certificates))
@@ -160,216 +188,39 @@ func (s *TLSHandshakeService) handshakeTo(ctx context.Context, hostname, address
 	return result, nil
 }
 
-// convertX509ToPipelineFormat converts x509 certificates into the map format
-// expected by the inventory-service's extractCertificateData() function.
-// Field names match what extractCertificatesFromFinding() looks for in RawData["certificates"].
-func convertX509ToPipelineFormat(certs []*x509.Certificate) []map[string]interface{} {
+// pipelineCertificateMaps renders the shared probe's certificate chain in the
+// map format the cloud collectors store and the inventory-service's
+// extractCertificateData() reads from RawData["certificates"] — the canonical
+// entry (CLAUDE.md "Single certificate format") plus the "subject" / "issuer"
+// aliases this service has always written. The values come from
+// certificates.ExtractCertificatesFromX509; this only names them.
+func pipelineCertificateMaps(certs []certificates.CertificateInfo) []map[string]interface{} {
 	var result []map[string]interface{}
-
-	for i, cert := range certs {
-		// Encode to PEM
-		pemBlock := &pem.Block{
-			Type:  "CERTIFICATE",
-			Bytes: cert.Raw,
-		}
-		pemBytes := pem.EncodeToMemory(pemBlock)
-
-		// Calculate fingerprints
-		fingerprintSHA256 := sha256.Sum256(cert.Raw)
-		fingerprintSHA256Hex := hex.EncodeToString(fingerprintSHA256[:])
-
-		fingerprintSHA1 := sha1.Sum(cert.Raw) //nolint:gosec // intentional — SHA-1 fingerprint is the standard X.509 identifier, not used as a security primitive
-		fingerprintSHA1Hex := hex.EncodeToString(fingerprintSHA1[:])
-
-		// Extract Subject Alternative Names
-		sans := make([]string, 0)
-		sans = append(sans, cert.DNSNames...)
-		sans = append(sans, cert.EmailAddresses...)
-		for _, ip := range cert.IPAddresses {
-			sans = append(sans, ip.String())
-		}
-
-		// Extract key usage
-		keyUsage := extractX509KeyUsage(cert.KeyUsage)
-		extKeyUsage := extractX509ExtendedKeyUsage(cert.ExtKeyUsage)
-
-		// Calculate key size
-		keySize := calculatePublicKeySize(cert.PublicKey)
-
-		subjectDN := cert.Subject.String()
-		issuerDN := cert.Issuer.String()
-
-		certMap := map[string]interface{}{
-			// Primary fields (used by extractCertificateData)
-			"subject_dn":                subjectDN,
-			"issuer_dn":                 issuerDN,
-			"serial_number":             cert.SerialNumber.String(),
-			"not_before":                cert.NotBefore.Format(time.RFC3339),
-			"not_after":                 cert.NotAfter.Format(time.RFC3339),
-			"fingerprint_sha256":        fingerprintSHA256Hex,
-			"fingerprint_sha1":          fingerprintSHA1Hex,
-			"certificate_pem":           string(pemBytes),
-			"subject_alternative_names": sans,
-			"key_usage":                 keyUsage,
-			"extended_key_usage":        extKeyUsage,
-			"key_algorithm":             cert.PublicKeyAlgorithm.String(),
-			"signature_alg":             cert.SignatureAlgorithm.String(),
-			"key_size":                  keySize,
-			"is_ca":                     cert.IsCA,
-			"chain_order":               i, // 0 = leaf, 1+ = intermediates
+	for _, c := range certs {
+		result = append(result, map[string]interface{}{
+			"subject_dn":                c.SubjectDN,
+			"issuer_dn":                 c.IssuerDN,
+			"serial_number":             c.SerialNumber,
+			"not_before":                c.NotBefore.Format(time.RFC3339),
+			"not_after":                 c.NotAfter.Format(time.RFC3339),
+			"fingerprint_sha256":        c.FingerprintSHA256,
+			"fingerprint_sha1":          c.FingerprintSHA1,
+			"certificate_pem":           c.CertificatePEM,
+			"subject_alternative_names": c.SubjectAlternativeNames,
+			"key_usage":                 c.KeyUsage,
+			"extended_key_usage":        c.ExtendedKeyUsage,
+			"key_algorithm":             c.KeyAlgorithm,
+			"signature_alg":             c.SignatureAlg,
+			"key_size":                  c.KeySize,
+			"is_ca":                     c.IsCA,
+			"chain_order":               c.ChainOrder, // 0 = leaf, 1+ = intermediates
 
 			// Backward compatibility fields
-			"subject": subjectDN,
-			"issuer":  issuerDN,
-		}
-
-		result = append(result, certMap)
+			"subject": c.SubjectDN,
+			"issuer":  c.IssuerDN,
+		})
 	}
-
 	return result
-}
-
-// tlsVersionToString converts a TLS version constant to a human-readable string
-func tlsVersionToString(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("Unknown-0x%04X", version)
-	}
-}
-
-// cipherSuiteToString converts a TLS cipher suite constant to its IANA name
-func cipherSuiteToString(suite uint16) string {
-	switch suite {
-	case tls.TLS_RSA_WITH_RC4_128_SHA:
-		return "TLS_RSA_WITH_RC4_128_SHA"
-	case tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA:
-		return "TLS_RSA_WITH_3DES_EDE_CBC_SHA"
-	case tls.TLS_RSA_WITH_AES_128_CBC_SHA:
-		return "TLS_RSA_WITH_AES_128_CBC_SHA"
-	case tls.TLS_RSA_WITH_AES_256_CBC_SHA:
-		return "TLS_RSA_WITH_AES_256_CBC_SHA"
-	case tls.TLS_RSA_WITH_AES_128_CBC_SHA256:
-		return "TLS_RSA_WITH_AES_128_CBC_SHA256"
-	case 0x003D: // TLS_RSA_WITH_AES_256_CBC_SHA256
-		return "TLS_RSA_WITH_AES_256_CBC_SHA256"
-	case tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA:
-		return "TLS_ECDHE_RSA_WITH_RC4_128_SHA"
-	case tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA:
-		return "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA"
-	case tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:
-		return "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA"
-	case tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:
-		return "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA"
-	case tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:
-		return "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
-	case tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
-		return "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-	case tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
-		return "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
-	case tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
-		return "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
-	case tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
-		return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
-	case tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305:
-		return "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
-	case tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305:
-		return "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"
-	case tls.TLS_AES_128_GCM_SHA256:
-		return "TLS_AES_128_GCM_SHA256"
-	case tls.TLS_AES_256_GCM_SHA384:
-		return "TLS_AES_256_GCM_SHA384"
-	case tls.TLS_CHACHA20_POLY1305_SHA256:
-		return "TLS_CHACHA20_POLY1305_SHA256"
-	default:
-		return fmt.Sprintf("Unknown-0x%04X", suite)
-	}
-}
-
-// extractX509KeyUsage converts x509.KeyUsage flags to a string array
-func extractX509KeyUsage(keyUsage x509.KeyUsage) []string {
-	var usage []string
-	if keyUsage&x509.KeyUsageDigitalSignature != 0 {
-		usage = append(usage, "DigitalSignature")
-	}
-	if keyUsage&x509.KeyUsageContentCommitment != 0 {
-		usage = append(usage, "ContentCommitment")
-	}
-	if keyUsage&x509.KeyUsageKeyEncipherment != 0 {
-		usage = append(usage, "KeyEncipherment")
-	}
-	if keyUsage&x509.KeyUsageDataEncipherment != 0 {
-		usage = append(usage, "DataEncipherment")
-	}
-	if keyUsage&x509.KeyUsageKeyAgreement != 0 {
-		usage = append(usage, "KeyAgreement")
-	}
-	if keyUsage&x509.KeyUsageCertSign != 0 {
-		usage = append(usage, "CertSign")
-	}
-	if keyUsage&x509.KeyUsageCRLSign != 0 {
-		usage = append(usage, "CRLSign")
-	}
-	if keyUsage&x509.KeyUsageEncipherOnly != 0 {
-		usage = append(usage, "EncipherOnly")
-	}
-	if keyUsage&x509.KeyUsageDecipherOnly != 0 {
-		usage = append(usage, "DecipherOnly")
-	}
-	return usage
-}
-
-// extractX509ExtendedKeyUsage converts x509.ExtKeyUsage OIDs to a string array
-func extractX509ExtendedKeyUsage(extKeyUsage []x509.ExtKeyUsage) []string {
-	var usage []string
-	for _, eku := range extKeyUsage {
-		switch eku {
-		case x509.ExtKeyUsageAny:
-			usage = append(usage, "Any")
-		case x509.ExtKeyUsageServerAuth:
-			usage = append(usage, "ServerAuth")
-		case x509.ExtKeyUsageClientAuth:
-			usage = append(usage, "ClientAuth")
-		case x509.ExtKeyUsageCodeSigning:
-			usage = append(usage, "CodeSigning")
-		case x509.ExtKeyUsageEmailProtection:
-			usage = append(usage, "EmailProtection")
-		case x509.ExtKeyUsageIPSECEndSystem:
-			usage = append(usage, "IPSECEndSystem")
-		case x509.ExtKeyUsageIPSECTunnel:
-			usage = append(usage, "IPSECTunnel")
-		case x509.ExtKeyUsageIPSECUser:
-			usage = append(usage, "IPSECUser")
-		case x509.ExtKeyUsageTimeStamping:
-			usage = append(usage, "TimeStamping")
-		case x509.ExtKeyUsageOCSPSigning:
-			usage = append(usage, "OCSPSigning")
-		default:
-			usage = append(usage, fmt.Sprintf("Unknown(%d)", eku))
-		}
-	}
-	return usage
-}
-
-// calculatePublicKeySize determines the key size from a public key
-func calculatePublicKeySize(pubKey interface{}) int {
-	switch key := pubKey.(type) {
-	case *rsa.PublicKey:
-		return key.N.BitLen()
-	case *ecdsa.PublicKey:
-		return key.Curve.Params().BitSize
-	case ed25519.PublicKey:
-		return 256 // Ed25519 uses 256-bit keys
-	default:
-		return 0
-	}
 }
 
 // EnrichCertificatesWithACM merges ACM metadata into handshake-discovered certificates.

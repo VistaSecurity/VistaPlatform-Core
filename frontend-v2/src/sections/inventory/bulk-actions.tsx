@@ -1,25 +1,22 @@
-// Inventory bulk / stale write actions — restores the parity surface the rebuild
-// dropped (old web-ui had a bulk/stale action menu). All wired through the typed
-// inventory-service client. The page has NO row-selection model (rows are
-// click-to-open-drawer), so:
-//   • the STALE lens gets per-row Rescan / Archive plus a header bar that
-//     Revalidates / Archives the whole current page of stale assets;
-//   • Delete (soft) and Restore live on the ASSET DRAWER, where a single asset
-//     is already in focus (see drawers.tsx).
-// Approve / Deny are intentionally NOT here — that bulk surface already exists
-// in Discovery → Approvals (approvals-page.tsx); duplicating it would split the
-// pending-asset workflow across two pages.
+// Per-asset write actions on the asset drawer and the full asset page: soft
+// delete, restore, and the Active Scan button. All wired through the typed
+// inventory-service client.
+//
+// Acting on MANY assets — scan, archive, restore, delete, edit, export — is the
+// bulk action bar on Inventory → All assets and Stale (bulk-action-bar.tsx,
+//), which replaced the Stale lens's old whole-page bar and per-row
+// buttons. Approve / Deny stay in Discovery → Approvals (approvals-page.tsx).
 //
 // Endpoint bodies (verified against api/openapi/inventory-service.openapi.yaml +
-// the generated client): the three bulk actions all take AssetIdsRequest
-// (`{ asset_ids: string[] }`); restore is POST /{id}/restore (no body); delete
-// is DELETE /{id} (204, no body).
+// the generated client): restore is POST /{id}/restore (no body); delete is
+// DELETE /{id} (204, no body).
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon, Modal } from '../../components/ui';
+import { activeScanView, type ActiveScanView, type AssetActiveScan } from '../discovery/active-scan-row-state';
+import { ScanDialog } from './scan-dialog';
 
 // All inventory list/detail query keys are rooted at ['inventory'] (see
 // useAssets/useConfigs/useConnections); detail + child-config keys are by id.
@@ -30,98 +27,6 @@ function invalidateInventory(qc: ReturnType<typeof useQueryClient>, assetId?: st
     qc.invalidateQueries({ queryKey: ['asset-detail', assetId] });
     qc.invalidateQueries({ queryKey: ['asset-configs', assetId] });
   }
-}
-
-// ---- bulk stale actions over a set of asset ids --------------------------
-// rescan + revalidate share the AssetIdsRequest body and return a job; archive
-// returns a count. One mutation keyed by `kind` keeps the call sites tiny.
-type BulkKind = 'rescan' | 'archive' | 'revalidate';
-const BULK_PATH: Record<BulkKind, '/infrastructure-assets/stale/rescan' | '/infrastructure-assets/stale/archive' | '/infrastructure-assets/revalidate'> = {
-  rescan: '/infrastructure-assets/stale/rescan',
-  archive: '/infrastructure-assets/stale/archive',
-  revalidate: '/infrastructure-assets/revalidate',
-};
-
-function useBulkStaleAction() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async ({ kind, ids }: { kind: BulkKind; ids: string[] }) => {
-      const { data, error } = await clients.inventory.POST(BULK_PATH[kind], { body: { asset_ids: ids } });
-      if (error || !data) throw new Error(`Failed to ${kind} asset${ids.length === 1 ? '' : 's'}`);
-      return data;
-    },
-    onSettled: () => invalidateInventory(qc),
-  });
-}
-
-// ---- per-row actions on a stale asset ------------------------------------
-// Rescan (queues a revalidation job) and Archive (sets lifecycle → archived).
-// Both gated assets.update. `stopPropagation` so clicking an action doesn't
-// also open the asset drawer (the row's own onClick).
-export function StaleRowActions({ assetId }: { assetId: string }) {
-  const bulk = useBulkStaleAction();
-  const pending = bulk.isPending && (bulk.variables?.ids?.includes(assetId) ?? false);
-  const run = (kind: BulkKind, e: React.MouseEvent) => {
-    e.stopPropagation();
-    bulk.mutate({ kind, ids: [assetId] });
-  };
-  return (
-    <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
-      <div style={{ display: 'flex', gap: 6, justifySelf: 'end' }} onClick={(e) => e.stopPropagation()}>
-        <button className="ui-btn sm ghost" title="Rescan — queue a revalidation job for this asset" disabled={pending} onClick={(e) => run('rescan', e)} style={{ height: 26, padding: '0 8px' }}>
-          <Icon name="radar" size={13} />
-        </button>
-        <button className="ui-btn sm ghost" title="Archive — set lifecycle to archived" disabled={pending} onClick={(e) => run('archive', e)} style={{ height: 26, padding: '0 8px', color: 'var(--warn)' }}>
-          <Icon name="archive" size={13} />
-        </button>
-      </div>
-    </PermissionGate>
-  );
-}
-
-// ---- header bar for the stale lens ---------------------------------------
-// Acts on the whole CURRENT PAGE of stale assets (the table has no multi-select).
-// Revalidate queues jobs; Archive bulk-archives. Gated assets.update.
-export function StaleBulkBar({ assetIds }: { assetIds: string[] }) {
-  const bulk = useBulkStaleAction();
-  const [confirmArchive, setConfirmArchive] = useState(false);
-  const n = assetIds.length;
-  if (n === 0) return null;
-  const busy = bulk.isPending;
-
-  const archiveAll = () => {
-    bulk.mutate({ kind: 'archive', ids: assetIds }, { onSettled: () => setConfirmArchive(false) });
-  };
-
-  return (
-    <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 16px', borderBottom: '1px solid var(--app-border)', background: 'var(--app-panel2)' }}>
-        <Icon name="clock-alert" size={14} style={{ color: 'var(--warn-strong)' }} />
-        <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>{n} stale asset{n === 1 ? '' : 's'} on this page</span>
-        <div style={{ flex: 1 }} />
-        <button className="ui-btn sm" title="Queue a revalidation job for every stale asset on this page" disabled={busy} onClick={() => bulk.mutate({ kind: 'revalidate', ids: assetIds })} style={{ height: 28, padding: '0 10px', fontSize: 12 }}>
-          <Icon name="radar" size={13} />{busy && bulk.variables?.kind === 'revalidate' ? 'Revalidating…' : 'Revalidate all'}
-        </button>
-        <button className="ui-btn sm" title="Archive every stale asset on this page" disabled={busy} onClick={() => setConfirmArchive(true)} style={{ height: 28, padding: '0 10px', fontSize: 12, color: 'var(--warn)' }}>
-          <Icon name="archive" size={13} />Archive all
-        </button>
-      </div>
-      <Modal
-        open={confirmArchive}
-        onClose={busy ? undefined : () => setConfirmArchive(false)}
-        dismissible={!busy}
-        size="sm"
-        tone="danger"
-        icon="archive"
-        eyebrow="Inventory"
-        title={`Archive ${n} stale asset${n === 1 ? '' : 's'}?`}
-        description="Archived assets drop out of active inventory and reporting. Discovery can resurface them; you can restore individually from the asset drawer."
-        primary={<button className="ui-btn" style={{ background: 'var(--warn)', color: 'var(--accent-fg)', fontWeight: 600 }} disabled={busy} onClick={archiveAll}>{busy ? 'Archiving…' : `Archive ${n}`}</button>}
-        secondary={<button className="ui-btn" disabled={busy} onClick={() => setConfirmArchive(false)}>Cancel</button>}
-        footerNote={bulk.isError ? <span style={{ color: 'var(--danger-text)' }}>{(bulk.error as Error).message}</span> : undefined}
-      />
-    </PermissionGate>
-  );
 }
 
 // ---- asset drawer: soft-delete (danger confirm) --------------------------
@@ -166,33 +71,46 @@ export function DeleteAssetButton({ assetId, hostname, onDone }: { assetId: stri
   );
 }
 
-// ---- asset drawer: Active Scan (on-demand crypto scan) -------------------
-// POST /infrastructure-assets/scan { asset_ids:[id] } (). Approves the
-// asset and dispatches an active TLS probe whose results flow back through the
-// discovery pipeline to catalog its certificates + cipher configs. Gated
-// assets.update.
-export function ScanAssetButton({ assetId }: { assetId: string }) {
-  const qc = useQueryClient();
-  const scan = useMutation({
-    mutationFn: async () => {
-      const { data, error } = await clients.inventory.POST('/infrastructure-assets/scan', { body: { asset_ids: [assetId] } });
-      if (error || !data) throw new Error('Failed to start active scan');
-      return data;
-    },
-    // The scan is dispatched asynchronously (a job the discovery pipeline picks
-    // up), so the drawer has nothing to re-render on success — without a toast
-    // the click looked like a no-op. Mirrors Discovery → Active Scan.
-    onSuccess: () => toast.success('Active scan started — results appear once the probe completes'),
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to start active scan'),
-    onSettled: () => invalidateInventory(qc, assetId),
-  });
+// ---- asset drawer / asset page: Active Scan ------------------------------
+// Opens the Active Scan dialog for this one asset: the same dialog the
+// Inventory bulk bar opens, so a single scan also gets the "Run from" choice
+// and the outside-your-networks question. Gated assets.update.
+// `activeScan` is the asset's own scan record (AssetActiveScan, from the asset
+// read): while it says `scanning` the button is disabled and says so, and
+// afterwards its tooltip says how the last scan ended. The drawer and the page
+// poll the asset while the scan runs, so the button changes when it finishes.
+export function ScanAssetButton({ assetId, activeScan }: { assetId: string; activeScan?: AssetActiveScan | null }) {
+  const view = activeScanView({ active_scan: activeScan });
+  const [open, setOpen] = useState(false);
+  const running = view.kind === 'scanning';
   return (
     <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
-      <button className="ui-btn sm" title="Active Scan — probe this asset now and catalog its TLS crypto" disabled={scan.isPending} onClick={() => scan.mutate()} style={{ height: 28, padding: '0 9px' }}>
-        <Icon name="radar" size={13} />{scan.isPending ? 'Scanning…' : 'Active Scan'}
+      <button className="ui-btn sm" title={scanButtonTitle(view)} disabled={running} onClick={() => setOpen(true)} style={{ height: 28, padding: '0 9px' }}>
+        <Icon name="radar" size={13} />{running ? 'Scanning…' : 'Active Scan'}
       </button>
+      {open && <ScanDialog open selection={{ kind: 'ids', ids: new Set([assetId]) }} onClose={() => setOpen(false)} />}
     </PermissionGate>
   );
+}
+
+/** The Active Scan button's tooltip: what it does, and how the last scan went. */
+export function scanButtonTitle(view: ActiveScanView, now = Date.now()): string {
+  const base = 'Active Scan — probe this asset now and catalog its TLS crypto';
+  const ago = (iso?: string) => {
+    if (!iso) return '';
+    const mins = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60_000));
+    return mins < 1 ? ' just now' : mins < 60 ? ` ${mins}m ago` : mins < 1440 ? ` ${Math.round(mins / 60)}h ago` : ` ${Math.round(mins / 1440)}d ago`;
+  };
+  switch (view.kind) {
+    case 'scanning':
+      return `A scan of this asset is running (started${ago(view.since)}); results appear once it finishes`;
+    case 'completed':
+      return `${base}. Last scan finished${ago(view.at)}.`;
+    case 'failed':
+      return `${base}. Last scan failed${ago(view.at)}: it did not reach this asset.`;
+    default:
+      return base;
+  }
 }
 
 // ---- asset drawer: restore a soft-deleted / archived asset ---------------

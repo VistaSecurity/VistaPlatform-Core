@@ -149,17 +149,15 @@ func vendorPipelineHop3Claims(t *testing.T, vendor string, s hop3Summary) []pipe
 			// PQC-ready.
 			{What: "UniFi management TLS PQC category", Got: mgmt.PQCCategory, Want: "pqc_ready"},
 			{What: "UniFi management TLS certificate is on the controller", Got: hasCertificateOn(s, "device"), Want: true},
-			// The VPNs terminate on the gateway (their address is its LAN
-			// address), and an interrogation finding belongs to the
-			// interrogated device — but a PRIVATE address keeps ordinary
-			// routing unless it is one of the device's own MEASURED addresses
-			//and the gateway's LAN address is not recorded as one
-			// yet: interrogation does not attach the gateway's own interface
-			// addresses to it as identifiers. So they still mint "server" assets.
-			{What: "UniFi assets minted by the ingest",
-				Got: newAssets(s), Want: []string{},
-				KnownGap: "P-11 remainder: the gateway's LAN address is not a measured device address (with K-02 / W4.2; their class: P-12 / W2.3)",
-				Current:  []string{"new[branch-office-s2s|192.0.2.1]", "new[remote-access|192.0.2.1]"}},
+			// P-11 remainder, slice A: the VPNs terminate on the
+			// gateway (their address is its LAN address), and a PRIVATE address
+			// routes a finding to the interrogated device only when it is one of
+			// the device's own MEASURED addresses. The interrogation
+			// now claims the gateway's address on every network it routes
+			// (net.vlans `gateway`), so the LAN address is one, and the VPNs
+			// land on the device instead of minting "server" assets.
+			{What: "UniFi assets minted by the ingest", Got: newAssets(s), Want: []string{}},
+			{What: "UniFi IPsec tunnel is on the gateway", Got: ipsec.Asset, Want: "device"},
 		}
 
 	case "cisco":
@@ -231,6 +229,17 @@ func vendorPipelineHop3Claims(t *testing.T, vendor string, s hop3Summary) []pipe
 				Got: linksAny(hardened, "3DES", "MD5"), Want: false},
 			{What: "F5 hardened VIP carries no weak-cipher or weak-hash factor",
 				Got: hasFactor(hardened, "Weak cipher suite") || hasFactor(hardened, "Weak hash algorithm"), Want: false},
+			// P-04, fixed by W1.2: no tlsVersion, options leaving more than
+			// one version — the version is unmeasured end to end: not stored,
+			// not linked, not scored, and said so.
+			{What: "F5 hardened VIP stores no protocol version",
+				Got: hardened.Version == nil, Want: true},
+			{What: "F5 hardened VIP links no protocol version",
+				Got: len(hardened.Links["protocol_version"]), Want: 0},
+			{What: "F5 hardened VIP is unassessed, not Low",
+				Got: hardened.RiskScore == nil, Want: true},
+			{What: "F5 hardened VIP names the unmeasured version as a risk factor",
+				Got: hasFactor(hardened, unmeasuredVersionFactor), Want: true},
 			// P-06,: the key-size floor is for asymmetric keys.
 			{What: "F5 AES-256 VIP is not flagged as a weak key size",
 				Got: hasFactor(secure, "Weak key size"), Want: false},

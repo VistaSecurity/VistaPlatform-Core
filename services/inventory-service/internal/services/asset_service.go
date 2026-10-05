@@ -76,6 +76,14 @@ type AssetService struct {
 	genericNamesOnce sync.Once
 	genericNamesVal  *identity.GenericNames
 
+	// The one identity intake (platform ADR-0003): every builder in
+	// this service turns what it saw into an identity.Sighting and lets this
+	// decide scope, dynamic scopes, admission and hygiene. Built lazily by
+	// intake() over the identity repository (intake_adapters.go).
+	intakeOnce sync.Once
+	intakeVal  *identity.Intake
+	intakeErr  error
+
 	// The rule-based classifier (ADR-0004 D6) over the CURATED
 	// classification_rules table, reloaded on an interval so a rule an admin
 	// adds in the console becomes live without a restart. Built once, lazily,
@@ -283,7 +291,10 @@ func discoverySourceMetadata(f IngestFinding) models.JSONB {
 	out := models.JSONB{}
 	if raw, ok := f.RawData["source"].(string); ok && raw != "" {
 		switch raw {
-		case "sensor_discovery", "sensor_discoveries":
+		// The converter now preserves a scan / PCAP row's own source (so
+		// findingSource can rank it), but the Approvals filter buttons and the
+		// auto-approval conditions know these rows as sensor discoveries.
+		case "sensor_discovery", "sensor_discoveries", "active_scan", "discovery_jobs", "pcap", "pcap_upload":
 			out["discovery_source"] = "sensor_discoveries"
 		case "cloud_discovery":
 			out["discovery_source"] = "cloud_discovery"
@@ -375,6 +386,65 @@ func findingIsAtRest(f IngestFinding) bool {
 	}
 	return strings.EqualFold(strings.TrimSpace(f.Protocol), atRestProtocolSentinel)
 }
+
+// refusedHandshakeNote is the identification note the scan engine stamps on a
+// TLS port that answered the ClientHello with an alert (shared/discovery
+// identify.go). Such a finding names the protocol and measures nothing.
+const refusedHandshakeNote = "tls-handshake-refused"
+
+func findingIsRefusedHandshake(f IngestFinding) bool {
+	note, _ := f.RawData["identification_note"].(string)
+	return note == refusedHandshakeNote
+}
+
+// recordHandshakeOutcome keeps asset_endpoints.tls_handshake_outcome in step
+// with the finding's endpoint, so the asset can say "TLS, handshake refused"
+// instead of showing a bare TLS endpoint with nothing under it.
+//
+//   - A finding carrying the refused note sets it to 'refused'.
+//   - Any other finding that names a modelled protocol on that endpoint clears
+//     it: the endpoint has since been measured as something, and a refusal from
+//     an earlier scan is no longer the latest word. (A later scan by name is the
+//     usual way a refused port starts negotiating.)
+//   - A finding that names no modelled protocol leaves it alone: an
+//     unidentified sighting says nothing about the handshake either way.
+//
+// The endpoint is looked up, never created (resolveEndpointForFinding).
+func (s *AssetService) recordHandshakeOutcome(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) {
+	refused := findingIsRefusedHandshake(f)
+	if !refused {
+		if _, verdict := resolveProtocol(f.Protocol); verdict != protocolEnum {
+			return
+		}
+	}
+	epID, err := s.resolveEndpointForFinding(ctx, tenantID, assetID, f)
+	if err != nil || epID == uuid.Nil {
+		// Not attached, or no socket: nothing to annotate. A lookup failure is
+		// not worth failing the finding for; the next scan rewrites the state.
+		if err != nil && !errors.Is(err, errEndpointNotAttached) {
+			log.Printf("[AssetService] IngestFindings: resolving the endpoint to record the handshake outcome for %s failed: %v", findingLabel(f), err)
+		}
+		return
+	}
+	var outcome interface{}
+	if refused {
+		outcome = handshakeOutcomeRefused
+	}
+	wErr := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		_, e := tx.Exec(`
+			UPDATE asset_endpoints SET tls_handshake_outcome = $1::text, updated_at = NOW()
+			WHERE id = $2 AND tenant_id = $3 AND tls_handshake_outcome IS DISTINCT FROM $1::text`,
+			outcome, epID, tenantID)
+		return e
+	})
+	if wErr != nil {
+		log.Printf("[AssetService] IngestFindings: recording the handshake outcome on endpoint %s failed: %v", epID, wErr)
+	}
+}
+
+// handshakeOutcomeRefused is the value asset_endpoints.tls_handshake_outcome
+// holds for a port that answered the ClientHello with a TLS alert.
+const handshakeOutcomeRefused = "refused"
 
 // protocolVerdict is what resolveProtocol answers with. Only protocolEnum
 // carries a value a row may store in crypto_implementations.protocol; the other
@@ -1211,6 +1281,20 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 				return nil
 			}
 
+			// Endpoints follow the identity decision (platform ADR-0003 D2). When
+			// the engine held this finding's evidence — supporting evidence for an
+			// established asset — it attached no socket, so nothing hangs off one
+			// here either: no identified service, no crypto configuration, no
+			// deferred finding. An endpoint the asset already has is not refreshed
+			// by this sighting. The sockets wait in the observation's evidence (and,
+			// in enforce admission, its retained payload) for an operator's Link or
+			// Confirm.
+			evidenceHeld := res.EvidenceHeld
+			if evidenceHeld {
+				log.Printf("[AssetService] IngestFindings: %s is supporting evidence for asset %s; its endpoint stays on observation %s until it is linked or confirmed",
+					findingLabel(f), assetID, res.ObservationID)
+			}
+
 			// Enrich asset with network segment (environment, location) and service identification when services are wired
 			if s.networkSegmentService != nil {
 				var cloudProvider, cloudRegion string
@@ -1238,7 +1322,7 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 				}
 			}
 			var didSegment, didService bool
-			if s.serviceIdentificationSvc != nil {
+			if s.serviceIdentificationSvc != nil && !evidenceHeld {
 				port := 0
 				if f.Port != nil {
 					port = *f.Port
@@ -1257,6 +1341,10 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 					// the asset as enriched.
 					epID, epErr := s.resolveEndpointForFinding(ctx, tenantID, assetID, f)
 					switch {
+					case errors.Is(epErr, errEndpointNotAttached):
+						// The identity decision attached no endpoint for this
+						// socket; a service name is not a reason to create one.
+						log.Printf("[AssetService] IngestFindings: not recording the identified service for %s: %v", findingLabel(f), epErr)
 					case epErr != nil:
 						log.Printf("[AssetService] IngestFindings: resolving the endpoint to record the identified service for %s failed: %v", findingLabel(f), epErr)
 					case epID == uuid.Nil:
@@ -1279,6 +1367,9 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 					}
 				}
 			}
+			if !evidenceHeld {
+				s.recordHandshakeOutcome(ctx, tenantID, assetID, f)
+			}
 			if s.networkSegmentService != nil {
 				didSegment = true
 			}
@@ -1296,7 +1387,10 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 				})
 			}
 
-			if durableMaterialization {
+			if durableMaterialization || evidenceHeld {
+				// Held evidence: see above. In enforce admission the retained
+				// payload below waits for the decision that attaches it.
+				//
 				// The same transaction as identity resolution retained this receipt.
 				// The restart-safe worker materializes it after identity and approval
 				// are both settled; ingestion success never depends on best-effort
@@ -1324,6 +1418,16 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			if assetStatus != identity.StatusMonitoring {
 				if assetStatus == identity.StatusArchived {
 					log.Printf("[AssetService] IngestFindings: %s matched archived asset %s; its crypto is neither materialized nor deferred", findingLabel(f), assetID)
+					return nil
+				}
+				// A finding with nothing to replay is not parked: its port is
+				// already an endpoint of the asset (identity resolution above), and
+				// approval would materialize nothing from it (see
+				// deferralMaterializesNothing). Parking it only spent a slot of the
+				// capped array, so a busy pending host — a full-estate scan's open,
+				// unidentified ports — pushed its TLS and SSH observations out
+				// before anyone could approve it ( H12).
+				if deferralMaterializesNothing(f) {
 					return nil
 				}
 				s.storeDeferredFinding(tenantID, assetID, f)
@@ -1949,6 +2053,23 @@ func findingDiscoveryMethod(f IngestFinding) string {
 // the asset's current posture.
 const maxDeferredFindings = 50
 
+// deferralMaterializesNothing reports whether replaying f on approval would
+// write nothing — the early returns of processDiscoveryCryptoData, in its
+// order: an at-rest resource with a posture DOES materialize (an application
+// row); one without, and any finding whose protocol names no crypto
+// measurement (a transport such as "tcp", a plaintext service, an unrecognised
+// name), does not.
+func deferralMaterializesNothing(f IngestFinding) bool {
+	if _, ok := atRestPostureFromFinding(f); ok {
+		return false
+	}
+	if findingIsAtRest(f) {
+		return true
+	}
+	_, verdict := resolveProtocol(f.Protocol)
+	return verdict != protocolEnum
+}
+
 // storeDeferredFinding saves the raw finding data in the asset's metadata under
 // the "deferred_findings" key. When the asset is later approved, ApproveAssets
 // processes these deferred findings to create certificates and crypto configurations.
@@ -2121,6 +2242,42 @@ func (s *AssetService) processDiscoveryCryptoData(
 		return nil
 	}
 
+	// A TLS port that refused the handshake negotiated nothing either. The
+	// scan engine names such a port TLS — the server answered the ClientHello
+	// with a TLS alert, usually because it requires a server name an address
+	// scan cannot offer — and the endpoint keeps that name. But there is no
+	// version, cipher suite or certificate to record, and a configuration with
+	// every component NULL is the same empty row as the cases above.
+	if findingIsRefusedHandshake(f) {
+		log.Printf("[AssetService] asset %s: no crypto configuration materialized for %s — the server refused the handshake",
+			assetID, findingLabel(f))
+		return nil
+	}
+
+	// The endpoint the observation was measured on. A configuration hangs off
+	// the socket, not off the host (DATA_MODEL §2): resolving it here is what
+	// makes :443 and :8443 on one host two configurations of one asset rather
+	// than one row that flaps between them.
+	//
+	// uuid.Nil is a real answer, not a failure: an at-rest cloud resource has no
+	// endpoint. That is exactly what retires the AT-REST port sentinel — there
+	// is no fake port to invent, because there is no endpoint row.
+	//
+	// Looked up BEFORE anything is written, and never created (platform
+	// ADR-0003 D2): a socket the identity decision did not attach to this asset
+	// is not this asset's, so neither is the certificate it served or the
+	// configuration it negotiated. Skipped with a log line rather than failed —
+	// the evidence is still on its observation, and a Link or Confirm there is
+	// what attaches the endpoint and materialises the rest.
+	endpointID, epErr := s.resolveEndpointForFinding(context.Background(), tenantID, assetID, f)
+	if errors.Is(epErr, errEndpointNotAttached) {
+		log.Printf("[AssetService] asset %s: no crypto materialized for %s — %v", assetID, findingLabel(f), epErr)
+		return nil
+	}
+	if epErr != nil {
+		return fmt.Errorf("resolve endpoint before materializing crypto: %w", epErr)
+	}
+
 	// Extract and process certificate chain from discovery finding
 	var certIDs []uuid.UUID
 	var primaryCertID *uuid.UUID
@@ -2194,19 +2351,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// returned for every other verdict. Checked again rather than assumed —
 	// the enum column would reject an empty protocol, but only after the
 	// certificate work above had already been committed.
-	// The endpoint the observation was measured on. A configuration hangs off
-	// the socket, not off the host (DATA_MODEL §2): resolving it here is what
-	// makes :443 and :8443 on one host two configurations of one asset rather
-	// than one row that flaps between them.
-	//
-	// uuid.Nil is a real answer, not a failure: an at-rest cloud resource has no
-	// endpoint. That is exactly what retires the AT-REST port sentinel — there
-	// is no fake port to invent, because there is no endpoint row.
-	endpointID, epErr := s.resolveEndpointForFinding(context.Background(), tenantID, assetID, f)
-	if epErr != nil {
-		return fmt.Errorf("resolve endpoint before materializing crypto: %w", epErr)
-	}
-
+	// endpointID was resolved above, before the certificates.
 	key, recordable := s.cryptoKeyForFindingOnEndpoint(assetID, endpointID, f)
 	if !recordable {
 		return errors.Join(append(materializationErrs,
@@ -2221,6 +2366,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// A cipher string the parser cannot fully resolve is a partial
 	// assessment; record it where every reader can see it (cipher_assessment.go).
 	raw, cipherPartial := annotateCipherAssessment(raw, f.CipherSuite)
+	// So is a protocol version the producer says it did not measure
+	// (component_assessment.go, W1.2).
+	raw, versionUnmeasured := annotateComponentAssessment(raw, key.ProtocolVersion)
+	key.VersionUnmeasured = versionUnmeasured
+	partialAssessment := cipherPartial || versionUnmeasured
 	rawJSON, _ := json.Marshal(raw)
 
 	var sensor interface{}
@@ -2446,7 +2596,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// Medium its number would claim "Low" for a set nobody resolved, so it is
 	// stored as unassessed (NULL) — including over a score an earlier pass left
 	// behind. Medium and worse, which known components support, stands.
-	if scoreThisPass && cipherPartial && !partialAssessmentKeepsScore(cryptoRiskScore) {
+	if scoreThisPass && partialAssessment && !partialAssessmentKeepsScore(cryptoRiskScore) {
 		cryptoRiskAssessed = false
 		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 			return clearCryptoRiskScore(tx, cryptoID)
@@ -3187,6 +3337,16 @@ func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.Asse
 		if cerr := s.recordClassOutcome(ctxBG, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
 			return cerr
 		}
+		// A person's spreadsheet listing the asset keeps it in scope for
+		// automatic scanning, whatever a connection said about it first
+		// (platform ADR-0002 D10; shared/identity/postgres import_only.go).
+		// Read off the resolution, not off a history row, so it holds even
+		// when the listing changed nothing.
+		if source.Kind == identity.SourceImported && source.Ref == identity.SpreadsheetImportSourceRef {
+			if cerr := pgidentity.ClearImportOnly(ctxBG, tx, tenantID.String(), assetID); cerr != nil {
+				return cerr
+			}
+		}
 		// The approval decision the caller reached stands, EXCEPT over a
 		// conflict: a conflicting observation waits for the human who has to
 		// settle the merge, whatever the segment rule said.
@@ -3291,14 +3451,14 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 
 	var assetID uuid.UUID
 	var durableMaterialization bool
-	res, err := s.resolveObservationWithRepo(context.Background(), obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
+	res, err := s.resolveObservationAttributed(context.Background(), obs, operatorScanAttribution(tenantID, f, effectiveIP), func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
 		mode, err := repo.AdmissionMode(ctxBG, tenantID.String())
 		if err != nil {
 			return err
 		}
 		durableMaterialization = res.ObservationID != "" && (mode == "enforce" || mode == "paused")
 		if durableMaterialization {
-			payload, err := json.Marshal(f)
+			payload, err := operatorScanPayload(f, res.OperatorScanJob)
 			if err != nil {
 				return err
 			}
@@ -3329,13 +3489,21 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 	if err != nil {
 		return identity.Resolution{}, false, err
 	}
+	if res.OperatorScanJob != "" {
+		log.Printf("[AssetService] IngestFindings: %s attached to asset %s, which a person scanned (Active Scan job %s)",
+			findingLabel(f), res.Asset.ID, res.OperatorScanJob)
+	}
+	if res.OperatorScanRefused != "" {
+		log.Printf("[AssetService] IngestFindings: %s came from a person's Active Scan but was not attributed to the scanned asset: %s",
+			findingLabel(f), res.OperatorScanRefused)
+	}
 	if res.Asset.Zero() {
-		// The floor: every identifier this finding carries already belongs to
-		// another asset and none of them could decide, so the engine opened a
-		// merge proposal and created nothing. Not an error — a human has the
-		// work item — but the caller must not treat it as an ingested asset.
-		log.Printf("[AssetService] IngestFindings: %s matched nothing it may claim; its identifiers belong to %d existing asset(s) and merge proposal %s was opened",
-			findingLabel(f), len(res.Candidates), res.Proposal.ID)
+		// No asset: either every identifier this finding carries already
+		// belongs to another asset and none could decide (a merge proposal is
+		// the work item), or identity admission kept the evidence as an
+		// unresolved observation (Discovery → Observations). Not an error
+		// either way, but the caller must not treat it as an ingested asset.
+		log.Print(noAssetIngestMessage(findingLabel(f), res))
 		return res, durableMaterialization, nil
 	}
 
@@ -3352,6 +3520,32 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 			findingLabel(f), un.Kind, un.Value)
 	}
 	return res, durableMaterialization, nil
+}
+
+// noAssetIngestMessage says what became of a finding that landed on no asset,
+// in the terms of what actually happened. It used to always claim a
+// merge proposal had been opened — printing an empty id — when the finding had
+// in fact been kept as an unresolved observation (e.g. an address on a DHCP
+// segment with no device binding) and no proposal existed.
+func noAssetIngestMessage(label string, res identity.Resolution) string {
+	if res.Proposal.ID != "" {
+		return fmt.Sprintf("[AssetService] IngestFindings: %s matched nothing it may claim; its identifiers belong to %d existing asset(s) and merge proposal %s was opened",
+			label, len(res.Candidates), res.Proposal.ID)
+	}
+	reason := res.AdmissionReason
+	if reason == "" {
+		reason = "none recorded"
+	}
+	observation := res.ObservationID
+	if observation == "" {
+		observation = "none"
+	}
+	msg := fmt.Sprintf("[AssetService] IngestFindings: %s: evidence retained as an unresolved observation (outcome %s, reason %s, observation %s); no asset was created and no merge proposal exists",
+		label, res.Outcome, reason, observation)
+	if n := len(res.Candidates); n > 0 {
+		msg += fmt.Sprintf(" (its identifiers belong to %d existing asset(s))", n)
+	}
+	return msg
 }
 
 // bulkAssetKey returns a stable dedupe key for an import row: the lowercased
@@ -3582,7 +3776,7 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		return nil, nil, fmt.Errorf(
 			"asset_status cannot be changed by an update: approving, denying and archiving each " +
 				"do more than set a column. Use POST /infrastructure-assets/approve, " +
-				"POST /infrastructure-assets/deny, or POST /infrastructure-assets/stale/archive")
+				"POST /infrastructure-assets/deny, or POST /infrastructure-assets/bulk-actions/archive")
 	}
 	if input.Tags != nil {
 		// JSONB column: marshal the map to bytes — the database/sql driver

@@ -14,6 +14,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
@@ -50,26 +51,6 @@ func (r *flipResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.A
 	return out, nil
 }
 
-// recordingScanner stands in for nmap: it records which address each dispatch
-// connected to and under which SNI name, and sends nothing anywhere.
-type recordingScanner struct {
-	mu        sync.Mutex
-	addresses []string
-	hostnames []string
-}
-
-func (s *recordingScanner) ScanTarget(target string, _ []int32, _ []string, originalHostname *string, _ map[string]interface{}) ([]models.DiscoveryFinding, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.addresses = append(s.addresses, target)
-	if originalHostname != nil {
-		s.hostnames = append(s.hostnames, *originalHostname)
-	} else {
-		s.hostnames = append(s.hostnames, "")
-	}
-	return nil, nil
-}
-
 func (f *dispatchFixture) tenantUser(t *testing.T) string {
 	t.Helper()
 	id := uuid.New()
@@ -79,15 +60,38 @@ func (f *dispatchFixture) tenantUser(t *testing.T) string {
 	return id.String()
 }
 
-func (f *dispatchFixture) onlyTarget(t *testing.T, jobID string) models.DiscoveryTarget {
+// runPlatformPlan runs a platform job from scratch on the shared engine, with
+// fake as its whole network: any units an earlier run left are removed and
+// the job is put back to queued, then claimed and processed as the processor
+// does. The external-target checks are made per unit (unitAuthorizer), so a
+// fresh run is what judges them again. Since WP5 this is the only
+// executor the platform has; the legacy processTarget these tests drove is
+// gone.
+func (f *dispatchFixture) runPlatformPlan(t *testing.T, fake *FakeNet, jobID string) {
 	t.Helper()
-	var target models.DiscoveryTarget
-	if err := f.raw.QueryRow(`SELECT id, input FROM discovery_targets WHERE tenant_id=$1 AND job_id=$2`, f.tenant, jobID).Scan(&target.ID, &target.Input); err != nil {
-		t.Fatalf("read target: %v", err)
+	f.jp.planEngineOptions = []shareddisc.Option{shareddisc.WithDialer(fake)}
+	for _, q := range []string{
+		`DELETE FROM discovery_job_units WHERE job_id = $1`,
+		`UPDATE discovery_targets SET status = 'pending', started_at = NULL, completed_at = NULL, error_message = NULL WHERE job_id = $1`,
+		`UPDATE discovery_jobs SET status = 'queued', started_at = NULL, completed_at = NULL, error_message = NULL WHERE id = $1`,
+	} {
+		if _, err := f.raw.Exec(q, jobID); err != nil {
+			t.Fatalf("reset job: %v", err)
+		}
 	}
-	target.Protocols = []string{"TLS"}
-	target.Ports = []int32{443}
-	return target
+	if claimed, err := f.svc.ClaimJob(jobID); err != nil || !claimed {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+	job, err := f.svc.GetJob(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Plan == nil {
+		t.Fatal("the job has no scan plan: it would not run on the shared engine")
+	}
+	if err := f.jp.processDiscoveryJob(context.Background(), job); err != nil {
+		t.Logf("processDiscoveryJob: %v", err)
+	}
 }
 
 // TestIntegration_DNSRebindingScansOnlyThePinnedAddress: the name resolves to a
@@ -107,8 +111,7 @@ func TestIntegration_DNSRebindingScansOnlyThePinnedAddress(t *testing.T) {
 			resolver := &flipResolver{answers: map[string][]string{}}
 			resolver.set("rebind.example.com", "93.184.216.34")
 			f.svc.WithResolver(resolver)
-			scanner := &recordingScanner{}
-			f.jp.portScanner = scanner
+			fake := NewFakeNet()
 
 			req := models.CreateDiscoveryJobRequest{
 				Targets: []string{"https://rebind.example.com/"}, Protocols: []string{"TLS"}, Ports: []int{443},
@@ -125,18 +128,10 @@ func TestIntegration_DNSRebindingScansOnlyThePinnedAddress(t *testing.T) {
 			}
 
 			resolver.set("rebind.example.com", rebindTo)
-			target := f.onlyTarget(t, job.ID)
-			if target.Input != "rebind.example.com" {
-				t.Fatalf("stored input = %q, want the URL reduced to its host", target.Input)
-			}
-			if err := f.jp.processTarget(job, &target, req.Options); err != nil {
-				t.Fatalf("processTarget: %v", err)
-			}
-			if !reflect.DeepEqual(scanner.addresses, []string{"93.184.216.34"}) {
-				t.Fatalf("scanner contacted %v, want only the pinned [93.184.216.34] (DNS now says %s)", scanner.addresses, rebindTo)
-			}
-			if !reflect.DeepEqual(scanner.hostnames, []string{"rebind.example.com"}) {
-				t.Fatalf("SNI names = %v, want the hostname kept for SNI", scanner.hostnames)
+			f.runPlatformPlan(t, fake, job.ID)
+			dialed := fake.DialedAddrs()
+			if dialed["93.184.216.34"] == 0 || len(dialed) != 1 {
+				t.Fatalf("scan contacted %v, want only the pinned 93.184.216.34 (DNS now says %s)", dialed, rebindTo)
 			}
 		})
 	}
@@ -146,28 +141,28 @@ func TestIntegration_DNSRebindingScansOnlyThePinnedAddress(t *testing.T) {
 // re-check reads the consent from the JOB, not from anything a caller can
 // supply at scan time. A job with no recorded confirmation (created before
 // this existed, or tampered into discovery_targets) whose target is public is
-// refused at dispatch and the scanner is never reached; the same job with
-// the consent recorded scans.
+// refused at dispatch and nothing is contacted; the same job with the consent
+// recorded scans.
 func TestIntegration_UnconfirmedJobNeverScansPublicAtDispatch(t *testing.T) {
 	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
 	f := newDispatchFixture(t)
-	scanner := &recordingScanner{}
-	f.jp.portScanner = scanner
+	fake := NewFakeNet()
 	job, err := f.svc.CreateJob(f.tenant.String(), f.tenantUser(t), models.CreateDiscoveryJobRequest{
 		Targets: []string{"10.0.0.5"}, Protocols: []string{"TLS"}, Ports: []int{443}, ExecutionMode: "auto",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Tamper the stored target (row and plan) to a public address.
 	if _, err := f.raw.Exec(`UPDATE discovery_targets SET input='93.184.216.34' WHERE job_id=$1`, job.ID); err != nil {
 		t.Fatal(err)
 	}
-	target := f.onlyTarget(t, job.ID)
-	if err := f.jp.processTarget(job, &target, nil); !errors.Is(err, dispatchguard.ErrDenied) {
-		t.Fatalf("unconfirmed public target at dispatch: err=%v, want ErrDenied", err)
+	if _, err := f.raw.Exec(`UPDATE discovery_jobs SET metadata = jsonb_set(metadata, '{scan_plan,targets,0,target}', '"93.184.216.34"') WHERE id=$1`, job.ID); err != nil {
+		t.Fatal(err)
 	}
-	if len(scanner.addresses) != 0 {
-		t.Fatalf("scanner reached %v for a job nobody confirmed", scanner.addresses)
+	f.runPlatformPlan(t, fake, job.ID)
+	if dials := fake.Dials(); len(dials) != 0 {
+		t.Fatalf("the scan reached %v for a job nobody confirmed", dials)
 	}
 
 	// Consent recorded for a DIFFERENT range: still refused — consent covers
@@ -175,23 +170,16 @@ func TestIntegration_UnconfirmedJobNeverScansPublicAtDispatch(t *testing.T) {
 	if _, err := f.raw.Exec(`UPDATE discovery_jobs SET metadata = jsonb_set(COALESCE(metadata,'{}'::jsonb), '{external_targets}', '{"confirmed":true,"targets":[{"target":"93.184.217.0/28","addresses":["93.184.217.0/28"]}]}') WHERE id=$1`, job.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.jp.processTarget(job, &target, nil); !errors.Is(err, dispatchguard.ErrDenied) {
-		t.Fatalf("public target outside the confirmed range: err=%v, want ErrDenied", err)
-	}
-	if len(scanner.addresses) != 0 {
-		t.Fatalf("scanner reached %v, which nobody confirmed", scanner.addresses)
+	f.runPlatformPlan(t, fake, job.ID)
+	if dials := fake.Dials(); len(dials) != 0 {
+		t.Fatalf("the scan reached %v, which nobody confirmed", dials)
 	}
 	if _, err := f.raw.Exec(`UPDATE discovery_jobs SET metadata = jsonb_set(metadata, '{external_targets}', '{"confirmed":true,"targets":[{"target":"93.184.216.34","addresses":["93.184.216.34"]}]}') WHERE id=$1`, job.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.raw.Exec(`UPDATE discovery_targets SET status='pending' WHERE job_id=$1`, job.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.jp.processTarget(job, &target, nil); err != nil {
-		t.Fatalf("confirmed public target at dispatch: %v", err)
-	}
-	if !reflect.DeepEqual(scanner.addresses, []string{"93.184.216.34"}) {
-		t.Fatalf("scanner contacted %v, want [93.184.216.34]", scanner.addresses)
+	f.runPlatformPlan(t, fake, job.ID)
+	if dialed := fake.DialedAddrs(); dialed["93.184.216.34"] == 0 || len(dialed) != 1 {
+		t.Fatalf("scan contacted %v, want 93.184.216.34", dialed)
 	}
 }
 
@@ -290,44 +278,6 @@ func TestIntegration_ExternalTargetsCreateJob(t *testing.T) {
 	_ = rows.Close()
 	if !reflect.DeepEqual(ports, []int32{443, 8443}) {
 		t.Fatalf("job ports = %v, want [443 8443] — the URL's explicit port joins the scan", ports)
-	}
-}
-
-// TestIntegration_SwitchOffStopsQueuedConfirmedWork: a job confirmed while the
-// capability was on, still queued when the operator turns it off, scans
-// nothing ( W5.13b review, item 2 — this mutation survived before).
-func TestIntegration_SwitchOffStopsQueuedConfirmedWork(t *testing.T) {
-	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
-	f := newDispatchFixture(t)
-	scanner := &recordingScanner{}
-	f.jp.portScanner = scanner
-	job, err := f.svc.CreateJob(f.tenant.String(), f.tenantUser(t), models.CreateDiscoveryJobRequest{
-		Targets: []string{"93.184.216.34"}, Protocols: []string{"TLS"}, Ports: []int{443}, ExecutionMode: "auto", ExternalTargetsConfirmed: true,
-	})
-	if err != nil {
-		t.Fatalf("confirmed job refused: %v", err)
-	}
-	target := f.onlyTarget(t, job.ID)
-
-	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "false")
-	err = f.jp.processTarget(job, &target, nil)
-	if ext, ok := dispatchguard.IsExternalTargetsError(err); !ok || ext.Code != dispatchguard.CodeExternalTargetsDisabled {
-		t.Fatalf("switch off at scan time: err=%v, want external_targets_disabled", err)
-	}
-	if len(scanner.addresses) != 0 {
-		t.Fatalf("scanner reached %v after the operator turned external targets off", scanner.addresses)
-	}
-
-	// Positive polarity: switched back on, the same queued job scans.
-	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
-	if _, err := f.raw.Exec(`UPDATE discovery_targets SET status='pending' WHERE job_id=$1`, job.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.jp.processTarget(job, &target, nil); err != nil {
-		t.Fatalf("switch back on: %v", err)
-	}
-	if !reflect.DeepEqual(scanner.addresses, []string{"93.184.216.34"}) {
-		t.Fatalf("scanner contacted %v, want [93.184.216.34]", scanner.addresses)
 	}
 }
 
@@ -431,14 +381,44 @@ func TestIntegration_TooBroadLegacySegmentIsNotOwnership(t *testing.T) {
 	}
 }
 
+// TestIntegration_SwitchOffStopsQueuedConfirmedWork: a job confirmed while the
+// capability was on, still queued when the operator turns it off, scans
+// nothing ( W5.13b review, item 2 — this mutation survived before).
+func TestIntegration_SwitchOffStopsQueuedConfirmedWork(t *testing.T) {
+	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
+	f := newDispatchFixture(t)
+	fake := NewFakeNet()
+	job, err := f.svc.CreateJob(f.tenant.String(), f.tenantUser(t), models.CreateDiscoveryJobRequest{
+		Targets: []string{"93.184.216.34"}, Protocols: []string{"TLS"}, Ports: []int{443}, ExecutionMode: "auto", ExternalTargetsConfirmed: true,
+	})
+	if err != nil {
+		t.Fatalf("confirmed job refused: %v", err)
+	}
+
+	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "false")
+	f.runPlatformPlan(t, fake, job.ID)
+	if dials := fake.Dials(); len(dials) != 0 {
+		t.Fatalf("the scan reached %v after the operator turned external targets off", dials)
+	}
+	if st := f.unitStatuses(t, job.ID); st["93.184.216.34"] != unitFailed {
+		t.Fatalf("units = %v, want the external address refused", st)
+	}
+
+	// Positive polarity: switched back on, the same queued job scans.
+	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
+	f.runPlatformPlan(t, fake, job.ID)
+	if dialed := fake.DialedAddrs(); dialed["93.184.216.34"] == 0 || len(dialed) != 1 {
+		t.Fatalf("scan contacted %v, want 93.184.216.34", dialed)
+	}
+}
+
 // TestIntegration_LoweredJobBoundStopsQueuedWork (review N2): the job records
-// its external-address total, and the processor re-checks it against the
+// its external-address total, and the executor re-checks it against the
 // operator's CURRENT job bound.
 func TestIntegration_LoweredJobBoundStopsQueuedWork(t *testing.T) {
 	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
 	f := newDispatchFixture(t)
-	scanner := &recordingScanner{}
-	f.jp.portScanner = scanner
+	fake := NewFakeNet()
 	job, err := f.svc.CreateJob(f.tenant.String(), f.tenantUser(t), models.CreateDiscoveryJobRequest{
 		Targets: []string{"93.184.216.0/28"}, Protocols: []string{"TLS"}, Ports: []int{443}, ExecutionMode: "auto", ExternalTargetsConfirmed: true,
 	})
@@ -449,24 +429,16 @@ func TestIntegration_LoweredJobBoundStopsQueuedWork(t *testing.T) {
 	if err := f.raw.QueryRow(`SELECT (metadata->'external_targets'->>'total_addresses')::int FROM discovery_jobs WHERE id=$1`, job.ID).Scan(&total); err != nil || total != 16 {
 		t.Fatalf("recorded total = %d (err %v), want 16", total, err)
 	}
-	target := f.onlyTarget(t, job.ID)
 
 	t.Setenv(dispatchguard.EnvExternalJobMaxAddresses, "8")
-	if err := f.jp.processTarget(job, &target, nil); !errors.Is(err, dispatchguard.ErrDenied) {
-		t.Fatalf("job bound lowered to 8 after queueing a 16-address job: err=%v, want ErrDenied", err)
-	}
-	if len(scanner.addresses) != 0 {
-		t.Fatalf("scanner reached %d address(es) over the operator's current bound", len(scanner.addresses))
+	f.runPlatformPlan(t, fake, job.ID)
+	if dialed := fake.DialedAddrs(); len(dialed) != 0 {
+		t.Fatalf("the scan reached %d address(es) over the operator's current bound", len(dialed))
 	}
 
 	t.Setenv(dispatchguard.EnvExternalJobMaxAddresses, "16")
-	if _, err := f.raw.Exec(`UPDATE discovery_targets SET status='pending' WHERE job_id=$1`, job.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.jp.processTarget(job, &target, nil); err != nil {
-		t.Fatalf("at the bound: %v", err)
-	}
-	if len(scanner.addresses) != 16 {
-		t.Fatalf("scanner reached %d address(es), want the 16 confirmed", len(scanner.addresses))
+	f.runPlatformPlan(t, fake, job.ID)
+	if dialed := fake.DialedAddrs(); len(dialed) != 16 {
+		t.Fatalf("the scan reached %d address(es), want the 16 confirmed", len(dialed))
 	}
 }

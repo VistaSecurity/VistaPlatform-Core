@@ -18,6 +18,8 @@
 # remembering to add a line.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# GO_TEST_FLAGS -> IT_ARGS / ALL_ARGS (see the file for why it is an array).
+. scripts/lib/go-test-flags.sh
 
 MODE="${1:-print}"
 
@@ -98,7 +100,7 @@ while read -r module pkg; do
     continue
   fi
   echo "▶ sweep: $module $pkg"
-  ( cd "$module" && go test "${GO_TEST_FLAGS:--v}" -count=1 -run Integration "$pkg" ) || FAILED=1
+  ( cd "$module" && go test "${IT_ARGS[@]}" "$pkg" ) || FAILED=1
 done < <(discover)
 
 exit "$FAILED"

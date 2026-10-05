@@ -58,6 +58,15 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	// Identity is inventory-service's (platform ADR-0003 D3): every intake in
+	// this process posts its sightings there. Installed before anything that
+	// can resolve is constructed.
+	sightings, err := api.NewSightingClient(cfg)
+	if err != nil {
+		log.Fatalf("Failed to build the inventory-service sightings client: %v", err)
+	}
+	services.SetSightingPoster(sightings)
+
 	// Initialize services for platform agent worker
 	cloudService := services.NewCloudDiscoveryService(db, bypassDB, cfg.EncryptionMasterKey)
 	deviceService := services.NewDeviceService(db)

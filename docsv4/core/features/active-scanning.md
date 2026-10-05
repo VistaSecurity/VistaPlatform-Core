@@ -25,6 +25,12 @@ what is on it, and an unattended daily scan of a public range is the one thing
 this feature must never do. You can still scan it whenever you like from
 **Discovery** — that is a scan with a person behind it.
 
+A segment the platform **learned** from one of your devices (see
+[Public ranges learned from your devices](#public-ranges-learned-from-your-devices))
+counts only if it is private: a learned public range is not treated as yours at
+all until someone claims it, and a claimed one is treated exactly like a public
+segment you registered — never scanned automatically.
+
 Everything else is refused, and refused before anything else is considered:
 
 | Never scanned | Why |
@@ -54,16 +60,37 @@ connections**. See
 
 ## What each scan does
 
-An automatic scan is the same active probe the **Discover** wizard runs: a TCP
-connect to each configured port, then a TLS or SSH handshake on the ports that
-answer, recording the certificate, protocol version, cipher suite and key
-exchange it is offered. Results join the normal discovery pipeline, so they
-appear in Inventory and Findings like any other discovery.
+An automatic scan runs on the same scan engine as the **Discover** wizard: it
+checks each configured port, then identifies the service from what answers on
+the ones that are open — reading the banner, and completing a TLS or SSH
+handshake when that is what is listening — recording the certificate, protocol
+versions, cipher suite and key exchange it is offered. You do not choose
+protocols: a port that answers TLS is recorded as TLS, one that answers SSH as
+SSH, whatever its number. Closed and silent ports cost a moment rather than a
+full timeout each, so a scan of a host that drops packets finishes quickly.
+Results join the normal discovery pipeline, so they appear in Inventory and
+Findings like any other discovery. Identity checks and the **Active Scan**
+button on an asset use the same engine.
 
-Only **TLS** and **SSH** can be scanned automatically. Industrial (OT/ICS)
-probes — Modbus, OPC UA, EtherNet/IP, BACnet — are never run unattended, whatever
-your entitlements: those are opt-in, per-job decisions you make in the Discover
-wizard.
+### A TLS port that ends the handshake
+
+A scan reaches a host by address, so it offers no server name. Some TLS servers
+answer that with a TLS alert and close the connection. The port is still TLS, but
+nothing was negotiated, so there is no certificate, version or cipher suite to
+record. The asset's endpoint is kept and labelled **TLS, handshake refused**: in
+the asset drawer under the configurations list, and in the Service column of the
+asset page's Services & Endpoints tab. The server may require a server name;
+scan it by name to see its configuration. A later scan that does negotiate
+replaces the label with the configuration it measured.
+
+Only **TLS** and **SSH** are identified by automatic scans. Industrial (OT/ICS)
+probes — Modbus, OPC UA, EtherNet/IP, BACnet — are never run unattended. They are
+an explicit, per-job opt-in that a job's protocol list cannot request (naming one
+there is refused); that opt-in is the Discover wizard's **Probe industrial (OT/ICS)
+devices** box under Advanced, unchecked unless you tick it, or the same field on the
+discovery job API. OT active probing is included
+in every edition and switched on by default; your operator can turn it off for
+your plan or for your organization.
 
 ## The controls
 
@@ -72,24 +99,26 @@ wizard.
 | **Automatic scanning** | On | The master switch. Off means nothing is scanned unless you start a scan yourself from Discovery. |
 | **Scan on first observation** | On | Scan a new internal host as soon as it appears, instead of waiting for the next scheduled pass. |
 | **Rescan every** | 24 hours | How long a host's last automatic scan may age before it is scanned again. 1–720 hours. |
-| **Protocols** | TLS, SSH | What each scan probes for. |
-| **Ports** | The well-known TLS and SSH ports | The ports each scan tries. At most 64. "Reset ports to the defaults" restores the built-in list. |
+| **Ports** | The well-known TLS and SSH ports | The ports each scan checks; the service on each is identified from what answers. At most 64. "Reset ports to the defaults" restores the built-in list. |
 | **Prefer the observing sensor** | On | Run each automatic scan from the sensor of yours that most recently observed the host, or one on the same network segment, instead of the platform sensor — so hosts only reachable from inside your network are scanned from there. Off runs every automatic scan from the platform sensor. |
 
 **Prefer the observing sensor** decides *where* each scan runs, not whether it
 runs. With it on, a host one of your sensors has observed is scanned from that
 sensor; a host only the platform has seen is scanned from the platform sensor.
-If the observing sensor is offline when a pass runs, that host is skipped for
-the pass and stays due — it is not scanned from somewhere that cannot see it.
-Manual scans choose per run with **Run from** on **Discovery → Active Scan** and
-are not governed by this switch. See
+If the observing sensor is offline when a pass runs, the host is scanned from
+another of your sensors that is online and on the same network segment. If no
+such sensor exists, the host is skipped for the pass and stays due — it is not
+moved to the platform sensor, which may not be able to see it.
+Manual scans choose per run with **Run from** in the scan dialog (Inventory's
+bulk **Scan**, or **Active Scan** on an asset) and are not governed by this switch. See
 [Active Scan: choosing where it runs](./discovery.md#active-scan-choosing-where-it-runs).
 
-The default port list is deliberately **narrower** than the one the Discover
-wizard offers. The wizard's list also carries the file-sharing ports (139, 445)
-and the industrial-control ports (502 Modbus, 4840 OPC UA, 44818 EtherNet/IP,
-47808 BACnet). Those are reasonable for a scan you chose, aimed somewhere
-specific, once — they are not reasonable for a connect attempt repeated against
+The default port list is deliberately **narrower** than what the Discover
+wizard scans. Even its *Quick* depth also connects to the file-sharing ports
+(139, 445) and the industrial-control ports (502 Modbus, 4840 OPC UA, 44818
+EtherNet/IP, 47808 BACnet) — a connection only; an industrial protocol's own
+probe needs the wizard's separate opt-in. Those are reasonable for a scan you
+chose, aimed somewhere specific, once — they are not reasonable for a connect attempt repeated against
 every host in scope on every interval. If you want them scanned automatically,
 add them to the list yourself; that is a decision with a person behind it.
 
@@ -117,7 +146,17 @@ by one of your own sensors — see **Prefer the observing sensor** above. The
 executor and its state: *Queued*, *Awaiting <sensor>* (handed to the sensor,
 not yet collected), *Running on <sensor>*, *Completed*, or *Failed: sensor
 offline* with the sensor's last check-in. Scans you start yourself show the
-same on **Discovery → Active Scan**.
+same under **Scans started here** in Inventory.
+
+### Sensors older than this release
+
+A sensor installed before this release keeps working: the platform sends it
+the older form of the scan (each port probed for TLS and SSH in turn), which it
+knows how to run. That form is slower against hosts that drop packets, and it
+will be retired in a later release. **Discovery → Sensors & Agents** marks such
+a sensor *Needs upgrading to run scans on the current engine*; install the
+current sensor build on that host to upgrade it. Platform-managed sensors are
+upgraded with the platform and are never marked.
 
 ## What it has been doing
 
@@ -145,7 +184,7 @@ whose estate lives in an address range the platform does not treat as internal.
 
 | Row | Meaning | What to do |
 |---|---|---|
-| **Public addresses** | Hosts whose address is neither private nor inside a registered segment. | If the range really is yours, register it as a network segment typed Private, VPN or Cloud — the link on the row takes you there. Otherwise nothing: this is the feature refusing to scan a third party. |
+| **Public addresses** | Hosts whose address is neither private nor inside a registered segment. | If the range really is yours, register it as a network segment typed Private, VPN or Cloud — the link on the row takes you there. (Claiming a public range the platform learned from a device makes it scannable when you ask, not automatically — see [Public ranges learned from your devices](#public-ranges-learned-from-your-devices).) Otherwise nothing: this is the feature refusing to scan a third party. |
 | **Carrier-grade NAT (100.64.0.0/10)** | Shared address space (RFC 6598). **Tailscale, ZeroTier and mobile carriers use this range**, so an estate built on an overlay network lands here in full. | Register the range as a network segment. That is your explicit statement that those addresses are yours; without it the platform cannot tell your overlay from another operator's subscribers. |
 | **Excluded by your operator** | The platform's own addresses. | Nothing — the platform does not scan itself. |
 | **Link-local**, **loopback**, **multicast**, **unspecified** | Not hosts on your network. | Nothing. |
@@ -158,11 +197,14 @@ refused nothing — not that no pass has run; that is a separate line above.
 
 - **It will not scan from somewhere that cannot see the host.** With **Prefer
   the observing sensor** on, a host one of your sensors observed is scanned from
-  that sensor, and if that sensor is offline the host waits for the next pass.
+  that sensor. If that sensor is offline, the host is scanned from another of
+  your online sensors on the same network segment when one covers it; only when
+  none does is it skipped for the pass and left due. It is never moved to the
+  platform sensor.
   With it off, automatic scans run from the platform and reach what the platform
   can reach; a host only reachable from inside your network is then not scanned
-  automatically — scan it from **Discovery → Active Scan** with **Run from** set
-  to your sensor.
+  automatically — scan it from **Inventory** (tick it, **Scan**) with **Run from**
+  set to your sensor.
 - **It will not scan an asset with no address.** A cloud resource with nothing to
   connect to has nothing to probe.
 - **It will not scan the same address twice at once.** An address that already
@@ -183,12 +225,18 @@ you to confirm.
 
 **Where:**
 
-- **Discovery → Active Scan → Scan addresses or hostnames**, or **Discovery →
-  Command Center → Discover assets** — the same wizard, for targets you type.
-  Needs the **`discovery.create`** permission, as any scan does.
-- **Discovery → Active Scan → Scan** on an asset already in your inventory whose
-  address is outside your registered networks. Pressing Scan on an asset you
-  chose is the same explicit choice, so the page asks rather than refuses.
+- **Discovery → Command Center → Discover assets** — the wizard for targets you
+  type
+  (depth, where it runs and its preview are described in
+  [Discovery](./discovery.md#1-create-discovery-job)). Its preview lists the
+  targets outside your registered networks before you start, and shows that
+  they will be scanned at Standard depth at most. Needs the
+  **`discovery.create`** permission, as any scan does.
+- **Scan** on assets already in your inventory (Inventory's bulk bar, or
+  **Active Scan** on one asset) whose address is outside your registered
+  networks. Choosing to scan an asset is the same explicit choice, so the dialog
+  lists those assets and asks rather than refuses. **Scan anyway** sends only
+  the assets it asked about.
   Confirming needs **`discovery.create`** as well as the **`assets.update`**
   that scanning an asset always needs.
 
@@ -223,6 +271,51 @@ Targets outside your registered networks always run from the **platform
 sensor**. A scan that would hand them to one of your own sensors is refused
 with that reason: run it from the platform.
 
+A scan described by **depth** through the API (`scan_depth`; see
+[Scan depth, ports, pace and where it runs](./discovery.md#scan-depth-ports-pace-and-where-it-runs-api))
+scans a target outside your registered networks at **Standard** at most, while
+the job's other targets get the depth asked for; the job lists each such
+downgrade. It is a guardrail for targets nobody has claimed, not an access
+control — registering the range as a network segment (or claiming a learned
+one, below) lifts it.
+
+### Public ranges learned from your devices
+
+When you interrogate a firewall, router or controller (**Discovery → Devices**),
+the networks it reports become network segments marked *Learned from …* under
+**Settings → Infrastructure → Network Segments**. A learned **private** range
+counts as yours, as any private address does. A learned **public** range does
+not: a device's settings cannot show whether a public network on one of its
+interfaces is your DMZ or your internet provider's link, and guessing wrong
+would mean scanning someone else's network. Its row says *Public range · not
+treated as yours*.
+
+If the range really is yours, press **Claim as mine** on its row and confirm.
+From then on it is treated exactly like a public segment you registered
+yourself:
+
+- addresses in it can be scanned when someone asks, without the
+  outside-your-networks confirmation above — but never by the automatic scan;
+- your sensors treat it as yours, so they may connect to services in it to read
+  certificates (see
+  [Certificates of third-party TLS connections](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections));
+- the limits that apply to every segment still apply: a range wider than /8
+  (IPv4) or /16 (IPv6) cannot be claimed, a segment marked sensitive or with
+  active probes disabled is still never probed, and an inactive segment grants
+  nothing.
+
+**A claim is your statement, not something the platform checks.** There is no
+proof-of-control step. Claiming needs the **`settings.update`** permission — the
+same as registering a segment — and every claim and revocation is recorded in
+your organization's audit log with who made it, when, the range and the device
+it was learned from. The row shows *Claimed by … · date*. **Do not claim a range
+you do not control**, such as your internet provider's side of a link.
+
+**Revoke claim** on the same row withdraws it; the range goes back to being
+learned, and scanning it again needs the confirmation above. Interrogating the
+device again keeps the claim, and if the device stops reporting the range, the
+segment — and the claim — stay until you revoke it or delete the segment.
+
 ### What is never scanned, confirmed or not
 
 | Never scanned | Why |
@@ -250,9 +343,12 @@ network or at cloud metadata.
 
 One target outside your registered networks may name at most **4,096 addresses**
 — an IPv4 `/20` or an IPv6 `/116` — and one scan at most **16,384** such
-addresses across all its targets. Split a larger block across scans, or register
-it as a network segment if it is yours: private ranges and registered segments
-are not bounded by this. Your operator may set lower limits.
+addresses across all its targets. Split a larger block across scans. Registering a
+block as a network segment does not lift the limit: **no** scan target, in a
+private range or a registered segment either, may name more than 4,096 addresses
+(and no scan more than 16,384 in all), because the scanner cannot expand more. A
+larger target is refused when you start the scan, with its address count and the
+limit, instead of being scanned in part. Your operator may set lower limits.
 
 A network segment wider than `/8` (IPv4) or `/16` (IPv6) never counts as yours,
 whatever its type, unless it lies wholly inside private space: nobody owns that
@@ -284,7 +380,8 @@ request that reaches outside your registered networks must carry
 `external_targets_unconfirmed` listing the targets (for the asset scan, with
 each asset's id and name), and nothing is scanned or changed. A refused target is
 **400** `targets_refused` with each reason, and the operator's switch is **403**
-`external_targets_disabled`.
+`external_targets_disabled`. A scan described by depth that is larger than the
+installation's probe budget is **422** `scan_budget_exceeded`.
 
 For operators, in the chart:
 
@@ -309,8 +406,8 @@ boolean, scanning outside registered networks is off.
 ## Turning it off
 
 Set **Automatic scanning** to off and save. Nothing is scanned unless you start
-a scan yourself from **Discovery → Command Center → Discover assets** or
-**Discovery → Active Scan**. Scans already running are not cancelled — cancel
+a scan yourself from **Discovery → Command Center → Discover assets** or with
+**Scan** in **Inventory**. Scans already running are not cancelled — cancel
 those from the job itself.
 
 ## Related

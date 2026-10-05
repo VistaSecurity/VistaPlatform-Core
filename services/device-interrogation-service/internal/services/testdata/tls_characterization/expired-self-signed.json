@@ -1,0 +1,62 @@
+{
+  "services.TLSHandshakeResult": {
+    "ALPN": "string=",
+    "Certificates": {
+      "[]map[string]interface {}": [
+        {
+          "map[string]interface {}": {
+            "certificate_pem": "string={{expired_self_signed.pem}}",
+            "chain_order": "int=0",
+            "extended_key_usage": {
+              "[]string": [
+                "string=ServerAuth"
+              ]
+            },
+            "fingerprint_sha1": "string={{expired_self_signed.sha1}}",
+            "fingerprint_sha256": "string={{expired_self_signed.sha256}}",
+            "is_ca": "bool=false",
+            "issuer": "string=CN=device.example.test",
+            "issuer_dn": "string=CN=device.example.test",
+            "key_algorithm": "string=RSA",
+            "key_size": "int=2048",
+            "key_usage": {
+              "[]string": [
+                "string=DigitalSignature",
+                "string=KeyEncipherment"
+              ]
+            },
+            "not_after": "string=2020-01-01T00:00:00Z",
+            "not_before": "string=2015-01-01T00:00:00Z",
+            "serial_number": "string=3001",
+            "signature_alg": "string=SHA256-RSA",
+            "subject": "string=CN=device.example.test",
+            "subject_alternative_names": {
+              "[]string": [
+                "string=device.example.test"
+              ]
+            },
+            "subject_dn": "string=CN=device.example.test"
+          }
+        }
+      ]
+    },
+    "CipherSuite": "string=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    "Error": "string=",
+    "KeyExchange": {
+      "discovery.TLSKeyExchange": {
+        "Group": "string=X25519",
+        "GroupID": "tls.CurveID=X25519",
+        "KeyBits": "int=0",
+        "PQCHybridGroup": "string=",
+        "SupportsClassical": {
+          "*bool": "bool=true"
+        },
+        "SupportsPQCHybrid": {
+          "*bool": "bool=false"
+        }
+      }
+    },
+    "Success": "bool=true",
+    "TLSVersion": "string=TLS 1.2"
+  }
+}

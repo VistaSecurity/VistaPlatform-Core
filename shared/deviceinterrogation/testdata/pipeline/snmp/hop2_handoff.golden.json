@@ -30,7 +30,7 @@
             "network_type": "private",
             "pqc_kex_detected": false,
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",

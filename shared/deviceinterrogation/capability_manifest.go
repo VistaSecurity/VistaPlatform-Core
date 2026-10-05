@@ -91,10 +91,11 @@ func ciscoManifest() CollectorManifest {
 			CapVPNTunnelEdges:    Gap("K-09", "W4.4", "the remote peer is vpn_peer_address metadata on the device's own VPN rows (W1.5); no tunnel edge yet"),
 			// Proven only by HAND-WRITTEN fixtures (the configured `ssl cipher`
 			// lines): no real capture of an ASA's SSL settings is in the corpus.
-			// The `show webvpn` asset is not counted — it carries only the
-			// converter's defaulted "TLS 1.2" (P-04), and `show webvpn` is not an
-			// ASA exec command at all (`show running-config webvpn` is).
-			CapDeviceServedTLS:      Supplies("configured `ssl cipher` lists only, proven by hand-written fixtures; the WebVPN asset is a defaulted version (P-04, W1.2)"),
+			// The `show webvpn` asset is not counted — it measures nothing (its
+			// version is unmeasured since W1.2 removed the "TLS 1.2" default),
+			// and `show webvpn` is not an ASA exec command at all (`show
+			// running-config webvpn` is).
+			CapDeviceServedTLS:      Supplies("configured `ssl cipher` lists only, proven by hand-written fixtures; the WebVPN asset carries an unmeasured version (W1.2)"),
 			CapCertificateInventory: Gap("M-06", "W2.4", "no certificate is collected (P-13)"),
 			CapCollectionWarnings:   Supplies(),
 
@@ -312,7 +313,7 @@ func f5Manifest() CollectorManifest {
 			CapLBDependencies:       Supplies(),
 			CapVPNCrypto:            NotApplicable(naF5LTMNoVPN),
 			CapVPNTunnelEdges:       NotApplicable(naF5LTMNoVPN),
-			CapDeviceServedTLS:      Supplies("VIP client-ssl/server-ssl; versions default to TLS 1.2 when the profile names none (P-04, W1.2)"),
+			CapDeviceServedTLS:      Supplies("VIP client-ssl/server-ssl; with no tlsVersion the version is read from the profile's options, and is unmeasured unless they leave exactly one (W1.2)"),
 			CapCertificateInventory: Supplies("certificates read from config carry no data_source (P-13, W2.4)"),
 			CapCollectionWarnings:   Supplies(),
 

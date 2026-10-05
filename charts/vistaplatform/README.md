@@ -79,6 +79,27 @@ and per-connection CA bundles are covered in
 
 See `examples/values-customer.yaml.example` (bundled with this chart) for the full annotated starter. After `helm pull --untar`, copy it into your own infrastructure repo, edit, and apply with `-f`.
 
+## PostgreSQL JIT
+
+Every backend asks PostgreSQL for `jit=off` on each connection it opens, because
+JIT compilation dominates short queries on the platform's partitioned tables.
+Nothing needs to be set for that. To keep the server's own JIT setting instead,
+for example because a connection pooler rejects the `jit` start-up parameter,
+set one value for all backends:
+
+```yaml
+appConfig:
+  dbJit: true   # or "on"; leave empty (the default) for jit=off
+```
+
+It is rendered as `DB_JIT` into the shared app ConfigMap, so every backend sees
+it, and the pods roll on the upgrade that changes it. A `DB_JIT` entry in
+`backends.<service>.extraEnv` overrides it for that service. If you turn this on
+to get past a pooler, also set `jit = off` on the PostgreSQL side
+(`ALTER DATABASE <name> SET jit = off`) so you keep the behaviour the platform
+is tuned for. Behaviour behind PgBouncer or a managed database proxy is
+documented here but is not tested by the project.
+
 ## What the chart deploys
 
 - 16 Go backend services (auth, inventory, compliance, etc.)

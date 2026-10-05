@@ -19,16 +19,42 @@ func (r *Repository) ProjectSegmentLocation(ctx context.Context, asset identity.
 	if _, err := uuid.Parse(segment); err != nil {
 		return nil
 	}
+	return r.projectSegmentLocation(ctx, asset, segment, source)
+}
+
+// InheritSegmentLocation fills missing physical placement (location_id and
+// site) from the segment the asset is ALREADY assigned to
+// (assets.network_segment_id), whoever assigned it.
+//
+// It is the hearsay-safe half of [Repository.ProjectSegmentLocation]: it never
+// takes a segment from the observation, so a peer a controller described
+// cannot move an asset into a segment or a location. It only keeps an asset's
+// placement consistent with its own segment. An asset in a located segment
+// that names no site is drawn twice on the network map — once under the
+// segment's site, once under "Unassigned" — which is what this closes.
+//
+// The same never-overwrite rules apply: a location_id or site that disagrees
+// with the segment's location (an operator's, a CMDB's) is left alone, and a
+// segment without a location, an inactive one, or no segment at all writes
+// nothing. Call only for a settled identity (not a conflict), inside its unit
+// of work.
+func (r *Repository) InheritSegmentLocation(ctx context.Context, asset identity.AssetRef, source identity.Source) error {
+	return r.projectSegmentLocation(ctx, asset, "", source)
+}
+
+// projectSegmentLocation is the one placement writer behind both methods.
+// segment == "" means the asset's own network_segment_id.
+func (r *Repository) projectSegmentLocation(ctx context.Context, asset identity.AssetRef, segment string, source identity.Source) error {
 	return r.RunInTx(ctx, asset.TenantID, func(bound *Repository) error {
-		var currentLocation, currentSite, location, site string
+		var currentLocation, currentSite, segmentID, location, site string
 		err := bound.Tx().QueryRowContext(ctx, `
-   SELECT coalesce(a.location_id::text,''),coalesce(a.site,''),l.id::text,l.name
+   SELECT coalesce(a.location_id::text,''),coalesce(a.site,''),ns.id::text,l.id::text,l.name
    FROM public.assets a
-   JOIN public.network_segments ns ON ns.id=$3::uuid AND ns.tenant_id=a.tenant_id AND ns.is_active
+   JOIN public.network_segments ns ON ns.id=coalesce(nullif($3::text,'')::uuid,a.network_segment_id) AND ns.tenant_id=a.tenant_id AND ns.is_active
    JOIN public.locations l ON l.id=ns.location_id AND l.tenant_id=a.tenant_id
    WHERE a.id=$2::uuid AND a.tenant_id=$1::uuid AND a.deleted_at IS NULL
      AND (a.network_segment_id IS NULL OR a.network_segment_id=ns.id)
-   FOR UPDATE OF a`, asset.TenantID, asset.ID, segment).Scan(&currentLocation, &currentSite, &location, &site)
+   FOR UPDATE OF a`, asset.TenantID, asset.ID, segment).Scan(&currentLocation, &currentSite, &segmentID, &location, &site)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -55,7 +81,7 @@ func (r *Repository) ProjectSegmentLocation(ctx context.Context, asset identity.
 		if err != nil {
 			return fmt.Errorf("project segment placement: %w", err)
 		}
-		changes["network_segment_id"] = segment
+		changes["network_segment_id"] = segmentID
 		return bound.RecordHistory(ctx, identity.HistoryEntry{TenantID: asset.TenantID, AssetID: asset.ID, Action: identity.ActionUpdated, Source: source, Changes: changes})
 	})
 }

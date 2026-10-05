@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -28,17 +27,15 @@ func TestIntegration_SourceRefresh_DisabledCloudIntegrationIsNotDispatched(t *te
 		t.Fatal(err)
 	}
 	devices := NewDeviceServiceWithKey(owner, testMasterKey)
+	// The retained (asset-less) shape: a linked cloud observation completes
+	// without consulting any source (TestIntegration_SourceRefresh_
+	// CloudDiscoveredAssetCompletes), so the integration check lives here.
 	bucket := s3Bucket("example-disabled-bucket")
-	device, err := devices.CreateDevice(ctx, tenant, models.CreateDeviceRequest{
-		DeviceType: bucket.DeviceType, Hostname: bucket.Hostname, CredentialID: &integration,
-		Metadata: map[string]interface{}{"region": "us-east-1"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	bucket.TenantID = tenant
+	bucket.CredentialID = &integration
 	enableSourceRefresh(t, owner, tenant)
 	refresh := NewConfiguredSourceRefresh(owner, NewJobQueueService(owner, owner, nil), devices, nil)
-	status, err := refresh.Refresh(ctx, refreshObservation(t, owner, tenant, "cloud:aws", &device.ID))
+	status, err := refresh.Refresh(ctx, retainedCloudRefresh(t, owner, devices, tenant, bucket))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -485,50 +485,6 @@ func TestBuildEnrichmentDiscovery(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// getCipherSuiteName
-// ---------------------------------------------------------------------------
-
-func TestGetCipherSuiteName(t *testing.T) {
-	t.Parallel()
-	// TLS_AES_128_GCM_SHA256 is 0x1301
-	name := getCipherSuiteName(0x1301)
-	if name != "TLS_AES_128_GCM_SHA256" {
-		t.Errorf("getCipherSuiteName(0x1301) = %q, want TLS_AES_128_GCM_SHA256", name)
-	}
-
-	// Unknown cipher
-	name = getCipherSuiteName(0xFFFF)
-	if name != "Unknown-0xFFFF" {
-		t.Errorf("getCipherSuiteName(0xFFFF) = %q, want Unknown-0xFFFF", name)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// getTLSVersionName
-// ---------------------------------------------------------------------------
-
-func TestGetTLSVersionName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		version uint16
-		want    string
-	}{
-		{0x0301, "TLS 1.0"},
-		{0x0302, "TLS 1.1"},
-		{0x0303, "TLS 1.2"},
-		{0x0304, "TLS 1.3"},
-		{0x0000, "Unknown-0x0000"},
-	}
-
-	for _, tt := range tests {
-		got := getTLSVersionName(tt.version)
-		if got != tt.want {
-			t.Errorf("getTLSVersionName(0x%04X) = %q, want %q", tt.version, got, tt.want)
-		}
-	}
-}
-
 // TestBuildEnrichmentDiscovery_ReportsTheVersionItMeasured pins the version the
 // probe puts on the discovery itself, not just in RawMetadata.
 //

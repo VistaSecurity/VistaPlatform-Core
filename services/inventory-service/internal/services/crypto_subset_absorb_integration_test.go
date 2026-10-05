@@ -82,7 +82,7 @@ func (f absorbFixture) newAsset(t *testing.T, host string) uuid.UUID {
 
 func (f absorbFixture) ingest(t *testing.T, asset uuid.UUID, finding IngestFinding) {
 	t.Helper()
-	if err := f.svc.processDiscoveryCryptoData(f.tenant, asset, finding, nil, nil, nil); err != nil {
+	if err := materializeForTest(f.svc, f.tenant, asset, finding, nil, nil, nil); err != nil {
 		t.Fatalf("ingest %s: %v", derefStr(finding.ProtocolVersion), err)
 	}
 }

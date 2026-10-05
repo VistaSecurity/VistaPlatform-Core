@@ -36,7 +36,7 @@ const CERT = '00000000-0000-4000-8000-0000000000f1';
 const noPqc = { needs_migration: 1, pqc_ready: 0, symmetric_safe: 0, unclassified: 0 };
 
 const MAP: NetworkMap = {
-  segments: [{ segment_id: SEG, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr' }],
+  segments: [{ segment_id: SEG, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr', gateway: null }],
   assets: [
     {
       asset_id: ROUTER, display_name: 'edge-router', class_key: 'router', address: '10.0.0.1',

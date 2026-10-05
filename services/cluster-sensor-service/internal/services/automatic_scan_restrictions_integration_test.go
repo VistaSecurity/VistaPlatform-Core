@@ -1,24 +1,30 @@
 package services
 
 import (
-	"errors"
+	"context"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
-	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 )
 
+// An automatic scan restricted after it was queued — the asset marked
+// sensitive, its range excluded, admission paused — is refused at creation
+// and, when the platform runs the job already queued, before any packet: the
+// address is never contacted and its unit never finishes as scanned. The job
+// is planned (the legacy request shape is translated, WP5); the check
+// is the per-unit automatic-scan re-check (unitAuthorizer.authorizeUnit).
 func TestIntegration_AutomaticScanPolicyAtQueueAndPlatformClaim(t *testing.T) {
-	f := newDispatchFixture(t)
-	asset := uuid.New()
-	if _, err := f.raw.Exec(`INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status) VALUES($1,$2,'auto-target','192.168.80.20','server','hardware.computer.server','monitoring')`, asset, f.tenant); err != nil {
-		t.Fatal(err)
-	}
-	req := models.CreateDiscoveryJobRequest{Targets: []string{"192.168.80.20"}, Protocols: []string{"TLS"}, Ports: []int{443}, ExecutionMode: "async", Options: map[string]interface{}{"origin": "auto_scan"}}
+	const addr = "10.186.80.20"
+	req := models.CreateDiscoveryJobRequest{Targets: []string{addr}, Protocols: []string{"TLS"}, Ports: []int{443}, ExecutionMode: "async", Options: map[string]interface{}{"origin": "auto_scan"}}
 	for _, mode := range []string{"sensitive", "excluded", "paused"} {
 		t.Run(mode, func(t *testing.T) {
+			f, fake := newUnitFixture(t)
+			fake.Host(addr, nil, nil)
+			asset := uuid.New()
+			if _, err := f.raw.Exec(`INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status) VALUES($1,$2,'auto-target',$3,'server','hardware.computer.server','monitoring')`, asset, f.tenant, addr); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := f.raw.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{}') ON CONFLICT(tenant_id) DO UPDATE SET config='{}'`, f.tenant); err != nil {
 				t.Fatal(err)
 			}
@@ -26,18 +32,15 @@ func TestIntegration_AutomaticScanPolicyAtQueueAndPlatformClaim(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var target models.DiscoveryTarget
-			if err := f.raw.QueryRow(`SELECT id,input FROM discovery_targets WHERE tenant_id=$1 AND job_id=$2`, f.tenant, job.ID).Scan(&target.ID, &target.Input); err != nil {
-				t.Fatal(err)
+			if job.Plan == nil {
+				t.Fatal("the automatic scan was not planned")
 			}
-			target.Protocols = []string{"TLS"}
-			target.Ports = []int32{443}
 			value := `{"identity_admission":{"mode":"paused"}}`
 			if mode == "sensitive" {
 				value = `{"identity_enrichment":{"sensitive_asset_ids":["` + asset.String() + `"]}}`
 			}
 			if mode == "excluded" {
-				value = `{"identity_enrichment":{"excluded_cidrs":["192.168.80.0/24"]}}`
+				value = `{"identity_enrichment":{"excluded_cidrs":["10.186.80.0/24"]}}`
 			}
 			if _, err := f.raw.Exec(`UPDATE tenant_admin_settings SET config=$2::jsonb WHERE tenant_id=$1`, f.tenant, value); err != nil {
 				t.Fatal(err)
@@ -45,14 +48,19 @@ func TestIntegration_AutomaticScanPolicyAtQueueAndPlatformClaim(t *testing.T) {
 			if _, err := f.svc.CreateJob(f.tenant.String(), "system", req); err == nil {
 				t.Fatal("restricted automatic job created")
 			}
-			// No scanner is installed in this fixture: reaching network work would panic.
-			err = f.jp.processTarget(job, &target, req.Options)
-			if !errors.Is(err, dispatchguard.ErrDenied) && !errors.Is(err, dispatchguard.ErrPaused) {
-				t.Fatalf("claim error=%v", err)
+			if claimed, err := f.svc.ClaimJob(job.ID); err != nil || !claimed {
+				t.Fatal(claimed, err)
 			}
-			var started *time.Time
-			if err := f.raw.QueryRow(`SELECT started_at FROM discovery_targets WHERE id=$1`, target.ID).Scan(&started); err != nil || started != nil {
-				t.Fatalf("restricted target started=%v err=%v", started, err)
+			loaded, err := f.svc.GetJob(job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = f.jp.processDiscoveryJob(context.Background(), loaded)
+			if n := fake.DialedAddrs()[addr]; n != 0 {
+				t.Fatalf("the restricted address was dialled %d time(s)", n)
+			}
+			if st := f.unitStatuses(t, job.ID); st[addr] == unitDone {
+				t.Fatalf("units = %v: the restricted address finished as scanned", st)
 			}
 		})
 	}

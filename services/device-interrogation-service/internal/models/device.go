@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,9 +59,21 @@ type Device struct {
 	InterrogationError    *string    `json:"interrogation_error" db:"interrogation_error"`
 	Metadata              JSONB      `json:"metadata" db:"metadata"`
 	Tags                  JSONB      `json:"tags" db:"tags"`
-	CreatedAt             time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt             *time.Time `json:"deleted_at" db:"deleted_at"`
+	// PlatformReinterrogationAllowed is the operator's consent for the platform
+	// to re-run this device's interrogation on its own when identity enrichment
+	// needs fresh evidence from it (the rule). Stored as the device
+	// metadata key identity_enrichment_executor = "platform"; absent means off.
+	// Only the explicit request field of the same name writes it — a client's
+	// free-form `metadata` cannot (see services.PlatformReinterrogationKey).
+	PlatformReinterrogationAllowed bool `json:"platform_reinterrogation_allowed"`
+	// InterrogatedByAgent is true when this device's most recent completed job
+	// was run by an agent. Identity enrichment then re-asks THAT agent, and the
+	// consent above does not apply — the form hides the control for such a
+	// device. Read-only; the same rule the enrichment planner uses.
+	InterrogatedByAgent bool       `json:"interrogated_by_agent"`
+	CreatedAt           time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at" db:"updated_at"`
+	DeletedAt           *time.Time `json:"deleted_at" db:"deleted_at"`
 }
 
 // JSONB is a helper type for PostgreSQL JSONB columns
@@ -105,12 +118,61 @@ type CreateDeviceRequest struct {
 	TLSInsecureSkipVerify *bool                  `json:"tls_insecure_skip_verify,omitempty"`
 	Metadata              map[string]interface{} `json:"metadata"`
 	Tags                  map[string]interface{} `json:"tags"`
+	// PlatformReinterrogationAllowed: see Device. Nil leaves it as it is.
+	PlatformReinterrogationAllowed *bool `json:"platform_reinterrogation_allowed,omitempty"`
 
 	// ProbeEvidence is set ONLY by Add device, after the platform itself
 	// authenticated to the device and read its identity. It is never bound from
 	// a request body (json:"-"): an operator typing a serial into the form is a
 	// declaration, not evidence, and must not be able to claim otherwise.
 	ProbeEvidence *identity.AdmissionEvidence `json:"-"`
+
+	// ProbeMACAddress is the MAC Add device's probe read from the device. Set
+	// ONLY by Add device, never bound from a request body (json:"-"), for the
+	// same reason as ProbeEvidence: it is evidence, and becomes an identifier.
+	// (metadata.mac_address is client-settable and stays display-only.)
+	ProbeMACAddress string `json:"-"`
+	// ProbeSSHHostKeyFingerprint and ProbeSSHHostKeyType are the host key the
+	// probe authenticated through, set ONLY by Add device. Evidence, like the
+	// MAC: it becomes an ssh_host_key_fingerprint identifier with its key
+	// algorithm ( D4: the drift classifier compares keys by algorithm).
+	ProbeSSHHostKeyFingerprint string `json:"-"`
+	ProbeSSHHostKeyType        string `json:"-"`
+	// ProbeRead records which of IPAddress, Hostname and SerialNumber the
+	// probe filled in from what it READ off the device, so the identity
+	// sighting can store those as measured and only what the operator typed
+	// as declared. Set only by Add device.
+	ProbeRead ProbeReadValues `json:"-"`
+}
+
+// ProbeReadValues are the form values Add device's probe read off the device.
+type ProbeReadValues struct {
+	IPAddress    string
+	Hostname     string
+	SerialNumber string
+}
+
+// Value is the read value of one form field: ip, host or serial.
+func (p ProbeReadValues) Value(field string) string {
+	switch field {
+	case "ip":
+		return p.IPAddress
+	case "host":
+		return p.Hostname
+	case "serial":
+		return p.SerialNumber
+	}
+	return ""
+}
+
+// Has reports whether the probe read v (case-insensitive).
+func (p ProbeReadValues) Has(v string) bool {
+	for _, read := range []string{p.IPAddress, p.Hostname, p.SerialNumber} {
+		if read != "" && strings.EqualFold(strings.TrimSpace(read), v) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateDeviceRequest represents a request to update a device
@@ -130,6 +192,9 @@ type UpdateDeviceRequest struct {
 	ConnectionStatus      *string                `json:"connection_status"`
 	Metadata              map[string]interface{} `json:"metadata"`
 	Tags                  map[string]interface{} `json:"tags"`
+	// PlatformReinterrogationAllowed: see Device. Nil leaves it as it is;
+	// false withdraws the consent, true grants it.
+	PlatformReinterrogationAllowed *bool `json:"platform_reinterrogation_allowed,omitempty"`
 }
 
 // InterrogateDeviceRequest represents a request to interrogate a device

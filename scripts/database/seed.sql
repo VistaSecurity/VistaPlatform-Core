@@ -144,9 +144,9 @@ ON CONFLICT (key) DO NOTHING;
 UPDATE subscription_tiers SET name = 'pro', display_name = 'Pro' WHERE name = 'professional';
 
 INSERT INTO subscription_tiers (name, display_name, max_sensors, max_assets, max_users, retention_days, price_cents, billing_interval, features, display_order, is_active) VALUES
-('free',       'Free',       1,  50,   1,    7,    0,     'monthly', '{"compliance_frameworks":0,"ai_insights":false,"integrations_max":0,"priority_support":false,"reporting_enabled":false}'::jsonb,  1, true),
-('starter',    'Starter',    5,  1000, -1,   90,   4900,  'monthly', '{"compliance_frameworks":0,"ai_insights":false,"integrations_max":1,"priority_support":false,"reporting_enabled":true,"report_types":["pdf"]}'::jsonb, 2, true),
-('pro',        'Pro',        10, 5000, 25,   365,  19900, 'monthly', '{"compliance_frameworks":3,"ai_insights":true,"integrations_max":5,"priority_support":true,"reporting_enabled":true,"report_types":["pdf","excel"]}'::jsonb, 3, true),
+('free',       'Free',       1,  50,   1,    7,    0,     'monthly', '{"compliance_frameworks":0,"ai_insights":false,"integrations_max":0,"priority_support":false,"reporting_enabled":false,"ot_active_probing":true}'::jsonb,  1, true),
+('starter',    'Starter',    5,  1000, -1,   90,   4900,  'monthly', '{"compliance_frameworks":0,"ai_insights":false,"integrations_max":1,"priority_support":false,"reporting_enabled":true,"report_types":["pdf"],"ot_active_probing":true}'::jsonb, 2, true),
+('pro',        'Pro',        10, 5000, 25,   365,  19900, 'monthly', '{"compliance_frameworks":3,"ai_insights":true,"integrations_max":5,"priority_support":true,"reporting_enabled":true,"report_types":["pdf","excel"],"ot_active_probing":true}'::jsonb, 3, true),
 ('enterprise', 'Enterprise', -1, -1,   -1,   1095, 0,     'monthly', '{"compliance_frameworks":-1,"ai_insights":true,"integrations_max":-1,"priority_support":true,"reporting_enabled":true,"report_types":["pdf","excel","custom"],"sso":true,"custom_branding":true,"dedicated_success_manager":true,"sla_uptime":99.9,"ot_active_probing":true}'::jsonb, 4, true),
 -- Community is the Core edition's tier: unlimited CAPACITY, zero paid
 -- CAPABILITIES. It exists because a tenant with no tier at all resolves every
@@ -159,7 +159,7 @@ INSERT INTO subscription_tiers (name, display_name, max_sensors, max_assets, max
 -- the floor a Core deployment runs on. Edition gating still applies
 -- independently via shared/entitlements/editions.go, so listing a paid item
 -- here as false is belt-and-suspenders, not the only defence.
-('community',  'Community',  -1, -1,   -1,   365,  0,     'monthly', '{"compliance_frameworks":0,"ai_insights":false,"integrations_max":-1,"priority_support":false,"reporting_enabled":true}'::jsonb, 0, false)
+('community',  'Community',  -1, -1,   -1,   365,  0,     'monthly', '{"compliance_frameworks":0,"ai_insights":false,"integrations_max":-1,"priority_support":false,"reporting_enabled":true,"ot_active_probing":true}'::jsonb, 0, false)
 ON CONFLICT (name) DO NOTHING;
 
 -- Converge Starter to PR 1 design for clusters seeded against the earlier
@@ -175,14 +175,10 @@ UPDATE subscription_tiers SET
     features = features || '{"compliance_frameworks":0,"integrations_max":1,"reporting_enabled":true,"report_types":["pdf"]}'::jsonb
 WHERE name = 'starter';
 
--- Backfill ot_active_probing on the Enterprise tier for clusters where the
--- INSERT above was a no-op (ON CONFLICT DO NOTHING). Adds the flag without
--- disturbing other features. Safe to re-run; jsonb || takes the latest
--- value for any duplicated key.
-UPDATE subscription_tiers
-SET features = features || '{"ot_active_probing":true}'::jsonb
-WHERE name = 'enterprise'
-  AND NOT (features ? 'ot_active_probing');
+-- ot_active_probing in this display-only features JSON is brought onto every
+-- seeded tier, for installs that predate it, by the one-shot OT correction
+-- after the tier_entitlements seed below. (It used to be backfilled on
+-- Enterprise only, while OT active probing was an Enterprise capability.)
 
 -- =================================================================
 -- Subscription Tiers — PR 1 of billing/tier-flexibility redesign
@@ -227,12 +223,17 @@ INSERT INTO billable_items (key, display_name, description, category, kind, unit
 -- Capabilities (boolean gates)
 ('custom_policies',           'Custom Compliance Policies', 'Tenant may author their own compliance frameworks beyond platform-published ones', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 19900, 200),
 ('threshold_overrides',       'Threshold Overrides',        'Tenant may customize measurement thresholds on subscribed platform-framework controls', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 4900, 210),
-('ot_active_probing',         'OT Active Probing',          'Active TLS/protocol probing of OT/ICS devices (Modbus, DNP3, BACnet, etc.); risk-managed feature', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 14900, 220),
+-- ot_active_probing is Core and on by default: default_value and every seeded
+-- tier below say enabled. It stays in the catalogue as a switch a plan or a
+-- per-tenant exception can turn off, priced at 0 rather than removed so it can
+-- be re-priced later without a code change.
+('ot_active_probing',         'OT Active Probing',          'Active TLS/protocol probing of OT/ICS devices (Modbus, DNP3, BACnet, etc.); risk-managed feature', 'capability', 'boolean', NULL, '{"enabled": true}'::jsonb,  true, 0,     220),
 ('ot_primary_lens',           'OT Inventory Lens',          'OT-specific inventory view and dashboards', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 4900, 230),
 ('cbom_signing',              'CBOM Signing & Attestation', 'Cryptographic signing of CBOM artifacts with compliance-attestation layers', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 9900, 240),
 ('sso_saml',                  'SSO / SAML',                 'Single sign-on via your own identity provider — OIDC (Google, Microsoft, Azure AD) or SAML 2.0 — with group-to-role mapping and an org-wide authentication policy', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 9900, 250),
 ('cmdb_sync',                 'CMDB / ITSM Sync',           'Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds)', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  67),
 ('connector_netbox',          'NetBox Connector',           'Pull sites, prefixes, VLANs, device types and devices from a NetBox network source of truth, and see the drift between NetBox and discovered inventory. Read-only towards NetBox.', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  70),
+('ai_tenant_provider',        'Own AI Model Provider',      'Tenant may connect its own AI model provider (Anthropic, or any OpenAI-compatible endpoint) from Settings → AI assistant, instead of using the one this deployment provides', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  72),
 ('siem_export',               'SIEM Export',                'Forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook)',      'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  68),
 ('custom_branding',           'Custom Branding',            'White-label admin and web UI with custom logos and colors', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, true, 14900, 260),
 ('billing_portal',            'Self-Service Billing',       'Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional.', 'capability', 'boolean', NULL, '{"enabled": false}'::jsonb, false, NULL,  69),
@@ -267,18 +268,19 @@ FROM (VALUES
     ('community',     'pcap_gb_per_month',           '{"quantity": null}'),
     ('community',     'custom_policies',             '{"enabled": false}'),
     ('community',     'threshold_overrides',         '{"enabled": false}'),
-    ('community',     'ot_active_probing',           '{"enabled": false}'),
+    ('community',     'ot_active_probing',           '{"enabled": true}'),
     ('community',     'ot_primary_lens',             '{"enabled": false}'),
     ('community',     'cbom_signing',                '{"enabled": false}'),
     ('community',     'sso_saml',                    '{"enabled": false}'),
     ('community',     'custom_branding',             '{"enabled": false}'),
     ('community',     'cmdb_sync',                   '{"enabled": false}'),
     ('community',     'connector_netbox',            '{"enabled": false}'),
+    ('community',     'ai_tenant_provider',          '{"enabled": false}'),
     ('community',     'siem_export',                 '{"enabled": false}'),
     ('community',     'billing_portal',              '{"enabled": false}'),
     ('community',     'support_sla_tier',            '{"value": "standard"}'),
 
-    -- Free (trial; minimal caps; nothing enabled)
+    -- Free (trial; minimal caps; no paid capability)
     ('free',          'max_sensors',                 '{"quantity": 1}'),
     ('free',          'max_assets',                  '{"quantity": 100}'),
     ('free',          'max_users',                   '{"quantity": 1}'),
@@ -289,13 +291,14 @@ FROM (VALUES
     ('free',          'pcap_gb_per_month',           '{"quantity": 1}'),
     ('free',          'custom_policies',             '{"enabled": false}'),
     ('free',          'threshold_overrides',         '{"enabled": false}'),
-    ('free',          'ot_active_probing',           '{"enabled": false}'),
+    ('free',          'ot_active_probing',           '{"enabled": true}'),
     ('free',          'ot_primary_lens',             '{"enabled": false}'),
     ('free',          'cbom_signing',                '{"enabled": false}'),
     ('free',          'sso_saml',                    '{"enabled": false}'),
     ('free',          'custom_branding',             '{"enabled": false}'),
     ('free',          'cmdb_sync',                   '{"enabled": false}'),
     ('free',          'connector_netbox',            '{"enabled": false}'),
+    ('free',          'ai_tenant_provider',          '{"enabled": false}'),
     ('free',          'siem_export',                 '{"enabled": false}'),
     ('free',          'billing_portal',              '{"enabled": false}'),
     ('free',          'support_sla_tier',            '{"value": "standard"}'),
@@ -311,13 +314,14 @@ FROM (VALUES
     ('starter',       'pcap_gb_per_month',           '{"quantity": 10}'),
     ('starter',       'custom_policies',             '{"enabled": false}'),
     ('starter',       'threshold_overrides',         '{"enabled": false}'),
-    ('starter',       'ot_active_probing',           '{"enabled": false}'),
+    ('starter',       'ot_active_probing',           '{"enabled": true}'),
     ('starter',       'ot_primary_lens',             '{"enabled": false}'),
     ('starter',       'cbom_signing',                '{"enabled": false}'),
     ('starter',       'sso_saml',                    '{"enabled": false}'),
     ('starter',       'custom_branding',             '{"enabled": false}'),
     ('starter',       'cmdb_sync',                   '{"enabled": false}'),
     ('starter',       'connector_netbox',            '{"enabled": false}'),
+    ('starter',       'ai_tenant_provider',          '{"enabled": false}'),
     ('starter',       'siem_export',                 '{"enabled": false}'),
     ('starter',       'billing_portal',              '{"enabled": false}'),
     ('starter',       'support_sla_tier',            '{"value": "business"}'),
@@ -337,13 +341,14 @@ FROM (VALUES
     ('pro',           'pcap_gb_per_month',           '{"quantity": 100}'),
     ('pro',           'custom_policies',             '{"enabled": false}'),
     ('pro',           'threshold_overrides',         '{"enabled": false}'),
-    ('pro',           'ot_active_probing',           '{"enabled": false}'),
+    ('pro',           'ot_active_probing',           '{"enabled": true}'),
     ('pro',           'ot_primary_lens',             '{"enabled": false}'),
     ('pro',           'cbom_signing',                '{"enabled": false}'),
     ('pro',           'sso_saml',                    '{"enabled": false}'),
     ('pro',           'custom_branding',             '{"enabled": false}'),
     ('pro',           'cmdb_sync',                   '{"enabled": false}'),
     ('pro',           'connector_netbox',            '{"enabled": false}'),
+    ('pro',           'ai_tenant_provider',          '{"enabled": false}'),
     ('pro',           'siem_export',                 '{"enabled": false}'),
     ('pro',           'billing_portal',              '{"enabled": false}'),
     ('pro',           'support_sla_tier',            '{"value": "nbd"}'),
@@ -377,13 +382,14 @@ FROM (VALUES
     ('enterprise',    'pcap_gb_per_month',           '{"quantity": 500}'),
     ('enterprise',    'custom_policies',             '{"enabled": false}'),
     ('enterprise',    'threshold_overrides',         '{"enabled": false}'),
-    ('enterprise',    'ot_active_probing',           '{"enabled": false}'),
+    ('enterprise',    'ot_active_probing',           '{"enabled": true}'),
     ('enterprise',    'ot_primary_lens',             '{"enabled": false}'),
     ('enterprise',    'cbom_signing',                '{"enabled": false}'),
     ('enterprise',    'sso_saml',                    '{"enabled": false}'),
     ('enterprise',    'custom_branding',             '{"enabled": false}'),
     ('enterprise',    'cmdb_sync',                   '{"enabled": false}'),
     ('enterprise',    'connector_netbox',            '{"enabled": false}'),
+    ('enterprise',    'ai_tenant_provider',          '{"enabled": false}'),
     ('enterprise',    'siem_export',                 '{"enabled": false}'),
     ('enterprise',    'billing_portal',              '{"enabled": false}'),
     ('enterprise',    'support_sla_tier',            '{"value": "premium"}')
@@ -409,6 +415,58 @@ UPDATE tenant_entitlements te SET override_value = '{"value": "standard"}'::json
 FROM billable_items bi
 WHERE bi.id = te.item_id AND bi.key = 'support_sla_tier'
   AND te.override_value = '{"value": "community"}'::jsonb;
+
+-- ot_active_probing: Enterprise -> Core, on by default, catalogue price 0.
+--
+-- The INSERTs above are ON CONFLICT DO NOTHING, so an install seeded while OT
+-- active probing was an Enterprise capability keeps its old rows: every tier
+-- `{"enabled": false}`, the catalogue default false and its add-on price 14900.
+-- This converges such an install ONCE.
+--
+-- Once, not on every run: the seed re-runs on every helm upgrade, and after
+-- this an operator turning OT probing off for a plan is the switch working —
+-- re-flipping it on each upgrade would silently undo that choice. The guard is
+-- the catalogue row still holding BOTH pre-change values; the block moves both,
+-- so every later run matches nothing. (An operator who deliberately restores
+-- both exact old values by hand would re-arm it; nothing else does.)
+--
+-- Tier rows: every tier's `false` row flips, custom plans included. While OT
+-- probing was edition-gated a tier row for it was inert on Core (the licence
+-- step forced it off) and on Enterprise (forced on), so a `false` there was the
+-- seed's, not anyone's choice — and on Enterprise, leaving it would switch OT
+-- probing OFF for tenants that had it, since the licence no longer forces it.
+-- Only on an MSP install did a plan's `false` mean something; such a plan is
+-- turned on here once and can be turned off again from the plan editor.
+--
+-- Per-tenant overrides (tenant_entitlements) are NOT touched: an override is a
+-- deliberate per-tenant decision and outranks the tier in the resolver, so an
+-- existing "off" override keeps that tenant off. That IS the off-switch.
+DO $$
+DECLARE
+    ot_item uuid;
+BEGIN
+    SELECT id INTO ot_item FROM billable_items
+    WHERE key = 'ot_active_probing'
+      AND default_value = '{"enabled": false}'::jsonb
+      AND default_addon_price_cents = 14900;
+    IF ot_item IS NULL THEN
+        RETURN;  -- fresh install, already converged, or an operator's own catalogue edit
+    END IF;
+
+    UPDATE tier_entitlements SET included_value = '{"enabled": true}'::jsonb
+    WHERE item_id = ot_item AND included_value->>'enabled' = 'false';
+
+    -- The display-only features JSON on the seeded tiers, so it does not
+    -- contradict the entitlement rows it sits beside.
+    UPDATE subscription_tiers SET features = features || '{"ot_active_probing":true}'::jsonb
+    WHERE name IN ('community', 'free', 'starter', 'pro', 'enterprise');
+
+    UPDATE billable_items
+    SET default_value = '{"enabled": true}'::jsonb,
+        default_addon_price_cents = 0,
+        updated_at = NOW()
+    WHERE id = ot_item;
+END $$;
 
 -- =================================================================
 -- Backfill: tier-less tenants land on the default floor

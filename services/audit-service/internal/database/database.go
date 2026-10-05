@@ -31,7 +31,7 @@ func NewConnection(cfg *config.Config) (*DB, error) {
 		)
 	}
 
-	db, err := sql.Open("postgres", dbURL)
+	db, err := sql.Open("postgres", shareddb.ApplyServerDefaults(dbURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

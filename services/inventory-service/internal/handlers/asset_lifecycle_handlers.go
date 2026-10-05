@@ -45,6 +45,14 @@ type AssetLifecycleHandler struct {
 	// scan needs (discovery.create, on top of the route's assets.update).
 	// Nil fails closed: the confirmation is refused.
 	permissions PermissionChecker
+	// selections resolves a query selection for a bulk scan. Nil
+	// refuses query selections; an id list never needs it.
+	selections selectionResolver
+}
+
+// selectionResolver is the slice of AssetService a query selection needs.
+type selectionResolver interface {
+	ResolveAssetSelection(tenantID uuid.UUID, sel services.AssetSelection, limit int) ([]uuid.UUID, error)
 }
 
 // SetPermissionChecker wires the check confirming an external scan needs.
@@ -65,6 +73,7 @@ func NewAssetLifecycleHandler(
 		lifecycleService:    lifecycleService,
 		revalidationService: revalidationService,
 		assetService:        assetService,
+		selections:          assetService,
 	}
 }
 
@@ -237,10 +246,14 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 	// a segment sensor, else the platform), platform, or one named sensor.
 	// The permission is the same for all three — assets.update, checked on
 	// the route — because the permission follows the action, not the executor.
+	//
+	// The assets are a selection: ticked rows (`asset_ids`) or every
+	// asset matching an Inventory query (`query` + the confirmed
+	// `expected_count`), at most MaxBulkScanAssets either way.
 	var req struct {
-		AssetIDs []string `json:"asset_ids" binding:"required"`
-		RunFrom  string   `json:"run_from"`
-		SensorID string   `json:"sensor_id"`
+		selectionBody
+		RunFrom  string `json:"run_from"`
+		SensorID string `json:"sensor_id"`
 		// ExternalTargetsConfirmed is the person's answer to "N assets are
 		// outside your registered networks" ( W5.13b).
 		ExternalTargetsConfirmed bool `json:"external_targets_confirmed"`
@@ -250,14 +263,30 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 		return
 	}
 
-	assetIDs := make([]uuid.UUID, 0, len(req.AssetIDs))
-	for _, idStr := range req.AssetIDs {
-		if id, err := uuid.Parse(idStr); err == nil {
-			assetIDs = append(assetIDs, id)
-		}
+	var assetIDs []uuid.UUID
+	var err error
+	if req.Query == nil {
+		assetIDs, err = services.ResolveAssetIDList(req.AssetIDs, services.MaxBulkScanAssets)
+	} else if h.selections == nil {
+		err = errors.New("query selections are not available")
+	} else {
+		assetIDs, err = h.selections.ResolveAssetSelection(tenantUUID, req.selection(), services.MaxBulkScanAssets)
 	}
-	if len(assetIDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid asset IDs provided"})
+	if errors.Is(err, services.ErrSelectionEmpty) || (err == nil && len(assetIDs) == 0) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid asset IDs provided", "details": "the selection matches no asset"})
+		return
+	}
+	if err != nil {
+		if errors.Is(err, services.ErrSelectionInvalid) && req.Query == nil {
+			// The original wording, for a caller that sent only asset_ids.
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No valid asset IDs provided"})
+			return
+		}
+		if writeSelectionError(c, err) {
+			return
+		}
+		log.Printf("[ERROR] ScanAssets - tenant %s: resolve selection: %v", tenantUUID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to resolve the selection"})
 		return
 	}
 

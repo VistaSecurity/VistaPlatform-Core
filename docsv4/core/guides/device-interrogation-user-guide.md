@@ -151,7 +151,7 @@ remaining fields so you can still add the device by hand:
 
 | Reason shown | What to check |
 |---|---|
-| Couldn't reach the device | The address and port, and that the device is reachable from the platform. If only a deployed agent can reach it, add it by hand. |
+| Couldn't reach the device | The address and port, and that the device is reachable from the platform. If only one of your device agents can reach it, add it through that agent (below). |
 | The device's certificate isn't trusted | Tick **Skip TLS verification** and click **Try connecting again**. |
 | The device rejected the credentials | The username and password, and that the account may read system information. |
 | That address isn't allowed | Loopback and link-local addresses (including cloud metadata) are never probed. |
@@ -166,6 +166,41 @@ like a device added by hand.
 Adding and testing devices is recorded in the audit log, and an organization
 can run 20 of these connections a minute.
 
+### Adding a device only an agent can reach
+
+The platform can only connect to devices it can route to. A device on a
+segment that only one of your deployed device agents can see is identified by
+that agent instead.
+
+1. Click **Add device** and fill in the same four fields.
+2. Under **Reach it from**, choose the agent. (The choice appears only when your
+   organization has device agents; **Vista platform — connect now** is the
+   default.)
+3. Click **Add device**. The form closes straight away: nothing is dialled from
+   the platform. The agent connects, logs in and reads the same identity the
+   platform would — the same calls, the same rules about what is read.
+
+Until the agent answers, the attempt is a row at the top of the devices list:
+
+| Row shows | What it means |
+|---|---|
+| **Discovering…** | Waiting for the agent, or the agent is identifying the device now. The agent checks for work every 30 seconds by default, so usually within a minute. |
+| **Discovery failed** | The agent tried and could not identify the device. Hover over it for the reason — the same reasons as above, except that *Couldn't reach the device* means the agent could not reach it. Fix the cause and click **Retry**. |
+| **Not picked up** | The agent did not take the job within 15 minutes. This says nothing about the device: check that the agent is running and up to date, then click **Retry**. |
+| **Held for review** | Identified, but your organization enforces identity admission and the serial number could not be read. Review it in **Discovery → Observations**. |
+
+When the agent has identified the device the row is replaced by the device,
+filled in with what it learned, exactly as if the platform had connected
+itself. **Dismiss** removes an attempt and the credentials it was queued with.
+
+Only that agent runs the identification — never the platform or another agent
+— and only an agent new enough to support it. If the agent has not checked in
+recently, or is older than your platform, **Add device** says so and queues
+nothing. Your credentials are encrypted until the agent picks the job up, are
+then sealed so only that agent can read them, and are dropped from the job once
+the device is created. Attempts count toward the same 20 connections a minute
+and are recorded in the audit log.
+
 Click **Add without connecting** to save what you entered, or **Enter the details
 by hand instead** to skip the connection altogether. For **Other** device types,
 which can't be identified automatically, the form shows every field from the
@@ -179,7 +214,7 @@ Each row carries its own actions:
 |---|---|
 | **Interrogate** | Queues a run against that device |
 | **Test connection** | Opens a dialog; click **Test** to log in with the stored credentials and read the device's identity. Reports how long that took, or why it failed, using the same reasons as **Add device**. A device can be tested once every 10 seconds, because repeated logins with a wrong stored password can lock the device's account. Needs the same permission as **Interrogate**. |
-| **Edit management settings** | Changes the address, credentials or TLS option |
+| **Edit management settings** | Changes the address, credentials, TLS option or automatic re-checks (below) |
 | **Open this asset's page** | Goes to the asset in Inventory |
 | **Stop managing this asset** | Removes the management configuration and its credentials. The asset stays. |
 
@@ -188,6 +223,16 @@ For repeating work, use a schedule (below).
 
 An asset discovered through a cloud API has no management credentials and is not
 interrogable; its row says so rather than offering a button that would fail.
+
+**Automatic re-checks.** When identity enrichment needs fresh evidence from a
+device, it can run that device's interrogation again — but for a device the
+platform interrogates (not an agent), only if you have allowed it. Turn on
+**Allow the platform to re-check this device automatically** when adding the
+device or under **Edit management settings**; it is off by default, and you can
+turn it off again at any time. Turning it on lets observations that were waiting
+for this permission continue on the next enrichment cycle. The setting is not
+shown for a device an agent interrogates, which enrichment asks through that
+agent, or for a cloud resource.
 
 ### Connection status
 
@@ -300,6 +345,63 @@ and an interrogated address is never given a name by reverse DNS either.
 
 If a finding cannot be attributed to any device, the job's **Pipeline** counts
 it as skipped, with the reason, rather than dropping it silently.
+
+#### What interrogating a gateway records
+
+A router or firewall knows which networks it serves: on each one it holds an
+address of its own, the address hosts there use as their gateway. UniFi
+gateways, FortiGates and F5 devices report it together with each network's
+prefix. Cisco devices report their VLANs without a prefix, so nothing below
+applies to them yet. There is nothing to enter by hand — interrogating the
+device is the whole step.
+
+From each network the device reports, an interrogation records:
+
+- **The device's own address on that network**, as one of its identifiers. A
+  router with four networks is one asset holding four addresses, not four
+  assets. If a sensor had already filed one of those addresses as a separate
+  asset known by nothing but addresses, the address moves to the router, and
+  both assets' history says so. If the address belongs to an asset known by
+  something stronger — a MAC address, a serial number, an agent, or an address
+  you declared — the router does not take it; a merge proposal opens for you to
+  decide instead.
+- **That the device is the network's gateway.** Every network segment where the
+  device holds that address — one you created or one learned from the device —
+  records it as its gateway. The next interrogation keeps this current: a
+  network the device no longer reports loses it, and another device's gateway is
+  never removed. When two devices report the same network (a high-availability
+  pair), the most recent report is shown.
+- **Its WAN address** (UniFi gateways), from the device's own record, as an
+  identifier with no network attached — your provider's network is not one of
+  your segments. Only the address is kept, never WAN credentials or connection
+  settings.
+
+The device's own network is the one its **management address** — the address
+the platform interrogates it at — falls in, and its location follows that
+network. A router that answers on many networks therefore stays in one place,
+rather than moving each time a sensor sees it on another of them.
+
+Where you see it:
+
+- **The router's asset page → Overview → Networks routed**: every network it is
+  the gateway of, with the network's prefix, the router's address on it, the
+  VLAN tag (*Untagged* when the device reported none), DHCP, how many assets are
+  on the network (click the number for the list, the router included) and
+  whether a sensor covers it. The card is not shown for an asset that routes
+  nothing. If it says *Couldn't load routed networks*, the rest of the page is
+  still correct; reload to try again.
+- **A host's asset page → Overview → Network segment**: for example *Office LAN
+  · via edge-router (192.0.2.1)*, linking to the router. A network with no
+  recorded gateway shows just its name.
+- **Settings → Infrastructure → Network Segments**: the **Gateway** and
+  **Coverage** columns — see
+  [Gateway and coverage](./tenant-admin-guide.md#gateway-and-coverage), which
+  also explains *No sensor on this network*.
+- **Inventory → Map**: each network names its gateway beside its prefix, or
+  says *gateway not recorded*.
+
+Routing tables and firewall rules are **not** collected: they are a map of how to
+move through your network, and nothing in the inventory needs them.
 
 ### Cancelling a job
 

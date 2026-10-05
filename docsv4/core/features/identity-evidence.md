@@ -9,24 +9,110 @@ The identity coverage row reports not-evaluated, established, and operator-confi
 assets separately, and links to unresolved observations and identity conflicts.
 
 Open **Discovery → Observations** to inspect retained evidence, its source,
-observation times, identifiers, network scope, and enrichment state. Repeated
-delivery of one observation does not count as independent corroboration.
-Linked records open the corresponding asset; conflict records link to Approvals.
+observation times, identifiers, network, and enrichment state. Each row says
+what it needs — **Ready to confirm**, **Matches an asset**, **Several match**,
+**Needs a network**, **Needs a sensor** or **Likely noise** — and opening it
+explains why. Repeated delivery of one observation does not count as independent corroboration. Linked records open
+the corresponding asset; conflict records link to Approvals.
 
-With asset-edit permission, an unresolved observation offers three decisions:
+**Why DHCP hosts wait here.** On a network that hands out addresses
+dynamically, today's address is tomorrow's other device, so an address alone
+never creates or matches an asset (a **pinned** address is the exception,
+below). A host found by address on such a network — a scan sees no MAC address
+or host key — is kept as an observation instead. Confirming says you recognise
+it. If the network's addresses do not in fact move, set the segment's DHCP to
+off in **Settings → Network Segments**; future scans then create assets there
+directly.
+
+**A scan you run on an asset is that asset's.** Pressing **Scan** on an asset
+(**Scan** in Inventory, or the asset's own **Active Scan**) names the asset,
+and the platform scans the address it has for it, so the result updates that
+asset rather than waiting here — unless the scan meets a different MAC address,
+host key or serial number than the asset has, or an identifier another asset
+holds. Automatic scans keep waiting as described above.
+
+**What the observation needs depends on who owns it.** The row reads **Ready to
+confirm** only when nothing you already have owns the observation's address or
+any other of its identifiers. If exactly one asset does, Confirm would be
+refused — it would create a second record of the same device — so the row reads
+**Matches an asset** and its suggested action is **Link to** that asset's name.
+If more than one asset owns identifiers of it — or the one that does is deleted,
+archived or denied and cannot take a link — it reads **Several match** and has
+no one-click action: compare the assets (merge them if they are one
+device), link the observation to the right one yourself, or dismiss it.
+
+**Why a static address on a DHCP network still matches.** A network flagged
+DHCP is flagged as a whole, but not every address on it is a lease: a router's
+own LAN address, a server or a printer configured by hand keeps its address
+for good. An address its asset holds **pinned** still identifies that asset
+inside a DHCP network, so a scan of it — even a plain port scan with no MAC
+address or host key — updates the asset instead of waiting as an observation.
+The network keeps its DHCP setting; only the pinned address is exempt, and it
+only ever matches the asset that holds it. An address is pinned when:
+
+- you add it to the asset yourself (the asset form, or **Add device** /
+  **Edit device** on the Devices page), or tick **Pin** next to an address a
+  sensor recorded, in the asset form's **Identifiers** list;
+- the host's own agent reports the interface as statically configured (Linux,
+  Windows and macOS, where the operating system says so — an address the
+  operating system says nothing about is not pinned).
+
+A pinned address shows **static** in the asset page's **Identifiers** list. To
+unpin an address you added, remove it from the asset form; the next sighting
+records it again, unpinned. An address the agent reports as a DHCP lease is
+recorded as such and behaves like any other address on the network.
+
+With asset-edit permission, an unresolved observation offers three decisions,
+each with a reason the platform proposes from what was seen and you can edit:
 
 - **Confirm identity** records your reason and creates an operator-confirmed
   asset, subject to your asset allowance. Monitoring approval remains separate.
 - **Link to an asset** requires selecting the existing asset and explaining the
-  evidence. Conflicting identifier ownership must be resolved in Approvals.
+  evidence; on a **Matches an asset** row the owning asset is already chosen.
+  Conflicting identifier ownership must be resolved in Approvals.
 - **Dismiss** removes the observation from active work without asserting that
   it represents a different device. Repeated identical evidence does not undo
   the dismissal.
+
+Confirm and Dismiss also work on many rows at once: tick them and use the bar
+above the table. Bulk Confirm is offered only when every selected observation
+is Ready to confirm, and bulk **Link to existing** only when every selected
+observation Matches an asset (each is linked to the asset that owns it); linking
+to an asset you choose stays one observation at a time. One reason covers
+the batch, and each observation reports its own outcome.
 
 Each decision is retained in audit storage. A changed or conflicting observation
 returns a refresh request so you can review its current evidence before deciding.
 Retained certificate findings become eligible for attachment after the observation
 is linked and the asset is approved for monitoring.
+
+**Confirm and Link attach the endpoints.** The ports listed under an
+observation's **Endpoints** become endpoints of the asset you confirm it as or
+link it to, as soon as you decide; their services, certificates and crypto
+configurations follow once the asset is approved for monitoring. Confirming
+several observations of one address — a scan that found 443, 8443 and 9443 on
+a host nothing owns leaves three — gives **one** asset with three endpoints: the
+first confirmation creates the asset, and each later one from the same
+collector and network joins it.
+
+**Supporting evidence keeps its endpoints until you attach them.** Some
+sightings are linked to an asset you already have without being able to
+identify it on their own — for example a scan of an address that is in none of
+your network segments, or one on a DHCP network that carried a host key but
+no MAC address. This **supporting evidence** is listed as **Linked**, moves the
+asset's last-seen time, and adds nothing else: no endpoint, no identified
+service, no crypto configuration. Its row offers **Attach endpoints…**, which
+links it to that asset and adds its endpoints there. Endpoints the asset
+already had are never removed; supporting sightings just stop refreshing them,
+so an endpoint's last-seen time shows when something last identified the asset
+on that port.
+
+**When a matched device's identifiers differ.** A sighting that matches an
+asset but carries a different SSH host key or address is not silently accepted:
+the platform decides whether the key was rotated, the device moved, it was
+reimaged or a different device now answers, and records it on the asset's
+History tab. See
+[When a device's identifiers change](inventory-and-lenses.md#when-a-devices-identifiers-change).
 
 Unresolved observations leave the active view after 30 days without a sighting.
 Unlinked summaries are eligible for removal after 90 days; linked evidence and
@@ -60,7 +146,13 @@ replacing populated class attributes. A cloud resource with an unresolved parent
 keeps its context pending until the parent can be identified. Replay schedules no
 new DNS or certificate-status lookup.
 
-Automatic enrichment first checks existing configured sources. When that work
+Automatic enrichment first checks existing configured sources. A device is not
+re-interrogated for something it reported itself: a peer a controller or switch
+named, which could not be identified, waits on what is actually missing (its
+network, for example) rather than prompting another interrogation that would
+repeat the same answer. Automatic re-checks of any one configured device run at
+most once every 6 hours; interrogating it yourself, and its interrogation
+schedule, are not limited. When that work
 finishes, eligible observations may request one scoped DNS lookup and bounded
 TLS/SSH probes through the observing collector. DNS answers are context, not
 proof that a device has been identified. Results follow the same identity and

@@ -60,7 +60,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -71,9 +70,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
-	"github.com/vistasecurity/vistaplatform/shared/identity/derive"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
-	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // deviceFactKeys are the registered fact keys that carry what `devices` held in
@@ -256,6 +253,7 @@ func scanManagedAsset(scan func(dest ...any) error) (managedAssetRow, error) {
 	if nested, ok := meta[deviceMetadataKey].(map[string]interface{}); ok {
 		d.Metadata = nested
 	}
+	d.PlatformReinterrogationAllowed = platformReinterrogationAllowed(d.Metadata)
 	return row, nil
 }
 
@@ -406,7 +404,8 @@ func factMeasurementMode(sourceRef string) identity.MeasurementMode {
 // ---------------------------------------------------------------------------
 
 // deviceObservationInput is what a caller knows about a device before the
-// engine has decided which asset it is.
+// engine has decided which asset it is; deviceSighting turns it into the
+// sighting inventory-service resolves.
 type deviceObservationInput struct {
 	DeviceType      string
 	Hostname        string
@@ -426,139 +425,6 @@ type deviceObservationInput struct {
 	Source          identity.Source
 	ObservedAt      time.Time
 	Admission       identity.AdmissionEvidence
-}
-
-// deviceObservation builds the identity.Observation for a managed device.
-//
-// The identifiers are the honest answer to "what did we actually observe",
-// which for a device added through the form is what the operator typed:
-//
-//   - serial_number, when supplied. Globally unique, top of the precedence list
-//     for every hardware class.
-//   - cloud_resource_id, for a cloud resource. The provider's own id, and the
-//     strongest identifier a cloud resource ever has.
-//   - the hostname: an FQDN if it is dotted (globally unique, unscoped), a bare
-//     hostname otherwise (scoped to the segment, or recorded and mute).
-//   - the management address: the host part of the management URL, which is
-//     frequently the only address an operator supplies.
-//   - the IP address, scoped to the segment.
-//
-// SCOPE is what makes the weak two able to decide a match at all, and getting
-// it from the same resolver inventory-service uses is what makes a device and
-// the same host seen by the sensor resolve to ONE asset. There is always a
-// scope: when no segment contains the address it is the tenant-wide default
-// (ADR-0002 D3 erratum), because "this tenant has no segments" is a fact about
-// their topology and not the absence of one.
-func (s *DeviceService) deviceObservation(ctx context.Context, tenantID uuid.UUID, in deviceObservationInput) (identity.Observation, error) {
-	host := strings.TrimSpace(in.Hostname)
-	ip := strings.TrimSpace(in.IPAddress)
-	managementAddress := managementHost(in.ManagementURL)
-	segmentID, dynamicScope := s.deviceSegmentScope(ctx, tenantID, ip, host, managementAddress, in.CloudNetworkRef)
-
-	obs := identity.Observation{
-		TenantID:    tenantID.String(),
-		ClassHint:   DeviceTypeClassKey(in.DeviceType),
-		Source:      in.Source,
-		ObservedAt:  in.ObservedAt,
-		Admission:   in.Admission,
-		Confidence:  1, // a person asserted it, or a provider API answered
-		DisplayName: host,
-		// A device the tenant holds credentials for is the tenant's own gear by
-		// definition, so the asset must not be created as `external`.
-		Network: identity.Network{Ownership: identity.OwnershipInternal, SegmentID: segmentID},
-	}
-	// assets.hostname is a NAME. The Devices form's one field takes either, and
-	// an operator who typed an address there has given us an address — putting
-	// it in the hostname column would make every reader that renders "hostname"
-	// show an IP and every hostname search miss it. It still becomes an
-	// ip_address identifier below, which is where an address belongs.
-	if net.ParseIP(host) == nil {
-		obs.Hostname = strings.ToLower(host)
-	}
-	if dynamicScope {
-		// The segment hands addresses out; an ip_address inside it must not
-		// decide a match, because today's DHCP lease is tomorrow's other host.
-		obs.DynamicScopes = map[string]bool{segmentID: true}
-	}
-
-	add := func(kind identity.Kind, value, scope string) {
-		if strings.TrimSpace(value) == "" {
-			return
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: kind, Value: value, Scope: scope, Confidence: 1,
-		})
-	}
-
-	if serial := strings.TrimSpace(in.SerialNumber); serial != "" {
-		add(identity.KindSerialNumber, serial, "")
-		// D3 (B4): some vendors use the interface MAC as the serial. A
-		// 12-hex serial whose first three octets are a registered OUI is also
-		// recorded as the MAC it spells — DERIVED (Source inferred, ref
-		// derived:serial:<serial>), so the device a person typed in and the
-		// same device a sensor or controller later reports by MAC meet by MAC.
-		// This form has no MAC field, so there is never a stated one to prefer.
-		// The operator's addresses are not put through the IPv6 hygiene rule:
-		// a person typed them, and a declared value is not second-guessed.
-		if mac, ok := derive.MACFromSerialRegistered(serial); ok {
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindMACAddress, Value: mac, Confidence: derivedMACConfidence,
-				Source: identity.Source{Kind: identity.SourceInferred, Ref: derive.RefSerial(serial)},
-			})
-		}
-	}
-	if rid := strings.TrimSpace(in.CloudResourceID); rid != "" {
-		add(identity.KindCloudResourceID, rid, "")
-	}
-	for _, name := range dedupeStrings(host, managementAddress) {
-		if parsed := net.ParseIP(name); parsed != nil {
-			add(identity.KindIPAddress, name, segmentID)
-			if obs.DisplayName == "" {
-				obs.DisplayName = name
-			}
-			continue
-		}
-		if strings.Contains(strings.TrimSuffix(name, "."), ".") {
-			add(identity.KindFQDN, name, "")
-		} else {
-			add(identity.KindHostname, name, segmentID)
-		}
-		if obs.DisplayName == "" {
-			obs.DisplayName = name
-		}
-	}
-	if ip != "" {
-		add(identity.KindIPAddress, ip, segmentID)
-		if obs.DisplayName == "" {
-			obs.DisplayName = ip
-		}
-	}
-
-	// Leniency is a decision made HERE and visible: a malformed serial typed
-	// into the form must not lose the device, but the reject is reported rather
-	// than dropped.
-	clean, rejected := obs.Sanitize()
-	for _, r := range rejected {
-		logDroppedIdentifier(in, r)
-	}
-	if len(clean.Identifiers) == 0 {
-		return identity.Observation{}, errDeviceHasNoIdentifier
-	}
-	return clean, nil
-}
-
-// deviceScopeInputs makes the management target participate in the same
-// segment lookup as an explicitly entered IP/hostname. Operators commonly
-// provide only a URL; treating its address as tenant-default made it unable to
-// match the same appliance observed by a sensor in a configured segment.
-func deviceScopeInputs(ip, hostname, managementAddress string) (string, string) {
-	if strings.TrimSpace(ip) == "" && net.ParseIP(strings.TrimSpace(managementAddress)) != nil {
-		ip = managementAddress
-	}
-	if strings.TrimSpace(hostname) == "" && net.ParseIP(strings.TrimSpace(managementAddress)) == nil {
-		hostname = managementAddress
-	}
-	return strings.TrimSpace(ip), strings.TrimSpace(hostname)
 }
 
 // managementHost returns the host part of a management URL, or "".
@@ -601,165 +467,6 @@ func dedupeStrings(values ...string) []string {
 		out = append(out, v)
 	}
 	return out
-}
-
-// ---------------------------------------------------------------------------
-// Segment scope
-// ---------------------------------------------------------------------------
-
-// scopeResolver answers "where was I standing?" — the scope a hostname or an IP
-// identifies within (ADR-0002 D3).
-//
-// It exists as a type rather than a method so the two intakes in this package
-// that need it — the Devices form and the interrogation observation sink —
-// share ONE implementation.
-type scopeResolver struct {
-	db   *sql.DB
-	repo *pgidentity.Repository
-}
-
-func newDeviceScopeResolver(db *sql.DB, repo *pgidentity.Repository) scopeResolver {
-	return scopeResolver{db: db, repo: repo}
-}
-
-// segmentScope resolves the scope, and whether it hands addresses out
-// dynamically.
-//
-// It NEVER returns an empty scope. "This tenant has no segments" — which is
-// every fresh tenant — is a fact about their topology, not the absence of one,
-// and `identity.ScopeTenantDefault` is what it means. An empty scope is what
-// made one host, observed three times, into three assets: neither its hostname
-// nor its IP could vote, so nothing matched.
-//
-// The ADDRESS half is `shared/identity/postgres.ScopeForAddress`, byte for byte
-// the call inventory-service makes, so the two services cannot disagree about
-// which segment an address is in — one more spelling of this lookup is one more
-// dedupe key. The NAME half is local for the same reason it is local there: a
-// `domain` segment is matched by hostname, which an address-keyed lookup cannot
-// answer.
-func (r scopeResolver) segmentScope(ctx context.Context, tenantID uuid.UUID, ip, hostname, cloudNetworkRef string) (string, bool) {
-	if addr, ok := parseScopeAddr(ip); ok && r.repo != nil {
-		scope, dynamic, err := r.repo.ScopeForAddress(ctx, tenantID.String(), addr, cloudNetworkRef)
-		if err == nil && scope != "" {
-			return scope, dynamic
-		}
-		if err != nil {
-			// A failed lookup must not lose the device, and must not be silent:
-			// it degrades every identifier in this observation to the tenant
-			// default.
-			logSegmentLookupFailed(tenantID, err)
-		}
-	}
-	if hostname != "" {
-		if scope, ok := r.domainScope(ctx, tenantID, hostname); ok {
-			return scope, false
-		}
-	}
-	return identity.ScopeTenantDefault, false
-}
-
-// domainScope matches a hostname against the tenant's `domain` segments, using
-// the same rule inventory-service's segment service applies
-// (shared/network.MatchSegment).
-func (r scopeResolver) domainScope(ctx context.Context, tenantID uuid.UUID, hostname string) (string, bool) {
-	var candidates []sharednetwork.Segment
-	err := shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `
-			SELECT id, segment_type, value
-			FROM public.network_segments
-			WHERE tenant_id = $1 AND is_active = true AND segment_type = 'domain'
-			ORDER BY created_at`, tenantID)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var seg sharednetwork.Segment
-			if err := rows.Scan(&seg.ID, &seg.Type, &seg.Value); err != nil {
-				return err
-			}
-			candidates = append(candidates, seg)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		logSegmentLookupFailed(tenantID, err)
-		return "", false
-	}
-	match, ok := sharednetwork.MatchSegment(candidates, "", hostname)
-	if !ok {
-		return "", false
-	}
-	return match.ID, true
-}
-
-// parseScopeAddr turns an observed address into a netip.Addr. False for absent,
-// empty or unparseable values, and for the unspecified address, which cloud
-// collectors use as a placeholder and which is inside nothing.
-func parseScopeAddr(ip string) (netip.Addr, bool) {
-	v := strings.TrimSpace(ip)
-	if v == "" {
-		return netip.Addr{}, false
-	}
-	addr, err := netip.ParseAddr(v)
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	addr = addr.Unmap().WithZone("")
-	if !addr.IsValid() || addr.IsUnspecified() {
-		return netip.Addr{}, false
-	}
-	return addr, true
-}
-
-// firstSegmentForAddresses returns the scope of the first value that is an
-// address inside a real segment — never the tenant default — through
-// `ScopeForAddress`, the one address lookup both services share. False when
-// none of them is ( B5).
-func (r scopeResolver) firstSegmentForAddresses(ctx context.Context, tenantID uuid.UUID, cloudNetworkRef string, values ...string) (string, bool, bool) {
-	if r.repo == nil {
-		return "", false, false
-	}
-	for _, v := range values {
-		addr, ok := parseScopeAddr(v)
-		if !ok {
-			continue
-		}
-		scope, dynamic, err := r.repo.ScopeForAddress(ctx, tenantID.String(), addr, cloudNetworkRef)
-		if err != nil {
-			logSegmentLookupFailed(tenantID, err)
-			continue
-		}
-		if scope != "" && scope != identity.ScopeTenantDefault {
-			return scope, dynamic, true
-		}
-	}
-	return "", false, false
-}
-
-// deviceSegmentScope is the Devices form's seat at the same resolver.
-//
-// The scope is that of the FIRST address the form carries — the IP field, an
-// address typed into the name field, the management URL's host — that falls in
-// a real segment ( B5). It used to consider only the IP field, falling
-// back to the management host: an operator who typed the address into the name
-// field (which the form invites) or whose IP field held an address no segment
-// covers got every identifier scoped to the tenant default, while the sensor
-// filed the same address under its segment — one appliance, two scopes, two
-// records that could never collide. When no address resolves, the old rule
-// stands, including the `domain` segment match on the name.
-func (s *DeviceService) deviceSegmentScope(ctx context.Context, tenantID uuid.UUID, ip, host, managementAddress, cloudNetworkRef string) (string, bool) {
-	repo, err := s.Repo()
-	if err != nil {
-		logSegmentLookupFailed(tenantID, err)
-		repo = nil
-	}
-	resolver := newDeviceScopeResolver(s.db, repo)
-	if scope, dynamic, ok := resolver.firstSegmentForAddresses(ctx, tenantID, cloudNetworkRef, ip, host, managementAddress); ok {
-		return scope, dynamic
-	}
-	scopeIP, scopeHost := deviceScopeInputs(ip, host, managementAddress)
-	return resolver.segmentScope(ctx, tenantID, scopeIP, scopeHost, cloudNetworkRef)
 }
 
 // ---------------------------------------------------------------------------

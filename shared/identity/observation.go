@@ -226,6 +226,16 @@ type Observation struct {
 	// things, and there was previously no way for a matcher to know it.
 	Attributes map[string]any `json:"attributes,omitempty"`
 
+	// TLSCertFingerprints are the SHA-256 fingerprints of the leaf
+	// certificates a service on this device presented in this sighting.
+	//
+	// They are not identifiers — a certificate is renewed on a schedule and a
+	// load balancer presents one for many machines, so it never decides a
+	// match — but when a match was made and a device binding CHANGED, whether
+	// the certificate also changed is part of how the drift classifier tells a
+	// rotated key from a replaced device (drift.go).
+	TLSCertFingerprints []string `json:"tls_cert_fingerprints,omitempty"`
+
 	// DynamicScopes names the scopes in this observation that hand addresses
 	// out dynamically, so an ip_address inside one does not decide a match
 	// (ADR-0002 D3) — today's DHCP lease is tomorrow's other host.
@@ -238,6 +248,18 @@ type Observation struct {
 	// the other, because both are saying the same thing and a scope named by
 	// either is dynamic.
 	DynamicScopes map[string]bool `json:"dynamic_scopes,omitempty"`
+
+	// pinned are the keys of this observation's `ip_address` identifiers whose
+	// owner holds them as [AssignmentStatic] inside a dynamic scope (pinned.go).
+	// Unexported because it is not the caller's to say: [Engine.Resolve] reads
+	// it from the store once per observation, and admission and every voting
+	// rule then read the same answer.
+	pinned map[string]bool
+
+	// claims is what the engine decided, once per resolution, about each of
+	// this observation's claimed addresses (claimed.go). Unexported for the
+	// reason pinned is: it is read from the store, not said by the caller.
+	claims addressClaims
 }
 
 // ClassProvenance is how an observation's class hint was decided.

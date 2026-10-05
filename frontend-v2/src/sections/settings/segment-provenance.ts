@@ -47,6 +47,52 @@ export function segmentProvenance(metadata: Record<string, unknown> | null | und
   return { label: vendor ? `Learned from ${vendor}` : 'Learned by interrogation', dhcp };
 }
 
+// ---- Claiming a learned public range --------------------------------
+//
+// A learned PUBLIC range is not treated as the organization's: the device's
+// data cannot tell its DMZ from its internet provider's link. A person can
+// claim it ("Claim as mine"); the server records who and when under
+// `metadata.claimed` and from then on treats the range as one they declared.
+// Private, VPN and cloud ranges already count as theirs, and a declared
+// segment is theirs by definition, so neither has anything to claim.
+
+export interface SegmentClaim {
+  /** Who claimed it, as recorded when they did. */
+  byName: string;
+  /** When, as the server recorded it (RFC 3339). */
+  at: string;
+}
+
+/** The standing claim on a segment, or null. */
+export function segmentClaim(metadata: Record<string, unknown> | null | undefined): SegmentClaim | null {
+  const raw = metadata?.claimed;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const c = raw as Record<string, unknown>;
+  const byName = typeof c.by_name === 'string' && c.by_name.trim() ? c.by_name : 'someone in your organization';
+  return { byName, at: typeof c.at === 'string' ? c.at : '' };
+}
+
+/** The fields of a segment that decide whether it can be claimed. */
+export interface ClaimableInput {
+  segment_type: string;
+  network_type: string;
+  metadata?: Record<string, unknown> | null;
+}
+
+/** True for a learned public CIDR range — the only kind a claim means anything on. */
+export function isClaimableSegment(seg: ClaimableInput): boolean {
+  return seg.segment_type === 'cidr' && seg.network_type === 'public' && segmentProvenance(seg.metadata) !== null;
+}
+
+/** "Claimed by Ada Admin · Oct 1, 2026". */
+export function claimChipText(claim: SegmentClaim): string {
+  const when = claim.at ? new Date(claim.at) : null;
+  const date = when && !Number.isNaN(when.getTime())
+    ? when.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+    : '';
+  return date ? `Claimed by ${claim.byName} · ${date}` : `Claimed by ${claim.byName}`;
+}
+
 export const SEGMENT_DHCP_LABEL: Record<SegmentDHCP, string> = {
   on: 'DHCP on',
   off: 'DHCP off',

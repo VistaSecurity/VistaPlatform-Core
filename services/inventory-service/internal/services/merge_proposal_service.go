@@ -875,6 +875,10 @@ var (
 		{"device_jobs", "asset_id"},
 		{"database_encryption_states", "asset_id"},
 		{"crypto_applications", "asset_id"},
+		// The network a merged-away device was the gateway of is routed by
+		// the survivor. Its candidacies on other networks follow it
+		// too, after this list runs (pgidentity.RepointGatewayCandidates).
+		{"network_segments", "gateway_asset_id"},
 	}
 	endpointReferrers = []fkRef{
 		{"crypto_implementations", "endpoint_id"},
@@ -949,6 +953,7 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
                source_kind = CASE WHEN `+preferNewerMergeState+` THEN src.source_kind ELSE dst.source_kind END,
                source_ref = CASE WHEN `+preferNewerMergeState+` THEN src.source_ref ELSE dst.source_ref END,
                last_scan_status = CASE WHEN src.last_scanned_at > dst.last_scanned_at OR dst.last_scanned_at IS NULL THEN src.last_scan_status ELSE dst.last_scan_status END,
+               tls_handshake_outcome = CASE WHEN src.last_seen_at > dst.last_seen_at THEN src.tls_handshake_outcome ELSE dst.tls_handshake_outcome END,
                last_scanned_at = GREATEST(dst.last_scanned_at, src.last_scanned_at),
                first_seen_at = LEAST(dst.first_seen_at, src.first_seen_at),
 		       last_seen_at  = GREATEST(dst.last_seen_at, src.last_seen_at),
@@ -1085,6 +1090,11 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 		if _, err := tx.ExecContext(ctx, step.sql, tenantID, from, to); err != nil {
 			return fmt.Errorf("merge: move %s: %w", step.what, err)
 		}
+	}
+	// After network_segments.gateway_asset_id moved above: a survivor that is
+	// now a network's gateway is no longer a candidate for it.
+	if err := pgidentity.RepointGatewayCandidates(ctx, tx, tenantID.String(), from.String(), to.String()); err != nil {
+		return fmt.Errorf("merge: %w", err)
 	}
 
 	if err := moveAssetEdges(ctx, tx, tenantID, from, to); err != nil {

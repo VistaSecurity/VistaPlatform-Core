@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
-import { Icon } from '../../components/ui';
+import { Icon, Pill } from '../../components/ui';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, sensorOnline, relTime } from './kit';
 import { useSensors, useDiscoveryCounts, useDeviceAgents } from './queries';
 import { RegisterSensorModal, DeleteSensorModal, DeleteAgentModal, PendingRegistrationsSection } from './sensor-modals';
@@ -8,7 +8,7 @@ import { SensorDetailDrawer } from './sensor-detail-drawer';
 import { AgentDetailDrawer, type DeviceAgentRow } from './agent-detail-drawer';
 import { AgentFleetDefaultsModal } from './agent-fleet-defaults-modal';
 import { SensorFleetDefaultsModal } from './sensor-fleet-defaults-modal';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary, partitionSensorFleet } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary, partitionSensorFleet, needsScanEngineUpgrade } from './agent-fleet';
 
 // Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
 // agent are two different things:
@@ -169,7 +169,14 @@ export function SensorsPage() {
                 <CellTxt v={s.sensor_type || s.profile} />
                 <CellTxt v={(s.network_interfaces ?? []).join(', ')} />
                 <CellMono right v={counts[s.id] ?? '—'} />
-                <CellMono v={s.version ? 'v' + s.version : '—'} c="var(--app-t3)" />
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <CellMono v={s.version ? 'v' + s.version : '—'} c="var(--app-t3)" />
+                  {needsScanEngineUpgrade(s) && (
+                    <span title="This sensor runs scans on the older engine, which is slower and will be retired. Install the current sensor build to upgrade it.">
+                      <Pill color="var(--warn)" style={{ fontSize: 10 }}>Needs upgrading to run scans on the current engine</Pill>
+                    </span>
+                  )}
+                </span>
                 <StatusCell status={s.status} online={on} />
                 <span style={{ display: 'flex', justifyContent: 'flex-end' }}>
                   {/* A platform sensor is this workspace's handle to a shared

@@ -17,7 +17,7 @@ import toast from 'react-hot-toast';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
-import { deviceTypeLabel } from './kit';
+import { deviceTypeLabel, isCloudSourced } from './kit';
 
 type Device = deviceInterrogationComponents['schemas']['Device'];
 type DiscoveryErrorCode = deviceInterrogationComponents['schemas']['DeviceDiscoveryError']['error'];
@@ -38,6 +38,21 @@ const SSH_DEVICE_TYPES: readonly string[] = ['cisco', 'cisco_router', 'cisco_swi
 export function isSSHManagedDeviceType(deviceType: string | null | undefined): boolean {
   return !!deviceType && SSH_DEVICE_TYPES.includes(deviceType);
 }
+
+/**
+ * Whether the platform re-interrogation consent means anything for this device
+ * (the rule). Identity enrichment re-asks an AGENT-interrogated
+ * device through that agent, and a cloud resource through its integration —
+ * neither reads the consent — so the form offers it only for a device the
+ * platform itself interrogates. A device being added has no history yet: the
+ * platform is what interrogates it unless an agent later does.
+ */
+export function offersPlatformReinterrogation(device?: Device | null): boolean {
+  if (!device) return true;
+  return !device.interrogated_by_agent && !isCloudSourced(device);
+}
+
+export const REINTERROGATION_LABEL = 'Allow the platform to re-check this device automatically';
 
 function apiErrorMessage(error: unknown, fallback: string) {
   if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') return error.message;
@@ -73,6 +88,10 @@ const PROBE_FAILURE_TITLES: Record<DiscoveryErrorCode, string> = {
   credentials_missing: 'No stored credentials to test with',
   rate_limited: 'Too many device connections just now',
   test_throttled: 'This device was tested moments ago',
+  agent_not_found: "That agent isn't registered here",
+  agent_unavailable: "That agent isn't available",
+  not_retryable: "This discovery can't be retried now",
+  not_found: 'That discovery no longer exists',
 };
 
 export function probeFailureTitle(code: string | undefined): string {
@@ -85,9 +104,20 @@ function isProbeFailure(code: string | undefined): boolean {
 }
 
 // A limit refusal dialled nothing, so it says nothing about the device: the
-// form does not fall back to the by-hand fields for it.
+// form does not fall back to the by-hand fields for it. Neither does a refusal
+// to queue on an agent ( slice B) — nothing was dialled there either.
+const NON_DISCLOSING: readonly string[] = ['rate_limited', 'agent_not_found', 'agent_unavailable', 'not_retryable', 'not_found'];
 function disclosesFields(code: string | undefined): boolean {
-  return isProbeFailure(code) && code !== 'rate_limited';
+  return isProbeFailure(code) && !NON_DISCLOSING.includes(code!);
+}
+
+/** A device agent Add device can route an identification through. */
+export type ReachAgent = { id: string; name?: string | null };
+const PLATFORM = 'platform';
+function agentLabel(a: ReachAgent): string {
+  const name = a.name?.trim();
+  if (name) return name;
+  return `Agent ${a.id.slice(0, 8)}`;
 }
 
 export function isValidDeviceHostname(value: string) {
@@ -125,11 +155,18 @@ function FailurePanel({ error, onRetry, retrying, addByHandHint }: {
 }
 
 // ---- Add / edit device ------------------------------------------------------
-export function DeviceFormModal({ open, device, onClose }: {
+export function DeviceFormModal({ open, device, onClose, agents = [] }: {
   open: boolean;
   /** Present → edit mode (PUT); absent/null → create mode (probe, then POST on fallback). */
   device?: Device | null;
   onClose: () => void;
+  /**
+   * The tenant's device agents. When there are any, Add device asks where the
+   * device is reachable from: the platform connects now, an agent identifies
+   * it as a queued discovery ( slice B). With none the form is the four
+   * fields, unchanged.
+   */
+  agents?: readonly ReachAgent[];
 }) {
   const isEdit = !!device?.id;
   const qc = useQueryClient();
@@ -146,9 +183,12 @@ export function DeviceFormModal({ open, device, onClose }: {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [tlsInsecure, setTlsInsecure] = useState(false);
+  const [reinterrogation, setReinterrogation] = useState(false);
   // Create mode only: the remaining fields are revealed when the probe fails
   // (or the operator chooses to enter them by hand).
   const [expanded, setExpanded] = useState(false);
+  // Create mode only: where the device is reachable from.
+  const [reachVia, setReachVia] = useState<string>(PLATFORM);
 
   // (Re)hydrate from the target device whenever it changes or the modal reopens.
   useEffect(() => {
@@ -163,13 +203,23 @@ export function DeviceFormModal({ open, device, onClose }: {
     setUsername(device?.username ?? '');
     setPassword(''); // never prefill the (masked) password
     setTlsInsecure(device?.tls_insecure_skip_verify ?? false);
+    setReinterrogation(device?.platform_reinterrogation_allowed ?? false);
     setExpanded(false);
+    setReachVia(PLATFORM);
   }, [device, open]);
 
   const canProbe = !isEdit && PROBE_TYPES.includes(deviceType);
   const isSsh = isSSHManagedDeviceType(deviceType);
+  const offersReinterrogation = offersPlatformReinterrogation(device);
+  // Sent only where the control is shown: for an agent-interrogated device the
+  // stored value is left exactly as it is.
+  const reinterrogationField = offersReinterrogation ? { platform_reinterrogation_allowed: reinterrogation } : {};
   const showAllFields = isEdit || expanded || !canProbe;
   const probing = canProbe && !expanded;
+  // Offered only when there is a choice to make; an agent that has gone since
+  // the form opened falls back to the platform.
+  const offerReach = probing && agents.length > 0;
+  const viaAgent = offerReach && reachVia !== PLATFORM ? agents.find((a) => a.id === reachVia) : undefined;
 
   const hostnameValid = isValidDeviceHostname(hostname);
   // Probe: all four fields. By hand: a way to reach the device (hostname/IP or
@@ -199,6 +249,7 @@ export function DeviceFormModal({ open, device, onClose }: {
         username: username.trim(),
         password: password.trim(),
         tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
+        ...reinterrogationField,
       };
       const { data, error } = await clients.devices.POST('/devices/discover-and-create', { body });
       if (error || !data) throw probeError(error, "Couldn't connect to the device.");
@@ -210,6 +261,30 @@ export function DeviceFormModal({ open, device, onClose }: {
       // still be added by hand. Anything else (an identity conflict, a 500) is
       // shown as-is and leaves the form alone.
       if (err instanceof DeviceProbeError && disclosesFields(err.code)) setExpanded(true);
+    },
+  });
+
+  // POST /devices/discoveries — identify the device FROM the chosen agent.
+  // Nothing is dialled now; the device appears in the list when the agent has
+  // identified it, and the attempt is a row there until then.
+  const queue = useMutation({
+    mutationFn: async () => {
+      const body: deviceInterrogationComponents['schemas']['CreateDeviceDiscoveryRequest'] = {
+        device_type: deviceType as deviceInterrogationComponents['schemas']['CreateDeviceDiscoveryRequest']['device_type'],
+        management_url: managementUrl.trim(),
+        username: username.trim(),
+        password: password.trim(),
+        tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
+        agent_id: viaAgent!.id,
+      };
+      const { data, error } = await clients.devices.POST('/devices/discoveries', { body });
+      if (error || !data) throw probeError(error, "Couldn't queue the discovery on that agent.");
+      return data;
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['discovery', 'device-discoveries'] });
+      toast.success(`Discovering on ${agentLabel(viaAgent!)} — the device appears in the list once it is identified.`);
+      onClose();
     },
   });
 
@@ -227,6 +302,7 @@ export function DeviceFormModal({ open, device, onClose }: {
           username: username.trim() || undefined,
           password: password.trim() || undefined,
           tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
+          ...reinterrogationField,
         };
         const { data, error } = await clients.devices.PUT('/devices/{id}', {
           params: { path: { id: device!.id } }, body,
@@ -246,6 +322,7 @@ export function DeviceFormModal({ open, device, onClose }: {
         username: username.trim() || undefined,
         password: password.trim() || undefined,
         tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
+        ...reinterrogationField,
       };
       const { data, error } = await clients.devices.POST('/devices', { body });
       if (error || !data) throw new Error(apiErrorMessage(error, 'Failed to create device'));
@@ -256,24 +333,28 @@ export function DeviceFormModal({ open, device, onClose }: {
 
   // A reopened form starts clean: no stale failure from the last attempt.
   useEffect(() => {
-    if (open) { probe.reset(); save.reset(); }
+    if (open) { probe.reset(); save.reset(); queue.reset(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, device?.id]);
 
-  const pending = probe.isPending || save.isPending;
-  const probeFailure = probe.error instanceof DeviceProbeError && isProbeFailure(probe.error.code) ? probe.error : null;
+  const pending = probe.isPending || save.isPending || queue.isPending;
+  const attempt = viaAgent ? queue : probe;
+  const probeFailure = attempt.error instanceof DeviceProbeError && isProbeFailure(attempt.error.code) ? attempt.error : null;
   const footerErr = save.error
     ? save.error.message
-    : probe.error && !probeFailure ? probe.error.message : null;
+    : attempt.error && !probeFailure ? attempt.error.message : null;
 
   let primaryLabel: string;
   if (isEdit) primaryLabel = save.isPending ? 'Saving…' : 'Save changes';
+  else if (viaAgent) primaryLabel = queue.isPending ? 'Queueing…' : 'Add device';
   else if (probing) primaryLabel = probe.isPending ? 'Connecting…' : 'Add device';
   else if (canProbe) primaryLabel = save.isPending ? 'Saving…' : 'Add without connecting';
   else primaryLabel = save.isPending ? 'Saving…' : 'Add device';
 
   const description = isEdit
     ? 'A hostname, IP, or management URL is required, plus a device type. Credentials are encrypted at rest.'
+    : viaAgent
+      ? `${agentLabel(viaAgent)} connects with these credentials and identifies the device. It appears in the list once identified — this can take a minute. Credentials are encrypted at rest.`
     : probing
       ? 'Vista connects with these credentials and fills in the vendor, model, serial number, firmware, hostname and addresses itself. Credentials are encrypted at rest.'
       : canProbe
@@ -296,7 +377,7 @@ export function DeviceFormModal({ open, device, onClose }: {
           className="ui-btn accent"
           data-testid="device-form-primary"
           disabled={!valid || pending}
-          onClick={() => (probing ? probe.mutate() : save.mutate())}
+          onClick={() => (viaAgent ? queue.mutate() : probing ? probe.mutate() : save.mutate())}
         >
           {primaryLabel}
         </button>
@@ -308,8 +389,8 @@ export function DeviceFormModal({ open, device, onClose }: {
         <FailurePanel
           error={probeFailure}
           addByHandHint
-          onRetry={managementUrl.trim() && username.trim() && password.trim() ? () => probe.mutate() : undefined}
-          retrying={probe.isPending}
+          onRetry={managementUrl.trim() && username.trim() && password.trim() ? () => attempt.mutate() : undefined}
+          retrying={attempt.isPending}
         />
       )}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
@@ -320,6 +401,7 @@ export function DeviceFormModal({ open, device, onClose }: {
             // A tick made for a TLS device must not ride along to an SSH one.
             if (isSSHManagedDeviceType(next)) setTlsInsecure(false);
             probe.reset();
+            queue.reset();
           }} disabled={isEdit || pending}>
             {DEVICE_TYPES.map((t) => <option key={t} value={t}>{t === 'other' ? 'Other' : deviceTypeLabel(t) ?? t}</option>)}
           </ModalSelect>
@@ -327,6 +409,14 @@ export function DeviceFormModal({ open, device, onClose }: {
         <ModalField label={isSsh && !isEdit ? 'Management address (SSH)' : 'Management URL'}>
           <ModalInput name="management_url" value={managementUrl} onChange={(e) => setManagementUrl(e.target.value)} placeholder={isSsh ? '10.0.0.1 or ssh://10.0.0.1:22' : 'https://10.0.0.1'} disabled={probe.isPending} />
         </ModalField>
+        {offerReach && (
+          <ModalField label="Reach it from">
+            <ModalSelect name="reach_via" value={viaAgent ? reachVia : PLATFORM} onChange={(e) => { setReachVia(e.target.value); probe.reset(); queue.reset(); }} disabled={pending}>
+              <option value={PLATFORM}>Vista platform — connect now</option>
+              {agents.map((a) => <option key={a.id} value={a.id}>Agent: {agentLabel(a)}</option>)}
+            </ModalSelect>
+          </ModalField>
+        )}
         <ModalField label="Username"><ModalInput name="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" autoComplete="off" disabled={probe.isPending} /></ModalField>
         <ModalField label={isEdit ? 'Password (leave blank to keep)' : 'Password'}>
           <ModalInput name="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete="new-password" disabled={probe.isPending} />
@@ -352,6 +442,20 @@ export function DeviceFormModal({ open, device, onClose }: {
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, fontSize: 12.5, color: 'var(--app-t1)', cursor: 'pointer' }}>
           <input name="tls_insecure_skip_verify" type="checkbox" checked={tlsInsecure} onChange={(e) => setTlsInsecure(e.target.checked)} disabled={probe.isPending} />
           Skip TLS verification (self-signed management certs)
+        </label>
+      )}
+      {/* Platform re-interrogation consent means nothing for a device only an
+          agent can reach — the platform cannot re-check it — so it is not
+          offered when Add device goes through an agent. */}
+      {offersReinterrogation && !viaAgent && (
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, margin: '8px 0 4px', fontSize: 12.5, color: 'var(--app-t1)', cursor: 'pointer' }}>
+          <input name="platform_reinterrogation_allowed" type="checkbox" checked={reinterrogation} onChange={(e) => setReinterrogation(e.target.checked)} disabled={probe.isPending} style={{ marginTop: 2 }} />
+          <span>
+            {REINTERROGATION_LABEL}
+            <span style={{ display: 'block', color: 'var(--app-t3)', fontSize: 12 }}>
+              When identity enrichment needs fresh evidence from this device, the platform may run this device's interrogation again without being asked. Off by default.
+            </span>
+          </span>
         </label>
       )}
       {!isEdit && canProbe && (

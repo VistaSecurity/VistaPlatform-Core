@@ -358,6 +358,12 @@ func projectInterfaces(ifaces []Interface) []map[string]any {
 		if i.Virtual {
 			entry["virtual"] = true
 		}
+		if len(i.StaticAddresses) > 0 {
+			entry["static_addresses"] = append([]string(nil), i.StaticAddresses...)
+		}
+		if len(i.DynamicAddresses) > 0 {
+			entry["dynamic_addresses"] = append([]string(nil), i.DynamicAddresses...)
+		}
 		out = append(out, entry)
 	}
 	return out

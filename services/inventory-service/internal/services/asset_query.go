@@ -264,11 +264,16 @@ func legacyFilterTerms(f models.AssetFilters) (terms []string, statusDefaulted b
 		add("last_seen < %s", quoteValue(f.LastSeenBefore))
 	}
 	if f.UnscannedOnly != nil && *f.UnscannedOnly {
-		// "Never actively scanned" is a property of every endpoint, not of the
-		// host: NOT EXISTS an endpoint that has been scanned. §5.1's NOT EXISTS
-		// also matches an asset with no endpoints at all, which is right — an
-		// at-rest resource has never been scanned either.
-		add("not endpoint:(exists(last_scanned))")
+		// "Never actively scanned": no endpoint has a scan time AND the asset
+		// itself carries no finished scan. The endpoint half alone can never
+		// let an asset with no endpoint leave the list — a scan that found no
+		// listener has no endpoint to stamp — so the asset-level fact
+		// (`last_scanned`, written by autoscan.FinishActiveScans and the
+		// automatic stamp when a scan FINISHES and reached the asset) is the
+		// other half. A scan that failed writes neither, so its asset stays.
+		// An at-rest resource with no address is never dispatched, never
+		// recorded, and so stays too: nothing has scanned it.
+		add("not endpoint:(exists(last_scanned)) and not exists(last_scanned)")
 	}
 	if len(f.Protocol) > 0 {
 		add("crypto:(protocol in (%s))", valueList(f.Protocol))

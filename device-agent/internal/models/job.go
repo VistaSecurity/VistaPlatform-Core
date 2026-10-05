@@ -76,6 +76,12 @@ type JobResult struct {
 	// carries its DeviceInfo copy too, for a control plane older than this
 	// field, which ignores it.
 	DeviceIdentity *di.DeviceIdentity `json:"device_identity,omitempty"`
+
+	// Identification is a device_discovery job's answer: the allowlisted
+	// projection of what Registry.Identify read ( slice B). FailureCode is
+	// the typed reason a discovery failed. An interrogation sets neither.
+	Identification *di.IdentificationReport `json:"identification,omitempty"`
+	FailureCode    string                   `json:"failure_code,omitempty"`
 }
 
 // DiscoveredAsset represents an infrastructure asset discovered during interrogation.

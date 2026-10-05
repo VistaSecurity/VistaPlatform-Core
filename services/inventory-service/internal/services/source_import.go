@@ -195,6 +195,7 @@ const MaxSourceHardwarePage = 5000
 type sourceAssetWriter interface {
 	UsesIdentityAdmission(context.Context, uuid.UUID) (bool, error)
 	CreateAssetFromSource(uuid.UUID, models.AssetInput, identity.Source) (*models.Asset, identity.Outcome, error)
+	DeclareFor(ctx context.Context, tenantID, assetID uuid.UUID, sg identity.Sighting) (identity.Resolution, error)
 }
 
 // assetLimitChecker is the plan cap check (LimitEnforcementService).
@@ -638,12 +639,14 @@ func (s *SourceImportService) AttachLinks(ctx context.Context, tenantID uuid.UUI
 			out = append(out, SourceItemResult{Outcome: SourceItemNotFound})
 			continue
 		}
-		err := s.identity.AttachIdentifiers(ctx,
-			identity.AssetRef{TenantID: tenantID.String(), ID: it.AssetID.String()},
-			[]identity.Identifier{{
-				Kind: identity.Kind(it.Kind), Value: it.Value, Scope: it.Scope, Confidence: 1,
-				Source: source, SeenAt: time.Now().UTC(),
-			}})
+		// A declaration about THIS asset, from the source's own system of
+		// record: an `api` sighting carrying the link, scoped by its sync
+		// profile, attached by the engine (Engine.ResolveDeclaredFor). One
+		// another asset already holds is refused and reported, never moved.
+		_, err := s.assets.DeclareFor(ctx, tenantID, it.AssetID, identity.Sighting{
+			Source: source, Channel: identity.ChannelAPI, ObservedAt: time.Now().UTC(),
+			Identifiers: []identity.SightedIdentifier{{Kind: identity.Kind(it.Kind), Value: it.Value, Profile: it.Scope}},
+		})
 		if err != nil {
 			out = append(out, SourceItemResult{Outcome: SourceOutcomeError, Error: err.Error()})
 			continue

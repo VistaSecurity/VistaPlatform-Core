@@ -87,6 +87,20 @@ describe('suggestAssetQuery', () => {
     expect(out.completions.map((c) => c.text)).toContain('environment');
   });
 
+  it('offers the asset-level last_scanned, with its help text, and accepts it as a timestamp', () => {
+    const out = suggestAssetQuery('last_sc', 7);
+    const field = out.completions.find((c) => c.text === 'last_scanned');
+    expect(field).toBeDefined();
+    expect(JSON.stringify(field)).toContain('finished active or automatic scan');
+    // The built-in "Never scanned" view (builtin-views.ts), and the date comparisons a person
+    // would write in the Inventory query bar.
+    expect(checkAssetQuery('not endpoint:(exists(last_scanned)) and not exists(last_scanned)').ok).toBe(true);
+    expect(checkAssetQuery('last_scanned < now-30d').ok).toBe(true);
+    expect(checkAssetQuery('last_scanned:[2026-01-01 to now]').ok).toBe(true);
+    // A timestamp, not text: a substring match is refused.
+    expect(checkAssetQuery('last_scanned:*2026*').ok).toBe(false);
+  });
+
   it('offers a field’s closed value set after its colon', () => {
     const out = suggestAssetQuery('environment:', 12);
     expect(out.completions.map((c) => c.text)).toContain('production');

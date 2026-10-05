@@ -162,10 +162,13 @@ what it finds. A busy segment shows results within minutes. A quiet one takes
 longer, because a passive sensor can only report what happens on the wire.
 
 > **Want data right now, with nothing to install?** Go to **Discovery → Command
-> Center → Discover assets**, enter a subnet or a few addresses you own, and run
-> it. This is an **active** scan, unlike a passive sensor: the platform sensor
-> connects to each address, performs a TLS or SSH handshake and records what it
-> offers. It can reach whatever the platform itself can reach, so only enter
+> Center → Discover assets**, enter a subnet or a few addresses you own, keep
+> the **Standard** depth and start it. This is an **active** scan, unlike a
+> passive sensor: the platform sensor finds which ports answer on each address,
+> identifies what is listening (a TLS or SSH handshake where it can) and records
+> what it offers. The dialog previews roughly how long it may take before you
+> start; then you can close it and follow the scan under **Discovery → Discovery
+> Jobs**. It can reach whatever the platform itself can reach, so only enter
 > addresses you're authorized to scan.
 
 Full detail: [Sensor Registration & Management](docsv4/core/features/SENSOR_REGISTRATION.md).

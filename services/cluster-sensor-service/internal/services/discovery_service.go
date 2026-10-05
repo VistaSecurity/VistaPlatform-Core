@@ -6,14 +6,17 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 
 	"github.com/google/uuid"
@@ -100,6 +103,51 @@ func dispatchableOTProtocols(canonical []string) []string {
 	return out
 }
 
+// dispatchedOTProtocols is the job's OT opt-in as it will be dispatched and
+// recorded: the request's names canonicalised against the allowlist, dropped
+// entirely when the tenant's `ot_active_probing` switch is off (or cannot be
+// read), and kept only where a standard port exists. This is what the plan's
+// OT ports are derived from (translateLegacyRequest), what the engine is told
+// to probe, and what discovery_jobs.ot_probe_protocols records.
+func (s *DiscoveryService) dispatchedOTProtocols(tenantID string, requested []string) ([]string, error) {
+	otProtocols := canonicalizeOTProbeProtocols(requested)
+	if len(otProtocols) > 0 {
+		tenantUUID, parseErr := uuid.Parse(tenantID)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid tenant_id: %w", parseErr)
+		}
+		limitSvc := sharedservices.NewLimitEnforcementService(s.db.DB)
+		allowed, ferr := limitSvc.CheckFeatureAccess(tenantUUID, "ot_active_probing")
+		if ferr != nil {
+			log.Printf("CreateJob: ot_active_probing switch check failed for tenant %s: %v — dropping OT probes", tenantID, ferr)
+			otProtocols = nil
+		} else if !allowed {
+			log.Printf("CreateJob: ot_active_probing is switched off for tenant %s, dropping OT probes %v", tenantID, otProtocols)
+			otProtocols = nil
+		}
+	}
+	// ot_probe_protocols is an audit column whose documented meaning is "these
+	// probes were dispatched". Keep it honest: drop any protocol we would not
+	// actually probe, so the column can never claim a probe that never left
+	// the cluster. (otProbeDefaultPort covers every allowlisted protocol
+	// today, so this normally filters nothing — it is here so that a future
+	// protocol added to the allowlist without a port cannot silently re-open
+	// the "recorded as probed, never probed" gap B-60 was.)
+	return dispatchableOTProtocols(otProtocols), nil
+}
+
+// otProbePorts pairs each dispatched OT protocol with its standard port, the
+// shape the shared translation takes.
+func otProbePorts(otProtocols []string) []shareddisc.OTProbePort {
+	out := make([]shareddisc.OTProbePort, 0, len(otProtocols))
+	for _, proto := range otProtocols {
+		if port := otProbeDefaultPort(proto); port != 0 {
+			out = append(out, shareddisc.OTProbePort{Protocol: proto, Port: port})
+		}
+	}
+	return out
+}
+
 // createdByOrNull renders a caller identity for the nullable `created_by`
 // column: the uuid when the caller is a person, NULL otherwise.
 //
@@ -155,6 +203,10 @@ type DiscoveryService struct {
 	// uses the same resolver for a hostname that was not pinned (a job created
 	// before pinning existed), so one seam covers both lookups.
 	resolver dispatchguard.Resolver
+	// running indexes the jobs THIS replica is executing, so CancelJob can
+	// stop one at once (job_lifecycle.go). Created on first use.
+	runningMu sync.Mutex
+	running   *runningJobRegistry
 }
 
 func NewDiscoveryService(db, bypassDB *sqlx.DB) *DiscoveryService {
@@ -174,7 +226,77 @@ const resolveTimeout = 10 * time.Second
 // Tenant-sensor dispatch rules (which sensor a `sensors` job may be handed to,
 // and why a request is refused) live in sensor_dispatch.go.
 
+// CreateJob validates, authorizes, plans and persists a job. A request that
+// asks for a dry run must go through PreviewJob: this refuses it rather than
+// create the job the caller asked not to create.
 func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateDiscoveryJobRequest) (*models.DiscoveryJob, error) {
+	if req.DryRun {
+		return nil, &shareddisc.ScanRequestError{Message: "dry_run previews a job and creates none: it is answered by PreviewJob, not CreateJob"}
+	}
+	job, _, err := s.createJob(tenantID, userID, req, false)
+	return job, err
+}
+
+// PreviewJob is POST /discovery/jobs with `dry_run`: it runs the SAME function
+// CreateJob does — createJob, one code path — and stops, inside the creation
+// transaction, after the plan is built and checked and before the first write.
+// Every refusal a real create would give is given here with the same type
+// (so the handler answers the same status and code), except an unconfirmed
+// external target, which is reported on the preview instead of refused.
+//
+// It writes nothing: the transaction is rolled back, never committed. (It
+// cannot be declared READ ONLY: the target-scope read takes a row lock, SELECT
+// … FOR SHARE, so a segment withdrawn a moment ago wins the race, and Postgres
+// refuses that in a read-only transaction. The lock is released by the
+// rollback.)
+func (s *DiscoveryService) PreviewJob(tenantID, userID string, req models.CreateDiscoveryJobRequest) (*shareddisc.ScanPreview, error) {
+	_, preview, err := s.createJob(tenantID, userID, req, true)
+	return preview, err
+}
+
+// errDryRunDone ends a dry run's transaction after the plan is built. It is
+// returned from inside the transaction so the transaction rolls back, and is
+// swallowed by createJob.
+var errDryRunDone = errors.New("dry run complete")
+
+func (s *DiscoveryService) createJob(tenantID, userID string, req models.CreateDiscoveryJobRequest, dryRun bool) (*models.DiscoveryJob, *shareddisc.ScanPreview, error) {
+	// `protocols` is allowlisted (TLS, SSH, SMB and the TLS-wrapped names) so an
+	// OT/ICS name cannot reach the OT probers from here: those run only from
+	// `ot_probe_protocols`, canonicalised and recorded below, which is what keeps
+	// the explicit opt-in, the audit column and the one-standard-port restriction
+	// in force. First, before any lookup, so a refused request touches nothing.
+	if err := shareddisc.ValidateJobProtocols(req.Protocols); err != nil {
+		return nil, nil, err
+	}
+	// The request exactly as the caller sent it: the identity-probe
+	// fingerprint is taken from it (so a replay matches whichever path the
+	// job took), and it is what a translated request falls back to.
+	original := req
+
+	// OT active probes: each requested OT protocol probes its standard port.
+	// The `ot_active_probing` switch (Core, on by default; an operator can
+	// turn it off per plan or per tenant) gates the capability — when off,
+	// requested OT probes are dropped and logged so the operator gets the rest
+	// of the job rather than a hard 4xx. Read BEFORE the translation below, so
+	// a probe the switch drops never adds its port to the plan: a switched-off
+	// OT protocol's port is not even connected to.
+	otProtocols, err := s.dispatchedOTProtocols(tenantID, req.OTProbeProtocols)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// A legacy protocols × ports request — or an OT-only one — runs as a
+	// custom plan on its ports ( D2, WP5): there is no other executor.
+	translated := translateLegacyRequest(&req, dryRun, otProtocols)
+	// Scan-plan or legacy ( WP3): which path this request takes, and the
+	// scan-plan fields validated — the same function inventory-service runs.
+	// A request still legacy here is created only for a tenant sensor without
+	// plan support (the D3 fallback below) or refused.
+	shape, err := shareddisc.ResolveJobRequest(jobRequestFields(req, dryRun))
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// The coordinator persists this token before dispatch. A retry after remote
 	// commit must return the same job rather than perform another network probe.
 	requestID := ""
@@ -183,37 +305,52 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 		value, ok := raw.(string)
 		parsed, parseErr := uuid.Parse(value)
 		if !ok || parseErr != nil || parsed == uuid.Nil {
-			return nil, fmt.Errorf("invalid identity enrichment request ID")
+			return nil, nil, fmt.Errorf("invalid identity enrichment request ID")
 		}
 		requestID = parsed.String()
-		encoded, encodeErr := json.Marshal(req)
+		encoded, encodeErr := json.Marshal(original)
 		if encodeErr != nil {
-			return nil, encodeErr
+			return nil, nil, encodeErr
 		}
 		sum := sha256.Sum256(encoded)
 		requestFingerprint = hex.EncodeToString(sum[:])
+	}
+	// What a stored probe under the same request ID must match besides the
+	// fingerprint when the two differ only by request shape (see
+	// storedIdentityProbe.answers): read now, before the D3 fallback below can
+	// rewrite req and shape.
+	incoming := incomingIdentityProbe(shape, req)
+
+	// The automatic sweep and identity enrichment may be planned jobs (
+	// WP2): their authorizations below read the plan, which they keep to
+	// individual addresses, TCP ports the policy allows, no OT probes and
+	// custom or quick depth (dispatchguard planned.go).
+	unattended := isUnattendedProbe(requestID, req.Options)
+	// They are never previewed: a dry run is a person's question, and an
+	// identity probe's replay token must not be read or reserved by one.
+	if unattended && dryRun {
+		return nil, nil, &shareddisc.ScanRequestError{Message: "dry_run previews a scan a person asks for; automatic scans and identity probes are not previewed"}
 	}
 
 	if requestID != "" {
 		tenant, err := uuid.Parse(tenantID)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		replay := &models.DiscoveryJob{TenantID: tenantID, ExecutionMode: req.ExecutionMode, RequestedSensorIDs: req.PreferredSensorIDs}
-		var storedFingerprint string
+		var stored storedIdentityProbe
 		err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenant, func(tx *sql.Tx) error {
-			return tx.QueryRow(`SELECT id,status,created_at,updated_at,COALESCE(metadata->>'identity_enrichment_fingerprint','')
-    FROM discovery_jobs WHERE tenant_id=$1 AND metadata->'options'->>'identity_enrichment_request_id'=$2`, tenant, requestID).
-				Scan(&replay.ID, &replay.Status, &replay.CreatedAt, &replay.UpdatedAt, &storedFingerprint)
+			return tx.QueryRow(storedIdentityProbeSQL, tenant, requestID).
+				Scan(append([]any{&replay.ID, &replay.Status, &replay.CreatedAt, &replay.UpdatedAt}, stored.scanDest()...)...)
 		})
 		if err == nil {
-			if storedFingerprint != requestFingerprint {
-				return nil, fmt.Errorf("identity enrichment request ID reused with different inputs")
+			if !stored.answers(requestFingerprint, incoming) {
+				return nil, nil, fmt.Errorf("identity enrichment request ID reused with different inputs")
 			}
-			return replay, nil
+			return replay, nil, nil
 		}
 		if err != sql.ErrNoRows {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// A `sensors` job is refused HERE, with a reason, when the sensor it names
@@ -221,14 +358,60 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 	// creation is what keeps "the job was created" meaning "the job can run":
 	// a row waiting on a sensor that will never collect it is the silent
 	// failure this path used to produce, in a different costume.
-	if _, err := s.resolveDispatchSensor(context.Background(), tenantID, req.ExecutionMode, req.PreferredSensorIDs, time.Now()); err != nil {
-		return nil, err
+	// Hole H37: "cloud" on this endpoint means "run from the platform"; see
+	// normalizeLegacyExecutionMode. Never stored as "cloud".
+	req.ExecutionMode = normalizeLegacyExecutionMode(req.ExecutionMode)
+	if shape.Plan {
+		applyRunFrom(&req, shape)
+	}
+	// D3: an automatic or identity job, a person's Active Scan — or a legacy
+	// request translated to a plan — that names a tenant sensor too old to run
+	// a plan is created as the legacy job that sensor can run, rather than
+	// refused. Any other planned job a person asks for (Discover Assets) is
+	// still refused (ErrSensorScanPlanUnsupported).
+	activeScan := !unattended && isActiveScanRequest(req.Options)
+	if shape.Plan && (unattended || translated || activeScan) && isSensorExecutionMode(req.ExecutionMode) {
+		lacks, lerr := s.sensorLacksScanPlan(context.Background(), tenantID, req.PreferredSensorIDs)
+		if lerr != nil {
+			return nil, nil, lerr
+		}
+		if lacks {
+			switch {
+			case translated:
+				req = original
+				req.ExecutionMode = normalizeLegacyExecutionMode(req.ExecutionMode)
+			case activeScan:
+				// The Active Scan the sensor ran before WP4 asked for TLS
+				// and/or SSH per asset. Its ports are the plan's; both probes
+				// run on each, which is what the plan's identification would
+				// have tried.
+				if req, err = legacyFallbackRequest(req, shape.Spec, activeScanFallbackProtocols()); err != nil {
+					return nil, nil, err
+				}
+			default:
+				protocols, perr := s.automaticScanProtocols(context.Background(), tenantID)
+				if perr != nil {
+					return nil, nil, perr
+				}
+				if req, err = legacyFallbackRequest(req, shape.Spec, protocols); err != nil {
+					return nil, nil, err
+				}
+			}
+			if dryRun {
+				return nil, nil, &shareddisc.ScanRequestError{Message: "dry_run previews a scan plan, and the sensor named cannot run one: this scan would run there as protocols × ports, which has no plan to preview"}
+			}
+			shape = shareddisc.JobRequestShape{}
+		}
+	}
+	chosenSensor, err := s.resolveDispatchSensor(context.Background(), tenantID, req.ExecutionMode, req.PreferredSensorIDs, shape.Plan, time.Now())
+	if err != nil {
+		return nil, nil, err
 	}
 	if len(req.Targets) == 0 {
-		return nil, fmt.Errorf("at least one target is required")
+		return nil, nil, fmt.Errorf("at least one target is required")
 	}
 	if len(req.Targets) > 1000 {
-		return nil, fmt.Errorf("too many targets; limit is 1000 per job")
+		return nil, nil, fmt.Errorf("too many targets; limit is 1000 per job")
 	}
 
 	// Normalise every target (a URL becomes its host, an explicit port joins
@@ -241,67 +424,54 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 	// authorized one.
 	parsedTargets, err := dispatchguard.ParseManualTargets(req.Targets)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), resolveTimeout)
 	resolvedTargets, err := dispatchguard.ResolveManualTargets(resolveCtx, s.resolver, parsedTargets)
 	cancelResolve()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Targets, req.Ports = normalisedScanShape(resolvedTargets, req.Ports)
 	pinned := pinnedAddresses(resolvedTargets)
 
+	// The scanner expands a CIDR or range to at most shareddisc.MaxTargetAddresses
+	// hosts and used to drop the rest without a word, so a /19 was scanned as
+	// its first /20 and the job still ended "completed". A job it cannot
+	// fully expand is refused here, naming the numbers, rather than accepted and
+	// quietly under-scanned.
+	if err := shareddisc.CheckTargetSizes(req.Targets); err != nil {
+		return nil, nil, err
+	}
+
 	// Explicit external targets are a PERSON's to confirm. The automatic
 	// sweep, identity enrichment and service callers (no user behind them)
 	// never scan outside the registered networks, whatever flag they send.
-	personInitiated := createdByOrNull(userID) != nil && requestID == "" && !dispatchguard.IsAutomaticScan(req.Options)
+	personInitiated := createdByOrNull(userID) != nil && !unattended
 	manualOpts := dispatchguard.ManualOptions{
-		Policy:          dispatchguard.ExternalPolicyFromEnv(),
-		Confirmed:       req.ExternalTargetsConfirmed,
+		Policy: dispatchguard.ExternalPolicyFromEnv(),
+		// A dry run is judged as if confirmed, so that every refusal that does
+		// NOT depend on the confirmation is still given and the plan shows the
+		// downgrades that will apply once the person confirms. The
+		// confirmation is the LAST check AuthorizeManual makes, so this
+		// changes no other verdict; whether it is still owed is reported on
+		// the preview (confirmation_required).
+		Confirmed:       req.ExternalTargetsConfirmed || dryRun,
 		PersonInitiated: personInitiated,
 	}
 
-	// OT active probes are an independent per-target cross-product:
-	// each requested OT protocol probes its standard port. Tier flag
-	// `ot_active_probing` gates the capability — when off, requested OT
-	// probes are dropped silently and logged so the operator gets the
-	// rest of the job rather than a hard 4xx.
-	otProtocols := canonicalizeOTProbeProtocols(req.OTProbeProtocols)
-	if len(otProtocols) > 0 {
-		tenantUUID, parseErr := uuid.Parse(tenantID)
-		if parseErr != nil {
-			return nil, fmt.Errorf("invalid tenant_id: %w", parseErr)
-		}
-		limitSvc := sharedservices.NewLimitEnforcementService(s.db.DB)
-		allowed, ferr := limitSvc.CheckFeatureAccess(tenantUUID, "ot_active_probing")
-		if ferr != nil {
-			log.Printf("CreateJob: tier flag check ot_active_probing failed for tenant %s: %v — dropping OT probes", tenantID, ferr)
-			otProtocols = nil
-		} else if !allowed {
-			log.Printf("CreateJob: tenant %s lacks ot_active_probing tier flag, dropping OT probes %v", tenantID, otProtocols)
-			otProtocols = nil
-		}
-	}
-	// ot_probe_protocols is an audit column whose documented meaning is "these
-	// probes were dispatched". Keep it honest: drop any protocol we would not
-	// actually create a target row for, so the column can never claim a probe
-	// that never left the cluster. (otProbeDefaultPort covers every allowlisted
-	// protocol today, so this normally filters nothing — it is here so that a
-	// future protocol added to the allowlist without a port cannot silently
-	// re-open the "recorded as probed, never probed" gap B-60 was.)
-	otProtocols = dispatchableOTProtocols(otProtocols)
-
-	itProbing := len(req.Protocols) > 0 && len(req.Ports) > 0
-	if !itProbing && len(otProtocols) == 0 {
-		return nil, fmt.Errorf("at least one protocol/port pair or OT probe is required")
+	// A scan-plan job always probes (its depth names the ports); the
+	// protocol/port pair rule is the legacy path's.
+	itProbing := !shape.Plan && len(req.Protocols) > 0 && len(req.Ports) > 0
+	if !shape.Plan && !itProbing && len(otProtocols) == 0 {
+		return nil, nil, fmt.Errorf("at least one protocol/port pair or OT probe is required")
 	}
 	if itProbing {
 		if len(req.Protocols) == 0 {
-			return nil, fmt.Errorf("at least one protocol is required")
+			return nil, nil, fmt.Errorf("at least one protocol is required")
 		}
 		if len(req.Ports) == 0 {
-			return nil, fmt.Errorf("at least one port is required")
+			return nil, nil, fmt.Errorf("at least one port is required")
 		}
 	}
 
@@ -350,7 +520,7 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 	// tenant_id values are kept as the primary control (belt-and-suspenders).
 	tenantUUID, err := uuid.Parse(tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid tenant_id: %w", err)
+		return nil, nil, fmt.Errorf("invalid tenant_id: %w", err)
 	}
 
 	// created_by is NULLABLE, and a job the platform created on its own
@@ -361,17 +531,17 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 	// it. NULL is the honest value and the column already accepts it.
 	createdBy := createdByOrNull(userID)
 
+	var preview *shareddisc.ScanPreview
 	err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantUUID, func(tx *sql.Tx) error {
 		if requestID != "" {
 			if _, lockErr := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1,72047))`, tenantID+":"+requestID); lockErr != nil {
 				return lockErr
 			}
-			var fingerprint string
-			replayErr := tx.QueryRow(`SELECT id,status,created_at,updated_at,COALESCE(metadata->>'identity_enrichment_fingerprint','')
-    FROM discovery_jobs WHERE tenant_id=$1 AND metadata->'options'->>'identity_enrichment_request_id'=$2`, tenantID, requestID).
-				Scan(&job.ID, &job.Status, &job.CreatedAt, &job.UpdatedAt, &fingerprint)
+			var stored storedIdentityProbe
+			replayErr := tx.QueryRow(storedIdentityProbeSQL, tenantID, requestID).
+				Scan(append([]any{&job.ID, &job.Status, &job.CreatedAt, &job.UpdatedAt}, stored.scanDest()...)...)
 			if replayErr == nil {
-				if fingerprint != requestFingerprint {
+				if !stored.answers(requestFingerprint, incoming) {
 					return fmt.Errorf("identity enrichment request ID reused with different inputs")
 				}
 				return nil
@@ -386,8 +556,11 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 			if err != nil {
 				return err
 			}
-			if err := authorizeEnrichmentDispatch(tx, sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}, selectedSensor); err != nil {
-				return err
+			// A planned probe is judged below, on the plan, once it is built.
+			if !shape.Plan {
+				if err := authorizeEnrichmentDispatch(tx, sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}, selectedSensor); err != nil {
+					return err
+				}
 			}
 		}
 		// TARGET AUTHORIZATION — every path, every origin (#H5).
@@ -399,14 +572,37 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 		// the Discover wizard. This check does not look at the origin at all.
 		// It runs inside the job-creation transaction so a segment withdrawn a
 		// moment ago wins the race, and it is repeated at dispatch time in
-		// job_processor.processTarget against the EXPANDED addresses.
+		// each work unit (unitAuthorizer) against the EXPANDED addresses.
 		//
 		// Since W5.13b a person may also name targets OUTSIDE the
 		// registered networks, confirmed in this request; reserved and
 		// platform-excluded ranges stay refused whatever is confirmed.
-		external, err := dispatchguard.AuthorizeManualTargets(tx, tenantID, resolvedTargets, manualOpts)
+		external, verdicts, err := dispatchguard.AuthorizeAndClassifyManualTargets(tx, tenantID, resolvedTargets, manualOpts)
 		if err != nil {
 			return err
+		}
+		// A scan-plan job is planned HERE, at the point the guard has just
+		// classified each target: the per-target external depth cap (D3) is
+		// applied on these verdicts, Auto is resolved (an external target
+		// keeps the job on the platform), and the budget is checked — all
+		// before anything is written.
+		if shape.Plan {
+			plan, perr := planScanJob(tx, tenantID, &req, job, shape, chosenSensor, resolvedTargets, verdicts, metadata, time.Now())
+			if perr != nil {
+				return perr
+			}
+			job.Plan = plan
+			// A planned identity probe's authorization, judged on the plan
+			// just built: every address the sensor will scan, every port.
+			if requestID != "" {
+				selectedSensor, err := uuid.Parse(req.PreferredSensorIDs[0])
+				if err != nil {
+					return err
+				}
+				if err := authorizeEnrichmentDispatch(tx, unattendedPlanPayload(tenantID, req.Options, plan, otProtocols), selectedSensor); err != nil {
+					return err
+				}
+			}
 		}
 		// A tenant sensor is handed the TARGETS, not the addresses they were
 		// authorized on: it would resolve a name again on its own network
@@ -421,6 +617,24 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 					Reason: "targets outside your registered networks can only be scanned from the platform sensor, not a tenant sensor; run this scan from the platform"})
 			}
 			return &dispatchguard.RefusedTargetsError{Targets: refused}
+		}
+		// A dry run ends HERE: everything a refusal can depend on has run, and
+		// nothing has been written. The transaction is rolled back.
+		if dryRun {
+			confirmationRequired := len(external) > 0 && !req.ExternalTargetsConfirmed
+			listed := make([]shareddisc.PreviewExternalTarget, 0, len(external))
+			for _, e := range external {
+				listed = append(listed, shareddisc.PreviewExternalTarget{Target: e.Target, Addresses: e.Addresses})
+			}
+			if job.Plan == nil {
+				return errors.New("dry run: the request produced no scan plan")
+			}
+			p, perr := shareddisc.NewScanPreview(*job.Plan, confirmationRequired, listed)
+			if perr != nil {
+				return perr
+			}
+			preview = &p
+			return errDryRunDone
 		}
 		if len(external) > 0 {
 			// The job's record of the consent. The processor reads
@@ -447,7 +661,13 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 			if len(req.OTProbeProtocols) > 0 {
 				return fmt.Errorf("automatic scanning cannot request OT probes")
 			}
-			if err := dispatchguard.AuthorizeAutomaticScan(tx, sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}); err != nil {
+			// A planned job is judged on its plan: the addresses and TCP ports
+			// the executor will be handed, with no protocol list.
+			payload := sensordispatch.Payload{TenantID: tenantID, Targets: req.Targets, Protocols: req.Protocols, Ports: req.Ports, Options: req.Options}
+			if job.Plan != nil {
+				payload = unattendedPlanPayload(tenantID, req.Options, job.Plan, otProtocols)
+			}
+			if err := dispatchguard.AuthorizeAutomaticScan(tx, payload); err != nil {
 				return err
 			}
 		}
@@ -498,6 +718,29 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 			}
 		}
 
+		// Create scan-plan targets: one row per input carrying that target's
+		// PLANNED TCP ports (after any external cap) and no protocols — a
+		// scan-plan job identifies services from what answers. The plan in
+		// metadata is the full record (UDP, depth, pace) for the executor.
+		if job.Plan != nil {
+			for i, target := range req.Targets {
+				tcp, perr := job.Plan.Targets[i].TCPPortSet()
+				if perr != nil {
+					return fmt.Errorf("plan for %s: %w", target, perr)
+				}
+				ports := make([]int32, 0, tcp.Len())
+				for _, port := range tcp.Ports() {
+					ports = append(ports, int32(port)) //nolint:gosec // 1-65535
+				}
+				if _, err := tx.Exec(`
+					INSERT INTO discovery_targets (job_id, tenant_id, input, protocols, ports, status, created_at, updated_at)
+					VALUES ($1, $2, $3, $4, $5, 'pending', $6, $6)`,
+					job.ID, tenantID, target, pq.Array([]string{}), pq.Array(ports), time.Now()); err != nil {
+					return fmt.Errorf("failed to create discovery target: %w", err)
+				}
+			}
+		}
+
 		// Create OT targets (one row per input × OT-protocol, with that
 		// protocol's standard port only). Keeping them as separate rows means
 		// the sensor's existing target-loop logic handles them with no code
@@ -531,11 +774,14 @@ func (s *DiscoveryService) CreateJob(tenantID, userID string, req models.CreateD
 
 		return nil
 	})
+	if dryRun && errors.Is(err, errDryRunDone) {
+		return nil, preview, nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return job, nil
+	return job, nil, nil
 }
 
 func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
@@ -557,8 +803,10 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 	query := `SELECT j.id, j.tenant_id, COALESCE(j.created_by::text, ''), j.execution_mode, j.status, j.requested_sensor_ids, j.fanout,
 	          j.retention_cap_mb, j.retention_ttl_hours, j.created_at, j.updated_at, j.started_at, j.completed_at,
 	          j.error_message, j.assigned_sensor_id, j.dispatched_at, s.name, s.last_heartbeat, c.delivered_at,
-	          COALESCE(j.metadata -> 'options' ->> 'origin', '')
+	          COALESCE(j.metadata -> 'options' ->> 'origin', ''),
+	          j.metadata -> '` + shareddisc.ScanPlanMetadataKey + `'
 	          FROM discovery_jobs j` + jobExecutorJoins + ` WHERE j.id = $1`
+	var planJSON []byte
 
 	err := s.bypassDB.QueryRow(query, jobID).Scan(
 		&job.ID,
@@ -584,6 +832,7 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 		&job.AssignedSensorLastHeartbeat,
 		&job.PickedUpAt,
 		&job.Origin,
+		&planJSON,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -591,6 +840,8 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 		}
 		return nil, fmt.Errorf("failed to get job: %w", err)
 	}
+
+	job.Plan = decodeJobPlan(jobID, planJSON)
 
 	// Convert pq.StringArray to []string
 	job.RequestedSensorIDs = []string(requestedSensorIDs)
@@ -607,7 +858,35 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 	return job, nil
 }
 
+// decodeJobPlan reads a scan-plan job's plan ( WP3) from its
+// metadata.scan_plan, nil for a legacy job. An unreadable plan is logged and
+// left off rather than failing the read: the processor reads jobs through
+// GetJob too.
+func decodeJobPlan(jobID string, planJSON []byte) *shareddisc.ScanPlan {
+	if len(planJSON) == 0 || string(planJSON) == "null" {
+		return nil
+	}
+	var plan shareddisc.ScanPlan
+	if err := json.Unmarshal(planJSON, &plan); err != nil {
+		log.Printf("job %s: unreadable metadata.%s: %v", jobID, shareddisc.ScanPlanMetadataKey, err)
+		return nil
+	}
+	return &plan
+}
+
+// UpdateJobStatus moves a job that has not ended to status. A job that has
+// ended — completed, failed or cancelled — is never moved: the call returns
+// ErrJobStatusConflict and writes nothing (see terminalJobStatuses). The one
+// way out of a terminal state is RequeueJobForRetry.
 func (s *DiscoveryService) UpdateJobStatus(jobID, status string, errorMessage *string) error {
+	return s.UpdateJobStatusFrom(jobID, status, errorMessage)
+}
+
+// UpdateJobStatusFrom is UpdateJobStatus restricted to a job currently in one
+// of from (any non-terminal status when from is empty). The check and the
+// write are one UPDATE, so two writers racing for the same job cannot both
+// win — which is what makes ClaimJob a claim.
+func (s *DiscoveryService) UpdateJobStatusFrom(jobID, status string, errorMessage *string, from ...string) error {
 	// RLS: cross-tenant — runs on the bypass role (Phase 4). Keyed by job id
 	// only; no tenant is threaded to this call site (the job_processor calls it
 	// with only the job id during the NATS-driven lifecycle). Wrapping requires
@@ -627,10 +906,16 @@ func (s *DiscoveryService) UpdateJobStatus(jobID, status string, errorMessage *s
 		query = `UPDATE discovery_jobs SET status = $1, updated_at = $2 WHERE id = $3`
 		args = []interface{}{status, now, jobID}
 	}
+	query, args = guardJobStatusUpdate(query, args, from)
 
-	_, err := s.bypassDB.Exec(query, args...)
+	res, err := s.bypassDB.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update job status: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("failed to update job status: %w", err)
+	} else if n == 0 {
+		return s.jobStatusRefused(jobID, status)
 	}
 
 	// A job that ends has no unfinished targets left. Without this a job that
@@ -790,6 +1075,9 @@ func (s *DiscoveryService) getJobMaterialization(jobID string, total int) *model
 		PendingApproval    int `db:"pending_approval"`
 		AwaitingProcessing int `db:"awaiting_processing"`
 		Suppressed         int `db:"suppressed"`
+		Observed           int `db:"observed"`
+		ObservedHosts      int `db:"observed_hosts"`
+		FindingHosts       int `db:"finding_hosts"`
 	}
 	// pending_approval is `= 'pending'`, not `<> 'auto_approved'`. The column
 	// grew two more terminal values that are not auto_approved and are not
@@ -805,9 +1093,12 @@ func (s *DiscoveryService) getJobMaterialization(jobID string, total int) *model
 			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'auto_approved')  AS auto_approved,
 			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'pending')         AS pending_approval,
 			COUNT(*) FILTER (WHERE processed_at IS NULL)                                             AS awaiting_processing,
-			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'suppressed')      AS suppressed
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'suppressed')      AS suppressed,
+			COUNT(*) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'observed')        AS observed,
+			COUNT(DISTINCT dest_ip) FILTER (WHERE processed_at IS NOT NULL AND approval_status = 'observed') AS observed_hosts,
+			(SELECT COUNT(DISTINCT `+hostKeySQL+`) FROM discovery_findings WHERE job_id = $2::uuid) AS finding_hosts
 		FROM sensor_discoveries
-		WHERE batch_id = $1`, jobID)
+		WHERE batch_id = $1`, jobID, jobID)
 	if err != nil {
 		log.Printf("[DiscoveryService] getJobMaterialization: failed to count queue rows for job %s: %v", jobID, err)
 		return nil
@@ -819,6 +1110,9 @@ func (s *DiscoveryService) getJobMaterialization(jobID string, total int) *model
 		PendingApproval:    row.PendingApproval,
 		AwaitingProcessing: row.AwaitingProcessing,
 		Suppressed:         row.Suppressed,
+		Observed:           row.Observed,
+		ObservedHosts:      row.ObservedHosts,
+		FindingHosts:       row.FindingHosts,
 	}
 }
 
@@ -874,7 +1168,8 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 		       j.assigned_sensor_id, j.dispatched_at,
 		       s.name AS assigned_sensor_name, s.last_heartbeat AS assigned_sensor_last_heartbeat,
 		       c.delivered_at AS picked_up_at,
-		       COALESCE(j.metadata -> 'options' ->> 'origin', '') AS origin
+		       COALESCE(j.metadata -> 'options' ->> 'origin', '') AS origin,
+		       j.metadata -> '`+shareddisc.ScanPlanMetadataKey+`' AS plan_json
 		FROM discovery_jobs j %s %s
 		ORDER BY j.created_at DESC
 		LIMIT $%d OFFSET $%d`, jobExecutorJoins, whereClause, argIndex, argIndex+1)
@@ -889,8 +1184,15 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 		return nil, 0, fmt.Errorf("invalid tenant_id: %w", err)
 	}
 
+	// The plan rides along as raw JSON (models.DiscoveryJob.Plan is not a
+	// column) so the Jobs page can show a scan-plan job's depth and executor
+	// on its row ( WP4b).
+	type listRow struct {
+		models.DiscoveryJob
+		PlanJSON []byte `db:"plan_json"`
+	}
 	var total int
-	var jobs []models.DiscoveryJob
+	var rows []listRow
 	err = s.withTenantTxx(context.Background(), tenantUUID, func(tx *sqlx.Tx) error {
 		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM discovery_jobs j %s", whereClause)
 		if e := tx.Get(&total, countQuery, args...); e != nil {
@@ -898,7 +1200,7 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 		}
 
 		pageArgs := append(append([]interface{}{}, args...), pageSize, offset)
-		if e := tx.Select(&jobs, jobsQuery, pageArgs...); e != nil {
+		if e := tx.Select(&rows, jobsQuery, pageArgs...); e != nil {
 			return fmt.Errorf("failed to get jobs: %w", e)
 		}
 		return nil
@@ -906,8 +1208,11 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 	if err != nil {
 		return nil, 0, err
 	}
-	for i := range jobs {
+	jobs := make([]models.DiscoveryJob, len(rows))
+	for i, r := range rows {
+		jobs[i] = r.DiscoveryJob
 		jobs[i].Executor = executorFor(jobs[i].ExecutionMode, jobs[i].AssignedSensorID)
+		jobs[i].Plan = decodeJobPlan(jobs[i].ID, r.PlanJSON)
 	}
 
 	return jobs, total, nil

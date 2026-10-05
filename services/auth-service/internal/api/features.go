@@ -37,6 +37,7 @@ var knownFeatures = []string{
 	"custom_branding",
 	"cmdb_sync",
 	"connector_netbox",
+	"ai_tenant_provider",
 	"siem_export",
 	"billing_portal",
 }

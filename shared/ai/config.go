@@ -87,6 +87,58 @@ type ProviderConfig struct {
 
 	// Timeout bounds one HTTP attempt. Zero means [DefaultTimeout].
 	Timeout time.Duration `json:"timeout,omitempty"`
+
+	// keySource, when set, is where the credential comes from INSTEAD of the
+	// environment — see [ProviderConfig.WithKeySource]. Unexported and a func,
+	// so it cannot be marshalled, logged or echoed to a UI: the struct still
+	// has no field that can hold a key.
+	keySource func() string
+}
+
+// WithKeySource returns a copy whose credential comes from source rather than
+// from an environment variable.
+//
+// It exists for a provider configured in the database — a tenant's own, or the
+// platform default a platform administrator set — whose key is stored
+// encrypted and decrypted at the moment of use. The closure keeps the design
+// rule above intact: the config still carries no credential, only the means to
+// fetch one, and that means cannot be serialised.
+//
+// # A stored configuration never reads the environment
+//
+// Once a source is set, [ProviderConfig.APIKey] returns ONLY what it yields,
+// including the empty string. Falling back to the environment would send the
+// operator's ANTHROPIC_API_KEY or OPENAI_API_KEY to whatever endpoint a tenant
+// typed into a settings form — the deployment's credential delivered to a host
+// of the tenant's choosing. A tenant endpoint with no key gets no key.
+//
+// A nil source is replaced by one that returns "", for the same reason.
+func (c ProviderConfig) WithKeySource(source func() string) ProviderConfig {
+	if source == nil {
+		source = func() string { return "" }
+	}
+	out := c
+	out.keySource = source
+	return out
+}
+
+// HasKeySource reports whether the credential comes from a stored
+// configuration rather than the environment.
+func (c ProviderConfig) HasKeySource() bool { return c.keySource != nil }
+
+// KeyDescription names where the credential is expected to be, for an error a
+// person reads. For an environment-configured provider that is the variable's
+// name, which is what the operator has to go and set; for a stored one the
+// variable does not exist and naming it would send them to the wrong place.
+func (c ProviderConfig) KeyDescription() string {
+	if c.keySource != nil {
+		return "the stored API key"
+	}
+	name := c.APIKeyEnv
+	if name == "" {
+		name = DefaultAPIKeyEnv(c.Kind)
+	}
+	return name
 }
 
 // DefaultAPIKeyEnv returns the conventional environment variable for a kind,
@@ -143,6 +195,10 @@ func (c ProviderConfig) WithDefaults() ProviderConfig {
 // An empty result is a real answer: "openai_compat" against a local endpoint
 // legitimately has no key, and the provider decides whether it needs one.
 func (c ProviderConfig) APIKey() string {
+	if c.keySource != nil {
+		// Exclusively. See WithKeySource: no environment fallback, ever.
+		return strings.TrimSpace(c.keySource())
+	}
 	name := c.APIKeyEnv
 	if name == "" {
 		name = DefaultAPIKeyEnv(c.Kind)

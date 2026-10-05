@@ -9,6 +9,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/autoscan"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
@@ -92,6 +93,10 @@ func normalizeAssetCollections(a *models.Asset) {
 // path writes this key, so a malformed one is corruption, and a tombstone
 // pointing at a non-asset is worse than no pointer at all.
 func setMergedInto(a *models.Asset) {
+	// The Active Scan record is projected at the same point for the same
+	// reason: it is stored in metadata, and a client has to find it in the
+	// schema to show a scan as running or finished.
+	a.ActiveScan = autoscan.ActiveScanFromMetadata(a.Metadata)
 	raw, ok := a.Metadata["merged_into"].(string)
 	if !ok || raw == "" {
 		return
@@ -169,7 +174,7 @@ func (s *AssetService) getAssetIdentifiers(tenantID, assetID uuid.UUID) ([]model
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		rows, err := tx.Query(`
 			SELECT id, asset_id, kind, value, scope, source_kind, source_ref, confidence,
-			       first_seen_at, last_seen_at
+			       first_seen_at, last_seen_at, address_assignment
 			FROM asset_identifiers
 			WHERE tenant_id = $1 AND asset_id = $2
 			ORDER BY array_position($3::text[], kind), value`,
@@ -181,7 +186,7 @@ func (s *AssetService) getAssetIdentifiers(tenantID, assetID uuid.UUID) ([]model
 		for rows.Next() {
 			var i models.Identifier
 			if err := rows.Scan(&i.ID, &i.AssetID, &i.Kind, &i.Value, &i.Scope,
-				&i.SourceKind, &i.SourceRef, &i.Confidence, &i.FirstSeenAt, &i.LastSeenAt); err != nil {
+				&i.SourceKind, &i.SourceRef, &i.Confidence, &i.FirstSeenAt, &i.LastSeenAt, &i.AddressAssignment); err != nil {
 				return fmt.Errorf("scan asset identifier: %w", err)
 			}
 			out = append(out, i)
@@ -202,7 +207,7 @@ func (s *AssetService) getAssetEndpoints(tenantID, assetID uuid.UUID) ([]models.
 			       service_name, service_version, service_confidence, service_identification_method,
 			       bound_local,
 			       source_kind, source_ref, status, first_seen_at, last_seen_at,
-			       last_scanned_at, last_scan_status
+			       last_scanned_at, last_scan_status, tls_handshake_outcome
 			FROM asset_endpoints
 			WHERE tenant_id = $1 AND asset_id = $2
 			ORDER BY `+endpointOrder,
@@ -216,7 +221,7 @@ func (s *AssetService) getAssetEndpoints(tenantID, assetID uuid.UUID) ([]models.
 			if err := rows.Scan(&e.ID, &e.TenantID, &e.AssetID, &e.Address, &e.FQDN, &e.Port,
 				&e.Transport, &e.Protocol, &e.ServiceName, &e.ServiceVersion, &e.ServiceConfidence,
 				&e.ServiceIdentificationMethod, &e.BoundLocal, &e.SourceKind, &e.SourceRef, &e.Status,
-				&e.FirstSeenAt, &e.LastSeenAt, &e.LastScannedAt, &e.LastScanStatus); err != nil {
+				&e.FirstSeenAt, &e.LastSeenAt, &e.LastScannedAt, &e.LastScanStatus, &e.TLSHandshakeOutcome); err != nil {
 				return fmt.Errorf("scan asset endpoint: %w", err)
 			}
 			out = append(out, e)
@@ -246,7 +251,7 @@ func loadEndpointsForAssets(tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.UUID) (m
 		       service_name, service_version, service_confidence, service_identification_method,
 		       bound_local,
 		       source_kind, source_ref, status, first_seen_at, last_seen_at,
-		       last_scanned_at, last_scan_status
+		       last_scanned_at, last_scan_status, tls_handshake_outcome
 		FROM asset_endpoints
 		WHERE tenant_id = $1 AND asset_id = ANY($2::uuid[])
 		ORDER BY asset_id, `+endpointOrder,
@@ -260,7 +265,7 @@ func loadEndpointsForAssets(tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.UUID) (m
 		if err := rows.Scan(&e.ID, &e.TenantID, &e.AssetID, &e.Address, &e.FQDN, &e.Port,
 			&e.Transport, &e.Protocol, &e.ServiceName, &e.ServiceVersion, &e.ServiceConfidence,
 			&e.ServiceIdentificationMethod, &e.BoundLocal, &e.SourceKind, &e.SourceRef, &e.Status,
-			&e.FirstSeenAt, &e.LastSeenAt, &e.LastScannedAt, &e.LastScanStatus); err != nil {
+			&e.FirstSeenAt, &e.LastSeenAt, &e.LastScannedAt, &e.LastScanStatus, &e.TLSHandshakeOutcome); err != nil {
 			return nil, fmt.Errorf("scan endpoint: %w", err)
 		}
 		out[e.AssetID] = append(out[e.AssetID], e)
@@ -278,7 +283,7 @@ func loadIdentifiersForAssets(tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.UUID) 
 	}
 	rows, err := tx.Query(`
 		SELECT id, asset_id, kind, value, scope, source_kind, source_ref, confidence,
-		       first_seen_at, last_seen_at
+		       first_seen_at, last_seen_at, address_assignment
 		FROM asset_identifiers
 		WHERE tenant_id = $1 AND asset_id = ANY($2::uuid[])
 		ORDER BY asset_id, array_position($3::text[], kind), value`,
@@ -290,7 +295,7 @@ func loadIdentifiersForAssets(tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.UUID) 
 	for rows.Next() {
 		var i models.Identifier
 		if err := rows.Scan(&i.ID, &i.AssetID, &i.Kind, &i.Value, &i.Scope,
-			&i.SourceKind, &i.SourceRef, &i.Confidence, &i.FirstSeenAt, &i.LastSeenAt); err != nil {
+			&i.SourceKind, &i.SourceRef, &i.Confidence, &i.FirstSeenAt, &i.LastSeenAt, &i.AddressAssignment); err != nil {
 			return nil, fmt.Errorf("scan identifier: %w", err)
 		}
 		out[i.AssetID] = append(out[i.AssetID], i)

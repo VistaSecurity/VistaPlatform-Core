@@ -3,7 +3,9 @@ package producers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +30,8 @@ import (
 // # Two subjects for one kind, and why both
 //
 // `plaintext_management` is raised on the ASSET when the interrogation facts
-// say so (`mgmt.plaintext` = true), and on the ENDPOINT when a specific socket
+// say so (`mgmt.plaintext` = true on any management channel — see
+// foldManagementPlane), and on the ENDPOINT when a specific socket
 // is the plaintext management service. Those are different claims about
 // different things — "this device is managed over Telnet" and "port 23 on this
 // address answers Telnet" — and the registry allows both subject types for
@@ -132,28 +135,150 @@ type ConfigRun struct {
 type configAsset struct {
 	id    uuid.UUID
 	label string
-	// mgmtPlaintext is three-valued: nil means no fact, which is NOT "false".
-	// An explicit false is an answer (the device is managed over SSH or HTTPS)
-	// and is counted as assessed; an absence is not assessed and is counted as
-	// nothing at all.
-	mgmtPlaintext *bool
-	mgmtProtocol  string
-	// factSource is the source_ref of the mgmt.plaintext fact — the citation.
-	factSource string
-	factSeenAt time.Time
-	// factExpired is true when the newest `mgmt.*` fact has passed its
-	// `asset_facts.expires_at`.
-	//
-	// The FOURTH state, and it is not the same as nil. nil is "nobody has
-	// interrogated this device": there is nothing to judge and nothing to
-	// resolve. Expired is "what an interrogation told us has run out": the
-	// producer has stopped knowing, so it raises nothing AND withholds the
-	// subject from the sweep, leaving a finding raised while the fact was
-	// current exactly where it was. Resolving it would render "we stopped
-	// knowing" as "somebody turned telnet off".
-	factExpired bool
+	// mgmt is the asset's management plane as the interrogations described it:
+	// the newest `mgmt.plaintext` answer per management protocol, each with the
+	// `mgmt.protocol` its own source wrote beside it. Empty means no source ever
+	// answered — NOT "false". See foldManagementPlane for how the answers are
+	// combined, and why the newest one across all sources is not the answer.
+	mgmt []mgmtObservation
 
 	endpoints []configEndpoint
+}
+
+// mgmtObservation is one source's statement about the management plane: "the
+// device is managed over <protocol>, and that is / is not plaintext".
+//
+// It is the PAIR that means something. `mgmt.plaintext` describes "the
+// management protocol in mgmt.protocol" (standards/fact-keys.yaml), and the two
+// facts are stored per source_ref, so the protocol is the one written by the
+// same source as the plaintext answer — never the newest protocol from
+// somewhere else.
+type mgmtObservation struct {
+	// Protocol is the sibling `mgmt.protocol` value, lower-cased; "" when the
+	// source wrote a plaintext answer without naming the protocol.
+	Protocol   string    `json:"protocol"`
+	Plaintext  *bool     `json:"plaintext"`
+	SourceRef  string    `json:"source_ref"`
+	ObservedAt time.Time `json:"observed_at"`
+	// Expired is true when either fact of the pair has passed its
+	// `asset_facts.expires_at`.
+	//
+	// Not the same as no answer. No answer is "nobody has interrogated this":
+	// nothing to judge and nothing to resolve. Expired is "what an
+	// interrogation told us has run out": the producer has stopped knowing, so
+	// it raises nothing from it AND withholds the subject from the sweep,
+	// leaving a finding raised while the fact was current exactly where it
+	// was. Resolving it would render "we stopped knowing" as "somebody turned
+	// telnet off".
+	Expired bool `json:"expired"`
+}
+
+// mgmtChannel is the set of protocols one answer is allowed to speak for.
+//
+// THE fix for P-08. A `false` from a source means "the channel I used is not
+// plaintext" — an SSH session, an HTTPS API — and says nothing about the SNMP
+// v2c community the same device also answers. Taking the newest answer across
+// every source (what this producer did) let any later SSH or HTTPS run clear a
+// plaintext-management finding SNMP v2c or a Cisco VTY line had raised.
+//
+// So answers are combined per CHANNEL: the newest answer within a channel
+// stands for that channel, and the asset is plaintext-managed when ANY
+// channel's standing answer is true. Within a channel a later answer does
+// retract an earlier one — that is how the condition ever goes away.
+//
+// A channel is the protocol itself, except where one answer is positive
+// evidence about its plaintext sibling:
+//
+//   - telnet / ssh → "cli". The only `ssh` writer is the Cisco collector, and it
+//     writes `ssh` + false only after reading the VTY `transport input` (or the
+//     platform's equivalent) and finding no telnet; when the device cannot say,
+//     it writes no plaintext answer at all (cisco_ops.go). Its false is a
+//     statement about telnet, so it retracts its own earlier telnet.
+//   - http / https → "web". The UniFi collector reads the scheme off the
+//     controller URL it authenticated against; moving that URL to HTTPS is the
+//     remediation the http finding asks for.
+//
+// SNMP is deliberately NOT a channel family: `snmpv2c` stands alone. Nothing
+// today reads whether v2c is still enabled, so a future SNMPv3 collector's
+// false would be the same unfounded "all clear" this type exists to stop —
+// devices routinely answer v2c and v3 at once.
+func mgmtChannel(protocol string) string {
+	switch protocol {
+	case "telnet", "ssh":
+		return "cli"
+	case "http", "https":
+		return "web"
+	}
+	return protocol
+}
+
+// mgmtVerdict is what the producer concludes about one asset's management plane.
+type mgmtVerdict struct {
+	// Answered: at least one channel has a CURRENT answer, either value.
+	Answered bool
+	// Plaintext lists the current channel answers that are true — the
+	// finding's evidence — oldest protocol name first for a stable summary.
+	Plaintext []mgmtObservation
+	// NotPlaintext lists the current channel answers that are false: the
+	// channels a source vouched for, which the finding names so a reader can
+	// see that an SSH or HTTPS interrogation was considered and why it did not
+	// clear the finding.
+	NotPlaintext []mgmtObservation
+	// ExpiredPlaintext: a channel whose standing answer is true has expired.
+	// The subject is withheld from the sweep rather than resolved.
+	ExpiredPlaintext bool
+	// AnyExpired: some channel's standing answer has expired, either value —
+	// reported in ConfigRun.FactsExpired.
+	AnyExpired bool
+}
+
+// foldManagementPlane combines the per-protocol answers into a verdict. Pure, so
+// the decision is unit-testable without a database.
+func foldManagementPlane(obs []mgmtObservation) mgmtVerdict {
+	standing := map[string]mgmtObservation{}
+	for _, o := range obs {
+		if o.Plaintext == nil {
+			continue
+		}
+		ch := mgmtChannel(o.Protocol)
+		cur, ok := standing[ch]
+		switch {
+		case !ok, o.ObservedAt.After(cur.ObservedAt):
+			standing[ch] = o
+		case o.ObservedAt.Equal(cur.ObservedAt) && *o.Plaintext && !*cur.Plaintext:
+			// Two sources, one instant, opposite answers: the finding is the
+			// safer side of a tie nobody can break.
+			standing[ch] = o
+		}
+	}
+
+	var v mgmtVerdict
+	for _, o := range standing {
+		if o.Expired {
+			v.AnyExpired = true
+			if *o.Plaintext {
+				v.ExpiredPlaintext = true
+			}
+			continue
+		}
+		v.Answered = true
+		if *o.Plaintext {
+			v.Plaintext = append(v.Plaintext, o)
+		} else {
+			v.NotPlaintext = append(v.NotPlaintext, o)
+		}
+	}
+	byProtocol := func(s []mgmtObservation) {
+		sort.Slice(s, func(i, j int) bool {
+			if s[i].Protocol != s[j].Protocol {
+				return s[i].Protocol < s[j].Protocol
+			}
+			return s[i].SourceRef < s[j].SourceRef
+		})
+	}
+	byProtocol(v.Plaintext)
+	byProtocol(v.NotPlaintext)
+	return v
 }
 
 // configEndpoint is one endpoint and the signals a rule may read off it.
@@ -219,60 +344,81 @@ func (p *ConfigurationProducer) read(ctx context.Context, tenantID uuid.UUID) ([
 	err := p.repo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
 		tx := r.Tx()
 
-		// One row per asset with the two mgmt.* facts folded in. DISTINCT ON
-		// picks the most recently observed value per key — facts are stored per
-		// SOURCE, so a device seen by both an interrogation and an agent has two
-		// mgmt.protocol rows and something has to choose. Most-recent is the
-		// honest default; full reconciliation precedence (ADR-0002 D4) belongs
-		// to the asset read, not to a posture pass.
+		// One row per asset, with its management-plane answers folded in as a
+		// JSON array: the newest `mgmt.plaintext` per (asset, protocol), each
+		// paired with the `mgmt.protocol` written by the SAME source_ref.
 		//
-		// `expires_at` travels with the value rather than filtering the CTE: an
-		// expired fact and a fact that was never written are different answers,
-		// and only one of them means "the condition is absent". See
-		// configAsset.factExpired. The compliance fact shape already honours the
-		// column (scope_probe.go); this producer did not.
+		// Per protocol, not per asset. Facts are stored per source (and an
+		// interrogation's source_ref is its job), so an SNMP v2c run and a
+		// later SSH run of the same device are two rows that say different
+		// things about different channels. Picking the newest row per KEY —
+		// what this read did — let the SSH run's `false` hide SNMP's `true`
+		// (P-08). The channels are combined in Go: foldManagementPlane.
+		//
+		// The plaintext value travels as jsonb, not `#>> '{}'`, so that MISSING
+		// and `false` stay distinguishable — the exact collapse
+		// standards/fact-keys.yaml warns about on this key.
+		//
+		// `expires_at` travels with the value rather than filtering: an expired
+		// fact and a fact that was never written are different answers, and
+		// only one of them means "the condition is absent". See
+		// mgmtObservation.Expired. One query, not two, so the read phase keeps
+		// its two statements (the failing-handle tests count them).
 		rows, err := tx.QueryContext(ctx, `
-			WITH latest AS (
-			    SELECT DISTINCT ON (asset_id, key) asset_id, key, value, source_ref, observed_at, expires_at
-			    FROM asset_facts
-			    WHERE tenant_id = $1 AND key = ANY($2::text[])
-			    ORDER BY asset_id, key, observed_at DESC
+			WITH mgmt AS (
+			    SELECT DISTINCT ON (p.asset_id, lower(btrim(coalesce(pr.value #>> '{}', ''))))
+			           p.asset_id,
+			           lower(btrim(coalesce(pr.value #>> '{}', ''))) AS protocol,
+			           p.value AS plaintext,
+			           p.source_ref,
+			           p.observed_at,
+			           ((p.expires_at IS NOT NULL AND p.expires_at <= now())
+			            OR (pr.expires_at IS NOT NULL AND pr.expires_at <= now())) AS expired
+			    FROM asset_facts p
+			    LEFT JOIN asset_facts pr
+			           ON pr.tenant_id = p.tenant_id AND pr.asset_id = p.asset_id
+			          AND pr.key = $3 AND pr.source_ref = p.source_ref
+			    WHERE p.tenant_id = $1 AND p.key = $2
+			    ORDER BY p.asset_id, lower(btrim(coalesce(pr.value #>> '{}', ''))),
+			             p.observed_at DESC, p.updated_at DESC, p.id
 			)
 			SELECT a.id,
 			       coalesce(nullif(a.display_name, ''), nullif(a.hostname, ''), host(a.primary_address), ''),
-			       (SELECT value FROM latest WHERE latest.asset_id = a.id AND latest.key = $3),
-			       coalesce((SELECT value #>> '{}' FROM latest WHERE latest.asset_id = a.id AND latest.key = $4), ''),
-			       coalesce((SELECT source_ref FROM latest WHERE latest.asset_id = a.id AND latest.key = $3), ''),
-			       (SELECT observed_at FROM latest WHERE latest.asset_id = a.id AND latest.key = $3),
-			       EXISTS (SELECT 1 FROM latest
-			               WHERE latest.asset_id = a.id AND latest.key IN ($3, $4)
-			                 AND latest.expires_at IS NOT NULL AND latest.expires_at <= now())
+			       coalesce((SELECT jsonb_agg(jsonb_build_object(
+			                           'protocol', mgmt.protocol,
+			                           'plaintext', mgmt.plaintext,
+			                           'source_ref', mgmt.source_ref,
+			                           'observed_at', mgmt.observed_at,
+			                           'expired', mgmt.expired))
+			                 FROM mgmt WHERE mgmt.asset_id = a.id), '[]'::jsonb)
 			FROM assets a
 			WHERE a.tenant_id = $1
 			  AND a.deleted_at IS NULL
 			  AND a.asset_status <> 'archived'`,
-			tenantID,
-			textArray(facts.KeyMgmtPlaintext, facts.KeyMgmtProtocol),
-			facts.KeyMgmtPlaintext, facts.KeyMgmtProtocol)
+			tenantID, facts.KeyMgmtPlaintext, facts.KeyMgmtProtocol)
 		if err != nil {
 			return fmt.Errorf("query assets: %w", err)
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var a configAsset
-			// The jsonb value arrives as raw text so that MISSING and `false`
-			// stay distinguishable. `value #>> '{}'` on an absent row and on a
-			// `false` row both scan into "" through a NullString, which is the
-			// exact collapse standards/fact-keys.yaml warns about on this key.
 			var raw []byte
-			var seenAt sql.NullTime
-			if err := rows.Scan(&a.id, &a.label, &raw, &a.mgmtProtocol, &a.factSource, &seenAt,
-				&a.factExpired); err != nil {
+			if err := rows.Scan(&a.id, &a.label, &raw); err != nil {
 				return fmt.Errorf("scan asset: %w", err)
 			}
-			a.mgmtPlaintext = parseJSONBool(raw)
-			if seenAt.Valid {
-				a.factSeenAt = seenAt.Time
+			var wire []struct {
+				mgmtObservation
+				// Raw, then parseJSONBool: a value that is somehow not a JSON
+				// boolean is NO answer, not a failed pass for the tenant.
+				Plaintext json.RawMessage `json:"plaintext"`
+			}
+			if err := json.Unmarshal(raw, &wire); err != nil {
+				return fmt.Errorf("asset %s: management facts: %w", a.id, err)
+			}
+			for _, w := range wire {
+				o := w.mgmtObservation
+				o.Plaintext = parseJSONBool(w.Plaintext)
+				a.mgmt = append(a.mgmt, o)
 			}
 			cp := a
 			byID[a.id] = &cp
@@ -348,16 +494,20 @@ func (p *ConfigurationProducer) plan(subjects []configAsset, run *ConfigRun) ([]
 
 	for _, a := range subjects {
 		run.Assets++
-		if a.factExpired {
-			// Stopped knowing, rather than learned there is nothing. The
-			// subject is withheld from the sweep so a finding raised while the
-			// fact was current stays raised.
+		v := foldManagementPlane(a.mgmt)
+		if v.AnyExpired {
 			run.FactsExpired++
+		}
+		if f := p.planFactPlaintext(a, v, run); f != nil {
+			planned = append(planned, *f)
+		} else if v.ExpiredPlaintext {
+			// Stopped knowing, rather than learned there is nothing: the
+			// channel whose standing answer was "plaintext" has expired and
+			// nothing current says otherwise. Withheld from the sweep so a
+			// finding raised while the fact was current stays raised.
 			withheld[findings.KindPlaintextManagement] = append(
 				withheld[findings.KindPlaintextManagement],
 				producer.Subject{Type: findings.SubjectAsset, ID: a.id})
-		} else if f := p.planFactPlaintext(a, run); f != nil {
-			planned = append(planned, *f)
 		}
 		judged := 0
 		for _, ep := range a.endpoints {
@@ -375,7 +525,7 @@ func (p *ConfigurationProducer) plan(subjects []configAsset, run *ConfigRun) ([]
 			run.Endpoints++
 			planned = append(planned, p.planEndpoint(a, ep, run)...)
 		}
-		if (a.mgmtPlaintext != nil && !a.factExpired) || judged > 0 {
+		if v.Answered || judged > 0 {
 			assessed = append(assessed, a.id)
 		}
 	}
@@ -385,44 +535,76 @@ func (p *ConfigurationProducer) plan(subjects []configAsset, run *ConfigRun) ([]
 // planFactPlaintext raises plaintext_management on the ASSET from the
 // interrogation facts.
 //
-// Three-valued, and the middle value is the point. `mgmt.plaintext` absent is
-// NOT ASSESSED and produces nothing; an explicit `false` is an ANSWER and also
-// produces nothing, but is counted — so the run can report how much of the
-// estate has been looked at. Only an explicit `true` is a finding.
+// Three-valued, and the middle value is the point. No current answer is NOT
+// ASSESSED and produces nothing; current answers that are all `false` are an
+// ANSWER and also produce nothing, but are counted — so the run can report how
+// much of the estate has been looked at. A finding needs a channel whose
+// standing answer is `true` (foldManagementPlane): a `false` about SSH or HTTPS
+// does not outvote a `true` about SNMP v2c.
 //
-// The evidence names the two fact keys and the fact's own source_ref. It never
-// carries the community string, the credential or anything else the
-// interrogation saw: this producer reads exactly two registered keys, and both
-// are `redact: false` posture values by their registry entries.
-func (p *ConfigurationProducer) planFactPlaintext(a configAsset, run *ConfigRun) *plannedConfig {
-	if a.mgmtPlaintext == nil {
+// The evidence names every plaintext protocol and the source that saw it, plus
+// the protocols other sources vouched for — so "an HTTPS interrogation ran and
+// the finding is still open" reads as a decision, not a bug. It never carries
+// the community string, the credential or anything else the interrogation saw:
+// this producer reads exactly two registered keys, and both are `redact: false`
+// posture values by their registry entries.
+func (p *ConfigurationProducer) planFactPlaintext(a configAsset, v mgmtVerdict, run *ConfigRun) *plannedConfig {
+	if !v.Answered {
 		return nil
 	}
 	run.PlaintextAssessed++
-	if !*a.mgmtPlaintext {
+	if len(v.Plaintext) == 0 {
 		return nil
 	}
 
-	detail := strings.TrimSpace(a.mgmtProtocol)
-	if detail == "" {
-		// The plaintext fact without the protocol fact beside it. Say that,
-		// rather than naming a protocol nobody measured.
-		detail = "protocol not recorded"
+	protocols := make([]string, 0, len(v.Plaintext))
+	seen := map[string]bool{}
+	plaintext := make([]map[string]any, 0, len(v.Plaintext))
+	newest := v.Plaintext[0]
+	for _, o := range v.Plaintext {
+		name := o.Protocol
+		if name == "" {
+			// The plaintext fact without the protocol fact beside it. Say that,
+			// rather than naming a protocol nobody measured.
+			name = "protocol not recorded"
+		}
+		if !seen[name] {
+			seen[name] = true
+			protocols = append(protocols, name)
+		}
+		plaintext = append(plaintext, mgmtEvidence(o))
+		if o.ObservedAt.After(newest.ObservedAt) {
+			newest = o
+		}
 	}
+	detail := strings.Join(protocols, ", ")
 
 	evidence := map[string]any{
 		"matched_by": signalFact,
 		"fact_keys":  []string{facts.KeyMgmtPlaintext, facts.KeyMgmtProtocol},
 		"subject":    "asset",
+		// One entry per plaintext channel: which protocol, which source saw
+		// it, when.
+		"plaintext_protocols": plaintext,
 	}
-	if a.mgmtProtocol != "" {
-		evidence["mgmt_protocol"] = a.mgmtProtocol
+	if len(v.NotPlaintext) > 0 {
+		vouched := make([]map[string]any, 0, len(v.NotPlaintext))
+		for _, o := range v.NotPlaintext {
+			vouched = append(vouched, mgmtEvidence(o))
+		}
+		evidence["encrypted_protocols"] = vouched
 	}
-	if a.factSource != "" {
-		evidence["fact_source_ref"] = a.factSource
+	// The flat keys the Findings page and the citation already read. With
+	// several plaintext channels mgmt_protocol names them all; the source and
+	// time are the newest plaintext observation's.
+	if detail != "protocol not recorded" {
+		evidence["mgmt_protocol"] = detail
 	}
-	if !a.factSeenAt.IsZero() {
-		evidence["fact_observed_at"] = a.factSeenAt.UTC().Format(time.RFC3339)
+	if newest.SourceRef != "" {
+		evidence["fact_source_ref"] = newest.SourceRef
+	}
+	if !newest.ObservedAt.IsZero() {
+		evidence["fact_observed_at"] = newest.ObservedAt.UTC().Format(time.RFC3339)
 	}
 
 	f, ok := p.finding(findings.KindPlaintextManagement,
@@ -431,6 +613,19 @@ func (p *ConfigurationProducer) planFactPlaintext(a configAsset, run *ConfigRun)
 		return nil
 	}
 	return &plannedConfig{finding: f}
+}
+
+// mgmtEvidence is one management-plane observation as the finding's evidence
+// carries it.
+func mgmtEvidence(o mgmtObservation) map[string]any {
+	e := map[string]any{"protocol": o.Protocol}
+	if o.SourceRef != "" {
+		e["source_ref"] = o.SourceRef
+	}
+	if !o.ObservedAt.IsZero() {
+		e["observed_at"] = o.ObservedAt.UTC().Format(time.RFC3339)
+	}
+	return e
 }
 
 // planEndpoint runs the rule table over one endpoint.

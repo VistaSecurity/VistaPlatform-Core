@@ -45,6 +45,15 @@ data:
   ADMIN_UI_BASE_URL: {{ printf "%s://%s" $tlsScheme $adminHost | quote }}
   DB_MAX_OPEN_CONNS: {{ .Values.appConfig.dbMaxOpenConns | quote }}
   DB_MAX_IDLE_CONNS: {{ .Values.appConfig.dbMaxIdleConns | quote }}
+  {{- with .Values.appConfig.dbJit }}
+  # Keep the PostgreSQL server's own JIT setting (appConfig.dbJit). Rendered ONLY
+  # when set: absent, every backend connection sends jit=off, so a default
+  # install's ConfigMap is byte-identical to the one it had before this key
+  # existed and nothing rolls on upgrade. It is in the shared ConfigMap so every
+  # backend agrees; a backends.<svc>.extraEnv DB_JIT is a container env entry,
+  # which Kubernetes resolves ahead of envFrom, so it still wins for that service.
+  DB_JIT: {{ . | quote }}
+  {{- end }}
   NATS_STREAM_REPLICAS: {{ .Values.appConfig.natsStreamReplicas | quote }}
   REDIS_POOL_SIZE: {{ .Values.appConfig.redisPoolSize | quote }}
   REDIS_MIN_IDLE_CONNS: {{ .Values.appConfig.redisMinIdleConns | quote }}

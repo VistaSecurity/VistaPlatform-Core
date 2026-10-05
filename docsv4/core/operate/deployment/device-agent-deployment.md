@@ -273,6 +273,16 @@ The agent polls the platform every 30 seconds (configurable) for pending jobs. W
 4. Results are submitted back to platform
 5. Credentials are cleared from memory
 
+**Adding devices through the agent.** When a device is reachable only from
+this agent, **Add device** can route its identification here (**Reach it
+from** in the form). That is a `device_discovery` job, assigned to this agent
+alone: the agent logs in, reads the device's identity with the same calls the
+platform uses, and reports only that identity — or the reason it could not.
+On each poll the agent tells the platform which job types it supports; an agent
+older than the platform does not, and is never handed a discovery it cannot
+run. Add device refuses to queue on an agent that has not polled in the last
+10 minutes.
+
 ### Supported Device Types
 
 Currently supported:

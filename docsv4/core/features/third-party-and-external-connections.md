@@ -130,9 +130,11 @@ it presents. We call that *enrichment*.
   (fc00::/7), loopback and link-local;
 - addresses inside a **network segment you registered** under **Settings →
   Infrastructure → Network Segments**, whatever its type, public included.
-  Segments the platform *learned* from a firewall's or switch's VLAN table do not
-  count: a device reporting its internet-facing network is telling us where it is
-  connected, not what you own;
+  Public segments the platform *learned* from a firewall's or switch's VLAN table do
+  not count: a device reporting its internet-facing network is telling us where it
+  is connected, not what you own — unless someone in your organization has
+  **claimed** the range as yours (see
+  [Public ranges learned from your devices](./active-scanning.md#public-ranges-learned-from-your-devices));
 - connections you **elevated** to monitored (below) — that one endpoint, not every
   port on the vendor's host.
 

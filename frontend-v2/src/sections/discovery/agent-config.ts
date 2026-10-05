@@ -6,7 +6,10 @@
 // confirming, precisely so the console does not keep a second copy of the
 // registry that can drift from the platform's.
 
-export type SettingKind = 'bool' | 'int' | 'enum';
+/** `port_list` is a list of TCP ports carried as a canonical comma-separated
+ *  string ("9443,10443", "" for none) — a string, not an array, because a
+ *  device older than the setting could not decode an array at all. */
+export type SettingKind = 'bool' | 'int' | 'enum' | 'port_list';
 export type SettingOrigin = 'built_in' | 'fleet' | 'device';
 export type ConfigState =
   | 'never_reported'
@@ -32,6 +35,10 @@ export interface Setting {
   min?: number;
   max?: number;
   allowed?: string[];
+  /** On a port list: the ports the device already watches, keyed by port
+   *  number, named as the console shows them. From the platform, so the
+   *  console keeps no copy of the sensor's port table. */
+  built_in_ports?: Record<string, string>;
 }
 
 export interface ConfigStatus {
@@ -259,4 +266,66 @@ export function versionNote(v: VersionInfo | undefined): VersionNote | null {
           : 'This device has not reported a version, so there is nothing to compare against.',
       };
   }
+}
+
+// ---- Port lists ( WP5) -------------------------------------------------
+//
+// The console's half of the ONE port-list rule. The platform's half is
+// ParsePortList in shared/agentconfig/ports.go, and both are held to the same
+// cases, problem text included, by shared/agentconfig/testdata/port_lists.json.
+// The platform re-checks every save; this check exists so a person is told
+// about "abc" as they type it rather than after Save.
+
+export const MAX_PORT_LIST_ENTRIES = 64;
+
+// Exactly ParsePortList's separators; `\s` would accept more than the platform does.
+const PORT_LIST_SEPARATOR = /[, \t\n\r]+/;
+const DIGITS = /^[0-9]+$/;
+
+function parsePort(f: string): { port?: number; problem?: string } {
+  if (!DIGITS.test(f)) {
+    const dash = f.indexOf('-');
+    if (dash >= 0 && DIGITS.test(f.slice(0, dash)) && DIGITS.test(f.slice(dash + 1))) {
+      return { problem: `${JSON.stringify(f)} is a range; list each port on its own` };
+    }
+    return { problem: `${JSON.stringify(f)} is not a port number` };
+  }
+  const p = Number(f);
+  if (p < 1 || p > 65535) return { problem: `${f} is outside the port range 1-65535` };
+  return { port: p };
+}
+
+/** Reads a port list as typed: entries separated by commas or whitespace,
+ *  sorted, duplicates removed, one problem per unusable entry. Any problem
+ *  means the list is refused. */
+export function parsePortList(text: string): { ports: number[]; problems: string[] } {
+  const seen = new Set<number>();
+  const problems: string[] = [];
+  for (const f of text.split(PORT_LIST_SEPARATOR)) {
+    if (f === '') continue;
+    const { port, problem } = parsePort(f);
+    if (problem) {
+      problems.push(problem);
+      continue;
+    }
+    seen.add(port as number);
+  }
+  const ports = [...seen].sort((a, b) => a - b);
+  if (ports.length > MAX_PORT_LIST_ENTRIES) {
+    problems.push(`${ports.length} ports listed; at most ${MAX_PORT_LIST_ENTRIES} are allowed`);
+  }
+  return { ports, problems };
+}
+
+/** The canonical form the platform stores: sorted, deduplicated, comma-joined. */
+export function formatPortList(ports: number[]): string {
+  return [...new Set(ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535))]
+    .sort((a, b) => a - b)
+    .join(',');
+}
+
+/** What the device already does with a port, when it does something — the
+ *  reason listing it as an additional TLS port changes nothing. */
+export function builtInPortMeaning(setting: Pick<Setting, 'built_in_ports'>, port: number): string | undefined {
+  return setting.built_in_ports?.[String(port)];
 }

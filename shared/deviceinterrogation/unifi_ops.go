@@ -47,7 +47,21 @@ var unifiDeviceStructuredFields = []string{
 	"port_table",     // → net.interfaces, and the VLAN a port is on
 	"ethernet_table", // → net.interfaces MACs
 	"lldp_table",     // → net.neighbors and connects_to edges
+	"wan1",           // → the gateway's WAN address, an identifier (unifiWANFields)
+	"wan2",           // → the second WAN's address, on a dual-WAN gateway
 }
+
+// unifiWANTables are the device-object fields a UniFi gateway describes its
+// WAN interfaces in.
+var unifiWANTables = []string{"wan1", "wan2"}
+
+// unifiWANFields is the allowlist of a `wan1` / `wan2` object's fields: the
+// interface's address and nothing else ( D2). The upstream network is not
+// a tenant segment, so the address is an identifier of the gateway and nothing
+// more. Its gateway, name servers, connection type and — on the networkconf
+// side, which is never read for a WAN — PPPoE user and password are the
+// operator's upstream configuration, and have no consumer.
+var unifiWANFields = []string{"ip"}
 
 // unifiPortFields is the allowlist of `port_table` entry fields. PoE draw,
 // 802.1X state, per-port counters and the rest of the ~40 fields are not
@@ -191,6 +205,17 @@ func unifiDeviceSubject(device map[string]interface{}) PeerRef {
 	subject := peerRef(name, unifiClassHint(firstUnifiString(device, "type")))
 	subject.AddIdentifier(IdentifierMACAddress, firstUnifiString(device, "mac"))
 	subject.AddIdentifier(IdentifierIPAddress, firstUnifiString(device, "ip"))
+	// A gateway's WAN addresses, from its own device record ( D2). On a
+	// UniFi gateway `ip` is usually the first WAN's address already; reading
+	// the WAN objects as well catches the second WAN, and a gateway whose
+	// `ip` names a LAN interface. AddIdentifier drops a duplicate and an
+	// address that does not normalise (a WAN that is down reports none).
+	for _, table := range unifiWANTables {
+		if wan, ok := device[table].(map[string]interface{}); ok {
+			projected := unifiProject(wan, unifiWANFields)
+			subject.AddIdentifier(IdentifierIPAddress, firstUnifiString(projected, "ip"))
+		}
+	}
 	subject.AddIdentifier(IdentifierSerialNumber, firstUnifiString(device, "serial"))
 	// The controller's name is an operator alias, including DNS-shaped aliases.
 	// Only its explicit hostname field may supply a hostname identifier.

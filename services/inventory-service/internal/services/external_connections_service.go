@@ -620,7 +620,9 @@ func (s *ExternalConnectionsService) assessCrypto(input models.ExternalConnectio
 			add(key, "certificate public key")
 		}
 	}
-	add(value(input.CertSignatureAlgorithm), "certificate signature")
+	// Producers record the x509 library's spelling ("SHA256-RSA"); the
+	// catalogue codes it "RSA-SHA256".
+	add(cryptoparse.X509SignatureCatalogueCode(value(input.CertSignatureAlgorithm)), "certificate signature")
 	if isWeakProtocol(input.Protocol, input.ProtocolVersion) {
 		weakReasons = append(weakReasons, "Weak protocol: "+input.Protocol+" "+value(input.ProtocolVersion))
 	}

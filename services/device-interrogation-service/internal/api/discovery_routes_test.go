@@ -103,6 +103,12 @@ func TestDeviceProbeRoutes_PermissionGates(t *testing.T) {
 	}{
 		{http.MethodPost, devicesPrefix + "/" + id + "/test-connection", `{}`, rbac.PermissionDiscoveryManage},
 		{http.MethodPost, devicesPrefix + "/discover-and-create", `{`, rbac.PermissionDiscoveryCreate},
+		// Agent-routed Add device ( slice B): queueing a device login on
+		// an agent is the add itself; retry and dismiss act on that add.
+		{http.MethodPost, devicesPrefix + "/discoveries", `{`, rbac.PermissionDiscoveryCreate},
+		{http.MethodGet, devicesPrefix + "/discoveries", ``, rbac.PermissionDiscoveryRead},
+		{http.MethodPost, devicesPrefix + "/discoveries/" + id + "/retry", ``, rbac.PermissionDiscoveryCreate},
+		{http.MethodDelete, devicesPrefix + "/discoveries/" + id, ``, rbac.PermissionDiscoveryCreate},
 	} {
 		t.Run("refused "+r.path, func(t *testing.T) {
 			w, mock := routeRequest(t, r.method, r.path, r.body, r.permission, false)

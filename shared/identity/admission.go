@@ -90,7 +90,10 @@ func AssessAdmission(obs Observation) AdmissionDecision {
 			addr, err := netip.ParseAddr(id.Value)
 			if err == nil && !addr.IsUnspecified() && !addr.IsMulticast() && !addr.IsLoopback() {
 				hasAddress = true
-				dynamic = dynamic || obs.DynamicScopes[id.Scope]
+				// A pinned address (pinned.go) is not a lease whatever
+				// its segment says, so it binds the sighting like any static
+				// address does.
+				dynamic = dynamic || (obs.DynamicScopes[id.Scope] && !obs.addressPinned(id))
 			}
 		}
 	}

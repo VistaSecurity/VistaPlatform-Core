@@ -35,6 +35,31 @@ func ids(obs identity.Observation) map[identity.Kind]identity.Identifier {
 // the honest answer when nothing can say which segment an address is in.
 func unscopedService() *AssetService { return &AssetService{} }
 
+// A finding goes through the one identity intake: a locally
+// administered MAC seen on the wire is a randomised address and is withheld,
+// and a `.local` name is a scoped hostname, not an unscoped fqdn — the same
+// rules the host-observation path always applied, now applied to findings too.
+func TestDiscoveryObservation_WithholdsRotatingMACs(t *testing.T) {
+	f := IngestFinding{
+		Hostname: ptr("laptop.local"), IPAddress: ptr("192.0.2.11"), Port: ptr(22), Protocol: "SSH",
+		RawData: map[string]interface{}{"source": "sensor_discovery", "mac_address": "aa:bb:cc:00:11:22"},
+	}
+	obs, err := unscopedService().discoveryObservation(uuid.New(), f, f.IPAddress, identity.OwnershipInternal)
+	if err != nil {
+		t.Fatalf("discoveryObservation: %v", err)
+	}
+	got := ids(obs)
+	if v, ok := got[identity.KindMACAddress]; ok {
+		t.Errorf("a locally administered MAC from a finding became an identifier: %+v", v)
+	}
+	if _, ok := got[identity.KindFQDN]; ok {
+		t.Error("`.local` was filed as an unscoped fqdn")
+	}
+	if v, ok := got[identity.KindHostname]; !ok || v.Value != "laptop.local" || v.Scope != identity.ScopeTenantDefault {
+		t.Errorf("hostname identifier = %+v, want laptop.local scoped to the tenant default", v)
+	}
+}
+
 func TestDiscoveryObservation_ExtractsEveryIdentifierTheFindingCarries(t *testing.T) {
 	f := IngestFinding{
 		Hostname:  ptr("db-1.example.test"),
@@ -43,8 +68,11 @@ func TestDiscoveryObservation_ExtractsEveryIdentifierTheFindingCarries(t *testin
 		Protocol:  "TLS",
 		AssetType: "server",
 		RawData: map[string]interface{}{
-			"source":        "sensor_discovery",
-			"mac_address":   "AA-BB-CC-DD-EE-01",
+			"source": "sensor_discovery",
+			// A universally administered MAC (U/L bit clear). A locally
+			// administered one is a randomised address on this channel and the
+			// intake withholds it (TestDiscoveryObservation_WithholdsRotatingMACs).
+			"mac_address":   "A8-BB-CC-DD-EE-01",
 			"serial_number": "J7K2L9",
 		},
 	}
@@ -67,8 +95,8 @@ func TestDiscoveryObservation_ExtractsEveryIdentifierTheFindingCarries(t *testin
 	}
 	// Normalised, not passed through: two observers spelling one MAC
 	// differently must produce the same row.
-	if v, ok := got[identity.KindMACAddress]; !ok || v.Value != "aa:bb:cc:dd:ee:01" {
-		t.Errorf("mac_address identifier = %+v, want the canonical aa:bb:cc:dd:ee:01 form", v)
+	if v, ok := got[identity.KindMACAddress]; !ok || v.Value != "a8:bb:cc:dd:ee:01" {
+		t.Errorf("mac_address identifier = %+v, want the canonical a8:bb:cc:dd:ee:01 form", v)
 	}
 	if v, ok := got[identity.KindSerialNumber]; !ok || v.Value != "J7K2L9" {
 		t.Errorf("serial_number identifier = %+v — case must survive, it is an opaque token", v)
@@ -246,6 +274,64 @@ func TestManualObservation_CarriesDeclaredIdentifiers(t *testing.T) {
 	}
 }
 
+func TestManualObservation_PreservesExplicitIdentifierScopes(t *testing.T) {
+	in := models.AssetInput{
+		ClassKey:  assetclass.KeyServer,
+		IPAddress: ptr("192.0.2.44"),
+		Identifiers: []models.AssetIdentifierInput{
+			{Kind: string(identity.KindIPAddress), Value: "192.0.2.44", Scope: ptr("lan-a")},
+			{Kind: string(identity.KindHostname), Value: "edge-1", Scope: ptr("lan-a")},
+		},
+	}
+	obs, err := unscopedService().manualObservation(uuid.New(), in,
+		identity.Source{Kind: identity.SourceDeclared, Ref: "manual"})
+	if err != nil {
+		t.Fatalf("manualObservation: %v", err)
+	}
+
+	want := map[string]bool{
+		identity.Identifier{Kind: identity.KindIPAddress, Value: "192.0.2.44", Scope: identity.ScopeTenantDefault}.Key(): true,
+		identity.Identifier{Kind: identity.KindIPAddress, Value: "192.0.2.44", Scope: "lan-a"}.Key():                     true,
+		identity.Identifier{Kind: identity.KindHostname, Value: "edge-1", Scope: "lan-a"}.Key():                          true,
+	}
+	for _, id := range obs.Identifiers {
+		if !want[id.Key()] {
+			continue
+		}
+		delete(want, id.Key())
+		if id.Kind == identity.KindIPAddress && id.Scope == "lan-a" && id.StoredAssignment() != identity.AssignmentStatic {
+			t.Errorf("explicit declared address = %+v, want static assignment", id)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing explicitly scoped identifiers: %v from %+v", want, obs.Identifiers)
+	}
+}
+
+func TestManualObservation_DropsMalformedExplicitScopeWithoutLosingValidIdentifiers(t *testing.T) {
+	in := models.AssetInput{
+		ClassKey: assetclass.KeyServer,
+		Identifiers: []models.AssetIdentifierInput{
+			{Kind: string(identity.KindIPAddress), Value: "not-an-ip", Scope: ptr("lan-a")},
+			{Kind: string(identity.KindHostname), Value: "core-1", Scope: ptr("lan-a")},
+		},
+	}
+	obs, err := unscopedService().manualObservation(uuid.New(), in,
+		identity.Source{Kind: identity.SourceDeclared, Ref: "manual"})
+	if err != nil {
+		t.Fatalf("manualObservation: %v", err)
+	}
+
+	for _, id := range obs.Identifiers {
+		if id.Value == "not-an-ip" {
+			t.Fatalf("malformed explicitly scoped IP was stored: %+v", obs.Identifiers)
+		}
+	}
+	if got, ok := ids(obs)[identity.KindHostname]; !ok || got.Value != "core-1" || got.Scope != "lan-a" {
+		t.Fatalf("valid scoped hostname = %+v, want core-1 in lan-a", got)
+	}
+}
+
 func TestManualObservation_RefusesAnAssetWithNothingToIdentifyItBy(t *testing.T) {
 	_, err := unscopedService().manualObservation(uuid.New(),
 		models.AssetInput{ClassKey: assetclass.KeyServer, Description: ptr("just a description")},
@@ -274,6 +360,36 @@ func TestFindingSourceNamesTheProducer(t *testing.T) {
 		got := findingSource(IngestFinding{RawData: tc.raw})
 		if got.Producer() != tc.wantProducer || got.Mode != tc.wantMode {
 			t.Errorf("%v → %+v, want producer %q mode %q", tc.raw, got, tc.wantProducer, tc.wantMode)
+		}
+	}
+}
+
+// A scan finding, as the converter now hands it over, resolves to the scan
+// producer measuring ACTIVELY — Source.Mode feeds identity reconcile ranking
+// (active identity outranks passive) and isSighting.
+func TestFindingSource_ScanFindingIsActiveScan(t *testing.T) {
+	for _, src := range []string{"active_scan", "discovery_jobs"} {
+		got := findingSource(IngestFinding{RawData: map[string]interface{}{"source": src}})
+		want := identity.Source{Kind: identity.SourceMeasured, Ref: "scan", Mode: identity.ModeActive}
+		if got != want {
+			t.Errorf("source %q → %+v, want %+v", src, got, want)
+		}
+	}
+	sensor := uuid.New().String()
+	got := findingSource(IngestFinding{SourceSensorID: &sensor, RawData: map[string]interface{}{"source": "active_scan"}})
+	if got.Ref != "scan:"+sensor || got.Mode != identity.ModeActive {
+		t.Errorf("scan with sensor id → %+v", got)
+	}
+	if !findingCollectorSource(IngestFinding{RawData: map[string]interface{}{"source": "device_interrogation"}}) {
+		t.Error("an interrogation row's collector must be verified like any other")
+	}
+}
+
+func TestDiscoverySourceMetadata_ScanRowsStayInTheSensorBucket(t *testing.T) {
+	for _, src := range []string{"sensor_discovery", "active_scan", "discovery_jobs", "pcap_upload"} {
+		got := discoverySourceMetadata(IngestFinding{RawData: map[string]interface{}{"source": src}})
+		if got["discovery_source"] != "sensor_discoveries" {
+			t.Errorf("%s → %v", src, got["discovery_source"])
 		}
 	}
 }

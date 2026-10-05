@@ -124,6 +124,7 @@ func TestEachSettingWritesItsOwnField(t *testing.T) {
 		agentconfig.KeyHostObservationWindow:   agentconfig.Int(120),
 		agentconfig.KeyDedupTTLMinutes:         agentconfig.Int(15),
 		agentconfig.KeyReportingInterval:       agentconfig.Int(120),
+		agentconfig.KeyExtraTLSPorts:           agentconfig.Text("9443,10443"),
 	})
 
 	c := s.config.Capture
@@ -140,6 +141,7 @@ func TestEachSettingWritesItsOwnField(t *testing.T) {
 		{"host_observation_window_seconds", c.HostObservationWindowSeconds, 120},
 		{"dedup_ttl_minutes", c.DedupTTLMinutes, 15},
 		{"reporting_interval_seconds", s.config.ReportingInterval, 2 * time.Minute},
+		{"extra_tls_ports", agentconfig.FormatPortList(c.ExtraPortsToMonitor), "9443,10443"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s wrote %v, want %v — check the setter is writing its own field", tc.name, tc.got, tc.want)
@@ -358,5 +360,104 @@ func TestPersistCaptureSettingKeepsInterfaceEditsWorking(t *testing.T) {
 	}
 	if len(cfg.Capture.Interfaces) != 1 || cfg.Capture.Interfaces[0] != "eth1" || cfg.Capture.HostObservation {
 		t.Fatalf("capture settings changed incorrectly: %+v", cfg.Capture)
+	}
+}
+
+// Additional TLS ports ( WP5) are a capture-filter term, so a change is
+// recorded at once, persisted for the restart that brings it into force, and
+// reported pending-restart until then — on every apply, not only the first.
+// After the restart the same desired value applies cleanly. Reverting before
+// a restart restores the running list and clears the pending flag.
+func TestExtraTLSPortsConvergeAcrossARestart(t *testing.T) {
+	s := testSensor(t)
+	s.setupAgentConfig("test")
+	want := agentconfig.Values{agentconfig.KeyExtraTLSPorts: agentconfig.Text("9443,10443")}
+
+	for _, rev := range []string{"ports", "unrelated-revision"} {
+		s.applier.Apply(rev, want)
+		_, failures, pending := s.applier.Report()
+		if len(failures) != 0 {
+			t.Fatalf("%s: failures = %v", rev, failures)
+		}
+		if len(pending) != 1 || pending[0] != string(agentconfig.KeyExtraTLSPorts) {
+			t.Fatalf("%s: pending = %v, want [extra_tls_ports] — the running filter does not admit these ports yet", rev, pending)
+		}
+		if got := s.applier.Running()[agentconfig.KeyExtraTLSPorts]; !got.Equal(agentconfig.Text("")) {
+			t.Fatalf("%s: running = %v, want the startup list until the capture reopens", rev, got)
+		}
+	}
+	if got := agentconfig.FormatPortList(s.config.Capture.ExtraPortsToMonitor); got != "9443,10443" {
+		t.Errorf("recorded = %q, want 9443,10443", got)
+	}
+
+	reloaded, err := config.LoadFromFile(s.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := agentconfig.FormatPortList(reloaded.Capture.ExtraPortsToMonitor); got != "9443,10443" {
+		t.Fatalf("persisted = %q; a restart would come back without the platform's ports", got)
+	}
+	restarted := &Sensor{config: reloaded, configPath: s.configPath}
+	restarted.setupAgentConfig("test")
+	restarted.applier.Apply("ports", want)
+	if _, failures, pending := restarted.applier.Report(); len(failures) != 0 || len(pending) != 0 {
+		t.Fatalf("after restart: failures=%v pending=%v, want applied", failures, pending)
+	}
+	if got := restarted.applier.Running()[agentconfig.KeyExtraTLSPorts]; !got.Equal(agentconfig.Text("9443,10443")) {
+		t.Errorf("after restart running = %v, want 9443,10443 reported as in effect", got)
+	}
+
+	s.applier.Apply("reverted", agentconfig.Values{agentconfig.KeyExtraTLSPorts: agentconfig.Text("")})
+	if _, failures, pending := s.applier.Report(); len(failures) != 0 || len(pending) != 0 {
+		t.Fatalf("reverted before restart: failures=%v pending=%v", failures, pending)
+	}
+}
+
+// The sensor applies the platform's rule itself and refuses junk with a reason
+// naming the bad entry, leaving the running list and the file alone. A
+// built-in port is accepted: the capture ignores it as an extra, harmlessly.
+func TestExtraTLSPortsRefuseJunkAndAcceptBuiltIns(t *testing.T) {
+	s := testSensor(t)
+	s.setupAgentConfig("test")
+	before, err := os.ReadFile(s.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, bad := range []agentconfig.Value{agentconfig.Text("9443,abc"), agentconfig.Text("70000"), agentconfig.Int(9443)} {
+		s.applier.Apply("bad-"+bad.String(), agentconfig.Values{agentconfig.KeyExtraTLSPorts: bad})
+		_, failures, _ := s.applier.Report()
+		why := failures[string(agentconfig.KeyExtraTLSPorts)]
+		if why == "" {
+			t.Fatalf("%q was accepted", bad.String())
+		}
+		if bad.S != nil && !strings.Contains(why, "abc") && !strings.Contains(why, "70000") {
+			t.Errorf("reason %q does not name the bad value", why)
+		}
+	}
+	if len(s.config.Capture.ExtraPortsToMonitor) != 0 {
+		t.Errorf("refused list recorded: %v", s.config.Capture.ExtraPortsToMonitor)
+	}
+	if after, _ := os.ReadFile(s.configPath); string(after) != string(before) {
+		t.Errorf("refused list persisted:\n%s", after)
+	}
+
+	s.applier.Apply("built-in", agentconfig.Values{agentconfig.KeyExtraTLSPorts: agentconfig.Text("443")})
+	if _, failures, _ := s.applier.Report(); len(failures) != 0 {
+		t.Errorf("a built-in port was refused: %v", failures)
+	}
+}
+
+// What the sensor reports it is running is what its capture admits: the
+// file's list in canonical form, invalid entries left out as the capture
+// leaves them out, and the empty list reported rather than omitted.
+func TestSensorLocalValuesReportTheExtraTLSPorts(t *testing.T) {
+	cfg := &config.Config{Capture: config.CaptureConfig{ExtraPortsToMonitor: []int{10443, 0, 9443, 70000, 9443}}}
+	if got := sensorLocalValues(cfg)[agentconfig.KeyExtraTLSPorts]; !got.Equal(agentconfig.Text("9443,10443")) {
+		t.Errorf("reported = %v, want 9443,10443", got)
+	}
+	got, ok := sensorLocalValues(&config.Config{})[agentconfig.KeyExtraTLSPorts]
+	if !ok || !got.Equal(agentconfig.Text("")) {
+		t.Errorf("reported = %v (present %v), want the empty list reported", got, ok)
 	}
 }

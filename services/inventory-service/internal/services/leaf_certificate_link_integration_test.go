@@ -484,6 +484,11 @@ func TestIntegration_Ingest_DirectMaterializationFollowsMergeAndApproval(t *test
 		t.Fatal(err)
 	}
 	finding := leafCertFinding("surviving-host.example.test", "198.51.100.32", 443, hexFingerprint("redirect-cert"))
+	// The endpoint the identity decision attached, moved to the survivor by
+	// the merge (platform ADR-0003 D2: materialisation only looks it up).
+	if err := f.svc.attachFindingEndpoint(context.Background(), f.tenant, survivor, finding); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.svc.processApprovedDiscoveryCryptoData(f.tenant, source, finding, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}

@@ -115,7 +115,7 @@ func ConnectBypass() (*sql.DB, error) {
 
 // ConnectWithPool opens a PostgreSQL connection with a custom pool config and pings.
 func ConnectWithPool(databaseURL string, pool PoolConfig) (*sql.DB, error) {
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := sql.Open("postgres", ApplyServerDefaults(databaseURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

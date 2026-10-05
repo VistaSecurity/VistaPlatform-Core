@@ -160,8 +160,9 @@ type CaptureConfig struct {
 	MaxConnections   int      `json:"max_connections"`
 	TimeoutSeconds   int      `json:"timeout_seconds"`
 	BufferSize       int      `json:"buffer_size"`
-	// ExtraPortsToMonitor extends the default BPF port list.
-	// Useful for non-standard TLS ports (e.g. 8443, 9443).
+	// ExtraPortsToMonitor lists additional TCP ports that are captured and
+	// decoded as TLS (e.g. 9443). A port with a built-in meaning (SSH, SMB,
+	// a STARTTLS port, ...) keeps it; values outside 1-65535 are ignored.
 	ExtraPortsToMonitor []int `json:"extra_ports_to_monitor"`
 	// DeepScan enables additional probes in the active prober:
 	// TLS version enumeration and deprecated-cipher detection.

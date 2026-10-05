@@ -11,9 +11,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/autoscan"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 )
 
@@ -46,10 +48,12 @@ func NewRevalidationService(
 }
 
 // resolveActiveScanAssets loads the requested assets and turns each into probe
-// coordinates: a BARE host (never "host:port" — see active_scan_plan.go), its
-// port, and the protocols already recorded against its crypto configurations.
-// Assets with neither an IP nor a hostname are omitted, so the caller can tell
-// which assets it is actually able to scan.
+// coordinates: a BARE host (never "host:port" — see active_scan_plan.go) and
+// its port. Assets with neither an IP nor a hostname are omitted, so the
+// caller can tell which assets it is actually able to scan.
+//
+// No protocol is read: the shared scan engine identifies the service from what
+// answers on the port ( WP4, spec V7).
 func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetIDs []uuid.UUID) ([]activeScanAsset, error) {
 	// One row per ENDPOINT, not per asset. Scan coordinates are (address, port),
 	// and that is what an endpoint is; a host exposing three ports is one asset
@@ -72,41 +76,9 @@ func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetI
 		  AND a.id = ANY($2)
 		  AND a.deleted_at IS NULL
 	`
-	// Protocols already observed on this asset — the best signal for what to
-	// probe it with (an SSH host must not be probed for TLS only).
-	const protocolQuery = `
-		SELECT asset_id, protocol
-		FROM crypto_implementations
-		WHERE tenant_id = $1
-		  AND asset_id = ANY($2)
-		  AND deleted_at IS NULL
-		  AND protocol IS NOT NULL
-	`
-
 	var assets []activeScanAsset
-	// RLS-scoped reads over assets / crypto_implementations.
+	// RLS-scoped read over assets / asset_endpoints.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		protocols := make(map[uuid.UUID][]string)
-		protoRows, e := tx.Query(protocolQuery, tenantID, pq.Array(assetIDs))
-		if e != nil {
-			return fmt.Errorf("failed to query crypto configurations: %w", e)
-		}
-		for protoRows.Next() {
-			var assetID uuid.UUID
-			var protocol sql.NullString
-			if e := protoRows.Scan(&assetID, &protocol); e != nil {
-				continue
-			}
-			if protocol.Valid && protocol.String != "" {
-				protocols[assetID] = append(protocols[assetID], protocol.String)
-			}
-		}
-		if e := protoRows.Err(); e != nil {
-			_ = protoRows.Close()
-			return e
-		}
-		_ = protoRows.Close()
-
 		rows, e := tx.Query(assetQuery, tenantID, pq.Array(assetIDs))
 		if e != nil {
 			return fmt.Errorf("failed to query assets: %w", e)
@@ -137,7 +109,7 @@ func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetI
 			if hostname.Valid && hostname.String != "" {
 				name = hostname.String
 			}
-			asset := activeScanAsset{id: id, name: name, host: host, configProtocols: protocols[id]}
+			asset := activeScanAsset{id: id, name: name, host: host}
 			if port.Valid && port.Int64 > 0 {
 				asset.port = int(port.Int64)
 			}
@@ -147,6 +119,20 @@ func (s *RevalidationService) resolveActiveScanAssets(tenantID uuid.UUID, assetI
 	})
 	if err != nil {
 		return nil, err
+	}
+	// The names the assets are known by, to offer a TLS port that refuses the
+	// address-only handshake. Best effort: a failure costs the scan its extra
+	// chance at a name, never the scan itself.
+	ids := make([]uuid.UUID, 0, len(assets))
+	for _, a := range assets {
+		ids = append(ids, a.id)
+	}
+	if names, nerr := autoscan.LoadSNICandidates(context.Background(), s.db, tenantID, ids); nerr != nil {
+		log.Printf("[RevalidationService] tenant %s: not offering server names to the scan: %v", tenantID, nerr)
+	} else {
+		for i := range assets {
+			assets[i].sni = names[assets[i].id]
+		}
 	}
 	return assets, nil
 }
@@ -169,6 +155,7 @@ func (s *RevalidationService) CreateRevalidationJob(tenantID uuid.UUID, userID u
 	var firstJobID string
 	var failed int
 	var lastErr error
+	requestAt := time.Now()
 	for _, batch := range batches {
 		job, e := s.discoveryService.CreateJob(
 			tenantID.String(),
@@ -176,17 +163,27 @@ func (s *RevalidationService) CreateRevalidationJob(tenantID uuid.UUID, userID u
 			models.CreateDiscoveryJobInput{
 				Targets:       batch.targets,
 				ExecutionMode: "async",
-				Protocols:     batch.protocols,
-				Ports:         batch.ports,
+				ScanDepth:     string(shareddisc.DepthCustom),
+				TCPPorts:      shareddisc.CustomPortList(batch.ports),
+				// A re-scan of known assets: its results are stamped
+				// discovery_source=active_scan, not ingested as passive
+				// sensor observations (sensorRowSource in the converter).
+				Options:       activeScanJobOptions(),
+				SNICandidates: batch.sniByHost,
 			},
 			authHeader,
 		)
 		if e != nil {
+			s.markDispatchFailed(tenantID, batch)
 			failed += len(batch.assetIDs)
 			lastErr = e
 			logBatchDispatchFailure(tenantID, batch, e)
 			continue
 		}
+		// Recorded exactly as an Active Scan is, so the same completion logic
+		// settles it. No approval: a stale-asset revalidation is not a
+		// decision about the asset.
+		s.recordDispatched(tenantID, batch, job.ID, requestAt)
 		if firstJobID == "" {
 			firstJobID = job.ID
 		}
@@ -204,8 +201,10 @@ func (s *RevalidationService) CreateRevalidationJob(tenantID uuid.UUID, userID u
 // CreateActiveScanJob dispatches an on-demand Active Scan () for the given
 // assets. Unlike stale revalidation, it (1) approves the targeted assets
 // (pending_approval → monitoring) so the discovery pipeline extracts their crypto
-// instead of deferring it, (2) stamps scan freshness (last_scanned_at / last_scan_status),
-// and (3) dispatches an active TLS probe. Its findings reach sensor_discoveries the same
+// instead of deferring it, (2) dispatches an active probe, and (3) records the
+// dispatched jobs on each asset and marks the probed endpoints `scanning`, which
+// autoscan.FinishActiveScans settles to completed/failed when the jobs end. Both
+// paths record the same way. Its findings reach sensor_discoveries the same
 // way every discovery job's do (cluster-sensor mirrors unconditionally), so the normal
 // discovery-processor → IngestFindings pipeline matches each asset by IP/port and catalogs
 // its certificates and cipher configs.
@@ -245,6 +244,9 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 	if err != nil {
 		return result, err
 	}
+	// Whatever this scan leaves alone is said in the log as well as in the
+	// response: the response reaches one browser tab, once.
+	defer func() { logActiveScanLeftAlone(tenantID, assetIDs, assets, result) }()
 	if !externalConfirmed {
 		need, err := s.externalAssets(tenantID, assets)
 		if err != nil {
@@ -276,13 +278,11 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 				continue
 			}
 
-			// Approve + stamp freshness BEFORE dispatching THIS batch. Approving
-			// (pending_approval → monitoring) is required or the pipeline defers the
-			// scanned crypto; stamping makes the asset drop out of the "unscanned"
-			// coverage set. Idempotent for already-monitoring assets. The returned
-			// stamps are what a failed dispatch restores.
-			prior, e := s.stampScanning(tenantID, routed.batch.assetIDs)
-			if e != nil {
+			// Approve BEFORE dispatching THIS batch: an asset still
+			// pending_approval has its scanned crypto deferred by the pipeline,
+			// and the results can arrive within seconds of dispatch.
+			// Idempotent for already-monitoring assets.
+			if e := s.approveForScan(tenantID, routed.batch.assetIDs); e != nil {
 				failed += len(routed.batch.assetIDs)
 				lastErr = fmt.Errorf("failed to mark assets for scanning: %w", e)
 				logBatchDispatchFailure(tenantID, routed.batch, lastErr)
@@ -293,26 +293,47 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 				Targets:            routed.batch.targets,
 				ExecutionMode:      routed.executionMode,
 				PreferredSensorIDs: routed.preferredSensorIDs,
-				Protocols:          routed.batch.protocols,
-				Ports:              routed.batch.ports,
-				Options:            activeScanJobOptions(),
+				// A planned job on the shared scan engine ( WP4): the
+				// batch's ports at scan depth "custom", no protocol list.
+				ScanDepth: string(shareddisc.DepthCustom),
+				TCPPorts:  shareddisc.CustomPortList(routed.batch.ports),
+				Options:   activeScanJobOptions(),
+				// Names the assets are known by, for a TLS port that wants one.
+				SNICandidates: routed.batch.sniByHost,
 				// Only ever true when a person confirmed it on this request.
 				ExternalTargetsConfirmed: externalConfirmed,
 			}, authHeader)
 			if e != nil {
-				// Restore the pre-scan freshness so the UI doesn't show a stuck
-				// "scanning" and the asset isn't reported as freshly scanned.
-				s.stampScanFailed(tenantID, prior)
 				// A target verdict is the caller's to act on, per asset —
-				// never folded into a generic failure ( W5.13b).
+				// never folded into a generic failure ( W5.13b). Nothing
+				// was scanned and nothing is recorded: the person is asked.
 				if s.recordTargetVerdict(&result, routed.batch, e) {
 					continue
 				}
+				// Nothing was dispatched: the endpoints say so, and no scan
+				// time or asset record is written, so the asset stays on the
+				// Active Scan list.
+				s.markDispatchFailed(tenantID, routed.batch)
 				failed += len(routed.batch.assetIDs)
 				lastErr = e
 				logBatchDispatchFailure(tenantID, routed.batch, e)
+				// Said in the response too. When another batch did start, the
+				// request succeeds, and without this the person saw "Active
+				// scan started for N assets" with these assets in no list at
+				// all — only a server log line knew they never ran.
+				for _, id := range routed.batch.assetIDs {
+					result.Skipped = append(result.Skipped, ActiveScanSkip{AssetID: id, Reason: dispatchFailureReason(e)})
+				}
 				continue
 			}
+			// Mark this batch's endpoints `scanning` and record the job on
+			// each asset, in one transaction, now that the job exists. The
+			// record is what ties the endpoints to the job that settles them
+			// (autoscan.FinishActiveScans) and what records a scan of an asset
+			// with no endpoint at all. The scan TIME is written only when the
+			// job finishes, so the asset stays on the "unscanned" list, shown
+			// as scanning, until its scan has actually run.
+			s.recordDispatched(tenantID, routed.batch, job.ID, now)
 			dispatched := ActiveScanDispatchedJob{JobID: job.ID, Executor: "platform", Count: len(routed.batch.assetIDs)}
 			if routed.sensor != nil {
 				id := routed.sensor.ID
@@ -345,6 +366,16 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 			result.Scanned, failed, tenantID, lastErr)
 	}
 	return result, nil
+}
+
+// dispatchFailureReason is what a person is told about a batch whose job could
+// not be created: the downstream service's own wording when it gave one.
+func dispatchFailureReason(err error) string {
+	var downstream *DownstreamError
+	if errors.As(err, &downstream) && downstream.Message != "" {
+		return "the scan could not be started: " + downstream.Message
+	}
+	return "the scan could not be started"
 }
 
 // RunFrom is the executor a manual Active Scan asked for.
@@ -433,8 +464,8 @@ type activeScanRouter interface {
 //
 // platform: everything from the platform. sensor: everything from the chosen
 // sensor. auto: the routing rule — observing sensor, else segment sensor, else
-// platform — with an offline observer's hosts SKIPPED rather than scanned from
-// the wrong place. A router that cannot answer falls back to the platform for
+// platform — with an offline observer's hosts handed to a live segment sensor
+// when one covers them and otherwise SKIPPED, never scanned from the platform. A router that cannot answer falls back to the platform for
 // this scan, loudly, because refusing to scan at all is the worse failure and
 // "from the platform" is what every manual scan did until today.
 func (s *RevalidationService) routeActiveScanBatch(tenantID uuid.UUID, batch activeScanBatch, runFrom RunFrom, chosen *sensorrouting.Sensor, now time.Time) []routedActiveScanBatch {
@@ -473,141 +504,120 @@ func (s *RevalidationService) routeActiveScanBatch(tenantID uuid.UUID, batch act
 	return out
 }
 
+// maxActiveScanSkipLogLines bounds the per-asset lines one scan request may
+// write; the summary line always carries the full counts.
+const maxActiveScanSkipLogLines = 50
+
+// logActiveScanLeftAlone records every asset a person asked to scan that was
+// not dispatched, and why: skipped by routing or by a target verdict, waiting
+// on a confirmation, or absent because it has no address or name to scan.
+func logActiveScanLeftAlone(tenantID uuid.UUID, requested []uuid.UUID, resolved []activeScanAsset, result ActiveScanResult) {
+	addressable := make(map[uuid.UUID]bool, len(resolved))
+	for _, a := range resolved {
+		addressable[a.id] = true
+	}
+	var noTarget []uuid.UUID
+	for _, id := range requested {
+		if !addressable[id] {
+			noTarget = append(noTarget, id)
+		}
+	}
+	if len(result.Skipped) == 0 && len(result.NeedsConfirmation) == 0 && len(noTarget) == 0 {
+		return
+	}
+	log.Printf("[WARN] Active scan left assets alone - tenantID: %v, requested: %d, dispatched: %d, skipped: %d, awaiting confirmation: %d, no address or name: %d",
+		tenantID, len(requested), result.Scanned, len(result.Skipped), len(result.NeedsConfirmation), len(noTarget))
+	lines := 0
+	line := func(format string, args ...interface{}) {
+		if lines < maxActiveScanSkipLogLines {
+			log.Printf(format, args...)
+		}
+		lines++
+	}
+	for _, sk := range result.Skipped {
+		line("[WARN] Active scan skipped asset %v, tenantID: %v: %s", sk.AssetID, tenantID, sk.Reason)
+	}
+	for _, n := range result.NeedsConfirmation {
+		line("[WARN] Active scan not started for asset %v, tenantID: %v: target %s is outside the registered networks and was not confirmed", n.AssetID, tenantID, n.Target)
+	}
+	for _, id := range noTarget {
+		line("[WARN] Active scan skipped asset %v, tenantID: %v: it has no address or name to scan", id, tenantID)
+	}
+	if lines > maxActiveScanSkipLogLines {
+		log.Printf("[WARN] Active scan: %d more asset(s) left alone, not listed - tenantID: %v", lines-maxActiveScanSkipLogLines, tenantID)
+	}
+}
+
 // logBatchDispatchFailure records exactly which assets were not dispatched and
 // why. Without this, a batch that fails while another succeeds vanishes: the
 // caller sees a job ID and a plausible count, and nothing anywhere says the
 // rest never ran.
 func logBatchDispatchFailure(tenantID uuid.UUID, batch activeScanBatch, err error) {
-	log.Printf("[ERROR] Active scan batch dispatch failed - tenantID: %v, ports: %v, protocols: %v, %d asset(s): %v, error: %v",
-		tenantID, batch.ports, batch.protocols, len(batch.assetIDs), batch.assetIDs, err)
+	log.Printf("[ERROR] Active scan batch dispatch failed - tenantID: %v, ports: %v, %d asset(s): %v, error: %v",
+		tenantID, batch.ports, len(batch.assetIDs), batch.assetIDs, err)
 }
 
-// stampScanning approves the given assets, stamps scan freshness on their
-// endpoints, and returns each ENDPOINT's PRIOR last_scanned_at so a failed
-// dispatch can put it back exactly as it was. The read and the write share one
-// transaction, so the captured value is the one this statement overwrote.
+// approveForScan approves the assets an Active Scan is about to dispatch
+// (pending_approval → monitoring). Approval is on the asset — a decision about
+// the thing, not about one of its faces — and idempotent.
 //
-// Scan freshness is endpoint-level (DATA_MODEL §2): a scan probes a socket, and
-// "when was this last scanned" about an asset with three endpoints, two of them
-// scanned, has no single true answer. Approval stays on the asset — it is a
-// decision about the thing, not about one of its faces.
-//
-// RLS-scoped read+write over assets and asset_endpoints.
-func (s *RevalidationService) stampScanning(tenantID uuid.UUID, assetIDs []uuid.UUID) ([]scanStamp, error) {
-	var prior []scanStamp
-	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		rows, e := tx.Query(`
-			SELECT e.id, e.last_scanned_at
-			FROM asset_endpoints e
-			JOIN assets a ON a.tenant_id = e.tenant_id AND a.id = e.asset_id AND a.deleted_at IS NULL
-			WHERE e.tenant_id = $1 AND e.asset_id = ANY($2)
-		`, tenantID, pq.Array(assetIDs))
-		if e != nil {
-			return e
-		}
-		for rows.Next() {
-			var stamp scanStamp
-			if e := rows.Scan(&stamp.assetID, &stamp.lastScannedAt); e != nil {
-				_ = rows.Close()
-				return e
-			}
-			prior = append(prior, stamp)
-		}
-		if e := rows.Err(); e != nil {
-			_ = rows.Close()
-			return e
-		}
-		_ = rows.Close()
-
-		if _, e := tx.Exec(`
+// RLS-scoped write over assets.
+func (s *RevalidationService) approveForScan(tenantID uuid.UUID, assetIDs []uuid.UUID) error {
+	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		_, e := tx.Exec(`
 			UPDATE assets
 			SET asset_status = 'monitoring',
 			    updated_at   = now()
 			WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL
-		`, tenantID, pq.Array(assetIDs)); e != nil {
-			return e
-		}
-
-		_, e = tx.Exec(`
-			UPDATE asset_endpoints
-			SET last_scanned_at  = now(),
-			    last_scan_status = 'scanning',
-			    updated_at       = now()
-			WHERE tenant_id = $1 AND asset_id = ANY($2)
 		`, tenantID, pq.Array(assetIDs))
 		return e
 	})
-	if err != nil {
-		return nil, err
-	}
-	return prior, nil
 }
 
-// stampScanFailed undoes the optimistic freshness stamp for assets whose scan
-// was never actually dispatched, RESTORING each asset's previous
-// last_scanned_at rather than blanking it.
+// recordDispatched records a dispatched job for its batch: the batch's
+// endpoints are marked `scanning` and the job is added to each asset's Active
+// Scan record (autoscan.RecordActiveScanTx), in one transaction, so there is
+// never a `scanning` endpoint without the job that will settle it.
 //
-// Blanking would be its own lie: last_scanned_at IS NULL is the "never scanned"
-// coverage cut, so nulling it on an asset that really was scanned last week
-// would erase genuine scan history and report it as never scanned. Restoring
-// puts a previously-unscanned asset back to NULL (returning it to the Active
-// Scan list, which is the point) and leaves a previously-scanned asset with its
-// real timestamp.
+// It runs AFTER the job exists, so a failed dispatch leaves nothing to undo.
+// last_scanned_at is not touched: it is a scan time, written by
+// autoscan.FinishActiveScans when the job has actually scanned the endpoint.
+// Writing it at dispatch is what made a scan that never ran look like one that
+// did, and what took an asset off the unscanned list before its scan happened.
 //
-// last_scan_status is deliberately NOT restored — it is set to 'failed', which
-// is what actually happened. asset_status is left approved: approval is an
-// intentional, idempotent act, and reverting it could undo an approval the
-// asset already had.
+// Best-effort: the job is already running, and the dispatch response is what
+// the caller reports. A failure is logged loudly; the asset then simply stays
+// on the unscanned list and nothing is left `scanning`.
+func (s *RevalidationService) recordDispatched(tenantID uuid.UUID, batch activeScanBatch, jobID string, requestAt time.Time) {
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		return autoscan.RecordActiveScanTx(context.Background(), tx, tenantID, batch.assetIDs, batch.ports, jobID, requestAt)
+	})
+	if err != nil {
+		log.Printf("[ERROR] Active scan job %s dispatched but not recorded on its %d asset(s), tenantID: %v: %v",
+			jobID, len(batch.assetIDs), tenantID, err)
+	}
+}
+
+// markDispatchFailed records that a batch's scan was never dispatched: its
+// endpoints read `failed`. last_scanned_at is left alone (nothing scanned
+// them), so a never-scanned asset stays on the Active Scan list and a scanned
+// one keeps its real history. An endpoint another request is still scanning
+// is not touched. asset_status is left approved: approval is intentional and
+// idempotent, and reverting it could undo an approval the asset already had.
 //
 // Best-effort by design — the dispatch error is what the caller reports.
-func (s *RevalidationService) stampScanFailed(tenantID uuid.UUID, prior []scanStamp) {
-	nullIDs, tsIDs, tsValues := planStampRestore(prior)
-
+func (s *RevalidationService) markDispatchFailed(tenantID uuid.UUID, batch activeScanBatch) {
 	_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		if len(nullIDs) > 0 {
-			if _, e := tx.Exec(restoreNullStampSQL(scanStampTable), tenantID, pq.Array(nullIDs)); e != nil {
-				return e
-			}
-		}
-		if len(tsIDs) > 0 {
-			if _, e := tx.Exec(restoreTimestampStampSQL(scanStampTable), tenantID, pq.Array(tsIDs), pq.Array(tsValues)); e != nil {
-				return e
-			}
-		}
-		return nil
+		_, e := tx.Exec(`
+			UPDATE asset_endpoints
+			SET last_scan_status = 'failed',
+			    updated_at       = now()
+			WHERE tenant_id = $1 AND asset_id = ANY($2) AND port = ANY($3)
+			  AND status <> 'closed'
+			  AND last_scan_status IS DISTINCT FROM 'scanning'
+		`, tenantID, pq.Array(batch.assetIDs), pq.Array(batch.ports))
+		return e
 	})
-}
-
-// scanStampTable is the table the freshness stamp lives on. Scan freshness is
-// a property of the endpoint that was probed, not of the asset (DATA_MODEL §2).
-const scanStampTable = "asset_endpoints"
-
-// The two restore statements are built by these helpers rather than inlined so
-// the live SQL check (stamp_restore_sqlcheck_test.go) runs the SAME statements
-// against a real Postgres, pointed at a probe table. Inlining them would let the
-// production SQL drift away from the only thing that verifies it works.
-
-// restoreNullStampSQL returns endpoints that were genuinely never scanned to NULL.
-func restoreNullStampSQL(table string) string {
-	return fmt.Sprintf(`
-		UPDATE %s
-		SET last_scan_status = 'failed',
-		    last_scanned_at  = NULL,
-		    updated_at       = now()
-		WHERE tenant_id = $1 AND id = ANY($2)`, table)
-}
-
-// restoreTimestampStampSQL restores each endpoint's exact prior last_scanned_at.
-// The parallel uuid[]/timestamptz[] arrays are unnested into a join so one
-// statement restores many distinct instants.
-func restoreTimestampStampSQL(table string) string {
-	return fmt.Sprintf(`
-		UPDATE %s AS a
-		SET last_scan_status = 'failed',
-		    last_scanned_at  = p.prior,
-		    updated_at       = now()
-		FROM unnest($2::uuid[], $3::timestamptz[]) AS p(id, prior)
-		WHERE a.tenant_id = $1 AND a.id = p.id`, table)
 }
 
 // RevalidateStaleAssets creates a re-validation job for all stale assets
@@ -629,21 +639,4 @@ func (s *RevalidationService) RevalidateStaleAssets(tenantID uuid.UUID, userID u
 	}
 
 	return s.CreateRevalidationJob(tenantID, userID, assetIDs, authHeader)
-}
-
-// ProcessRevalidationResults processes discovery job results and updates last_seen_at
-func (s *RevalidationService) ProcessRevalidationResults(tenantID uuid.UUID, jobID string) error {
-	// Get job results from discovery service
-	// This would need to be implemented in discovery_service.go
-	// For now, we'll assume the discovery service has a method to get results
-
-	// The actual processing would:
-	// 1. Get discovery job results
-	// 2. Match results to existing assets by IP/hostname/port
-	// 3. Update last_seen_at for found assets
-	// 4. Clear stale_status for found assets
-	// 5. Keep stale_status for assets not found
-
-	// This is a placeholder - actual implementation would depend on discovery service API
-	return fmt.Errorf("not implemented: requires discovery service result retrieval")
 }

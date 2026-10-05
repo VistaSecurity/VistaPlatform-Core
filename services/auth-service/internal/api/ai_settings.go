@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -155,8 +156,46 @@ type aiStatusResponse struct {
 	// fixes and only one of them is the reader's.
 	EditionLinked bool `json:"edition_linked"`
 
+	// ProviderSource says whose provider is answering for THIS tenant:
+	// "tenant" (the organization connected its own), "deployment" (the one
+	// whoever runs this deployment set, by either route) or "none".
+	ProviderSource string `json:"provider_source"`
+
+	// ProviderProblem is set when a provider is configured for this tenant but
+	// cannot be used, in a sentence a reader can act on. It never quotes the
+	// underlying error: this endpoint is readable by any signed-in member.
+	ProviderProblem string `json:"provider_problem,omitempty"`
+
+	// ProviderKinds are the provider kinds this build can connect to. Empty in
+	// Core, which is how the page knows not to offer the form at all.
+	ProviderKinds []string `json:"provider_kinds"`
+
+	// TenantProviderAllowed is whether this tenant may connect a provider of
+	// its own, and TenantProviderBlockedBy says who decided when it may not:
+	// "plan" or "deployment".
+	TenantProviderAllowed   bool   `json:"tenant_provider_allowed"`
+	TenantProviderBlockedBy string `json:"tenant_provider_blocked_by,omitempty"`
+
+	// TenantProvider is the provider this tenant has stored, when it has one —
+	// whether or not it is the one in effect.
+	TenantProvider *aiTenantProvider `json:"tenant_provider,omitempty"`
+
 	Seams  []aiSeamStatus   `json:"seams"`
 	Tenant aiTenantControls `json:"tenant"`
+}
+
+// aiTenantProvider is a tenant's stored provider as the page may show it.
+//
+// The endpoint is the HOST only — the tenant typed the URL and needs to
+// recognise it, and the path and query are the part that can carry something
+// nobody meant to put on a screen. The credential is the last four characters,
+// which is all that was ever stored in clear.
+type aiTenantProvider struct {
+	Kind       string `json:"kind"`
+	Host       string `json:"host,omitempty"`
+	Model      string `json:"model,omitempty"`
+	HasKey     bool   `json:"has_key"`
+	APIKeyHint string `json:"api_key_hint,omitempty"`
 }
 
 // aiDeployment is the deployment-level half of the answer, resolved ONCE at
@@ -174,6 +213,24 @@ type aiDeployment struct {
 	modelID            string
 	editionLinked      bool
 	seams              []aiSeamStatus
+
+	// resolver, when set, makes the provider half PER TENANT: a tenant may
+	// have connected its own provider, and the platform default may have been
+	// set in admin-ui since this process started. Nil keeps the answer the
+	// environment gave at wiring, which is all a process without a resolver
+	// can know.
+	resolver *ai.Resolver
+
+	// sink receives the audit record for a connection test. Nil where there is
+	// no audit rail.
+	sink ai.AuditSink
+}
+
+// withResolver returns the deployment answering per tenant through r.
+func (d aiDeployment) withResolver(r *ai.Resolver, sink ai.AuditSink) aiDeployment {
+	d.resolver = r
+	d.sink = sink
+	return d
 }
 
 // resolveAIDeployment reads the environment and the build once.
@@ -196,6 +253,14 @@ func resolveAIDeployment() aiDeployment {
 		dep.modelID = cfg.Model
 	}
 
+	dep.seams = aiSeamRows(dep.editionLinked, dep.providerConfigured)
+	return dep
+}
+
+// aiSeamRows is the "what is turned on" table for one answer to "can a model
+// be reached".
+func aiSeamRows(editionLinked, providerConfigured bool) []aiSeamStatus {
+	var rows []aiSeamStatus
 	for _, info := range seams.Catalogue() {
 		row := aiSeamStatus{
 			Key:             string(info.Seam),
@@ -219,27 +284,131 @@ func resolveAIDeployment() aiDeployment {
 		default:
 			// Generative: needs BOTH the Enterprise implementations in the
 			// build and a provider this deployment can reach.
-			row.Live = dep.editionLinked && dep.providerConfigured
+			row.Live = editionLinked && providerConfigured
 		}
-		dep.seams = append(dep.seams, row)
+		rows = append(rows, row)
 	}
-	return dep
+	return rows
 }
 
 // respond writes the deployment half plus a tenant's controls.
-func (d aiDeployment) respond(c *gin.Context, tc ai.TenantControls) {
-	c.JSON(http.StatusOK, aiStatusResponse{
+func (d aiDeployment) respond(c *gin.Context, tenantID uuid.UUID, tc ai.TenantControls) {
+	resp, err := d.status(c.Request.Context(), tenantID, tc)
+	if err != nil {
+		// The page's whole job is to say what is true. A provider half that
+		// could not be read is answered as a failure, not as "nothing is
+		// configured", which would be a claim.
+		log.Printf("[ai-settings] resolve provider for %s: %v", tenantID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read the AI assistant settings"})
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// status builds the response for one tenant.
+func (d aiDeployment) status(ctx context.Context, tenantID uuid.UUID, tc ai.TenantControls) (aiStatusResponse, error) {
+	resp := aiStatusResponse{
 		ProviderConfigured: d.providerConfigured,
 		ProviderName:       d.providerName,
 		ModelID:            d.modelID,
 		EditionLinked:      d.editionLinked,
+		ProviderSource:     providerSourceNone,
+		ProviderKinds:      ai.RegisteredProviders(),
 		Seams:              d.seams,
 		Tenant: aiTenantControls{
 			RecordQuestions:   tc.RecordQuestions,
 			AssistantDisabled: tc.AssistantDisabled,
 			AuthoringDisabled: authoringDisabledInterim,
 		},
-	})
+	}
+	if d.providerConfigured {
+		resp.ProviderSource = providerSourceDeployment
+	}
+	if d.resolver == nil {
+		return resp, nil
+	}
+
+	// In a build with no model clients the plan gate decides nothing — there
+	// is nothing to connect — so it is not asked.
+	resolve := d.resolver.ForTenant
+	if d.editionLinked {
+		resolve = d.resolver.DescribeTenant
+	}
+	res, err := resolve(ctx, tenantID)
+	if err != nil {
+		return aiStatusResponse{}, err
+	}
+	perm, stored := res.Permission, res.TenantStored
+
+	resp.ProviderConfigured = res.Provider.Available()
+	resp.ProviderName, resp.ModelID = "", ""
+	switch res.Source {
+	case ai.SourceTenant:
+		resp.ProviderSource = providerSourceTenant
+	case ai.SourcePlatform, ai.SourceEnvironment:
+		resp.ProviderSource = providerSourceDeployment
+	default:
+		resp.ProviderSource = providerSourceNone
+	}
+	if resp.ProviderConfigured {
+		resp.ProviderName = ai.NormalizeKind(res.Config.Kind)
+		resp.ModelID = res.Config.Model
+	} else if res.Source != ai.SourceNone {
+		// Something IS configured for this tenant and it cannot answer. Only
+		// said when this build could have used it: in Core the page already
+		// explains the edition, and "your provider is broken" on top of that
+		// would send the reader to fix something that is not the reason.
+		if d.editionLinked {
+			resp.ProviderProblem = providerProblem(res.Err)
+		}
+	}
+	resp.Seams = aiSeamRows(d.editionLinked, resp.ProviderConfigured)
+
+	resp.TenantProviderAllowed = d.editionLinked && perm.Allowed()
+	switch {
+	case resp.TenantProviderAllowed, !d.editionLinked:
+		// Allowed, or the edition is the whole answer.
+	case !perm.PlatformAllows:
+		resp.TenantProviderBlockedBy = "deployment"
+	default:
+		resp.TenantProviderBlockedBy = "plan"
+	}
+	if stored != nil {
+		resp.TenantProvider = &aiTenantProvider{
+			Kind:       stored.Kind,
+			Host:       stored.Host(),
+			Model:      stored.Model,
+			HasKey:     stored.APIKeyEnc != "",
+			APIKeyHint: stored.APIKeyHint,
+		}
+	}
+	return resp, nil
+}
+
+// The three values of provider_source. "deployment" covers both ways an
+// operator can set one (admin-ui and the chart): a tenant has no use for the
+// difference.
+const (
+	providerSourceTenant     = "tenant"
+	providerSourceDeployment = "deployment"
+	providerSourceNone       = "none"
+)
+
+// providerProblem turns a resolution error into a sentence for the page. It
+// classifies; it does not quote.
+func providerProblem(err error) string {
+	switch {
+	case err == nil:
+		return "The configured provider reports that it is not available."
+	case errors.Is(err, ai.ErrNoMasterKey):
+		return "This deployment cannot read stored credentials, so the saved API key cannot be used. Whoever runs it needs to set its encryption key."
+	case errors.Is(err, ai.ErrPrivateEndpoint):
+		return "The provider's endpoint is on a private address, which this deployment does not currently allow."
+	case errors.Is(err, ai.ErrUnknownProvider):
+		return "The configured provider is not one this build includes."
+	default:
+		return "The configured provider could not be set up. Enter it again; if that does not help, the saved API key may no longer be readable."
+	}
 }
 
 // getTenantAIHandler serves GET /tenant/ai.
@@ -255,7 +424,7 @@ func getTenantAIHandler(db *sql.DB, dep aiDeployment) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read the AI assistant settings"})
 			return
 		}
-		dep.respond(c, tc)
+		dep.respond(c, tenantID, tc)
 	}
 }
 
@@ -354,7 +523,7 @@ func updateTenantAIHandler(db *sql.DB, dep aiDeployment) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save the AI assistant settings"})
 			return
 		}
-		dep.respond(c, next)
+		dep.respond(c, tenantID, next)
 	}
 }
 

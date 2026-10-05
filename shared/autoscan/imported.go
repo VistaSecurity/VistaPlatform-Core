@@ -22,31 +22,47 @@ package autoscan
 // removes candidates. An explicit scan a person asks for — Active Scan on an
 // asset or an address — does not read it.
 //
-// "Imported only" is decided from the inventory's own provenance:
+// "Imported only" is STORED on the asset, in `assets.import_only_sources`
+// (shared/identity/postgres import_only.go, ADR-0002 D10 amendment of
+//. It used to be derived here on every check, from the asset's
+// `created` history row and every identifier, fact and endpoint it carries;
+// on a real inventory that made automatic-scan job creation take minutes. The
+// stored state means exactly what the derivation computed:
 //
-//   - the asset was CREATED by a connection (its `created` history entry says
-//     source_kind "imported" and its source is a connection ref);
-//   - and nothing independent has vouched for it since:
-//   - no identifier, fact or endpoint with source_kind "measured" from a
+//   - set when a connection CREATES the asset (the source its `created`
+//     history entry names: source_kind "imported", a connection ref);
+//   - cleared when something independent vouches for it:
+//   - an identifier, fact or endpoint with source_kind "measured" from a
 //     source other than an active scan — a sensor, an agent or an
 //     interrogation seeing the host is exactly the evidence the import lacked;
 //     a scan's own result is not, or consent withdrawn could never take effect
 //     for an asset scanned while it held;
-//   - and no spreadsheet upload has listed it since (a timeline entry from the
-//     upload that is not its creation — a person's explicit list keeps it in
-//     scope). An asset a spreadsheet CREATED is out of the rule already, by
-//     the connection scoping of the first clause.
+//   - or a person's spreadsheet upload listing it after its creation (a
+//     person's explicit list keeps it in scope). An asset a spreadsheet
+//     CREATED is never import-only: it was not created by a connection.
+//   - on a merge the survivor is import-only only if every merged asset was,
+//     and it carries every creating connection.
+//
+// Once cleared it stays cleared: the evidence arrived, and a later rewrite or
+// expiry of the row that carried it does not un-see the host.
 //
 // Consent is `source_scan_consents` (tenant, source_ref): a row with
-// allow_active_scan = true for ANY connection that reported the asset (the
-// creating one, or one whose identifiers, facts or endpoints it carries). No
-// row means no consent — which is the state of every connection until the
-// tenant turns it on.
+// allow_active_scan = true for ANY connection that reported the asset (one
+// that created it, recorded in the column, or one whose identifiers, facts or
+// endpoints it carries). No row means no consent — which is the state of every
+// connection until the tenant turns it on. Consent is read when the check
+// runs, not stored, because the tenant changes it at any time.
+//
+// Where the rule applies (owner decision,: only to an address in
+// PRIVATE space the tenant has not declared. An address inside a network
+// segment a person registered (declared, not learned —
+// dispatchguard.SegmentDeclaresAutomaticScope) is already vouched for by that
+// registration, and an import-only asset there is eligible without connection
+// consent. The callers apply that narrowing, since only they know the address
+// being scanned; this predicate answers only "import-only without consent".
 
 import (
 	"strings"
-
-	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
 // ReasonImportedWithoutConsent is an asset known only from a connection that
@@ -54,59 +70,46 @@ import (
 const ReasonImportedWithoutConsent Reason = "imported_without_scan_consent"
 
 // ImportedWithoutConsentSQL is a boolean SQL expression, TRUE when the asset
-// aliased `a` must be withheld from automatic scanning: created by a
-// connection, never independently measured or listed by a person's upload,
-// and no connection that reported it consents. `a` must expose tenant_id and
-// id.
+// aliased `a` is import-only (its stored import_only_sources) and no
+// connection that reported it consents. `a` must expose tenant_id, id and
+// import_only_sources.
+//
+// It reads asset_history not at all, and the identifier, fact and endpoint
+// tables only for an import-only asset — which is why a caller can afford it
+// per candidate. A caller that has established the tenant has NO import-only
+// asset ([AnyImportOnlySQL]) can leave it out.
 func ImportedWithoutConsentSQL(a string) string {
 	// Consent rows exist only for connections (the signed route that writes
 	// them is called by the service that owns connections), so the consent
-	// join below needs no connection filter of its own; the created-by clause
-	// is what scopes the rule.
-	r := strings.NewReplacer(
-		"{a}", a,
-		"{sheet}", "'"+identity.SpreadsheetImportSourceRef+"'",
-		"{conn_ch}", identity.ConnectionSourceRefSQL("ch.source"),
-	)
+	// join below needs no connection filter of its own; the stored state is
+	// what scopes the rule.
+	r := strings.NewReplacer("{a}", a)
+	// One NOT EXISTS per place a reporting connection can be named, each a
+	// join to the consent row by its key: every arm is an index lookup on
+	// (tenant_id, asset_id), evaluated only for an import-only asset.
 	return r.Replace(`(
-	EXISTS (SELECT 1 FROM asset_history ch
-	         WHERE ch.tenant_id = {a}.tenant_id AND ch.asset_id = {a}.id
-	           AND ch.action = 'created' AND ch.changes_json->>'source_kind' = 'imported'
-	           AND {conn_ch})
-	AND NOT EXISTS (
-	    SELECT 1 FROM asset_identifiers mi
-	     WHERE mi.tenant_id = {a}.tenant_id AND mi.asset_id = {a}.id AND mi.source_kind = 'measured'
-	       AND COALESCE(mi.source_ref, '') <> 'scan' AND COALESCE(mi.source_ref, '') NOT LIKE 'scan:%'
-	    UNION ALL
-	    SELECT 1 FROM asset_facts mf
-	     WHERE mf.tenant_id = {a}.tenant_id AND mf.asset_id = {a}.id AND mf.source_kind = 'measured'
-	       AND mf.source_ref <> 'scan' AND mf.source_ref NOT LIKE 'scan:%'
-	    UNION ALL
-	    SELECT 1 FROM asset_endpoints me
-	     WHERE me.tenant_id = {a}.tenant_id AND me.asset_id = {a}.id AND me.source_kind = 'measured'
-	       AND COALESCE(me.source_ref, '') <> 'scan' AND COALESCE(me.source_ref, '') NOT LIKE 'scan:%'
-	    UNION ALL
-	    -- A spreadsheet listing it SINCE: not its creation. (A spreadsheet
-	    -- creation is out of the rule by the first clause's connection
-	    -- scoping; counting it here as well would mask that scoping.)
-	    SELECT 1 FROM asset_history sh
-	     WHERE sh.tenant_id = {a}.tenant_id AND sh.asset_id = {a}.id AND sh.source = {sheet}
-	       AND sh.action <> 'created')
+	{a}.import_only_sources IS NOT NULL
 	AND NOT EXISTS (
 	    SELECT 1 FROM source_scan_consents sc
 	     WHERE sc.tenant_id = {a}.tenant_id AND sc.allow_active_scan
-	       AND sc.source_ref IN (
-	           SELECT ch.source FROM asset_history ch
-	            WHERE ch.tenant_id = {a}.tenant_id AND ch.asset_id = {a}.id
-	              AND ch.action = 'created' AND ch.changes_json->>'source_kind' = 'imported'
-	           UNION ALL
-	           SELECT ii.source_ref FROM asset_identifiers ii
-	            WHERE ii.tenant_id = {a}.tenant_id AND ii.asset_id = {a}.id AND ii.source_kind = 'imported'
-	           UNION ALL
-	           SELECT fi.source_ref FROM asset_facts fi
-	            WHERE fi.tenant_id = {a}.tenant_id AND fi.asset_id = {a}.id AND fi.source_kind = 'imported'
-	           UNION ALL
-	           SELECT ei.source_ref FROM asset_endpoints ei
-	            WHERE ei.tenant_id = {a}.tenant_id AND ei.asset_id = {a}.id AND ei.source_kind = 'imported'))
+	       AND sc.source_ref = ANY({a}.import_only_sources))
+	AND NOT EXISTS (
+	    SELECT 1 FROM asset_identifiers ii
+	      JOIN source_scan_consents sc ON sc.tenant_id = ii.tenant_id AND sc.source_ref = ii.source_ref AND sc.allow_active_scan
+	     WHERE ii.tenant_id = {a}.tenant_id AND ii.asset_id = {a}.id AND ii.source_kind = 'imported')
+	AND NOT EXISTS (
+	    SELECT 1 FROM asset_facts fi
+	      JOIN source_scan_consents sc ON sc.tenant_id = fi.tenant_id AND sc.source_ref = fi.source_ref AND sc.allow_active_scan
+	     WHERE fi.tenant_id = {a}.tenant_id AND fi.asset_id = {a}.id AND fi.source_kind = 'imported')
+	AND NOT EXISTS (
+	    SELECT 1 FROM asset_endpoints ei
+	      JOIN source_scan_consents sc ON sc.tenant_id = ei.tenant_id AND sc.source_ref = ei.source_ref AND sc.allow_active_scan
+	     WHERE ei.tenant_id = {a}.tenant_id AND ei.asset_id = {a}.id AND ei.source_kind = 'imported')
 )`)
 }
+
+// AnyImportOnlySQL is a query of one boolean column: does tenant $1 have any
+// import-only asset at all? Most tenants — every Core tenant, which has no
+// connections — never have one, and then the consent rule has nothing to
+// withhold. A partial index (idx_assets_tenant_import_only) answers it.
+const AnyImportOnlySQL = `SELECT EXISTS (SELECT 1 FROM assets WHERE tenant_id = $1 AND import_only_sources IS NOT NULL)`

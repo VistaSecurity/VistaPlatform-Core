@@ -74,6 +74,18 @@ func TestToIngestFinding_SuiteLabelWithoutMeasuredGroupIsNotPromoted(t *testing.
 	}
 }
 
+// A group the platform has no name for is recorded by its wire id alone, and
+// on a passive TLS <= 1.2 row the suite label sits beside it. The id marks a
+// measurement, but the label is still a label.
+func TestToIngestFinding_SuiteLabelBesideUnnamedGroupIsNotPromoted(t *testing.T) {
+	f := convertTLSKex(t, tlsKexEnvelope(map[string]interface{}{
+		"key_exchange_algorithm": "ECDHE_RSA", "key_exchange_group_raw": 30, "key_exchange_key_size": 448,
+	}))
+	if f.KeyExchangeAlgorithm != nil {
+		t.Errorf("KeyExchangeAlgorithm = %q, want nil — a suite label is not a measured group", *f.KeyExchangeAlgorithm)
+	}
+}
+
 func tlsKexEnvelope(raw map[string]interface{}) map[string]interface{} {
 	return map[string]interface{}{
 		"version": "TLS 1.3", "cipher_suite": "TLS_AES_128_GCM_SHA256", "key_size": 0,

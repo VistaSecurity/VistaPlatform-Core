@@ -93,7 +93,7 @@ func (s *AssetService) retainedEvidence(ctx context.Context, tx *sqlx.Tx, tenant
  WHERE p.tenant_id=$1 AND p.observation_id=$2
  UNION ALL SELECT 'host_inventory',receipt_key,observed_at,materialized_at,superseded_at,last_error<>'',payload::text,observation,false
  FROM identity_observation_host_inventories WHERE tenant_id=$1 AND observation_id=$2
- UNION ALL SELECT 'peer',context_id,observed_at,materialized_at,NULL::timestamptz,last_error<>'',payload::text,'{}'::jsonb,false
+ UNION ALL SELECT 'peer',context_id,observed_at,materialized_at,retired_at,last_error<>'',payload::text,'{}'::jsonb,false
  FROM identity_observation_peer_contexts WHERE tenant_id=$1 AND observation_id=$2
  UNION ALL SELECT 'cloud',receipt_key,observed_at,materialized_at,NULL::timestamptz,last_error<>'',context_enc,'{}'::jsonb,true
  FROM identity_observation_cloud_contexts WHERE tenant_id=$1 AND observation_id=$2

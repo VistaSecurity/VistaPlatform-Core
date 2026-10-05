@@ -5,8 +5,9 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore, riskColor } from '../../components/ui';
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
+import { SCANNING_POLL_MS, isScanning } from '../discovery/active-scan-row-state';
 import { serviceConfidence, keyCustodyLabel } from './lens-helpers';
-import { assetIdentity, classDeclares, classLabel, operatingSystem, primaryAddressPort, primaryEndpoint } from './asset-shape';
+import { assetIdentity, classDeclares, classLabel, handshakeRefusal, operatingSystem, primaryAddressPort, primaryEndpoint, stripMask, type EndpointLike } from './asset-shape';
 import {
   PROVENANCE_LABEL,
   PROVENANCE_TITLE,
@@ -19,7 +20,7 @@ import {
   type CryptoComponent,
   type RemediationGuidanceView,
 } from './risk-explanation';
-import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
+import { CryptoRiskChip, NOT_MEASURED_TITLE, PartialAssessmentNote, assessmentGaps, cryptoRiskPresentation, type AssessmentGapSource } from './crypto-risk-presentation';
 
 export type CryptoConfig = inventoryComponents['schemas']['CryptoImplementation'];
 export type Certificate = inventoryComponents['schemas']['Certificate'];
@@ -41,6 +42,8 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
 }) {
   const c = config as Record<string, unknown> & CryptoConfig;
   const risk = cryptoRiskPresentation(c);
+  const gapSource = c as AssessmentGapSource;
+  const { versionUnmeasured } = assessmentGaps(gapSource);
   const assetId = c.asset_id as string | undefined;
   const certId = c.certificate_id as string | undefined;
   return (
@@ -50,7 +53,7 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
           <CryptoRiskChip config={c} size={28} />
           <div style={{ flex: 1, minWidth: 0 }}>
             <div className="eyebrow-app">Crypto configuration</div>
-            <h2 style={{ margin: '4px 0 2px', fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', lineHeight: 1.15 }}>{c.protocol as string} · {c.protocol_version as string}</h2>
+            <h2 style={{ margin: '4px 0 2px', fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', lineHeight: 1.15 }}>{c.protocol} · {versionUnmeasured ? <span title={NOT_MEASURED_TITLE}>version not measured</span> : c.protocol_version as string}</h2>
             <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)', wordBreak: 'break-all' }}>{c.cipher_suite as string}</div>
           </div>
           <CloseBtn onClose={onClose} />
@@ -82,7 +85,8 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
       </div>
       <div style={{ flex: 1, padding: '4px 22px 30px' }}>
         <SectionLabel icon="lock">Cryptography</SectionLabel>
-        <MetaRow k="Protocol" v={`${c.protocol ?? ''} ${c.protocol_version ?? ''}`.trim()} />
+        <MetaRow k="Protocol" v={c.protocol} />
+        <MetaRow k="Version" v={versionUnmeasured ? 'Not measured' : (c.protocol_version as string)} title={versionUnmeasured ? NOT_MEASURED_TITLE : undefined} mono />
         <MetaRow k="Cipher suite" v={c.cipher_suite as string} mono />
         <MetaRow k="Key exchange" v={c.key_exchange_algorithm as string} mono />
         <MetaRow k="Signature" v={c.signature_algorithm as string} mono />
@@ -106,6 +110,7 @@ export function ConfigDrawer({ config, onOpenAsset, onOpenCert, onClose, active 
         <SectionLabel icon="activity">Assessment</SectionLabel>
         <MetaRow k="Risk score" v={risk.assessed ? risk.score : '—'} mono />
         <MetaRow k="Risk level" v={risk.assessed ? risk.level : 'not assessed'} />
+        <PartialAssessmentNote config={gapSource} />
         <MetaRow k="Discovery" v={c.discovery_method as string} />
         <MetaRow k="Last verified" v={(c.last_verified_at as string)?.slice(0, 10)} mono />
         <WhyThisScore configId={c.id as string} score={risk.score} />
@@ -345,6 +350,9 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
       if (error || !data) throw new Error('Failed to load asset');
       return data.asset;
     },
+    // While a person's scan of this asset runs, re-read it so the Active Scan
+    // button changes when the scan finishes rather than when the drawer reopens.
+    refetchInterval: (query) => (isScanning(query.state.data) ? SCANNING_POLL_MS : false),
   });
   const configsQ = useQuery({
     queryKey: ['asset-configs', assetId],
@@ -384,7 +392,7 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
             <RestoreAssetButton assetId={assetId} onDone={onClose} />
           )}
           {detailQ.data && !a.deleted_at && a.asset_status !== 'archived' && (
-            <ScanAssetButton assetId={assetId} />
+            <ScanAssetButton assetId={assetId} activeScan={detailQ.data.active_scan} />
           )}
           {onEdit && detailQ.data && (
             <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
@@ -440,6 +448,8 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
           </div>
         )}
 
+        <HandshakeRefusedNotes endpoints={Array.isArray(a.endpoints) ? a.endpoints : []} />
+
         <SectionLabel icon="circle-alert">Asset details</SectionLabel>
         <MetaRow k="Class" v={classLabel(a.class_key)} />
         <ServiceMetaRow a={a} />
@@ -463,6 +473,26 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         <MetaRow k="Risk score" v={risk} mono />
       </div>
     </DrawerShell>
+  );
+}
+
+// An endpoint whose server ended the TLS handshake has no configuration to list
+// above, which on its own reads as "nothing here". Say what happened and what to
+// do about it, once per endpoint.
+function HandshakeRefusedNotes({ endpoints }: { endpoints: EndpointLike[] }) {
+  const refused = endpoints.map((e) => ({ e, note: handshakeRefusal(e) })).filter((r) => r.note !== null);
+  if (refused.length === 0) return null;
+  return (
+    <div data-testid="handshake-refused-notes" style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '6px 0' }}>
+      {refused.map(({ e, note }) => (
+        <div key={e.id ?? `${e.address}:${e.port}`}>
+          <div className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)' }}>
+            {[stripMask(e.address) || e.fqdn, e.port].filter(Boolean).join(':')} · {note!.label}
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{note!.hint}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 

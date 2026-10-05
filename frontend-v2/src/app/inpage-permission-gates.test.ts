@@ -149,6 +149,13 @@ describe('Discovery job retry / cancel (Discovery → Job Logs)', () => {
   });
 });
 
+describe('Resume scan (Discovery → Discovery Jobs, #2170)', () => {
+  it('gates on discovery.create — the rerun route\'s permission in inventory-service', () => {
+    routeRequires('services/inventory-service/cmd/main.go', 'api.POST("/discovery/jobs/:id/rerun"', 'PermissionDiscoveryCreate');
+    gateUses(`${FE}sections/discovery/jobs-page.tsx`, 'discovery.create', ['discovery.manage']);
+  });
+});
+
 describe('Scheduled scans (Discovery → Scheduled Scans)', () => {
   it('gates create / enable-disable / trigger on their own three permissions', () => {
     const go = 'services/device-interrogation-service/internal/api/router.go';

@@ -25,13 +25,13 @@ Someone running the estate wants to know what is out there, what is waiting for 
 
 The top panel. The headline is the **percentage of monitored assets that are high-risk**, with the numerator and denominator shown beside it. It is a population share, so it does not receive an individual-risk band. An empty monitored population shows a dash rather than 0%. The panel also shows the thirty-day individual-risk trend, observed third-party exposure, open critical findings, and post-quantum adoption.
 
-#### Inventory health
+#### Assets Monitored
 
 Directly beneath it, and the subject of the rest of this page.
 
 | | |
 |---|---|
-| **Configuration items** | Everything in the inventory, whatever it is made of — not only the things that speak TLS. |
+| **Assets Monitored** | Every asset under monitoring, whatever it is made of — not only the things that speak TLS. Assets still waiting for approval are counted separately, below. |
 | **Pending approval** | Discovered assets nobody has accepted or denied yet. |
 | **Stale** | Assets nothing has seen recently. Still in the inventory, and still counted. |
 | **By class** | The estate broken down by top-level [asset class](./inventory-and-lenses.md). |

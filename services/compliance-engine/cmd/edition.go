@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 
 	"github.com/gin-gonic/gin"
@@ -60,7 +61,11 @@ type editionHooks struct {
 	// The return value is what makes this hook different from its siblings: in
 	// an Enterprise build the seam may still be unavailable because AI_PROVIDER
 	// names nothing reachable, and an operator needs those two "no"s told apart.
-	RegisterAuthorRoutes func(tenant, admin *gin.RouterGroup, db *sqlx.DB, rawDB *sql.DB, sink ai.AuditSink) models.AuthorAvailability
+	//
+	// The second return value answers the same question PER REQUEST, for the
+	// scope on the context: a tenant may have connected its own model provider,
+	// so whether drafting is available depends on who is asking.
+	RegisterAuthorRoutes func(tenant, admin *gin.RouterGroup, db *sqlx.DB, rawDB *sql.DB, sink ai.AuditSink, resolver *ai.Resolver) (models.AuthorAvailability, func(context.Context) models.AuthorAvailability)
 
 	// NewTenantMeasurementAuthor returns the authoring backend the
 	// measurement-template "apply to a tenant framework control" path needs,

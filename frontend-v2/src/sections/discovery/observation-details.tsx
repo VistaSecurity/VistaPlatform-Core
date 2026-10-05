@@ -16,6 +16,14 @@ const explanations: Record<string, string> = {
   platform_collector_not_authorized_for_identity_enrichment: 'A collector in the observed network is required.',
   network_scope_unresolved: 'The network for this observation is not yet established.',
   no_configured_source: 'No configured source can add evidence for this observation.',
+  //: the planner will not have the platform re-interrogate a device on its
+  // own without the operator's consent. Say where that consent lives.
+  executor_scope_unknown: 'The device that can answer this has not been cleared for automatic re-checks. To allow it, open Discovery → Devices, edit the device and turn on “Allow the platform to re-check this device automatically”. A device that has never been interrogated needs one interrogation first.',
+  observation_from_configured_source: 'This evidence came from the configured source itself, so there is nothing further to ask it.',
+  //: a peer a device reported, which identity could not place, is not a
+  // reason to interrogate that device again — it would repeat the same answer.
+  configured_source_already_reported_this_peer: 'The device that reported this has already said everything it knows about it, so it is not re-interrogated for this observation. Other checks still run.',
+  configured_source_refreshed_recently: 'The device that can answer this was re-checked recently. Automatic re-checks of a device run at most once every 6 hours. Interrogating it yourself from Discovery → Devices is not limited.',
   observing_collector_offline: 'The observing collector is offline or its heartbeat is stale. Enrichment will retry when it is available.',
   collector_network_checks_disabled: 'This collector’s profile disables active network checks.',
   collector_has_no_interface_in_target_network: 'The collector is online, but has no recently reported, enabled interface with an address and network prefix in the target network. Reflected advertisements can describe devices on another subnet. Use a collector attached to that network or review its interface configuration.',
@@ -27,6 +35,8 @@ const explanations: Record<string, string> = {
   dns_collector_failed: 'DNS resolution failed on the collector. Check its connectivity and configuration.',
   probe_failed_review_collector_before_retry: 'The probe failed. Review the collector before another attempt.',
   probe_results_ingested: 'Probe results have been retained and evaluated for identity.',
+  probe_coalesced_with_in_flight_request: 'The same address is already being probed for another observation. This one will use that result.',
+  collector_busy_retry_later: 'The collector is busy with other scans. The probe will be sent when it has room.',
   dns_context_only: 'DNS added address context. DNS alone does not establish a device identity.',
   // D8, fixed vocabulary. The observer no longer decides whether work can
   // happen — the EXECUTOR does — so "no collector can act" is its own reason and

@@ -19,7 +19,7 @@ package services
 //
 // What a host inventory IS, in the phase-1 model, is four things:
 //
-//	identity    → asset_identifiers, through the identification engine
+//	identity    → a sighting to inventory-service's identification engine
 //	facts       → asset_facts, under the `device-agent` producer
 //	sockets     → asset_endpoints, one per listening socket
 //	packages    → software_products + software_installs, source_kind `measured`
@@ -82,14 +82,13 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/shared/ai/seams"
-	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
-	"github.com/vistasecurity/vistaplatform/shared/identity/classproposal"
+	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/software"
 	swpostgres "github.com/vistasecurity/vistaplatform/shared/software/postgres"
@@ -435,13 +434,15 @@ func (h *HostInventoryIngest) Materialise(
 	var counts HostInventoryCounts
 	err := h.withRunLock(ctx, tenantID, func() error {
 		var err error
-		counts, err = h.materialise(ctx, tenantID, agentID, jobID, obs, nil, "")
+		counts, err = h.materialise(ctx, tenantID, agentID, jobID, obs, nil, "", "")
 		return err
 	})
 	return counts, err
 }
 
-func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID, jobID uuid.UUID, obs *di.InterrogateResult, original *identity.Observation, expectedAsset string) (HostInventoryCounts, error) {
+// materialise is one collection. original and receipt are a retained
+// collection's sighting and receipt key on replay; nil and "" for a live one.
+func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID, jobID uuid.UUID, obs *di.InterrogateResult, original *identity.Sighting, expectedAsset, receipt string) (HostInventoryCounts, error) {
 	counts := HostInventoryCounts{}
 	if obs == nil {
 		return counts, fmt.Errorf("host inventory: no observations to materialise")
@@ -462,15 +463,18 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 		return counts, fmt.Errorf("host inventory: the observations carry no subject, so there is nothing to bind them to")
 	}
 
-	observation, err := h.observationFor(ctx, tenantID, subject, meta, obs, source, hostInventoryRunRef(agentID, jobID))
+	sighting, err := hostSighting(tenantID, subject, meta, obs, source, hostInventoryRunRef(agentID, jobID))
 	if err != nil {
 		return counts, err
 	}
 	if original != nil {
-		observation = *original
+		sighting = *original
 	}
-	counts.Identifiers = len(observation.Identifiers)
-	counts.Endpoints = len(observation.Endpoints)
+	if receipt == "" {
+		receipt = sightingReceiptKey(sighting)
+	}
+	counts.Identifiers = len(sighting.Identifiers)
+	counts.Endpoints = len(sighting.Endpoints)
 
 	// The class, BEFORE the engine runs, because a newly created asset has to
 	// be born with it: `identity.Engine` reads the class off the observation at
@@ -478,22 +482,17 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 	// a second write and a second history row for one decision.
 	prop := h.classifyHost(ctx, obs)
 	counts.ClassProposal = prop.Class
-	applied := classproposal.Apply(&observation, prop)
-
-	engine, _, err := h.sink.engine()
-	if err != nil {
-		return counts, fmt.Errorf("host inventory: identification engine unavailable: %w", err)
-	}
+	applied := applyClassToSighting(&sighting, prop)
 
 	// FirstHand: this is the host's own account of itself, taken by an agent on
 	// it or over an authenticated session to it. See [classIntent] for why that
 	// entitles this path to promote and the peer path does not.
-	res, class, err := h.sink.resolveObservationWith(ctx, engine, observation,
-		classIntent{Proposal: prop, FirstHand: true}, func(repo *pgidentity.Repository, res identity.Resolution) error {
+	res, class, err := h.sink.resolveSightingWith(ctx, sighting,
+		classIntent{Proposal: prop, FirstHand: true}, func(tx *sql.Tx, res identity.Resolution) error {
 			if expectedAsset != "" && !res.Asset.Zero() && res.Asset.ID != expectedAsset {
 				return fmt.Errorf("retained inventory identity changed during replay")
 			}
-			return h.retainHostInventory(ctx, repo, observation, res, agentID, jobID, obs)
+			return h.retainHostInventory(ctx, tx, tenantID, sighting, receipt, res, agentID, jobID, obs)
 		})
 	if err != nil {
 		return counts, fmt.Errorf("host inventory: resolving %s: %w", meta.label(), err)
@@ -564,7 +563,7 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 		// Passing it as well would write the same values a second time under a
 		// second confidence, which is two opinions about one measurement.
 		err := h.sink.persist(ctx, tenantID, assetID, source, InterrogationObservations{
-			ObservedAt: observation.ObservedAt,
+			ObservedAt: sighting.ObservedAt,
 			Facts:      factObs,
 			Producer:   facts.ProducerDeviceAgent,
 		})
@@ -582,7 +581,7 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 	if ready, snapshotErr := connectionSnapshotReady(meta, obs); snapshotErr != nil {
 		counts.Errors = append(counts.Errors, snapshotErr.Error())
 	} else if ready {
-		if queued, qerr := h.writeConnections(ctx, tenantID, agentID, jobID, assetID, obs, observation.ObservedAt); qerr != nil {
+		if queued, qerr := h.writeConnections(ctx, tenantID, agentID, jobID, assetID, obs, sighting.ObservedAt); qerr != nil {
 			counts.Errors = append(counts.Errors, fmt.Sprintf("queueing outbound connections: %v", qerr))
 		} else {
 			counts.ConnectionsQueued = queued
@@ -599,7 +598,7 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 	if enumerated != nil {
 		if reason, ok := softwareListArrived(*enumerated, len(products)); !ok {
 			counts.Errors = append(counts.Errors, reason)
-		} else if err := h.writeSoftwareAt(ctx, tenantID, assetID, hostInventoryRunRef(agentID, jobID), source.Ref, products, &counts, observation.ObservedAt); err != nil {
+		} else if err := h.writeSoftwareAt(ctx, tenantID, assetID, hostInventoryRunRef(agentID, jobID), source.Ref, products, &counts, sighting.ObservedAt); err != nil {
 			counts.Errors = append(counts.Errors, fmt.Sprintf("writing software installs: %v", err))
 		}
 	}
@@ -612,13 +611,13 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 	if reason, ok := listenerListArrived(
 		meta.Sections[hostinventory.SectionListeners],
 		hasFact(obs, facts.KeySvcListeningSockets),
-		len(observation.Endpoints),
+		len(sighting.Endpoints),
 	); !ok {
 		if reason != "" {
 			counts.Errors = append(counts.Errors, reason)
 		}
 	} else if closed, err := h.closeAbsentEndpoints(ctx, tenantID, assetID,
-		hostInventorySourceRef(agentID, jobID)+":", hostInventoryRunRef(agentID, jobID), observation.ObservedAt); err != nil {
+		hostInventorySourceRef(agentID, jobID)+":", hostInventoryRunRef(agentID, jobID), sighting.ObservedAt); err != nil {
 		counts.Errors = append(counts.Errors, fmt.Sprintf("closing absent endpoints: %v", err))
 	} else {
 		counts.EndpointsClosed = closed
@@ -629,7 +628,7 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 		counts.Identifiers, counts.Facts, counts.Endpoints, counts.EndpointsClosed,
 		counts.InstallsCreated, counts.InstallsUpdated, counts.InstallsRemoved)
 	if counts.FullyMaterialized() && res.ObservationID != "" {
-		if err := h.finishRetainedHostInventory(ctx, tenantID, res.ObservationID, identity.ObservationReceiptKey(observation)); err != nil {
+		if err := h.finishRetainedHostInventory(ctx, tenantID, res.ObservationID, receipt); err != nil {
 			return counts, err
 		}
 	}
@@ -919,96 +918,6 @@ func (h *HostInventoryIngest) closeAbsentEndpoints(
 // ---------------------------------------------------------------------------
 // the observation
 // ---------------------------------------------------------------------------
-
-// observationFor builds the identification-engine observation for a host.
-//
-// Endpoints are on the OBSERVATION rather than written afterwards so they share
-// the engine's transaction: one collection is one statement about the world,
-// and splitting it would leave an asset whose history says it was created and
-// whose endpoints say nothing was listening, with no later run to repair it —
-// the next collection MATCHES and never takes the create path again.
-func (h *HostInventoryIngest) observationFor(
-	ctx context.Context,
-	tenantID uuid.UUID,
-	subject di.PeerRef,
-	meta hostInventoryMetadata,
-	obs *di.InterrogateResult,
-	source identity.Source,
-	runRef string,
-) (identity.Observation, error) {
-	primary := meta.primaryAddress(obs)
-	scope, dynamic := h.sink.scopeForAddress(ctx, tenantID, primary, meta.Hostname)
-
-	out := identity.Observation{
-		TenantID: tenantID.String(),
-		// Coarse and true. See the file header: a class is a rule's decision.
-		ClassHint:  assetclass.KeyUnknownHost,
-		Source:     source,
-		ObservedAt: meta.collectedAt(),
-		Admission:  identity.AdmissionEvidence{Direct: true, Authoritative: true, ReceiptID: runRef},
-		// The host said this about itself, either as the agent installed on it
-		// or through an authenticated session to it. There is no more direct
-		// measurement available anywhere in the product.
-		Confidence: 1,
-		Network: identity.Network{
-			// The tenant's own machine: we are either running on it or logged
-			// in to it. `third_party` would be nonsense and `unknown` would
-			// understate what an authenticated session establishes.
-			Ownership: identity.OwnershipInternal,
-			SegmentID: scope,
-		},
-		DisplayName: strings.TrimSpace(subject.DisplayName),
-		Hostname:    strings.ToLower(strings.TrimSpace(meta.Hostname)),
-	}
-	if dynamic {
-		out.DynamicScopes = map[string]bool{scope: true}
-	}
-
-	for _, id := range subject.Identifiers {
-		kind := identity.Kind(id.Kind)
-		if !kind.Valid() {
-			// The collector vocabulary is pinned to identity's by
-			// TestPeerIdentifierKindsMatchIdentityRegistry, so this is
-			// unreachable today and is the loud failure if that ever drifts.
-			return identity.Observation{}, fmt.Errorf("host inventory: identifier kind %q is not one of the ten", id.Kind)
-		}
-		// hostname and ip_address identify only WITHIN a scope; the other kinds
-		// a host reports about itself are globally unique, and a scope on one
-		// would split the uniqueness key.
-		identifierScope := ""
-		if kind.RequiresScope() {
-			identifierScope = scope
-		}
-		out.Identifiers = append(out.Identifiers, identity.Identifier{
-			Kind: kind, Value: id.Value, Scope: identifierScope, Confidence: 1,
-		})
-	}
-	if out.DisplayName == "" && primary != "" {
-		out.DisplayName = primary
-	}
-
-	// Endpoints carry the RUN's ref, not the agent's, for the same reason
-	// software installs do: the retirement sweep works by closing every row of
-	// this agent's whose ref is not THIS run's, and a stable ref makes that test
-	// vacuously false so nothing is ever closed.
-	out.Endpoints = hostInventoryEndpoints(obs, meta, primary, identity.Source{
-		Kind: identity.SourceMeasured, Ref: runRef, Mode: identity.ModeActive,
-	})
-
-	clean, rejected := out.Sanitize()
-	for _, r := range rejected {
-		// One malformed identifier must not lose the collection, but a drop is
-		// never silent: an identifier that cannot be stored is an asset that
-		// may not be recognisable again.
-		log.Printf("[HostInventory] %s: dropped a %s identifier: %v", meta.label(), r.Identifier.Kind, r.Err)
-	}
-	if len(clean.Identifiers) == 0 {
-		return identity.Observation{}, fmt.Errorf(
-			"host inventory: %s carries no usable identifier; an asset created from it could never be recognised again, so a new one would appear on every collection",
-			meta.label())
-	}
-	return clean, nil
-}
 
 // hostInventoryEndpoints turns the collection's listening sockets into
 // endpoints.
@@ -1378,7 +1287,14 @@ func refreshPackageCountAt(ctx context.Context, tx *sql.Tx, tenantID, assetID uu
 		              updated_at = now() WHERE excluded.observed_at >= asset_facts.observed_at`,
 		tenantID, assetID, facts.KeySWPackageCount, string(value),
 		software.SourceMeasured, sourceRef, at)
-	return err
+	if err != nil {
+		return err
+	}
+	// A measured fact from the agent is independent evidence for an asset
+	// known only from a connection's import (shared/identity/postgres
+	// import_only.go); this writer sits outside the Repository, so it says so
+	// itself.
+	return pgidentity.ClearImportOnlyIfVouched(ctx, tx, tenantID.String(), assetID)
 }
 
 // ---------------------------------------------------------------------------
@@ -1409,7 +1325,7 @@ func refreshPackageCountAt(ctx context.Context, tx *sql.Tx, tenantID, assetID uu
 //
 // The interface MACs. A host inventory enumerates every NIC on the machine
 // including veth pairs, bridges and locally-administered addresses —
-// observationFor already refuses those as IDENTITY for the same reason — and a
+// Intake already refuses those as IDENTITY for the same reason — and a
 // `02:42:AC` veth on a Linux server would classify it `container` through
 // Docker's OUI rule. That is the "a wrong class is worse than no class" failure
 // the rule table is written to avoid, arriving through the one collector that
@@ -1595,6 +1511,67 @@ func (m hostInventoryMetadata) primaryAddress(obs *di.InterrogateResult) string 
 	return ""
 }
 
+// hostAddress is one of the host's own addresses with the assignment its
+// configuration reported.
+type hostAddress struct {
+	addr       string
+	assignment identity.AddressAssignment
+}
+
+// hostAddresses are the host's own addresses from net.interfaces: non-virtual
+// interfaces only, without prefix lengths, deduplicated, in report order, each
+// with the assignment the collector read (`static_addresses` /
+// `dynamic_addresses`,; neither is unknown). The filter is primaryAddress's —
+// loopback, link-local and unspecified addresses are not where a host lives —
+// plus the identifier-hygiene rule (attrlist.AddressAttribute): a temporary
+// IPv6 privacy address rotates daily and is never an identifier.
+func (m hostInventoryMetadata) hostAddresses(obs *di.InterrogateResult) []hostAddress {
+	var out []hostAddress
+	seen := map[string]bool{}
+	for _, f := range obs.Facts {
+		if f.Key != facts.KeyNetInterfaces {
+			continue
+		}
+		blob, err := json.Marshal(f.Value)
+		if err != nil {
+			return nil
+		}
+		var ifaces []struct {
+			Virtual          bool     `json:"virtual"`
+			Addresses        []string `json:"addresses"`
+			StaticAddresses  []string `json:"static_addresses"`
+			DynamicAddresses []string `json:"dynamic_addresses"`
+		}
+		if err := json.Unmarshal(blob, &ifaces); err != nil {
+			return nil
+		}
+		for _, ifc := range ifaces {
+			if ifc.Virtual {
+				continue
+			}
+			assigned := map[string]identity.AddressAssignment{}
+			for _, raw := range ifc.StaticAddresses {
+				assigned[strings.TrimSpace(raw)] = identity.AssignmentStatic
+			}
+			for _, raw := range ifc.DynamicAddresses {
+				assigned[strings.TrimSpace(raw)] = identity.AssignmentDynamic
+			}
+			for _, raw := range ifc.Addresses {
+				a, ok := parseHostAddress(raw)
+				if !ok || seen[a] {
+					continue
+				}
+				if attrlist.AddressAttribute(netip.MustParseAddr(a), false) != "" {
+					continue
+				}
+				seen[a] = true
+				out = append(out, hostAddress{addr: a, assignment: assigned[strings.TrimSpace(raw)]})
+			}
+		}
+	}
+	return out
+}
+
 // parseHostAddress strips a prefix length and rejects the addresses that are
 // not a host's own: loopback, unspecified, and anything unparseable.
 func parseHostAddress(v string) (string, bool) {
@@ -1630,22 +1607,4 @@ func hostInventorySubject(obs *di.InterrogateResult) (di.PeerRef, bool) {
 		}
 	}
 	return di.PeerRef{}, false
-}
-
-// scopeForAddress resolves the segment an address falls in, and whether that
-// segment hands addresses out dynamically.
-//
-// A thin wrapper on the sink's resolver so this file has ONE call site for the
-// question, and so the answer is byte-for-byte the one every other intake gets
-// — one more spelling of this lookup would be one more dedupe key.
-func (s *ObservationSink) scopeForAddress(ctx context.Context, tenantID uuid.UUID, ip, hostname string) (string, bool) {
-	_, repo, err := s.engine()
-	if err != nil {
-		repo = nil
-	}
-	// The empty cloud-network ref is the point: a host inventory describes a
-	// machine, not a cloud resource, so there is no VPC to disambiguate two
-	// subnets that share a CIDR by. The resolver falls back to the tenant-wide
-	// default scope when the address is inside no configured segment.
-	return newDeviceScopeResolver(s.db, repo).segmentScope(ctx, tenantID, ip, hostname, "")
 }

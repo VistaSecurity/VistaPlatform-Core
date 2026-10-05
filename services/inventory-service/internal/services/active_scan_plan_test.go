@@ -1,25 +1,14 @@
 package services
 
 import (
-	"database/sql"
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 )
 
 // Test addresses are RFC 5737 documentation ranges.
-
-func hasProtocol(protocols []string, want string) bool {
-	for _, p := range protocols {
-		if p == want {
-			return true
-		}
-	}
-	return false
-}
 
 func hasPort(ports []int, want int) bool {
 	for _, p := range ports {
@@ -84,76 +73,40 @@ func TestPlanActiveScanBatches_AssetPortReachesJobPorts(t *testing.T) {
 	}
 }
 
-// TestPlanActiveScanBatches_PortlessAssetKeepsTLSFallback guards against
+// TestPlanActiveScanBatches_PortlessAssetKeepsFallbackPorts guards against
 // regressing the pre-fix behaviour for assets that record no port.
-func TestPlanActiveScanBatches_PortlessAssetKeepsTLSFallback(t *testing.T) {
+func TestPlanActiveScanBatches_PortlessAssetKeepsFallbackPorts(t *testing.T) {
 	batches := planActiveScanBatches([]activeScanAsset{{id: uuid.New(), host: "192.0.2.20"}})
 	if len(batches) != 1 {
 		t.Fatalf("expected 1 batch, got %d", len(batches))
 	}
 	if !hasPort(batches[0].ports, 443) || !hasPort(batches[0].ports, 8443) {
-		t.Errorf("portless asset lost the 443/8443 TLS fallback: %v", batches[0].ports)
-	}
-	if !hasProtocol(batches[0].protocols, "TLS") {
-		t.Errorf("portless asset lost the TLS default: %v", batches[0].protocols)
+		t.Errorf("portless asset lost the 443/8443 fallback: %v", batches[0].ports)
 	}
 }
 
-// TestPlanActiveScanBatches_SSHAssetGetsSSHProtocol pins bug B: an SSH asset
-// must actually be probed for SSH. Both evidence paths are covered — the port
-// (22) and a recorded SSH crypto configuration on a non-standard port.
-func TestPlanActiveScanBatches_SSHAssetGetsSSHProtocol(t *testing.T) {
-	cases := []struct {
-		name  string
-		asset activeScanAsset
-	}{
-		{"ssh by well-known port", activeScanAsset{id: uuid.New(), host: "192.0.2.30", port: 22}},
-		{"ssh by crypto configuration", activeScanAsset{id: uuid.New(), host: "192.0.2.31", port: 2022, configProtocols: []string{"ssh"}}},
+// TestPlanActiveScanBatches_GroupsByPortsOnly: the engine identifies the
+// service from what answers ( WP4), so two assets on the same port share
+// a job whatever their recorded configurations speak — an SSH asset and a TLS
+// asset both on 2222 are one job, not two.
+func TestPlanActiveScanBatches_GroupsByPortsOnly(t *testing.T) {
+	batches := planActiveScanBatches([]activeScanAsset{
+		{id: uuid.New(), host: "192.0.2.90", port: 2222},
+		{id: uuid.New(), host: "192.0.2.91", port: 2222},
+		{id: uuid.New(), host: "192.0.2.92"},
+		{id: uuid.New(), host: "192.0.2.93"},
+	})
+	if len(batches) != 2 {
+		t.Fatalf("expected 2 batches (one per port list), got %d: %+v", len(batches), batches)
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			batches := planActiveScanBatches([]activeScanAsset{tc.asset})
-			if len(batches) != 1 {
-				t.Fatalf("expected 1 batch, got %d", len(batches))
-			}
-			if !hasProtocol(batches[0].protocols, "SSH") {
-				t.Errorf("SSH asset was not scheduled for an SSH probe: protocols=%v", batches[0].protocols)
-			}
-		})
-	}
-}
-
-// TestDeriveActiveScanProtocols covers the protocol-derivation ladder.
-func TestDeriveActiveScanProtocols(t *testing.T) {
-	cases := []struct {
-		name            string
-		port            int
-		configProtocols []string
-		want            []string
-	}{
-		{"unknown port, no evidence falls back to TLS", 6443, nil, []string{"TLS"}},
-		{"well-known TLS port", 443, nil, []string{"TLS"}},
-		{"well-known SSH port", 22, nil, []string{"SSH"}},
-		{"config says HTTPS on an odd port", 9999, []string{"HTTPS"}, []string{"TLS"}},
-		{"config says SSH and TLS", 2222, []string{"ssh", "TLS"}, []string{"SSH", "TLS"}},
-		{"unprobeable config values are ignored", 443, []string{"tcp", "udp"}, []string{"TLS"}},
-		{"OT protocols are not smuggled into Protocols", 502, []string{"Modbus"}, []string{"TLS"}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := deriveActiveScanProtocols(tc.port, tc.configProtocols)
-			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
-				t.Errorf("deriveActiveScanProtocols(%d, %v) = %v, want %v", tc.port, tc.configProtocols, got, tc.want)
-			}
-		})
+	if len(batches[0].targets) != 2 || len(batches[1].targets) != 2 {
+		t.Fatalf("batches = %+v, want two hosts on 2222 and two on the fallback ports", batches)
 	}
 }
 
 // TestPlanActiveScanBatches_GroupsByScanShape checks the scan-volume property:
 // each job carries only the port(s) its own assets listen on, so probe work
-// stays proportional to the asset count instead of assets × ports × protocols.
+// stays proportional to the asset count instead of assets × ports.
 func TestPlanActiveScanBatches_GroupsByScanShape(t *testing.T) {
 	assets := []activeScanAsset{
 		{id: uuid.New(), host: "192.0.2.40", port: 443},
@@ -168,7 +121,7 @@ func TestPlanActiveScanBatches_GroupsByScanShape(t *testing.T) {
 
 	probes := 0
 	for _, b := range batches {
-		probes += len(b.targets) * len(b.ports) * len(b.protocols)
+		probes += len(b.targets) * len(b.ports)
 		if len(b.ports) != 1 {
 			t.Errorf("batch carries %d ports; each asset would be probed on ports it does not listen on", len(b.ports))
 		}
@@ -254,49 +207,5 @@ func TestPlanActiveScanBatches_DoesNotAliasFallbackPorts(t *testing.T) {
 	batches[0].ports[0] = 1
 	if activeScanFallbackPorts[0] != 443 {
 		t.Errorf("batch.ports aliases the package var activeScanFallbackPorts — mutating a batch corrupted it to %v", activeScanFallbackPorts)
-	}
-}
-
-// TestPlanStampRestore pins BOTH directions of the freshness restore. Blanking
-// last_scanned_at unconditionally would erase real scan history, because
-// `last_scanned_at IS NULL` is the "never scanned" coverage cut.
-func TestPlanStampRestore(t *testing.T) {
-	neverScanned := uuid.New()
-	scannedBefore := uuid.New()
-	when := time.Date(2026, 8, 6, 14, 30, 45, 123456000, time.UTC)
-
-	nullIDs, tsIDs, tsValues := planStampRestore([]scanStamp{
-		{assetID: neverScanned, lastScannedAt: sql.NullTime{Valid: false}},
-		{assetID: scannedBefore, lastScannedAt: sql.NullTime{Time: when, Valid: true}},
-	})
-
-	// Direction 1: previously NULL stays NULL — the asset really was never
-	// scanned and belongs back on the Active Scan list.
-	if len(nullIDs) != 1 || nullIDs[0] != neverScanned {
-		t.Errorf("previously-unscanned asset not restored to NULL: %v", nullIDs)
-	}
-
-	// Direction 2: a previously-scanned asset is restored to that EXACT instant,
-	// not blanked and not "now".
-	if len(tsIDs) != 1 || tsIDs[0] != scannedBefore.String() {
-		t.Fatalf("previously-scanned asset missing from the timestamp restore: %v", tsIDs)
-	}
-	if len(tsValues) != 1 {
-		t.Fatalf("expected 1 restore value, got %d", len(tsValues))
-	}
-	got, err := time.Parse(time.RFC3339Nano, tsValues[0])
-	if err != nil {
-		t.Fatalf("restore value %q is not a valid timestamp: %v", tsValues[0], err)
-	}
-	if !got.Equal(when) {
-		t.Errorf("restore value = %v, want the exact prior timestamp %v", got, when)
-	}
-
-	// And the previously-scanned asset must NOT also appear in the NULL group,
-	// which would blank it anyway.
-	for _, id := range nullIDs {
-		if id == scannedBefore {
-			t.Error("previously-scanned asset was ALSO queued for NULL — its scan history would be erased")
-		}
 	}
 }

@@ -21,6 +21,10 @@ func (a admissionAssets) UsesIdentityAdmission(context.Context, uuid.UUID) (bool
 	return a.prospective, a.policyErr
 }
 
+func (admissionAssets) DeclareFor(context.Context, uuid.UUID, uuid.UUID, identity.Sighting) (identity.Resolution, error) {
+	return identity.Resolution{}, nil
+}
+
 func (admissionAssets) CreateAssetFromSource(uuid.UUID, models.AssetInput, identity.Source) (*models.Asset, identity.Outcome, error) {
 	panic("admission must not create anything")
 }

@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq" // PostgreSQL driver for the env-built pool
+	"github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // Response codes returned (as the JSON "code" field, with HTTP 403) when a
@@ -304,7 +305,7 @@ func CheckerFromEnv() *Checker {
 	db, ok := pools[url]
 	if !ok {
 		var err error
-		db, err = sql.Open("postgres", url)
+		db, err = sql.Open("postgres", database.ApplyServerDefaults(url))
 		if err != nil {
 			// Only an unregistered driver makes sql.Open fail, and lib/pq is
 			// imported above; treat it like an unset URL.

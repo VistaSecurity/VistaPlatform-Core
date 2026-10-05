@@ -126,6 +126,11 @@ type f5SSLProfile struct {
 	DefaultProfile      string
 	SecureRenegotiation string
 	TLSVersion          string
+	// Options is the profile's TMOS option list (`tmOptions` in iControl
+	// REST, `options` in tmsh), e.g. "no-tlsv1", "no-tlsv1.1". BIG-IP
+	// expresses which protocol versions a profile refuses here, not in a
+	// version field; nil when the response carried neither key.
+	Options []string
 }
 
 func (c *f5Client) interrogate(ctx context.Context) (*InterrogateResult, error) {
@@ -361,6 +366,7 @@ func (c *f5Client) getSSLProfiles(ctx context.Context, path string, withCertKeyC
 		profile.DefaultProfile = f5GetString(item, "defaultsFrom")
 		profile.SecureRenegotiation = f5GetString(item, "secureRenegotiation")
 		profile.TLSVersion = f5GetString(item, "tlsVersion")
+		profile.Options = f5ProfileOptions(item)
 		profiles = append(profiles, profile)
 	}
 	return profiles, nil
@@ -424,13 +430,28 @@ func (c *f5Client) convertVIPToAsset(ctx context.Context, vs f5VirtualServer, pr
 		},
 	}
 
-	// TLS version(s): expand F5 ranges into a supported-version list.
-	if profile.TLSVersion != "" {
+	// TLS version(s). Only what the profile states ( W1.2, principle 2:
+	// unknown stays unknown). This used to fill "TLS 1.2" whenever
+	// `tlsVersion` was empty — which BIG-IP leaves it on real client-ssl
+	// profiles, because versions are switched off through `options` — and
+	// that invented version was linked, scored and shown as measured, hiding
+	// a profile that still accepts TLS 1.0.
+	switch {
+	case profile.TLSVersion != "":
 		asset.TLSVersions = f5ParseTLSVersionRange(profile.TLSVersion)
 		asset.ProtocolVersion = strPtr(profile.TLSVersion)
-	} else {
-		asset.ProtocolVersion = strPtr("TLS 1.2")
-		asset.TLSVersions = []string{"TLS 1.2"}
+	case profile.Options != nil:
+		disabled, remaining := f5OptionsVersions(profile.Options)
+		if len(disabled) > 0 {
+			asset.Metadata["tls_versions_disabled"] = disabled
+		}
+		// Options only say what is refused. The version is known only when
+		// they leave a single one; otherwise it depends on the cipher string
+		// and the TMOS release, and stays unmeasured.
+		if len(remaining) == 1 {
+			asset.ProtocolVersion = strPtr(remaining[0])
+			asset.TLSVersions = remaining
+		}
 	}
 
 	// Cipher suites. A profile's `ciphers` is an OpenSSL-style cipher STRING
@@ -647,10 +668,72 @@ func f5ParseTLSVersionRange(tlsVersion string) []string {
 		}
 	}
 
-	if len(versions) == 0 {
-		versions = []string{"TLS 1.2"} // safe default
-	}
+	// Nothing recognisable is nothing measured: no "safe default" (W1.2).
 	return versions
+}
+
+// f5ProtocolVersionOptions maps each BIG-IP option that switches a protocol
+// version off to the version it refuses, in the order versions are listed.
+// SSL 3.0 is included because a profile without `no-sslv3` may still accept
+// it through a custom cipher string; leaving it out would let three `no-tls*`
+// options read as a single remaining version that is not, in fact, alone.
+var f5ProtocolVersionOptions = []struct{ option, version string }{
+	{"no-sslv3", "SSL 3.0"},
+	{"no-tlsv1", "TLS 1.0"},
+	{"no-tlsv1.1", "TLS 1.1"},
+	{"no-tlsv1.2", "TLS 1.2"},
+	{"no-tlsv1.3", "TLS 1.3"},
+}
+
+// f5OptionsVersions reads a profile's option list into the protocol versions
+// it switches off and the ones it leaves possible.
+func f5OptionsVersions(options []string) (disabled, remaining []string) {
+	set := make(map[string]bool, len(options))
+	for _, o := range options {
+		set[strings.ToLower(strings.TrimSpace(o))] = true
+	}
+	for _, v := range f5ProtocolVersionOptions {
+		if set[v.option] {
+			disabled = append(disabled, v.version)
+		} else {
+			remaining = append(remaining, v.version)
+		}
+	}
+	return disabled, remaining
+}
+
+// f5ProfileOptions reads a profile's option list. iControl REST names it
+// `tmOptions` (and tmsh `options`); it arrives as a JSON array, or as tmsh's
+// "{ a b }" string from some releases. "none" is an empty list. nil means
+// neither key was present, so nothing about versions was stated.
+func f5ProfileOptions(item map[string]interface{}) []string {
+	for _, key := range []string{"tmOptions", "options"} {
+		raw, ok := item[key]
+		if !ok || raw == nil {
+			continue
+		}
+		var out []string
+		switch v := raw.(type) {
+		case []interface{}:
+			for _, o := range v {
+				if s, ok := o.(string); ok {
+					out = append(out, strings.Fields(s)...)
+				}
+			}
+		case string:
+			out = strings.Fields(strings.Trim(strings.TrimSpace(v), "{}"))
+		default:
+			continue
+		}
+		cleaned := make([]string, 0, len(out))
+		for _, o := range out {
+			if o != "" && !strings.EqualFold(o, "none") {
+				cleaned = append(cleaned, o)
+			}
+		}
+		return cleaned
+	}
+	return nil
 }
 
 func f5TLSMinorVersionLabel(minor int) string {

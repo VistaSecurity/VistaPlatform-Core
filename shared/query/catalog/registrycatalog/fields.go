@@ -194,6 +194,16 @@ var assetFields = []catalog.FieldInfo{
 	col("class_confidence", ast.TypeNumber),
 	colAs("first_seen", "first_discovered_at", ast.TypeTimestamp),
 	colAs("last_seen", "last_seen_at", ast.TypeTimestamp),
+	// The asset-level scan fact: when the newest finished active or automatic
+	// scan that reached this asset completed. It lives in `assets.metadata`
+	// (inventory-service's autoscan.MetaLastScannedAt) because a scan of an
+	// asset with NO endpoint — nothing answered — has no endpoint row to carry
+	// `endpoint.last_scanned`, and such an asset could otherwise never be told
+	// apart from one nobody ever scanned. A failed scan never writes it.
+	withDescription(catalog.FieldInfo{
+		Name: "last_scanned", Type: ast.TypeTimestamp,
+		Accessor: ast.Accessor{Kind: ast.AccessorJSONB, JSONColumn: "metadata", Key: "last_scanned_at"},
+	}, "when the newest finished active or automatic scan reached this asset; absent if none has"),
 	col("created_at", ast.TypeTimestamp),
 	col("updated_at", ast.TypeTimestamp),
 	colAs("segment_id", "network_segment_id", ast.TypeUUID),

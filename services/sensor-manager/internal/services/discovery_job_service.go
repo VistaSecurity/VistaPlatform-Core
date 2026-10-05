@@ -12,6 +12,8 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/jobunits"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
@@ -90,7 +92,10 @@ var ErrJobNotAwaitingSensor = errors.New("discovery job is no longer awaiting th
 //
 // started_at is set from the command's delivered_at (when the sensor collected
 // it) when nothing set it earlier, so the job's timeline reads queued →
-// dispatched → picked up → completed like every other executor's.
+// dispatched → picked up → completed like every other executor's. A planned
+// job normally has it already: its first host report or ping sets it
+// (jobunits.RecordSensorBatch), so this back-fill is the fallback for a job
+// that reported nothing before it finished.
 func (s *DiscoveryJobService) CompleteSensorJob(ctx context.Context, tenantID, sensorID, jobID uuid.UUID, c sensordispatch.Completion) error {
 	if err := c.Validate(); err != nil {
 		return fmt.Errorf("invalid completion: %w", err)
@@ -117,9 +122,10 @@ func (s *DiscoveryJobService) CompleteSensorJob(ctx context.Context, tenantID, s
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 		var status string
 		var assigned sql.NullString
+		var planned bool
 		err := tx.QueryRowContext(ctx,
-			`SELECT status, assigned_sensor_id FROM discovery_jobs WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
-			jobID, tenantID).Scan(&status, &assigned)
+			`SELECT status, assigned_sensor_id, COALESCE(metadata ? $3, false) FROM discovery_jobs WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+			jobID, tenantID, shareddisc.ScanPlanMetadataKey).Scan(&status, &assigned, &planned)
 		if err == sql.ErrNoRows {
 			return ErrJobNotAssignedToSensor
 		}
@@ -140,6 +146,16 @@ func (s *DiscoveryJobService) CompleteSensorJob(ctx context.Context, tenantID, s
 			}
 			late = true
 			return nil
+		}
+
+		// A planned scan's hosts arrived one by one (RecordSensorUnits). A
+		// host still pending now was never reported — the sensor could not
+		// deliver it, or never reached it — so it is failed with that reason:
+		// the coverage says so, and a Retry scans exactly those hosts.
+		if planned {
+			if _, err := jobunits.FinishSensorPlanUnits(ctx, tx, jobID, unreportedHostMessage); err != nil {
+				return fmt.Errorf("settle unreported hosts: %w", err)
+			}
 		}
 
 		var errMsg interface{}
@@ -182,4 +198,21 @@ func (s *DiscoveryJobService) CompleteSensorJob(ctx context.Context, tenantID, s
 		return ErrJobNotAwaitingSensor
 	}
 	return nil
+}
+
+// unreportedHostMessage is what a planned scan's host carries when its sensor
+// finished the job without reporting it.
+const unreportedHostMessage = "not scanned: the sensor finished the job without reporting this address — retry to scan it"
+
+// RecordSensorUnits takes one progress report of a planned scan from the
+// tenant sensor running it ( WP2b): each host's result is stored with the
+// same commit the Platform Sensor uses for its own hosts, the job's progress
+// lease is renewed, and the answer says whether to go on. See
+// shared/jobunits.RecordSensorBatch.
+func (s *DiscoveryJobService) RecordSensorUnits(ctx context.Context, tenantID, sensorID, jobID uuid.UUID, batch sensordispatch.UnitBatch) (sensordispatch.UnitBatchResponse, error) {
+	resp, err := jobunits.RecordSensorBatch(ctx, s.db, tenantID, sensorID, jobID, batch)
+	if errors.Is(err, jobunits.ErrJobNotAssignedToSensor) {
+		return resp, ErrJobNotAssignedToSensor
+	}
+	return resp, err
 }

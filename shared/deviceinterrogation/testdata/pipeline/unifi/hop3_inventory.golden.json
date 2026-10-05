@@ -1,6 +1,6 @@
 {
   "vendor": "unifi",
-  "input_sha256": "7f6ac83c366399246ff3fdba651b28fc394cfc651a039f0bf4ab4cdb951ab2ab",
+  "input_sha256": "74be3b886410653b5307e560a1ba361bff0f9e80a135173cbd21e65416cab343",
   "inventory": {
     "assets": [
       {
@@ -27,16 +27,6 @@
         "asset": "device",
         "class_key": "wireless_controller",
         "status": "monitoring"
-      },
-      {
-        "asset": "new[branch-office-s2s|192.0.2.1]",
-        "class_key": "server",
-        "status": "monitoring"
-      },
-      {
-        "asset": "new[remote-access|192.0.2.1]",
-        "class_key": "server",
-        "status": "monitoring"
       }
     ],
     "crypto_configurations": [
@@ -51,7 +41,9 @@
         "key_size": null,
         "risk_score": null,
         "risk_level": "Unknown",
-        "risk_factors": [],
+        "risk_factors": [
+          "Partially assessed: the protocol version was not measured; a legacy version cannot be ruled out"
+        ],
         "algorithm_links": {},
         "pqc_category": "unclassified",
         "has_certificate": false
@@ -67,9 +59,37 @@
         "key_size": null,
         "risk_score": null,
         "risk_level": "Unknown",
-        "risk_factors": [],
+        "risk_factors": [
+          "Partially assessed: the protocol version was not measured; a legacy version cannot be ruled out"
+        ],
         "algorithm_links": {},
         "pqc_category": "unclassified",
+        "has_certificate": false
+      },
+      {
+        "asset": "device",
+        "protocol": "IPSec",
+        "port": 500,
+        "protocol_version": "IKEv2",
+        "cipher_suite": "aes256-sha256",
+        "key_exchange_algorithm": "DH-MODP-2048",
+        "hash_algorithm": "SHA256",
+        "key_size": 2048,
+        "risk_score": 35,
+        "risk_level": "Low",
+        "risk_factors": [],
+        "algorithm_links": {
+          "hash": [
+            "SHA256"
+          ],
+          "key_exchange": [
+            "DH-MODP-2048"
+          ],
+          "symmetric": [
+            "AES256"
+          ]
+        },
+        "pqc_category": "needs_migration",
         "has_certificate": false
       },
       {
@@ -105,33 +125,7 @@
         "has_certificate": true
       },
       {
-        "asset": "new[branch-office-s2s|192.0.2.1]",
-        "protocol": "IPSec",
-        "port": 500,
-        "protocol_version": "IKEv2",
-        "cipher_suite": "aes256-sha256",
-        "key_exchange_algorithm": "DH-MODP-2048",
-        "hash_algorithm": "SHA256",
-        "key_size": 2048,
-        "risk_score": 35,
-        "risk_level": "Low",
-        "risk_factors": [],
-        "algorithm_links": {
-          "hash": [
-            "SHA256"
-          ],
-          "key_exchange": [
-            "DH-MODP-2048"
-          ],
-          "symmetric": [
-            "AES256"
-          ]
-        },
-        "pqc_category": "needs_migration",
-        "has_certificate": false
-      },
-      {
-        "asset": "new[remote-access|192.0.2.1]",
+        "asset": "device",
         "protocol": "VPN",
         "port": 51820,
         "protocol_version": null,
@@ -173,11 +167,11 @@
       "unclassified": 2
     },
     "ingest_outcomes": [
-      "created",
       "matched",
       "matched",
       "matched",
-      "created"
+      "matched",
+      "matched"
     ]
   }
 }

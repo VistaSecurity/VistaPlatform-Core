@@ -15,9 +15,11 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 )
 
-// retainManagement commits encrypted configuration with its identity evidence.
+// retainManagement keeps encrypted configuration against the observation
+// inventory-service held for review, on this service's transaction after the
+// resolution committed there.
 // Encryption covers all fields because metadata and URLs may contain secrets too.
-func (s *DeviceService) retainManagement(ctx context.Context, repo *pgidentity.Repository, obs identity.Observation, res identity.Resolution, fields deviceFieldUpdate) error {
+func (s *DeviceService) retainManagement(ctx context.Context, repo *pgidentity.Repository, tenantID string, res identity.Resolution, fields deviceFieldUpdate) error {
 	if res.ObservationID == "" {
 		return nil
 	}
@@ -35,17 +37,14 @@ func (s *DeviceService) retainManagement(ctx context.Context, repo *pgidentity.R
 	_, err = repo.Tx().ExecContext(ctx, `INSERT INTO identity_observation_management(tenant_id,observation_id,context_enc)
 	 VALUES($1,$2,$3) ON CONFLICT(tenant_id,observation_id) DO UPDATE
 	 SET context_enc=EXCLUDED.context_enc,updated_at=now()
-	 WHERE identity_observation_management.materialized_at IS NULL`, obs.TenantID, res.ObservationID, sealed)
+	 WHERE identity_observation_management.materialized_at IS NULL`, tenantID, res.ObservationID, sealed)
 	return err
 }
 
 // ReplayRetainedManagement installs configuration only after identity resolution
 // and monitoring approval. Existing management is preserved for operator review.
 func (s *DeviceService) ReplayRetainedManagement(ctx context.Context, tenant uuid.UUID) error {
-	repo, err := s.Repo()
-	if err != nil {
-		return err
-	}
+	repo := s.Repo()
 	for range 50 {
 		done := false
 		err := repo.RunInTx(ctx, tenant.String(), func(bound *pgidentity.Repository) error {
@@ -120,6 +119,13 @@ func (s *DeviceService) ReplayRetainedManagement(ctx context.Context, tenant uui
 				}
 				if err := s.upsertDeviceCredentials(ctx, bound.Tx(), tenant, asset, fields); err != nil {
 					return err
+				}
+				// The operator's re-interrogation consent, given on the Add
+				// device form, belongs to the management it was given with.
+				if fields.PlatformReinterrogation != nil && *fields.PlatformReinterrogation {
+					if err := applyPlatformReinterrogation(ctx, bound.Tx(), tenant, asset, fields.PlatformReinterrogation, false); err != nil {
+						return err
+					}
 				}
 			}
 			if err := mergeAssetMetadata(ctx, bound.Tx(), tenant, asset, map[string]interface{}{deviceTypeKey: fields.DeviceType, deviceDiscoveryMethodKey: fields.DiscoveryMethod}); err != nil {

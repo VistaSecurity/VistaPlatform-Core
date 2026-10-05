@@ -14,6 +14,7 @@ const observation: inventoryComponents['schemas']['IdentityObservation'] = {
   evidence: {}, admission_reasons: ['insufficient_identity_evidence'], state: 'unresolved', asset_id: null, proposal_id: null,
   first_seen_at: '2026-09-18T10:00:00Z', last_seen_at: '2026-09-18T10:00:00Z', occurrence_count: 1,
   enrichment_state: 'blocked', enrichment_reason: 'collector_capability_missing', last_attempt_at: null, next_attempt_at: null,
+  network_name: null, source_name: 'Sensor', needs: 'none', suggested_action: 'none', explanation_code: 'no_suggestion', suggested_reason: '', summary: [], link_asset: null, evidence_held: false,
   enrichment_jobs: [{ id: 'job', action: 'dns', executor_scope: 'sensor:one', state: 'blocked', reason: 'collector_capability_missing', attempts: 0, last_attempt_at: null, next_attempt_at: '2026-09-19T10:00:00Z' }],
   retained_evidence: { total: 51, limit: 50, has_more: true, items: [{
     kind: 'crypto', scope: 'source_context', source_ref: 'sensor:one', observed_at: null, collector_version: 'rc.11', materialization_state: 'pending',
@@ -97,4 +98,14 @@ it('keeps the long-form enrichment guidance separate from the short block phrase
   expect(host.textContent).toContain('review its interface configuration');
   act(() => root.render(<CollectorReachability collector={collector} />));
   expect(host.textContent).not.toContain('review its interface configuration');
+});
+
+it('says why a configured source was not asked again, in words rather than the reason token', () => {
+  const job = { ...observation.enrichment_jobs![0], action: 'configured_source' as const, executor_scope: 'configured_sources', state: 'completed' as const };
+  act(() => root.render(<ObservationDetails observation={{ ...observation, enrichment_jobs: [{ ...job, reason: 'configured_source_already_reported_this_peer' }] }} />));
+  expect(host.textContent).toContain('not re-interrogated for this observation');
+  expect(host.textContent).not.toContain('configured source already reported this peer');
+  act(() => root.render(<ObservationDetails observation={{ ...observation, enrichment_jobs: [{ ...job, reason: 'configured_source_refreshed_recently' }] }} />));
+  expect(host.textContent).toContain('at most once every 6 hours');
+  expect(host.textContent).not.toContain('configured source refreshed recently');
 });

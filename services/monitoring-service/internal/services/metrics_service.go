@@ -27,7 +27,7 @@ type MetricsService struct {
 
 func NewMetricsService(cfg *config.Config) *MetricsService {
 	// Initialize database connection
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(cfg.DatabaseURL))
 	if err != nil {
 		panic(fmt.Sprintf("Failed to connect to database: %v", err))
 	}

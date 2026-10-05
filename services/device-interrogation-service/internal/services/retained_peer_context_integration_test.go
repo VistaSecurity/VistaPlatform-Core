@@ -26,7 +26,6 @@ import (
 	"github.com/google/uuid"
 
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
-	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -43,15 +42,6 @@ func TestIntegration_ObservationSink_RetainsMultiIdentifierPeerContext(t *testin
 	}
 
 	sink := NewObservationSink(app)
-	_, repo, err := sink.engine()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Admission is what retains a weakly-evidenced peer instead of creating an
-	// asset for it; force it on whatever this build's capabilities say.
-	if sink.eng, err = identity.New(identity.Config{Repo: repo, AdmissionEnabled: true}); err != nil {
-		t.Fatal(err)
-	}
 
 	// Three identifiers and no identity evidence: an advertised neighbour, so
 	// admission retains it rather than resolving it.
@@ -89,10 +79,10 @@ func TestIntegration_ObservationSink_RetainsMultiIdentifierPeerContext(t *testin
 	if err := json.Unmarshal(body, &state); err != nil {
 		t.Fatalf("decode retained payload: %v", err)
 	}
-	if len(state.Peers) != 1 {
-		t.Fatalf("retained %d peer envelopes, want 1", len(state.Peers))
+	if len(state.Sightings) != 1 {
+		t.Fatalf("retained %d peer envelopes, want 1", len(state.Sightings))
 	}
-	for key := range state.Peers {
+	for key := range state.Sightings {
 		if raw, err := hex.DecodeString(key); err != nil || len(raw) != 32 {
 			t.Fatalf("peer key %q is not a hex SHA-256", key)
 		}

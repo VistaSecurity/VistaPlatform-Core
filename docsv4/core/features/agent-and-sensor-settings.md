@@ -65,11 +65,12 @@ The last two are deliberately separate. One device is unreachable; the other is
 running and healthy but too old to be managed, and they need different actions.
 
 **Which settings need a restart:** on a sensor, **Host observation**, **Host
-observation window** and **Host observation DNS** — all three. They change what
-the sensor captures, and the capture filter is fixed when the sensor opens its
-network interface, so switching a decoder on without reopening it would leave it
-running and receiving nothing. Everything else takes effect at the next
-check-in.
+observation window**, **Host observation DNS** and **Additional TLS ports**. They
+change what the sensor captures, and the capture filter is fixed when the sensor
+opens its network interface, so switching a decoder on without reopening it would
+leave it running and receiving nothing. Everything else takes effect at the next
+check-in. Changing a sensor's monitored network interfaces also reopens its
+capture, which brings these in at the same time.
 
 The window belongs in that list and was missing from it: it was classified as
 taking effect immediately until review found that the console reported
@@ -118,11 +119,57 @@ description for each. Broadly:
 - **Discovery agents** — host inventory on/off and how often, how often the
   agent asks for work, how often it reports in, and how much it logs.
 - **Sensors** — active probing, third-party TLS enrichment (off by default),
-  network discovery, host observation and its window, DNS decoding, the
-  observation rest period, the reporting interval, and how much it logs.
+  network discovery, host observation and its window, DNS decoding, additional
+  TLS ports, the observation rest period, the reporting interval, and how much
+  it logs.
 
 A setting your device's build does not support is reported back as unsupported,
-naming the version — the console will not show it as applied.
+naming the version — the console will not show it as applied. It shows the
+device as **Failed**, telling you to upgrade it, whenever that setting is not in
+force. The one exception is a new setting that you have not changed, where an
+older build already behaves the way the default asks — **Additional TLS ports**,
+for example, defaults to none, which is what an older sensor does. That is not
+reported as a failure, so upgrading the platform does not turn every older sensor
+red. Set such a setting to something else and the older device shows **Failed**
+until it is upgraded.
+
+## Additional TLS ports
+
+Sensors decode TLS on the ports TLS normally uses — 443, 8443, the TLS forms of
+mail and directory protocols, RDP and others — and on STARTTLS and industrial
+ports they already know. If your organization runs TLS on a port of its own, such
+as an internal service on 9443, list it here and sensors decode the TLS
+handshakes they see on it: certificates, versions and cipher suites, exactly as
+on 443.
+
+**Where:** a sensor's **Control** tab for that sensor alone, or **Sensor
+defaults** for every sensor that has no list of its own. Type a port and press
+**Add** (several at once, separated by commas or spaces, also works), remove one
+with its **×**, then **Save**.
+
+- **Ports only, TLS only.** Each entry is one port from 1 to 65535 — ranges are
+  not accepted — and at most 64. A listed port is decoded **as TLS and nothing
+  else**: a service on it that does not speak TLS produces no discoveries.
+- **Built-in ports are already watched.** Adding one (443, say) is accepted, and
+  the console tells you it is *already monitored as HTTPS*; the sensor keeps
+  treating it the way it always has. A listed port never changes what a built-in
+  port means — 22 stays SSH, 445 stays SMB.
+- **Mistakes are named.** An entry that is not a port number, or is out of range,
+  is refused with the entry quoted, before anything is saved.
+- **It needs a restart.** A saved list shows **Pending restart** on the sensor
+  until the sensor restarts (or its network interfaces are changed, which reopens
+  the capture) and reports the new list in effect; then the setting reads **In
+  effect on this sensor**. Restart a sensor from its Control tab, under **Send
+  command** → **restart**.
+- **Each port adds a little capture load**, because the sensor admits and
+  inspects more of the traffic it sees. List the ports you use, not ranges of
+  guesses.
+
+The same list can be set in a sensor's own configuration file
+(`capture.extraPortsToMonitor`). A sensor reports that list when it first checks
+in and it is kept as that sensor's own setting; after that the console's value
+is the one in force, and the sensor writes it back to its file so a restart
+reads the same list.
 
 ## Which version a device is running
 

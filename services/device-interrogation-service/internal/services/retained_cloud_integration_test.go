@@ -35,10 +35,6 @@ func TestIntegration_RetainedCloudReplaysProviderEvidenceAfterApproval(t *testin
 	if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"paused"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
 		t.Fatal(err)
 	}
-	svc.devices.identityEng, err = identity.New(identity.Config{Repo: svc.devices.identityRepo, AdmissionEnabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
 	seen := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
 	arn := "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/held/123"
 	device := models.Device{ID: uuid.New(), TenantID: tenant, DeviceType: "aws_alb", Vendor: stringPtr("AWS"), Hostname: stringPtr("cloud-held.example.test"), CreatedAt: seen,
@@ -154,10 +150,6 @@ func TestIntegration_RetainedCloudEnumerationPreservesFactsAndDeclaredAttributes
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"paused"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	svc.devices.identityEng, err = identity.New(identity.Config{Repo: svc.devices.identityRepo, AdmissionEnabled: true})
-	if err != nil {
 		t.Fatal(err)
 	}
 	plan := awsEnumerationPlanForTest(t)

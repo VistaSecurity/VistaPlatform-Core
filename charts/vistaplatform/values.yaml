@@ -397,6 +397,18 @@ appConfig:
   oauthCallbackBaseURL: ""
   dbMaxOpenConns: "15"
   dbMaxIdleConns: "5"
+  # -- PostgreSQL JIT for every backend's database connections. Empty (the
+  # default) leaves the platform's behaviour as it is: each connection sends
+  # jit=off, because JIT compilation dominates short queries on the partitioned
+  # tables (tens of seconds against about a tenth of one). Set `true` (or "on")
+  # to keep the PostgreSQL server's own JIT setting instead, for example behind a
+  # connection pooler that rejects the `jit` start-up parameter, in which case
+  # also turn JIT off on the server side (`ALTER DATABASE ... SET jit = off`).
+  # One value for all backends, rendered into the shared app ConfigMap; a
+  # per-service `backends.<svc>.extraEnv` DB_JIT entry still wins for that
+  # service. Behaviour behind PgBouncer or a managed proxy is documented but not
+  # tested by the project.
+  dbJit: ""
   natsStreamReplicas: "1"
   redisPoolSize: "50"
   redisMinIdleConns: "10"
@@ -555,7 +567,12 @@ backends:
     # resource-tracker-service and the audit middleware signs activity logs to
     # audit-service, both via INTERNAL_AUTH_SECRET. Without internalAuthSecret
     # those signed calls are rejected with 401.
-    secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true}
+    #
+    # encryptionMasterKey: a model provider configured in Settings stores its
+    # API key encrypted; this service drafts controls and remediation plans
+    # through that provider and has to open the key.
+    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: true,
+      redisUrl: true}
     resources:
       requests: {cpu: 200m, memory: 256Mi}
       limits: {cpu: 500m, memory: 512Mi}
@@ -636,21 +653,22 @@ backends:
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
-    extraEnv:
-      # NATS monitor port (8222) is only published on the headless Service —
-      # the regular `nats` ClusterIP Service publishes 4222 only by design
-      # (see datastores/nats.yaml header).
-      - {name: NATS_MONITOR_URL, value: "http://nats-headless:8222"}
-      # No in-cluster api-gateway pod (cluster Traefik routes per-service via
-      # IngressRoute CRDs). Reporting `disabled` for these probes is honest;
-      # `down` would be a false alarm.
-      - {name: API_GATEWAY_URL, value: ""}
-      - {name: TRAEFIK_API_URL, value: ""}
-      # Traefik dashboard-API proxy target. Empty = feature reports "not
-      # configured" instead of dialing the nonexistent api-gateway host. Cluster
-      # Traefik's dashboard API lives in kube-system and isn't exposed here.
-      - {name: TRAEFIK_DASHBOARD_URL, value: ""}
-
+    # Four probe targets are rendered by the deployment template, NOT through
+    # extraEnv: a customer who sets their own extraEnv list replaces the
+    # chart's list wholesale, and without them the service probes hosts this
+    # chart never creates and reports "Service down" for api-gateway and nats.
+    #
+    #   NATS_MONITOR_URL=http://nats-headless:8222 — the monitor port (8222) is
+    #     only published on the headless Service; the regular `nats` ClusterIP
+    #     Service publishes 4222 only by design (see datastores/nats.yaml).
+    #   API_GATEWAY_URL="" and TRAEFIK_API_URL="" — there is no in-cluster
+    #     api-gateway pod (cluster Traefik routes per-service via IngressRoute
+    #     CRDs). Reporting `disabled` for these probes is honest; `down` would
+    #     be a false alarm.
+    #   TRAEFIK_DASHBOARD_URL="" — the dashboard-API proxy reports "not
+    #     configured" instead of dialing the nonexistent api-gateway host.
+    #
+    # To change one, name it in extraEnv: your entry replaces the chart's.
     image:
       digest: ""
   cluster-sensor-service:
@@ -1078,6 +1096,25 @@ discovery:
     # Most such addresses one scan may name in total, across all its targets.
     # 1-16384; lower only.
     maxAddressesPerJob: 16384
+  # Probe budget for a scan described by depth (POST /discovery/jobs with
+  # scan_depth): the most addresses x (TCP + UDP ports) one scan may send.
+  # A larger scan is refused (422 scan_budget_exceeded) with the numbers.
+  # The default, 25,000,000, admits a Thorough scan of one /24 (about 16.8
+  # million) and a Standard scan of the largest job the address limits allow
+  # (about 22.5 million). Renders DISCOVERY_MAX_JOB_PROBES on
+  # cluster-sensor-service; a value that is not a whole number between 1 and
+  # 2147450880 means the default (fail closed).
+  maxJobProbes: 25000000
+  # How a cluster-sensor-service replica shares scanning out between tenants
+  # (scans described by depth). A unit is one host being scanned — about one
+  # host's worth of connections at the scan's pace. maxConcurrentUnits caps the
+  # hosts one replica scans at once, across every tenant; maxConcurrentUnitsPerTenant
+  # caps one tenant, however many scans it runs, so one tenant's large scan
+  # cannot take the whole replica. Render DISCOVERY_MAX_CONCURRENT_UNITS and
+  # DISCOVERY_MAX_CONCURRENT_UNITS_PER_TENANT; each 1-256, a value outside that
+  # means the default, and the per-tenant cap is never above the replica's.
+  maxConcurrentUnits: 16
+  maxConcurrentUnitsPerTenant: 4
 
 # Catalogue mirror feeds (admin-service → Catalog → End-of-life / Vulnerability
 # feed). The OSV feed downloads each ecosystem's bulk archive and reads it one

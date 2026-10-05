@@ -59,7 +59,7 @@ func (s *Sensor) queueIdentityDNS(command models.Command) *models.CommandRespons
 		s.identityDNSPending[command.ID] = true
 		return nil
 	default:
-		return s.discoveryJobRefusal(command, "sensor busy: scoped DNS queue is full")
+		return s.discoveryJobRefusal(command, sensordispatch.SensorBusyPrefix+": scoped DNS queue is full")
 	}
 }
 func (s *Sensor) runIdentityDNS(queue <-chan models.Command) {

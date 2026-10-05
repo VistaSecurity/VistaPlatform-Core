@@ -288,7 +288,15 @@ func TestProvisionalYieldRerunWritesNothingOfItsOwn(t *testing.T) {
 	}
 	before := len(repo.HistoryFor(p))
 
-	res := mustResolve(t, e, direct(advertAt.Add(time.Hour), segmentB, lease, label))
+	// The observation carries a socket the asset does not have yet. A match
+	// that changed nothing writes no timeline row (asset-history rule), so
+	// without something new the one entry this test counts would not exist and
+	// a stray supporting entry from the re-run would be the ONLY thing it saw.
+	// The endpoint is written by whichever path reaches the asset first, which
+	// is what makes the mutation below visible.
+	obs := direct(advertAt.Add(time.Hour), segmentB, lease, label)
+	obs.Endpoints = []identity.EndpointObservation{{Address: "198.51.100.43", Port: 443, Transport: "tcp"}}
+	res := mustResolve(t, e, obs)
 
 	if res.Outcome != identity.OutcomeMatched || res.Asset.ID != p.ID {
 		t.Fatalf("outcome = %s on %q, want the fallback ordinary match on %s", res.Outcome, res.Asset.ID, p.ID)

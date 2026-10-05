@@ -138,7 +138,7 @@ func TestIntegration_NewlyModelledProtocols_LandOnTheDecidedEnumValue(t *testing
 				CipherSuite:     tc.suite,
 				RawData:         map[string]interface{}{},
 			}
-			if err := svc.processDiscoveryCryptoData(tenant, assetID, f, nil, nil, nil); err != nil {
+			if err := materializeForTest(svc, tenant, assetID, f, nil, nil, nil); err != nil {
 				t.Fatalf("processDiscoveryCryptoData: %v", err)
 			}
 			if n := countImplementationRows(t, raw, tenant, assetID); n != 1 {
@@ -194,7 +194,7 @@ func TestIntegration_SSLVPN_IsVisibleToTheTLSMeasurements(t *testing.T) {
 		CipherSuite:     &suite,
 		RawData:         map[string]interface{}{"source": "device_interrogation"},
 	}
-	if err := svc.processDiscoveryCryptoData(tenant, assetID, f, nil, nil, nil); err != nil {
+	if err := materializeForTest(svc, tenant, assetID, f, nil, nil, nil); err != nil {
 		t.Fatalf("processDiscoveryCryptoData: %v", err)
 	}
 
@@ -246,7 +246,7 @@ func TestIntegration_PPTP_ScoresFromTheCatalogue(t *testing.T) {
 				"vpn_type":    "pptp-server",
 			},
 		}
-		if err := svc.processDiscoveryCryptoData(tenant, assetID, f, nil, nil, nil); err != nil {
+		if err := materializeForTest(svc, tenant, assetID, f, nil, nil, nil); err != nil {
 			t.Fatalf("processDiscoveryCryptoData: %v", err)
 		}
 		// COALESCE because an unassessed implementation leaves risk_score NULL

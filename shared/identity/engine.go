@@ -11,6 +11,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
+	"github.com/vistasecurity/vistaplatform/shared/identity/matcher"
 )
 
 // Outcome is what [Engine.Resolve] decided.
@@ -41,6 +42,11 @@ const (
 	// a question. The engine advanced that asset's last-seen and, when the
 	// asset is provisional, attached the identifiers the observation added
 	// ( D3). It is NOT a match: nothing here was allowed to decide.
+	//
+	// On an ESTABLISHED asset nothing is attached at all — not the
+	// identifiers and not the endpoints ([Resolution.EvidenceHeld]): the
+	// sockets stay on the observation until an operator links or confirms it
+	// (platform ADR-0003 D2).
 	OutcomeSupporting Outcome = "supporting"
 )
 
@@ -122,6 +128,41 @@ type Resolution struct {
 	// rule-merge executor in inventory-service acts on the verdict later,
 	// outside this transaction, through the audited merge path.
 	MergeRecommended bool `json:"merge_recommended,omitempty"`
+
+	// Drift is set on a match the drift classifier decided was the same
+	// device changing — a rotated host key, a moved address, a reimage, or an
+	// unverified key change flagged for review (drift.go). The engine has
+	// already written the timeline entry; the caller publishes the event after
+	// its transaction commits.
+	Drift *Drift `json:"drift,omitempty"`
+
+	// EvidenceHeld is set when the observation was linked to Asset but the
+	// engine wrote NOTHING from it: supporting evidence for an established
+	// asset, or a non-sighting (a DNS answer) for any asset. Its endpoints
+	// stay on the observation (platform ADR-0003 D2: endpoints follow the
+	// identity decision), so a caller must not write anything from it onto
+	// the asset either — no service identification on its sockets, no crypto
+	// configuration, no deferred finding. Link or Confirm on the observation
+	// is what materialises them.
+	EvidenceHeld bool `json:"evidence_held,omitempty"`
+
+	// OperatorScanJob is set on a match a person's scan request decided
+	// ([Engine.WithOperatorScanRequest]): the job that carried it. DecidedBy
+	// is empty then, because no identifier decided.
+	OperatorScanJob string `json:"operator_scan_job,omitempty"`
+
+	// OperatorScanRefused says why a person's scan request supplied for this
+	// observation did NOT decide it (operator_scan.go). The rest of the
+	// Resolution is what the engine decided without the request.
+	OperatorScanRefused string `json:"operator_scan_refused,omitempty"`
+}
+
+// ObservationEndpoints is the observation's endpoints as the engine would
+// write them at time at: sanitized, deduplicated, and stamped with the
+// observation's source. For a caller that materialises an observation the
+// engine held ([Resolution.EvidenceHeld]) after an operator decides it.
+func ObservationEndpoints(obs Observation, at time.Time) []EndpointObservation {
+	return stampEndpoints(obs.Endpoints, obs.Source, at)
 }
 
 // Config configures an [Engine].
@@ -149,9 +190,15 @@ type Config struct {
 
 	// ProvisionalInventory turns on's provisional inventory: rule D2
 	// (an advertisement on a configured, unambiguous segment becomes a
-	// provisional asset instead of an observation nobody can see) and rule D3
-	// (corroboration, supporting evidence, and the hearsay-yields
-	// reassignment).
+	// provisional asset instead of an observation nobody can see) and the
+	// provisional half of rule D3 (corroboration of a provisional asset and
+	// the hearsay-yields reassignment).
+	//
+	// It does NOT gate "supporting evidence": evidence whose every identifier
+	// belongs to ONE asset is OutcomeSupporting with the flag off too (
+	// decision 3) — that shortcut is about ownership, not provisional
+	// inventory. A caller therefore has to handle OutcomeSupporting whatever
+	// this is set to.
 	//
 	// Default FALSE, and every caller but inventory-service's production
 	// constructor leaves it so. The rules it enables change what Resolve
@@ -207,6 +254,11 @@ type Engine struct {
 	dynamic   map[string]bool
 	prec      func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
 	now       func() time.Time
+
+	// operatorScan is a verified person's scan request for THIS resolution
+	// ([Engine.WithOperatorScanRequest]). Like observationID it rides only on a
+	// per-observation copy, never on the shared engine.
+	operatorScan *OperatorScanRequest
 }
 
 // New builds an engine. It fails only on a missing repository: every other
@@ -377,6 +429,30 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		owners[id.Key()] = refs
 	}
 
+	// A person's scan of a named asset (operator_scan.go) decides before the
+	// walk, or not at all: a refused request resolves the observation exactly
+	// as it would have been resolved without one.
+	if e.operatorScan != nil {
+		res, refused, err := e.resolveOperatorScan(ctx, obs, at, ids, owners)
+		if err != nil || refused == "" {
+			return res, err
+		}
+		plain := *e
+		plain.operatorScan = nil
+		res, err = plain.resolve(ctx, obs)
+		res.OperatorScanRefused = refused
+		return res, err
+	}
+
+	// Claimed addresses (claimed.go): before the walk, because a
+	// claimed address that will re-home must not vote for its old holder, and
+	// one whose holder keeps it must vote even in a dynamic scope.
+	claims, err := e.decideAddressClaims(ctx, obs, ids, owners)
+	if err != nil {
+		return Resolution{}, err
+	}
+	obs.claims = claims
+
 	// Step 3: the precedence walk.
 	precedence := e.precedenceFor(ctx, obs.TenantID, obs.ClassHint)
 	if obs.Admission.Authoritative {
@@ -487,7 +563,25 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 				decidedBy, observed.Kind, observed.Value, existing.Value, observed.Kind)
 			return e.resolveSingletonConflict(ctx, obs, at, ids, owners, ref, why)
 		}
-		if e.admissionDecision != nil && (e.admissionCandidate != nil || decidedBy == KindHostname || decidedBy == KindFQDN || decidedBy == KindIPAddress) {
+		// Owner Decision 4 (drift.go): a device binding or the address
+		// changing under a decided match is CLASSIFIED — rotated, moved,
+		// reimaged, unverified or replaced — rather than vetoed or waved
+		// through by whichever kind the walk checked first.
+		drift, err := e.classifyDrift(ctx, obs, at, ids, ref)
+		if err != nil {
+			return Resolution{}, err
+		}
+		switch {
+		case drift.result.Verdict == matcher.DriftReplaced:
+			return e.resolveSingletonConflict(ctx, obs, at, ids, owners, ref, "a different device now answers here: "+drift.result.Explanation)
+		case drift.result.Verdict.Matches():
+			// The classifier has read the interfaces too and called it the
+			// same device; the interface check below would only repeat a
+			// coarser version of that question.
+		case e.admissionDecision != nil && (e.admissionCandidate != nil || decidedBy == KindHostname || decidedBy == KindFQDN || decidedBy == KindIPAddress):
+			// No drift row applies (a name, not an address, decided; or the
+			// change is not one the table has an opinion on): the interface
+			// rule as it always was.
 			if disagrees, err := e.interfaceBindingConflict(ctx, ids, ref); err != nil {
 				return Resolution{}, err
 			} else if disagrees {
@@ -553,10 +647,28 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			changes["lease_moved"] = movedKeys
 		}
 
+		// — a claimed address held by a provisional or address-only
+		// record moves to the device that reported it as its own (claimed.go).
+		claimed, unattached, err := e.applyAddressClaims(ctx, obs, at, ref, unattached)
+		if err != nil {
+			return Resolution{}, err
+		}
+		if len(claimed) > 0 {
+			attach = append(attach, claimed...)
+			changes["claimed_rehomed"] = identifierKeys(claimed)
+		}
+
 		if err := e.applyToAsset(ctx, ref, obs, at, attach, unattached, ActionUpdated, changes); err != nil {
 			return Resolution{}, err
 		}
 		if err := e.retireEmptiedLeaseHolders(ctx, obs, at, moves); err != nil {
+			return Resolution{}, err
+		}
+		if err := e.retireClaimedHolders(ctx, obs, at, claimed); err != nil {
+			return Resolution{}, err
+		}
+		applied, err := e.applyDrift(ctx, obs, at, ref, drift)
+		if err != nil {
 			return Resolution{}, err
 		}
 		return Resolution{
@@ -565,6 +677,7 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			DecidedBy:         decidedBy,
 			DecidedByInferred: decider.Inferred(),
 			Unattached:        unattached,
+			Drift:             applied,
 		}, nil
 	default:
 		if e.admissionDecision != nil && !e.admissionDecision.Established {
@@ -572,10 +685,12 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			if len(claimed) > 1 {
 				return e.resolveContested(ctx, obs, at, ids, owners)
 			}
-			if e.provisional && len(claimed) == 1 {
-				// D3: every identifier anybody owns is owned by the SAME
-				// asset. This is another sighting of a thing we already know
-				// about, not a question — supporting evidence.
+			if len(claimed) == 1 {
+				// D3 /: every identifier anybody owns is owned by
+				// the SAME asset. This is another sighting of a thing we
+				// already know about, not a question — supporting evidence.
+				// Unconditional, like the floor below: the shortcut is about
+				// ownership, not about Config.ProvisionalInventory.
 				for id := range claimed {
 					return e.resolveSupporting(ctx, obs, at, ids, owners, AssetRef{TenantID: obs.TenantID, ID: id})
 				}
@@ -886,14 +1001,15 @@ func (e *Engine) proposeWithoutCreating(
 }
 
 // kindVotes reports whether an identifier may decide a match, as opposed to
-// merely being recorded. The two scope rules of ADR-0002 D3 live here.
+// merely being recorded. The two scope rules of ADR-0002 D3 live here, the
+// dynamic-scope one with its pinned-address exception ([Engine.dynamicAddress]).
 //
 // The empty-scope guard is belt and braces: [Identifier.Normalized] gives every
 // scoped kind [ScopeTenantDefault] when the caller supplied nothing, so this
 // should be unreachable. It stays because the consequence of reaching it —
 // silently, on one kind, in one intake path — was three assets for one host.
 func (e *Engine) kindVotes(obs Observation, id Identifier) bool {
-	if e.muted[id.Key()] {
+	if e.muted[id.Key()] || obs.claimMuted(id) {
 		return false
 	}
 	if id.Generic {
@@ -915,7 +1031,9 @@ func (e *Engine) kindVotes(obs Observation, id Identifier) bool {
 	if id.Kind.RequiresScope() && id.Scope == "" {
 		return false
 	}
-	if id.Kind == KindIPAddress && (e.dynamic[id.Scope] || obs.DynamicScopes[id.Scope]) {
+	if e.dynamicAddress(obs, id) {
+		// ADR-0002 D3: an address in a dynamic scope decides nothing — unless
+		// its owner holds it pinned (pinned.go, decision 1).
 		return false
 	}
 	return true
@@ -1273,17 +1391,28 @@ func (e *Engine) acceptMerge(
 }
 
 // applyToAsset is the update half of a match: attach, upsert, touch, history.
+//
+// An `updated` timeline row is written only when the match changed something
+// about the asset ([Engine.recordIfChanged]): an identifier or endpoint the
+// store reports it newly wrote, a better name, or an outcome the caller put in
+// `changes`. A pure re-observation still refreshes every last-seen above; it
+// just leaves the timeline alone.
 func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation, at time.Time, attach, unattached []Identifier, action HistoryAction, changes map[string]any) error {
+	var added, epsChanged int
 	if len(attach) > 0 {
-		if err := e.repo.AttachIdentifiers(ctx, ref, attach); err != nil {
+		n, err := e.repo.AttachIdentifiers(ctx, ref, attach)
+		if err != nil {
 			return fmt.Errorf("identity: attaching identifiers to %s: %w", ref.ID, err)
 		}
+		added = n
 	}
 	eps := stampEndpoints(obs.Endpoints, obs.Source, at)
 	if len(eps) > 0 {
-		if err := e.repo.UpsertEndpoints(ctx, ref, eps); err != nil {
+		n, err := e.repo.UpsertEndpoints(ctx, ref, eps)
+		if err != nil {
 			return fmt.Errorf("identity: upserting endpoints on %s: %w", ref.ID, err)
 		}
+		epsChanged = n
 	}
 	if err := e.repo.Touch(ctx, ref, at); err != nil {
 		return fmt.Errorf("identity: touching %s: %w", ref.ID, err)
@@ -1310,6 +1439,10 @@ func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation
 	if changes == nil {
 		changes = map[string]any{}
 	}
+	// What the caller already says about the outcome (a lease move, a
+	// corroborated provisional, a floating address ...) is read BEFORE this
+	// function adds its own keys below.
+	changed := added > 0 || epsChanged > 0 || action != ActionUpdated || hasOutcomeKey(changes)
 	after, err := e.repo.LoadSummaries(ctx, ref.TenantID, []string{ref.ID})
 	if err != nil {
 		return err
@@ -1317,15 +1450,113 @@ func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation
 	if len(before) == 1 && len(after) == 1 {
 		if before[0].Hostname != after[0].Hostname {
 			changes["hostname"] = map[string]string{"from": before[0].Hostname, "to": after[0].Hostname}
+			changed = true
 		}
 		if before[0].DisplayName != after[0].DisplayName {
 			changes["display_name"] = map[string]string{"from": before[0].DisplayName, "to": after[0].DisplayName}
+			changed = true
 		}
 	}
 	changes["identifiers"] = identifierKeys(attach)
 	changes["endpoints"] = endpointKeys(eps)
 	if len(unattached) > 0 {
 		changes["unattached"] = identifierKeys(unattached)
+	}
+	// An import or a declaration listing an asset is a person's or a
+	// connection's statement about it, and readers of the timeline treat "this
+	// source has listed it" as a fact in its own right: the auto-scan consent
+	// rule (shared/autoscan ImportedWithoutConsentSQL) lifts its withholding
+	// when a spreadsheet lists an asset a connection created, even if the
+	// spreadsheet's row carried nothing the asset lacked. So the FIRST listing
+	// by each such source is written, once; a sensor's hundredth sighting is
+	// not that kind of fact, which is why measured sources are left out.
+	if (obs.Source.Kind == SourceImported || obs.Source.Kind == SourceDeclared) && obs.Source.Ref != "" {
+		changes["listed_by"] = obs.Source.Ref
+	}
+	return e.recordIfChanged(ctx, ref, obs, at, action, changes, changed)
+}
+
+// Keys of an `updated` entry's changes that DESCRIBE how the match was made
+// rather than say what it changed, or that carry per-observation noise.
+// Anything else a caller puts there (`lease_moved`, `corroborated_provisional`,
+// `claimed_rehomed` ...) is an outcome in its own right and always earns a row,
+// so a key added later fails towards writing, not towards silence.
+var descriptiveChangeKeys = map[string]bool{
+	"decided_by":          true,
+	"decided_by_inferred": true,
+	"supporting":          true,
+	"sighting":            true,
+	"observation_id":      true,
+	// Written by applyToAsset itself from what the store reported.
+	"identifiers": true,
+	"endpoints":   true,
+}
+
+// conditionKeys are the entries that record a standing CONDITION of the
+// evidence rather than a change to the asset: identifiers left unattached
+// because another asset owns them, an address that floats, an observation held
+// as address-only hearsay, a proposal kept separate, an import or declaration
+// listing the asset (`listed_by`). They are worth one row the
+// first time they appear and nothing after, so [Engine.recordIfChanged] asks
+// the timeline whether it already says so.
+var conditionKeys = []string{"listed_by", "unattached", "floating_address", "announces", "suppressed_proposal", "address_only_link"}
+
+// qualifierKeys say what KIND of observation the condition was recorded under,
+// so a sighting and a name-to-address answer about the same unattached
+// identifiers are not mistaken for each other.
+var qualifierKeys = []string{"supporting", "sighting"}
+
+func hasOutcomeKey(changes map[string]any) bool {
+	for k := range changes {
+		if descriptiveChangeKeys[k] || isConditionKey(k) || k == "hostname" || k == "display_name" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isConditionKey(k string) bool {
+	for _, c := range conditionKeys {
+		if c == k {
+			return true
+		}
+	}
+	return false
+}
+
+// recordIfChanged writes the timeline row when the observation changed stored
+// state on the asset (`changed`, decided by the caller from what the
+// repository reported it wrote). When nothing changed it still writes the row
+// the FIRST time a standing condition appears — see conditionKeys — and
+// otherwise writes nothing: `asset_history` is the timeline people read, and a
+// row per observation for a host seen every few seconds buries the few that
+// say something.
+func (e *Engine) recordIfChanged(ctx context.Context, ref AssetRef, obs Observation, at time.Time, action HistoryAction, changes map[string]any, changed bool) error {
+	if !changed {
+		memo := map[string]any{}
+		hasCondition := false
+		for _, k := range conditionKeys {
+			if v, ok := changes[k]; ok {
+				memo[k] = v
+				hasCondition = true
+			}
+		}
+		if !hasCondition {
+			return nil
+		}
+		for _, k := range qualifierKeys {
+			if v, ok := changes[k]; ok {
+				memo[k] = v
+			}
+		}
+		seen, err := e.repo.HistoryHasChange(ctx, ref, action, memo)
+		if err != nil {
+			return fmt.Errorf("identity: reading %s history for %s: %w", action, ref.ID, err)
+		}
+		if seen {
+			return nil
+		}
 	}
 	return e.history(ctx, ref, obs, at, action, changes)
 }
@@ -1741,6 +1972,19 @@ func classConfidence(obs Observation) float64 {
 // producer.
 func identifierSource(raw Identifier, obs Source) Source {
 	if !raw.Inferred() {
+		// A LOWER stated provenance is honoured too: an Add device
+		// sighting is declared, but the MAC its probe read off the device is
+		// a measurement, and storing it as declared would claim a person
+		// typed it. Never a higher one: an identifier cannot out-rank the
+		// observation that carried it.
+		if k := raw.Source.Kind; k != "" && k.Valid() && SourceRank(k) < SourceRank(obs.Kind) {
+			src := obs
+			src.Kind = k
+			if ref := strings.TrimSpace(raw.Source.Ref); ref != "" {
+				src.Ref = ref
+			}
+			return src
+		}
 		return obs
 	}
 	src := Source{Kind: SourceInferred, Ref: strings.TrimSpace(raw.Source.Ref), Mode: obs.Mode}
@@ -1784,6 +2028,11 @@ func dedupeIdentifiers(ids []Identifier) []Identifier {
 			if out[i].Inferred() && !id.Inferred() {
 				out[i].Source = id.Source
 			}
+			if out[i].KeyAlgorithm == "" {
+				out[i].KeyAlgorithm = id.KeyAlgorithm
+			}
+			out[i].Pinned = out[i].Pinned || id.Pinned
+			out[i].Claimed = out[i].Claimed || id.Claimed
 			continue
 		}
 		seen[id.Key()] = len(out)

@@ -220,6 +220,15 @@ type JobResult struct {
 	// to the first asset's copy.
 	DeviceIdentity *di.DeviceIdentity `json:"device_identity,omitempty"`
 
+	// Identification is a device_discovery job's answer ( slice B): the
+	// allowlisted projection of what Registry.Identify read. Set only on a
+	// successful discovery; an interrogation never sends it.
+	Identification *di.IdentificationReport `json:"identification,omitempty"`
+	// FailureCode is a failed device_discovery job's typed reason — one of the
+	// shared IdentifyFailure values, so the row can say "unreachable" rather
+	// than "failed". The platform stores only codes it knows.
+	FailureCode string `json:"failure_code,omitempty"`
+
 	// ObservationsErr is what the in-cluster executor could not persist of the
 	// Facts/Relationships it wrote itself, handed to the result processor so it
 	// lands in the job's processing block. Never serialised: an agent cannot

@@ -224,11 +224,11 @@ func TestResolveMany_ScopesTenantEntitlementLookup(t *testing.T) {
 // makeTierGrantingBoolean creates a throwaway subscription tier that grants
 // `key` and returns a fresh tenant on it.
 //
-// It exists because NO seeded tier grants ANY boolean capability: every boolean
-// item in the catalogue is edition-gated, and the seed ships all of them
-// `{"enabled": false}` on every tier. Reading the resolver's tier-boolean-true
-// path off the seed is therefore not possible — and the tests that tried to
-// broke the nightly for a month. A private tier keeps this test about
+// It exists because no seeded tier grants an edition-gated boolean: the seed
+// ships every one of them `{"enabled": false}` on every tier (the one boolean it
+// does switch on, the Core `ot_active_probing`, is pinned separately by
+// TestIntegration_OTActiveProbing_*). Tests that read the tier-boolean-true path
+// off the seed broke the nightly for a month. A private tier keeps this test about
 // the resolver instead of about the seed, and cannot leak into other tests the
 // way mutating `pro` would. It is cleaned up explicitly: residue that only
 // another test's side effect removes is residue.
@@ -268,9 +268,9 @@ func TestResolve_TierBoolean_Enabled(t *testing.T) {
 	db := openTestDB(t)
 	applySchemaAndSeed(t, db)
 	r := sqlLayerResolver(db)
-	tenant := makeTierGrantingBoolean(t, db, "ot_active_probing")
+	tenant := makeTierGrantingBoolean(t, db, "ot_primary_lens")
 
-	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestResolve_TierBoolean_Enabled(t *testing.T) {
 	}
 	enabled, ok := ent.BooleanValue()
 	if !ok || !enabled {
-		t.Errorf("tier-granted ot_active_probing should be enabled=true, got enabled=%v ok=%v", enabled, ok)
+		t.Errorf("tier-granted ot_primary_lens should be enabled=true, got enabled=%v ok=%v", enabled, ok)
 	}
 }
 
@@ -306,9 +306,9 @@ func TestResolve_CoreInstallNeverGrantsGatedCapabilities(t *testing.T) {
 
 	gated := []string{
 		"custom_policies", "threshold_overrides",
-		"ot_active_probing", "ot_primary_lens",
+		"ot_primary_lens",
 		"cbom_signing", "sso_saml", "custom_branding",
-		"cmdb_sync", "connector_netbox", "siem_export", "billing_portal",
+		"cmdb_sync", "connector_netbox", "ai_tenant_provider", "siem_export", "billing_portal",
 	}
 
 	// Every seeded active tier, plus one of the test's own that grants ALL of
@@ -406,13 +406,13 @@ func makeTierGrantingBooleans(t *testing.T, db *sql.DB, keys []string) uuid.UUID
 func TestResolve_TierBoolean_Disabled(t *testing.T) {
 	r, _, tenant := setupResolver(t, "starter")
 
-	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	enabled, ok := ent.BooleanValue()
 	if !ok || enabled {
-		t.Errorf("ot_active_probing on Starter should be enabled=false, got enabled=%v ok=%v", enabled, ok)
+		t.Errorf("ot_primary_lens on Starter should be enabled=false, got enabled=%v ok=%v", enabled, ok)
 	}
 }
 
@@ -443,14 +443,17 @@ func TestResolve_UnlimitedQuantity(t *testing.T) {
 func TestResolve_OverrideBeatsTier(t *testing.T) {
 	r, db, tenant := setupResolver(t, "starter")
 
-	// Grant ot_active_probing as an active override even though Starter
-	// doesn't include it. Sales would do this for a customer add-on.
+	// Grant ot_primary_lens as an active override even though Starter
+	// doesn't include it. Sales would do this for a customer add-on. (These
+	// override tests used ot_active_probing until it became a Core capability
+	// that every tier grants — a key the tier already enables cannot show an
+	// override or an expired override changing anything.)
 	_, err := db.Exec(`
 		INSERT INTO tenant_entitlements
 		    (tenant_id, item_id, override_value, reason, effective_from)
 		VALUES (
 		    $1,
-		    (SELECT id FROM billable_items WHERE key='ot_active_probing'),
+		    (SELECT id FROM billable_items WHERE key='ot_primary_lens'),
 		    '{"enabled": true}'::jsonb,
 		    'sales addon',
 		    NOW() - INTERVAL '1 day'
@@ -460,7 +463,7 @@ func TestResolve_OverrideBeatsTier(t *testing.T) {
 		t.Fatalf("insert override: %v", err)
 	}
 
-	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -469,7 +472,7 @@ func TestResolve_OverrideBeatsTier(t *testing.T) {
 	}
 	enabled, _ := ent.BooleanValue()
 	if !enabled {
-		t.Errorf("override should enable ot_active_probing on Starter")
+		t.Errorf("override should enable ot_primary_lens on Starter")
 	}
 }
 
@@ -481,7 +484,7 @@ func TestResolve_ExpiredOverrideIgnored(t *testing.T) {
 		    (tenant_id, item_id, override_value, reason, effective_from, expires_at)
 		VALUES (
 		    $1,
-		    (SELECT id FROM billable_items WHERE key='ot_active_probing'),
+		    (SELECT id FROM billable_items WHERE key='ot_primary_lens'),
 		    '{"enabled": true}'::jsonb,
 		    'expired trial',
 		    NOW() - INTERVAL '30 days',
@@ -492,7 +495,7 @@ func TestResolve_ExpiredOverrideIgnored(t *testing.T) {
 		t.Fatalf("insert expired override: %v", err)
 	}
 
-	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -501,7 +504,7 @@ func TestResolve_ExpiredOverrideIgnored(t *testing.T) {
 	}
 	enabled, _ := ent.BooleanValue()
 	if enabled {
-		t.Errorf("expired override should not enable ot_active_probing on Starter")
+		t.Errorf("expired override should not enable ot_primary_lens on Starter")
 	}
 }
 
@@ -513,7 +516,7 @@ func TestResolve_FutureOverrideIgnored(t *testing.T) {
 		    (tenant_id, item_id, override_value, reason, effective_from)
 		VALUES (
 		    $1,
-		    (SELECT id FROM billable_items WHERE key='ot_active_probing'),
+		    (SELECT id FROM billable_items WHERE key='ot_primary_lens'),
 		    '{"enabled": true}'::jsonb,
 		    'scheduled future grant',
 		    NOW() + INTERVAL '1 day'
@@ -523,7 +526,7 @@ func TestResolve_FutureOverrideIgnored(t *testing.T) {
 		t.Fatalf("insert future override: %v", err)
 	}
 
-	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -546,15 +549,15 @@ func TestIsEnabled(t *testing.T) {
 	applySchemaAndSeed(t, db)
 	r := sqlLayerResolver(db)
 	// Same reason as TestResolve_TierBoolean_Enabled: no seeded tier grants a
-	// boolean any more, so the true branch needs a tier of its own.
-	tenant := makeTierGrantingBoolean(t, db, "ot_active_probing")
+	// gated boolean, so the true branch needs a tier of its own.
+	tenant := makeTierGrantingBoolean(t, db, "ot_primary_lens")
 
-	ok, err := entitlements.IsEnabled(context.Background(), r, tenant, "ot_active_probing")
+	ok, err := entitlements.IsEnabled(context.Background(), r, tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("IsEnabled: %v", err)
 	}
 	if !ok {
-		t.Error("IsEnabled(ot_active_probing) on a tier that grants it should be true")
+		t.Error("IsEnabled(ot_primary_lens) on a tier that grants it should be true")
 	}
 
 	ok, err = entitlements.IsEnabled(context.Background(), r, tenant, "sso_saml")
@@ -681,7 +684,7 @@ func TestResolve_TenantWithoutTier_FallsToDefault(t *testing.T) {
 		t.Fatalf("create tenant without tier: %v", err)
 	}
 
-	ent, err := r.Resolve(context.Background(), id, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), id, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -702,7 +705,7 @@ func TestResolve_OverrideExpiryThreshold(t *testing.T) {
 		    (tenant_id, item_id, override_value, reason, effective_from, expires_at)
 		VALUES (
 		    $1,
-		    (SELECT id FROM billable_items WHERE key='ot_active_probing'),
+		    (SELECT id FROM billable_items WHERE key='ot_primary_lens'),
 		    '{"enabled": true}'::jsonb,
 		    'just-expired',
 		    NOW() - INTERVAL '1 day',
@@ -713,7 +716,7 @@ func TestResolve_OverrideExpiryThreshold(t *testing.T) {
 		t.Fatalf("insert just-expired override: %v", err)
 	}
 
-	ent, err := r.Resolve(context.Background(), tenant, "ot_active_probing")
+	ent, err := r.Resolve(context.Background(), tenant, "ot_primary_lens")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}

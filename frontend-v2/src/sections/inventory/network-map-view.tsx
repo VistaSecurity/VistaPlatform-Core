@@ -18,12 +18,14 @@ import { CLASS_GROUP_STYLES } from './map-model';
 import { classLabel } from './asset-shape';
 import { ExplodedDevice } from './network-map-exploded';
 import { SEGMENTS_SETTINGS_PATH } from '../settings/auto-scan-not-scanned';
+import { GATEWAY_NOT_RECORDED, GATEWAY_NOT_RECORDED_TITLE, gatewayAddress, gatewayName } from './segment-gateway';
+import { GatewayLink } from './segment-gateway-view';
 import {
   HOLLOW_TONES, NETWORK_VIEWS, NETWORK_VIEW_LABEL, TONE_COLOR, TONE_LABEL, ZOOM_LABEL,
   arcPath, assetIcon, assetTone, badgeCount, cryptoTraits, defaultPrefs, emptySegmentCount,
   groupCounts, groupSites, hasCrypto, legendTones, networkTruncationNotice, parsePrefs, splitArc,
   toneCounts, visibleAssets,
-  type ColourMode, type NetworkMapAsset, type NetworkMapPrefs, type SiteGroup, type Tone, type Tray,
+  type ColourMode, type NetworkMapAsset, type NetworkMapPrefs, type SegmentGateway, type SiteGroup, type Tone, type Tray,
   type TraitTone, type Zoom,
 } from './network-map-model';
 
@@ -174,13 +176,22 @@ function TraySummary({ assets, mode }: { assets: readonly NetworkMapAsset[]; mod
   );
 }
 
-/** The gateway line on a network. Never guessed (D3): until the segment
- * records its gateway this says so, rather than naming the `.1`. */
-function GatewayNote() {
+/** The gateway line on a network: the device that reported routing it,
+ *  linking to its asset page. Never guessed (D3): when no device has reported
+ *  it the line says so, rather than naming the `.1`. */
+function GatewayNote({ gateway }: { gateway: SegmentGateway | null }) {
+  if (gateway) {
+    return (
+      <span data-testid="network-map-gateway" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: '100%', fontSize: 11, color: 'var(--app-t3)' }}>
+        <Icon name="router" size={12} style={{ flex: 'none' }} />
+        <GatewayLink gateway={gateway} size={11} />
+      </span>
+    );
+  }
   return (
-    <span title="No device has been recorded as this network's gateway yet."
+    <span data-testid="network-map-gateway-missing" title={GATEWAY_NOT_RECORDED_TITLE}
       style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--app-t3)' }}>
-      <Icon name="router" size={12} style={{ opacity: 0.55 }} />gateway not recorded
+      <Icon name="router" size={12} style={{ opacity: 0.55 }} />{GATEWAY_NOT_RECORDED}
     </span>
   );
 }
@@ -197,7 +208,7 @@ function TrayBox({ tray, ctx, compact }: { tray: Tray; ctx: Ctx; compact?: boole
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
         {tray.detail && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{tray.detail}</span>}
-        {tray.segmentId && !compact && <GatewayNote />}
+        {tray.segmentId && !compact && <GatewayNote gateway={tray.gateway} />}
       </div>
       {ctx.zoom === 1 ? <TraySummary assets={tray.assets} mode={ctx.mode} /> : <Tiles assets={tray.assets} ctx={ctx} />}
     </div>
@@ -351,7 +362,7 @@ function CircuitView({ sites, ctx }: { sites: SiteGroup[]; ctx: Ctx }) {
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, borderBottom: `2px solid ${trunk}`, padding: '0 4px 4px', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--app-t1)' }}>{t.name}</span>
                     {t.detail && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{t.detail}</span>}
-                    {t.segmentId && <GatewayNote />}
+                    {t.segmentId && <GatewayNote gateway={t.gateway} />}
                     <span style={{ fontSize: 11.5, color: 'var(--app-t3)', marginLeft: 'auto' }}>{t.assets.length}</span>
                   </div>
                   {ctx.zoom === 1 ? (
@@ -426,7 +437,7 @@ function RadialView({ sites, ctx, centreLabel }: { sites: SiteGroup[]; ctx: Ctx;
       shapes.push(
         <path key={`t-${site.key}-${tray.key}`} d={arcPath(c, c, n0, n1, t.a0 + gap, t.a1 - gap)}
           style={{ fill: 'var(--app-panel)', stroke: 'var(--app-border2)', strokeWidth: 0.6 }}>
-          <title>{`${tray.name} · ${tray.assets.length} devices`}</title>
+          <title>{`${tray.name} · ${tray.assets.length} devices${tray.gateway ? ` · gateway ${gatewayName(tray.gateway)} (${gatewayAddress(tray.gateway)})` : ''}`}</title>
         </path>,
       );
       if (ctx.zoom === 1) label(`tl-${site.key}-${tray.key}`, tray.name, t.a0, t.a1, n0, n1, true);

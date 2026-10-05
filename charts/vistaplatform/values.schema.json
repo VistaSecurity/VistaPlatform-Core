@@ -370,7 +370,29 @@
       }
     },
     "appConfig": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "dbJit": {
+          "description": "Keep the PostgreSQL server's own JIT setting (true / \"on\") instead of the platform's per-connection jit=off. The service treats any unrecognised value as 'off', so a misspelling such as \"yes\" would silently do the opposite of what was meant; the schema refuses it instead.",
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "",
+                "on",
+                "off",
+                "true",
+                "false",
+                "1",
+                "0"
+              ]
+            }
+          ]
+        }
+      }
     },
     "ai": {
       "type": "object",
@@ -624,6 +646,24 @@
               "description": "Most external addresses one scan may name in total."
             }
           }
+        },
+        "maxJobProbes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147450880,
+          "description": "Probe budget for a scan described by depth: the most addresses x (TCP + UDP ports) one scan may send. Rendered as DISCOVERY_MAX_JOB_PROBES for cluster-sensor-service."
+        },
+        "maxConcurrentUnits": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "description": "Most hosts one cluster-sensor-service replica scans at once, across every tenant (scans described by depth). Rendered as DISCOVERY_MAX_CONCURRENT_UNITS."
+        },
+        "maxConcurrentUnitsPerTenant": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "description": "Most hosts one tenant's scans described by depth scan at once on one replica. Rendered as DISCOVERY_MAX_CONCURRENT_UNITS_PER_TENANT."
         }
       }
     },

@@ -61,7 +61,6 @@ export const SECTIONS: NavSection[] = [
           { path: '/discovery/sensors', label: 'Sensors & Agents' },
           { path: '/discovery/jobs', label: 'Discovery Jobs' },
           { path: '/discovery/devices', label: 'Devices' },
-          { path: '/discovery/active-scan', label: 'Active Scan' },
           { path: '/discovery/scans', label: 'Scheduled Scans' },
         ],
       },

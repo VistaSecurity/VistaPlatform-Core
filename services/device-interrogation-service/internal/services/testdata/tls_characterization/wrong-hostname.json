@@ -1,0 +1,90 @@
+{
+  "services.TLSHandshakeResult": {
+    "ALPN": "string=",
+    "Certificates": {
+      "[]map[string]interface {}": [
+        {
+          "map[string]interface {}": {
+            "certificate_pem": "string={{other_leaf.pem}}",
+            "chain_order": "int=0",
+            "extended_key_usage": {
+              "[]string": [
+                "string=ServerAuth"
+              ]
+            },
+            "fingerprint_sha1": "string={{other_leaf.sha1}}",
+            "fingerprint_sha256": "string={{other_leaf.sha256}}",
+            "is_ca": "bool=false",
+            "issuer": "string=CN=Example Test ECDSA CA,O=Example Test",
+            "issuer_dn": "string=CN=Example Test ECDSA CA,O=Example Test",
+            "key_algorithm": "string=ECDSA",
+            "key_size": "int=256",
+            "key_usage": {
+              "[]string": [
+                "string=DigitalSignature"
+              ]
+            },
+            "not_after": "string=2125-01-01T00:00:00Z",
+            "not_before": "string=2020-01-01T00:00:00Z",
+            "serial_number": "string=2003",
+            "signature_alg": "string=ECDSA-SHA256",
+            "subject": "string=CN=other.example.test",
+            "subject_alternative_names": {
+              "[]string": [
+                "string=other.example.test"
+              ]
+            },
+            "subject_dn": "string=CN=other.example.test"
+          }
+        },
+        {
+          "map[string]interface {}": {
+            "certificate_pem": "string={{ecdsa_ca.pem}}",
+            "chain_order": "int=1",
+            "extended_key_usage": "[]string=nil",
+            "fingerprint_sha1": "string={{ecdsa_ca.sha1}}",
+            "fingerprint_sha256": "string={{ecdsa_ca.sha256}}",
+            "is_ca": "bool=true",
+            "issuer": "string=CN=Example Test ECDSA CA,O=Example Test",
+            "issuer_dn": "string=CN=Example Test ECDSA CA,O=Example Test",
+            "key_algorithm": "string=ECDSA",
+            "key_size": "int=256",
+            "key_usage": {
+              "[]string": [
+                "string=CertSign",
+                "string=CRLSign"
+              ]
+            },
+            "not_after": "string=2125-01-01T00:00:00Z",
+            "not_before": "string=2020-01-01T00:00:00Z",
+            "serial_number": "string=2001",
+            "signature_alg": "string=ECDSA-SHA256",
+            "subject": "string=CN=Example Test ECDSA CA,O=Example Test",
+            "subject_alternative_names": {
+              "[]string": []
+            },
+            "subject_dn": "string=CN=Example Test ECDSA CA,O=Example Test"
+          }
+        }
+      ]
+    },
+    "CipherSuite": "string=TLS_AES_128_GCM_SHA256",
+    "Error": "string=",
+    "KeyExchange": {
+      "discovery.TLSKeyExchange": {
+        "Group": "string=X25519",
+        "GroupID": "tls.CurveID=X25519",
+        "KeyBits": "int=0",
+        "PQCHybridGroup": "string=",
+        "SupportsClassical": {
+          "*bool": "bool=true"
+        },
+        "SupportsPQCHybrid": {
+          "*bool": "bool=false"
+        }
+      }
+    },
+    "Success": "bool=true",
+    "TLSVersion": "string=TLS 1.3"
+  }
+}

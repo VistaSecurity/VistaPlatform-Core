@@ -6,24 +6,34 @@
 // the tenant through the server's buckets; and the whole filter state is ONE
 // query string in the URL, which is what makes a view shareable and a scope,
 // an approval rule and a saved view all the same kind of thing.
-import { useMemo } from 'react';
-import { useNavigate } from 'react-router';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useHref, useNavigate } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { Asset } from '@vistasecurity/api-contract';
 import { Icon, RiskChip } from '../../components/ui';
 import { ASSETS_PAGE_SIZE, AssetQueryError, useAssetFacets, useAssetsQuery } from './asset-queries';
 import { assetIdentity, assetRisk, classIcon } from './asset-shape';
 import { columnsForClass, gridTemplate, type AssetColumn } from './columns';
+import type { OpenAsset } from './drawers';
 import { FACET_LEVELS, FacetRail } from './facet-rail';
 import { applyFacetChange, queryToFacets, type FacetState } from './facet-query';
 import { QueryChip, QueryEditor, ServerQueryErrors } from './query-editor';
 import { SavedViews } from './saved-views';
 import { IdentityStatus } from './identity-status';
 import { IdentityCoverage } from '../discovery/observations-page';
+import { NO_SELECTION, isSelected, pageState, toggleRow, togglePage, type AssetSelection } from './asset-selection';
+import { activeScanView } from '../discovery/active-scan-row-state';
+import { ActiveScanJobsPanel, BulkActionBar, SelectAllBanner, SelectBox, nameFrom, useScanFeed } from './bulk-action-bar';
 
-function Header({ cols, grid }: { cols: AssetColumn[]; grid: string }) {
+// The checkbox column sits in front of the class-dependent grid.
+const SELECT_COL = '18px';
+
+function Header({ cols, grid, selectState, onSelectPage }: {
+  cols: AssetColumn[]; grid: string; selectState: 'none' | 'some' | 'all'; onSelectPage: () => void;
+}) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: grid, gap: 12, padding: '0 16px', height: 34, alignItems: 'center', borderBottom: '1px solid var(--app-border2)', position: 'sticky', top: 0, background: 'var(--app-panel)', zIndex: 1 }}>
+      <SelectBox state={selectState} onChange={onSelectPage} label="Select every asset on this page" />
       <span />
       <span className="eyebrow-app">Asset</span>
       {cols.map((c) => (
@@ -33,26 +43,82 @@ function Header({ cols, grid }: { cols: AssetColumn[]; grid: string }) {
   );
 }
 
-function AssetRow({ asset, cols, grid, onOpen }: {
-  asset: Asset; cols: AssetColumn[]; grid: string; onOpen: (id: string) => void;
+/** A person's scan of this asset that is running, or whose last run failed —
+ * the two states the retired Active Scan page showed per row. A
+ *  completed scan needs no badge: its results are the row. */
+function ScanBadge({ asset }: { asset: Asset }) {
+  const view = activeScanView(asset);
+  if (view.kind !== 'scanning' && view.kind !== 'failed') return null;
+  const scanning = view.kind === 'scanning';
+  return (
+    <span
+      title={scanning ? 'An active scan of this asset is running' : 'The last active scan did not reach this asset'}
+      style={{ flex: 'none', fontSize: 10.5, fontWeight: 600, borderRadius: 40, padding: '1px 7px', color: scanning ? 'var(--info)' : 'var(--danger-text)', background: `color-mix(in srgb, ${scanning ? 'var(--info)' : 'var(--danger)'} 12%, transparent)` }}
+    >
+      {scanning ? 'Scanning…' : 'Last scan failed'}
+    </span>
+  );
+}
+
+// A plain left click is the peek; everything a browser means by "open this
+// somewhere else" (a modifier key, or the middle button) is not ours to take.
+function isPlainClick(e: React.MouseEvent): boolean {
+  return e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey;
+}
+
+/**
+ * One row of the list.
+ *
+ * A click opens the asset DRAWER, the peek from a list (ADR-0006 D3), seeded
+ * with the row so its header paints before the detail read returns. The full
+ * page stays one click further: the drawer's "Open full page", and the name
+ * here, which is a real link so a new tab, a copied address and a middle click
+ * all do what a browser does with one. The link is also the keyboard target,
+ * which is why the row itself is not a second tab stop.
+ */
+function AssetRow({ asset, cols, grid, onOpen, selected, onToggle }: {
+  asset: Asset; cols: AssetColumn[]; grid: string; onOpen: OpenAsset; selected: boolean; onToggle: () => void;
 }) {
   const ident = assetIdentity(asset);
   const risk = assetRisk(asset);
+  const href = useHref(`/inventory/assets/${asset.id}`);
+  // The rest of the row is a bigger target for the same link, so it answers a
+  // modified click the way the link would. The link has already decided its
+  // own clicks, hence the `closest('a')` guard.
+  const outsideLink = (e: React.MouseEvent) => !(e.target as HTMLElement).closest('a');
   return (
     <div
       className="row-hover"
-      role="button"
-      tabIndex={0}
-      onClick={() => onOpen(asset.id)}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(asset.id); } }}
-      style={{ display: 'grid', gridTemplateColumns: grid, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}
+      onClick={(e) => {
+        if (!outsideLink(e)) return;
+        if (isPlainClick(e)) onOpen(asset.id, asset);
+        else window.open(href, '_blank', 'noopener');
+      }}
+      onAuxClick={(e) => {
+        if (e.button !== 1 || !outsideLink(e)) return;
+        e.preventDefault();
+        window.open(href, '_blank', 'noopener');
+      }}
+      aria-selected={selected}
+      style={{ display: 'grid', gridTemplateColumns: grid, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer', background: selected ? 'color-mix(in srgb, var(--accent) 6%, transparent)' : undefined }}
     >
+      <SelectBox state={selected ? 'all' : 'none'} onChange={onToggle} label={`Select ${ident.primary}`} />
       <RiskChip level={risk.level} assessed={risk.assessed} size={22} title={risk.title} />
       <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
         <Icon name={classIcon(asset.class_key)} size={14} style={{ color: 'var(--app-t3)', flex: 'none' }} />
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.primary}</div>
+          <Link
+            to={`/inventory/assets/${asset.id}`}
+            onClick={(e) => { if (isPlainClick(e)) { e.preventDefault(); onOpen(asset.id, asset); } }}
+            // A link answers Enter by itself; the row answered Space too, and
+            // keyboard users should not lose that.
+            onKeyDown={(e) => { if (e.key === ' ') { e.preventDefault(); onOpen(asset.id, asset); } }}
+            style={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', textDecoration: 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            {ident.primary}
+          </Link>
           <IdentityStatus asset={asset} />
+          <ScanBadge asset={asset} />
           {ident.secondary && (
             <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.secondary}</div>
           )}
@@ -153,7 +219,7 @@ export function AppliedQuery({ typed, applied }: { typed: string; applied: strin
   );
 }
 
-export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCount, onNewAsset, onImport }: {
+export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCount, onNewAsset, onImport, onOpenAsset }: {
   query: string;
   onQueryChange: (q: string) => void;
   page: number;
@@ -161,6 +227,9 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
   pendingCount: number;
   onNewAsset: () => void;
   onImport?: () => void;
+  // Stacks the asset drawer. The hosting page owns the drawer stack, and the
+  // Edit modal the drawer opens, so the list only says which asset was asked for.
+  onOpenAsset: OpenAsset;
 }) {
   const navigate = useNavigate();
 
@@ -178,14 +247,32 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
   const assetsQ = useAssetsQuery(query, page);
   const facetsQ = useAssetFacets(query, FACET_LEVELS);
 
-  const assets = assetsQ.data?.assets ?? [];
+  const assets = useMemo(() => assetsQ.data?.assets ?? [], [assetsQ.data]);
   const total = assetsQ.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / ASSETS_PAGE_SIZE));
 
   const cols = useMemo(() => columnsForClass(read.facets.class), [read.facets.class]);
   const grid = useMemo(() => gridTemplate(cols), [cols]);
+  const rowGrid = `${SELECT_COL} ${grid}`;
 
-  const openAsset = (id: string) => { void navigate(`/inventory/assets/${id}`); };
+  // The selection. It belongs to the query it was made under: a new
+  // query is a different list, so ticked rows and "all N matching" both reset.
+  // Kept with the query it was made under and read as empty under any other.
+  const [made, setMade] = useState<{ query: string; selection: AssetSelection }>({ query, selection: NO_SELECTION });
+  const selection = made.query === query ? made.selection : NO_SELECTION;
+  const setSelection = (next: AssetSelection | ((s: AssetSelection) => AssetSelection)) =>
+    setMade((m) => {
+      const current = m.query === query ? m.selection : NO_SELECTION;
+      return { query, selection: typeof next === 'function' ? next(current) : next };
+    });
+  const pageIds = useMemo(() => assets.map((a) => a.id), [assets]);
+  // Every row this lens has shown, so ticked rows from earlier pages can be
+  // exported and named in the "not scanned" list.
+  // One Map for the lens's lifetime, filled as pages arrive; never replaced,
+  // so its identity is stable for the bar and the feed.
+  const [seen] = useState(() => new Map<string, Asset>());
+  useEffect(() => { assets.forEach((a) => seen.set(a.id, a)); }, [assets, seen]);
+  const feed = useScanFeed(useMemo(() => nameFrom(seen), [seen]));
 
   const body = () => {
     if (assetsQ.isError) {
@@ -243,8 +330,19 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
     }
     return (
       <>
-        <Header cols={cols} grid={grid} />
-        {assets.map((a) => <AssetRow key={a.id} asset={a} cols={cols} grid={grid} onOpen={openAsset} />)}
+        <SelectAllBanner selection={selection} pageIds={pageIds} total={total} query={query} queryable onChange={setSelection} />
+        <Header cols={cols} grid={rowGrid} selectState={pageState(selection, pageIds)} onSelectPage={() => setSelection((s) => togglePage(s, pageIds))} />
+        {assets.map((a) => (
+          <AssetRow
+            key={a.id}
+            asset={a}
+            cols={cols}
+            grid={rowGrid}
+            onOpen={onOpenAsset}
+            selected={isSelected(selection, a.id)}
+            onToggle={() => setSelection((s) => toggleRow(s, a.id, pageIds))}
+          />
+        ))}
       </>
     );
   };
@@ -281,6 +379,20 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
           <button className="ui-btn sm" onClick={() => { void navigate('/discovery/approvals'); }}>
             Review<Icon name="chevron-right" size={13} />
           </button>
+        </div>
+      )}
+
+      <BulkActionBar selection={selection} onChange={setSelection} seen={seen} onScanStarted={feed.record} />
+      {(feed.scans.length > 0 || feed.skipped.length > 0) && (
+        <div style={{ margin: '0 26px' }}>
+          <ActiveScanJobsPanel
+            scans={feed.scans}
+            skipped={feed.skipped}
+            onDismiss={feed.clear}
+            // A scan this lens started has ended: re-read the list so its
+            // rows (and the never-scanned view) show what the scan did.
+            onScanSettled={() => { void assetsQ.refetch(); }}
+          />
         </div>
       )}
 

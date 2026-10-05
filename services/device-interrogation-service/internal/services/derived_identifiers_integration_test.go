@@ -146,7 +146,7 @@ func TestIntegration_ObservationSink_PeerIPv6Hygiene(t *testing.T) {
 // neighbour reported by serial alone gains the MAC its serial spells, recorded
 // as derived; one reported WITH a MAC gains nothing — the reported MAC is the
 // better evidence.
-// Mutation: drop `!statedMAC` on the serial branch of peerObservation → the
+// Mutation: drop `!statedMAC` on Intake's serial branch (shared/identity/intake.go) → the
 // second peer carries two MACs.
 func TestIntegration_ObservationSink_PeerSerialDerivesAMACOnlyWithoutOne(t *testing.T) {
 	db := testdb.Connect(t)

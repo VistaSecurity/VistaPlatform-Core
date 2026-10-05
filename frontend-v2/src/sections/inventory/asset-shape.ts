@@ -34,6 +34,7 @@ export interface EndpointLike {
   status?: string | null;
   last_seen_at?: string | null;
   last_scanned_at?: string | null;
+  tls_handshake_outcome?: string | null;
 }
 
 /** One observed identifier. Mirrors AssetIdentifier. */
@@ -113,6 +114,21 @@ export function primaryEndpoint(a: AssetLike): EndpointLike | null {
   if (a.primary_endpoint) return a.primary_endpoint;
   const list = Array.isArray(a.endpoints) ? a.endpoints : [];
   return list.length > 0 ? list[0] : null;
+}
+
+/**
+ * What to say about an endpoint whose server ended the TLS handshake. It is TLS
+ * (the server answered the ClientHello with an alert) but nothing was
+ * negotiated, so there is no configuration to show; usually the server needs a
+ * server name and a scan of an address offered none. Null for every other
+ * endpoint, including one that simply has no outcome recorded.
+ */
+export const HANDSHAKE_REFUSED_LABEL = 'TLS, handshake refused';
+export const HANDSHAKE_REFUSED_HINT =
+  'The server ended the TLS handshake. It may require a server name; scan it by name to see its configuration.';
+export function handshakeRefusal(ep: EndpointLike | null | undefined): { label: string; hint: string } | null {
+  if (ep?.tls_handshake_outcome !== 'refused') return null;
+  return { label: HANDSHAKE_REFUSED_LABEL, hint: HANDSHAKE_REFUSED_HINT };
 }
 
 /**
@@ -345,6 +361,18 @@ export function identifierProvenanceLabel(ident: { source_kind?: string | null; 
     return `Derived from ${rest || 'other evidence'}`;
   }
   return sourceKindLabel(ident.source_kind);
+}
+
+/**
+ * The marker an identifier row carries when its address is PINNED:
+ * declared by an operator, or reported static by the host's own agent. A pinned
+ * address still matches its owner inside a network segment flagged DHCP, so
+ * the asset page says which of its addresses are pinned. Empty for everything
+ * else — a lease the agent reported is recorded but needs no marker, because
+ * it behaves exactly like an address nobody said anything about.
+ */
+export function addressPinLabel(ident: { kind?: string | null; address_assignment?: string | null }): string {
+  return clean(ident.kind) === 'ip_address' && clean(ident.address_assignment) === 'static' ? 'static' : '';
 }
 
 /**

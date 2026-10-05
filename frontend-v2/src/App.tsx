@@ -25,7 +25,7 @@ import { CommandCenterPage } from './sections/discovery/command-center';
 import { LogsPage } from './sections/discovery/logs-page';
 import { DevicesPage } from './sections/discovery/devices-page';
 import { ScansPage } from './sections/discovery/scans-page';
-import { ActiveScanPage } from './sections/discovery/active-scan-page';
+import { NEVER_SCANNED_HREF } from './sections/inventory/builtin-views';
 import { CloudPage } from './sections/discovery/cloud-page';
 import { ApprovalsPage } from './sections/discovery/approvals-page';
 import { ObservationsPage } from './sections/discovery/observations-page';
@@ -121,7 +121,10 @@ export default function App() {
           <Route path="/discovery/jobs" element={<JobsPage />} />
           <Route path="/discovery/devices" element={<DevicesPage />} />
           <Route path="/discovery/scans" element={<ScansPage />} />
-          <Route path="/discovery/active-scan" element={<ActiveScanPage />} />
+          {/* Discovery → Active Scan is folded into Inventory (#2272): its list is
+              the "Never scanned" view of All assets, and scanning is the bulk
+              bar's Scan. A bookmark lands on that view. */}
+          <Route path="/discovery/active-scan" element={<Navigate to={NEVER_SCANNED_HREF} replace />} />
           <Route path="/discovery/approvals" element={<ApprovalsPage />} />
           <Route path="/discovery/observations" element={<ObservationsPage />} />
           <Route path="/discovery/logs" element={<LogsPage />} />

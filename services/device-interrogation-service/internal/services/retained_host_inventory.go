@@ -25,11 +25,15 @@ func (h *HostInventoryIngest) withRunLock(ctx context.Context, tenant uuid.UUID,
 	}, fn)
 }
 
-func (h *HostInventoryIngest) retainHostInventory(ctx context.Context, repo *pgidentity.Repository, obs identity.Observation, res identity.Resolution, agent, job uuid.UUID, payload *di.InterrogateResult) error {
+// retainHostInventory keeps a collection whose sighting inventory-service held
+// for review (an observation, no asset), so it can be materialised once the
+// observation is linked and approved. On this service's transaction, after
+// the resolution committed there.
+func (h *HostInventoryIngest) retainHostInventory(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, sighting identity.Sighting, receipt string, res identity.Resolution, agent, job uuid.UUID, payload *di.InterrogateResult) error {
 	if res.ObservationID == "" {
 		return nil
 	}
-	envelope, err := json.Marshal(obs)
+	envelope, err := json.Marshal(sighting)
 	if err != nil {
 		return err
 	}
@@ -37,9 +41,9 @@ func (h *HostInventoryIngest) retainHostInventory(ctx context.Context, repo *pgi
 	if err != nil {
 		return err
 	}
-	_, err = repo.Tx().ExecContext(ctx, `INSERT INTO identity_observation_host_inventories
+	_, err = tx.ExecContext(ctx, `INSERT INTO identity_observation_host_inventories
 	 (tenant_id,observation_id,receipt_key,job_id,agent_id,observation,payload,observed_at)
-	 VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, obs.TenantID, res.ObservationID, identity.ObservationReceiptKey(obs), job, agent, string(envelope), string(body), obs.ObservedAt)
+	 VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, tenantID, res.ObservationID, receipt, job, agent, string(envelope), string(body), sighting.ObservedAt)
 	return err
 }
 
@@ -72,10 +76,18 @@ func (h *HostInventoryIngest) ReplayRetainedHostInventories(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		var original identity.Observation
+		// The envelope is the sighting as first sent. A row retained before
+		// this service posted sightings holds the observation it built instead
+		// (no channel); that one is replayed by rebuilding the sighting from the
+		// payload, which is what the observation was built from.
+		var original identity.Sighting
 		var payload di.InterrogateResult
 		if err = json.Unmarshal(envelope, &original); err != nil {
 			return err
+		}
+		replayed := &original
+		if original.Channel == "" {
+			replayed = nil
 		}
 		if err = json.Unmarshal(body, &payload); err != nil {
 			return err
@@ -118,7 +130,7 @@ func (h *HostInventoryIngest) ReplayRetainedHostInventories(ctx context.Context,
 					return err
 				})
 			}
-			counts, err := h.materialise(ctx, tenant, agent, job, &payload, &original, asset.String())
+			counts, err := h.materialise(ctx, tenant, agent, job, &payload, replayed, asset.String(), receipt)
 			if err != nil {
 				return err
 			}

@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/oauth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/rbac"
+	aiedition "github.com/vistasecurity/vistaplatform/shared/ai/edition"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
@@ -183,6 +184,16 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		c.Next()
 	})
 	router.Use(auditMiddleware.LogRequest())
+
+	// The provider half is answered PER TENANT from here on: a tenant may have
+	// connected its own provider and the platform default may be set in
+	// admin-ui, neither of which the environment read above can see. The sink
+	// is for the page's connection test, which sends a real (five-word) prompt
+	// and is audited like any other.
+	aiDeploymentStatus = aiDeploymentStatus.withResolver(
+		aiedition.NewProviderResolver(db),
+		auditmiddleware.NewAISink(auditMiddleware, "auth-service"),
+	)
 
 	// API routes with service prefix for consistency
 	// This follows the microservices pattern where each service has its own namespace
@@ -370,6 +381,13 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// The deployment half is resolved once — see resolveAIDeployment.
 			tenant.GET("/ai", getTenantAIHandler(db, aiDeploymentStatus))
 			tenant.PUT("/ai", middleware.RequirePermission(rbacService, "settings.update"), updateTenantAIHandler(db, aiDeploymentStatus))
+			// The provider half of the same page: a tenant connecting, testing
+			// and disconnecting a model provider of its own. Same permission as
+			// the switches — the Integrations hub already stores credentials
+			// under settings.update.
+			tenant.PUT("/ai/provider", middleware.RequirePermission(rbacService, "settings.update"), putTenantAIProviderHandler(db, aiDeploymentStatus))
+			tenant.DELETE("/ai/provider", middleware.RequirePermission(rbacService, "settings.update"), deleteTenantAIProviderHandler(db, aiDeploymentStatus))
+			tenant.POST("/ai/provider/test", middleware.RequirePermission(rbacService, "settings.update"), testTenantAIProviderHandler(db, aiDeploymentStatus))
 			tenant.GET("/trial-status", getTenantTrialStatusHandler(db))
 			// Billing overview is gated by billing.read (tenant_admin +
 			// billing_admin per the seeded role design).

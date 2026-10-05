@@ -44,10 +44,6 @@ func TestIntegration_RetainedDeviceManagementEncryptedAndReplayedAfterApproval(t
 	if _, err = db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
 		t.Fatal(err)
 	}
-	svc.identityEng, err = identity.New(identity.Config{Repo: svc.identityRepo, AdmissionEnabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
 	name, url, password := "retained-device.example.test", "https://retained-device.example.test", "test-device-secret-for-encrypted-retention"
 	_, err = svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{DeviceType: "f5", Hostname: &name, ManagementURL: &url, Password: &password, Metadata: map[string]interface{}{"nested_secret": password}})
 	var retained *identity.RetainedObservation
@@ -126,14 +122,7 @@ func TestIntegration_PausedCloudResourceRetainsManagement(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
 	cloud := NewCloudDiscoveryService(db, db, "test-retained-cloud-master-key")
-	if _, err := cloud.devices.identityEngine(); err != nil {
-		t.Fatal(err)
-	}
 	var err error
-	cloud.devices.identityEng, err = identity.New(identity.Config{Repo: cloud.devices.identityRepo, AdmissionEnabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err = db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"paused"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
 		t.Fatal(err)
 	}

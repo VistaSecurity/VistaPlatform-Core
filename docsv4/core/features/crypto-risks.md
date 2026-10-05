@@ -174,6 +174,18 @@ Honest-answer cases to expect:
   score. An explicit zero is shown as Informational only when the worst linked
   numeric catalogue contribution is also zero. Not assessed is not a clean bill
   of health — the available evidence could not establish a number.
+- **"Partially assessed."** Part of the configuration was never measured. The
+  usual cases are a protocol version that a device interrogation could not
+  read, and a cipher string that could not be fully resolved. The
+  configuration drawer shows the version as **Not measured**, and a
+  *Partially assessed* note lists what is missing. The configuration's risk
+  factors say the same. The score covers only what was measured. If the
+  measured components already make the configuration Medium or worse, that
+  score stands. Below Medium, the configuration is shown as *Not assessed*.
+  An unmeasured version is never treated as TLS 1.2 or SSH-2.0, never counted
+  as safe, and never passes a compliance control on the protocol version. A
+  control on the protocol version has nothing to evaluate for such a
+  configuration.
 - **Missing catalogue evidence.** No resolved components, or components
   carrying only qualitative assessments, cannot explain a numeric catalogue
   contribution. A positive stored score can still be displayed without claiming

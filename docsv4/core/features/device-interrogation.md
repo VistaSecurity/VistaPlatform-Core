@@ -22,9 +22,14 @@ certificates, its findings, its history — accumulates on that one asset.
 What that changes, in practice:
 
 - **A device you add may already be in your inventory.** If the hostname,
-  address or serial number you supply matches something already known, the
+  address or serial number you supply — or the MAC address or SSH host key the
+  probe reads off the device — matches something already known, the
   management configuration attaches to that existing asset rather than creating a
   duplicate. The page will show you an asset that already has discovery history.
+  Typing a hostname, address or serial onto an existing device that **another**
+  asset already owns is refused with a merge proposal in **Discovery →
+  Approvals**; a value nobody else owns is saved at once, and a typed address is
+  pinned (see [Asset identity and discovery evidence](identity-evidence.md)).
 - **Each device has an asset class** — what it *is* (`firewall`,
   `load_balancer`, `switch`, `object storage`…) — alongside its **device type**,
   which names the vendor connector used to interrogate it. An F5 BIG-IP is a load
@@ -132,11 +137,36 @@ identity admission enforced, a device whose serial the probe read is created;
 one without a serial is retained for review. The form shows it and discloses the remaining fields so
 the device can still be added by hand.
 
+**Through a device agent.** A device only one of your deployed device agents can
+reach is identified by that agent: choose it under **Reach it from** in the same
+form (offered when your organization has device agents).
+
+**API:** `POST /api/v1/device-interrogation-service/devices/discoveries` with the
+same four fields plus `agent_id` → `202` and the queued attempt;
+`GET …/devices/discoveries` lists attempts; `POST …/devices/discoveries/{id}/retry`
+and `DELETE …/devices/discoveries/{id}` retry and dismiss one.
+
+- The identification is queued as a `device_discovery` job **assigned to that
+  agent**. Only that agent runs it — never the platform or another agent — and
+  only an agent that reports it supports device discovery; an older agent is
+  never handed one. An agent that has not checked in recently is refused at
+  once (`agent_unavailable`), and nothing is queued.
+- The agent runs the same identification as the platform (the same calls, the
+  same failure reasons) and reports only the identity fields in the table above.
+  The device is then created exactly as a platform-identified one is.
+- Until then the attempt is a row on the Devices page: **Discovering…**,
+  **Discovery failed** (reason on hover, **Retry**), **Not picked up** (the agent
+  did not take it within 15 minutes — not a statement about the device), or
+  **Held for review** (identity admission enforced, no serial read).
+- The password is encrypted until the agent claims the job, sealed so only that
+  agent can open it, and dropped from the job once the device is created.
+  Attempts share the 20-a-minute budget and are audited like any probe.
+
 ### 2. Add a device by hand
 
-For a device type that can't be identified automatically, or one only a deployed
-agent can reach, add it with the details you already have: after a failed
-connection, or with **Enter the details by hand instead**.
+For a device type that can't be identified automatically, add it with the
+details you already have: after a failed connection, or with **Enter the
+details by hand instead**.
 
 **API:** `POST /api/v1/device-interrogation-service/devices`
 
@@ -297,6 +327,16 @@ what is it talking to" without a second tool.
   Cisco ASA `ssl cipher <version> …` lines and FortiOS custom lists are read the
   same way. An ASA line records the TLS version it configures; the Cisco levels
   (`low`, `medium`, `high`, `fips`, `all`) are partially assessed.
+- **TLS versions**: BIG-IP switches protocol versions off through the
+  profile's options (`no-tlsv1`, `no-tlsv1.1`, …) rather than naming the
+  version in use. The options that refuse a version are recorded as
+  `tls_versions_disabled`. A version is recorded only when the options leave
+  exactly one (SSL 3.0 is counted, because a custom cipher string can still
+  enable it). Otherwise the version is **not measured**, and the configuration
+  is partially assessed (see
+  [Crypto risks](crypto-risks.md)). Earlier releases recorded
+  "TLS 1.2" for every profile without a version. On the next interrogation
+  that invented version is removed from the configuration and from its score.
 - **Endpoints**: 
   - `/mgmt/tm/ltm/virtual` - Virtual servers
   - `/mgmt/tm/ltm/profile/client-ssl` - Client SSL profiles
@@ -310,6 +350,7 @@ what is it talking to" without a second tool.
 - **Method**: SSH + CLI commands
 - **Platforms**: IOS, IOS-XE, IOS-XR, NX-OS and ASA. The platform is read from `show version` and picks the per-platform commands below. Every parser is tested against real captured output from each platform, not only against hand-written examples.
 - **Data Collected**: Crypto maps, IPsec SAs, IKEv1 and IKEv2 SAs, SSL proxy settings, plus device identity and the operational facts listed under [What is collected](#what-is-collected)
+- **Versions are the device's own.** The SSH management row's protocol version is taken from the banner the device sends. A device announcing `SSH-1.99` still accepts the obsolete SSH-1 protocol and is recorded and scored that way, not as SSH-2.0. The `show ssl` and WebVPN rows carry a TLS version only when the output names one. When it names none, the version is **not measured** and the configuration is partially assessed (see [Crypto risks](crypto-risks.md)).
 - **VPN tunnels are the device's configuration.** Each crypto map entry and each IPsec / IKE SA is recorded on the Cisco device itself, on UDP 500, or 4500 when the SA says NAT traversal is in use. The remote peer is recorded as the tunnel's peer address, not as a separate server. The IKE version is the one the device states: an IKEv1 or IKEv2 SA is that version, a crypto map entry is IKEv2 when it names an IKEv2 profile and IKEv1 when it names an ISAKMP profile, and it is left blank when the device does not say.
 - **Commands**: `show version`, `show crypto map`, `show crypto ipsec sa`, `show crypto isakmp sa` (on ASA: `show crypto ikev1 sa detail`), `show crypto ikev2 sa`, `show ssl`, `show webvpn`, `show running-config | include ssl cipher`, `show inventory`, `show ip interface brief` (on ASA: `show interface ip brief`), `show interfaces`, `show vlan brief`, `show cdp neighbors detail`, `show lldp neighbors detail`, `show ip arp` (on IOS-XR and ASA: `show arp`), and one narrow telnet check per platform: `show running-config | include ^line vty|transport input` (IOS / IOS-XE), `show feature | include telnet` (NX-OS), `show running-config telnet` (IOS-XR and ASA). To check the privilege level: `show privilege` (IOS / IOS-XE) or `show curpriv` (ASA). That is the whole list — it is a closed set, and adding to it is a deliberate edit the test suite makes visible.
 - **Never run**: `show running-config` in any form broader than the filtered ones above (the section form returns pre-shared keys, enable secrets, SNMP communities and tunnel-group passwords), `show startup-config`, `show ip route`, `show mac address-table`, `show snmp`, `show crypto key`, and no configuration command. Every command output is read up to a size bound and a time limit, and a reply cut short — at the bound, or at a `--More--` pager prompt — is reported as partial rather than presented as a complete table.

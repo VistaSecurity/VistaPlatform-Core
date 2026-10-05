@@ -90,6 +90,7 @@ type Handler struct {
 	// interface; sensorTenant is nil in production (TenantForSensor over
 	// bypassDB) and a stub in the contract test.
 	jobCompleter  sensorJobCompleter
+	unitRecorder  sensorUnitRecorder
 	sensorTenant  sensorTenantResolver
 	pcapService   pcapStore
 	natsClient    *events.NATSClient
@@ -151,6 +152,7 @@ func (h *Handler) SetEncryptionKey(key string) {
 func (h *Handler) SetDiscoveryJobService(service *services.DiscoveryJobService) {
 	if service != nil {
 		h.jobCompleter = service
+		h.unitRecorder = service
 	}
 }
 

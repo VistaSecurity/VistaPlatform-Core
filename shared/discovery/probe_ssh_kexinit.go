@@ -3,6 +3,7 @@ package discovery
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -250,8 +251,8 @@ func (c *sshKexInitCapture) negotiate() {
 // exchange — so it is cheaper and shorter-lived than the handshake pass it
 // accompanies. The alternative was keeping every SSH server in the inventory
 // unassessed.
-func sshprobeKexInit(p *Prober, address string) (*sshKexInitCapture, error) {
-	conn, err := net.DialTimeout("tcp", address, p.timeout)
+func sshprobeKexInit(ctx context.Context, p *Prober, dial ContextDialFunc, address string) (*sshKexInitCapture, error) {
+	conn, err := sshDial(ctx, p, dial, address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect for SSH KEXINIT: %w", err)
 	}

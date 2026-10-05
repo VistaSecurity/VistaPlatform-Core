@@ -4,20 +4,77 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { useAssetsQuery } from '../inventory/asset-queries';
 import { assetIdentity, primaryAddressPort } from '../inventory/asset-shape';
+import { invalidateObservationDecisions } from './queries';
+import { proposedReason, type DecisionAction, type Observation } from './observation-review';
 
-type Action = 'confirm' | 'link' | 'dismiss';
-
-export function ObservationActions({ id }: { id: string }) {
-  return <PermissionGate permission={TENANT_PERMISSIONS.assets.update}><DecisionForm id={id} /></PermissionGate>;
+type Action = DecisionAction;
+interface DecisionProps {
+  id: string;
+  /** The row the decision is about; its server-proposed reason prefills the form ( D1). */
+  observation?: Pick<Observation, 'suggested_reason' | 'link_asset' | 'state' | 'evidence_held' | 'asset_id'>;
+  /** Open straight onto one decision — the collapsed row's Confirm/Dismiss buttons. */
+  initialAction?: Action | null;
 }
 
-function DecisionForm({ id }: { id: string }) {
-  const [action, setAction] = useState<Action | null>(null);
-  const [reason, setReason] = useState('');
+export function ObservationActions(props: DecisionProps) {
+  return <PermissionGate permission={TENANT_PERMISSIONS.assets.update}><DecisionForm {...props} /></PermissionGate>;
+}
+
+function DecisionForm(props: DecisionProps) {
+  const { observation } = props;
+  if (observation?.state === 'linked' && observation.evidence_held && observation.asset_id) {
+    return <AttachHeldForm id={props.id} assetID={observation.asset_id} initialOpen={props.initialAction != null} />;
+  }
+  return <ChooseDecisionForm {...props} />;
+}
+
+/** Supporting evidence the engine linked to an established asset without
+ *  attaching its endpoints (platform ADR-0003 D2). The asset is already
+ *  decided; the operator's Link to it is what attaches the endpoints. */
+function AttachHeldForm({ id, assetID, initialOpen }: { id: string; assetID: string; initialOpen: boolean }) {
+  // The collapsed row's "Attach endpoints…" opens straight onto the form.
+  const [open, setOpen] = useState(initialOpen);
+  const [reason, setReason] = useState('Attached from Observations: these endpoints belong to the linked asset.');
+  const cache = useQueryClient();
+  const mutation = useMutation({ mutationFn: async () => {
+    const result = await clients.inventory.POST('/discovery/observations/{id}/link', { params: { path: { id } }, body: { reason: reason.trim(), asset_id: assetID } });
+    if (!result.response.ok) {
+      throw new Error(result.response.status === 409
+        ? 'This observation changed or has conflicting ownership. Refresh it and review the current evidence.'
+        : 'The decision could not be saved. Try again.');
+    }
+  }, onSuccess: async () => {
+    setOpen(false);
+    await invalidateObservationDecisions(cache);
+  }});
+  if (!open) return <div style={{ marginTop: 12 }}>
+    <button className="ui-btn sm" onClick={() => setOpen(true)}>Attach endpoints to the linked asset</button>
+  </div>;
+  return <form style={{ marginTop: 12, display: 'grid', gap: 10, maxWidth: 600 }} onSubmit={(e) => { e.preventDefault(); mutation.mutate(); }}>
+    <p>This evidence supports an asset already in your inventory, but it could not identify that asset on its own, so its endpoints were not added to it. Attaching them adds the endpoints listed here to the linked asset, with their services and crypto configurations.</p>
+    <label>Reason<textarea className="ui-input" value={reason} required maxLength={2000} onChange={(e) => setReason(e.target.value)} /></label>
+    {mutation.isError && <p role="alert">{mutation.error.message} <button type="button" onClick={() => { void cache.invalidateQueries({ queryKey: ['identity-observations'] }); }}>Refresh evidence</button></p>}
+    <div style={{ display: 'flex', gap: 8 }}>
+      <button className="ui-btn" type="submit" disabled={mutation.isPending || !reason.trim()}>{mutation.isPending ? 'Saving…' : 'Attach endpoints'}</button>
+      <button className="ui-btn" type="button" disabled={mutation.isPending} onClick={() => { setOpen(false); mutation.reset(); }}>Cancel</button>
+    </div>
+  </form>;
+}
+
+function ChooseDecisionForm({ id, observation, initialAction = null }: DecisionProps) {
+  // A link suggestion names the asset that already owns the evidence: Link
+  // opens with it chosen, still changeable (the existing Link flow, unchanged).
+  const suggested = observation?.link_asset ?? null;
+  const [assetID, setAssetID] = useState(() => (initialAction === 'link' && suggested ? suggested.id : ''));
+  const prefill = (a: Action | null) => (a && observation ? proposedReason(observation, a) : '');
+  const [action, setActionState] = useState<Action | null>(initialAction);
+  // Prefilled, still required and still editable: a high-confidence
+  // suggestion costs no typing, and the audit still records a person's reason.
+  const [reason, setReason] = useState(() => prefill(initialAction));
+  const setAction = (a: Action | null) => { setActionState(a); setReason(prefill(a)); setAssetID(a === 'link' && suggested ? suggested.id : ''); };
   const [name, setName] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const [assetID, setAssetID] = useState('');
   const cache = useQueryClient();
   const candidates = useAssetsQuery(`(status:monitoring OR status:pending_approval)${search.trim() ? ` AND ${JSON.stringify(search.trim())}` : ''}`, page, action === 'link');
   const mutation = useMutation({ mutationFn: async () => {
@@ -41,13 +98,8 @@ function DecisionForm({ id }: { id: string }) {
         : 'The decision could not be saved. Try again.');
     }
   }, onSuccess: async () => {
-    setAction(null); setReason('');
-    await Promise.all([
-      cache.invalidateQueries({ queryKey: ['identity-observations'] }),
-      cache.invalidateQueries({ queryKey: ['identity-summary'] }),
-      cache.invalidateQueries({ queryKey: ['inventory'] }),
-      cache.invalidateQueries({ queryKey: ['discovery', 'pending-assets'] }),
-    ]);
+    setAction(null);
+    await invalidateObservationDecisions(cache);
   }});
   if (!action) return <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
     <button className="ui-btn sm" onClick={() => setAction('confirm')}>Confirm identity</button>
@@ -63,6 +115,7 @@ function DecisionForm({ id }: { id: string }) {
       {candidates.isPending && <p role="status">Loading assets…</p>}
       <label>Asset<select className="ui-input" value={assetID} required onChange={(e) => setAssetID(e.target.value)}>
         <option value="">Choose an asset</option>
+        {suggested && !candidates.data?.assets.some((a) => a.id === suggested.id) && <option value={suggested.id}>{suggested.name || 'Existing asset'} · already owns this address</option>}
         {candidates.data?.assets.map((asset) => <option key={asset.id} value={asset.id}>{assetIdentity(asset).primary} · {primaryAddressPort(asset) || 'No address'} · {asset.id.slice(0, 8)}</option>)}
       </select></label>
       <div><button type="button" disabled={page === 1} onClick={() => { setPage(page - 1); setAssetID(''); }}>Previous</button> Page {page} <button type="button" disabled={!candidates.data || page * candidates.data.pageSize >= candidates.data.total} onClick={() => { setPage(page + 1); setAssetID(''); }}>Next</button></div>

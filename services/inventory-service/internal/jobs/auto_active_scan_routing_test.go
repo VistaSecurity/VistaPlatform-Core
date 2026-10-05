@@ -2,8 +2,8 @@ package jobs
 
 // Tenant-sensor routing inside the automatic sweep, through a fake
 // router: one `sensors` job per observing sensor, platform for the rest, an
-// offline observer's targets skipped AND left unstamped, and the whole thing
-// off when the tenant's switch is off.
+// offline observer's targets moved to a live segment sensor or else skipped
+// AND left unstamped, and the whole thing off when the tenant's switch is off.
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 	sharedautoscan "github.com/vistasecurity/vistaplatform/shared/autoscan"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 type fakeRouter struct {
@@ -70,10 +71,22 @@ func TestSweepTenant_RoutesToTheObservingSensor(t *testing.T) {
 	if platformJob.ExecutionMode != "async" || len(platformJob.PreferredSensorIDs) != 0 || len(platformJob.Targets) != 1 || platformJob.Targets[0] != "10.0.0.3" {
 		t.Errorf("platform job = %+v", platformJob)
 	}
-	// Both jobs carry the tenant's policy and the automatic-scan origin.
+	// Both jobs carry the tenant's policy ports, as a plan, and the
+	// automatic-scan origin. The routing resolves as it was meant to: the
+	// sensor job runs from the observing sensor, the async one from the
+	// platform (shareddisc.ResolveJobRequest, the function cluster-sensor runs).
+	want := map[string]struct{ runFrom, sensor string }{
+		"sensors": {shareddisc.RunFromSensor, xps.ID.String()},
+		"async":   {shareddisc.RunFromPlatform, ""},
+	}
 	for _, job := range d.jobs {
-		if job.Options["origin"] != autoscan.Origin || len(job.Protocols) != len(store.policy.Protocols) {
-			t.Errorf("job lost its policy/origin: %+v", job)
+		if job.Options["origin"] != autoscan.Origin || job.ScanDepth != "custom" || job.TCPPorts != shareddisc.CustomPortList(store.policy.Ports) || len(job.Protocols) != 0 {
+			t.Errorf("job lost its policy/origin or is not planned: %+v", job)
+		}
+		shape, err := shareddisc.ResolveJobRequest(shareddisc.JobRequestFields{ScanDepth: job.ScanDepth, TCPPorts: job.TCPPorts,
+			ExecutionMode: job.ExecutionMode, PreferredSensorIDs: job.PreferredSensorIDs})
+		if err != nil || !shape.Plan || shape.RunFrom != want[job.ExecutionMode].runFrom || shape.SensorID != want[job.ExecutionMode].sensor {
+			t.Errorf("job %s resolves to %+v %v, want run_from %+v", job.ExecutionMode, shape, err, want[job.ExecutionMode])
 		}
 	}
 	// Each asset is stamped by the job that probes ITS address.
@@ -109,6 +122,67 @@ func TestSweepTenant_SkipsAndDoesNotStampAnOfflineObserversTargets(t *testing.T)
 	}
 	if store.stateSet[0].LastSweepAssets != 1 {
 		t.Errorf("state = %+v, want 1 asset", store.stateSet[0])
+	}
+}
+
+// realRouter runs the production planner (sensorrouting.Route) over a fixed
+// fleet, so the sweep is tested against what the rule actually returns rather
+// than a hand-built plan.
+type realRouter struct {
+	observedBy map[string]uuid.UUID
+	fleet      []sensorrouting.Sensor
+	seen       []string
+}
+
+func (r *realRouter) Resolve(_ context.Context, _ uuid.UUID, targets []string, now time.Time) (sensorrouting.Plan, error) {
+	r.seen = append(r.seen, targets...)
+	return sensorrouting.Route(targets, r.observedBy, r.fleet, now), nil
+}
+
+// A host whose observing sensor is offline goes to a DIFFERENT live sensor on
+// its segment as an ordinary automatic job: execution mode `sensors`, that
+// sensor named, the automatic-scan origin intact — which is what makes
+// cluster-sensor-service run its automatic-scan authorization on it exactly as
+// on an observer-routed job. A host with an offline observer and no live
+// segment sensor is still skipped and unstamped, and never becomes a platform
+// job. The router only ever sees what EligibleTargets (the consent filter)
+// returned.
+func TestSweepTenant_OfflineObserversHostGoesToALiveSegmentSensorNotThePlatform(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	gone := liveSensorNamed("xps16-sensor")
+	stale := now.Add(-time.Hour)
+	gone.LastHeartbeat = &stale
+	gone.Prefixes = sensorrouting.PrefixesFor([]string{"10.0.0.5/24"}, "")
+	branch := liveSensorNamed("branch-sensor")
+	branch.Prefixes = sensorrouting.PrefixesFor([]string{"10.0.0.6/24"}, "")
+
+	store := &fakeStore{policy: sharedautoscan.DefaultPolicy(), targets: targetsAt("10.0.0.1", "10.9.0.1")}
+	d := &fakeDispatcher{}
+	router := &realRouter{
+		observedBy: map[string]uuid.UUID{"10.0.0.1": gone.ID, "10.9.0.1": gone.ID},
+		fleet:      []sensorrouting.Sensor{gone, branch},
+	}
+	routedJob(store, d, router).SweepTenant(context.Background(), uuid.New(), false)
+
+	if len(router.seen) != 2 || router.seen[0] != "10.0.0.1" || router.seen[1] != "10.9.0.1" {
+		t.Fatalf("router saw %v, want exactly the eligible targets", router.seen)
+	}
+	if len(d.jobs) != 1 {
+		t.Fatalf("dispatched %d job(s), want one sensor job: %+v", len(d.jobs), d.jobs)
+	}
+	job := d.jobs[0]
+	if job.ExecutionMode != "sensors" || len(job.PreferredSensorIDs) != 1 || job.PreferredSensorIDs[0] != branch.ID.String() {
+		t.Errorf("job = mode %q sensors %v, want sensors/[branch-sensor]", job.ExecutionMode, job.PreferredSensorIDs)
+	}
+	if len(job.Targets) != 1 || job.Targets[0] != "10.0.0.1" {
+		t.Errorf("job targets = %v, want [10.0.0.1]", job.Targets)
+	}
+	if job.Options["origin"] != autoscan.Origin {
+		t.Errorf("job origin = %v, want %q — the automatic-scan authorization keys on it", job.Options["origin"], autoscan.Origin)
+	}
+	// Only the routed host's asset is stamped; the skipped one stays due.
+	if len(store.recorded) != 1 || len(store.recorded[0].assetIDs) != 1 || store.recorded[0].assetIDs[0] != store.targets[0].AssetID {
+		t.Errorf("stamps = %+v, want only 10.0.0.1's asset", store.recorded)
 	}
 }
 

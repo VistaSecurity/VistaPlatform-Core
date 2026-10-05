@@ -108,6 +108,9 @@ const ASSET_FIELDS: FieldInfo[] = [
   col('class_confidence', 'number'),
   colAs('first_seen', 'first_discovered_at', 'timestamp'),
   colAs('last_seen', 'last_seen_at', 'timestamp'),
+  // §4.3: the asset-level scan fact, a key of `assets.metadata` (a scan of an
+  // asset with no endpoint has no endpoint row to carry endpoint.last_scanned).
+  { name: 'last_scanned', type: 'timestamp', accessor: { kind: 'jsonb', jsonColumn: 'metadata', key: 'last_scanned_at' } },
   col('created_at', 'timestamp'),
   col('updated_at', 'timestamp'),
   colAs('segment_id', 'network_segment_id', 'uuid'),

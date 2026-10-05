@@ -16,7 +16,8 @@ export function SensorFleetDefaultsModal({ onClose }: { onClose: () => void }) {
     <Modal open onClose={onClose} size="lg" icon="settings" eyebrow="Sensors" title="Sensor fleet defaults">
       <div style={{ fontSize: 12, color: 'var(--app-t3)', lineHeight: 1.6, marginBottom: 10 }}>
         These apply to every sensor that has no setting of its own. A sensor with an override keeps
-        it. Host observation and DNS decoding take effect when a sensor restarts.
+        it. Host observation, DNS decoding and additional TLS ports take effect when a sensor
+        restarts.
       </div>
 
       {q.isLoading && <div style={{ fontSize: 12, color: 'var(--app-t3)' }}>Loading defaults…</div>}

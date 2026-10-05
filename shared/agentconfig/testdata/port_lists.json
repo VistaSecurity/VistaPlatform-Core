@@ -1,0 +1,21 @@
+{
+  "_comment": "The port-list rule, case by case. Read by shared/agentconfig (ParsePortList, Go) AND by frontend-v2's agent-config.test.ts (parsePortList, TypeScript), so the console's check and the platform's cannot disagree about what a port list is or what a person is told when one is wrong. Problems are compared word for word.",
+  "cases": [
+    { "input": "", "ports": [], "canonical": "", "problems": [] },
+    { "input": "9443", "ports": [9443], "canonical": "9443", "problems": [] },
+    { "input": "10443,9443", "ports": [9443, 10443], "canonical": "9443,10443", "problems": [] },
+    { "input": " 9443 , 10443 ,, ", "ports": [9443, 10443], "canonical": "9443,10443", "problems": [] },
+    { "input": "9443 10443\n8444", "ports": [8444, 9443, 10443], "canonical": "8444,9443,10443", "problems": [] },
+    { "input": "9443,9443,10443", "ports": [9443, 10443], "canonical": "9443,10443", "problems": [] },
+    { "input": "1,65535", "ports": [1, 65535], "canonical": "1,65535", "problems": [] },
+    { "input": "443", "ports": [443], "canonical": "443", "problems": [] },
+    { "input": "0", "ports": [], "canonical": "", "problems": ["0 is outside the port range 1-65535"] },
+    { "input": "65536", "ports": [], "canonical": "", "problems": ["65536 is outside the port range 1-65535"] },
+    { "input": "99999999999999999999", "ports": [], "canonical": "", "problems": ["99999999999999999999 is outside the port range 1-65535"] },
+    { "input": "abc", "ports": [], "canonical": "", "problems": ["\"abc\" is not a port number"] },
+    { "input": "-5", "ports": [], "canonical": "", "problems": ["\"-5\" is not a port number"] },
+    { "input": "9443.5", "ports": [], "canonical": "", "problems": ["\"9443.5\" is not a port number"] },
+    { "input": "9000-9010", "ports": [], "canonical": "", "problems": ["\"9000-9010\" is a range; list each port on its own"] },
+    { "input": "9443,abc,70000", "ports": [9443], "canonical": "9443", "problems": ["\"abc\" is not a port number", "70000 is outside the port range 1-65535"] }
+  ]
+}

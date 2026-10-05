@@ -71,6 +71,9 @@
         "discovery_method": "device_interrogation",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "unmeasured_components": [
+          "protocol_version"
+        ],
         "version": ""
       }
     },
@@ -91,6 +94,9 @@
         "profile_name": "ssl-fwd-proxy-default",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "unmeasured_components": [
+          "protocol_version"
+        ],
         "version": ""
       }
     }

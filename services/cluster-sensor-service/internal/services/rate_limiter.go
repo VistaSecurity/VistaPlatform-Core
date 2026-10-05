@@ -41,6 +41,13 @@ func (r *RateLimiter) withTenantTxx(ctx context.Context, tenantID uuid.UUID, fn 
 }
 
 func (r *RateLimiter) GetRateLimit(tenantID string) (*models.DiscoveryRateLimit, error) {
+	return r.getRateLimit(tenantID, true)
+}
+
+// getRateLimit reads the tenant's limits. A tenant with none stored gets the
+// defaults, and persistDefault says whether they are written down (the first
+// real request does; a dry run must write nothing).
+func (r *RateLimiter) getRateLimit(tenantID string, persistDefault bool) (*models.DiscoveryRateLimit, error) {
 	// RLS-scoped read over discovery_rate_limits (tenant_isolation policy). The
 	// explicit WHERE tenant_id = $1 stays as the primary control.
 	tenantUUID, err := uuid.Parse(tenantID)
@@ -65,19 +72,18 @@ func (r *RateLimiter) GetRateLimit(tenantID string) (*models.DiscoveryRateLimit,
 		return nil, fmt.Errorf("failed to get rate limit: %w", err)
 	}
 	if !found {
+		if !persistDefault {
+			return defaultRateLimit(tenantID), nil
+		}
 		// Create default rate limit
 		return r.createDefaultRateLimit(tenantID)
 	}
 	return rateLimit, nil
 }
 
-func (r *RateLimiter) createDefaultRateLimit(tenantID string) (*models.DiscoveryRateLimit, error) {
-	tenantUUID, err := uuid.Parse(tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid tenant_id: %w", err)
-	}
-
-	rateLimit := &models.DiscoveryRateLimit{
+// defaultRateLimit is what a tenant with no stored limits is held to.
+func defaultRateLimit(tenantID string) *models.DiscoveryRateLimit {
+	return &models.DiscoveryRateLimit{
 		TenantID:         tenantID,
 		ScansPerHour:     100,
 		ConcurrentJobs:   5,
@@ -86,21 +92,52 @@ func (r *RateLimiter) createDefaultRateLimit(tenantID string) (*models.Discovery
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
 	}
+}
 
+func (r *RateLimiter) createDefaultRateLimit(tenantID string) (*models.DiscoveryRateLimit, error) {
+	tenantUUID, err := uuid.Parse(tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tenant_id: %w", err)
+	}
+
+	rateLimit := defaultRateLimit(tenantID)
+
+	// ON CONFLICT: two first requests for a tenant (concurrent deliveries of
+	// its first job) both find no row and both insert. The loser used to get a
+	// unique violation, which CheckRateLimit reported as "rate limit exceeded"
+	// and the processor turned into a FAILED job. It now reads the winner's row.
 	query := `
 		INSERT INTO discovery_rate_limits (tenant_id, scans_per_hour, concurrent_jobs, max_targets_per_job, is_active, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (tenant_id) DO NOTHING
 		RETURNING id`
 
 	// RLS-scoped write: WithTenantTx sets app.tenant_id so the INSERT's
 	// tenant_id satisfies the policy WITH CHECK.
+	inserted := true
 	err = shareddatabase.WithTenantTx(context.Background(), r.db.DB, tenantUUID, func(tx *sql.Tx) error {
-		return tx.QueryRow(query,
+		e := tx.QueryRow(query,
 			rateLimit.TenantID, rateLimit.ScansPerHour, rateLimit.ConcurrentJobs,
 			rateLimit.MaxTargetsPerJob, rateLimit.IsActive, rateLimit.CreatedAt, rateLimit.UpdatedAt).Scan(&rateLimit.ID)
+		if e == sql.ErrNoRows {
+			inserted = false
+			return nil
+		}
+		return e
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create default rate limit: %w", err)
+	}
+	if !inserted {
+		existing := &models.DiscoveryRateLimit{}
+		err = r.withTenantTxx(context.Background(), tenantUUID, func(tx *sqlx.Tx) error {
+			return tx.Get(existing, `SELECT id, tenant_id, scans_per_hour, concurrent_jobs, max_targets_per_job, is_active, created_at, updated_at
+			          FROM discovery_rate_limits WHERE tenant_id = $1 AND is_active = true`, tenantID)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create default rate limit: %w", err)
+		}
+		return existing, nil
 	}
 	return rateLimit, nil
 }
@@ -128,7 +165,19 @@ func (r *RateLimiter) UpdateRateLimit(tenantID string, req models.RateLimitConfi
 }
 
 func (r *RateLimiter) CheckRateLimit(tenantID string) error {
-	rateLimit, err := r.GetRateLimit(tenantID)
+	return r.checkRateLimit(tenantID, true)
+}
+
+// CheckRateLimitReadOnly is CheckRateLimit for a request that creates nothing
+// (a dry run): the same two counts against the same limits, and the same
+// refusal, but a tenant with no stored limits is judged against the defaults
+// without the defaults being stored.
+func (r *RateLimiter) CheckRateLimitReadOnly(tenantID string) error {
+	return r.checkRateLimit(tenantID, false)
+}
+
+func (r *RateLimiter) checkRateLimit(tenantID string, persistDefault bool) error {
+	rateLimit, err := r.getRateLimit(tenantID, persistDefault)
 	if err != nil {
 		return err
 	}

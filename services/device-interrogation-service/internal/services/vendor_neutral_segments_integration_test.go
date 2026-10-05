@@ -211,17 +211,24 @@ func TestIntegration_VendorNeutralSegments_LeaseReuseInUnknownDHCPDoesNotJoin(t 
 	}
 }
 
-// (d2) The in-run half of the DHCP-unknown rule. An operator declared the
-// network first, with no DHCP posture, so declared-wins leaves the persisted
-// segment saying nothing and ScopeForAddress reads it as static. The firewall's
-// report in THIS run that it does not know is what keeps a reused lease from
-// joining two clients here.
+// (d2) An operator declared the network first. There used to be an in-run
+// half of the DHCP-unknown rule — the firewall's "I do not know" in THIS run
+// marked the address dynamic for this run's peers — and removed it
+// (item 7, owner decision: stored posture only), because the same overlay
+// also overrode an operator who had marked the segment static. What protects
+// a declared segment now is the posture stored on it: here the operator says
+// it hands out leases, and a reused lease does not join two clients.
 func TestIntegration_VendorNeutralSegments_LeaseReuseUnderDeclaredSegmentDoesNotJoin(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active) VALUES($1,'Operator LAN','cidr','10.20.30.0/24','private','production',true)`, tenant); err != nil {
+	var segment string
+	if err := db.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active) VALUES($1,'Operator LAN','cidr','10.20.30.0/24','private','production',true) RETURNING id::text`, tenant).Scan(&segment); err != nil {
 		t.Fatal(err)
+	}
+	if res, err := pgidentity.RecordSegmentPosture(context.Background(), db, tenant.String(), segment,
+		pgidentity.PostureOperator, true, pgidentity.PostureEvidence{ObservedAt: time.Now()}); err != nil || !res.Written {
+		t.Fatalf("operator posture: written=%v err=%v", res.Written, err)
 	}
 	sink := NewObservationSink(db)
 	firewall := seedInterrogatedDevice(t, db, tenant, "fortinet", "00:09:0f:00:00:0b", "fw-declared")
@@ -291,15 +298,6 @@ func TestIntegration_VendorNeutralSegments_EnforceAdmissionOnUnknownDHCP(t *test
 	app := testdb.ConnectAsAppRole(t, owner)
 	app.SetMaxOpenConns(1)
 	sink := NewObservationSink(app)
-	_, repo, err := sink.engine()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Force admission on whatever this build's capabilities say, as the
-	// retained-peer tests do.
-	if sink.eng, err = identity.New(identity.Config{Repo: repo, AdmissionEnabled: true}); err != nil {
-		t.Fatal(err)
-	}
 
 	// Run 1: the networks are learned — one with DHCP unknown, one static.
 	persistVLANs(t, sink, tenant, firewall, fortinetShapedVLANs())
@@ -524,6 +522,14 @@ func TestIntegration_VendorNeutralSegments_EnrichmentProbeRefusesLearnedPublic(t
 	}
 	if err := probe(declared, "198.19.0.9"); err == nil || strings.Contains(err.Error(), "learned public network") || !strings.Contains(err.Error(), "no longer reachable") {
 		t.Errorf("probe into a declared public segment = %v, want it past the segment check (refused only for the unreachable collector)", err)
+	}
+	// Once a person claims the learned segment ( D8) it is read as
+	// declared here too.
+	if _, err := db.Exec(`UPDATE network_segments SET metadata = metadata || jsonb_build_object($2::text, '{"by":"00000000-0000-0000-0000-000000000001","at":"2026-10-01T12:00:00Z"}'::jsonb) WHERE id = $1::uuid`, learned, dispatchguard.SegmentClaimKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := probe(learned, "198.18.0.1"); err == nil || strings.Contains(err.Error(), "learned public network") || !strings.Contains(err.Error(), "no longer reachable") {
+		t.Errorf("probe into a CLAIMED learned public segment = %v, want it past the segment check like a declared one", err)
 	}
 }
 

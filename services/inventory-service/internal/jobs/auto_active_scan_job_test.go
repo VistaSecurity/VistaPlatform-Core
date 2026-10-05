@@ -24,6 +24,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/autoscan"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	sharedautoscan "github.com/vistasecurity/vistaplatform/shared/autoscan"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 type fakeStore struct {
@@ -51,6 +52,18 @@ type fakeStore struct {
 
 	clearCalls int
 	clearErr   error
+
+	adoptCalls int
+	adoptErr   error
+	adoptSince time.Time
+
+	// sni is what SNICandidates answers, per asset.
+	sni    map[uuid.UUID][]string
+	sniErr error
+}
+
+func (f *fakeStore) SNICandidates(context.Context, uuid.UUID, []uuid.UUID) (map[uuid.UUID][]string, error) {
+	return f.sni, f.sniErr
 }
 
 type recordedScan struct {
@@ -82,6 +95,15 @@ func (f *fakeStore) ClearUnstartedScanStamps(context.Context, uuid.UUID) (int, e
 	f.clearCalls++
 	if f.clearErr != nil {
 		return 0, f.clearErr
+	}
+	return 0, nil
+}
+
+func (f *fakeStore) AdoptRecentJobs(_ context.Context, _ uuid.UUID, since time.Time) (int, error) {
+	f.adoptCalls++
+	f.adoptSince = since
+	if f.adoptErr != nil {
+		return 0, f.adoptErr
 	}
 	return 0, nil
 }
@@ -144,10 +166,18 @@ func TestSweepTenant_DispatchesWhatThePolicyAsksFor(t *testing.T) {
 	if len(job.Targets) != 2 {
 		t.Errorf("targets = %v, want both addresses", job.Targets)
 	}
-	// The job must carry the TENANT's protocols and ports, not a second copy of
-	// the defaults living in the worker.
-	if len(job.Protocols) != len(store.policy.Protocols) || len(job.Ports) != len(store.policy.Ports) {
-		t.Errorf("job carries %v/%v, want the policy's %v/%v", job.Protocols, job.Ports, store.policy.Protocols, store.policy.Ports)
+	// The job must carry the TENANT's ports, not a second copy of the defaults
+	// living in the worker — as a planned job on the shared engine (
+	// WP4): scan depth custom on those ports, and no protocol list.
+	if job.ScanDepth != "custom" || job.TCPPorts != shareddisc.CustomPortList(store.policy.Ports) {
+		t.Errorf("job carries %q/%q, want custom on the policy's ports %v", job.ScanDepth, job.TCPPorts, store.policy.Ports)
+	}
+	if len(job.Protocols) != 0 || len(job.Ports) != 0 {
+		t.Errorf("planned job still carries the legacy shape: protocols %v ports %v", job.Protocols, job.Ports)
+	}
+	if _, err := shareddisc.ResolveJobRequest(shareddisc.JobRequestFields{ScanDepth: job.ScanDepth, TCPPorts: job.TCPPorts,
+		ExecutionMode: job.ExecutionMode, PreferredSensorIDs: job.PreferredSensorIDs}); err != nil {
+		t.Errorf("the request does not resolve as a plan: %v", err)
 	}
 	// The origin marker is what every later reader uses to tell a scan nobody
 	// asked for from one somebody did — the idempotency gate, the settings
@@ -478,24 +508,36 @@ func TestNoteObservation_IgnoresTheNilTenant(t *testing.T) {
 	}
 }
 
-// The kill switch has to stop the worker, not merely make it quieter.
+// The kill switch has to stop the worker, not merely make it quieter: Start
+// logs and RETURNS, with no loop left running. Settling a person's Active Scan
+// is not this worker's job (ActiveScanFinishJob), so nothing here depends on it.
 func TestKillSwitch(t *testing.T) {
 	t.Setenv(EnvAutoScanEnabled, "false")
+	t.Setenv(EnvAutoScanTriggerInterval, "10ms")
 	store := &fakeStore{policy: sharedautoscan.DefaultPolicy(), targets: targetsAt("10.0.0.1")}
 	d := &fakeDispatcher{}
 	j := NewAutoActiveScanJob(store, d, nil, nil)
-	j.listTenants = func() ([]uuid.UUID, error) { return []uuid.UUID{uuid.New()}, nil }
+	tenant := uuid.New()
+	listed := 0
+	j.listTenants = func() ([]uuid.UUID, error) { listed++; return []uuid.UUID{tenant}, nil }
 
-	// Start returns immediately rather than blocking on a ticker.
+	// A context that is never cancelled: a worker that stayed up in a loop
+	// would hang here instead of returning.
 	done := make(chan struct{})
 	go func() { j.Start(context.Background()); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Start did not return with the kill switch set — the worker is still running")
+		t.Fatal("Start did not return with the kill switch set — the disabled worker is still running a loop")
+	}
+	if listed != 0 {
+		t.Errorf("enumerated tenants %d times with the kill switch set", listed)
 	}
 	if len(d.jobs) != 0 {
 		t.Errorf("dispatched %d jobs with the kill switch set", len(d.jobs))
+	}
+	if store.targetsSeen.calls != 0 {
+		t.Errorf("looked for automatic targets %d times with the kill switch set", store.targetsSeen.calls)
 	}
 	// And an observation reported while it is off queues nothing.
 	j.NoteObservation(uuid.New())

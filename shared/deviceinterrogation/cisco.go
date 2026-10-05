@@ -712,10 +712,12 @@ func (c *ciscoSSHClient) convertSSLConfigToAsset(config ciscoSSLConfig) CryptoAs
 		asset.Metadata["config_name"] = config.Name
 	}
 
+	// The version is the one the device's configuration named, or none: a
+	// WebVPN / SSL row whose lines named no version has an UNMEASURED version
+	// ( W1.2). It used to be "TLS 1.2", which linked, scored and showed a
+	// version nobody read.
 	if len(config.TLSVersions) > 0 {
 		asset.ProtocolVersion = strPtr(config.TLSVersions[0])
-	} else {
-		asset.ProtocolVersion = strPtr("TLS 1.2")
 	}
 
 	if config.Metadata != nil {
@@ -767,7 +769,11 @@ func (c *ciscoSSHClient) collectSSHInfo() CryptoAsset {
 		asset.Metadata["ssh_host_key_verification"] = c.hostKeyVerified
 	}
 
-	asset.ProtocolVersion = strPtr("SSH-2.0")
+	// The protocol version is the one the banner states (RFC 4253 §4.2):
+	// "SSH-1.99" is a server that still accepts SSH-1 and must not be shown
+	// as 2.0. No banner, or one naming no version the catalogue knows, is an
+	// unmeasured version ( W1.2) — never a constant.
+	asset.ProtocolVersion = sshBannerProtocolVersion(asset.SSHInfo.Banner)
 	return asset
 }
 

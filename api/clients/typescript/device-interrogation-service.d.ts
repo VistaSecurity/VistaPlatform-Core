@@ -626,6 +626,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/devices/discoveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Agent-routed Add device attempts, as the Devices page shows them
+         * @description The organization's recent agent-routed Add device attempts, newest first:
+         *     everything not dismissed, except a success more than ten minutes old (by
+         *     then the device is on the page). Never carries credentials.
+         */
+        get: operations["listDeviceDiscoveries"];
+        put?: never;
+        /**
+         * Add a device through a device agent
+         * @description Add device for a device only a deployed device agent can reach. The four
+         *     Add device fields plus the agent that can reach it. Nothing is dialled
+         *     from the platform: the identification is queued as a `device_discovery`
+         *     job ALREADY ASSIGNED to that agent — only that agent can claim it, and
+         *     only once it has declared it can run device discovery — and the device is
+         *     created, exactly as the synchronous Add device creates it, when the agent
+         *     reports what it identified. Poll `GET /devices/discoveries` for the
+         *     outcome. The password is stored encrypted until the agent claims the job
+         *     and is sealed for that agent alone at hand-off. Rate limited and audited
+         *     with Add device.
+         */
+        post: operations["createDeviceDiscovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/discoveries/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Re-queue a failed agent-routed Add device on the same agent */
+        post: operations["retryDeviceDiscovery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/devices/discoveries/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Dismiss an agent-routed Add device and drop its stored credentials */
+        delete: operations["dismissDeviceDiscovery"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/jobs": {
         parameters: {
             query?: never;
@@ -1075,8 +1144,16 @@ export interface components {
              * @enum {string}
              */
             origin: "built_in" | "fleet" | "device";
-            /** @enum {string} */
-            kind: "bool" | "int" | "enum";
+            /**
+             * @description `port_list` is a list of TCP port numbers carried as a canonical
+             *     comma-separated string — `"9443,10443"`, `""` for none — not as an
+             *     array, because a device older than the setting decodes its whole
+             *     check-in answer through a type that accepts only a boolean, a whole
+             *     number or a string. Entries are 1-65535, at most 64 distinct; the
+             *     platform sorts and de-duplicates on save.
+             * @enum {string}
+             */
+            kind: "bool" | "int" | "enum" | "port_list";
             /**
              * @description When the device adopts a change. `restart` settings sit at
              *     `awaiting_restart` until the process restarts; showing them as
@@ -1103,6 +1180,20 @@ export interface components {
             /** Format: int64 */
             max?: number;
             allowed?: string[];
+            /**
+             * @description On a `port_list` setting only: the ports the device already
+             *     watches, keyed by port number, named as the console shows them —
+             *     so a client can say "already monitored as HTTPS" without its own
+             *     copy of the device's port table. Listing one is accepted and
+             *     ignored by the device.
+             * @example {
+             *       "22": "SSH",
+             *       "443": "HTTPS"
+             *     }
+             */
+            built_in_ports?: {
+                [key: string]: string;
+            };
         };
         /** @description How far the device has converged on the desired settings. */
         AgentConfigStatus: {
@@ -1120,7 +1211,14 @@ export interface components {
              * @description When the device last reported. Absent if it never has.
              */
             reported_at?: string;
-            /** @description The device's own reason, per setting it could not apply. */
+            /**
+             * @description Per setting the device could not apply, its own reason — except a
+             *     setting its build does not support, which is reworded to say to
+             *     upgrade the device, and omitted entirely when the setting is still
+             *     at a default that older builds already behave as (so a new
+             *     setting nobody has changed does not mark every older device
+             *     failed).
+             */
             failures?: {
                 [key: string]: string;
             };
@@ -1250,12 +1348,60 @@ export interface components {
             password: string;
             /** @description Explicit opt-in for appliances with a self-signed management certificate. Defaults to false. Persisted on the created device. Ignored and stored as false for an SSH-managed type (Cisco), where it would otherwise disable SSH host-key verification. */
             tls_insecure_skip_verify?: boolean;
+            /** @description Consent for the platform to re-run this device's interrogation on its own when identity enrichment needs fresh evidence from it. Omit to leave it unchanged (off for a new device); false withdraws it. The only way to set it — an `identity_enrichment_executor` key of the same meaning inside `metadata` is ignored. Has no effect on a device an agent interrogates. */
+            platform_reinterrogation_allowed?: boolean;
         };
         /** @description A typed identification failure. `message` is fixed copy chosen by `error`; it never carries text the device returned. */
         DeviceDiscoveryError: {
             /** @enum {string} */
-            error: "not_supported" | "invalid_target" | "target_disallowed" | "connection_failed" | "tls_untrusted" | "authentication_failed" | "host_key_mismatch" | "unsupported_response" | "discovery_failed" | "credentials_missing" | "rate_limited" | "test_throttled";
+            error: "not_supported" | "invalid_target" | "target_disallowed" | "connection_failed" | "tls_untrusted" | "authentication_failed" | "host_key_mismatch" | "unsupported_response" | "discovery_failed" | "credentials_missing" | "rate_limited" | "test_throttled" | "agent_not_found" | "agent_unavailable" | "not_retryable" | "not_found";
             message: string;
+        };
+        /** @description The four Add device fields, plus the device agent that can reach the device. */
+        CreateDeviceDiscoveryRequest: {
+            /** @enum {string} */
+            device_type: "f5" | "palo_alto" | "cisco" | "fortinet" | "unifi";
+            /** @description As for discover-and-create. May not carry credentials, a query or a fragment. */
+            management_url: string;
+            username: string;
+            password: string;
+            /** @description As for discover-and-create; ignored for Cisco. */
+            tls_insecure_skip_verify?: boolean;
+            /**
+             * Format: uuid
+             * @description The organization's device agent that runs the identification.
+             */
+            agent_id: string;
+        };
+        /** @description One agent-routed Add device. `status` is the row state: `queued` (waiting for the agent), `running`, `succeeded` (the device was created — `asset_id`), `held_for_review` (identity evidence was retained for Approvals — `observation_id` / `proposal_id`), `failed` (`error_code`, `message`), or `not_picked_up` (the agent never claimed it within 15 minutes — not a statement about the device). `message` is fixed copy chosen by `error_code`; it never carries text the device returned. */
+        DeviceDiscovery: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            status: "queued" | "running" | "succeeded" | "held_for_review" | "failed" | "not_picked_up";
+            device_type: string;
+            management_url: string;
+            /** Format: uuid */
+            agent_id: string;
+            agent_name: string | null;
+            /** @description A shared identification failure (connection_failed, authentication_failed, tls_untrusted, …) or one of not_picked_up, agent_no_result, create_failed, cancelled. */
+            error_code?: string;
+            message?: string;
+            /** Format: uuid */
+            asset_id?: string;
+            observation_id?: string;
+            proposal_id?: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            started_at?: string;
+            /** Format: date-time */
+            completed_at?: string;
+            /** Format: date-time */
+            expires_at?: string;
+        };
+        DeviceDiscoveryListResponse: {
+            discoveries: components["schemas"]["DeviceDiscovery"][];
         };
         DeviceConnectionTestResult: {
             /** Format: uuid */
@@ -1292,6 +1438,8 @@ export interface components {
             username?: string;
             password?: string;
             tls_insecure_skip_verify?: boolean;
+            /** @description Consent for the platform to re-run this device's interrogation on its own when identity enrichment needs fresh evidence from it. Omit to leave it unchanged (off for a new device); false withdraws it. The only way to set it — an `identity_enrichment_executor` key of the same meaning inside `metadata` is ignored. Has no effect on a device an agent interrogates. */
+            platform_reinterrogation_allowed?: boolean;
             metadata?: {
                 [key: string]: unknown;
             };
@@ -1315,6 +1463,8 @@ export interface components {
             password?: string;
             tls_insecure_skip_verify?: boolean;
             connection_status?: string;
+            /** @description Consent for the platform to re-run this device's interrogation on its own when identity enrichment needs fresh evidence from it. Omit to leave it unchanged (off for a new device); false withdraws it. The only way to set it — an `identity_enrichment_executor` key of the same meaning inside `metadata` is ignored. Has no effect on a device an agent interrogates. */
+            platform_reinterrogation_allowed?: boolean;
             metadata?: {
                 [key: string]: unknown;
             };
@@ -1642,6 +1792,18 @@ export interface components {
             tags: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * @description Whether the platform may re-run this device's interrogation on its
+             *     own when identity enrichment needs fresh evidence from it. False
+             *     until an operator turns it on (Add / Edit device).
+             */
+            platform_reinterrogation_allowed: boolean;
+            /**
+             * @description True when this device's most recent completed job was run by an
+             *     agent. Identity enrichment then asks that agent and
+             *     `platform_reinterrogation_allowed` does not apply. Read-only.
+             */
+            interrogated_by_agent: boolean;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -3423,6 +3585,164 @@ export interface operations {
                     "application/json": components["schemas"]["DeviceDiscoveryError"];
                 };
             };
+        };
+    };
+    listDeviceDiscoveries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The attempts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryListResponse"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    createDeviceDiscovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDeviceDiscoveryRequest"];
+            };
+        };
+        responses: {
+            /** @description Queued on the agent. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscovery"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description `agent_unavailable` — the agent has not polled recently while declaring it can discover devices: it is stopped, cannot reach the platform, or is older than this platform. Nothing was queued. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            /** @description Nothing was queued: the agent is not this organization's (`agent_not_found`), the device type cannot be identified automatically (`not_supported`), or the address carries credentials, a query or a fragment (`invalid_target`). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            /** @description Nothing was queued. `rate_limited` — the organization has used its device-probe budget for the minute. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    retryDeviceDiscovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Queued again. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscovery"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description No such discovery in this organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            /** @description `not_retryable` — only a failed attempt, or one no agent picked up, can be retried; `agent_unavailable` — the agent still is not polling. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            /** @description `rate_limited`. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    dismissDeviceDiscovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description No such discovery in this organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceDiscoveryError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
         };
     };
     listInterrogationJobs: {

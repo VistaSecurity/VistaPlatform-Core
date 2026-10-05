@@ -103,18 +103,6 @@ func TestVlanSegmentSpecs(t *testing.T) {
 	}
 }
 
-// TestVlanSegmentSpecs_LeaseScope pins the identity-safety half of the DHCP
-// posture: only a network the device positively said serves no DHCP lets a
-// bare address vote. Unknown is treated like dynamic for that one purpose, so
-// a reused lease can never join two devices on a network nobody measured.
-func TestVlanSegmentSpecs_LeaseScope(t *testing.T) {
-	for posture, want := range map[dhcpPosture]bool{dhcpEnabled: true, dhcpUnknown: true, dhcpDisabled: false} {
-		if got := (vlanSegmentSpec{DHCP: posture}).leaseScope(); got != want {
-			t.Errorf("leaseScope(%s) = %v, want %v", posture, got, want)
-		}
-	}
-}
-
 // TestVlanSegmentMetadata pins what a learned segment records about itself:
 // an unknown posture is written as unknown and never as `dynamic`, which
 // ScopeForAddress and every other reader take as a measured answer.

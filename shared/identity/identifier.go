@@ -279,9 +279,233 @@ type Identifier struct {
 	// recorded, as true, and the flag exists so the engine needs no lookup.
 	Generic bool `json:"generic,omitempty"`
 
+	// Pinned marks an `ip_address` that is not merely where the device was
+	// seen: an operator DECLARED it on the asset, or the host REPORTED it about
+	// itself (its agent, or an authenticated session reading its own interface
+	// configuration). Owner decision 1 on: such an address still matches
+	// its owner inside a DHCP segment, because a pinned address is not a lease.
+	//
+	// Like Generic it is per-observation context, not identity: [Identifier.Key]
+	// ignores it. [Intake] sets it; the repositories turn it into the stored
+	// `address_assignment = 'static'` ([Identifier.StoredAssignment]) unless
+	// [Identifier.Assignment] says otherwise, and the engine's vote exemption
+	// reads the OWNER's stored assignment, never this flag on the sighting
+	// (pinned.go). It is meaningful only on `ip_address`.
+	Pinned bool `json:"pinned,omitempty"`
+
+	// Claimed marks an `ip_address` the device itself reported as an address
+	// configured on its own interface, over a first-hand session the platform
+	// opened: the canonical case is a gateway's address on each network it
+	// routes. A claimed address is always [Identifier.Pinned], and it
+	// does one more thing: it settles who else holds the address
+	// (claimed.go). It re-homes from a provisional asset, or from one that
+	// holds nothing but addresses, and it votes even in a dynamic scope
+	// against any other holder, so that holder becomes a merge proposal
+	// rather than silently keeping it.
+	//
+	// Per-observation context like Pinned: not part of [Identifier.Key], not
+	// stored. [Intake] sets it, and only on a measured sighting whose channel
+	// is direct and authoritative (an authenticated session).
+	Claimed bool `json:"claimed,omitempty"`
+
+	// Assignment is the explicit form of the same fact, for the one answer
+	// Pinned cannot carry: a host reporting an address as a DHCP lease
+	// ([AssignmentDynamic]). Empty defers to Pinned (and to a declared source):
+	// see [Identifier.StoredAssignment]. Meaningful for `ip_address` only;
+	// [Identifier.Normalized] clears it on every other kind. Provenance, not
+	// identity: [Identifier.Key] ignores it.
+	Assignment AddressAssignment `json:"address_assignment,omitempty"`
+
+	// KeyAlgorithm is the key type of an `ssh_host_key_fingerprint` — the
+	// family [NormalizeSSHKeyAlgorithm] returns (`ed25519`, `rsa`,
+	// `ecdsa-p256`, …) — and empty for every other kind, or when the observer
+	// did not say.
+	//
+	// It is a sibling of the value, not part of it. A host offers one key per
+	// algorithm and a probe sees whichever one negotiation picked, so two
+	// fingerprints on one host are normally two keys, not a rotation; the drift
+	// classifier tells the cases apart by algorithm ( Decision 4). The
+	// fingerprint alone is still the identity — a SHA-256 over the key blob,
+	// which includes the type — so [Identifier.Key] ignores this, and rows
+	// stored before it existed keep matching. Stores persist it
+	// (`asset_identifiers.key_algorithm`) and fill it in on the next sighting
+	// that carries it.
+	KeyAlgorithm string `json:"key_algorithm,omitempty"`
+
 	// Source and SeenAt are provenance, set by the engine.
 	Source Source    `json:"source,omitzero"`
 	SeenAt time.Time `json:"seen_at,omitzero"`
+}
+
+// AddressAssignment is how an `ip_address` came to be held by its asset — the
+// `asset_identifiers.address_assignment` column. Empty is "nobody said", and it
+// is the overwhelmingly common answer: a sensor that sees an address on the
+// wire cannot tell a lease from a pin.
+type AddressAssignment string
+
+const (
+	// AssignmentStatic is a pinned address: an operator declared it on the
+	// asset, or the host's own agent reported the interface as statically
+	// configured. It decides a match for its owner even inside a segment
+	// flagged dynamic, because the segment's DHCP flag is a statement about
+	// the range and this is a statement about this one address.
+	AssignmentStatic AddressAssignment = "static"
+	// AssignmentDynamic is an address the host's own agent reported as a
+	// DHCP lease. Recorded, never a reason to vote.
+	AssignmentDynamic AddressAssignment = "dynamic"
+)
+
+// Valid reports whether a is one of the two stored values or empty.
+func (a AddressAssignment) Valid() bool {
+	return a == "" || a == AssignmentStatic || a == AssignmentDynamic
+}
+
+// StoredAssignment is the assignment a repository records for this identifier:
+// empty for every kind but `ip_address`; the identifier's own [Assignment]
+// when it has one; otherwise [AssignmentStatic] for an `ip_address` marked
+// [Identifier.Pinned] or a person DECLARED (an operator typing an address onto
+// an asset is pinning it — decision 1); otherwise empty.
+//
+// It lives here, and both repositories call it, so "a declaration pins its
+// address" is one rule rather than one per intake path: the manual identifier
+// edit, the Devices form and a declared observation through the engine all
+// reach the store through [Repository.AttachIdentifiers] or
+// [Repository.CreateAsset].
+func (i Identifier) StoredAssignment() AddressAssignment {
+	if i.Kind != KindIPAddress {
+		return ""
+	}
+	if i.Assignment != "" {
+		// An explicit answer — the host said "dhcp" — wins over Pinned, which
+		// Intake also sets on every self-reported address.
+		return i.Assignment
+	}
+	if i.Pinned || i.Source.Kind == SourceDeclared {
+		return AssignmentStatic
+	}
+	return ""
+}
+
+// SourceRank orders source kinds for the identifier upsert's provenance rule:
+// declared (a person said so) over measured and imported (a collector or a
+// system of record said so) over inferred (we worked it out). A stored
+// identifier's source_kind moves only UP this ladder, and its source_ref moves
+// with its source_kind — a weaker sighting refreshes last-seen without
+// rewriting who vouched for the value. An empty kind ranks as measured, the
+// column's default.
+func SourceRank(k SourceKind) int {
+	switch k {
+	case SourceDeclared:
+		return 3
+	case SourceInferred:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// UpsertIdentifier folds a re-sighting `next` into the stored copy `prev` of
+// the same identifier, under the provenance rules the SQL upsert in
+// shared/identity/postgres applies (the identitytest contract holds the two
+// to the same answers):
+//
+//   - source kind moves only up [SourceRank]; the ref travels with the kind
+//     (an equal-rank re-sighting of the same kind refreshes a non-empty ref,
+//     a weaker or sideways one keeps the stored ref);
+//   - the address assignment is replaced only by a non-empty value from a
+//     source at least as strong as the stored one, so `static` is never
+//     downgraded to unknown and a measured "dhcp" never unpins a declaration;
+//   - last-seen never moves backwards;
+//   - an SSH host key's algorithm, once known, is kept when a re-sighting
+//     does not say it.
+//
+// Everything else (confidence, generic) is next's. It is exported for the
+// in-memory repository, which is the executable statement of the rule.
+func UpsertIdentifier(prev, next Identifier) Identifier {
+	out := next
+	if prev.SeenAt.After(next.SeenAt) {
+		out.SeenAt = prev.SeenAt
+	}
+	prevKind, nextKind := storedSourceKind(prev.Source.Kind), storedSourceKind(next.Source.Kind)
+	prevRank, nextRank := SourceRank(prevKind), SourceRank(nextKind)
+	switch {
+	case nextRank > prevRank:
+		out.Source = next.Source
+		out.Source.Kind = nextKind
+	case nextKind == prevKind:
+		out.Source = prev.Source
+		out.Source.Kind = prevKind
+		if strings.TrimSpace(next.Source.Ref) != "" {
+			out.Source.Ref = next.Source.Ref
+		}
+	default:
+		out.Source = prev.Source
+		out.Source.Kind = prevKind
+	}
+	if out.KeyAlgorithm == "" {
+		// A sighting that does not say an SSH host key's algorithm does not
+		// forget one an earlier sighting said ( Decision 4), as the SQL
+		// upsert's coalesce does.
+		out.KeyAlgorithm = prev.KeyAlgorithm
+	}
+	prevAssign, nextAssign := prev.StoredAssignment(), next.StoredAssignment()
+	out.Assignment = prevAssign
+	if nextAssign != "" && nextRank >= prevRank {
+		out.Assignment = nextAssign
+	}
+	return out
+}
+
+// storedSourceKind is the column's default made explicit: an identifier
+// written with no source kind is stored `measured`.
+func storedSourceKind(k SourceKind) SourceKind {
+	if k == "" {
+		return SourceMeasured
+	}
+	return k
+}
+
+// NormalizeSSHKeyAlgorithm maps an SSH host key type or signature algorithm
+// name to the KEY family it names, or "" when it names none.
+//
+// The observers report different names for one key: a probe reports the
+// negotiated SIGNATURE algorithm (`rsa-sha2-512`), a banner grab the key type
+// (`ssh-rsa`), an agent its own spelling. All three are one RSA key. ECDSA
+// keeps its curve, because a host may hold a P-256 and a P-384 key at once; a
+// host certificate is the key it certifies.
+func NormalizeSSHKeyAlgorithm(raw string) string {
+	a := strings.ToLower(strings.TrimSpace(raw))
+	a = strings.TrimSuffix(a, "-cert-v01@openssh.com")
+	switch a {
+	case "":
+		return ""
+	case "ssh-rsa", "rsa", "rsa-sha2-256", "rsa-sha2-512", "ssh-rsa-sha256@ssh.com", "rsa-sha2-256@ssh.com", "rsa-sha2-512@ssh.com":
+		return "rsa"
+	case "ssh-ed25519", "ed25519":
+		return "ed25519"
+	case "ssh-ed448", "ed448":
+		return "ed448"
+	case "ssh-dss", "dsa", "dss":
+		return "dsa"
+	case "ecdsa-sha2-nistp256", "ecdsa-p256", "ecdsa256", "nistp256":
+		return "ecdsa-p256"
+	case "ecdsa-sha2-nistp384", "ecdsa-p384", "ecdsa384", "nistp384":
+		return "ecdsa-p384"
+	case "ecdsa-sha2-nistp521", "ecdsa-p521", "ecdsa521", "nistp521":
+		return "ecdsa-p521"
+	case "sk-ssh-ed25519@openssh.com":
+		return "sk-ed25519"
+	case "sk-ecdsa-sha2-nistp256@openssh.com":
+		return "sk-ecdsa-p256"
+	case "ecdsa":
+		// A bare "ecdsa" does not say which curve, and the curve is what
+		// tells two ECDSA keys apart. Unknown, not a guess.
+		return ""
+	default:
+		// A name we do not recognise is kept verbatim rather than dropped:
+		// two sightings spelling it the same way still compare.
+		return a
+	}
 }
 
 // Inferred reports whether the identifier was derived from other evidence
@@ -335,9 +559,23 @@ func (i Identifier) Normalized() (Identifier, error) {
 	if scope == "" {
 		scope = i.Kind.DefaultScopeFor()
 	}
+	if !i.Assignment.Valid() {
+		return i, fmt.Errorf("identity: %s: address assignment %q is not one of static, dynamic or empty", i.Kind, i.Assignment)
+	}
 	out := i
 	out.Value = v
 	out.Scope = scope
+	if out.Kind != KindIPAddress {
+		// How an address is assigned is a fact about an address. On any other
+		// kind it means nothing, and storing it would invite a reader to think
+		// it did.
+		out.Assignment = ""
+	}
+	if i.Kind == KindSSHHostKeyFingerprint {
+		out.KeyAlgorithm = NormalizeSSHKeyAlgorithm(i.KeyAlgorithm)
+	} else {
+		out.KeyAlgorithm = ""
+	}
 	return out, nil
 }
 

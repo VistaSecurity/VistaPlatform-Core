@@ -1,6 +1,6 @@
 {
   "vendor": "f5",
-  "input_sha256": "53019bc5ee992fd4152c44e99a739429a308c231f91faf318597cbd208bf2c0f",
+  "input_sha256": "ba65b5fe08836bce203951bab1afd4d12278880286a324540da5f34b8df9df5c",
   "inventory": {
     "assets": [
       {
@@ -34,7 +34,7 @@
         "asset": "asset[hostname=vs_legacy_443,ip_address=198.51.100.11]",
         "protocol": "TLS",
         "port": 443,
-        "protocol_version": "TLS 1.2",
+        "protocol_version": null,
         "cipher_suite": "ECDHE+AES-GCM:!aNULL:!RC4:!3DES:!MD5",
         "key_exchange_algorithm": null,
         "hash_algorithm": null,
@@ -42,13 +42,10 @@
         "risk_score": null,
         "risk_level": "Unknown",
         "risk_factors": [
-          "Partially assessed: the cipher string could not be fully resolved (ECDHE+AES-GCM); the enabled cipher set is unknown"
+          "Partially assessed: the cipher string could not be fully resolved (ECDHE+AES-GCM); the enabled cipher set is unknown",
+          "Partially assessed: the protocol version was not measured; a legacy version cannot be ruled out"
         ],
-        "algorithm_links": {
-          "protocol_version": [
-            "TLS1.2"
-          ]
-        },
+        "algorithm_links": {},
         "pqc_category": "unclassified",
         "has_certificate": false
       },

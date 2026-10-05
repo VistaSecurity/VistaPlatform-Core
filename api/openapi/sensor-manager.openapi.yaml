@@ -458,9 +458,10 @@ paths:
         entirely.
 
         Gated at SensorsManage. The sensor adopts the change at its next
-        heartbeat; settings marked `apply: restart` — host observation and DNS
-        decoding, whose BPF filter is fixed when the capture handle opens — are
-        listed in `needs_restart` and adopted when the sensor restarts.
+        heartbeat; settings marked `apply: restart` — host observation, DNS
+        decoding and the additional TLS ports, which shape the BPF filter fixed
+        when the capture handle opens — are listed in `needs_restart` and
+        adopted when the sensor restarts.
       parameters:
       - name: sensor_id
         in: path
@@ -1193,6 +1194,73 @@ paths:
         '503':
           $ref: '#/components/responses/LegacyServiceUnavailable'
 
+  /sensors/{sensor_id}/discovery-jobs/{job_id}/units:
+    parameters:
+    - $ref: '#/components/parameters/SensorId'
+    - name: job_id
+      in: path
+      required: true
+      description: Discovery job UUID — a planned scan the platform dispatched to this sensor.
+      schema:
+        type: string
+        format: uuid
+    post:
+      operationId: reportDiscoveryJobUnits
+      tags:
+      - sensors
+      summary: A sensor reports the hosts of a planned scan as it finishes them
+      description: |
+        A planned scan (a job with a scan depth) run by a tenant sensor
+        (#2170). Sensor-agent-facing, like the completion callback: the caller
+        is authenticated **as the sensor** (mTLS/HMAC), not by a tenant JWT.
+
+        After each host the sensor posts its result — the engine's counts and
+        what it identified on the open ports — and the platform stores it as
+        the job's work unit, with the same mapping and the same idempotency
+        fence as a host the platform scans itself, and queues its findings for
+        inventory. An empty `units` list is a progress ping. Every report
+        renews the job's progress lease: a planned scan on a sensor is failed
+        only when the sensor goes silent for the lease (15 minutes), not when
+        it runs long.
+
+        A host is stored once for the dispatch attempt that handed it over:
+        a re-sent host is counted `duplicate`, one from an earlier attempt or
+        of a cancelled host `stale`, an address the job does not have
+        `unknown`. A batch the engine could not have produced (counts that do
+        not add up, an observation of another address) is refused whole (400).
+
+        409 with `code` tells the sensor to STOP: `discovery_job_cancelled`
+        (a person cancelled it) or `discovery_job_ended` (the platform failed
+        it, or it completed). Nothing in that batch was stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscoveryJobUnitBatch'
+      responses:
+        '200':
+          description: Stored; go on.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryJobUnitBatchResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '409':
+          description: The job was cancelled or has ended; stop. Nothing was stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryJobUnitBatchResponse'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
 components:
   parameters:
     SensorId:
@@ -1355,7 +1423,14 @@ components:
             "revert to fleet default", or say whether a value is deliberate.
         kind:
           type: string
-          enum: [bool, int, enum]
+          enum: [bool, int, enum, port_list]
+          description: |
+            `port_list` is a list of TCP port numbers carried as a canonical
+            comma-separated string — `"9443,10443"`, `""` for none — not as an
+            array, because a device older than the setting decodes its whole
+            check-in answer through a type that accepts only a boolean, a whole
+            number or a string. Entries are 1-65535, at most 64 distinct; the
+            platform sorts and de-duplicates on save.
         apply:
           type: string
           enum: [immediate, restart]
@@ -1388,6 +1463,19 @@ components:
           type: array
           items:
             type: string
+        built_in_ports:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            On a `port_list` setting only: the ports the device already
+            watches, keyed by port number, named as the console shows them —
+            so a client can say "already monitored as HTTPS" without its own
+            copy of the device's port table. Listing one is accepted and
+            ignored by the device.
+          example:
+            "443": HTTPS
+            "22": SSH
     AgentConfigStatus:
       type: object
       description: How far the device has converged on the desired settings.
@@ -1413,7 +1501,13 @@ components:
           type: object
           additionalProperties:
             type: string
-          description: The device's own reason, per setting it could not apply.
+          description: |
+            Per setting the device could not apply, its own reason — except a
+            setting its build does not support, which is reworded to say to
+            upgrade the device, and omitted entirely when the setting is still
+            at a default that older builds already behave as (so a new
+            setting nobody has changed does not mark every older device
+            failed).
         pending_restart:
           type: array
           items:
@@ -2238,6 +2332,128 @@ components:
           type: integer
           minimum: 0
         discoveries_submitted:
+          type: integer
+          minimum: 0
+    DiscoveryJobUnitBatch:
+      type: object
+      additionalProperties: false
+      description: |
+        One progress report of a planned scan. Mirrors
+        shared/sensordispatch.UnitBatch. At most 512 hosts; empty is a ping.
+      required:
+      - units
+      properties:
+        units:
+          type: array
+          maxItems: 512
+          items:
+            $ref: '#/components/schemas/DiscoveryJobUnitResult'
+    DiscoveryJobUnitResult:
+      type: object
+      additionalProperties: false
+      description: |
+        One host of a planned scan (shared/sensordispatch.UnitResult). `failed`
+        means the host was not scanned (the sensor's own rules refused it, or
+        the scan errored) and `error` says why; otherwise `host` holds the
+        engine's counts — `ports_requested` equals open + closed + filtered +
+        local errors + not probed — and `tcp`/`udp` what was identified.
+      required:
+      - target_id
+      - address
+      - attempt
+      - host
+      properties:
+        target_id:
+          type: string
+          format: uuid
+        address:
+          type: string
+        attempt:
+          type: integer
+          minimum: 1
+        failed:
+          type: boolean
+        error:
+          type: string
+        host:
+          type: object
+          additionalProperties: true
+          description: The engine's per-host counts (shared/sensordispatch.UnitHost).
+          required:
+          - liveness
+          - ports_requested
+          - open_count
+          - closed
+          - filtered
+          - local_errors
+          - not_probed
+          properties:
+            liveness:
+              type: string
+              enum: [up, no_answer, assumed_up, undetermined]
+            ports_requested:
+              type: integer
+              minimum: 0
+            open_count:
+              type: integer
+              minimum: 0
+            closed:
+              type: integer
+              minimum: 0
+            filtered:
+              type: integer
+              minimum: 0
+            local_errors:
+              type: integer
+              minimum: 0
+            not_probed:
+              type: integer
+              minimum: 0
+        tcp:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            description: An identification observation (shared/discovery.Observation).
+        udp:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            description: A UDP service observation (shared/discovery.Observation).
+        deadline_hit:
+          type: boolean
+        deadline_seconds:
+          type: integer
+          minimum: 0
+    DiscoveryJobUnitBatchResponse:
+      type: object
+      additionalProperties: false
+      description: |
+        The answer to a progress report (shared/sensordispatch.UnitBatchResponse).
+        `code` is set only with 409, when the sensor must stop.
+      required:
+      - job_status
+      - accepted
+      - duplicate
+      - stale
+      - unknown
+      properties:
+        code:
+          type: string
+          enum: [discovery_job_cancelled, discovery_job_ended]
+        job_status:
+          type: string
+        accepted:
+          type: integer
+          minimum: 0
+        duplicate:
+          type: integer
+          minimum: 0
+        stale:
+          type: integer
+          minimum: 0
+        unknown:
           type: integer
           minimum: 0
     DiscoveryJobCompletionResponse:

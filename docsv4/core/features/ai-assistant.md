@@ -23,25 +23,26 @@ has. Other roles will see an access notice rather than the page.
 
 ## What the page shows
 
-### This deployment
+### Model provider
 
 | Row | What it means |
 |---|---|
-| **Model provider** | Whether whoever runs this deployment has connected a model endpoint, and which kind. |
-| **Model** | The model id this deployment asks for, when one is pinned. |
+| **Model provider** | Which model endpoint answers for your organization, and whose it is: **Provided by this deployment** (whoever runs the platform set it) or **Connected by your organization**. |
+| **Model** | The model id that is asked for, when one is pinned. |
 | **Capabilities on** | How many of the capabilities below can answer here right now. |
 
-The model provider is **not** configured from this page and cannot be. It is set
-by the operator who runs the platform, in the deployment's environment, alongside
-the database and the certificates — see
-[Connecting a model provider](../operate/configuration/ai-provider.md). That is
-deliberate: it involves a credential and an endpoint, both of which belong with
-the rest of the infrastructure rather than in a tenant's settings screen.
+In Core this row reads **Not included in this edition**: the model clients are
+part of Enterprise, and the rule-based behaviour in the table below is what
+answers.
 
-Two things you will **never** see here, by design: the endpoint address and
-anything resembling an API key. The platform's configuration object has no field
-that can hold a credential at all — it holds the *name* of the environment
-variable the operator put one in — so there is nothing for this page to leak.
+
+Whoever runs the platform can also set a provider for every organization — see
+[Connecting a model provider](../operate/configuration/ai-provider.md).
+
+You will **never** see an API key on this page, and you will never see the
+address of the deployment's own endpoint. For a provider your organization
+connected, the page shows the endpoint's host name and the last four characters
+of the key, and nothing more.
 
 ### Capabilities
 
@@ -129,7 +130,8 @@ where the capability itself lives.
 
 Change either switch and **Save changes** becomes available. Saving writes to
 your organization's settings and is recorded in your audit trail against your
-user, like every other settings change.
+user, like every other settings change. Connecting or disconnecting a provider
+saves on its own and is recorded the same way.
 
 If your platform administrator also has a copy of these settings open, the last
 save wins. Reload the page to see the current values.
@@ -140,4 +142,4 @@ save wins. Reload the page to see the current values.
 - [Audit Logging](../guides/audit-logging.md) — where the record of every AI call lands
 - [Roles & Permissions](./roles-and-permissions.md) — who can open this page
 - [Editions](../editions.md) — which capabilities belong to which edition
-- [Connecting a model provider](../operate/configuration/ai-provider.md) — the operator side of the "Model provider" row above
+- [Connecting a model provider](../operate/configuration/ai-provider.md) — the operator side of the "Model provider" row above: a default for every organization, and whether organizations may connect their own

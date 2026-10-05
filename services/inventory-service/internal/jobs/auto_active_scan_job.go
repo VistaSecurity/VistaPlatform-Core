@@ -20,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 	sharedautoscan "github.com/vistasecurity/vistaplatform/shared/autoscan"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 // AutoActiveScanJob scans every internal host the platform knows about — when
@@ -78,7 +79,11 @@ type autoScanStore interface {
 	RecordScanned(ctx context.Context, tenantID uuid.UUID, assetIDs []uuid.UUID, jobID string, at time.Time) error
 	StampCompletedScans(ctx context.Context, tenantID uuid.UUID) (int, error)
 	ClearUnstartedScanStamps(ctx context.Context, tenantID uuid.UUID) (int, error)
+	AdoptRecentJobs(ctx context.Context, tenantID uuid.UUID, since time.Time) (int, error)
 	SetState(ctx context.Context, tenantID uuid.UUID, state autoscan.State) error
+	// SNICandidates is the names each asset is known by, for a TLS port that
+	// refuses an address-only handshake (autoscan.Store.SNICandidates).
+	SNICandidates(ctx context.Context, tenantID uuid.UUID, assetIDs []uuid.UUID) (map[uuid.UUID][]string, error)
 }
 
 // autoScanDispatcher is the one call this job makes to cluster-sensor-service.
@@ -362,6 +367,24 @@ func (j *AutoActiveScanJob) SweepTenant(ctx context.Context, tenantID uuid.UUID,
 	}
 
 	now := j.now()
+
+	// Adopt the jobs an earlier pass created but never got to stamp. The
+	// dispatch call is an HTTP request with a 30 s timeout; creating a large
+	// job can outlast it, and cluster-sensor-service still creates the job. We
+	// then see an error, skip RecordScanned, and the same hosts would be
+	// dispatched again on every sweep. The job row is the durable record, so
+	// stamp from it. After the policy check because the window is the
+	// tenant's rescan interval, and before EligibleTargets so the assets
+	// come out of the due list. A failure is logged and the pass goes on:
+	// the worst case is the repeat dispatch this exists to prevent, which
+	// the in-flight gate below still bounds while the jobs are running.
+	since := now.Add(-time.Duration(policy.RescanIntervalHours) * time.Hour)
+	if adopted, err := j.store.AdoptRecentJobs(ctx, tenantID, since); err != nil {
+		j.logger.Printf("ERROR: tenant %s: could not adopt recent automatic scan jobs: %v", tenantID, err)
+	} else if adopted > 0 {
+		j.logger.Printf("tenant %s: %d asset(s) adopted into recent automatic scan jobs whose dispatch call did not report back", tenantID, adopted)
+	}
+
 	targets, refusals, err := j.store.EligibleTargets(ctx, tenantID, policy, now, j.excluded)
 	if err != nil {
 		j.logger.Printf("ERROR: tenant %s: could not select targets: %v", tenantID, err)
@@ -392,7 +415,9 @@ func (j *AutoActiveScanJob) SweepTenant(ctx context.Context, tenantID uuid.UUID,
 	for _, batch := range batches {
 		for _, routed := range j.routeBatch(ctx, tenantID, policy, batch, now) {
 			if routed.skipped != nil {
-				// The observing sensor is offline. NOT stamped and NOT handed
+				// The observing sensor is offline and no other live sensor
+				// covers the host's segment (the router hands it to one when
+				// there is). NOT stamped and NOT handed
 				// to the platform: the target stays eligible and is looked at
 				// again next pass, when the sensor may be back. Substituting
 				// the platform would be a scan from a place that cannot see
@@ -402,14 +427,7 @@ func (j *AutoActiveScanJob) SweepTenant(ctx context.Context, tenantID uuid.UUID,
 				j.logger.Printf("tenant %s: %d address(es) skipped this pass: %s", tenantID, len(routed.addresses), routed.skipped.Message())
 				continue
 			}
-			job, err := j.dispatcher.CreateJobInternal(tenantID.String(), models.CreateDiscoveryJobInput{
-				Targets:            routed.addresses,
-				ExecutionMode:      routed.executionMode,
-				PreferredSensorIDs: routed.preferredSensorIDs,
-				Protocols:          policy.Protocols,
-				Ports:              policy.Ports,
-				Options:            autoscan.JobOptions(),
-			})
+			job, err := j.dispatcher.CreateJobInternal(tenantID.String(), automaticScanJobInput(routed, policy, j.sniCandidates(ctx, tenantID, batch, routed)))
 			if err != nil {
 				// Deliberately NOT stamped: an asset whose scan never left the
 				// cluster must stay due, or a peer outage would look like a
@@ -443,9 +461,55 @@ func (j *AutoActiveScanJob) SweepTenant(ctx context.Context, tenantID uuid.UUID,
 	j.recordState(ctx, tenantID, now, dispatched, scannedAssets, refusals)
 }
 
+// automaticScanJobInput is the job one routed batch is dispatched as: a
+// planned job on the shared scan engine ( WP4) — scan depth "custom" on
+// the policy's ports, no protocol list. The engine identifies TLS and SSH from
+// what answers, so the policy's protocols are not sent; cluster-sensor-service
+// still reads them when it has to fall back to the legacy job for a sensor
+// that cannot run a plan (owner decision D3).
+//
+// Routing is passed through as it was: execution_mode "sensors" with the one
+// observing sensor resolves to run_from "sensor" on that sensor, and "async"
+// to the platform (shareddisc.ResolveJobRequest).
+func automaticScanJobInput(routed routedBatch, policy autoscan.Policy, sni map[string][]string) models.CreateDiscoveryJobInput {
+	return models.CreateDiscoveryJobInput{
+		Targets:            routed.addresses,
+		ExecutionMode:      routed.executionMode,
+		PreferredSensorIDs: routed.preferredSensorIDs,
+		ScanDepth:          string(shareddisc.DepthCustom),
+		TCPPorts:           shareddisc.CustomPortList(policy.Ports),
+		Options:            autoscan.JobOptions(),
+		SNICandidates:      sni,
+	}
+}
+
+// sniCandidates is the names to offer, per address of a routed batch, to a TLS
+// port that refuses the address-only handshake: the union over the assets behind
+// each address. Best effort and bounded (autoscan.MergeSNICandidates): a failed
+// read is logged and the batch goes without names, because the sweep must not
+// stop scanning for want of a nicety.
+func (j *AutoActiveScanJob) sniCandidates(ctx context.Context, tenantID uuid.UUID, batch autoscan.Batch, routed routedBatch) map[string][]string {
+	byAsset, err := j.store.SNICandidates(ctx, tenantID, routed.assetIDs)
+	if err != nil {
+		j.logger.Printf("tenant %s: not offering server names to this job: %v", tenantID, err)
+		return nil
+	}
+	out := map[string][]string{}
+	for _, addr := range routed.addresses {
+		var lists [][]string
+		for _, id := range batch.AssetsByAddress[addr] {
+			lists = append(lists, byAsset[id])
+		}
+		if names := autoscan.MergeSNICandidates(lists...); len(names) > 0 {
+			out[addr] = names
+		}
+	}
+	return out
+}
+
 // routedBatch is one dispatchable job after routing: its addresses, the assets
 // behind them, and where it runs. `skipped` is set instead when the batch's
-// observing sensor is offline.
+// observing sensor is offline and no live sensor covers its segment.
 type routedBatch struct {
 	addresses          []string
 	assetIDs           []uuid.UUID
@@ -466,9 +530,10 @@ func (r routedBatch) describe() string {
 //
 // With the tenant's "Prefer the observing sensor" switch off, or no router
 // wired, everything runs from the platform exactly as before. With it on,
-// each address goes to the tenant sensor that last observed it, else a sensor
-// bound to its segment, else the platform; addresses whose observing sensor is
-// offline come back as skipped. A router that cannot answer at all falls back
+// each address goes to the tenant sensor that last observed it, else a live
+// sensor bound to its segment, else the platform; an address whose observing
+// sensor is offline goes to a live segment sensor when there is one and
+// otherwise comes back as skipped — never as a platform job. A router that cannot answer at all falls back
 // to the platform for this pass with an ERROR, because "scan from the platform"
 // is the behaviour every tenant had until today and refusing to scan anything
 // is the worse failure.

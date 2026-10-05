@@ -1,5 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
+  builtInPortMeaning,
+  formatPortList,
+  MAX_PORT_LIST_ENTRIES,
+  parsePortList,
   settingLabel,
   settingName,
   settingUnit,
@@ -240,5 +246,51 @@ describe('saveResultFrom', () => {
     expect(got.adjusted).toEqual([]);
     expect(got.needs_restart).toEqual([]);
     expect(got.changed).toEqual(['host_observation_dns: false → true']);
+  });
+});
+
+// The console's port-list check against the SAME cases the platform's
+// ParsePortList is held to (shared/agentconfig/testdata/port_lists.json),
+// problem text included — so a person is told the same thing about "abc"
+// before Save as the platform would tell them after it.
+describe('port lists (#2170 WP5)', () => {
+  const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
+  const { cases } = JSON.parse(readFileSync(repoRoot + 'shared/agentconfig/testdata/port_lists.json', 'utf8')) as {
+    cases: { input: string; ports: number[]; canonical: string; problems: string[] }[];
+  };
+
+  it('loads the shared cases', () => {
+    // A table that loads nothing passes everything.
+    expect(cases.length).toBeGreaterThan(10);
+  });
+
+  for (const c of cases) {
+    it(`parses ${JSON.stringify(c.input)} as the platform does`, () => {
+      const got = parsePortList(c.input);
+      expect(got.ports).toEqual(c.ports);
+      expect(got.problems).toEqual(c.problems);
+      if (c.problems.length === 0) expect(formatPortList(got.ports)).toBe(c.canonical);
+    });
+  }
+
+  it('caps distinct ports at the platform ceiling', () => {
+    const list = (n: number) => Array.from({ length: n }, (_, i) => 10000 + i).join(',');
+    expect(parsePortList(list(MAX_PORT_LIST_ENTRIES)).problems).toEqual([]);
+    expect(parsePortList(list(MAX_PORT_LIST_ENTRIES + 1)).problems).toEqual(['65 ports listed; at most 64 are allowed']);
+    expect(parsePortList(list(MAX_PORT_LIST_ENTRIES) + ',' + list(MAX_PORT_LIST_ENTRIES)).problems).toEqual([]);
+  });
+
+  it('formats canonically and names built-in ports from the platform\'s table', () => {
+    expect(formatPortList([10443, 9443, 9443, 0, 70000])).toBe('9443,10443');
+    const s = { built_in_ports: { '443': 'HTTPS' } };
+    expect(builtInPortMeaning(s, 443)).toBe('HTTPS');
+    expect(builtInPortMeaning(s, 9443)).toBeUndefined();
+    expect(builtInPortMeaning({}, 443)).toBeUndefined();
+  });
+
+  it('a port-list edit that returns to the stored list is not a change', () => {
+    const ports = setting({ key: 'extra_tls_ports', value: '9443,10443' });
+    expect(changedKeys([ports], { extra_tls_ports: formatPortList([10443, 9443]) })).toEqual([]);
+    expect(changedKeys([ports], { extra_tls_ports: '9443' })).toEqual(['extra_tls_ports']);
   });
 });

@@ -19,7 +19,7 @@ var sessionPools sync.Map // *sql.DB -> *sql.DB; removed by CloseWithSessionPool
 // Registration does not connect or log the DSN. Owners must close both pools
 // with CloseWithSessionPool (the shared connection and test helpers do so).
 func RegisterSessionPool(db *sql.DB, driverName, dsn string) error {
-	pool, err := sql.Open(driverName, dsn)
+	pool, err := sql.Open(driverName, ApplyServerDefaults(dsn))
 	if err != nil {
 		return fmt.Errorf("open session control pool: %w", err)
 	}

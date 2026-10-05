@@ -15,6 +15,7 @@ export type FeatureName =
   | 'custom_branding'
   | 'cmdb_sync'
   | 'connector_netbox'
+  | 'ai_tenant_provider'
   | 'siem_export'
   | 'billing_portal';
 
@@ -59,6 +60,11 @@ export interface FeaturesMap {
    * discovered. Read-only towards NetBox — nothing is ever written back.
    */
   connector_netbox: boolean;
+  /**
+   * When true, the tenant may connect its own AI model provider from
+   * Settings → AI assistant instead of using the one the deployment provides.
+   */
+  ai_tenant_provider: boolean;
   /** Forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook). */
   siem_export: boolean;
   /**
@@ -109,6 +115,7 @@ export const defaultFeatures: FeaturesMap = {
   custom_branding: false,
   cmdb_sync: false,
   connector_netbox: false,
+  ai_tenant_provider: false,
   siem_export: false,
   billing_portal: false,
 };

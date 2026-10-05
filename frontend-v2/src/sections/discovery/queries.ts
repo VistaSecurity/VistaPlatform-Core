@@ -1,5 +1,7 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import type { inventoryOperations } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { MAX_BULK } from './observation-review';
 
 // Typed live queries shared across the Discovery pages. Query keys are shared
 // deliberately — the Command Center and the sub-pages reuse one cache entry.
@@ -72,6 +74,13 @@ export function useJobs(pageSize = 50) {
 // device interrogations (device-interrogation-service), these are scans
 // (cluster-sensor-service, proxied through inventory-service). The unified
 // Discovery → Discovery Jobs page (morning-notes decision 7b) merges both.
+//
+// The list re-reads every 5 s while any job on it has not ended,
+// so a running scan's row moves (the list carries a scan-plan job's progress
+// while it runs), and stops once everything has settled. TanStack Query
+// pauses the interval while the tab is hidden.
+const SETTLED = new Set(['completed', 'failed', 'cancelled', 'success', 'error']);
+
 export function useDiscoveryJobs(pageSize = 100) {
   return useQuery({
     queryKey: ['discovery', 'scan-jobs', pageSize],
@@ -80,13 +89,14 @@ export function useDiscoveryJobs(pageSize = 100) {
       if (error || !data) throw new Error('Failed to load discovery jobs');
       return data;
     },
+    refetchInterval: (query) => ((query.state.data?.jobs ?? []).some((j) => !SETTLED.has((j.status ?? '').toLowerCase())) ? 5000 : false),
   });
 }
 
-// One discovery job (an Active Scan the operator just started), for the Active
-// Scan page's own job feedback: its executor and dispatch state. Polls
-// while the job is still in flight and stops once it has settled.
-const SETTLED = new Set(['completed', 'failed', 'cancelled', 'success', 'error']);
+// One discovery job (an Active Scan the operator just started, or the job open
+// in the Discovery Jobs detail), with its executor and dispatch state — and,
+// for a scan-plan job, its plan, progress and coverage. Polls every 5 s while
+// the job is still in flight and stops once it has settled.
 
 export function useScanJob(jobId?: string | null) {
   return useQuery({
@@ -121,7 +131,8 @@ export function useJobResults(jobId?: string | null) {
 // A discovery job's findings + materialization split, for the unified Jobs
 // page's discovery-job detail panel. Enabled only when a discovery/automatic
 // row is selected.
-export function useDiscoveryJobResults(jobId?: string | null) {
+// `live` re-reads every 5 s while the job runs.
+export function useDiscoveryJobResults(jobId?: string | null, opts: { live?: boolean } = {}) {
   return useQuery({
     queryKey: ['discovery', 'scan-job-results', jobId],
     enabled: !!jobId,
@@ -132,6 +143,28 @@ export function useDiscoveryJobResults(jobId?: string | null) {
       if (error || !data) throw new Error("Failed to load this scan's results");
       return data;
     },
+    refetchInterval: opts.live ? 5000 : false,
+  });
+}
+
+// One page of a scan-plan job's results grouped by host ( H21): each host
+// with all its ports, paged by HOST so a host is never split across pages and
+// a 65k-port scan is never one 65k-row response. The previous page stays on
+// screen while the next loads (no layout jump), and `live` re-reads the page
+// every 5 s while the job runs so results appear as hosts finish.
+export function useDiscoveryJobHosts(jobId: string | null | undefined, page: number, pageSize: number, opts: { live?: boolean } = {}) {
+  return useQuery({
+    queryKey: ['discovery', 'scan-job-hosts', jobId, page, pageSize],
+    enabled: !!jobId,
+    queryFn: async () => {
+      const { data, error } = await clients.inventory.GET('/discovery/jobs/{id}/results', {
+        params: { path: { id: jobId! }, query: { group: 'host', page, page_size: pageSize } },
+      });
+      if (error || !data) throw new Error("Failed to load this scan's results by host");
+      return { hosts: data.hosts ?? [], total: data.total_hosts ?? 0 };
+    },
+    placeholderData: keepPreviousData,
+    refetchInterval: opts.live ? 5000 : false,
   });
 }
 
@@ -208,18 +241,75 @@ export function usePendingAssets() {
   });
 }
 
-// Active Scan coverage (): monitoring assets that have never been actively
-// scanned (last_scanned_at IS NULL). Drives the Active Scan page — the "what's left to
-// verify" list. Pending/imported assets are handled in Approvals + the import handoff.
-export function useUnscannedAssets() {
+// ---- Discovery → Observations ---------------------------------------
+//
+// Every key starts with 'identity-observations', so one invalidation covers the
+// list, the expanded rows' detail reads and the asset page's provisional panel.
+
+export type ObservationListQuery = NonNullable<inventoryOperations['listIdentityObservations']['parameters']['query']>;
+
+export function useObservationList(query: ObservationListQuery, opts: { enabled?: boolean } = {}) {
   return useQuery({
-    queryKey: ['discovery', 'unscanned-assets'],
+    queryKey: ['identity-observations', 'list', query],
+    enabled: opts.enabled ?? true,
     queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
-        params: { query: { unscanned_only: true, page: 1, page_size: 100 } },
-      });
-      if (error || !data) throw new Error('Failed to load unscanned assets');
-      return data.assets ?? [];
+      const { data, response } = await clients.inventory.GET('/discovery/observations', { params: { query } });
+      if (!response.ok || !data) throw new Error('Unable to load observations');
+      return data;
     },
+    // The previous page stays on screen while the next one loads.
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** One observation with its enrichment jobs and retained evidence (the detail read). */
+export function useObservation(id: string | null | undefined) {
+  return useQuery({
+    queryKey: ['identity-observations', 'detail', id],
+    enabled: !!id,
+    queryFn: async () => {
+      const { data, response } = await clients.inventory.GET('/discovery/observations/{id}', { params: { path: { id: id! } } });
+      if (!response.ok || !data) throw new Error('Unable to load observation');
+      return data;
+    },
+  });
+}
+
+/**
+ * What any observation decision can change: the observations themselves, the
+ * identity coverage strip, inventory (a confirm creates an asset) and the
+ * approval queue (that asset is pending approval). Shared by the single-row
+ * form and the bulk bar so the two cannot drift.
+ */
+export function invalidateObservationDecisions(cache: QueryClient) {
+  return Promise.all([
+    cache.invalidateQueries({ queryKey: ['identity-observations'] }),
+    cache.invalidateQueries({ queryKey: ['identity-summary'] }),
+    cache.invalidateQueries({ queryKey: ['inventory'] }),
+    cache.invalidateQueries({ queryKey: ['discovery', 'pending-assets'] }),
+  ]);
+}
+
+export type BulkObservationInput = inventoryOperations['bulkDecideIdentityObservations']['requestBody']['content']['application/json'];
+
+/**
+ * Confirm or dismiss many observations with one reason. A 200 can carry failed
+ * rows — that is per-row information, not an error, so it resolves; only a
+ * refused REQUEST (400/403/5xx) rejects.
+ */
+export function useBulkObservationDecision() {
+  const cache = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: BulkObservationInput) => {
+      if (body.ids.length === 0 || body.ids.length > MAX_BULK) throw new Error(`Select between 1 and ${MAX_BULK} observations.`);
+      const { data, response } = await clients.inventory.POST('/discovery/observations/bulk', { body });
+      if (!response.ok || !data) {
+        throw new Error(response.status === 403
+          ? 'You do not have permission to decide observations.'
+          : 'The decision could not be saved. The list has been refreshed; check it and try again.');
+      }
+      return data;
+    },
+    onSettled: () => invalidateObservationDecisions(cache),
   });
 }

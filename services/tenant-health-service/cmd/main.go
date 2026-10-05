@@ -46,7 +46,7 @@ func main() {
 		logrus.Fatal("DATABASE_URL environment variable not set")
 	}
 
-	db, err := sql.Open("postgres", dbURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(dbURL))
 	if err != nil {
 		logrus.Fatalf("Failed to connect to database: %v", err)
 	}

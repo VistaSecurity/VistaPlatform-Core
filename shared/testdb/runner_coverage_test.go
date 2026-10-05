@@ -245,3 +245,11 @@ func TestIntegrationRunnerAppliesSchemaAndSeedLikeNightly(t *testing.T) {
 		}
 	}
 }
+
+
+func assertLiveMatch(t *testing.T, text, pattern, message string) {
+	t.Helper()
+	if !regexp.MustCompile(pattern).MatchString(text) {
+		t.Fatal(message)
+	}
+}

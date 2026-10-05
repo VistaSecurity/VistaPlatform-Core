@@ -136,7 +136,9 @@ func (a *Applier) Apply(revision string, values agentconfig.Values) {
 		v := values[k]
 		setter, ok := a.setters[k]
 		if !ok {
-			failures[k] = fmt.Sprintf("this agent (%s) does not support %s", currentAgentVersion(), k)
+			// The shared wording, because the platform recognises an
+			// unsupported setting by it (agentconfig.Reconcile).
+			failures[k] = agentconfig.UnsupportedReason(currentAgentVersion(), k)
 			continue
 		}
 		err := setter(v)

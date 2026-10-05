@@ -63,10 +63,10 @@ export function AutoScanPage({ meta }: { meta: SettingsNavItem }) {
         <>
           {/* Keyed on the saved values so a successful save re-seeds the form
               from what the SERVER stored, not from what was typed — the server
-              normalizes (dedupes and sorts ports, canonicalizes protocols) and
+              normalizes (dedupes and sorts ports) and
               the box should show what is actually in force. */}
           <AutoScanForm
-            key={`${data.policy.rescan_interval_hours}:${data.policy.ports.join(',')}:${data.policy.protocols.join(',')}:${String(data.policy.enabled)}:${String(data.policy.scan_on_first_observation)}:${String(data.policy.prefer_observing_sensor ?? true)}`}
+            key={`${data.policy.rescan_interval_hours}:${data.policy.ports.join(',')}:${String(data.policy.enabled)}:${String(data.policy.scan_on_first_observation)}:${String(data.policy.prefer_observing_sensor ?? true)}`}
             policy={data.policy}
             limits={data.limits}
             summary={data.summary}
@@ -151,13 +151,6 @@ function AutoScanForm({ policy, limits, summary }: { policy: AutoScanPolicy; lim
   const dirty = isDirty(draft, policy);
   const set = <K extends keyof AutoScanDraft>(key: K, value: AutoScanDraft[K]) => setDraft((d) => ({ ...d, [key]: value }));
 
-  const toggleProtocol = (proto: string) => {
-    setDraft((d) => ({
-      ...d,
-      protocols: d.protocols.includes(proto) ? d.protocols.filter((p) => p !== proto) : [...d.protocols, proto],
-    }));
-  };
-
   const save = useMutation({
     mutationFn: async () => {
       const { data, error, response } = await clients.inventory.PUT('/discovery/auto-scan', {
@@ -211,31 +204,20 @@ function AutoScanForm({ policy, limits, summary }: { policy: AutoScanPolicy; lim
         <p style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 8 }}>
           {draft.preferObservingSensor
             ? 'A host one of your sensors has observed is scanned from that sensor. A host only the platform has seen is scanned from the platform sensor, which reaches only what the platform can route to. If the observing sensor is offline when a pass runs, the host waits for the next pass rather than being scanned from somewhere that cannot see it.'
-            : 'Automatic scans run from the platform sensor inside the cluster, so they only reach hosts the platform itself can route to. A host reachable only from inside a network where you run your own sensor is not scanned automatically — scan those from Discovery → Active Scan with "Run from" set to that sensor.'}
+            : 'Automatic scans run from the platform sensor inside the cluster, so they only reach hosts the platform itself can route to. A host reachable only from inside a network where you run your own sensor is not scanned automatically — scan those from Inventory → All assets: tick them, choose Scan, and set "Run from" to that sensor.'}
         </p>
       </SSection>
 
       <SSection
         title="What each scan probes"
-        desc="The protocols and ports every automatic scan tries. The defaults are the well-known TLS and SSH ports. They are deliberately narrower than the Discover wizard's list: file-sharing and industrial-control ports are fine for a scan you chose, once, but not for one that repeats on every host every interval — add them here if you want them."
+        desc="The ports every automatic scan checks. The defaults are the well-known TLS and SSH ports. They are deliberately narrower than the Discover wizard's list: file-sharing and industrial-control ports are fine for a scan you chose, once, but not for one that repeats on every host every interval — add them here if you want them."
       >
         <SCard>
-          <SRow label="Protocols" hint="Only TLS and SSH can be scanned automatically. Industrial (OT) probes are never run unattended.">
-            <span style={{ display: 'inline-flex', gap: 14 }}>
-              {limits.supported_protocols.map((proto) => (
-                <label key={proto} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--app-t1)' }}>
-                  <input
-                    type="checkbox"
-                    checked={draft.protocols.includes(proto)}
-                    onChange={() => toggleProtocol(proto)}
-                    aria-label={proto}
-                  />
-                  {proto}
-                </label>
-              ))}
-            </span>
-          </SRow>
-          <SRow label="Ports" hint={`Comma-separated. At most ${limits.max_ports}.`} last>
+          <SRow
+            label="Ports"
+            hint={`Each automatic scan checks these ports and identifies the service from what answers (TLS and SSH). Industrial (OT) probes are never run unattended. Comma-separated, at most ${limits.max_ports}.`}
+            last
+          >
             <SInput value={draft.portsText} onChange={(v) => set('portsText', v)} width={420} mono />
           </SRow>
         </SCard>

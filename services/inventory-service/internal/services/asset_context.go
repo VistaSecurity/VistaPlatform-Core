@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
@@ -37,6 +38,16 @@ type assetContextField struct {
 	set    bool
 }
 
+// metadataProvenanceKeys are the metadata entries that name the WRITE rather
+// than describe the asset: the batch an observation arrived in and the sensor
+// that sent it. Every observation carries a fresh batch id, and a host two
+// sensors can hear alternates its sensor id, so a timeline that counted them
+// as changes wrote a row per observation of a host nothing had happened to.
+// They are still stored (the merge below refreshes them, and the asset's
+// metadata is shown and edited as a whole); they just never earn a row on
+// their own.
+var metadataProvenanceKeys = []string{"batch_id", "sensor_id"}
+
 // applyAssetContext writes the declared context of an asset — the fields a
 // person or a system of record supplies — and records what changed.
 //
@@ -49,6 +60,19 @@ type assetContextField struct {
 // rows or not at all (see AssetService.resolveObservationWith). Nil opens its
 // own tenant-scoped transaction, which is what the paths that are not resolving
 // an observation do.
+//
+// An `updated` row is written only for what the write CHANGED, judged against
+// the row as stored, not against the input: a sensor re-stating the ownership,
+// tags and discovery source an asset already has, every coalescing window,
+// changes nothing, and a timeline row per window buried the few that said
+// something. A `created` row records everything the asset was created with.
+//
+// Listing is not this function's to record. The first time an import or a
+// declaration lists an asset is written by the identification engine
+// (`listed_by`, shared/identity applyToAsset) on the same transaction, whether
+// or not the listing changed any context, and the import-only scan-consent
+// state is cleared off the resolution (createAssetResolved), not off a row
+// here.
 func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUID, in models.AssetInput, source identity.Source, outcome identity.Outcome) error {
 	fields := []assetContextField{
 		{column: "environment", value: nullableEnum(in.Environment), set: in.Environment != nil},
@@ -64,10 +88,20 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 		{column: "region", value: in.Region, set: in.Region != nil},
 	}
 
+	// Every SET expression reads the target row as `a`, because the statement
+	// also joins the pre-update copy `p` and an unqualified column would be
+	// ambiguous between them. `changed` collects, per `changes` key, the
+	// RETURNING predicate that says whether that key's stored value moved.
 	setClauses := []string{}
+	changed := []string{}
+	keys := []string{}
 	args := []interface{}{}
 	changes := map[string]any{}
 	idx := 1
+	track := func(key, predicate string) {
+		keys = append(keys, key)
+		changed = append(changed, predicate)
+	}
 	for _, f := range fields {
 		if !f.set {
 			continue
@@ -79,6 +113,7 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 		setClauses = append(setClauses, clause)
 		args = append(args, f.value)
 		changes[f.column] = f.value
+		track(f.column, fmt.Sprintf("p.%[1]s IS DISTINCT FROM a.%[1]s", f.column))
 		idx++
 	}
 
@@ -89,9 +124,10 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 		if err != nil {
 			return fmt.Errorf("marshal tags: %w", err)
 		}
-		setClauses = append(setClauses, fmt.Sprintf("tags = COALESCE(tags, '{}'::jsonb) || $%d::jsonb", idx))
+		setClauses = append(setClauses, fmt.Sprintf("tags = COALESCE(a.tags, '{}'::jsonb) || $%d::jsonb", idx))
 		args = append(args, string(b))
 		changes["tags"] = in.Tags
+		track("tags", "COALESCE(p.tags, '{}'::jsonb) IS DISTINCT FROM a.tags")
 		idx++
 	}
 	if len(in.Attributes) > 0 {
@@ -99,9 +135,10 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 		if err != nil {
 			return fmt.Errorf("marshal attributes: %w", err)
 		}
-		setClauses = append(setClauses, fmt.Sprintf("attributes = COALESCE(attributes, '{}'::jsonb) || $%d::jsonb", idx))
+		setClauses = append(setClauses, fmt.Sprintf("attributes = COALESCE(a.attributes, '{}'::jsonb) || $%d::jsonb", idx))
 		args = append(args, string(b))
 		changes["attributes"] = in.Attributes
+		track("attributes", "COALESCE(p.attributes, '{}'::jsonb) IS DISTINCT FROM a.attributes")
 		idx++
 	}
 	if len(in.Metadata) > 0 {
@@ -109,7 +146,7 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 		if err != nil {
 			return fmt.Errorf("marshal metadata: %w", err)
 		}
-		setClauses = append(setClauses, fmt.Sprintf("metadata = COALESCE(metadata, '{}'::jsonb) || $%d::jsonb", idx))
+		setClauses = append(setClauses, fmt.Sprintf("metadata = COALESCE(a.metadata, '{}'::jsonb) || $%d::jsonb", idx))
 		args = append(args, string(b))
 		// Metadata is the only merged column the `changes` map used to omit, so
 		// a change to it produced a history row saying nothing changed. The
@@ -117,34 +154,77 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 		// here, which makes "which collector put this in front of me" one of
 		// the questions the timeline could not answer about itself.
 		changes["metadata"] = in.Metadata
-		idx++
+		// Compared WITHOUT the per-write provenance (metadataProvenanceKeys):
+		// a new batch id is not news about the asset.
+		track("metadata", fmt.Sprintf(
+			"(COALESCE(p.metadata, '{}'::jsonb) - $%[1]d::text[]) IS DISTINCT FROM (a.metadata - $%[1]d::text[])", idx+1))
+		args = append(args, pq.Array(metadataProvenanceKeys))
+		idx += 2
 	}
 	if in.AssetOwnership != nil {
 		setClauses = append(setClauses, fmt.Sprintf("asset_ownership = $%d", idx))
 		args = append(args, *in.AssetOwnership)
 		changes["asset_ownership"] = *in.AssetOwnership
+		track("asset_ownership", "p.asset_ownership IS DISTINCT FROM a.asset_ownership")
 		idx++
 	}
 	if len(setClauses) == 0 {
 		return nil
 	}
 
-	query := fmt.Sprintf(`UPDATE assets SET %s, updated_at = NOW() WHERE tenant_id = $%d AND id = $%d`,
-		strings.Join(setClauses, ", "), idx, idx+1)
+	// `prior` is the row as stored, locked, so the RETURNING list compares
+	// what this write found with what it left — the same shape
+	// identity/postgres LinkObservation uses for its own history. The lock
+	// is the one the UPDATE takes anyway, taken a statement earlier.
+	query := fmt.Sprintf(`
+		WITH prior AS (
+			SELECT * FROM assets WHERE tenant_id = $%[2]d AND id = $%[3]d FOR UPDATE
+		)
+		UPDATE assets a SET %[1]s, updated_at = NOW()
+		  FROM prior p
+		 WHERE a.tenant_id = p.tenant_id AND a.id = p.id
+		RETURNING %[4]s`,
+		strings.Join(setClauses, ", "), idx, idx+1, strings.Join(changed, ", "))
 	args = append(args, tenantID, assetID)
 
+	moved := make([]bool, len(keys))
+	found := true
 	if err := s.exec(tx, tenantID, func(tx *sqlx.Tx) error {
-		_, err := tx.Exec(query, args...)
+		dest := make([]any, len(moved))
+		for i := range moved {
+			dest[i] = &moved[i]
+		}
+		err := tx.QueryRow(query, args...).Scan(dest...)
+		if errors.Is(err, sql.ErrNoRows) {
+			// No such asset row: nothing was written, so there is nothing
+			// to record either.
+			found = false
+			return nil
+		}
 		return err
 	}); err != nil {
 		return fmt.Errorf("failed to apply asset context: %w", err)
 	}
-	if len(changes) == 0 {
+	if !found {
 		return nil
 	}
 	action := identity.ActionUpdated
 	if outcome == identity.OutcomeCreated {
+		// The asset did not exist a moment ago, so everything it was created
+		// with is the record, whether or not the engine's insert happened to
+		// default a column to the same value.
 		action = identity.ActionCreated
+	} else {
+		// History is a log of changes, not of attempts (setAssetStatus).
+		// Only the keys whose stored value moved are named.
+		for i, k := range keys {
+			if !moved[i] {
+				delete(changes, k)
+			}
+		}
+	}
+	if len(changes) == 0 {
+		return nil
 	}
 	s.recordAssetHistory(tx, tenantID, assetID, action, source, changes)
 	return nil

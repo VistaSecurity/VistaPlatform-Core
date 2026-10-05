@@ -336,7 +336,7 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 		// candidate with no evidence can only be rubber-stamped.
 		idRows, err := tx.QueryContext(ctx, `
 			SELECT asset_id, kind, value, coalesce(scope, ''), confidence, source_kind,
-			       coalesce(source_ref, ''), last_seen_at
+			       coalesce(source_ref, ''), last_seen_at, coalesce(address_assignment, ''), coalesce(key_algorithm, '')
 			FROM public.asset_identifiers
 			WHERE tenant_id = $1 AND asset_id = ANY($2::uuid[])
 			ORDER BY asset_id, kind, value`,
@@ -352,8 +352,10 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 				confidence            float64
 				sourceKind, sourceRef string
 				seenAt                time.Time
+				assignment            string
+				keyAlgorithm          string
 			)
-			if err := idRows.Scan(&assetID, &kind, &value, &scope, &confidence, &sourceKind, &sourceRef, &seenAt); err != nil {
+			if err := idRows.Scan(&assetID, &kind, &value, &scope, &confidence, &sourceKind, &sourceRef, &seenAt, &assignment, &keyAlgorithm); err != nil {
 				return fmt.Errorf("identity/postgres: scan candidate identifier: %w", err)
 			}
 			s, ok := byID[assetID.String()]
@@ -361,12 +363,14 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 				continue
 			}
 			s.Identifiers = append(s.Identifiers, identity.Identifier{
-				Kind:       identity.Kind(kind),
-				Value:      value,
-				Scope:      scope,
-				Confidence: confidence,
-				Source:     identity.Source{Kind: identity.SourceKind(sourceKind), Ref: sourceRef},
-				SeenAt:     seenAt,
+				Kind:         identity.Kind(kind),
+				Value:        value,
+				Scope:        scope,
+				Confidence:   confidence,
+				Assignment:   identity.AddressAssignment(assignment),
+				Source:       identity.Source{Kind: identity.SourceKind(sourceKind), Ref: sourceRef},
+				SeenAt:       seenAt,
+				KeyAlgorithm: keyAlgorithm,
 			})
 		}
 		return idRows.Err()
@@ -443,13 +447,14 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 					class_confidence, display_name, hostname, primary_address,
 					asset_status, asset_ownership, network_segment_id, discovery_method,
 					confidence_score, first_discovered_at, last_seen_at, metadata,
-					identity_status
+					identity_status, import_only_sources
 				) VALUES (
 					$1, $2, $3, $4, NULLIF($5, ''),
 					$6, NULLIF($7, ''), NULLIF($8, ''), $9::text::inet,
 					$10, $11, $12::uuid, NULLIF($13, ''),
 					$14, $15, $16, $17::jsonb,
-					COALESCE(NULLIF($18, ''), 'legacy')
+					COALESCE(NULLIF($18, ''), 'legacy'),
+					CASE WHEN $19::text = '' THEN NULL ELSE ARRAY[$19::text] END
 				)
 				RETURNING id`,
 				tenantID, classKey, classPath, classSourceKindOr(a.ClassSourceKind), classSourceRefOr(a),
@@ -457,6 +462,9 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 				status, ownership, nullUUID(a.NetworkSegment), a.DiscoveryMethod,
 				nullPercent(a.Confidence), timeOrNow(a.FirstSeenAt), timeOrNow(a.LastSeenAt),
 				nameMetadata(a.Source), strings.TrimSpace(a.IdentityStatus),
+				// A connection creating the asset makes it import-only
+				// (import_only.go); every other source leaves it NULL.
+				importOnlySourceRef(a.Source),
 			).Scan(&id)
 			if err != nil {
 				return fmt.Errorf("identity/postgres: insert asset: %w", err)
@@ -489,10 +497,11 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 				return err
 			}
 
-			if err := r.attach(ctx, tx, ref, a.Identifiers); err != nil {
+			if _, err := r.attach(ctx, tx, ref, a.Identifiers); err != nil {
 				return err
 			}
-			return r.upsertEndpoints(ctx, tx, ref, a.Endpoints)
+			_, err = r.upsertEndpoints(ctx, tx, ref, a.Endpoints)
+			return err
 		})
 	})
 	if err != nil {
@@ -502,11 +511,16 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 }
 
 // AttachIdentifiers records identifiers against an existing asset, idempotently.
-func (r *Repository) AttachIdentifiers(ctx context.Context, asset identity.AssetRef, ids []identity.Identifier) error {
+//
+// It returns how many identifiers were newly inserted, as opposed to already
+// held and merely refreshed (see [identity.Repository.AttachIdentifiers]).
+func (r *Repository) AttachIdentifiers(ctx context.Context, asset identity.AssetRef, ids []identity.Identifier) (int, error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
-	return r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+	var added int
+	err := r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+		added = 0
 		if err := lockIdentifiers(ctx, tx, asset.TenantID, ids); err != nil {
 			return err
 		}
@@ -518,9 +532,15 @@ func (r *Repository) AttachIdentifiers(ctx context.Context, asset identity.Asset
 			return nil
 		}
 		return r.savepoint(ctx, tx, "identity_attach", func() error {
-			return r.attach(ctx, tx, asset, ids)
+			n, err := r.attach(ctx, tx, asset, ids)
+			added = n
+			return err
 		})
 	})
+	if err != nil {
+		return 0, err
+	}
+	return added, nil
 }
 
 // attach is the upsert shared by CreateAsset and AttachIdentifiers.
@@ -532,18 +552,40 @@ func (r *Repository) AttachIdentifiers(ctx context.Context, asset identity.Asset
 // without ever provoking a constraint violation that would poison the
 // transaction.
 //
-// Provenance on a re-sighting ( Phase 2): a value held as DERIVED
-// (`source_kind = 'inferred'`) that is now observed natively is upgraded to the
-// native source and ref; a value held natively that arrives again as derived
-// keeps its native source AND ref — a `measured` row whose ref said
-// "derived:eui64:…" would tell the asset page it was worked out when it was
-// seen. Every SET expression reads the row's OLD values, so the two CASEs see
-// the same pre-update source_kind.
-func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.AssetRef, ids []identity.Identifier) error {
+// Provenance on a re-sighting is [identity.UpsertIdentifier]'s rule, which the
+// in-memory store runs as Go and the identitytest contract holds both to:
+//
+//   - source_kind moves only UP declared > measured = imported > inferred
+//     ([identity.SourceRank]). A value held as DERIVED and now observed
+// natively is upgraded ( Phase 2), and a value a collector measured
+// and an operator now declares is upgraded too: before, only
+//     `inferred` could move, so the declaration left the row `measured` while
+//     the ref below was overwritten with the declaration's — a row that said
+//     one thing in each column.
+//   - source_ref travels WITH source_kind: replaced on an upgrade, refreshed by
+//     a non-empty ref of the same kind, and otherwise kept. A weaker sighting
+//     never rewrites who vouched for the value — a `measured` row whose ref
+//     said "derived:eui64:…" would tell the asset page it was worked out when
+//     it was seen.
+//   - address_assignment is replaced only by a non-NULL value from a source at
+//     least as strong as the stored one, so a pinned address is never
+//     unpinned by a sensor sighting (which says nothing) or by an agent's
+//     "dhcp" against an operator's declaration.
+//
+// Every SET expression reads the row's OLD values, so the CASEs all see the
+// same pre-update source_kind.
+//
+// It returns how many rows were INSERTED. `xmax = 0` on the returned row is
+// how Postgres says "this tuple was never updated or locked by another
+// transaction", which for an `INSERT ... ON CONFLICT DO UPDATE` is exactly
+// "the insert path ran"; a conflict that took the UPDATE branch carries the
+// updating transaction's id there.
+func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.AssetRef, ids []identity.Identifier) (int, error) {
 	assetID, err := parseAsset(asset.ID)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	inserted := 0
 	for _, id := range ids {
 		if id.Kind == "" || strings.TrimSpace(id.Value) == "" {
 			// The absence of an identifier is not an identifier whose value is
@@ -551,49 +593,79 @@ func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.Asse
 			// backstop for a caller that did not.
 			continue
 		}
-		res, err := tx.ExecContext(ctx, `
+		if !id.Assignment.Valid() {
+			return 0, fmt.Errorf("identity/postgres: attach %s=%q: address assignment %q is not static, dynamic or empty", id.Kind, id.Value, id.Assignment)
+		}
+		var wasInserted bool
+		err := tx.QueryRowContext(ctx, `
 			INSERT INTO public.asset_identifiers (
 				tenant_id, asset_id, kind, value, scope, source_kind, source_ref,
-				confidence, first_seen_at, last_seen_at
-			) VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, $9, $9)
+				confidence, first_seen_at, last_seen_at, address_assignment, key_algorithm
+			) VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, $9, $9, NULLIF($10, ''), NULLIF($11, ''))
 			ON CONFLICT (tenant_id, kind, value, coalesce(scope, '')) DO UPDATE
 			SET last_seen_at = GREATEST(public.asset_identifiers.last_seen_at, EXCLUDED.last_seen_at),
 			    confidence   = GREATEST(public.asset_identifiers.confidence, EXCLUDED.confidence),
 			    source_kind  = CASE
-			        WHEN public.asset_identifiers.source_kind = 'inferred' AND EXCLUDED.source_kind <> 'inferred'
+			        WHEN `+sourceRankSQL("EXCLUDED.source_kind")+` > `+sourceRankSQL("public.asset_identifiers.source_kind")+`
 			        THEN EXCLUDED.source_kind
 			        ELSE public.asset_identifiers.source_kind END,
 			    source_ref   = CASE
-			        WHEN EXCLUDED.source_kind = 'inferred' AND public.asset_identifiers.source_kind <> 'inferred'
-			        THEN public.asset_identifiers.source_ref
-			        ELSE coalesce(EXCLUDED.source_ref, public.asset_identifiers.source_ref) END,
+			        WHEN `+sourceRankSQL("EXCLUDED.source_kind")+` > `+sourceRankSQL("public.asset_identifiers.source_kind")+`
+			        THEN EXCLUDED.source_ref
+			        WHEN EXCLUDED.source_kind = public.asset_identifiers.source_kind
+			        THEN coalesce(EXCLUDED.source_ref, public.asset_identifiers.source_ref)
+			        ELSE public.asset_identifiers.source_ref END,
+			    address_assignment = CASE
+			        WHEN EXCLUDED.address_assignment IS NOT NULL
+			         AND `+sourceRankSQL("EXCLUDED.source_kind")+` >= `+sourceRankSQL("public.asset_identifiers.source_kind")+`
+			        THEN EXCLUDED.address_assignment
+			        ELSE public.asset_identifiers.address_assignment END,
+			    -- An SSH host key's algorithm ( Decision 4): a sighting
+			    -- that says it fills in a row stored before it was recorded;
+			    -- one that does not leaves it as it was.
+			    key_algorithm = coalesce(EXCLUDED.key_algorithm, public.asset_identifiers.key_algorithm),
 			    updated_at   = now()
-			WHERE public.asset_identifiers.asset_id = EXCLUDED.asset_id`,
+			WHERE public.asset_identifiers.asset_id = EXCLUDED.asset_id
+			RETURNING (xmax = 0)`,
 			asset.TenantID, assetID, string(id.Kind), id.Value, id.Scope,
 			sourceKindOr(id.Source.Kind), id.Source.Ref, clampConfidence(id.Confidence),
-			timeOrNow(id.SeenAt))
-		if err != nil {
-			return fmt.Errorf("identity/postgres: attach %s=%q: %w", id.Kind, id.Value, err)
+			timeOrNow(id.SeenAt), string(id.StoredAssignment()), id.KeyAlgorithm).Scan(&wasInserted)
+		if errors.Is(err, sql.ErrNoRows) {
+			// No row back is the WHERE clause refusing another asset's row.
+			return 0, fmt.Errorf("%w: %s=%q", identity.ErrIdentifierConflict, id.Kind, id.Value)
 		}
-		n, err := res.RowsAffected()
 		if err != nil {
-			return fmt.Errorf("identity/postgres: attach %s: rows affected: %w", id.Kind, err)
+			return 0, fmt.Errorf("identity/postgres: attach %s=%q: %w", id.Kind, id.Value, err)
 		}
-		if n == 0 {
-			return fmt.Errorf("%w: %s=%q", identity.ErrIdentifierConflict, id.Kind, id.Value)
+		if wasInserted {
+			inserted++
 		}
 	}
-	return nil
+	for _, id := range ids {
+		if vouches(sourceKindOr(id.Source.Kind), id.Source.Ref) {
+			if err := ClearImportOnlyIfVouched(ctx, tx, asset.TenantID, assetID); err != nil {
+				return 0, err
+			}
+			break
+		}
+	}
+	return inserted, nil
 }
 
 // UpsertEndpoints writes endpoints under the asset, keyed by the endpoint
 // identity of DATA_MODEL §2. Endpoints are dependent identity: they are never
 // matched on their own, only upserted under an asset the identifiers resolved.
-func (r *Repository) UpsertEndpoints(ctx context.Context, asset identity.AssetRef, eps []identity.EndpointObservation) error {
+//
+// It returns how many endpoints were newly inserted or had their protocol or
+// service name change; a sighting that only moves last-seen is not counted
+// (see [identity.Repository.UpsertEndpoints]).
+func (r *Repository) UpsertEndpoints(ctx context.Context, asset identity.AssetRef, eps []identity.EndpointObservation) (int, error) {
 	if len(eps) == 0 {
-		return nil
+		return 0, nil
 	}
-	return r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+	var changed int
+	err := r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+		changed = 0
 		writable, err := lockWritableAsset(ctx, tx, asset)
 		if err != nil {
 			return err
@@ -602,19 +674,26 @@ func (r *Repository) UpsertEndpoints(ctx context.Context, asset identity.AssetRe
 			return nil
 		}
 		return r.savepoint(ctx, tx, "identity_endpoints", func() error {
-			return r.upsertEndpoints(ctx, tx, asset, eps)
+			n, err := r.upsertEndpoints(ctx, tx, asset, eps)
+			changed = n
+			return err
 		})
 	})
+	if err != nil {
+		return 0, err
+	}
+	return changed, nil
 }
 
-func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset identity.AssetRef, eps []identity.EndpointObservation) error {
+func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset identity.AssetRef, eps []identity.EndpointObservation) (int, error) {
 	if len(eps) == 0 {
-		return nil
+		return 0, nil
 	}
 	assetID, err := parseAsset(asset.ID)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	changed := 0
 
 	// Serializes concurrent endpoint upserts for THIS asset. The
 	// match-by-address path below is a SELECT then an INSERT-or-UPDATE, which
@@ -634,7 +713,7 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
 		endpointUpsertLockKey(asset.TenantID, asset.ID),
 	); err != nil {
-		return fmt.Errorf("identity/postgres: lock endpoints for asset %s: %w", asset.ID, err)
+		return 0, fmt.Errorf("identity/postgres: lock endpoints for asset %s: %w", asset.ID, err)
 	}
 
 	for _, ep := range eps {
@@ -670,11 +749,14 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 			// identity FIRST: an existing row with the same address, port and
 			// transport but a different (or empty) fqdn is the SAME endpoint
 			// wearing a different name, not a second listener.
-			matched, err := r.mergeEndpointByAddress(ctx, tx, asset, assetID, addr, port, transport, fqdn, ep)
+			matched, didChange, err := r.mergeEndpointByAddress(ctx, tx, asset, assetID, addr, port, transport, fqdn, ep)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			if matched {
+				if didChange {
+					changed++
+				}
 				continue
 			}
 		}
@@ -687,7 +769,24 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 		// observation that did know has already recorded. A TLS probe of a
 		// port a host agent has already named would otherwise blank the
 		// process name on every scan.
-		_, err := tx.ExecContext(ctx, `
+		//
+		// What it reports back is whether this endpoint is worth a timeline
+		// row: a new one, or one whose protocol or service name this sighting
+		// changed. The `prev` CTE reads the row under the statement's own
+		// snapshot, i.e. as it was BEFORE the update, so the comparison needs
+		// no second round trip. (attach() uses `xmax = 0` instead, which a
+		// partitioned table such as this one will not return.)
+		var wasInserted, enrichmentChanged bool
+		err := tx.QueryRowContext(ctx, `
+			WITH prev AS (
+				SELECT protocol::text AS protocol, service_name
+				  FROM public.asset_endpoints
+				 WHERE tenant_id = $1 AND asset_id = $2
+				   AND address IS NOT DISTINCT FROM $3::text::inet
+				   AND coalesce(fqdn, '') = $4
+				   AND port IS NOT DISTINCT FROM $5::int
+				   AND transport = $6
+			)
 			INSERT INTO public.asset_endpoints (
 				tenant_id, asset_id, address, fqdn, port, transport, protocol,
 				service_name, service_confidence, service_identification_method, bound_local,
@@ -714,18 +813,34 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 				bound_local  = coalesce(EXCLUDED.bound_local, public.asset_endpoints.bound_local),
 				source_ref   = coalesce(EXCLUDED.source_ref, public.asset_endpoints.source_ref),
 				status       = 'active',
-				updated_at   = now()`,
+				updated_at   = now()
+			RETURNING
+			    NOT EXISTS (SELECT 1 FROM prev),
+			    EXISTS (SELECT 1 FROM prev p
+			             WHERE p.protocol IS DISTINCT FROM public.asset_endpoints.protocol::text
+			                OR p.service_name IS DISTINCT FROM public.asset_endpoints.service_name)`,
 			asset.TenantID, assetID, addr, fqdn, port, transport,
 			strings.TrimSpace(ep.Protocol),
 			strings.TrimSpace(ep.ServiceName), strings.TrimSpace(ep.ServiceConfidence),
 			strings.TrimSpace(ep.ServiceIdentificationMethod), ep.BoundLocal,
 			sourceKindOr(ep.Source.Kind), ep.Source.Ref,
-			timeOrNow(ep.SeenAt))
+			timeOrNow(ep.SeenAt)).Scan(&wasInserted, &enrichmentChanged)
 		if err != nil {
-			return fmt.Errorf("identity/postgres: upsert endpoint %s: %w", ep.Key(), err)
+			return 0, fmt.Errorf("identity/postgres: upsert endpoint %s: %w", ep.Key(), err)
+		}
+		if wasInserted || enrichmentChanged {
+			changed++
 		}
 	}
-	return nil
+	for _, ep := range eps {
+		if vouches(sourceKindOr(ep.Source.Kind), ep.Source.Ref) {
+			if err := ClearImportOnlyIfVouched(ctx, tx, asset.TenantID, assetID); err != nil {
+				return 0, err
+			}
+			break
+		}
+	}
+	return changed, nil
 }
 
 // mergeEndpointByAddress looks for an existing asset_endpoints row identified
@@ -748,37 +863,40 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 // fields), so there is nothing to merge yet. A future field added there
 // should follow the same "empty never wins" rule as fqdn.
 //
-// Reports whether an existing row was matched and updated. false means the
+// Reports whether an existing row was matched and updated, and whether that
+// update changed its protocol or service name (the endpoint changes worth a
+// timeline row; a refreshed last-seen is not one). false means the
 // caller should fall through to the ordinary `INSERT ... ON CONFLICT`, which
 // also covers the address-less (fqdn-only) endpoint case this function never
 // sees (it is only called when addr != nil).
 func (r *Repository) mergeEndpointByAddress(
 	ctx context.Context, tx *sql.Tx, asset identity.AssetRef, assetID uuid.UUID,
 	addr, port any, transport, fqdn string, ep identity.EndpointObservation,
-) (bool, error) {
+) (matched, changed bool, err error) {
 	var id uuid.UUID
-	var existingFQDN sql.NullString
-	err := tx.QueryRowContext(ctx, `
-		SELECT id, fqdn
+	var existingFQDN, oldProtocol, oldService sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT id, fqdn, protocol::text, service_name
 		  FROM public.asset_endpoints
 		 WHERE tenant_id = $1 AND asset_id = $2
 		   AND address = $3::inet
 		   AND port IS NOT DISTINCT FROM $4::int
 		   AND transport = $5`,
 		asset.TenantID, assetID, addr, port, transport,
-	).Scan(&id, &existingFQDN)
+	).Scan(&id, &existingFQDN, &oldProtocol, &oldService)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return false, nil
+		return false, false, nil
 	case err != nil:
-		return false, fmt.Errorf("identity/postgres: match endpoint %s by address: %w", ep.Key(), err)
+		return false, false, fmt.Errorf("identity/postgres: match endpoint %s by address: %w", ep.Key(), err)
 	}
 
 	newFQDN := existingFQDN.String
 	if newFQDN == "" && fqdn != "" {
 		newFQDN = fqdn
 	}
-	_, err = tx.ExecContext(ctx, `
+	var newProtocol, newService sql.NullString
+	err = tx.QueryRowContext(ctx, `
 		UPDATE public.asset_endpoints SET
 			fqdn         = NULLIF($1, ''),
 			last_seen_at = GREATEST(last_seen_at, $2),
@@ -796,17 +914,18 @@ func (r *Repository) mergeEndpointByAddress(
 			source_ref   = coalesce(NULLIF($8, ''), source_ref),
 			status       = 'active',
 			updated_at   = now()
-		 WHERE tenant_id = $9 AND id = $10`,
+		 WHERE tenant_id = $9 AND id = $10
+		RETURNING protocol::text, service_name`,
 		newFQDN, timeOrNow(ep.SeenAt), strings.TrimSpace(ep.Protocol),
 		strings.TrimSpace(ep.ServiceName), strings.TrimSpace(ep.ServiceConfidence),
 		strings.TrimSpace(ep.ServiceIdentificationMethod), ep.BoundLocal,
 		ep.Source.Ref,
 		asset.TenantID, id,
-	)
+	).Scan(&newProtocol, &newService)
 	if err != nil {
-		return false, fmt.Errorf("identity/postgres: update matched endpoint %s: %w", ep.Key(), err)
+		return false, false, fmt.Errorf("identity/postgres: update matched endpoint %s: %w", ep.Key(), err)
 	}
-	return true, nil
+	return true, oldProtocol != newProtocol || oldService != newService, nil
 }
 
 // endpointUpsertLockKey namespaces the advisory lock so it cannot collide with
@@ -960,6 +1079,33 @@ func (r *Repository) RecordHistory(ctx context.Context, e identity.HistoryEntry)
 		}
 		return nil
 	})
+}
+
+// HistoryHasChange reports whether the asset's timeline already holds a row of
+// this action whose changes contain subset (jsonb `@>`). See
+// [identity.Repository.HistoryHasChange].
+func (r *Repository) HistoryHasChange(ctx context.Context, asset identity.AssetRef, action identity.HistoryAction, subset map[string]any) (bool, error) {
+	assetID, err := parseAsset(asset.ID)
+	if err != nil {
+		return false, err
+	}
+	payload, err := json.Marshal(subset)
+	if err != nil {
+		return false, fmt.Errorf("identity/postgres: marshal history subset: %w", err)
+	}
+	var seen bool
+	err = r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM public.asset_history
+				 WHERE tenant_id = $1 AND asset_id = $2 AND action = $3
+				   AND changes_json @> $4::jsonb)`,
+			asset.TenantID, assetID, string(action), string(payload)).Scan(&seen)
+	})
+	if err != nil {
+		return false, fmt.Errorf("identity/postgres: look for %s history on %s: %w", action, asset.ID, err)
+	}
+	return seen, nil
 }
 
 // OpenMergeProposal records a merge proposal for the Approvals queue.
@@ -1835,6 +1981,12 @@ func sourceKindOr(k identity.SourceKind) string {
 		return string(k)
 	}
 	return string(identity.SourceMeasured)
+}
+
+// sourceRankSQL is [identity.SourceRank] as a SQL expression over a
+// source_kind column. TestSourceRankSQLMatchesGo pins the two together.
+func sourceRankSQL(col string) string {
+	return "(CASE " + col + " WHEN 'declared' THEN 3 WHEN 'inferred' THEN 1 ELSE 2 END)"
 }
 
 // classSourceKindOr is sourceKindOr over the CLASS column's vocabulary, which

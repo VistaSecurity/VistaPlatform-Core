@@ -146,6 +146,24 @@ plaintext management service, it is raised on that **endpoint** instead. Both
 can be open at once, because they say different things: one is "this device is
 managed in the clear", the other is "port 23 on this address answers Telnet".
 
+A device is often interrogated more than one way — over SNMP v2c, and also over
+SSH or a vendor's HTTPS API. Each interrogation speaks only for the channel it
+used, so a later SSH or HTTPS interrogation does **not** close a finding that
+SNMP v2c or a Telnet-enabled line raised: the device still answers SNMP v2c.
+The finding names every plaintext protocol and the interrogation that saw it,
+and lists the encrypted channels that were also seen. It closes when the
+interrogation that reported the plaintext channel reports it gone — a Cisco
+device whose lines no longer accept Telnet, a controller moved from HTTP to
+HTTPS. If what an interrogation reported expires and nothing has looked again,
+the finding stays open rather than being shown as fixed.
+
+SNMP v2c is the case to know about: the SNMP interrogation can only see that
+v2c **works**, never that it has been switched off, so no later interrogation
+closes an SNMP v2c finding. Once you have disabled v2c on the device, set the
+finding's workflow status to **Resolved** so it leaves your open counts. The
+finding itself stays **Active** in that case, so a Resolved SNMP v2c finding
+is not reopened automatically if v2c is later re-enabled.
+
 **An insecure service exposed.** An endpoint running something the platform
 rates as unsafe to leave reachable: a datastore whose shipped default is no
 authentication (Redis, memcached, MongoDB, Elasticsearch, etcd, CouchDB), a

@@ -46,6 +46,7 @@ type fakeCiscoConfig struct {
 	execHangs          bool          // exec: accept the command and never answer
 	ptyHangs           bool          // never answer a pty-req (the client blocks on it)
 	hostname           string
+	serverVersion      string            // SSH identification string; "" = x/crypto's default
 	outputs            map[string]string // privilege-15 command output
 	userLevelResponses map[string]string // commands a level-1 account may run
 }
@@ -157,6 +158,7 @@ func startFakeCisco(t *testing.T, cfg fakeCiscoConfig) *fakeCisco {
 		}
 	}
 	server.AddHostKey(ciscoNewHostKey(t))
+	server.ServerVersion = cfg.serverVersion
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

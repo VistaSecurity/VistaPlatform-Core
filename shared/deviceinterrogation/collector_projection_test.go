@@ -218,6 +218,7 @@ func TestProjectionAllowlists_NameNoSecretFields(t *testing.T) {
 		"unifiEthernetFields":            unifiEthernetFields,
 		"unifiLLDPFields":                unifiLLDPFields,
 		"unifiUplinkFields":              unifiUplinkFields,
+		"unifiWANFields":                 unifiWANFields,
 		"unifiClientInventoryFields":     unifiClientInventoryFields,
 		"httpCertificateFields":          httpCertificateFields,
 	}
@@ -388,5 +389,47 @@ func TestF5SystemVersionProjection_RunsBeforeAnyRedaction(t *testing.T) {
 	}
 	if !strings.Contains(f5VersionResponse, poison) {
 		t.Fatal("the F5 sys/version fixture no longer carries secret-shaped fields; this test now proves nothing")
+	}
+}
+
+// F5 client-ssl profiles, read through the REAL client ( W1.2 added the
+// option list). The profile carries a passphrase beside its options; only
+// option KEYWORDS are read, and what reaches an asset's metadata from them is
+// the canonical version names of f5ProtocolVersionOptions, never a string the
+// device supplied.
+func TestF5ClientSSLProfileProjection_OptionsCarryOnlyKeywords(t *testing.T) {
+	const profiles = `{"items": [{
+	  "name": "clientssl-hardened",
+	  "kind": "tm:ltm:profile:client-ssl:client-sslstate",
+	  "ciphers": "ECDHE+AES-GCM:!aNULL",
+	  "passphrase": "MUST-NOT-BE-COLLECTED",
+	  "tmOptions": ["dont-insert-empty-fragments", "no-tlsv1", "no-tlsv1.1", "MUST-NOT-BE-COLLECTED"]
+	}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(profiles))
+	}))
+	defer srv.Close()
+	c := newF5Client(srv.URL, "admin", "admin", "", true)
+	got, err := c.getClientSSLProfiles(context.Background())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("getClientSSLProfiles = %v, %v", got, err)
+	}
+	if got[0].Options == nil {
+		t.Fatal("tmOptions was not read")
+	}
+	asset := c.convertVIPToAsset(context.Background(), f5VirtualServer{Name: "vs"}, &got[0], "198.51.100.10", 443)
+	assertNoPoison(t, "f5 client-ssl asset metadata", asset.Metadata)
+	disabled, _ := asset.Metadata["tls_versions_disabled"].([]string)
+	if len(disabled) == 0 {
+		t.Fatal("no disabled versions recorded from no-tlsv1 / no-tlsv1.1")
+	}
+	canonical := map[string]bool{}
+	for _, v := range f5ProtocolVersionOptions {
+		canonical[v.version] = true
+	}
+	for _, v := range disabled {
+		if !canonical[v] {
+			t.Errorf("tls_versions_disabled carries %q, which is not a canonical version name", v)
+		}
 	}
 }

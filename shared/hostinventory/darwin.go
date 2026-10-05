@@ -186,6 +186,7 @@ func collectDarwinInterfaces(ctx context.Context, r Runner, rep *Report, opts Op
 	out, err := runText(ctx, r, darwinCmdIfconfig)
 	if err == nil {
 		rep.Interfaces = ParseIfconfig([]byte(out))
+		darwinIPv4Assignments(ctx, r, rep.Interfaces)
 		rep.mark(SectionInterfaces, SectionOK)
 		return
 	}
@@ -251,6 +252,16 @@ func ParseIfconfig(b []byte) []Interface {
 				addr = addr[:z]
 			}
 			cur.Addresses = append(cur.Addresses, addr+prefixlenSuffix(f))
+			// SLAAC and DHCPv6 addresses carry `autoconf` / `dynamic`
+			// (and `temporary` for privacy addresses). A manual one carries
+			// none of them — but neither does one whose flags this build does
+			// not print, so the absence stays unknown.
+			for _, flag := range f[2:] {
+				if flag == "autoconf" || flag == "dynamic" || flag == "temporary" {
+					cur.assign(addr+prefixlenSuffix(f), assignedDynamic)
+					break
+				}
+			}
 		case "status:":
 			switch strings.TrimSpace(f[1]) {
 			case "active":
@@ -561,4 +572,90 @@ func ParseLsofUDP(b []byte) ([]Connection, []BoundUDPSocket) {
 		bound = append(bound, BoundUDPSocket{Address: addr, Port: port, Process: f[0], PID: pid})
 	}
 	return connections, bound
+}
+
+// darwinIPv4Assignments asks configd how each physical interface's IPv4
+// address was configured. `ifconfig` cannot say; `ipconfig` can:
+//
+//   - `ipconfig getsummary <if>` names the IPv4 ConfigMethod — Manual is a
+//     static address, DHCP or BOOTP a lease;
+//   - failing that, `ipconfig getpacket <if>` prints the DHCP packet the
+//     interface's lease came from, so an address equal to its `yiaddr` is a
+//     lease.
+//
+// Both are optional: a command that is missing, refuses, or says something
+// else leaves the address unknown, which is the honest answer.
+func darwinIPv4Assignments(ctx context.Context, r Runner, ifaces []Interface) {
+	for i := range ifaces {
+		ifc := &ifaces[i]
+		var v4 []string
+		for _, a := range ifc.Addresses {
+			if !strings.Contains(a, ":") {
+				v4 = append(v4, a)
+			}
+		}
+		if ifc.Virtual || len(v4) == 0 {
+			continue
+		}
+		method := ""
+		if out, ok := commandPresent(ctx, r, []string{"ipconfig", "getsummary", ifc.Name}); ok {
+			method = ParseIPConfigSummaryMethod(out)
+		}
+		switch method {
+		case "manual":
+			for _, a := range v4 {
+				ifc.assign(a, assignedStatic)
+			}
+			continue
+		case "dhcp", "bootp":
+			for _, a := range v4 {
+				ifc.assign(a, assignedDynamic)
+			}
+			continue
+		}
+		out, ok := commandPresent(ctx, r, []string{"ipconfig", "getpacket", ifc.Name})
+		if !ok {
+			continue
+		}
+		leased := ParseIPConfigPacketYIAddr(out)
+		for _, a := range v4 {
+			if leased != "" && strings.SplitN(a, "/", 2)[0] == leased {
+				ifc.assign(a, assignedDynamic)
+			}
+		}
+	}
+}
+
+// ParseIPConfigSummaryMethod returns the lower-cased IPv4 ConfigMethod from
+// `ipconfig getsummary` output, empty when there is none.
+func ParseIPConfigSummaryMethod(out string) string {
+	section := ""
+	for _, line := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "IPv4 :"):
+			section = "v4"
+		case strings.HasPrefix(t, "IPv6 :"):
+			section = "v6"
+		case section == "v4" && strings.HasPrefix(t, "ConfigMethod :"):
+			return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(t, "ConfigMethod :")))
+		}
+	}
+	return ""
+}
+
+// ParseIPConfigPacketYIAddr returns the `yiaddr` (the address the DHCP server
+// handed out) from `ipconfig getpacket` output, empty when there is none.
+func ParseIPConfigPacketYIAddr(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(k) == "yiaddr" {
+			v = strings.TrimSpace(v)
+			if v == "0.0.0.0" {
+				return ""
+			}
+			return v
+		}
+	}
+	return ""
 }

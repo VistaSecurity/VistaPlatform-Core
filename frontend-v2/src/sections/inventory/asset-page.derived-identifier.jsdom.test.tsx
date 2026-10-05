@@ -11,11 +11,17 @@
 // every row turns it red.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Asset } from '@vistasecurity/api-contract';
 import { AssetPage } from './asset-page';
 import { identifierProvenanceLabel } from './asset-shape';
+import { AddressPinToggle, type IdentifierDraft } from './class-picker';
+
+// The page renders the Active Scan button, which reads the query client; none of
+// these tests reads a query through it.
+const queryClient = new QueryClient();
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -52,9 +58,11 @@ function renderAsset(identifiers: NonNullable<Asset['identifiers']>) {
   state.asset = { id: 'asset-1', class_key: 'iot_device', identifiers } as Asset;
   act(() => {
     root.render(
-      <MemoryRouter initialEntries={['/inventory/assets/asset-1']}>
-        <Routes><Route path="/inventory/assets/:id" element={<AssetPage />} /></Routes>
-      </MemoryRouter>,
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/inventory/assets/asset-1']}>
+          <Routes><Route path="/inventory/assets/:id" element={<AssetPage />} /></Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
     );
   });
   return Array.from(container.querySelectorAll('[data-testid="identifier-provenance"]')).map((el) => ({
@@ -94,5 +102,34 @@ describe('identifierProvenanceLabel', () => {
     [{ source_kind: null, source_ref: null }, ''],
   ])('%o → %s', (ident, want) => {
     expect(identifierProvenanceLabel(ident)).toBe(want);
+  });
+});
+
+describe('asset page — pinned address marker (#2205)', () => {
+  it('marks an address its owner holds static, and nothing else', () => {
+    renderAsset([
+      { kind: 'ip_address', value: '192.0.2.1', source_kind: 'declared', address_assignment: 'static', confidence: 1 },
+      { kind: 'ip_address', value: '192.0.2.2', source_kind: 'measured', address_assignment: 'dynamic', confidence: 1 },
+      { kind: 'ip_address', value: '192.0.2.3', source_kind: 'measured', confidence: 1 },
+    ] as NonNullable<Asset['identifiers']>);
+    const pins = Array.from(container.querySelectorAll('[data-testid="identifier-address-pin"]'));
+    expect(pins.map((el) => el.textContent)).toEqual(['static']);
+    expect(pins[0].closest('div')?.textContent).toContain('192.0.2.1');
+  });
+});
+
+describe('identifier editor — pin toggle (#2205)', () => {
+  it('pins a measured address on request and shows an existing pin without a control', () => {
+    const seen: IdentifierDraft[] = [];
+    const row: IdentifierDraft = { kind: 'ip_address', value: '192.0.2.1', sourceKind: 'measured' };
+    act(() => root.render(<AddressPinToggle row={row} onChange={(r) => seen.push(r)} />));
+    const box = container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    act(() => box.click());
+    expect(seen[seen.length - 1]?.addressAssignment).toBe('static');
+
+    act(() => root.render(<AddressPinToggle row={{ ...row, storedAssignment: 'static' }} onChange={() => {}} />));
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(container.querySelector('[data-testid="identifier-pin-static"]')?.textContent).toBe('static');
   });
 });

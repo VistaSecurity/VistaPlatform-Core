@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -92,12 +94,13 @@ func TestFirstHeartbeatCarriesTheSensorsOwnConfiguration(t *testing.T) {
 		ReportingInterval: 45 * time.Second, // registry default: 300
 		Verbose:           &verbose,         // registry default log level: "info"
 		Capture: config.CaptureConfig{
-			ActiveProbing:                false, // registry default: true
-			NetworkDiscovery:             false, // registry default: true
-			HostObservation:              false, // registry default: true
-			HostObservationWindowSeconds: 120,   // registry default: 60
-			HostObservationDNS:           true,  // registry default: false
-			DedupTTLMinutes:              15,    // registry default: 60
+			ActiveProbing:                false,              // registry default: true
+			NetworkDiscovery:             false,              // registry default: true
+			HostObservation:              false,              // registry default: true
+			HostObservationWindowSeconds: 120,                // registry default: 60
+			HostObservationDNS:           true,               // registry default: false
+			DedupTTLMinutes:              15,                 // registry default: 60
+			ExtraPortsToMonitor:          []int{10443, 9443}, // registry default: none
 		},
 	}
 
@@ -120,6 +123,7 @@ func TestFirstHeartbeatCarriesTheSensorsOwnConfiguration(t *testing.T) {
 		agentconfig.KeyDedupTTLMinutes:       agentconfig.Int(15),
 		agentconfig.KeyReportingInterval:     agentconfig.Int(45),
 		agentconfig.KeyLogLevel:              agentconfig.Text("debug"),
+		agentconfig.KeyExtraTLSPorts:         agentconfig.Text("9443,10443"),
 	}
 
 	got := cp.lastBeat().ConfigRunning
@@ -177,5 +181,80 @@ func TestHeartbeatWithoutAnApplierOmitsConfigRunning(t *testing.T) {
 
 	if got := cp.lastBeat().ConfigRunning; len(got) != 0 {
 		t.Errorf("config_running = %v from a sensor with no applier wired, want none", got)
+	}
+}
+
+// The WIRING test for additional TLS ports ( WP5): a list the platform
+// stores reaches the field the capture filter is built from.
+//
+// The answer is the platform's wire form, written as JSON exactly as
+// sensor-manager's exchange encodes it (TestIntegration_SensorDesiredConfig_
+// ExtraTLSPortsReachTheExchange pins that side), and it travels the REAL path:
+// sendHeartbeat -> the HTTP client's decode -> applyHeartbeatReply -> the
+// applier -> the registered setter -> cfg.Capture.ExtraPortsToMonitor and the
+// sensor's file. Then a restart: the file is reloaded the way the next process
+// loads it, and the next beat reports the list as running with nothing pending.
+//
+// Mutation check: delete `s.config.Capture.ExtraPortsToMonitor = ports` in
+// managed_config.go and the first assertion fails; delete the
+// persistCaptureSetting call and the post-restart assertion fails; register
+// no handler and the beat reports a failure instead of pending-restart.
+func TestPlatformExtraTLSPortsReachTheCaptureConfig(t *testing.T) {
+	cp := &stubControlPlane{}
+	server := httptest.NewServer(cp.handler())
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "sensor-config.yaml")
+	if err := os.WriteFile(path, []byte("sensorId: 44444444-4444-4444-4444-444444444444\ncontrolPlaneUrl: "+server.URL+"\ncapture:\n  interfaces: [eth0]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Sensor{config: cfg, configPath: path, apiClient: api.NewOutboundClient(cfg), startTime: time.Now()}
+	s.setupAgentConfig("test")
+
+	var answer agentconfig.ExchangePayload
+	if err := json.Unmarshal([]byte(`{"revision":"rev-ports","values":{"extra_tls_ports":"9443,10443"}}`), &answer); err != nil {
+		t.Fatal(err)
+	}
+	cp.setAnswer(&answer)
+
+	s.sendHeartbeat() // delivers the answer
+	if got := agentconfig.FormatPortList(s.config.Capture.ExtraPortsToMonitor); got != "9443,10443" {
+		t.Fatalf("cfg.Capture.ExtraPortsToMonitor = %q after the platform sent 9443,10443", got)
+	}
+
+	s.sendHeartbeat() // reports what the first one applied
+	beat := cp.lastBeat()
+	if beat.ConfigRevision != "rev-ports" || len(beat.ConfigFailures) != 0 {
+		t.Fatalf("report: revision=%q failures=%v", beat.ConfigRevision, beat.ConfigFailures)
+	}
+	if len(beat.ConfigPendingRestart) != 1 || beat.ConfigPendingRestart[0] != string(agentconfig.KeyExtraTLSPorts) {
+		t.Errorf("pending restart = %v, want [extra_tls_ports]: the running capture filter does not admit these ports", beat.ConfigPendingRestart)
+	}
+	if got := beat.ConfigRunning[agentconfig.KeyExtraTLSPorts]; !got.Equal(agentconfig.Text("")) {
+		t.Errorf("running = %v before the restart, want the startup list", got)
+	}
+
+	// The next process.
+	reloaded, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := agentconfig.FormatPortList(reloaded.Capture.ExtraPortsToMonitor); got != "9443,10443" {
+		t.Fatalf("after restart the capture would watch %q, want 9443,10443", got)
+	}
+	next := &Sensor{config: reloaded, configPath: path, apiClient: api.NewOutboundClient(reloaded), startTime: time.Now()}
+	next.setupAgentConfig("test")
+	next.sendHeartbeat()
+	next.sendHeartbeat()
+	beat = cp.lastBeat()
+	if len(beat.ConfigPendingRestart) != 0 || len(beat.ConfigFailures) != 0 {
+		t.Errorf("after restart: pending=%v failures=%v, want applied", beat.ConfigPendingRestart, beat.ConfigFailures)
+	}
+	if got := beat.ConfigRunning[agentconfig.KeyExtraTLSPorts]; !got.Equal(agentconfig.Text("9443,10443")) {
+		t.Errorf("after restart running = %v, want 9443,10443 in effect", got)
 	}
 }

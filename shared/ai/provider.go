@@ -122,6 +122,15 @@ var (
 	// like an answer. The refusal is itself audited.
 	ErrUnattributed = errors.New("ai: request does not say which seam and which invoker it is for")
 
+	// ErrPrivateEndpoint is returned when a configured base URL points at a
+	// loopback, private, or link-local address and the configuration did not
+	// permit that. It lives here rather than beside the Enterprise clients
+	// that raise it so a Core-built settings handler can recognise it and say
+	// the right thing: this is the one refusal that is usually a LEGITIMATE
+	// configuration being rejected, and "who can allow it" differs by who is
+	// asking.
+	ErrPrivateEndpoint = errors.New("ai: endpoint is on a private address and private endpoints are not allowed")
+
 	// ErrUnknownProvider is returned by NewFromEnv when AI_PROVIDER names
 	// something this build does not have. NewFromEnv still returns NoneProvider
 	// alongside it, so a caller that logs and continues degrades to no-AI rather

@@ -231,3 +231,126 @@ func TestIntegration_SensorDesiredConfig_OtherTenantIsNotFound(t *testing.T) {
 		t.Errorf("PUT as another tenant = %d, want 404", w.Code)
 	}
 }
+
+// Additional TLS ports ( WP5), the platform half of the wiring: a list
+// saved through the real handler is stored canonically, announced as needing
+// a restart, and handed to the sensor in the exchange answer in the exact
+// wire form the sensor-side test decodes (sensor/cmd
+// TestPlatformExtraTLSPortsReachTheCaptureConfig). Then the sensor's report
+// moves the state: awaiting_restart while it says pending, applied once the
+// restarted sensor reports the revision with nothing pending.
+func TestIntegration_SensorDesiredConfig_ExtraTLSPortsReachTheExchange(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+	tenant := testdb.NewTenant(t, admin)
+	sensorID := seedSensor(t, admin, tenant)
+
+	app := testdb.ConnectAsAppRole(t, admin)
+	h := handlers.NewSensorConfigHandler(app)
+	p := gin.Params{{Key: "sensor_id", Value: sensorID.String()}}
+
+	w := call(t, h.PutSensorDesiredConfig, tenant, http.MethodPut,
+		`{"values":{"extra_tls_ports":"10443, 9443"}}`, p)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", w.Code, w.Body.String())
+	}
+	if restart, _ := decode(t, w)["needs_restart"].([]any); len(restart) != 1 || restart[0] != string(agentconfig.KeyExtraTLSPorts) {
+		t.Errorf("needs_restart = %v, want [extra_tls_ports]", restart)
+	}
+	if got := settingValue(t, call(t, h.GetSensorDesiredConfig, tenant, http.MethodGet, "", p), agentconfig.KeyExtraTLSPorts); got != "9443,10443" {
+		t.Errorf("stored = %v, want the canonical 9443,10443", got)
+	}
+
+	exchange := func(rep agentconfig.ExchangeReport) *agentconfig.ExchangePayload {
+		t.Helper()
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/heartbeat", nil)
+		out, err := h.Exchange(c, tenant, sensorID, rep)
+		if err != nil {
+			t.Fatalf("exchange: %v", err)
+		}
+		return out
+	}
+	payload := exchange(agentconfig.ExchangeReport{})
+	wire, err := json.Marshal(payload.Values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(wire, []byte(`"extra_tls_ports":"9443,10443"`)) {
+		t.Fatalf("exchange values = %s, want extra_tls_ports as the string 9443,10443", wire)
+	}
+
+	state := func() any {
+		return decode(t, call(t, h.GetSensorDesiredConfig, tenant, http.MethodGet, "", p))["status"].(map[string]any)["state"]
+	}
+	exchange(agentconfig.ExchangeReport{ConfigRevision: payload.Revision, PendingRestart: []string{string(agentconfig.KeyExtraTLSPorts)}})
+	if got := state(); got != string(agentconfig.StateAwaitingRestart) {
+		t.Errorf("state while the sensor reports pending = %v, want awaiting_restart", got)
+	}
+	exchange(agentconfig.ExchangeReport{ConfigRevision: payload.Revision})
+	if got := state(); got != string(agentconfig.StateApplied) {
+		t.Errorf("state after the restarted sensor reports = %v, want applied", got)
+	}
+
+	if w := call(t, h.PutSensorDesiredConfig, tenant, http.MethodPut,
+		`{"values":{"extra_tls_ports":"9443,abc"}}`, p); w.Code != http.StatusBadRequest {
+		t.Errorf("junk PUT = %d, want 400: %s", w.Code, w.Body.String())
+	}
+}
+
+// Upgrade day, through the REAL path — heartbeat exchange → agent_config_state
+// → store.Load → Reconcile → GET status: a sensor older than extra_tls_ports
+// reports it unsupported. While nobody has set it, the sensor is Applied with
+// no failure; once an operator sets ports, it is Failed, telling them to
+// upgrade the sensor. third_party_tls_enrichment, whose default an older
+// sensor does NOT honour, stays Failed either way.
+func TestIntegration_SensorDesiredConfig_OlderSensorAndANewSetting(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+	tenant := testdb.NewTenant(t, admin)
+	sensorID := seedSensor(t, admin, tenant)
+
+	app := testdb.ConnectAsAppRole(t, admin)
+	h := handlers.NewSensorConfigHandler(app)
+	p := gin.Params{{Key: "sensor_id", Value: sensorID.String()}}
+
+	// An older sensor converges on whatever revision it is handed and reports
+	// the setting it has no handler for, in the wording shipped builds send.
+	beat := func(failures map[string]string) map[string]any {
+		t.Helper()
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/heartbeat", nil)
+		payload, err := h.Exchange(c, tenant, sensorID, agentconfig.ExchangeReport{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.Exchange(c, tenant, sensorID, agentconfig.ExchangeReport{ConfigRevision: payload.Revision, ConfigFailures: failures}); err != nil {
+			t.Fatal(err)
+		}
+		return decode(t, call(t, h.GetSensorDesiredConfig, tenant, http.MethodGet, "", p))["status"].(map[string]any)
+	}
+	old := map[string]string{"extra_tls_ports": "this agent (v4.1.0) does not support extra_tls_ports"}
+
+	st := beat(old)
+	if st["state"] != string(agentconfig.StateApplied) || st["failures"] != nil {
+		t.Errorf("untouched setting on an older sensor: status = %v, want applied with no failures", st)
+	}
+
+	if w := call(t, h.PutSensorDesiredConfig, tenant, http.MethodPut, `{"values":{"extra_tls_ports":"9443"}}`, p); w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", w.Code, w.Body.String())
+	}
+	st = beat(old)
+	failures, _ := st["failures"].(map[string]any)
+	if st["state"] != string(agentconfig.StateFailed) ||
+		failures["extra_tls_ports"] != "This sensor's version (v4.1.0) does not support this setting — upgrade the sensor to apply it." {
+		t.Errorf("operator-set value on an older sensor: status = %v, want failed saying to upgrade", st)
+	}
+
+	if w := call(t, h.PutSensorDesiredConfig, tenant, http.MethodPut, `{"values":{}}`, p); w.Code != http.StatusOK {
+		t.Fatalf("clearing PUT = %d: %s", w.Code, w.Body.String())
+	}
+	st = beat(map[string]string{"third_party_tls_enrichment": "this agent (v1.0.0) does not support third_party_tls_enrichment"})
+	if st["state"] != string(agentconfig.StateFailed) {
+		t.Errorf("third_party_tls_enrichment unsupported at its default: status = %v, want failed", st)
+	}
+}

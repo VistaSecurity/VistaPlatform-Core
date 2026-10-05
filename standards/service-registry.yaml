@@ -258,6 +258,9 @@ admin_plane:
     # /ci-export/assets — the reads a CMDB push makes (D4, M3). HMAC-only
     # (RequireSignedServiceCall, a signed X-Tenant-ID required); the caller
     # reaches inventory-service through PeerServiceURL, never the edge.
+    # POST /sightings — device-interrogation-service's sightings, resolved by
+    # inventory-service's one identity engine (platform ADR-0003 D3); same
+    # gate. cmd/sighting_edge_deny_test.go pins the generated deny.
     - /inventory-service/internal/
 
   # Prefixes whose first URL segment does not name the Service that answers
@@ -379,7 +382,14 @@ services:
     # logs to audit-service — both via serviceauth.SignRequestFromEnv, which
     # reads INTERNAL_AUTH_SECRET. Without it, those calls degrade to an unsigned
     # X-Internal-Call header and every receiver rejects them with 401.
-    required_secrets: [INTERNAL_AUTH_SECRET, JWT_SECRET]
+    #
+    # ENCRYPTION_MASTER_KEY: a model provider configured in Settings (a tenant's
+    # own, or the platform default) stores its API key encrypted with the shared
+    # AES-256-GCM envelope. This service drafts controls and remediation plans
+    # through that provider, so it has to open the key. Without the master key
+    # the key auth-service sealed cannot be read here and drafting reports no
+    # provider — for exactly the tenants that configured one.
+    required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
       dependencies: [postgres, redis, nats]

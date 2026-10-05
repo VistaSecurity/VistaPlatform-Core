@@ -168,6 +168,22 @@ keys:
           type: array
           items: { type: string }
           description: "assigned IP addresses in CIDR form"
+        static_addresses:
+          type: array
+          items: { type: string }
+          description: >-
+            The subset of `addresses` the host's own configuration reports as
+            statically configured (Linux: no lease lifetime; Windows:
+            PrefixOrigin/SuffixOrigin Manual; macOS: ConfigMethod Manual),
+            spelled exactly as in `addresses`. A pinned address matches its
+            asset even inside a segment flagged DHCP. An address in
+            neither this list nor `dynamic_addresses` is unknown.
+        dynamic_addresses:
+          type: array
+          items: { type: string }
+          description: >-
+            The subset of `addresses` the host reports as leased — DHCP, or a
+            router advertisement (SLAAC) — spelled exactly as in `addresses`.
         vlan: { type: integer, description: "access or native VLAN id, where the device reports one" }
         state: { type: string, enum: [up, down, unknown], description: "operational state" }
         admin_state:
@@ -240,7 +256,16 @@ keys:
             inventing 0 or 1 for it would assert a tag nobody configured.
         name: { type: string, description: "VLAN name as configured" }
         subnet: { type: string, description: "associated prefix in CIDR form, where the device declares one" }
-        gateway: { type: string, description: "the device's own address on this network, where it declares one" }
+        gateway:
+          type: string
+          description: >-
+            The device's own address on this network, where it declares one.
+            Read at ingest: with a subnet, the address becomes a claimed
+            identifier of the device, and the device becomes the gateway of
+            every network segment where it holds it (network_segments.gateway_*,
+            via inventory-service's internal gateway-links route, which takes the
+            run's complete list so a network no longer reported is unlinked).
+            An entry without a subnet is skipped.
         dhcp_enabled: { type: boolean, description: "whether the device serves DHCP on this network" }
         dhcp_range_configured:
           type: boolean
@@ -515,8 +540,12 @@ keys:
       Whether the management protocol in mgmt.protocol carries credentials and
       configuration without transport encryption. An explicit false is an
       answer, not an absence — a device with no mgmt.plaintext fact has not
-      been assessed, and must not be displayed as safe. Feeds the configuration
-      producer's plaintext_management finding.
+      been assessed, and must not be displayed as safe. A false speaks only
+      for the protocol its own source named, so answers are never resolved
+      newest-wins across sources: an HTTPS or SSH run's false does not clear
+      an SNMP v2c true. A writer of ssh + false must have positively assessed
+      that telnet is off. Feeds the configuration producer's
+      plaintext_management finding.
     producers: [device-interrogation, sensor, platform-sensor, device-agent]
     redact: false
 

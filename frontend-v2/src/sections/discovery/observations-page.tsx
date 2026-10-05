@@ -1,29 +1,26 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import type { inventoryComponents } from '@vistasecurity/api-contract';
+import { TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { PROVISIONAL_INVENTORY_HREF } from '../inventory/facet-query';
-import { ObservationActions } from './observation-actions';
-import { CollectorReachability, ObservationDetails, enrichmentExplanation } from './observation-details';
+import { BulkBar, BulkDialog, type BulkAction } from './observation-bulk';
+import {
+  CHIPS, PAGE_SIZES, bulkFailureMessage, chipLabel, isSelectable, loadView, nextNonEmptyChip, saveView,
+  type ChipKey, type Observation, type ObservationState,
+} from './observation-review';
+import { ObservationTable, type RowFailure, type SortKey } from './observation-table';
+import { useBulkObservationDecision, useObservation, useObservationList, type ObservationListQuery } from './queries';
 
-type Observation = inventoryComponents['schemas']['IdentityObservation'];
-type State = Observation['state'] | 'all';
-const reasons: Record<string, string> = {
-  insufficient_identity_evidence: 'Evidence does not yet establish a distinct device.',
-  unverified_relayed_advertisement: 'The advertisement could not be tied directly to its originating device.',
-  dynamic_address_without_device_binding: 'This changing address has no contemporaneous device binding.',
-  network_scope_unresolved: 'The observation could not be placed in a specific network.',
-  no_device_or_address_binding: 'A name was observed without a confirmed device or address binding.',
-  authoritative_identifier: 'An authoritative source identified this entity.',
-  direct_scoped_interface: 'A device interface was directly observed within its network.',
-  direct_scoped_address: 'A network entity was directly observed at this address.',
-  declared_service: 'An operator declared this service.',
-  // D1/D8: promotion is the only step that consumes the tenant's asset
-  // allowance, so an exhausted allowance stops the item becoming established
-  // WITHOUT throwing the evidence away. Saying both halves is the point.
-  asset_allowance_exhausted: 'Direct evidence was found, but the asset allowance is exhausted; the item stays provisional.',
-};
+type StateFilter = ObservationState | 'all';
+const STATE_OPTIONS: { value: StateFilter; label: string }[] = [
+  { value: 'unresolved', label: 'Unresolved (last 30 days)' },
+  { value: 'conflict', label: 'Identity conflict' },
+  { value: 'linked', label: 'Linked' },
+  { value: 'dismissed', label: 'Dismissed' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'all', label: 'Every state' },
+];
 
 export function IdentityCoverage() {
   const q = useQuery({ queryKey: ['identity-summary'], queryFn: async () => {
@@ -54,73 +51,184 @@ export function IdentityCoverage() {
   </div>;
 }
 
-function ObservationEvidence({ observation: o, detail }: { observation: Observation; detail: boolean }) {
-  const raw = o.evidence.identifiers;
-  const identifiers = Array.isArray(raw) ? raw.filter((v): v is Record<string, unknown> => typeof v === 'object' && v !== null) : [];
-  const name = identifiers.find((i) => i.kind === 'hostname' || i.kind === 'fqdn')?.value;
-  return <article style={{ padding: 16, borderBottom: '1px solid var(--app-border)' }}>
-    <h3 style={{ fontSize: 14, margin: '0 0 8px' }}>{typeof name === 'string' ? name : 'Device observation'} <small>· {o.state}</small></h3>
-    {o.admission_reasons.map((r) => <p key={r}>{reasons[r] ?? r.replace(/_/g, ' ')}</p>)}
-    <dl style={{ fontSize: 12 }}>
-      <dt>Source</dt><dd>{o.source_ref} · {o.source_kind}{o.collector_version ? ` · ${o.collector_version}` : ''}</dd>
-      <dt>Network</dt><dd>{o.network_scope || 'Not established'}</dd>
-      <dt>First observed</dt><dd>{new Date(o.first_seen_at).toLocaleString()}</dd>
-      <dt>Last observed</dt><dd>{new Date(o.last_seen_at).toLocaleString()} · {o.occurrence_count} sighting{o.occurrence_count === 1 ? '' : 's'}</dd>
-      <dt>Enrichment</dt><dd>{o.enrichment_state}{o.enrichment_reason ? ` — ${enrichmentExplanation(o.enrichment_reason)}` : ''}</dd>
-    </dl>
-    {o.collector && <CollectorReachability collector={o.collector} />}
-    <details><summary>Observed identifiers</summary>
-      {identifiers.length === 0 ? <p>No usable identifiers recorded.</p> : <ul>{identifiers.map((i, n) => <li key={n}>{String(i.kind ?? '')}: {String(i.value ?? '')}{i.scope ? ` (${String(i.scope)})` : ''}</li>)}</ul>}
-    </details>
-    {!detail && <p><Link to={`/discovery/observations?observation_id=${o.id}`}>Open observation details</Link></p>}
-    {detail && <ObservationDetails observation={o} />}
-    {/* A provisional item and a linked asset are the same kind of link to two
-        different things, so only one is shown. `unresolved` WITH an asset is
-        exactly the provisional shape (#1898 D2): the observation keeps working
-        — enrichment still runs on it — while the asset it created waits for
-        something to corroborate it. */}
-    {o.asset_id && (o.state === 'unresolved'
-      ? <p>Provisional inventory item: <Link to={`/inventory/assets/${o.asset_id}`}>Open provisional item</Link></p>
-      : <Link to={`/inventory/assets/${o.asset_id}`}>Open linked asset</Link>)}
-    {o.proposal_id && <Link to="/discovery/approvals">Review identity conflict</Link>}
-    {(o.state === 'unresolved' || o.state === 'expired' || o.state === 'dismissed') && <ObservationActions id={o.id} />}
-  </article>;
+
+interface BulkOutcome { action: BulkAction; ok: number; failed: number }
+interface KeptFailure { failure: RowFailure; row?: Observation }
+
+const visuallyHidden = { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap' } as const;
+
+function outcomeText(o: BulkOutcome): string {
+  const done = `${o.ok} ${o.action === 'confirm' ? 'confirmed' : o.action === 'link' ? 'linked' : 'dismissed'}`;
+  return o.failed === 0 ? `${done}.` : `${done}, ${o.failed} need${o.failed === 1 ? 's' : ''} another look.`;
 }
 
+/**
+ * Discovery → Observations: identity evidence the platform kept but could not
+ * turn into an asset by itself, as a review table. Opens on Ready to
+ * confirm (D3); the server says what each row needs and proposes the reason
+ * (D1); bulk Confirm and bulk Link are homogeneous, and a Link only ever goes
+ * to the owner the server named (D4).
+ */
 export function ObservationsPage() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const assetID = params.get('asset_id') ?? undefined;
   const observationID = params.get('observation_id') ?? undefined;
-  const [state, setState] = useState<State>(assetID ? 'all' : 'unresolved');
+  const permissions = usePermissions();
+  const canDecide = permissions.hasPermission(TENANT_PERMISSIONS.assets.update);
+
+  const [remembered] = useState(loadView);
+  // Evidence for one asset is read across every state, as it always was.
+  const [chip, setChipState] = useState<ChipKey>(assetID ? 'all' : remembered.chip);
+  const [stateFilter, setStateFilter] = useState<StateFilter>(assetID ? 'all' : 'unresolved');
+  const [pageSize, setPageSize] = useState(remembered.pageSize);
   const [page, setPage] = useState(1);
-  const q = useQuery({ queryKey: ['identity-observations', state, page, assetID, observationID], queryFn: async () => {
-    if (observationID) {
-      const { data, response } = await clients.inventory.GET('/discovery/observations/{id}', { params: { path: { id: observationID } } });
-      if (!response.ok || !data) throw new Error('Unable to load observation');
-      return { observations: [data], total: 1 };
-    }
-    const { data, response } = await clients.inventory.GET('/discovery/observations', { params: { query: { state, page, page_size: 50, asset_id: assetID } } });
-    if (!response.ok || !data) throw new Error('Unable to load observations');
-    return data;
-  }});
+  const [sort, setSort] = useState<SortKey>('last_seen_desc');
+  const [search, setSearch] = useState('');
+  const [draft, setDraft] = useState('');
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [kept, setKept] = useState<ReadonlyMap<string, KeptFailure>>(new Map());
+  const [outcome, setOutcome] = useState<BulkOutcome | null>(null);
+  const [dialog, setDialog] = useState<BulkAction | null>(null);
+  const bulk = useBulkObservationDecision();
+
+  const q = search.trim();
+  const query: ObservationListQuery = {
+    ...(chip === 'all' ? { state: stateFilter } : { state: 'unresolved', needs: [chip] }),
+    page, page_size: pageSize, sort,
+    ...(q ? { q } : {}),
+    ...(assetID ? { asset_id: assetID } : {}),
+  };
+  const list = useObservationList(query, { enabled: !observationID });
+  const focus = useObservation(observationID);
+
+  const rows = list.data?.observations ?? [];
+  const counts = list.data?.counts;
+  // The selection is ids; what it MEANS is always re-read from the current
+  // rows, so a refetch that changes a row changes what the bar offers.
+  const selectedRows = rows.filter((r) => selected.has(r.id) && isSelectable(r));
+  const failures = new Map([...kept].map(([id, k]) => [id, k.failure]));
+  const pinned = [...kept.values()].flatMap((k) => (k.row && !rows.some((r) => r.id === k.row!.id) ? [k.row] : []));
+
+  // Any change of view clears the selection: a tick is a decision about a row
+  // you can see, and carrying it to rows you cannot is how a bulk action ends
+  // up deciding something nobody looked at.
+  const resetSelection = () => { setSelected(new Set()); setKept(new Map()); setOutcome(null); };
+  const changeView = () => { setPage(1); resetSelection(); };
+  const pickChip = (c: ChipKey) => { setChipState(c); changeView(); saveView({ chip: c, pageSize }); };
+  const pickPageSize = (n: number) => { setPageSize(n); changeView(); saveView({ chip, pageSize: n }); };
+  const pickSort = (s: SortKey) => { setSort(s); changeView(); };
+  const applySearch = (e: FormEvent) => { e.preventDefault(); setSearch(draft); changeView(); };
+  const clearSearch = () => { setDraft(''); setSearch(''); changeView(); };
+  const turnPage = (p: number) => { setPage(p); resetSelection(); };
+  const clearAsset = () => { const next = new URLSearchParams(params); next.delete('asset_id'); setParams(next); changeView(); };
+
+  const toggle = (id: string) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleAll = (ids: string[], on: boolean) => setSelected((s) => { const n = new Set(s); for (const id of ids) { if (on) n.add(id); else n.delete(id); } return n; });
+
+  const openDialog = (a: BulkAction) => { bulk.reset(); setDialog(a); };
+  const submit = (action: BulkAction, reason: string) => {
+    const decided = selectedRows;
+    bulk.mutate({ action, ids: decided.map((r) => r.id), reason }, {
+      onSuccess: (data) => {
+        // A failed row stays on screen with its reason — pinned above the
+        // table if the refreshed page no longer holds it (it may have changed
+        // state, which is often exactly why it failed).
+        setKept((prev) => {
+          const next = new Map(prev);
+          for (const r of data.results) {
+            if (r.outcome === 'ok') next.delete(r.id);
+            else next.set(r.id, { failure: { message: bulkFailureMessage(r), code: r.code, status: r.status }, row: decided.find((d) => d.id === r.id) });
+          }
+          return next;
+        });
+        const ok = data.results.filter((r) => r.outcome === 'ok').length;
+        setOutcome({ action, ok, failed: data.results.length - ok });
+        setSelected(new Set());
+        setDialog(null);
+      },
+    });
+  };
+
+  if (observationID) {
+    return <section style={{ padding: 26 }}>
+      <h1 style={{ margin: '0 0 6px', fontFamily: 'var(--font-head)', fontSize: 20 }}>Observations</h1>
+      <p>Identity evidence was retained for resolution. <Link to="/discovery/observations">View all observations</Link></p>
+      <IdentityCoverage />
+      {focus.isPending && <p role="status">Loading observation…</p>}
+      {focus.isError && <div role="alert"><p>Couldn’t load this observation.</p><button className="ui-btn sm" onClick={() => { void focus.refetch(); }}>Retry</button></div>}
+      {focus.data && <ObservationTable rows={[focus.data]} loading={false} canDecide={canDecide} selectable={false} selected={new Set()} onToggle={() => {}} onToggleAll={() => {}}
+        sort={sort} onSort={() => {}} failures={new Map()} expandFirst />}
+    </section>;
+  }
+
+  const total = list.data?.total ?? 0;
+  const empty = list.isSuccess && rows.length === 0 && pinned.length === 0;
+  const suggestion = empty ? nextNonEmptyChip(chip, counts) : null;
+  const unresolvedView = chip !== 'all' || stateFilter === 'unresolved';
+
   return <section style={{ padding: 26 }}>
-    <h1>Discovery observations</h1>
-    {observationID && <p>Identity evidence was retained for resolution. <Link to="/discovery/observations">View all observations</Link></p>}
-    {assetID && <p>Showing evidence linked to this asset. <Link to={`/inventory/assets/${assetID}`}>Back to asset</Link></p>}
-    <p>Evidence awaiting identification is retained here. An observation is not necessarily a distinct device.</p>
+    <h1 style={{ margin: '0 0 6px', fontFamily: 'var(--font-head)', fontSize: 20 }}>Observations</h1>
+    <p style={{ margin: '0 0 8px', color: 'var(--app-t2)', fontSize: 13 }}>Evidence the platform kept but could not turn into an asset by itself. Each row says what it needs from you. An observation is not necessarily a distinct device.</p>
     <IdentityCoverage />
-    {!observationID && <label>Show <select className="ui-input" style={{ width: 200 }} aria-label="Observation state" value={state} onChange={(e) => { setState(e.target.value as State); setPage(1); }}>
-      {(['unresolved', 'conflict', 'linked', 'dismissed', 'expired', 'all'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
-    </select></label>}
-    {q.isPending && <p role="status">Loading observations…</p>}
-    {q.isError && <p role="alert">Unable to load observations. <button className="ui-btn" onClick={() => { void q.refetch(); }}>Retry</button></p>}
-    {q.data && <>
-      {q.data.observations.length === 0 ? <p>No observations in this view. Unresolved observations leave the active view after 30 days without a sighting.</p> : q.data.observations.map((o) => <ObservationEvidence key={o.id} observation={o} detail={!!observationID} />)}
-      {!observationID && <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
-        <button className="ui-btn" disabled={page === 1} onClick={() => setPage(page - 1)}>Previous</button>
-        <span>Page {page} · {q.data.total} observations</span>
-        <button className="ui-btn" disabled={page * 50 >= q.data.total} onClick={() => setPage(page + 1)}>Next</button>
-      </div>}
+
+    <div role="group" aria-label="Show observations that" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', margin: '12px 0' }}>
+      {CHIPS.map((c) => <button key={c.key} type="button" className={`chip${chip === c.key ? ' active' : ''}`} aria-pressed={chip === c.key} onClick={() => pickChip(c.key)}>
+        {c.label}{counts ? <span className="mono" style={{ color: 'var(--app-t3)' }}>{counts[c.key]}</span> : null}
+      </button>)}
+      {assetID && <span className="chip active" style={{ cursor: 'default' }}>
+        Evidence for one asset
+        <button type="button" className="ui-btn sm ghost" style={{ height: 18, padding: '0 4px' }} aria-label="Clear the asset filter" onClick={clearAsset}><span aria-hidden="true">×</span></button>
+      </span>}
+      {assetID && <Link to={`/inventory/assets/${assetID}`} style={{ fontSize: 12 }}>Back to asset</Link>}
+    </div>
+
+    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 12 }}>
+      <form role="search" onSubmit={applySearch} style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
+        <input className="ui-input" type="search" aria-label="Search observations" placeholder="Address, name, network or sensor" value={draft} onChange={(e) => setDraft(e.target.value)} style={{ width: 280 }} />
+        <button className="ui-btn sm" type="submit">Search</button>
+        {q && <button className="ui-btn sm ghost" type="button" onClick={clearSearch}>Clear search</button>}
+      </form>
+      {chip === 'all' && <label style={{ fontSize: 12 }}>State
+        <select className="ui-input" style={{ width: 220 }} aria-label="Observation state" value={stateFilter} onChange={(e) => { setStateFilter(e.target.value as StateFilter); changeView(); }}>
+          {STATE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </label>}
+    </div>
+
+    <p role="status" style={visuallyHidden}>{selectedRows.length > 0 ? `${selectedRows.length} selected` : ''}</p>
+    <div role="status">
+      {outcome && <p style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, margin: '0 0 10px' }}>
+        <strong>{outcomeText(outcome)}</strong>
+        {outcome.failed > 0 && <span style={{ color: 'var(--app-t2)' }}>The rows that need another look stay in the table with the reason.</span>}
+        <button type="button" className="ui-btn sm ghost" onClick={() => { setOutcome(null); setKept(new Map()); }}>Done</button>
+      </p>}
+    </div>
+
+    {canDecide && selectedRows.length > 0 && <BulkBar rows={selectedRows} pending={bulk.isPending} onAction={openDialog} onClear={() => setSelected(new Set())} />}
+    {dialog && <BulkDialog action={dialog} rows={selectedRows} pending={bulk.isPending} error={bulk.isError ? bulk.error.message : null}
+      onSubmit={(reason) => submit(dialog, reason)} onClose={() => setDialog(null)} />}
+
+    {list.isError ? <div role="alert" className="panel" style={{ padding: 24, borderRadius: 14 }}>
+      <p style={{ margin: '0 0 8px', fontWeight: 600 }}>Couldn’t load observations</p>
+      <button className="ui-btn sm" onClick={() => { void list.refetch(); }}>Retry</button>
+    </div> : empty ? <div className="panel" style={{ padding: 24, borderRadius: 14 }} data-empty>
+      <p style={{ margin: '0 0 6px', fontWeight: 600 }}>{q ? `No observations match “${q}”.` : unresolvedView ? 'Nothing needs you right now' : 'No observations in this view.'}</p>
+      {!q && unresolvedView && <p style={{ margin: '0 0 8px', fontSize: 12.5, color: 'var(--app-t2)' }}>Unresolved observations leave the active view after 30 days without a sighting.</p>}
+      {q ? <button className="ui-btn sm" onClick={clearSearch}>Clear search</button>
+        : suggestion && counts && <button className="ui-btn sm" onClick={() => pickChip(suggestion)}>Show {chipLabel(suggestion)} ({counts[suggestion]})</button>}
+    </div> : <>
+      <ObservationTable rows={rows} pinned={pinned} loading={list.isPending} canDecide={canDecide} selectable selected={selected}
+        onToggle={toggle} onToggleAll={toggleAll} sort={sort} onSort={pickSort} failures={failures} skeletonRows={Math.min(pageSize, 8)} />
+      {list.data && <nav aria-label="Observation pages" style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 16, fontSize: 12.5 }}>
+        <button className="ui-btn sm" disabled={page === 1} onClick={() => turnPage(page - 1)}>Previous</button>
+        <span>Page {page} · {total} observations</span>
+        <button className="ui-btn sm" disabled={page * pageSize >= total} onClick={() => turnPage(page + 1)}>Next</button>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>Rows per page
+          <select className="ui-input" style={{ width: 80, marginTop: 0 }} value={pageSize} onChange={(e) => pickPageSize(Number(e.target.value))}>
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+      </nav>}
     </>}
   </section>;
 }

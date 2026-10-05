@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	database "github.com/vistasecurity/vistaplatform/shared/database"
+	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
@@ -18,10 +19,46 @@ import (
 // assignment share one tenant transaction, with settings locked before job or
 // asset rows. Paused work stays pending and does not block other tenants' work.
 func (s *JobQueueService) claimAuthorizedJob(ctx context.Context, agent, tenant *uuid.UUID) (*models.DeviceJob, error) {
-	predicate := `(job_type='cloud_discovery' OR (job_type='device_interrogation' AND agent_id IS NULL))`
+	return s.claimAuthorizedJobFor(ctx, agent, tenant, nil)
+}
+
+// platformClaimPredicate is what the in-cluster platform worker may claim.
+//
+// device_discovery is deliberately absent ( slice B). A discovery job is
+// created already assigned to the agent the operator named, and
+// valid_job_assignment refuses one without an agent, so the worker has nothing
+// to gain from looking — and naming the type here would make the worker the
+// second executor of a job only one agent can reach.
+const platformClaimPredicate = `(job_type='cloud_discovery' OR (job_type='device_interrogation' AND agent_id IS NULL))`
+
+// agentClaimPredicate is what a device agent may claim: its tenant's
+// unassigned interrogations (unless a refresh pinned them to the platform) and
+// the interrogations assigned to it — the race with the platform worker over
+// unassigned device_interrogation rows is unchanged.
+//
+// agentDiscoveryClaimArm widens it ONLY by device_discovery jobs ASSIGNED TO
+// THIS AGENT, and only for an agent that declared it can run them
+// (di.CapabilityDeviceDiscovery). Never an unassigned one: there are none, by
+// the CHECK above, and an agent-assigned job has exactly one possible executor.
+// An agent that predates the job type sends no capability and is never handed
+// one it would answer with "unknown job type" and strand in_progress.
+const (
+	agentClaimPredicate    = `tenant_id=$1 AND ((job_type='device_interrogation' AND (agent_id=$2 OR (agent_id IS NULL AND COALESCE(parameters->>'identity_refresh_executor','')<>'platform')))%s)`
+	agentDiscoveryClaimArm = ` OR (job_type='device_discovery' AND agent_id=$2)`
+)
+
+// claimAuthorizedJobFor is claimAuthorizedJob for an agent that declared
+// capabilities beyond device_interrogation. caps is ignored for the platform
+// worker (agent == nil).
+func (s *JobQueueService) claimAuthorizedJobFor(ctx context.Context, agent, tenant *uuid.UUID, caps map[string]bool) (*models.DeviceJob, error) {
+	predicate := platformClaimPredicate
 	args := []interface{}{}
 	if agent != nil {
-		predicate = `tenant_id=$1 AND job_type='device_interrogation' AND (agent_id=$2 OR (agent_id IS NULL AND COALESCE(parameters->>'identity_refresh_executor','')<>'platform'))`
+		extra := ""
+		if caps[di.CapabilityDeviceDiscovery] {
+			extra = agentDiscoveryClaimArm
+		}
+		predicate = fmt.Sprintf(agentClaimPredicate, extra)
 		args = []interface{}{*tenant, *agent}
 	}
 	// A job of a tenant that is no longer usable — suspended, canceled or

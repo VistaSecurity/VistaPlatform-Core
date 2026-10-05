@@ -2,6 +2,8 @@ package models
 
 import (
 	"time"
+
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 )
 
 // CreateDiscoveryJobInput represents input for creating a discovery job
@@ -21,6 +23,28 @@ type CreateDiscoveryJobInput struct {
 	// the tenant's registered networks ( W5.13b). Forwarded verbatim;
 	// cluster-sensor-service decides what it permits.
 	ExternalTargetsConfirmed bool `json:"external_targets_confirmed,omitempty"`
+	// SNICandidates maps a single-address target to the names its asset is
+	// known by, offered as SNI to a TLS port that refuses a nameless handshake.
+	// Set by the platform's own scan builders (Active Scan, the automatic
+	// sweep), never taken from a client: the discovery handler clears it.
+	// Forwarded verbatim; cluster-sensor-service validates and bounds it.
+	SNICandidates map[string][]string `json:"sni_candidates,omitempty"`
+	// OTProbeProtocols is the explicit per-job OT/ICS opt-in (Modbus, OPC_UA,
+	// EtherNet_IP, BACnet). Forwarded verbatim; cluster-sensor-service
+	// canonicalises it, honours the ot_active_probing switch and records it.
+	OTProbeProtocols []string `json:"ot_probe_protocols,omitempty"`
+	// The scan-plan fields ( WP3) — see shared/discovery.ResolveJobRequest.
+	// Forwarded verbatim; cluster-sensor-service plans the job from them.
+	ScanDepth string `json:"scan_depth,omitempty"`
+	TCPPorts  string `json:"tcp_ports,omitempty"`
+	UDPPorts  string `json:"udp_ports,omitempty"`
+	Pace      string `json:"pace,omitempty"`
+	RunFrom   string `json:"run_from,omitempty"`
+	SensorID  string `json:"sensor_id,omitempty"`
+	// DryRun previews the plan and a time estimate and creates nothing
+	// ( WP3b). Forwarded; cluster-sensor-service answers it. Scan-plan
+	// shape only.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // DiscoveryJob represents a discovery job
@@ -48,6 +72,10 @@ type DiscoveryJob struct {
 	// registered networks and the addresses each named ( W5.13b), set
 	// on the create response only.
 	ExternalTargets []ExternalScanTarget `json:"external_targets,omitempty"`
+	// Plan is what cluster-sensor-service decided a scan-plan job does
+	// ( WP3). Carried through on the create response; nil for a legacy
+	// protocols × ports job.
+	Plan *shareddisc.ScanPlan `json:"plan,omitempty"`
 }
 
 // ExternalScanTarget mirrors cluster-sensor-service's shape.

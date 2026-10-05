@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -67,16 +68,27 @@ func boundSSHBanner(s string) string {
 // common with the server, so a legacy-only appliance that pass 2 cannot
 // handshake with is still fully inventoried, and a pass-2 failure no longer
 // costs the whole finding. The hostname argument is unused for SSH.
+//
+// It is the registry entry: the further connections go straight to the address
+// conn reached. A caller with its own dialer uses ProbeSSHEndpoint, which hands
+// probeSSHConn that dialer.
 func probeSSH(p *Prober, conn net.Conn, _ string, port int) (*ProbeResult, error) {
-	address := conn.RemoteAddr().String()
-	kex, kexErr := sshprobeKexInit(p, address)
+	return probeSSHConn(context.Background(), p, conn, conn.RemoteAddr().String(), port, nil)
+}
+
+// probeSSHConn is the one SSH probe every shared caller runs, over conn (the
+// handshake pass). The KEXINIT pass and the banner-only fallback open their own
+// connections to address through dial (nil means a plain net.Dialer), so a
+// caller's guard sees every connection the probe makes.
+func probeSSHConn(ctx context.Context, p *Prober, conn net.Conn, address string, port int, dial ContextDialFunc) (*ProbeResult, error) {
+	kex, kexErr := sshprobeKexInit(ctx, p, dial, address)
 
 	// The banner-only fallback is worth a third connection only when the
 	// KEXINIT pass failed. It reads the identification string with no
 	// knowledge of what follows it, whereas the KEXINIT pass has already
 	// parsed that line structurally — so when the KEXINIT pass succeeded, the
 	// fallback can only produce a worse answer for the one field it supplies.
-	result, err := sshprobeHandshake(p, conn, port, kexErr != nil)
+	result, err := sshprobeHandshake(ctx, p, conn, address, port, dial, kexErr != nil)
 	if err != nil {
 		if kexErr != nil {
 			return nil, err
@@ -181,7 +193,7 @@ func applySSHKexInit(result *ProbeResult, kex *sshKexInitCapture) {
 // golang.org/x/crypto/ssh to capture the server banner, the host key type and
 // its SHA256 fingerprint. The connection is closed immediately after kex; no
 // authentication is attempted.
-func sshprobeHandshake(p *Prober, conn net.Conn, port int, allowBannerFallback bool) (*ProbeResult, error) {
+func sshprobeHandshake(ctx context.Context, p *Prober, conn net.Conn, address string, port int, dial ContextDialFunc, allowBannerFallback bool) (*ProbeResult, error) {
 	if err := conn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
 		return nil, fmt.Errorf("failed to set SSH probe deadline: %w", err)
 	}
@@ -239,7 +251,6 @@ func sshprobeHandshake(p *Prober, conn net.Conn, port int, allowBannerFallback b
 	// NewClientConn performs the version exchange and key exchange.
 	// It will fail at authentication (no auth methods), but by then
 	// we have all the kex data we need.
-	address := conn.RemoteAddr().String()
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, sshCfg)
 	if err != nil {
 		// Authentication failure is expected and acceptable — kex already succeeded.
@@ -249,7 +260,7 @@ func sshprobeHandshake(p *Prober, conn net.Conn, port int, allowBannerFallback b
 			// NewClientConn has already consumed the version banner from this
 			// stream AND closed conn on its way out, so the fallback must open
 			// a fresh connection — a read on conn here can only ever fail.
-			return sshprobeBannerOnly(p, address, port)
+			return sshprobeBannerOnly(ctx, p, dial, address, port)
 		}
 	}
 	if sshConn != nil {
@@ -318,8 +329,8 @@ func sshprobeShouldFallbackToBanner(err error, hasSSHConn bool, hostKeyCaptured 
 // nothing left to read and cannot be read anyway. This is the plain read the
 // bound on the banner exists for — it is not parsing the RFC 4253 version
 // structure, it is taking whatever bytes the remote sends first.
-func sshprobeBannerOnly(p *Prober, address string, port int) (*ProbeResult, error) {
-	conn, err := net.DialTimeout("tcp", address, p.timeout)
+func sshprobeBannerOnly(ctx context.Context, p *Prober, dial ContextDialFunc, address string, port int) (*ProbeResult, error) {
+	conn, err := sshDial(ctx, p, dial, address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect for SSH banner: %w", err)
 	}

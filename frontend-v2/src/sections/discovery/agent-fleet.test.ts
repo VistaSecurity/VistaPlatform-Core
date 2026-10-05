@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary, isPlatformInterrogationAgent, partitionSensorFleet } from './agent-fleet';
+import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManaged, hostInventorySummary, isPlatformInterrogationAgent, partitionSensorFleet, needsScanEngineUpgrade } from './agent-fleet';
 
 // A discovery agent used to be rendered through the sensor table, which had no
 // column for any of this — so every one of these values existed in the database
@@ -311,5 +311,22 @@ describe('partitionSensorFleet', () => {
 
   it('handles an empty fleet without inventing rows', () => {
     expect(partitionSensorFleet([])).toEqual({ sensors: [], interrogationAgents: [] });
+  });
+});
+
+describe('needsScanEngineUpgrade', () => {
+  it('flags a tenant sensor that does not report scan_plan_v1', () => {
+    expect(needsScanEngineUpgrade({ platform: 'linux', tags: ['edge'], status: 'active', reported_capabilities: ['identity_dns_v1'] })).toBe(true);
+    expect(needsScanEngineUpgrade({ platform: 'windows', status: 'active', reported_capabilities: null })).toBe(true);
+  });
+  it('does not flag one that does', () => {
+    expect(needsScanEngineUpgrade({ platform: 'linux', status: 'active', reported_capabilities: ['scan_plan_v1'] })).toBe(false);
+  });
+  it('never flags a platform-managed sensor, by either marker', () => {
+    expect(needsScanEngineUpgrade({ platform: 'platform', status: 'active', reported_capabilities: [] })).toBe(false);
+    expect(needsScanEngineUpgrade({ platform: 'linux', tags: ['system'], status: 'active' })).toBe(false);
+  });
+  it('does not flag a sensor that has not enrolled yet', () => {
+    expect(needsScanEngineUpgrade({ platform: 'linux', status: 'pending' })).toBe(false);
   });
 });

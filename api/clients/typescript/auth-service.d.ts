@@ -117,7 +117,9 @@ export interface paths {
          *
          *     `seams` carries one row per AI seam (ADR-0008 D1), with the deterministic behaviour that answers when no model does. `live` means something can actually answer through the seam here: for a classical seam that a deterministic implementation ships; for a generative one that this build links the Enterprise providers AND `AI_PROVIDER` names a reachable one. A seam no edition implements yet reports `live: false` whatever the provider says.
          *
-         *     **No credential and no endpoint ever crosses.** `provider_name` is the provider KIND; the base URL and the name of the variable holding the API key are deliberately absent, and `ai.ProviderConfig` has no key field at all.
+         *     The provider half is **per tenant**. `provider_source` says whose provider answers for the caller's organization: `tenant` (it connected its own — see `PUT /tenant/ai/provider`), `deployment` (whoever runs the deployment set one) or `none`. A tenant's own provider wins while the tenant is permitted one (`tenant_provider_allowed`).
+         *
+         *     **No credential ever crosses, and the deployment's endpoint never does.** `provider_name` is the provider KIND. For the deployment's provider the base URL and the name of the variable holding the API key are deliberately absent. For a provider the tenant connected itself, `tenant_provider` carries the endpoint's HOST (never the path) and the last four characters of the key, which is all that is stored in clear.
          */
         get: operations["getTenantAISettings"];
         /**
@@ -130,6 +132,58 @@ export interface paths {
          */
         put: operations["updateTenantAISettings"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tenant/ai/provider": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Connect (or change) the tenant's own model provider
+         * @description Stores a model provider for the calling organization, which then answers its generative capabilities in place of the deployment's. Requires `settings.update`.
+         *
+         *     The API key is stored encrypted under the deployment's master key and is never returned. Omit `api_key` to keep the stored one — permitted only when `kind` and `base_url` are unchanged; a changed endpoint needs the key again, so an editor cannot repoint the endpoint and have a credential they were never shown delivered to it. Send `""` for an endpoint that needs no key.
+         *
+         *     A tenant cannot allow itself a private or in-cluster address: that is one switch held by whoever runs the deployment.
+         *
+         *     Returns the same body as `GET /tenant/ai`.
+         */
+        put: operations["putTenantAIProvider"];
+        post?: never;
+        /**
+         * Disconnect the tenant's own model provider
+         * @description Removes the organization's provider and its stored credential. The deployment's provider, if there is one, answers from then on. Requires `settings.update`, and nothing else: disconnecting stays possible after a plan change removed the capability, so a credential is never stranded. Deleting when none is stored is not an error. Returns the same body as `GET /tenant/ai`.
+         */
+        delete: operations["deleteTenantAIProvider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tenant/ai/provider/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a provider configuration without saving it
+         * @description Sends one short prompt ("Reply with the single word OK") to the configuration in the request — which need not have been saved — through the same redaction and audit boundary every generative call uses. It carries no tenant data. Requires `settings.update`, and is refused with 409 while the organization's AI assistant is turned off.
+         *
+         *     A provider that could not be reached is a **200 with `ok: false`**: the request succeeded, the connection did not.
+         */
+        post: operations["testTenantAIProvider"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1870,6 +1924,23 @@ export interface components {
         };
         /** @description The deployment's AI status plus the calling tenant's own controls. Response body of both `GET` and `PUT /tenant/ai`. */
         TenantAIStatus: {
+            /**
+             * @description Whose provider answers for the calling organization: one it connected itself, the one whoever runs the deployment set (in admin-ui or at install — a tenant has no use for the difference), or none.
+             * @enum {string}
+             */
+            provider_source: "tenant" | "deployment" | "none";
+            /** @description Present when a provider IS configured for this tenant but cannot be used, as a sentence a reader can act on. A classification, never the underlying error text. */
+            provider_problem?: string;
+            /** @description The provider kinds this build can connect to. Empty in Core, which is how a client knows not to offer the connect form. */
+            provider_kinds: ("anthropic" | "openai_compat")[];
+            /** @description Whether this organization may connect a provider of its own. */
+            tenant_provider_allowed: boolean;
+            /**
+             * @description Who decided, when `tenant_provider_allowed` is false in a build that has the model clients: the organization's plan, or whoever runs the deployment. Absent in Core, where the edition is the whole answer.
+             * @enum {string}
+             */
+            tenant_provider_blocked_by?: "plan" | "deployment";
+            tenant_provider?: components["schemas"]["TenantAIProvider"];
             /** @description A model endpoint is configured AND this build can construct it. False in Core even when `AI_PROVIDER` names one — a Core build has no provider implementations, which is the honest answer and a different one from "nobody configured anything". */
             provider_configured: boolean;
             /**
@@ -1912,6 +1983,37 @@ export interface components {
             /** @description READ-ONLY, and NOT a tenant decision: the interim, deployment-wide disable of custom-policy authoring. Reported here so the page can give one honest list of what is switched off; `PUT` ignores it. */
             authoring_disabled: boolean;
         };
+        /** @description The provider this organization has stored — whether or not it is the one in effect (`provider_source` says). Absent when it has none. */
+        TenantAIProvider: {
+            /** @enum {string} */
+            kind: "anthropic" | "openai_compat";
+            /** @description The endpoint's host. Never the path or query. Absent when the provider's public default is used. */
+            host?: string;
+            model?: string;
+            has_key: boolean;
+            /** @description The last four characters of the stored API key. */
+            api_key_hint?: string;
+        };
+        TenantAIProviderUpdate: {
+            /** @enum {string} */
+            kind: "anthropic" | "openai_compat";
+            /** @description Optional for `anthropic`; required for `openai_compat`. */
+            base_url?: string;
+            /** @description Optional for `anthropic`; required for `openai_compat`. */
+            model?: string;
+            /** @description Write-only. Omit to keep the stored key (same `kind` and `base_url` only); send `""` for an endpoint that needs none. */
+            api_key?: string;
+        };
+        TenantAIProviderTestResult: {
+            ok: boolean;
+            /** @description The model that answered. */
+            model_id?: string;
+            latency_ms?: number;
+            /** @enum {string} */
+            reason?: "unauthorized" | "unreachable" | "private_endpoint" | "rate_limited" | "error";
+            /** @description The sentence to show. */
+            message?: string;
+        };
         /** @description The writable half. Both fields optional; an omitted one is left unchanged. At least one must be present. */
         TenantAIControlsUpdate: {
             assistant_disabled?: boolean;
@@ -1937,6 +2039,8 @@ export interface components {
             cmdb_sync: boolean;
             /** @description Tenant may connect a NetBox network source of truth and pull its sites, prefixes, VLANs, device types and devices, and see the drift between NetBox and discovered inventory. Pull only: the platform never writes to NetBox. */
             connector_netbox: boolean;
+            /** @description Tenant may connect its own AI model provider from Settings → AI assistant instead of using the one the deployment provides. */
+            ai_tenant_provider: boolean;
             /** @description Tenant may forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook). */
             siem_export: boolean;
             /** @description Tenant-facing self-service billing — subscription, invoices, plan change and the payment portal (admin-service `/my-billing/**`). Core mounts none of it; usage-against-limits stays unconditional. */
@@ -2982,6 +3086,121 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putTenantAIProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantAIProviderUpdate"];
+            };
+        };
+        responses: {
+            /** @description The saved provider, as the status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantAIStatus"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description This build has no model clients (Vista Platform Core), or the tenant's plan does not include connecting its own provider. */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            403: components["responses"]["LegacyForbidden"];
+            /** @description The deployment has no encryption key, so a credential cannot be stored; or the saved key can no longer be read and must be entered again. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    deleteTenantAIProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The status after disconnecting. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantAIStatus"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    testTenantAIProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantAIProviderUpdate"];
+            };
+        };
+        responses: {
+            /** @description The outcome of the test. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantAIProviderTestResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description Core build, or the plan does not include it. */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            403: components["responses"]["LegacyForbidden"];
+            /** @description The AI assistant is turned off for this organization, or the saved key cannot be read. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };

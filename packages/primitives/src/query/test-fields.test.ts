@@ -48,7 +48,7 @@ const SPEC_FIELDS: Record<string, string[]> = {
     'status', 'ownership', 'stale_status', 'identity_status', 'source', 'proposed_by',
     'risk', 'risk_score', 'risk_assessed_by',
     'confidence_score', 'class_confidence',
-    'first_seen', 'last_seen', 'created_at', 'updated_at',
+    'first_seen', 'last_seen', 'last_scanned', 'created_at', 'updated_at',
     'segment_id', 'location_id', 'id',
   ],
   endpoint: [

@@ -125,3 +125,67 @@ func TestIntegration_SegmentPlacement(t *testing.T) {
 		})
 	}
 }
+
+// TestIntegration_InheritSegmentLocation: placement from the segment the asset
+// is ALREADY in, never from anywhere else. An asset in a located segment with
+// no placement takes the segment's location and site (with history); one with
+// no segment, or in a segment without a location, gets nothing; a disagreeing
+// site is kept.
+//
+// MUTATION: drop the a.network_segment_id fallback from projectSegmentLocation's
+// segment join and "fill" goes red; drop its disagreeing-site guard and
+// "curated" is overwritten.
+func TestIntegration_InheritSegmentLocation(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+	tenant := testdb.NewTenant(t, db).String()
+	repo := pgrepo.New(db)
+	ctx := context.Background()
+	location, located, bare := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err := db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'South','site')`, location, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'South','cidr','198.18.0.0/24','production',$3)`, located, tenant, location); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Bare','cidr','198.18.1.0/24','production')`, bare, tenant); err != nil {
+		t.Fatal(err)
+	}
+	source := identity.Source{Kind: identity.SourceMeasured, Ref: "inherit-test"}
+	for _, tc := range []struct {
+		name, segment, site string
+		wantSite, wantLoc   string
+	}{
+		{name: "fill", segment: located, wantSite: "South", wantLoc: location},
+		{name: "unsegmented", segment: ""},
+		{name: "segment-without-location", segment: bare},
+		{name: "curated", segment: located, site: "Curated", wantSite: "Curated"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref, err := repo.CreateAsset(ctx, tenant, identity.NewAsset{ClassKey: "server", Hostname: "inherit-" + tc.name, NetworkSegment: tc.segment, Source: source})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`UPDATE assets SET site=NULLIF($2,'') WHERE id=$1`, ref.ID, tc.site); err != nil {
+				t.Fatal(err)
+			}
+			if err := repo.InheritSegmentLocation(ctx, ref, source); err != nil {
+				t.Fatal(err)
+			}
+			var site, loc string
+			var n int
+			if err = db.QueryRow(`SELECT coalesce(site,''),coalesce(location_id::text,'') FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc); err != nil {
+				t.Fatal(err)
+			}
+			if site != tc.wantSite || loc != tc.wantLoc {
+				t.Fatalf("placement (%q, %s), want (%q, %s)", site, loc, tc.wantSite, tc.wantLoc)
+			}
+			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json ? 'location_id' AND changes_json->>'network_segment_id'=$2`, ref.ID, located).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.wantLoc != ""]; n != want {
+				t.Fatalf("history %d want %d", n, want)
+			}
+		})
+	}
+}

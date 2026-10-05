@@ -1,20 +1,30 @@
-// Discover Assets wizard — the "scan targets for crypto assets" flow, on the
-// contracted inventory-service /discovery/* endpoints (POST /discovery/jobs →
-// poll GET /discovery/jobs/{id} → GET .../results). Composes the shared Modal
-// primitive.
+// Discover Assets — "find everything on this host or network" ( WP4a).
+// Discovery → Discover assets (the Command Center) opens it. Configure →
+// preview → start → "started, track it in Discovery Jobs", on
+// inventory-service's POST /discovery/jobs.
 //
-// There is deliberately NO import step. Findings reach inventory server-side:
-// cluster-sensor mirrors every job's findings into the same ingestion queue the
-// sensors feed, and the pipeline evaluates the tenant's segment auto-approval
-// rules. The wizard reports where they landed; it does not decide it.
+// - No protocol is picked: the person chooses a scan DEPTH and services are
+//   identified from what answers. Ports are Custom's business, under Advanced,
+//   parsed exactly as the platform parses them (discover-port-spec.ts, H8).
+// - The preview is the same request with `dry_run: true`: the server's own
+//   plan (per-target depth, where it runs and why) and a duration RANGE.
+//   Debounced, stale requests cancelled, and never in the way of Start.
+// - Starting hands the scan to the platform and stops there. The dialog does
+//   not poll: progress, results and Cancel live on Discovery → Discovery Jobs,
+//   and the dialog can be closed at any moment without affecting the scan.
+//
+// There is deliberately NO import step. Findings reach inventory server-side,
+// through the same ingestion queue the sensors feed, and the pipeline applies
+// the tenant's segment auto-approval rules.
 import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { inventoryComponents } from '@vistasecurity/api-contract';
+import { useFeature } from '@vistasecurity/primitives/features';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
-import { describeMaterialization, type Materialization } from './discover-summary';
+import { useSensors } from './queries';
+import { shortId } from './kit';
+import { AUTO, PLATFORM, runFromOptions } from './active-scan-run-from';
 import {
   DISABLED_EXPLANATION,
   TargetVerdictError,
@@ -23,508 +33,378 @@ import {
   targetVerdict,
   type TargetVerdict,
 } from './discover-targets';
+import {
+  DEPTHS,
+  OT_PROTOCOLS,
+  PACES,
+  asCreatedJob,
+  asPreview,
+  buildJobRequest,
+  checkForm,
+  depthLabel,
+  describeAdjustments,
+  describeEstimate,
+  describeExecutor,
+  describeSize,
+  initialForm,
+  loadRememberedChoice,
+  paceLabel,
+  saveRememberedChoice,
+  type CreateDiscoveryJobRequest,
+  type DiscoverForm,
+  type DiscoveryJob,
+  type DiscoveryJobPreview,
+} from './discover-plan';
 
-// ─── Finding detail helpers ───────────────────────────────────────────────────
+/** How long the form must sit still before it is previewed. */
+export const PREVIEW_DEBOUNCE_MS = 500;
 
-type RawData = Record<string, unknown>;
+// 'confirm-external' is the "outside your registered networks" question.
+// 'started' is terminal: the scan is the platform's now.
+type Phase = 'configure' | 'confirm-external' | 'started';
 
-interface CertInfo {
-  subject_dn?: string;
-  issuer_dn?: string;
-  subject?: string;
-  issuer?: string;
-  serial_number?: string;
-  not_before?: string;
-  not_after?: string;
-  fingerprint_sha256?: string;
-  key_algorithm?: string;
-  signature_alg?: string;
-  subject_alternative_names?: string[];
-  is_self_signed?: boolean;
-  chain_order?: number;
-  cert_is_ev?: boolean;
-  ocsp_status?: string;
-}
+// How many targets a list shows before summarising.
+const LIST_MAX = 20;
 
-function fmtDate(iso: string | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-}
+// Refusals the server will give a real create too: Start is not offered for
+// a request the preview already knows it will refuse.
+const DEFINITIVE = new Set<TargetVerdict['kind']>(['refused', 'too_large', 'disabled', 'budget', 'sensor_unsupported']);
 
-function expiryColor(iso: string | undefined): string {
-  if (!iso) return 'var(--app-t3)';
-  const days = (new Date(iso).getTime() - Date.now()) / 86_400_000;
-  if (days < 0) return 'var(--danger-text)';
-  if (days < 30) return 'var(--warn)';
-  return 'var(--app-ok)';
-}
-
-function cnFrom(dn: string | undefined): string {
-  if (!dn) return '—';
-  const m = dn.match(/CN=([^,]+)/i);
-  return m ? m[1].trim() : dn;
-}
-
-function FindingDetail({ f }: { f: DiscoveryFinding }) {
-  const raw = (f as unknown as { data?: RawData }).data ?? {};
-  const certs = (raw.certificates as CertInfo[] | undefined) ?? [];
-  const leaf = certs.find((c) => c.chain_order === 0) ?? certs[0];
-  const sans: string[] = leaf?.subject_alternative_names?.slice(0, 6) ?? [];
-  const keyInfo = [leaf?.key_algorithm, raw.key_size != null ? `${raw.key_size}-bit` : null].filter(Boolean).join(' ');
-  const fingerprint = (leaf?.fingerprint_sha256 as string | undefined) ?? '';
-
-  const [certModalOpen, setCertModalOpen] = useState(false);
-
-  const kv = (label: string, value: React.ReactNode, mono = false) => (
-    <div style={{ display: 'flex', gap: 8, padding: '3px 0' }}>
-      <span style={{ fontSize: 11, color: 'var(--app-t3)', width: 110, flexShrink: 0 }}>{label}</span>
-      <span style={{ fontSize: 11, color: 'var(--app-t1)', fontFamily: mono ? 'var(--font-mono)' : undefined, wordBreak: 'break-all' }}>{value ?? '—'}</span>
-    </div>
-  );
-
-  if (!leaf && !raw.cipher_suite) {
-    return <div style={{ padding: '8px 0', fontSize: 11, color: 'var(--app-t3)' }}>No detail data returned for this finding.</div>;
+// What a dry run answered when it did not answer with a preview. A dry run
+// goes through the same checks and the same error mapping as a real create,
+// so a 4xx is the answer Start would get (an offline sensor's 409, a field the
+// server rejects) — a refusal, in the server's words. Only no answer, a 5xx or
+// the tenant's rate limit is "couldn't estimate", which never holds Start.
+class PreviewAnswer extends Error {
+  constructor(readonly verdict: TargetVerdict, readonly status: number) {
+    super(verdict.message);
+    this.name = 'PreviewAnswer';
   }
+}
+const refusedByServer = (status: number) => status >= 400 && status < 500 && status !== 429;
 
-  return (
-    <>
-      {certModalOpen && leaf && (
-        <DiscoveryCertModal certs={certs} data={raw} onClose={() => setCertModalOpen(false)} />
-      )}
-      <div style={{ padding: '10px 0 4px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
-        {/* Left: certificate */}
-        <div>
-          {leaf && (
-            <>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--app-t3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Certificate</div>
-                <button
-                  onClick={() => setCertModalOpen(true)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10.5, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px' }}
-                >
-                  <Icon name="file-badge" size={11} />
-                  View full cert
-                </button>
-              </div>
-              {kv('Subject', cnFrom(leaf.subject ?? leaf.subject_dn))}
-              {kv('Issuer', cnFrom(leaf.issuer ?? leaf.issuer_dn))}
-              {leaf.not_after && kv(
-                'Expires',
-                <span style={{ color: expiryColor(leaf.not_after) }}>{fmtDate(leaf.not_after)}</span>,
-              )}
-              {kv('Valid from', fmtDate(leaf.not_before))}
-              {leaf.is_self_signed && kv('', <span style={{ color: 'var(--warn)', fontSize: 10 }}>⚠ Self-signed</span>)}
-              {leaf.cert_is_ev && kv('', <span style={{ color: 'var(--app-ok)', fontSize: 10 }}>✓ Extended Validation</span>)}
-              {leaf.ocsp_status && leaf.ocsp_status !== 'good' && kv('OCSP', <span style={{ color: 'var(--warn)' }}>{leaf.ocsp_status}</span>)}
-              {sans.length > 0 && kv('SANs', sans.join(', '))}
-              {fingerprint && kv('SHA-256', fingerprint.slice(0, 16) + '…', true)}
-            </>
-          )}
-        </div>
-        {/* Right: cipher / TLS */}
-        <div>
-          <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--app-t3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>Crypto</div>
-          {kv('Protocol', [f.protocol, f.protocol_version].filter(Boolean).join(' '))}
-          {!!raw.cipher_suite && kv('Cipher suite', raw.cipher_suite as string, true)}
-          {!!raw.key_exchange_algorithm && kv('Key exchange', raw.key_exchange_algorithm as string)}
-          {keyInfo && kv('Key', keyInfo)}
-          {!!raw.hash_algorithm && kv('Hash', raw.hash_algorithm as string)}
-          {leaf?.signature_alg && kv('Signature', leaf.signature_alg)}
-          {(raw.supported_tls_versions as string[] | undefined)?.length ? kv('Supported TLS', (raw.supported_tls_versions as string[]).join(', ')) : null}
-        </div>
-      </div>
-    </>
-  );
+type PreviewView =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'ready'; preview: DiscoveryJobPreview }
+  | { kind: 'empty' }
+  | { kind: 'refused'; verdict: TargetVerdict }
+  | { kind: 'failed'; message: string };
+
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
 }
 
-// ─── Discovery cert preview modal ────────────────────────────────────────────
-// Renders a full certificate detail view from raw finding data (no API lookup
-// needed — all fields come from the TLS prober's certInfoToMap output).
-
-interface RawCert {
-  subject?: string;
-  issuer?: string;
-  serial_number?: string;
-  not_before?: string;
-  not_after?: string;
-  subject_alternative_names?: string[];
-  key_usage?: string[];
-  extended_key_usage?: string[];
-  public_key_algorithm?: string;
-  public_key_size?: number;
-  signature_algorithm?: string;
-  is_self_signed?: boolean;
-  is_ca?: boolean;
-  is_ca_certificate?: boolean;
-  chain_order?: number;
-  certificate_pem?: string;
-  fingerprint_sha256?: string;
-  fingerprint_sha1?: string;
-  certificate_state?: string;
+function browserStorage(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
 }
 
-function DiscoveryCertModal({ certs, data, onClose }: {
-  certs: RawCert[];
-  data: RawData;
-  onClose: () => void;
+const muted = { fontSize: 11.5, color: 'var(--app-t3)' } as const;
+const groupTitle = { fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 8, padding: 0 } as const;
+const fieldset = { border: 'none', margin: '0 0 15px', padding: 0, minWidth: 0 } as const;
+
+function ChoiceCard({ name, value, checked, onChange, label, description }: {
+  name: string; value: string; checked: boolean; onChange: () => void; label: string; description: string;
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  // Sort leaf → intermediates → root
-  const sorted = [...certs].sort((a, b) => (a.chain_order ?? 0) - (b.chain_order ?? 0));
-  const leaf = sorted[0];
-
-  const expDays = leaf?.not_after
-    ? Math.round((new Date(leaf.not_after).getTime() - Date.now()) / 86_400_000)
-    : null;
-  const expColor = expDays == null ? 'var(--app-t2)' : expDays < 0 ? 'var(--danger)' : expDays < 30 ? 'var(--warn)' : 'var(--ok)';
-
-  const [copied, setCopied] = useState(false);
-  const copyPem = () => {
-    if (leaf?.certificate_pem) {
-      navigator.clipboard.writeText(leaf.certificate_pem).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      });
-    }
-  };
-
-  // Row helper
-  const row = (label: string, value: React.ReactNode, mono = false) =>
-    value == null || value === '' ? null : (
-      <div style={{ display: 'flex', gap: 12, padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
-        <span style={{ fontSize: 12, color: 'var(--app-t3)', width: 130, flexShrink: 0 }}>{label}</span>
-        <span style={{ fontSize: 12, color: 'var(--app-t1)', fontFamily: mono ? 'var(--font-mono)' : undefined, wordBreak: 'break-all', lineHeight: 1.5 }}>{value}</span>
-      </div>
-    );
-
-  const section = (title: string, icon: string) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 7, margin: '18px 0 6px', color: 'var(--app-t3)' }}>
-      <Icon name={icon} size={12} />
-      <span style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em' }}>{title}</span>
-    </div>
-  );
-
-  return createPortal(
-    /* Overlay — rendered at document.body to escape the discover modal's stacking context */
-    <div
-      onClick={onClose}
-      style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 560, maxHeight: '85vh', background: 'var(--app-panel)', border: '1px solid var(--app-border2)', borderRadius: 14, display: 'flex', flexDirection: 'column', boxShadow: '0 24px 80px rgba(0,0,0,0.5)' }}
-      >
-        {/* Header */}
-        <div style={{ padding: '18px 22px 16px', borderBottom: '1px solid var(--app-border)', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-          <span style={{ flex: 'none', width: 36, height: 36, borderRadius: 9, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-gradient)', color: 'var(--accent-fg)' }}>
-            <Icon name="file-badge" size={18} />
-          </span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--app-t3)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 3 }}>Certificate preview</div>
-            <div className="mono" style={{ fontSize: 15, fontWeight: 600, color: 'var(--app-t1)', wordBreak: 'break-all', lineHeight: 1.3 }}>
-              {cnFrom(leaf?.subject)}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 5, flexWrap: 'wrap' }}>
-              {leaf?.certificate_state && (
-                <span style={{ fontSize: 11, fontWeight: 600, color: leaf.certificate_state === 'active' ? 'var(--ok)' : 'var(--danger)', background: leaf.certificate_state === 'active' ? 'color-mix(in srgb, var(--ok) 11%, transparent)' : 'color-mix(in srgb, var(--danger) 11%, transparent)', borderRadius: 40, padding: '2px 9px', textTransform: 'capitalize' }}>
-                  {leaf.certificate_state}
-                </span>
-              )}
-              {expDays != null && (
-                <span className="mono" style={{ fontSize: 11.5, color: expColor }}>
-                  {expDays < 0 ? `expired ${-expDays}d ago` : `expires in ${expDays}d`}
-                </span>
-              )}
-              {leaf?.is_self_signed && <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--warn-strong)', background: 'color-mix(in srgb, var(--warn-strong) 11%, transparent)', borderRadius: 40, padding: '2px 9px' }}>self-signed</span>}
-              {data.cert_is_ev === true && <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 11%, transparent)', borderRadius: 40, padding: '2px 9px' }}>EV</span>}
-            </div>
-          </div>
-          <button onClick={onClose} style={{ flex: 'none', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--app-t3)', padding: 4, borderRadius: 6, marginTop: -2 }}>
-            <Icon name="x" size={16} />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '4px 22px 24px' }}>
-
-          {section('Identity', 'file-badge')}
-          {row('Subject', leaf?.subject, true)}
-          {row('Issuer', leaf?.issuer, true)}
-          {row('Serial number', leaf?.serial_number, true)}
-          {(leaf?.subject_alternative_names?.length ?? 0) > 0 && (
-            <div style={{ padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
-              <div style={{ fontSize: 12, color: 'var(--app-t3)', marginBottom: 6 }}>Subject alternative names</div>
-              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                {leaf!.subject_alternative_names!.map((s) => (
-                  <span key={s} className="mono" style={{ fontSize: 11, color: 'var(--app-t2)', background: 'var(--app-panel2)', border: '1px solid var(--app-border)', borderRadius: 6, padding: '2px 7px' }}>{s}</span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {section('Validity', 'clock')}
-          {row('Not before', leaf?.not_before ? fmtDate(leaf.not_before) + ' · ' + leaf.not_before?.slice(0, 10) : null, true)}
-          {row('Not after', leaf?.not_after ? (
-            <span style={{ color: expColor }}>{fmtDate(leaf.not_after)} · {leaf.not_after?.slice(0, 10)}</span>
-          ) : null)}
-
-          {section('Key & signature', 'key-round')}
-          {row('Public key', leaf?.public_key_algorithm ? `${leaf.public_key_algorithm} · ${leaf.public_key_size ?? '?'}-bit` : null, true)}
-          {row('Signature', leaf?.signature_algorithm, true)}
-          {row('Key usage', leaf?.key_usage?.join(', '))}
-          {row('Extended usage', leaf?.extended_key_usage?.join(', '))}
-
-          {section('Trust & revocation', 'shield-check')}
-          {row('OCSP', (data.ocsp_status as string) || null)}
-          {row('OCSP detail', (data.ocsp_detail as string) || null)}
-          {data.cert_has_sct != null && row('CT logged (SCT)', data.cert_has_sct ? 'yes' : 'no')}
-          {data.cert_known_bad_ca === true && row('Known-bad CA', <span style={{ color: 'var(--danger)' }}>yes — do not trust</span>)}
-          {row('Is CA', leaf?.is_ca ? 'yes' : leaf?.is_ca === false ? 'no' : null)}
-
-          {/* Chain */}
-          {sorted.length > 1 && (
-            <>
-              {section('Certificate chain', 'link')}
-              <div style={{ padding: '6px 0' }}>
-                {sorted.map((c, i) => {
-                  const label = cnFrom(c.subject) || '—';
-                  const role = i === 0 ? 'leaf' : c.is_self_signed ? 'root' : 'intermediate';
-                  return (
-                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0 5px ' + (i * 16) + 'px' }}>
-                      {i > 0 && <span style={{ color: 'var(--app-t3)', fontSize: 11 }}>↳</span>}
-                      <Icon name={c.is_ca_certificate ? 'shield-check' : 'file-badge'} size={13} style={{ color: i === 0 ? 'var(--accent)' : 'var(--app-t3)', flexShrink: 0 }} />
-                      <span className="mono" style={{ fontSize: 12, color: 'var(--app-t1)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
-                      <span style={{ fontSize: 10, color: 'var(--app-t3)', textTransform: 'uppercase', letterSpacing: '.08em', flexShrink: 0 }}>{role}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </>
-          )}
-
-          {section('Fingerprints', 'fingerprint')}
-          {row('SHA-256', leaf?.fingerprint_sha256, true)}
-          {row('SHA-1', leaf?.fingerprint_sha1, true)}
-
-          {/* PEM */}
-          {leaf?.certificate_pem && (
-            <>
-              {section('PEM', 'code')}
-              <div style={{ position: 'relative' }}>
-                <pre style={{ background: 'var(--app-panel2)', border: '1px solid var(--app-border)', borderRadius: 8, padding: '10px 12px', fontSize: 10, color: 'var(--app-t2)', overflowX: 'auto', maxHeight: 140, margin: 0, lineHeight: 1.5 }}>
-                  {leaf.certificate_pem}
-                </pre>
-                <button
-                  onClick={copyPem}
-                  style={{ position: 'absolute', top: 6, right: 6, display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '3px 8px', background: 'var(--app-panel)', border: '1px solid var(--app-border2)', borderRadius: 6, cursor: 'pointer', color: copied ? 'var(--ok)' : 'var(--app-t2)' }}
-                >
-                  <Icon name={copied ? 'check' : 'copy'} size={11} />
-                  {copied ? 'Copied' : 'Copy PEM'}
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  , document.body);
-}
-
-type DiscoveryFinding = inventoryComponents['schemas']['DiscoveryFinding'];
-
-const PROTOCOLS = ['TLS', 'SSH'];
-// "Sensors — tenant-deployed" is not offered here. Dispatch to a tenant sensor
-// exists now and needs ONE named sensor per job; the wizard takes free
-// targets, and the place to choose the sensor for a host is Discovery → Active
-// Scan's "Run from", where the platform can also route by which sensor
-// observed the host. Adding a sensor picker to the wizard is a separate
-// decision, not an oversight.
-export const EXEC_MODES: { value: string; label: string }[] = [
-  { value: 'auto', label: 'Auto — platform decides' },
-  { value: 'cloud', label: 'Cloud — platform sensor' },
-];
-
-// Reports where a job's findings went. The wording is built by
-// describeMaterialization (pure, unit-tested) — see discover-summary.ts for why
-// the two numbers are reported separately.
-function MaterializationSummary({ count, m }: { count: number; m?: Materialization }) {
-  const tones: Record<string, string> = {
-    neutral: 'var(--app-t2)',
-    ok: 'var(--app-ok)',
-    warn: 'var(--warn)',
-    muted: 'var(--app-t3)',
-  };
-  const summary = describeMaterialization(count, m);
   return (
-    <div style={{ fontSize: 12.5, marginBottom: 10 }}>
-      <div>
-        {summary.parts.map((part, i) => (
-          <span key={i}>
-            {i > 0 && <span style={{ color: 'var(--app-t3)' }}> · </span>}
-            <span style={{ color: tones[part.tone] }}>{part.text}</span>
-          </span>
-        ))}
-      </div>
-      <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 4 }}>{summary.note}</div>
-      <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 4 }}>
-        Click any row to inspect certificate and cipher details.
-      </div>
-    </div>
+    <label
+      style={{
+        display: 'flex', gap: 9, alignItems: 'flex-start', padding: '9px 11px', borderRadius: 9, cursor: 'pointer',
+        border: `1px solid ${checked ? 'var(--accent)' : 'var(--app-border2)'}`,
+        background: checked ? 'color-mix(in srgb, var(--accent) 8%, transparent)' : 'var(--app-panel2)',
+      }}
+    >
+      <input type="radio" name={name} value={value} checked={checked} onChange={onChange} style={{ marginTop: 2 }} />
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--app-t1)' }}>{label}</span>
+        <span style={{ display: 'block', ...muted, marginTop: 2 }}>{description}</span>
+      </span>
+    </label>
   );
 }
 
-const TERMINAL = ['completed', 'success', 'failed', 'error', 'cancelled'];
+/** A refusal, in the server's own sentence, with the targets it names. */
+function VerdictNotice({ verdict, onRunFromPlatform }: { verdict: TargetVerdict; onRunFromPlatform?: () => void }) {
+  const box = (border: string, children: React.ReactNode, role: 'alert' | 'status' = 'alert') => (
+    <div role={role} style={{ padding: '10px 12px', borderRadius: 9, border: `1px solid ${border}`, fontSize: 12.5 }}>{children}</div>
+  );
+  switch (verdict.kind) {
+    case 'refused':
+      return box('var(--danger)', <>
+        <div style={{ fontWeight: 600, color: 'var(--danger-text)', marginBottom: 6 }}>
+          {verdict.refused.length === 1 ? 'This target can never be scanned:' : `These ${verdict.refused.length} targets can never be scanned:`}
+        </div>
+        <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--app-t2)' }}>
+          {verdict.refused.map((r) => <li key={r.target}><span className="mono">{r.target}</span> — {r.reason}</li>)}
+        </ul>
+        <div style={{ marginTop: 6, color: 'var(--app-t3)' }}>Remove them to scan the rest.</div>
+      </>);
+    case 'too_large':
+      return box('var(--danger)', <>
+        <div style={{ fontWeight: 600, color: 'var(--danger-text)', marginBottom: 6 }}>{verdict.message}</div>
+        {verdict.oversize.length > 0 && (
+          <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--app-t2)' }}>
+            {verdict.oversize.slice(0, LIST_MAX).map((t) => <li key={t.target}><span className="mono">{t.target}</span> — {t.addresses} addresses</li>)}
+          </ul>
+        )}
+      </>);
+    case 'budget':
+      return box('var(--danger)', <>
+        <div style={{ fontWeight: 600, color: 'var(--danger-text)', marginBottom: 6 }}>{verdict.message}</div>
+        {verdict.largest && (
+          <div style={{ color: 'var(--app-t2)' }}>
+            Largest: <span className="mono">{verdict.largest.target}</span> — {verdict.largest.addresses.toLocaleString('en-US')} addresses ×{' '}
+            {(verdict.largest.tcp_port_count + verdict.largest.udp_port_count).toLocaleString('en-US')} ports.
+          </div>
+        )}
+        <div style={{ marginTop: 6, color: 'var(--app-t3)' }}>Choose a lower depth, or split the targets across scans.</div>
+      </>);
+    case 'disabled':
+      return box('var(--warn)', <>
+        <div style={{ fontWeight: 600, color: 'var(--app-t1)', marginBottom: 6 }}>
+          {verdict.targets.length === 1 ? '1 target is' : `${verdict.targets.length} targets are`} outside your registered networks.
+        </div>
+        <div style={{ color: 'var(--app-t2)' }}>{DISABLED_EXPLANATION}</div>
+        {verdict.targets.length > 0 && (
+          <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: 'var(--app-t2)' }}>
+            {verdict.targets.slice(0, LIST_MAX).map((t) => <li key={t.target} className="mono">{t.target}</li>)}
+          </ul>
+        )}
+      </>);
+    case 'sensor_unsupported':
+      // The chosen sensor cannot run a scan by depth. The way out that
+      // needs nobody else is the platform sensor; offered, never switched to
+      // behind the person's back.
+      return box('var(--danger)', <>
+        <div style={{ color: 'var(--danger-text)', fontWeight: 600, marginBottom: 6 }}>{verdict.message}</div>
+        {onRunFromPlatform && (
+          <button type="button" className="ui-btn sm" onClick={onRunFromPlatform}>Run from the platform sensor instead</button>
+        )}
+      </>);
+    case 'error':
+      return box('var(--danger)', <>
+        <div style={{ fontWeight: 600, color: 'var(--danger-text)', marginBottom: 6 }}>This scan can&apos;t start as set up:</div>
+        <div style={{ color: 'var(--app-t2)' }}>{verdict.message}</div>
+      </>);
+    case 'plan_unavailable':
+      // Not the person's mistake and not an emergency: calm, not an alert.
+      return box('var(--app-border2)', <div style={{ color: 'var(--app-t2)' }}>{verdict.message}</div>, 'status');
+    default:
+      return null;
+  }
+}
 
-// 'confirm-external' is the "outside your registered networks" question: the
-// API answered 422 external_targets_unconfirmed and listed the targets.
-type Phase = 'configure' | 'confirm-external' | 'running' | 'results';
-
-// How many external targets the confirmation lists before summarising.
-const CONFIRM_LIST_MAX = 20;
+function PreviewPanel({ view, onRunFromPlatform }: { view: PreviewView; onRunFromPlatform: () => void }) {
+  const shell = (children: React.ReactNode, live = true) => (
+    // A fixed floor so the dialog does not jump as the preview arrives.
+    <div aria-live={live ? 'polite' : undefined} data-testid="discover-preview" style={{ minHeight: 92, marginBottom: 6 }}>
+      <div style={{ ...groupTitle }}>Preview</div>
+      {children}
+    </div>
+  );
+  switch (view.kind) {
+    case 'idle':
+      return shell(<div style={muted}>Enter targets to see how big this scan is, roughly how long it may take, and where it will run.</div>);
+    case 'loading':
+      return shell(<div role="status" style={muted}>Estimating…</div>);
+    case 'failed':
+      return shell(<div role="status" style={muted}>Couldn&apos;t estimate this scan{view.message ? ` (${view.message})` : ''}. You can still start it.</div>);
+    case 'empty':
+      return shell(<div role="status" style={{ fontSize: 12.5, color: 'var(--app-t2)' }}>Nothing to scan: these targets name no addresses.</div>);
+    case 'refused':
+      return shell(<VerdictNotice verdict={view.verdict} onRunFromPlatform={onRunFromPlatform} />, false);
+    case 'ready': {
+      const { plan, estimate, confirmation_required, external_targets } = view.preview;
+      const est = describeEstimate(estimate);
+      const exec = describeExecutor(plan);
+      const adj = describeAdjustments(plan);
+      return shell(
+        <div role="status" style={{ fontSize: 12.5, color: 'var(--app-t2)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div>{describeSize(plan, estimate)}</div>
+          <div><span style={{ color: 'var(--app-t1)', fontWeight: 600 }}>{est.duration}</span>{est.basis && <span style={muted}> — {est.basis}</span>}</div>
+          <div><span style={{ color: 'var(--app-t1)' }}>{exec.where}</span>{exec.why && <span style={muted}> — {exec.why}</span>}</div>
+          {adj && (
+            <div style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--warn)' }}>
+              <div style={{ color: 'var(--app-t1)' }}>{adj.headline}</div>
+              <ul className="mono" style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 11.5 }}>
+                {adj.targets.slice(0, LIST_MAX).map((t) => <li key={t.target} title={t.reason}>{t.target}</li>)}
+              </ul>
+              {adj.targets.length > LIST_MAX && <div style={muted}>and {adj.targets.length - LIST_MAX} more</div>}
+              {adj.registerHint && (
+                <div style={{ ...muted, marginTop: 4 }}>
+                  If a range is yours, register it under Settings → Infrastructure → Network Segments and it is scanned at the depth you choose.
+                </div>
+              )}
+            </div>
+          )}
+          {confirmation_required && external_targets.length > 0 && (
+            <div style={muted}>
+              {externalConfirmTitle(external_targets.length)} You will be asked to confirm when you start.
+            </div>
+          )}
+        </div>,
+      );
+    }
+  }
+}
 
 export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const nav = useNavigate();
+  // The tenant's OT off-switch (owner decision D1: on unless an administrator
+  // turned it off). Off → the OT control is not shown at all: spec §1 says it
+  // is absent, and useFeature reads false while loading, so a disabled
+  // "turned off by your administrator" control would also flash at every
+  // tenant whose switch is on.
+  const otAvailable = useFeature('ot_active_probing');
+  const sensorsQ = useSensors();
+  const fleet = runFromOptions(sensorsQ.data, { loading: sensorsQ.isLoading, error: sensorsQ.isError });
+  // Active Scan's control and states, with Auto worded for what Auto means for
+  // free targets: a sensor that serves them all, else the platform (D7).
+  const runFromChoices = fleet.options.map((o) => (o.value === AUTO ? { ...o, label: 'Auto — a sensor on those networks, else the platform sensor' } : o));
+
   const [phase, setPhase] = useState<Phase>('configure');
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [expandedSet, setExpandedSet] = useState<Set<number>>(new Set());
-
-  const toggleExpand = (i: number) =>
-    setExpandedSet((prev) => {
-      const next = new Set(prev);
-      if (next.has(i)) next.delete(i); else next.add(i);
-      return next;
-    });
-
-  // form
-  const [targets, setTargets] = useState('');
-  const [protocols, setProtocols] = useState<string[]>(['TLS']);
-  const [ports, setPorts] = useState('443, 22');
-  const [execMode, setExecMode] = useState('auto');
-  // The API's last target verdict ( W5.13b): which targets need
-  // confirming, which can never be scanned, or that the operator turned
-  // external targets off. Cleared whenever the targets change.
+  const [form, setForm] = useState<DiscoverForm>(() => initialForm(null));
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // The last real create's refusal (the preview's are derived below). Cleared
+  // whenever the form changes.
   const [verdict, setVerdict] = useState<TargetVerdict | null>(null);
+  const [started, setStarted] = useState<{ job: DiscoveryJob; form: DiscoverForm } | null>(null);
+  // Each opening is a new session: a create that finishes after the dialog
+  // was closed and reopened must not take over the new one.
+  const session = useRef(0);
 
-  // Reset to a clean wizard whenever it (re)opens.
   useEffect(() => {
     if (open) {
+      session.current += 1;
       setPhase('configure');
-      setJobId(null);
-      setExpandedSet(new Set());
-      setTargets('');
-      setProtocols(['TLS']);
-      setPorts('443, 22');
-      setExecMode('auto');
+      setForm(initialForm(loadRememberedChoice(browserStorage())));
+      setAdvancedOpen(false);
       setVerdict(null);
+      setStarted(null);
     }
   }, [open]);
 
-  const targetList = targets.split(/[\n,]/).map((t) => t.trim()).filter(Boolean);
-  const portList = ports.split(',').map((p) => parseInt(p.trim(), 10)).filter((n) => Number.isInteger(n) && n >= 1 && n <= 65535);
-  const canStart = targetList.length > 0 && targetList.length <= 1000 && protocols.length > 0;
+  const update = (patch: Partial<DiscoverForm>) => {
+    setForm((f) => ({ ...f, ...patch }));
+    setVerdict(null);
+  };
 
-  // `confirmed` is the person's answer to "N targets are outside your
-  // registered networks". It is only ever sent true from the confirmation's
-  // "Scan anyway" — never pre-set — so a first submission always lets the
-  // API decide whether anything needs confirming.
+  // What the person picked, as long as it is still on offer; otherwise the
+  // fleet's default. Derived, so the select and the request never disagree.
+  const runFromValue = fleet.options.some((o) => o.value === form.runFrom && !o.disabled) ? form.runFrom : fleet.defaultValue;
+  const effective: DiscoverForm = { ...form, runFrom: runFromValue };
+  const check = checkForm(effective, otAvailable);
+  // Not while the sensors load: "Run from" would silently mean the platform.
+  const valid = check.problems.length === 0 && !fleet.loading;
+
+  // ── Preview: the same request with dry_run, once the form sits still ──
+  const previewKey = valid ? JSON.stringify(buildJobRequest(effective, check, { otAvailable, dryRun: true })) : null;
+  const debouncedKey = useDebounced(previewKey, PREVIEW_DEBOUNCE_MS);
+  const settled = previewKey !== null && previewKey === debouncedKey;
+  const previewQ = useQuery({
+    queryKey: ['discovery', 'job-preview', debouncedKey],
+    enabled: open && phase === 'configure' && settled,
+    retry: false,
+    staleTime: 30_000,
+    gcTime: 60_000,
+    // `signal` is what cancels a superseded preview: once the key moves on,
+    // the old request has no observer and react-query aborts it.
+    queryFn: async ({ signal }) => {
+      const body = JSON.parse(debouncedKey as string) as CreateDiscoveryJobRequest;
+      const { data, error, response } = await clients.inventory.POST('/discovery/jobs', { body, signal });
+      if (error || !data) throw new PreviewAnswer(targetVerdict(response.status, error), response.status);
+      const preview = asPreview(data);
+      if (!preview) throw new Error('unexpected answer');
+      return preview;
+    },
+  });
+
+  let preview: PreviewView = { kind: 'idle' };
+  if (previewKey !== null) {
+    if (!settled || previewQ.isPending) preview = { kind: 'loading' };
+    else if (previewQ.isError) {
+      const e = previewQ.error;
+      const v = e instanceof PreviewAnswer ? e.verdict : null;
+      const definitive = v !== null && (DEFINITIVE.has(v.kind) || v.kind === 'plan_unavailable' || (v.kind === 'error' && refusedByServer((e as PreviewAnswer).status)));
+      preview = v && definitive ? { kind: 'refused', verdict: v } : { kind: 'failed', message: v?.message ?? '' };
+    } else if (previewQ.data) {
+      preview = previewQ.data.estimate.addresses === 0 ? { kind: 'empty' } : { kind: 'ready', preview: previewQ.data };
+    }
+  }
+  const knownRefused = preview.kind === 'refused' && (DEFINITIVE.has(preview.verdict.kind) || preview.verdict.kind === 'error');
+
+  // ── Start ──
   const create = useMutation({
-    mutationFn: async (confirmed: boolean) => {
-      const { data, error, response } = await clients.inventory.POST('/discovery/jobs', {
-        body: {
-          targets: targetList,
-          protocols,
-          ports: portList,
-          execution_mode: execMode,
-          ...(confirmed ? { external_targets_confirmed: true } : {}),
-        },
-      });
+    mutationFn: async ({ body }: { body: CreateDiscoveryJobRequest; form: DiscoverForm; session: number }) => {
+      const { data, error, response } = await clients.inventory.POST('/discovery/jobs', { body });
       if (error || !data) throw new TargetVerdictError(targetVerdict(response.status, error));
-      return data.job;
+      const job = asCreatedJob(data);
+      if (!job) throw new Error('Unexpected response while starting discovery');
+      return job;
     },
     onMutate: () => setVerdict(null),
-    onSuccess: (job) => {
-      setJobId(job.id);
-      setPhase('running');
-      qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
+    onSuccess: (job, vars) => {
+      void qc.invalidateQueries({ queryKey: ['discovery', 'scan-jobs'] });
+      void qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
+      saveRememberedChoice(browserStorage(), vars.form);
+      if (vars.session !== session.current) return;
+      setStarted({ job, form: vars.form });
+      setPhase('started');
     },
-    onError: (e) => {
+    onError: (e, vars) => {
+      if (vars.session !== session.current) return;
       const v: TargetVerdict = e instanceof TargetVerdictError ? e.verdict : { kind: 'error', message: e instanceof Error ? e.message : 'Failed to start discovery' };
       setVerdict(v);
       setPhase(v.kind === 'unconfirmed' ? 'confirm-external' : 'configure');
     },
   });
 
-  // Poll job status while running.
-  const jobQ = useQuery({
-    queryKey: ['discovery', 'job', jobId],
-    enabled: open && phase === 'running' && !!jobId,
-    refetchInterval: 3000,
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/discovery/jobs/{id}', { params: { path: { id: jobId! } } });
-      if (error || !data) throw new Error('Failed to load job status');
-      return data;
-    },
-  });
-  const status = (jobQ.data?.status || '').toLowerCase();
-  useEffect(() => {
-    if (phase === 'running' && status && TERMINAL.includes(status)) setPhase('results');
-  }, [status, phase]);
+  // `confirmed` is the person's answer to "N targets are outside your
+  // registered networks". It is only ever true from the confirmation's "Scan
+  // anyway" — never pre-set — so a first Start always lets the server decide.
+  const start = (confirmed: boolean) =>
+    create.mutate({ body: buildJobRequest(effective, check, { otAvailable, confirmed }), form: effective, session: session.current });
 
-  // Fetch findings once the job finishes. Ingestion is asynchronous, so keep
-  // polling while the queue still holds rows the pipeline hasn't dispositioned —
-  // that is what lets the split below settle without the user doing anything.
-  const resultsQ = useQuery({
-    queryKey: ['discovery', 'job-results', jobId],
-    enabled: open && phase === 'results' && !!jobId,
-    refetchInterval: (q) => (q.state.data?.materialization?.awaiting_processing ? 3000 : false),
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/discovery/jobs/{id}/results', { params: { path: { id: jobId! } } });
-      if (error || !data) throw new Error('Failed to load findings');
-      qc.invalidateQueries({ queryKey: ['inventory'] });
-      return {
-        findings: (data.findings ?? []) as DiscoveryFinding[],
-        materialization: data.materialization as Materialization | undefined,
-      };
-    },
-  });
-  const findings = resultsQ.data?.findings ?? [];
-  const materialization = resultsQ.data?.materialization;
+  const onStart = () => {
+    // The preview already knows what needs confirming: ask now rather than
+    // send a request the server will answer with the same question.
+    if (preview.kind === 'ready' && preview.preview.confirmation_required && preview.preview.external_targets.length > 0) {
+      setVerdict({ kind: 'unconfirmed', targets: preview.preview.external_targets, message: '' });
+      setPhase('confirm-external');
+      return;
+    }
+    start(false);
+  };
 
-  const cancelM = useMutation({
-    mutationFn: async () => {
-      const { error } = await clients.inventory.POST('/discovery/jobs/{id}/cancel', { params: { path: { id: jobId! } } });
-      if (error) throw new Error('Failed to cancel');
-    },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['discovery', 'jobs'] });
-      onClose();
-    },
-  });
+  // The Jobs page opens ?job=<id> straight on that job's detail.
+  const goToJobs = () => {
+    onClose();
+    void nav(started ? `/discovery/jobs?job=${encodeURIComponent(started.job.id)}` : '/discovery/jobs');
+  };
+  const runFromPlatform = () => update({ runFrom: PLATFORM });
 
-  const busy = create.isPending || cancelM.isPending;
-  // Refusals and the operator switch are explained in the body, target by
-  // target; only an unclassified failure is a one-line footer note.
-  const err =
-    (verdict?.kind === 'error' ? verdict.message : null) ||
-    (jobQ.error as Error | undefined)?.message ||
-    (resultsQ.error as Error | undefined)?.message ||
-    null;
-
-  // Footer buttons per phase.
-  let primary: React.ReactNode = null;
-  let secondary: React.ReactNode = null;
+  let primary: React.ReactNode;
+  let secondary: React.ReactNode;
   if (phase === 'configure') {
     primary = (
-      <button className="ui-btn accent" disabled={!canStart || create.isPending} onClick={() => create.mutate(false)}>
+      <button className="ui-btn accent" disabled={!valid || knownRefused || create.isPending} onClick={onStart}>
         {create.isPending ? 'Starting…' : 'Start discovery'}
       </button>
     );
-    secondary = <button className="ui-btn" onClick={onClose} disabled={busy}>Cancel</button>;
+    secondary = <button className="ui-btn" onClick={onClose}>Cancel</button>;
   } else if (phase === 'confirm-external') {
     primary = (
-      <button className="ui-btn accent" disabled={create.isPending} onClick={() => create.mutate(true)}>
+      <button className="ui-btn accent" disabled={create.isPending} onClick={() => start(true)}>
         {create.isPending ? 'Starting…' : 'Scan anyway'}
       </button>
     );
@@ -533,48 +413,47 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
         Cancel
       </button>
     );
-  } else if (phase === 'running') {
-    secondary = (
-      <button className="ui-btn" onClick={() => cancelM.mutate()} disabled={cancelM.isPending}>
-        {cancelM.isPending ? 'Cancelling…' : 'Cancel job'}
-      </button>
-    );
-    primary = <button className="ui-btn" onClick={onClose}>Run in background</button>;
   } else {
-    // Results is terminal: the findings are already on their way to inventory.
-    primary = <button className="ui-btn accent" onClick={onClose}>Done</button>;
-    if ((materialization?.pending_approval ?? 0) > 0) {
-      secondary = (
-        <button className="ui-btn" onClick={() => { onClose(); nav('/discovery/approvals'); }}>
-          Go to Approvals
-        </button>
-      );
-    }
+    primary = <button className="ui-btn accent" onClick={goToJobs}>View in Discovery Jobs</button>;
+    secondary = <button className="ui-btn" onClick={onClose}>Close</button>;
   }
+
+  const problem = (field: string) => check.problems.find((p) => p.field === field)?.message;
+  const targetCount = check.targets.length;
+  const custom = form.depth === 'custom';
+  // A preset's ports, read-only, from the server's own plan once a preview
+  // for this depth has come back — never a copy of the preset kept here.
+  const shownPlan = preview.kind === 'ready' && preview.preview.plan.depth === form.depth ? preview.preview.plan : null;
 
   return (
     <Modal
       open={open}
-      onClose={busy ? undefined : onClose}
-      dismissible={!busy}
+      // Closable at every moment, a pending Start included: the scan never
+      // depends on this dialog being open.
+      onClose={onClose}
+      dismissible
       size="lg"
       tone="accent"
       icon="radar"
       eyebrow="Discovery"
       title="Discover assets"
-      description="Scan targets for cryptographic assets. Findings flow into your inventory automatically — hosts on an auto-approve network segment are monitored straight away, everything else waits in Approvals."
+      description="Find everything that answers on a host or a network. Services are identified from what answers, and what is found flows into your inventory automatically."
       primary={primary}
       secondary={secondary}
-      footerNote={err ? <span style={{ color: 'var(--danger-text)' }}>{err}</span> : undefined}
+      footerNote={verdict?.kind === 'error' ? <span style={{ color: 'var(--danger-text)' }}>{verdict.message}</span> : undefined}
     >
       {phase === 'configure' && (
         <>
-          <ModalField label="Targets" hint="One per line or comma-separated. IPs, CIDRs, ranges, hostnames or URLs (max 1000). Targets outside your registered networks ask for confirmation.">
+          <ModalField
+            label="Targets"
+            hint={`One per line or comma-separated: IP addresses, CIDR blocks, ranges, hostnames or URLs (max 1000). For IPv6, list addresses — an IPv6 network is too large to sweep.${targetCount > 0 ? ` ${targetCount} entered.` : ''}`}
+          >
             <textarea
               data-autofocus
               aria-label="Targets"
-              value={targets}
-              onChange={(e) => { setTargets(e.target.value); setVerdict(null); }}
+              aria-invalid={targetCount > 1000 || undefined}
+              value={form.targets}
+              onChange={(e) => update({ targets: e.target.value })}
               rows={4}
               spellCheck={false}
               className="mono"
@@ -582,61 +461,140 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
               style={{ width: '100%', padding: '10px 12px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12, outline: 'none', resize: 'vertical' }}
             />
           </ModalField>
+          {targetCount > 1000 && <div role="alert" style={{ margin: '-8px 0 12px', fontSize: 11.5, color: 'var(--danger-text)' }}>{problem('targets')}</div>}
 
-          {verdict?.kind === 'refused' && (
-            <div role="alert" style={{ marginBottom: 15, padding: '10px 12px', borderRadius: 9, border: '1px solid var(--danger)', fontSize: 12.5 }}>
-              <div style={{ fontWeight: 600, color: 'var(--danger-text)', marginBottom: 6 }}>
-                {verdict.refused.length === 1 ? 'This target can never be scanned:' : `These ${verdict.refused.length} targets can never be scanned:`}
-              </div>
-              <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--app-t2)' }}>
-                {verdict.refused.map((r) => (
-                  <li key={r.target}><span className="mono">{r.target}</span> — {r.reason}</li>
-                ))}
-              </ul>
-              <div style={{ marginTop: 6, color: 'var(--app-t3)' }}>Remove them to scan the rest.</div>
+          <fieldset style={fieldset}>
+            <legend style={groupTitle}>Scan depth</legend>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {DEPTHS.map((d) => (
+                <ChoiceCard
+                  key={d.value}
+                  name="discover-depth"
+                  value={d.value}
+                  checked={form.depth === d.value}
+                  label={d.label}
+                  description={d.description}
+                  onChange={() => {
+                    update({ depth: d.value });
+                    // Custom means "you choose the ports", and the ports are under Advanced.
+                    if (d.value === 'custom') setAdvancedOpen(true);
+                  }}
+                />
+              ))}
+            </div>
+          </fieldset>
+
+          <ModalField
+            label="Run from"
+            hint="Auto runs the scan from one of your sensors when it serves every target, and from the platform sensor otherwise. The platform sensor reaches only what the platform can route to."
+          >
+            <ModalSelect aria-label="Run from" value={runFromValue} disabled={fleet.loading} onChange={(e) => update({ runFrom: e.target.value })}>
+              {runFromChoices.map((o) => (
+                <option key={o.value} value={o.value} disabled={o.disabled} title={o.hint}>{o.label}</option>
+              ))}
+            </ModalSelect>
+          </ModalField>
+          {fleet.loading && <div role="status" style={{ ...muted, margin: '-8px 0 12px' }}>Loading your sensors…</div>}
+          {fleet.error && (
+            <div style={{ margin: '-8px 0 12px', fontSize: 11.5, color: 'var(--warn)' }}>
+              The sensor list could not be loaded, so this scan runs from the platform sensor. Reopen the dialog to choose one of your sensors.
             </div>
           )}
-
-          {verdict?.kind === 'disabled' && (
-            <div role="alert" style={{ marginBottom: 15, padding: '10px 12px', borderRadius: 9, border: '1px solid var(--warn)', fontSize: 12.5 }}>
-              <div style={{ fontWeight: 600, color: 'var(--app-t1)', marginBottom: 6 }}>
-                {verdict.targets.length === 1 ? '1 target is' : `${verdict.targets.length} targets are`} outside your registered networks.
-              </div>
-              <div style={{ color: 'var(--app-t2)' }}>{DISABLED_EXPLANATION}</div>
-              {verdict.targets.length > 0 && (
-                <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: 'var(--app-t2)' }}>
-                  {verdict.targets.slice(0, CONFIRM_LIST_MAX).map((t) => <li key={t.target} className="mono">{t.target}</li>)}
-                </ul>
-              )}
+          {fleet.noTenantSensors && (
+            <div style={{ ...muted, margin: '-8px 0 12px' }}>
+              You have no sensors registered, so this scan runs from the platform sensor. To scan from inside your network, register one under Discovery → Sensors &amp; Agents.
             </div>
           )}
 
           <div style={{ marginBottom: 15 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 8 }}>Protocols</div>
-            <div style={{ display: 'flex', gap: 16 }}>
-              {PROTOCOLS.map((p) => (
-                <label key={p} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, color: 'var(--app-t1)', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={protocols.includes(p)}
-                    onChange={(e) => setProtocols(e.target.checked ? [...protocols, p] : protocols.filter((x) => x !== p))}
-                  />
-                  {p}
-                </label>
-              ))}
-            </div>
+            <button
+              type="button"
+              className="ui-btn ghost sm"
+              aria-expanded={advancedOpen}
+              aria-controls="discover-advanced"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              style={{ padding: '0 6px', marginLeft: -6 }}
+            >
+              <Icon name={advancedOpen ? 'chevron-down' : 'chevron-right'} size={13} />Advanced
+            </button>
+            {advancedOpen && (
+              <div id="discover-advanced" role="group" aria-label="Advanced" style={{ marginTop: 10, paddingLeft: 12, borderLeft: '2px solid var(--app-border)' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
+                  <ModalField label="TCP ports" hint={custom ? (check.tcp?.ok ? `${check.tcp.ports.length.toLocaleString('en-US')} TCP ports` : 'Ports and ranges, e.g. 22,443,8000-8100.') : 'Set by the scan depth. Choose Custom to change.'}>
+                    <ModalInput
+                      aria-label="TCP ports"
+                      className="mono"
+                      readOnly={!custom}
+                      aria-invalid={(custom && !!problem('tcp')) || undefined}
+                      value={custom ? form.tcpPorts : shownPlan?.tcp_ports ?? ''}
+                      placeholder={custom ? '22,443,8000-8100' : 'Set by the scan depth'}
+                      onChange={(e) => update({ tcpPorts: e.target.value })}
+                    />
+                  </ModalField>
+                  <ModalField label="UDP ports" hint={custom ? (check.udp?.ok ? `${check.udp.ports.length.toLocaleString('en-US')} UDP ports` : 'A port with no known probe reports “no answer”, never “closed”.') : 'Set by the scan depth. Choose Custom to change.'}>
+                    <ModalInput
+                      aria-label="UDP ports"
+                      className="mono"
+                      readOnly={!custom}
+                      aria-invalid={(custom && !!problem('udp')) || undefined}
+                      value={custom ? form.udpPorts : shownPlan?.udp_ports ?? ''}
+                      placeholder={custom ? '53,123,161' : 'Set by the scan depth'}
+                      onChange={(e) => update({ udpPorts: e.target.value })}
+                    />
+                  </ModalField>
+                </div>
+                {custom && (problem('tcp') ?? problem('udp') ?? problem('ports')) && (
+                  <div role="alert" style={{ margin: '-6px 0 12px', fontSize: 11.5, color: 'var(--danger-text)' }}>
+                    {problem('tcp') && <div>TCP ports: {problem('tcp')}</div>}
+                    {problem('udp') && <div>UDP ports: {problem('udp')}</div>}
+                    {problem('ports') && <div>{problem('ports')}</div>}
+                  </div>
+                )}
+
+                <fieldset style={fieldset}>
+                  <legend style={groupTitle}>Pace</legend>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                    {PACES.map((p) => (
+                      <ChoiceCard key={p.value} name="discover-pace" value={p.value} checked={form.pace === p.value} label={p.label} description={p.hint} onChange={() => update({ pace: p.value })} />
+                    ))}
+                  </div>
+                </fieldset>
+
+                {otAvailable && (
+                  <div style={{ marginBottom: 15 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--app-t1)', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={form.ot} onChange={(e) => update({ ot: e.target.checked, otProtocols: e.target.checked ? form.otProtocols : [] })} />
+                      Probe industrial (OT/ICS) devices
+                    </label>
+                    <div id="discover-ot-ack" style={{ ...muted, marginTop: 4, paddingLeft: 24 }}>
+                      Off unless you tick it, and never part of a scan depth. Sends only each chosen protocol&apos;s documented, read-only
+                      identification request, to its standard port only, one connection at a time per device. Industrial controllers can be
+                      fragile: probe them only with their owner&apos;s agreement.
+                    </div>
+                    {form.ot && (
+                      <div role="group" aria-label="Industrial protocols" aria-describedby="discover-ot-ack" style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8, paddingLeft: 24 }}>
+                        {OT_PROTOCOLS.map((p) => (
+                          <label key={p.value} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--app-t1)', cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={form.otProtocols.includes(p.value)}
+                              onChange={(e) => update({ otProtocols: e.target.checked ? [...form.otProtocols, p.value] : form.otProtocols.filter((x) => x !== p.value) })}
+                            />
+                            {p.label}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                    {problem('ot') && <div role="alert" style={{ marginTop: 6, paddingLeft: 24, fontSize: 11.5, color: 'var(--danger-text)' }}>{problem('ot')}</div>}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
-            <ModalField label="Ports" hint="Comma-separated.">
-              <ModalInput value={ports} onChange={(e) => setPorts(e.target.value)} placeholder="443, 22, 8443" inputMode="numeric" />
-            </ModalField>
-            <ModalField label="Execution mode">
-              <ModalSelect value={execMode} onChange={(e) => setExecMode(e.target.value)}>
-                {EXEC_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-              </ModalSelect>
-            </ModalField>
-          </div>
+          {verdict && verdict.kind !== 'error' && verdict.kind !== 'unconfirmed'
+            ? <div style={{ minHeight: 92, marginBottom: 6 }}><VerdictNotice verdict={verdict} onRunFromPlatform={runFromPlatform} /></div>
+            : <PreviewPanel view={preview} onRunFromPlatform={runFromPlatform} />}
         </>
       )}
 
@@ -647,100 +605,51 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
           </div>
           <div id="discover-external-body">
             <ul className="mono" style={{ margin: '0 0 10px', paddingLeft: 18, fontSize: 12, color: 'var(--app-t2)', maxHeight: 220, overflowY: 'auto' }}>
-              {verdict.targets.slice(0, CONFIRM_LIST_MAX).map((t) => <li key={t.target}>{describeExternal(t)}</li>)}
+              {verdict.targets.slice(0, LIST_MAX).map((t) => <li key={t.target}>{describeExternal(t)}</li>)}
             </ul>
-            {verdict.targets.length > CONFIRM_LIST_MAX && (
-              <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginBottom: 10 }}>
-                and {verdict.targets.length - CONFIRM_LIST_MAX} more
-              </div>
+            {verdict.targets.length > LIST_MAX && (
+              <div style={{ ...muted, marginBottom: 10 }}>and {verdict.targets.length - LIST_MAX} more</div>
             )}
-            <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
+            <div style={muted}>
               Nothing outside your registered networks is ever scanned automatically — only when you confirm it here.
-              The scan runs against the addresses listed, and is recorded in your organization&apos;s audit log.
+              They are scanned at Standard depth at most, against the addresses listed, and the scan is recorded in your organization&apos;s audit log.
             </div>
           </div>
         </div>
       )}
 
-      {phase === 'running' && (
-        <div style={{ padding: '24px 4px', textAlign: 'center' }}>
-          <div style={{ fontSize: 13, color: 'var(--app-t2)' }}>
-            Scanning {targetList.length} target{targetList.length === 1 ? '' : 's'}…
-          </div>
-          <div className="mono" style={{ fontSize: 12, color: 'var(--app-t3)', marginTop: 8 }}>
-            Job {jobId?.slice(0, 8)} · {jobQ.data?.status || 'pending'}
-          </div>
-          <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 10 }}>
-            This can take a few minutes. You can run it in the background and check Discovery → Jobs.
-          </div>
-        </div>
-      )}
-
-      {phase === 'results' && (
-        <div>
-          {resultsQ.isLoading ? (
-            <div style={{ padding: '24px 4px', textAlign: 'center', fontSize: 13, color: 'var(--app-t3)' }}>Loading findings…</div>
-          ) : findings.length === 0 ? (
-            <div style={{ padding: '24px 4px', textAlign: 'center', fontSize: 13, color: 'var(--app-t3)' }}>
-              The scan completed but found no cryptographic assets on those targets.
-            </div>
-          ) : (
-            <>
-              <MaterializationSummary count={findings.length} m={materialization} />
-              <div className="panel" style={{ borderRadius: 10, maxHeight: 320, overflowY: 'auto' }}>
-                {findings.slice(0, 50).map((f, i) => {
-                  const expanded = expandedSet.has(i);
-                  const hasDetail = !!(f as unknown as { data?: RawData }).data;
-                  return (
-                    <div key={i} style={{ borderTop: i ? '1px solid var(--app-border)' : 'none' }}>
-                      {/* Summary row */}
-                      <div
-                        onClick={() => hasDetail && toggleExpand(i)}
-                        style={{
-                          display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
-                          cursor: hasDetail ? 'pointer' : 'default',
-                          background: expanded ? 'var(--app-panel3)' : undefined,
-                        }}
-                      >
-                        {/* Expand chevron */}
-                        <span style={{
-                          fontSize: 9, color: hasDetail ? 'var(--app-t3)' : 'transparent', flexShrink: 0,
-                          transform: expanded ? 'rotate(90deg)' : undefined, display: 'inline-block', transition: 'transform 0.15s',
-                        }}>▶</span>
-                        <span className="mono" style={{ fontSize: 12, color: 'var(--app-t1)', flex: 1, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {(f as unknown as { resolved_ip?: string }).resolved_ip
-                            ? `${f.hostname || (f as unknown as { resolved_ip?: string }).resolved_ip}:${f.port ?? ''}`
-                            : `${f.hostname || f.ip_address || 'unknown'}${f.port != null ? `:${f.port}` : ''}`}
-                        </span>
-                        <span style={{ fontSize: 11, color: 'var(--app-t3)', flexShrink: 0 }}>
-                          {[f.protocol, f.protocol_version].filter(Boolean).join(' ') || '—'}
-                        </span>
-                        {f.cipher_suite && (
-                          <span className="mono" style={{ fontSize: 10, color: 'var(--app-t3)', flexShrink: 0, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {f.cipher_suite}
-                          </span>
-                        )}
-                      </div>
-                      {/* Detail panel */}
-                      {expanded && (
-                        <div style={{ padding: '0 12px 10px 30px', background: 'var(--app-panel3)', borderTop: '1px solid var(--app-border)' }}>
-                          <FindingDetail f={f} />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-                {findings.length > 50 && (
-                  <div style={{ padding: '8px 12px', fontSize: 11, color: 'var(--app-t3)', borderTop: '1px solid var(--app-border)' }}>
-                    + {findings.length - 50} more
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
+      {phase === 'started' && started && <StartedPanel job={started.job} form={started.form} />}
     </Modal>
+  );
+}
+
+function StartedPanel({ job, form }: { job: DiscoveryJob; form: DiscoverForm }) {
+  const plan = job.plan;
+  const exec = plan ? describeExecutor(plan) : null;
+  const row = (label: string, value: React.ReactNode) => (
+    <div style={{ display: 'flex', gap: 12, padding: '3px 0', fontSize: 12.5 }}>
+      <span style={{ width: 110, flex: 'none', color: 'var(--app-t3)' }}>{label}</span>
+      <span style={{ color: 'var(--app-t1)', minWidth: 0 }}>{value}</span>
+    </div>
+  );
+  const targets = job.targets?.length ?? 0;
+  return (
+    <div role="status">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 10 }}>
+        <Icon name="check" size={16} style={{ color: 'var(--app-ok)' }} />
+        Started — track it in Discovery Jobs
+      </div>
+      {row('Scan depth', depthLabel(plan?.depth ?? form.depth))}
+      {row('Pace', paceLabel(plan?.pace ?? form.pace))}
+      {row('Runs from', exec ? <>{exec.where.replace(/^Runs from /, '')}{exec.why && <span style={{ color: 'var(--app-t3)' }}> — {exec.why}</span>}</> : 'Decided by the platform when the scan is picked up')}
+      {targets > 0 && row('Targets', targets.toLocaleString('en-US'))}
+      {row('Job', <span className="mono">{shortId(job.id)}</span>)}
+      <div style={{ ...muted, marginTop: 12, lineHeight: 1.55 }}>
+        You can close this dialog — the scan does not depend on it. Discovery Jobs shows its progress and lets you stop it.
+        What it finds flows into your inventory as it is processed: hosts on a network segment marked auto-approve are monitored
+        straight away, everything else waits in Discovery → Approvals. An address that sends no answer is reported as no answer,
+        not as empty — it may be down, filtered, or out of the scanner&apos;s reach.
+      </div>
+    </div>
   );
 }

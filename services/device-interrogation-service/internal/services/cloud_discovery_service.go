@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	awsconfig "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
+	apigatewayv2types "github.com/aws/aws-sdk-go-v2/service/apigatewayv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
 	cloudfronttypes "github.com/aws/aws-sdk-go-v2/service/cloudfront/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
@@ -28,6 +30,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
+	"github.com/vistasecurity/vistaplatform/shared/jobunits"
 )
 
 // CloudDiscoveryService handles cloud resource discovery
@@ -141,6 +144,11 @@ func (s *CloudDiscoveryService) DiscoverAWSResources(ctx context.Context, tenant
 // discoverLoadBalancers discovers ALB, ELB, or NLB resources
 func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenantID uuid.UUID, awsClient *awsclient.Client, lbType string, regions []string) ([]models.Device, error) {
 	var devices []models.Device
+	// Listener failures are collected, not skipped. A load balancer whose
+	// listeners could not be read used to be `continue`d past exactly as if it
+	// had no TLS listener, so a denied elasticloadbalancing:DescribeListeners
+	// reported the type succeeded with nothing found.
+	var lbErrs []error
 
 	for _, region := range regions {
 		// Create region-specific client
@@ -154,7 +162,10 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 		for paginator.HasMorePages() {
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("failed to list load balancers in %s: %w", region, err)
+				// What earlier pages recorded is kept: those assets exist,
+				// and discarding them would under-report what was found.
+				lbErrs = append(lbErrs, fmt.Errorf("failed to list load balancers in %s: %w", region, err))
+				return devices, errors.Join(lbErrs...)
 			}
 
 			for _, lb := range page.LoadBalancers {
@@ -171,7 +182,8 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 					LoadBalancerArn: lb.LoadBalancerArn,
 				})
 				if err != nil {
-					continue // Skip if we can't get listeners
+					lbErrs = append(lbErrs, fmt.Errorf("failed to list listeners of %s in %s: %w", awsconfig.ToString(lb.LoadBalancerArn), region, err))
+					continue
 				}
 
 				// Check if any listener uses TLS
@@ -234,7 +246,7 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 								// The negotiated cipher is a real measurement
 								// from this endpoint — prefer it.
 								configMap["cipher_suite"] = &handshakeResult.CipherSuite
-								applyHandshakeKeyExchange(configMap, handshakeResult)
+								applyHandshakeMeasurements(configMap, handshakeResult)
 								configMap["negotiated_protocol_version"] = handshakeResult.TLSVersion
 
 								// protocol_version must stay the WEAKEST
@@ -321,156 +333,212 @@ func (s *CloudDiscoveryService) discoverLoadBalancers(ctx context.Context, tenan
 		}
 	}
 
-	return devices, nil
+	return devices, errors.Join(lbErrs...)
 }
 
-// discoverAPIGateways discovers API Gateway v2 resources
+// apiGatewayListTimeout bounds the API Gateway listing calls for one region.
+// A variable so a test can drive the deadline path without waiting for it.
+var apiGatewayListTimeout = 30 * time.Second
+
+// discoverAPIGateways discovers API Gateway v2 resources.
+//
+// A region whose listing fails is returned as an error, never logged and
+// skipped. A `log; break` here is how an API Gateway listing that hit its
+// deadline in us-east-1 reached device_jobs.results as `"status":"succeeded",
+// "found":0` under a "complete" outcome — "we could not look" stored as "there
+// is nothing there". Whatever the working regions found is returned alongside
+// the error, so the dispatch records both halves (runCloudCollectors).
 func (s *CloudDiscoveryService) discoverAPIGateways(ctx context.Context, tenantID uuid.UUID, awsClient *awsclient.Client, regions []string) ([]models.Device, error) {
 	var devices []models.Device
+	var regionErrs []error
 
 	for _, region := range regions {
-		cfg := awsClient.GetConfig()
-		cfg.Region = region
-		regionClient := apigatewayv2.NewFromConfig(cfg)
+		found, err := s.discoverAPIGatewaysInRegion(ctx, tenantID, awsClient, region)
+		devices = append(devices, found...)
+		if err != nil {
+			regionErrs = append(regionErrs, fmt.Errorf("%s: %w", region, err))
+		}
+	}
 
-		// Add timeout for API Gateway calls (30 seconds per region)
-		regionCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
+	return devices, errors.Join(regionErrs...)
+}
 
-		// List all APIs
-		// Note: API Gateway v2 GetApis doesn't have a paginator, but supports NextToken
-		var nextToken *string
-		for {
-			input := &apigatewayv2.GetApisInput{}
-			if nextToken != nil {
-				input.NextToken = nextToken
-			}
+// apiGatewayLister is the slice of the API Gateway v2 client the listing uses.
+type apiGatewayLister interface {
+	GetApis(context.Context, *apigatewayv2.GetApisInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetApisOutput, error)
+	GetDomainNames(context.Context, *apigatewayv2.GetDomainNamesInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetDomainNamesOutput, error)
+	GetApiMappings(context.Context, *apigatewayv2.GetApiMappingsInput, ...func(*apigatewayv2.Options)) (*apigatewayv2.GetApiMappingsOutput, error)
+}
 
-			output, err := regionClient.GetApis(regionCtx, input)
-			if err != nil {
-				// Log and skip this region instead of failing entire job
-				log.Printf("Warning: failed to list API Gateways in %s: %v (skipping region)", region, err)
-				break
-			}
+// listAPIGatewaysWithCustomDomains lists one region's APIs and keeps those
+// mapped to at least one custom domain — the TLS-bearing ones.
+//
+// The domain mappings are listed ONCE per region. They used to be listed again
+// for every API, under the caller's context rather than the region's deadline,
+// and a failure of either listing `continue`d past the API, so an API we were
+// not able to inspect looked exactly like one with no custom domain. Any
+// listing failure is now the region's failure.
+func listAPIGatewaysWithCustomDomains(ctx context.Context, client apiGatewayLister) ([]apigatewayv2types.Api, error) {
+	var apis []apigatewayv2types.Api
+	var nextToken *string
+	for {
+		output, err := client.GetApis(ctx, &apigatewayv2.GetApisInput{NextToken: nextToken})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list API Gateways: %w", err)
+		}
+		apis = append(apis, output.Items...)
+		if awsconfig.ToString(output.NextToken) == "" {
+			break
+		}
+		nextToken = output.NextToken
+	}
+	if len(apis) == 0 {
+		return nil, nil
+	}
 
-			for _, api := range output.Items {
-
-				// Check if API has domain configurations (TLS)
-				domains, err := regionClient.GetDomainNames(ctx, &apigatewayv2.GetDomainNamesInput{})
+	mapped := make(map[string]bool)
+	nextToken = nil
+	for {
+		domains, err := client.GetDomainNames(ctx, &apigatewayv2.GetDomainNamesInput{NextToken: nextToken})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list API Gateway domain names: %w", err)
+		}
+		for _, domain := range domains.Items {
+			var mappingToken *string
+			for {
+				mappings, err := client.GetApiMappings(ctx, &apigatewayv2.GetApiMappingsInput{DomainName: domain.DomainName, NextToken: mappingToken})
 				if err != nil {
-					continue
+					return nil, fmt.Errorf("failed to list API mappings for domain %s: %w", awsconfig.ToString(domain.DomainName), err)
 				}
-
-				hasTLS := false
-				for _, domain := range domains.Items {
-					// Check if this domain is associated with this API
-					apiMappings, err := regionClient.GetApiMappings(ctx, &apigatewayv2.GetApiMappingsInput{
-						DomainName: domain.DomainName,
-					})
-					if err != nil {
-						continue
-					}
-
-					for _, mapping := range apiMappings.Items {
-						if awsconfig.ToString(mapping.ApiId) == awsconfig.ToString(api.ApiId) {
-							hasTLS = true
-							break
-						}
-					}
-					if hasTLS {
-						break
-					}
+				for _, mapping := range mappings.Items {
+					mapped[awsconfig.ToString(mapping.ApiId)] = true
 				}
-
-				if !hasTLS {
-					continue
+				if awsconfig.ToString(mappings.NextToken) == "" {
+					break
 				}
-
-				hostname := ""
-				if api.ApiEndpoint != nil {
-					hostname = *api.ApiEndpoint
-					// Strip https:// prefix for hostname used in TLS handshake
-					hostname = strings.TrimPrefix(hostname, "https://")
-					hostname = strings.TrimPrefix(hostname, "http://")
-				}
-
-				metadata := map[string]interface{}{
-					"api_id":   awsconfig.ToString(api.ApiId),
-					"protocol": string(api.ProtocolType),
-					"region":   region,
-					"api_name": awsconfig.ToString(api.Name),
-				}
-
-				// Interrogate the mapped custom domains. TLS on API Gateway
-				// is a property of the domain, and its SecurityPolicy
-				// (TLS_1_0 / TLS_1_2) is a MINIMUM — a handshake against the
-				// endpoint cannot show that TLS 1.0 is still accepted.
-				cryptoConfigs := make([]map[string]interface{}, 0, 2)
-				interrogationService := NewAWSInterrogationService(awsClient)
-				domainConfigs, iErr := interrogationService.InterrogateAPIGateway(regionCtx, awsconfig.ToString(api.ApiId))
-				if iErr != nil {
-					log.Printf("Warning: failed to interrogate API Gateway %s: %v", awsconfig.ToString(api.ApiId), iErr)
-				}
-				for _, cfg := range domainConfigs {
-					cryptoConfigs = append(cryptoConfigs, map[string]interface{}{
-						"protocol":         cfg.Protocol,
-						"protocol_version": cfg.ProtocolVersion,
-						"cipher_suite":     cfg.CipherSuite,
-						"port":             cfg.Port,
-						"hostname":         cfg.Hostname,
-						"tls_versions":     cfg.Metadata["tls_versions"],
-						"metadata":         cfg.Metadata,
-					})
-				}
-
-				// Perform TLS handshake against the API Gateway endpoint
-				if hostname != "" {
-					handshakeResult, hsErr := cloudTLSHandshake(ctx, hostname, 443)
-					if hsErr != nil {
-						log.Printf("Warning: TLS handshake error for API Gateway %s: %v", hostname, hsErr)
-					} else if handshakeResult != nil && handshakeResult.Success {
-						cryptoConfig := map[string]interface{}{
-							"protocol":           "HTTPS",
-							"protocol_version":   handshakeResult.TLSVersion,
-							"cipher_suite":       handshakeResult.CipherSuite,
-							"port":               443,
-							"hostname":           hostname,
-							"certificates":       handshakeResult.Certificates,
-							"handshake_verified": true,
-						}
-						applyHandshakeKeyExchange(cryptoConfig, handshakeResult)
-						cryptoConfigs = append(cryptoConfigs, cryptoConfig)
-					} else if handshakeResult != nil {
-						log.Printf("TLS handshake skipped for API Gateway %s: %s", hostname, handshakeResult.Error)
-					}
-				}
-				if len(cryptoConfigs) > 0 {
-					metadata["crypto_configs"] = cryptoConfigs
-				}
-
-				integrationID := awsClient.GetIntegrationID()
-				device := models.Device{
-					ID:               uuid.New(),
-					TenantID:         tenantID,
-					DeviceType:       "aws_api_gateway",
-					Vendor:           stringPtr("AWS"),
-					Hostname:         stringPtr(hostname),
-					DiscoveryMethod:  "cloud_api",
-					CredentialID:     &integrationID,
-					ConnectionStatus: "discovered",
-					Metadata:         models.JSONB(metadata),
-					CreatedAt:        time.Now(),
-					UpdatedAt:        time.Now(),
-				}
-
-				if err := s.upsertDeviceAsset(ctx, &device, getStringFromMap(metadata, "api_id")); err != nil {
-					log.Printf("Warning: failed to record aws_api_gateway %s: %v", hostname, err)
-					continue
-				}
-
-				devices = append(devices, device)
+				mappingToken = mappings.NextToken
 			}
 		}
+		if awsconfig.ToString(domains.NextToken) == "" {
+			break
+		}
+		nextToken = domains.NextToken
+	}
+
+	withTLS := make([]apigatewayv2types.Api, 0, len(apis))
+	for _, api := range apis {
+		if mapped[awsconfig.ToString(api.ApiId)] {
+			withTLS = append(withTLS, api)
+		}
+	}
+	return withTLS, nil
+}
+
+// discoverAPIGatewaysInRegion is one region of discoverAPIGateways. A function
+// of its own so the listing deadline is cancelled when the REGION finishes: a
+// `defer cancel()` inside the region loop held every region's timer until the
+// whole collector returned.
+func (s *CloudDiscoveryService) discoverAPIGatewaysInRegion(ctx context.Context, tenantID uuid.UUID, awsClient *awsclient.Client, region string) ([]models.Device, error) {
+	var devices []models.Device
+
+	cfg := awsClient.GetConfig()
+	cfg.Region = region
+	regionClient := apigatewayv2.NewFromConfig(cfg)
+
+	regionCtx, cancel := context.WithTimeout(ctx, apiGatewayListTimeout)
+	defer cancel()
+
+	apis, err := listAPIGatewaysWithCustomDomains(regionCtx, regionClient)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, api := range apis {
+		hostname := ""
+		if api.ApiEndpoint != nil {
+			hostname = *api.ApiEndpoint
+			// Strip https:// prefix for hostname used in TLS handshake
+			hostname = strings.TrimPrefix(hostname, "https://")
+			hostname = strings.TrimPrefix(hostname, "http://")
+		}
+
+		metadata := map[string]interface{}{
+			"api_id":   awsconfig.ToString(api.ApiId),
+			"protocol": string(api.ProtocolType),
+			"region":   region,
+			"api_name": awsconfig.ToString(api.Name),
+		}
+
+		// Interrogate the mapped custom domains. TLS on API Gateway
+		// is a property of the domain, and its SecurityPolicy
+		// (TLS_1_0 / TLS_1_2) is a MINIMUM — a handshake against the
+		// endpoint cannot show that TLS 1.0 is still accepted.
+		cryptoConfigs := make([]map[string]interface{}, 0, 2)
+		interrogationService := NewAWSInterrogationService(awsClient)
+		// The caller's context, not the listing deadline: one slow API must
+		// not exhaust the budget of every API after it.
+		domainConfigs, iErr := interrogationService.InterrogateAPIGateway(ctx, awsconfig.ToString(api.ApiId))
+		if iErr != nil {
+			log.Printf("Warning: failed to interrogate API Gateway %s: %v", awsconfig.ToString(api.ApiId), iErr)
+		}
+		for _, cfg := range domainConfigs {
+			cryptoConfigs = append(cryptoConfigs, map[string]interface{}{
+				"protocol":         cfg.Protocol,
+				"protocol_version": cfg.ProtocolVersion,
+				"cipher_suite":     cfg.CipherSuite,
+				"port":             cfg.Port,
+				"hostname":         cfg.Hostname,
+				"tls_versions":     cfg.Metadata["tls_versions"],
+				"metadata":         cfg.Metadata,
+			})
+		}
+
+		// Perform TLS handshake against the API Gateway endpoint
+		if hostname != "" {
+			handshakeResult, hsErr := cloudTLSHandshake(ctx, hostname, 443)
+			if hsErr != nil {
+				log.Printf("Warning: TLS handshake error for API Gateway %s: %v", hostname, hsErr)
+			} else if handshakeResult != nil && handshakeResult.Success {
+				cryptoConfig := map[string]interface{}{
+					"protocol":           "HTTPS",
+					"protocol_version":   handshakeResult.TLSVersion,
+					"cipher_suite":       handshakeResult.CipherSuite,
+					"port":               443,
+					"hostname":           hostname,
+					"certificates":       handshakeResult.Certificates,
+					"handshake_verified": true,
+				}
+				applyHandshakeMeasurements(cryptoConfig, handshakeResult)
+				cryptoConfigs = append(cryptoConfigs, cryptoConfig)
+			} else if handshakeResult != nil {
+				log.Printf("TLS handshake skipped for API Gateway %s: %s", hostname, handshakeResult.Error)
+			}
+		}
+		if len(cryptoConfigs) > 0 {
+			metadata["crypto_configs"] = cryptoConfigs
+		}
+
+		integrationID := awsClient.GetIntegrationID()
+		device := models.Device{
+			ID:               uuid.New(),
+			TenantID:         tenantID,
+			DeviceType:       "aws_api_gateway",
+			Vendor:           stringPtr("AWS"),
+			Hostname:         stringPtr(hostname),
+			DiscoveryMethod:  "cloud_api",
+			CredentialID:     &integrationID,
+			ConnectionStatus: "discovered",
+			Metadata:         models.JSONB(metadata),
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+		}
+
+		if err := s.upsertDeviceAsset(ctx, &device, getStringFromMap(metadata, "api_id")); err != nil {
+			log.Printf("Warning: failed to record aws_api_gateway %s: %v", hostname, err)
+			continue
+		}
+
+		devices = append(devices, device)
 	}
 
 	return devices, nil
@@ -561,7 +629,7 @@ func (s *CloudDiscoveryService) discoverCloudFrontDistributions(ctx context.Cont
 						"certificates":       handshakeResult.Certificates,
 						"handshake_verified": true,
 					}
-					applyHandshakeKeyExchange(cryptoConfig, handshakeResult)
+					applyHandshakeMeasurements(cryptoConfig, handshakeResult)
 					cryptoConfigs = append(cryptoConfigs, cryptoConfig)
 				} else if handshakeResult != nil {
 					log.Printf("TLS handshake skipped for CloudFront %s: %s", hostname, handshakeResult.Error)
@@ -744,6 +812,18 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 				// Include TLS handshake certificates for downstream processing.
 				// The discovery-processor-service and inventory-service
 				// extractCertificatesFromFinding() look for RawData["certificates"].
+				// What the endpoint's own handshake measured about the
+				// certificate (chain validation, quality flags, OCSP), under
+				// the canonical top-level keys. A bool false is kept: the
+				// loop tests presence, never truthiness.
+				handshakeValidated := false
+				for _, key := range jobunits.TLSValidationKeys() {
+					if v, ok := cfg[key]; ok && v != nil {
+						metadata[key] = v
+						handshakeValidated = true
+					}
+				}
+
 				if certs, ok := cfg["certificates"]; ok && certs != nil {
 					metadata["certificates"] = certs
 
@@ -753,7 +833,12 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 					// (cert_has_sct, cert_is_ev, cert_known_bad_ca, ocsp_status, …)
 					// from the metadata but never computes them; the ACM/handshake
 					// path never produced them, so they were silently empty.
-					if pems := canonicalCertPEMs(certs); len(pems) > 0 {
+					// Only when the handshake did not already measure them: the
+					// probe validated the chain against the SNI name and asked
+					// the OCSP responder once, so asking again would repeat the
+					// round-trip and replace a hostname-aware result with one
+					// that skips the hostname check.
+					if pems := canonicalCertPEMs(certs); len(pems) > 0 && !handshakeValidated {
 						if v := discovery.ClassifyCertChainFromPEMsWith(pems, resolveDNS, platformOCSPClient()); v != nil {
 							for k, val := range v.QualityFlags {
 								metadata[k] = val
@@ -1189,7 +1274,7 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		}
 	}
 
-	obs, err := s.devices.deviceObservation(ctx, device.TenantID, deviceObservationInput{
+	input := deviceObservationInput{
 		DeviceType:      device.DeviceType,
 		Hostname:        derefStr(device.Hostname),
 		IPAddress:       derefStr(device.IPAddress),
@@ -1201,7 +1286,8 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		Source:          cloudSource(device.Vendor),
 		Admission:       identity.AdmissionEvidence{Authoritative: true, ReceiptID: receipt},
 		ObservedAt:      now,
-	})
+	}
+	sighting, err := deviceSighting(device.TenantID, deviceSightingInput{deviceObservationInput: input, Channel: identity.ChannelAPI})
 	if err != nil {
 		recordCloudOutcome(ctx, resourceID, identity.Resolution{}, false, err)
 		return err
@@ -1257,7 +1343,7 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 	}
 
 	pending := false
-	res, err := s.devices.resolveObservation(ctx, obs, func(r *pgidentity.Repository, res identity.Resolution) error {
+	res, err := s.devices.resolveSighting(ctx, sighting, func(r *pgidentity.Repository, res identity.Resolution) error {
 		if res.Asset.Zero() {
 			// Every identifier this resource carries belongs to another asset.
 			// A merge proposal is waiting in Approvals; creating a third asset
@@ -1266,10 +1352,10 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 			//
 			// nil, NOT an error — see DeviceIdentityContestedError. The proposal
 			// was written in this transaction and an error here would erase it.
-			if err := s.devices.retainManagement(ctx, r, obs, res, fields); err != nil {
+			if err := s.devices.retainManagement(ctx, r, sighting.TenantID, res, fields); err != nil {
 				return err
 			}
-			return s.retainCloudContext(ctx, r, obs, res, device)
+			return s.retainCloudContext(ctx, r, sighting, res, device)
 		}
 		assetID, parseErr := uuid.Parse(res.Asset.ID)
 		if parseErr != nil {
@@ -1510,7 +1596,7 @@ func (s *CloudDiscoveryService) discoverApplicationGateways(ctx context.Context,
 					// Enrich the first TLS config with handshake data
 					tlsConfigs[0]["protocol_version"] = handshakeResult.TLSVersion
 					tlsConfigs[0]["cipher_suite"] = handshakeResult.CipherSuite
-					applyHandshakeKeyExchange(tlsConfigs[0], handshakeResult)
+					applyHandshakeMeasurements(tlsConfigs[0], handshakeResult)
 					tlsConfigs[0]["certificates"] = handshakeResult.Certificates
 					tlsConfigs[0]["handshake_verified"] = true
 				} else if handshakeResult != nil {
@@ -1960,7 +2046,7 @@ func (s *CloudDiscoveryService) processGCPHTTPSProxy(
 		} else if handshakeResult != nil && handshakeResult.Success {
 			tlsConfigs[0]["protocol_version"] = handshakeResult.TLSVersion
 			tlsConfigs[0]["cipher_suite"] = handshakeResult.CipherSuite
-			applyHandshakeKeyExchange(tlsConfigs[0], handshakeResult)
+			applyHandshakeMeasurements(tlsConfigs[0], handshakeResult)
 			tlsConfigs[0]["certificates"] = handshakeResult.Certificates
 			tlsConfigs[0]["handshake_verified"] = true
 		} else if handshakeResult != nil {
@@ -2060,7 +2146,7 @@ func (s *CloudDiscoveryService) processGCPSSLProxy(
 		} else if handshakeResult != nil && handshakeResult.Success {
 			tlsConfigs[0]["protocol_version"] = handshakeResult.TLSVersion
 			tlsConfigs[0]["cipher_suite"] = handshakeResult.CipherSuite
-			applyHandshakeKeyExchange(tlsConfigs[0], handshakeResult)
+			applyHandshakeMeasurements(tlsConfigs[0], handshakeResult)
 			tlsConfigs[0]["certificates"] = handshakeResult.Certificates
 			tlsConfigs[0]["handshake_verified"] = true
 		} else if handshakeResult != nil {

@@ -7,9 +7,10 @@ import type { deviceInterrogationComponents } from '@vistasecurity/api-contract'
 import { clients } from '../../lib/clients';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime, isCloudSourced, deviceTypeLabel } from './kit';
 import { Icon } from '../../components/ui';
-import { useDevices } from './queries';
+import { useDevices, useDeviceAgents } from './queries';
 import { classLabel } from '../inventory/asset-shape';
 import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal } from './device-modals';
+import { DiscoveryStatusPill, pendingDiscoveryRows, useDeviceDiscoveries, useDiscoveryActions, type DeviceDiscovery } from './device-discoveries';
 
 // Discovery → Devices — now "assets with management configured".
 //
@@ -28,6 +29,11 @@ import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal } from './devic
 // an asset is an inventory action and lives on the asset page.
 
 type Device = deviceInterrogationComponents['schemas']['Device'];
+
+// A table row is a device, or an agent-routed Add device that is not a device
+// yet ( slice B): queued, running, failed, unclaimed or held for review.
+// The attempt rows come first — they are what the operator just did.
+type Row = { kind: 'device'; d: Device } | { kind: 'discovery'; x: DeviceDiscovery };
 
 const COLS = [
   { label: 'Asset', w: '1.4fr' },
@@ -69,6 +75,15 @@ export function DevicesPage() {
   const q = useDevices();
   const qc = useQueryClient();
   const devices = q.data ?? [];
+  const agentsQ = useDeviceAgents();
+  const agents = (agentsQ.data ?? []).map((a) => ({ id: a.id, name: a.name }));
+  const discoveriesQ = useDeviceDiscoveries();
+  const attempts = pendingDiscoveryRows(discoveriesQ.data ?? []);
+  const { retry, dismiss } = useDiscoveryActions();
+  const rows: Row[] = [
+    ...attempts.map((x): Row => ({ kind: 'discovery', x })),
+    ...devices.map((d): Row => ({ kind: 'device', d })),
+  ];
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Device | null>(null);
@@ -124,7 +139,7 @@ export function DevicesPage() {
     },
   });
 
-  const note = queryNote(q, devices.length === 0, {
+  const note = queryNote(q, rows.length === 0, {
     thing: 'managed assets',
     emptyTitle: 'Nothing is managed yet',
     emptyMessage: 'These are the assets you have given the platform credentials for, so it can log in and read their cryptographic configuration. Add one with its management address and credentials, and the platform identifies it for you.',
@@ -137,7 +152,9 @@ export function DevicesPage() {
       </p>
       {/* Gates below name the permission each route enforces
           (device-interrogation-service/internal/api/router.go): POST /devices and
-          /devices/discover-and-create are DiscoveryCreate; PUT /devices/:id is
+          /devices/discover-and-create are DiscoveryCreate, as are POST
+          /devices/discoveries, its /:id/retry and DELETE /devices/discoveries/:id
+          (agent-routed Add device acts on an add, not a device); PUT /devices/:id is
           DiscoveryUpdate; POST /devices/:id/test-connection,
           /devices/:id/interrogate, DELETE /devices/:id/ssh-host-key and
           DELETE /devices/:id are DiscoveryManage. Test connection logs in with
@@ -156,9 +173,49 @@ export function DevicesPage() {
       {note ?? (
         <DTable
           cols={COLS}
-          rows={devices}
-          rowKey={(d) => d.id}
-          render={(d) => {
+          rows={rows}
+          rowKey={(r) => (r.kind === 'device' ? r.d.id : `discovery-${r.x.id}`)}
+          render={(r) => {
+            if (r.kind === 'discovery') {
+              const x = r.x;
+              const canRetry = x.status === 'failed' || x.status === 'not_picked_up';
+              return (
+                <>
+                  <div style={{ minWidth: 0 }} data-testid="discovery-row" data-status={x.status}>
+                    <CellMono v={x.management_url} />
+                    <div style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      via {x.agent_name ?? 'device agent'} · added {relTime(x.created_at)}
+                    </div>
+                  </div>
+                  <CellMono v={null} c="var(--app-t3)" />
+                  <CellTxt v={null} />
+                  <CellTxt v={deviceTypeLabel(x.device_type)} />
+                  <CellTxt v={null} />
+                  <CellTxt v="never" c="var(--app-t3)" />
+                  <DiscoveryStatusPill discovery={x} />
+                  <span style={{ display: 'inline-flex', gap: 4, justifyContent: 'flex-end' }}>
+                    {x.status === 'held_for_review' && x.observation_id && (
+                      <RowBtn icon="external-link" title="Review the held identity in Approvals" onClick={() => { void navigate(`/discovery/observations?observation_id=${x.observation_id}`); }} />
+                    )}
+                    <PermissionGate permission={TENANT_PERMISSIONS.discovery.create}>
+                      {canRetry && (
+                        <RowBtn
+                          icon={retry.isPending && retry.variables === x.id ? 'loader' : 'refresh-cw'}
+                          title={`Retry on ${x.agent_name ?? 'the agent'}`}
+                          onClick={() => retry.mutate(x.id)}
+                          disabled={retry.isPending && retry.variables === x.id}
+                        />
+                      )}
+                      {/* Dismiss drops the attempt and the credentials it was
+                          queued with. While it is still in flight it is a
+                          cancel: the agent's late answer is refused. */}
+                      <RowBtn icon="x" title="Dismiss" onClick={() => dismiss.mutate(x.id)} disabled={dismiss.isPending && dismiss.variables === x.id} />
+                    </PermissionGate>
+                  </span>
+                </>
+              );
+            }
+            const d = r.d;
             const cloud = isCloudSourced(d);
             return (
               <>
@@ -246,7 +303,7 @@ export function DevicesPage() {
         />
       )}
 
-      <DeviceFormModal open={formOpen} device={editing} onClose={() => { setFormOpen(false); setEditing(null); }} />
+      <DeviceFormModal open={formOpen} device={editing} agents={agents} onClose={() => { setFormOpen(false); setEditing(null); }} />
       <DeviceDeleteModal open={!!deleting} device={deleting} onClose={() => setDeleting(null)} />
       <TestConnectionModal open={!!testing} device={testing} onClose={() => setTesting(null)} />
     </PageWrap>

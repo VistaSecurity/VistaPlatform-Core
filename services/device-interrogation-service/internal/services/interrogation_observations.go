@@ -19,11 +19,13 @@ package services
 //     sent it. "Collect posture, never key material" is not a promise we can
 //     delegate to a process we cannot see.
 //
-//  2. **Resolve every subject and peer through the identification engine.**
-//     A collector cannot resolve an asset — it describes a peer by identifiers
-//     and the engine decides which asset that is, creating a pending one when
-//     it is nobody we know. That is what turns "this firewall sees a neighbour
-//     with MAC aa:bb:…" into a node on the map.
+//  2. **Resolve every subject and peer through the identification engine** —
+//     inventory-service's, the one engine host (platform ADR-0003 D3). A
+//     collector cannot resolve an asset: it describes a peer by identifiers,
+//     this file sends that as an identity.Sighting, and the engine decides
+//     which asset it is, creating a pending one when it is nobody we know.
+//     That is what turns "this firewall sees a neighbour with MAC aa:bb:…"
+//     into a node on the map.
 //
 //  3. **Write facts per subject and edges per pair**, with the edge's status
 //     decided by ADR-0003 D3 rather than by whoever wrote the collector.
@@ -49,12 +51,7 @@ import (
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
-	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
 	"github.com/vistasecurity/vistaplatform/shared/identity/classproposal"
-	"github.com/vistasecurity/vistaplatform/shared/identity/derive"
-	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
-	"github.com/vistasecurity/vistaplatform/shared/identity/identityaudit"
-	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
@@ -96,23 +93,18 @@ func (o InterrogationObservations) Empty() bool {
 // ObservationSink writes an interrogation's facts, identity and relationships
 // onto the asset model.
 //
-// It owns its own identification engine rather than borrowing DeviceService's
-// because both the agent result path (ResultProcessor) and the in-cluster path
-// (DeviceInterrogationService) persist the same observations and neither owns
-// the other.
+// It resolves nothing itself: every subject and peer is posted to
+// inventory-service as a sighting (sighting_poster.go), and the facts and
+// edges are written against the asset ids that come back. Both the agent
+// result path (ResultProcessor) and the in-cluster path
+// (DeviceInterrogationService) persist through one of these.
 type ObservationSink struct {
 	db *sql.DB
 
-	once sync.Once
-	repo *pgidentity.Repository
-	eng  *identity.Engine
-	err  error
-
-	// Decides which peer hostnames are generic for a tenant ( B2), with
-	// its per-tenant cardinality cache. Built lazily over repo by
-	// genericNames(). Tests may set it before first use to substitute a store.
-	genericOnce sync.Once
-	generic     *identity.GenericNames
+	// The fact and edge writer (asset_facts, asset_relationships). Never used
+	// to resolve identity.
+	storeOnce sync.Once
+	repo      *pgidentity.Repository
 
 	// The rule-based classifier over the CURATED classification_rules table
 	// (ADR-0004 D6, workstream 2.10b), reloaded on an interval so an admin's
@@ -170,38 +162,10 @@ func (s *ObservationSink) classifier() *classify.Refresher {
 	return s.classifyRef
 }
 
-func (s *ObservationSink) engine() (*identity.Engine, *pgidentity.Repository, error) {
-	s.once.Do(func() {
-		s.repo = pgidentity.New(s.db)
-		// AutoAcceptThreshold stays at zero HERE and is supplied PER
-		// OBSERVATION by resolveObservationWith, from the tenant's own setting
-		// (workstream 4.6a). The engine is built once per process and serves
-		// every tenant, so a threshold fixed here would be one tenant's
-		// decision applied to all of them.
-		//
-		// Before 4.6a it was zero for everybody, which meant a peer could never
-		// be auto-merged whatever the tenant set. The four fences that govern
-		// an auto-accept are [identity.Engine]'s and were never the gap; the
-		// number was.
-		s.eng, s.err = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission, Repo: s.repo})
-	})
-	return s.eng, s.repo, s.err
-}
-
-// genericNames returns the sink's generic-hostname decider, building it on first
-// use over the identity repository. If the engine cannot be built (or a test
-// preset one) the static dictionary alone applies; a nil *identity.GenericNames
-// is usable by design.
-func (s *ObservationSink) genericNames() *identity.GenericNames {
-	s.genericOnce.Do(func() {
-		if s.generic != nil {
-			return
-		}
-		if _, repo, err := s.engine(); err == nil {
-			s.generic = identity.NewGenericNames(repo)
-		}
-	})
-	return s.generic
+// store is the fact and edge writer over the sink's connection.
+func (s *ObservationSink) store() *pgidentity.Repository {
+	s.storeOnce.Do(func() { s.repo = pgidentity.New(s.db) })
+	return s.repo
 }
 
 // Persist writes everything an interrogation observed about assetID and its
@@ -231,10 +195,7 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 	if obs.Empty() {
 		return nil
 	}
-	engine, repo, err := s.engine()
-	if err != nil {
-		return fmt.Errorf("identification engine unavailable: %w", err)
-	}
+	repo := s.store()
 
 	// Defence in depth: re-run the collector-boundary redactor over anything
 	// that arrived from outside this process. Sanitize works on the core's
@@ -254,16 +215,39 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 	self := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	var errs []error
 
+	// A replay of a context that recorded its progress does only what is
+	// still pending ( item 25): the peers still held and the facts and
+	// edges that name one of them. The device's own writes (segments, gateway
+	// claims, identity, its own facts) landed on the first pass and are
+	// redone only if they failed there. Everything else is nil: do it all.
+	only := replayFilter(ctx)
+	selfDue := only.due(selfPeerKey)
+	pass := newPassPeers(ctx, s, tenantID, source, at)
+
 	// The device's networks must exist as cidr segments BEFORE peers are
-	// resolved, so a peer's address resolves into its segment, and an address
-	// on a network that hands out (or may hand out) leases cannot vote.
+	// resolved, so a peer's address resolves into its segment, and the DHCP
+	// posture the device measured is the segment's stored posture by the time
+	// inventory-service's Intake reads it. That stored posture is the ONLY way
+	// a run's DHCP answer reaches identity: there is no per-run overlay
+	// ( item 7), so an operator's static marking is never overridden.
 	for _, f := range wrapped.Facts {
-		if f.Key != facts.KeyNetVlans {
+		if !selfDue || f.Key != facts.KeyNetVlans {
 			continue
 		}
-		ctx = context.WithValue(ctx, observedDHCPKey{}, append(observedDHCP(ctx), vlanSegmentSpecs(f.Value)...))
 		if err := s.ensureVLANSegments(ctx, tenantID, assetID, f.Value); err != nil {
 			return fmt.Errorf("vlan segments: %w", err)
+		}
+	}
+
+	// Then the device's own address on each of those networks, claimed for
+	// it, and its home segment (gateway_claims.go). Before the peers,
+	// so a neighbour reported at one of the device's addresses meets the
+	// device rather than a record that address would otherwise have made.
+	// A failure here is reported with the rest and loses nothing else.
+	if selfDue && obs.producer() == facts.ProducerDeviceInterrogation {
+		if err := s.persistGatewayClaims(ctx, tenantID, assetID, source, at, wrapped.Facts); err != nil {
+			errs = append(errs, fmt.Errorf("gateway addresses: %w", err))
+			pass.fail(selfPeerKey)
 		}
 	}
 
@@ -273,9 +257,10 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 		return err
 	}
 
-	if wrapped.DeviceIdentity != nil {
-		if err := s.persistIdentity(ctx, repo, self, source, at, wrapped.DeviceIdentity); err != nil {
+	if selfDue && wrapped.DeviceIdentity != nil {
+		if err := s.persistIdentity(ctx, repo, tenantID, self, source, at, wrapped.DeviceIdentity); err != nil {
 			errs = append(errs, err)
+			pass.fail(selfPeerKey)
 		}
 	}
 
@@ -283,17 +268,27 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 	// always about one asset: a UniFi controller reports the interfaces, uptime
 	// and serial of every device it manages, and attributing a switch's port
 	// table to the controller would be a worse answer than not collecting it.
+	//
+	// Each subject is resolved once for the pass (passPeers), however many
+	// facts it carries.
 	bySubject := map[identity.AssetRef][]pgidentity.Fact{}
+	keysBySubject := map[identity.AssetRef]map[string]bool{}
 	for _, f := range wrapped.Facts {
-		subject := self
+		subject, key := self, selfPeerKey
 		if !f.Subject.IsZero() {
-			resolved, resolveErr := s.resolvePeer(ctx, engine, tenantID, f.Subject, source, at)
+			key = retainedPeerKey(f.Subject)
+		}
+		if !only.due(key) {
+			continue
+		}
+		if !f.Subject.IsZero() {
+			resolved, resolveErr := pass.resolve(ctx, f.Subject)
 			if resolveErr != nil {
 				var retained *identity.RetainedObservation
 				if errors.As(resolveErr, &retained) {
 					continue
 				}
-				if errors.Is(resolveErr, errPeerSyntheticNamesOnly) {
+				if errors.Is(resolveErr, errPeerSyntheticNamesOnly) || errors.Is(resolveErr, errSightingRefused) {
 					log.Printf("[ObservationSink] fact %s skipped: subject %v", f.Key, resolveErr)
 					continue
 				}
@@ -310,22 +305,30 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 			Confidence: f.Confidence,
 			ObservedAt: at,
 		})
+		if keysBySubject[subject] == nil {
+			keysBySubject[subject] = map[string]bool{}
+		}
+		keysBySubject[subject][key] = true
 	}
 	for subject, fs := range bySubject {
 		if err := repo.UpsertFacts(ctx, subject, obs.producer(), fs); err != nil {
 			errs = append(errs, fmt.Errorf("writing %d facts for asset %s: %w", len(fs), subject.ID, err))
+			for key := range keysBySubject[subject] {
+				pass.fail(key)
+			}
 		}
 	}
 
 	for _, rel := range wrapped.Relationships {
-		if err := s.persistRelationship(ctx, engine, repo, tenantID, self, source, at, rel); err != nil {
+		if !only.edgeDue(rel) {
+			continue
+		}
+		if err := s.persistRelationship(ctx, repo, pass, tenantID, self, source, at, rel); err != nil {
 			errs = append(errs, err)
+			pass.failEdge(rel)
 		}
 	}
-	if err := errors.Join(errs...); err != nil {
-		return err
-	}
-	return s.finishPeerContext(ctx, tenantID, retained)
+	return s.finishPeerContext(ctx, tenantID, retained, pass, errs)
 }
 
 // persistIdentity records the hardware identity an interrogation measured.
@@ -336,9 +339,17 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 // which shows. The serial is an IDENTIFIER, not a fact: it is how the asset is
 // recognised, and `devices.serial_number` being a plain column is a large part
 // of why an interrogated device and the same host seen elsewhere were two rows.
+//
+// The serial goes to the engine as a sighting, bound to the device through
+// the identifiers it already holds (selfIdentitySighting). It used to be
+// attached directly, with no engine, no scope check and no proposal when it
+// belonged to another asset ( item 4); now a serial another asset owns is
+// a merge proposal, and one nobody owns attaches to the device the session
+// was opened to.
 func (s *ObservationSink) persistIdentity(
 	ctx context.Context,
 	repo *pgidentity.Repository,
+	tenantID uuid.UUID,
 	self identity.AssetRef,
 	source identity.Source,
 	at time.Time,
@@ -364,33 +375,43 @@ func (s *ObservationSink) persistIdentity(
 	}
 
 	if serial := strings.TrimSpace(di.SerialNumber); serial != "" {
-		err := repo.AttachIdentifiers(ctx, self, []identity.Identifier{{
-			Kind:       identity.KindSerialNumber,
-			Value:      serial,
-			Confidence: 1,
-			Source:     source,
-			SeenAt:     at,
-		}})
+		assetID, err := uuid.Parse(self.ID)
+		if err != nil {
+			return errors.Join(append(errs, fmt.Errorf("device identity: asset id %q: %w", self.ID, err))...)
+		}
+		known, err := knownAssetIdentifiers(ctx, s.db, tenantID, assetID)
+		if err != nil {
+			return errors.Join(append(errs, fmt.Errorf("reading the device's identifiers: %w", err))...)
+		}
+		if len(known) == 0 {
+			// Nothing ties a sighting to the device the session was opened
+			// to, so a serial sent alone would be a new device to the engine
+			// — a duplicate of this one. Not sent; the next interrogation of a
+			// device that has an identifier sends it.
+			log.Printf("[ObservationSink] serial %q read from asset %s not sent: the asset holds no identifier to bind it to", serial, self.ID)
+			return errors.Join(errs...)
+		}
+		_, res, err := postSighting(ctx, s.db, selfIdentitySighting(tenantID, source, at, serial, known))
 		switch {
-		case errors.Is(err, identity.ErrIdentifierConflict):
-			// The serial already belongs to another asset. That is a merge
-			// question for a human — two assets claiming one serial is exactly
-			// the conflict the Approvals queue exists for — and forcing it here
-			// would be the auto-merge ADR-0002 D5 forbids.
-			log.Printf("[ObservationSink] serial %q already belongs to another asset in tenant %s; not attached to %s",
-				serial, self.TenantID, self.ID)
 		case err != nil:
-			errs = append(errs, fmt.Errorf("attaching serial: %w", err))
+			errs = append(errs, fmt.Errorf("resolving the device's serial: %w", err))
+		case res.Asset.ID != self.ID:
+			// A conflict (the serial is another asset's: a merge proposal is
+			// waiting) or evidence held for review. Either way not this
+			// device's to claim; the engine said so, and Approvals has it.
+			log.Printf("[ObservationSink] serial %q read from asset %s resolved %s (asset %q, proposal %q); not attached",
+				serial, self.ID, res.Outcome, res.Asset.ID, res.Proposal.ID)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// persistRelationship resolves an observed edge's two ends and writes it.
+// persistRelationship resolves an observed edge's two ends, through the
+// pass's memo, and writes it.
 func (s *ObservationSink) persistRelationship(
 	ctx context.Context,
-	engine *identity.Engine,
 	repo *pgidentity.Repository,
+	pass *passPeers,
 	tenantID uuid.UUID,
 	self identity.AssetRef,
 	source identity.Source,
@@ -399,13 +420,13 @@ func (s *ObservationSink) persistRelationship(
 ) error {
 	subject := self
 	if !rel.Subject.IsZero() {
-		resolved, err := s.resolvePeer(ctx, engine, tenantID, rel.Subject, source, at)
+		resolved, err := pass.resolve(ctx, rel.Subject)
 		if err != nil {
 			var retained *identity.RetainedObservation
 			if errors.As(err, &retained) {
 				return nil
 			}
-			if errors.Is(err, errPeerContested) || errors.Is(err, errPeerSyntheticNamesOnly) {
+			if errors.Is(err, errPeerContested) || errors.Is(err, errPeerSyntheticNamesOnly) || errors.Is(err, errSightingRefused) {
 				log.Printf("[ObservationSink] %s edge skipped: subject %v", rel.Type, err)
 				return nil
 			}
@@ -413,13 +434,13 @@ func (s *ObservationSink) persistRelationship(
 		}
 		subject = resolved
 	}
-	peer, err := s.resolvePeer(ctx, engine, tenantID, rel.Peer, source, at)
+	peer, err := pass.resolve(ctx, rel.Peer)
 	if err != nil {
 		var retained *identity.RetainedObservation
 		if errors.As(err, &retained) {
 			return nil
 		}
-		if errors.Is(err, errPeerContested) || errors.Is(err, errPeerSyntheticNamesOnly) {
+		if errors.Is(err, errPeerContested) || errors.Is(err, errPeerSyntheticNamesOnly) || errors.Is(err, errSightingRefused) {
 			// Not a failure of the interrogation: one edge could not be
 			// attached because a human has to settle who its far end is, or
 			// because its far end carries nothing that identifies it.
@@ -479,38 +500,31 @@ func (s *ObservationSink) persistRelationship(
 //
 // This is what makes the map possible from an interrogation: a switch's LLDP
 // neighbour is described only by a MAC and a system name, and the engine's job
-// is to say whether that is a host already in the inventory or a new one.
+// is to say whether that is a host already in the inventory or a new one. The
+// peer goes to inventory-service as a sighting (peerSighting); what comes back
+// is the asset the edge or fact lands on.
 func (s *ObservationSink) resolvePeer(
 	ctx context.Context,
-	engine *identity.Engine,
 	tenantID uuid.UUID,
 	peer di.PeerRef,
 	source identity.Source,
 	at time.Time,
 ) (identity.AssetRef, error) {
-	obs, prop, err := s.peerObservation(ctx, tenantID, peer, source, at)
+	sighting, prop, err := s.peerSighting(ctx, tenantID, peer, source, at)
 	if err != nil {
 		return identity.AssetRef{}, err
 	}
-	if state, ok := ctx.Value(peerContextKey{}).(*retainedPeerContext); ok {
+	state, _ := ctx.Value(peerContextKey{}).(*retainedPeerContext)
+	if state != nil {
 		if original, found := state.retainedPeer(peer); found {
-			obs = original
+			// The sighting exactly as first received, so a replay is the same
+			// delivery (receipt, observed-at) rather than a new one.
+			sighting = original
 		}
 	}
 	// No FirstHand: a peer is described by somebody else. See [classIntent].
-	synthetic := peerSyntheticNames(peer)
-	addressEvidence := peerAddressEvidence(peer, obs.Network.SegmentID)
-	res, _, err := s.resolveObservationWith(ctx, engine, obs, classIntent{Proposal: prop}, func(repo *pgidentity.Repository, res identity.Resolution) error {
-		if err := retainPeerContext(ctx, repo, tenantID, res); err != nil {
-			return err
-		}
-		if res.Asset.Zero() {
-			return nil
-		}
-		if err := recordSyntheticNames(ctx, repo.Tx(), tenantID, res.Asset.ID, synthetic); err != nil {
-			return err
-		}
-		return recordAddressEvidence(ctx, repo.Tx(), tenantID, res.Asset.ID, addressEvidence)
+	res, _, err := s.resolveSightingWith(ctx, sighting, classIntent{Proposal: prop}, func(tx *sql.Tx, res identity.Resolution) error {
+		return retainPeerContext(ctx, tx, tenantID, res)
 	})
 	if err != nil {
 		return identity.AssetRef{}, err
@@ -529,9 +543,9 @@ func (s *ObservationSink) resolvePeer(
 		// and unactionable: the asset is not missing, it is contested, and there
 		// is a proposal waiting that the message never mentioned.
 		return identity.AssetRef{}, fmt.Errorf("%w: peer %s (merge proposal %s is waiting in Approvals)",
-			errPeerContested, observationLabel(obs), res.Proposal.ID)
+			errPeerContested, sightingLabel(sighting), res.Proposal.ID)
 	}
-	if state, ok := ctx.Value(peerContextKey{}).(*retainedPeerContext); ok && state.Replay {
+	if state != nil && state.Replay {
 		ready := false
 		if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
 			return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE tenant_id=$1 AND id=$2 AND asset_status='monitoring' AND deleted_at IS NULL)`, tenantID, res.Asset.ID).Scan(&ready)
@@ -543,6 +557,17 @@ func (s *ObservationSink) resolvePeer(
 		}
 	}
 	return res.Asset, nil
+}
+
+// sightingLabel names a sighting in a log line or an error.
+func sightingLabel(s identity.Sighting) string {
+	if s.DisplayName != "" {
+		return s.DisplayName
+	}
+	if len(s.Identifiers) > 0 {
+		return string(s.Identifiers[0].Kind) + "=" + s.Identifiers[0].Value
+	}
+	return "(no identifiers)"
 }
 
 // classOutcome is what the CLASS half of a resolution did, beside what the
@@ -570,7 +595,7 @@ type classOutcome struct {
 //
 //   - A host inventory is the subject's own account of itself, taken by an agent
 //     running ON it or over an authenticated session TO it. There is no more
-//     direct measurement in the product — observationFor gives it confidence 1
+//     direct measurement in the product — hostSighting gives it confidence 1
 //     for that reason — so a rule reading `os.name = Microsoft Windows 11 Pro`
 //     off it may fill an asset's EMPTY class without asking anybody.
 //   - A peer is DESCRIBED by a third party: a switch's LLDP neighbour table, a
@@ -592,97 +617,58 @@ type classIntent struct {
 	FirstHand bool
 }
 
-// resolveObservationWith runs one fully-built observation through the engine, on
-// the engine's own transaction, carrying the classifier's answer about the thing
-// being resolved — and what this intake may do with it — so the class work it
-// owes lands in the same transaction as the asset.
+// resolveSightingWith posts one sighting to inventory-service, then — once the
+// engine's decision is committed there — does the class work the resolution
+// owes and the caller's own writes, in ONE transaction of this service's.
 //
-// Separated from resolvePeer because the two callers BUILD the observation
-// differently and must: a peer a device reported is described by identifiers and
-// nothing else, while a host inventory carries the host's own sockets as
-// endpoints and states its identity at first hand. What they share is the
-// running of it, including the one retry, and that is what lives here.
+// Shared by the peer path and host inventory, which BUILD their sightings
+// differently and must: a peer is described by identifiers and nothing else,
+// while a host inventory carries the host's own sockets as endpoints and
+// states its identity at first hand. What they share is the running of it.
+//
+// This is two transactions where it used to be one (the engine's, with the
+// class proposal and the retained context inside it). The engine's half —
+// asset, identifiers, endpoints, history, the tenant's auto-accept threshold,
+// the retry on a racing identifier claim, the audit event for an auto-accepted
+// merge — is inventory-service's and lands or does not. This half is
+// idempotent and is retried by whatever retries the caller (the next
+// interrogation, the agent's next report, the retained-context worker): a
+// class proposal is recorded once per asset and class, a retained context
+// once per id.
 //
 // A zero [classIntent] means "nothing classified this", and
 // [classproposal.Record] writes nothing for it.
-//
-// The host-inventory path used to pass exactly that — it asked the rules and
-// then recorded the answer on the job row instead of doing anything with it,
-// because until 4.6a this service had no proposal writer. It has one now and
-// that path passes a real proposal, which is what stopped a fully inventoried
-// laptop from sitting at `unknown_host` for ever.
-func (s *ObservationSink) resolveObservationWith(
+func (s *ObservationSink) resolveSightingWith(
 	ctx context.Context,
-	engine *identity.Engine,
-	obs identity.Observation,
+	sighting identity.Sighting,
 	intent classIntent,
-	after ...func(*pgidentity.Repository, identity.Resolution) error,
+	after ...func(*sql.Tx, identity.Resolution) error,
 ) (identity.Resolution, classOutcome, error) {
-	var res identity.Resolution
-	var class classOutcome
-	run := func() error {
-		return s.repo.RunInTx(ctx, obs.TenantID, func(r *pgidentity.Repository) error {
-			// The tenant's auto-accept threshold, read in THIS transaction and
-			// on every observation (workstream 4.6a). See
-			// identitysettings.ReadAutoAcceptThreshold for why it is neither
-			// cached nor captured at construction, and why a failed READ is an
-			// error rather than a silent fall back to "never".
-			threshold, tErr := identitysettings.ReadAutoAcceptThresholdFor(ctx, r.Tx(), obs.TenantID)
-			if tErr != nil {
-				return tErr
-			}
-			// The rule-merge switch ( Phase 4): whether a same-device
-			// verdict is stamped on this observation's proposal. A controller's
-			// client table is authoritative evidence, so this is the path that
-			// most often links two records of one device.
-			autoMerge, mErr := identitysettings.ReadAutoMergeExistingFor(ctx, r.Tx(), obs.TenantID)
-			if mErr != nil {
-				return mErr
-			}
-
-			var rErr error
-			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).Resolve(ctx, obs)
-			if rErr != nil {
-				return rErr
-			}
-			if intent.FirstHand && !res.Asset.Zero() && res.Outcome != identity.OutcomeConflict {
-				if err := r.ProjectSegmentLocation(ctx, res.Asset, obs.Network.SegmentID, obs.Source); err != nil {
-					return err
-				}
-			}
-			// Reset per attempt. The retry below runs this whole closure a
-			// second time against a different asset, and a `Promoted` left over
-			// from the attempt that rolled back would be a promotion nothing
-			// performed.
-			class = classOutcome{}
-			var cErr error
-			class, cErr = s.recordClassOutcome(ctx, r, obs, res, intent)
-			if cErr != nil {
-				return cErr
-			}
-			for _, callback := range after {
-				if err := callback(r, res); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-	}
-	err := run()
-	if errors.Is(err, identity.ErrIdentifierConflict) {
-		// Another intake claimed one of the observation's identifiers between
-		// our ownership read and our write. Resolving again matches the row it
-		// committed, which is the answer that was true all along. Once, not in
-		// a loop: a second conflict is a different fact.
-		err = run()
-	}
+	_, res, err := postSighting(ctx, s.db, sighting)
 	if err != nil {
 		return identity.Resolution{}, classOutcome{}, err
 	}
-	// AFTER the commit. An audit event announcing a merge that then rolled back
-	// would be a record of something that did not happen. Writes nothing unless
-	// the matcher actually accepted a merge on the tenant's behalf.
-	identityaudit.LogAutoAcceptedMerge(ctx, autoAcceptAuditLogger(), obs, res)
+	tenantID, err := uuid.Parse(strings.TrimSpace(sighting.TenantID))
+	if err != nil {
+		return identity.Resolution{}, classOutcome{}, fmt.Errorf("sighting tenant %q is not a uuid: %w", sighting.TenantID, err)
+	}
+	var class classOutcome
+	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		var cErr error
+		class, cErr = s.recordClassOutcome(ctx, tx, tenantID, res, intent)
+		if cErr != nil {
+			return cErr
+		}
+		for _, callback := range after {
+			if err := callback(tx, res); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return res, classOutcome{}, err
+	}
 	return res, class, nil
 }
 
@@ -720,8 +706,8 @@ func (s *ObservationSink) resolveObservationWith(
 // leaving a pending question in Approvals whose answer is already on the asset.
 func (s *ObservationSink) recordClassOutcome(
 	ctx context.Context,
-	r *pgidentity.Repository,
-	obs identity.Observation,
+	tx *sql.Tx,
+	tenantID uuid.UUID,
 	res identity.Resolution,
 	intent classIntent,
 ) (classOutcome, error) {
@@ -732,10 +718,6 @@ func (s *ObservationSink) recordClassOutcome(
 	}
 	if prop.Class == "" && !prop.Conflict {
 		return out, nil
-	}
-	tenantID, err := uuid.Parse(strings.TrimSpace(obs.TenantID))
-	if err != nil {
-		return out, fmt.Errorf("class proposal: tenant id %q is not a uuid: %w", obs.TenantID, err)
 	}
 	assetID, err := uuid.Parse(strings.TrimSpace(res.Asset.ID))
 	if err != nil {
@@ -749,14 +731,14 @@ func (s *ObservationSink) recordClassOutcome(
 	// decision, and one of them would claim a move from a class the asset never
 	// held. For a peer, see [classIntent]: hearsay proposes, it does not decide.
 	if intent.FirstHand && res.Outcome != identity.OutcomeCreated {
-		promoted, pErr := classproposal.Promote(ctx, r.Tx(), tenantID, assetID, prop)
+		promoted, pErr := classproposal.Promote(ctx, tx, tenantID, assetID, prop)
 		if pErr != nil {
 			return out, pErr
 		}
 		out.Promoted = promoted
 	}
 
-	return out, classproposal.Record(ctx, r.Tx(), tenantID, assetID, res.Outcome, prop)
+	return out, classproposal.Record(ctx, tx, tenantID, assetID, res.Outcome, prop)
 }
 
 // errPeerContested means a relationship's far end could not be resolved because
@@ -764,278 +746,11 @@ func (s *ObservationSink) recordClassOutcome(
 // attached; a human has a merge proposal to settle first.
 var errPeerContested = errors.New("the peer's identity is contested, so the edge was not attached")
 
-// peerObservation builds the observation for a peer a collector described.
-//
-// Note what is NOT set: no endpoints. A neighbour seen over LLDP or adopted by
-// a controller has not been observed listening on anything — inventing an
-// endpoint for it would be the phantom-TLS-endpoint mistake in a new place.
-//
-// The scope for its weak identifiers (hostname, ip_address) comes from the same
-// resolver every other intake uses, so a neighbour a switch reports and the
-// same host the sensor sees land in one scope and therefore on one asset. It is
-// a method rather than a free function precisely so that resolution has a
-// context and a database to do it with.
-func (s *ObservationSink) peerObservation(ctx context.Context, tenantID uuid.UUID, peer di.PeerRef, source identity.Source, at time.Time) (identity.Observation, classify.ClassProposal, error) {
-	scope, dynamicScope := s.scopeFor(ctx, tenantID, peer)
-	if addr, err := netip.ParseAddr(peer.Identifier(di.IdentifierIPAddress)); err == nil {
-		for _, segment := range observedDHCP(ctx) {
-			prefix, err := netip.ParsePrefix(segment.CIDR)
-			if err == nil && segment.leaseScope() && prefix.Contains(addr.Unmap()) {
-				dynamicScope = true
-			}
-		}
-	}
-	obs := identity.Observation{
-		TenantID:    tenantID.String(),
-		ClassHint:   peer.ClassHint,
-		Source:      source,
-		ObservedAt:  at,
-		Admission:   identity.AdmissionEvidence{Direct: peer.IdentityEvidence.ConnectedInterface, Authoritative: peer.IdentityEvidence.ControllerInventory},
-		DisplayName: strings.TrimSpace(peer.DisplayName),
-		// A peer of the tenant's own device, on the tenant's own network.
-		Network: identity.Network{Ownership: identity.OwnershipInternal},
-		// The collector observed the peer indirectly — the device told us about
-		// it. That is a real measurement, but not one we took ourselves, so it
-		// does not claim the full confidence of the device's own reading.
-		Confidence: 0.8,
-	}
-	obs.Network.SegmentID = scope
-	if dynamicScope {
-		obs.DynamicScopes = map[string]bool{scope: true}
-	}
-	var synthetic []string
-	// D3: a MAC the collector did not report can sometimes be worked
-	// out — from an EUI-64 IPv6 address, or from a serial that IS the MAC
-	// (derive.MACFromSerialRegistered, which also requires a registered OUI).
-	// Only when the peer carries no MAC of its own: a reported MAC is strictly
-	// better evidence, and a derived one that differed from it would be noise.
-	// Appended after the loop so the collector's own identifiers keep their
-	// order.
-	statedMAC := strings.TrimSpace(peer.Identifier(string(identity.KindMACAddress))) != ""
-	var derived []identity.Identifier
-	deriveMAC := func(mac, ref string) {
-		for _, d := range derived {
-			if d.Value == mac {
-				return
-			}
-		}
-		derived = append(derived, identity.Identifier{
-			Kind: identity.KindMACAddress, Value: mac, Confidence: derivedMACConfidence,
-			Source: identity.Source{Kind: identity.SourceInferred, Ref: ref},
-		})
-	}
-	segmentScoped := scope != "" && scope != identity.ScopeTenantDefault
-	for _, id := range peer.Identifiers {
-		kind := identity.Kind(id.Kind)
-		if !kind.Valid() {
-			// The collector vocabulary is pinned to identity's by
-			// TestPeerIdentifierKindsMatchIdentityRegistry, so this is
-			// unreachable today and is the loud failure if that ever drifts.
-			return identity.Observation{}, classify.ClassProposal{}, fmt.Errorf("peer identifier kind %q is not one of the nine", id.Kind)
-		}
-		if kind == identity.KindHostname && strings.Contains(strings.TrimSuffix(id.Value, "."), ".") {
-			// A dotted name is usually an FQDN — except `.local`, which is
-			// link-scoped (RFC 6762 §3). Filing those as unscoped FQDNs is the
-			// mDNS reflector merge: a gateway that reflected a laptop's
-			// announcement absorbed the laptop by name. Keep `.local` as a
-			// scoped hostname, the same rule host-observation ingest uses.
-			if !hostnamequality.IsMDNSLocalName(id.Value) {
-				kind = identity.KindFQDN
-			}
-		}
-		if peerNameIsSynthetic(kind, id.Value) {
-			// Not identity ( D1): a UUID-form, IP-encoded or `none` name.
-			// Kept as the peer asset's `synthetic_names` attribute
-			// (peerSyntheticNames, written by resolvePeer), never an identifier.
-			synthetic = append(synthetic, id.Value)
-			continue
-		}
-		if kind == identity.KindSerialNumber && !statedMAC {
-			if mac, ok := derive.MACFromSerialRegistered(id.Value); ok {
-				deriveMAC(mac, derive.RefSerial(id.Value))
-			}
-		}
-		if kind == identity.KindIPAddress {
-			if addr, err := netip.ParseAddr(strings.TrimSpace(id.Value)); err == nil {
-				if mac, ok := derive.MACFromEUI64(addr); ok && !statedMAC {
-					deriveMAC(mac, derive.RefEUI64(addr))
-				}
-				// D2: a temporary-shaped IPv6 address, or a link-local one
-				// with no real segment to scope it to, is kept as an attribute
-				// (peerAddressEvidence, written by resolvePeer), not an identifier.
-				if attrlist.AddressAttribute(addr, segmentScoped) != "" {
-					continue
-				}
-			}
-		}
-		// hostname and ip_address identify only WITHIN a scope; the other kinds
-		// a collector can report about a peer are globally unique, and a scope
-		// on one is rejected outright because it would split the uniqueness key.
-		identifierScope := ""
-		if kind == identity.KindHostname || kind == identity.KindIPAddress {
-			identifierScope = scope
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: kind, Value: id.Value, Scope: identifierScope, Confidence: 1,
-		})
-	}
-	obs.Identifiers = append(obs.Identifiers, derived...)
-	// A peer is MEASURED — a device told us about it; nobody typed it — so a
-	// hostname many unrelated devices carry (`iphone`, `printer`, or a name three
-	// assets in this tenant already hold) is marked generic at confidence 0.3
-	// ( B2). It is still recorded: it is true. A name an operator DECLARES
-	// on a manual device is not marked (managed_asset.go); that is their
-	// statement of which device this is.
-	obs.Identifiers = s.genericNames().MarkAll(ctx, tenantID.String(), obs.Identifiers)
-
-	// A synthetic name is still the best LABEL when it is the only one, so the
-	// display name and hostname columns choose from it as they always did;
-	// only its identifier is gone.
-	var names []string
-	if obs.DisplayName != "" {
-		names = append(names, obs.DisplayName)
-	}
-	for _, id := range obs.Identifiers {
-		if id.Kind == identity.KindHostname || id.Kind == identity.KindFQDN {
-			names = append(names, id.Value)
-		}
-	}
-	names = append(names, synthetic...)
-	if d := hostnamequality.Best(names...); d != "" {
-		obs.DisplayName = d
-	}
-	if h := hostnamequality.BestHostname(append(peerIdentifierNames(obs.Identifiers), synthetic...)...); h != "" {
-		obs.Hostname = strings.ToLower(h)
-	}
-
-	// A peer the COLLECTOR could not class — an LLDP neighbour that advertised
-	// nothing but a chassis MAC — still has evidence: the OUI. The collectors
-	// cannot use the curated table (they run in the agent, which has no
-	// database), so this is where an admin's rule reaches a neighbour.
-	//
-	// It never overrules the collector. A ClassHint the collector set is a
-	// conclusion it EARNED from the API it spoke, and applyPeerClassRules fills
-	// only an absent one.
-	prop := s.applyPeerClassRules(ctx, &obs, peer)
-
-	clean, rejected := obs.Sanitize()
-	for _, r := range rejected {
-		log.Printf("[ObservationSink] peer %q dropped a %s identifier: %v", obs.DisplayName, r.Identifier.Kind, r.Err)
-	}
-	if len(clean.Identifiers) == 0 {
-		// AddRelationship already refuses a peer with no identifier, so this is
-		// the case where every identifier it had failed normalisation here. An
-		// identifier-less asset can never be recognised again, so creating one
-		// would mint a duplicate on every run.
-		if len(synthetic) > 0 || len(peerAddressEvidence(peer, scope)) > 0 {
-			// Its only names were synthetic, or its only addresses rotate or
-			// are link-local with nowhere to scope them ( D1, D2). Before
-			// those rules such a peer became an asset held together by a value
-			// that changes; now there is nothing to hold it, and that is a
-			// skipped peer, not a failed job.
-			return identity.Observation{}, classify.ClassProposal{}, fmt.Errorf("%w: peer %q", errPeerSyntheticNamesOnly, obs.DisplayName)
-		}
-		return identity.Observation{}, classify.ClassProposal{}, fmt.Errorf("peer %q carries no usable identifier", obs.DisplayName)
-	}
-	return clean, prop, nil
-}
-
 // errPeerSyntheticNamesOnly means a peer's only identifiers were names that are
 // not identity (hostnamequality.IsIdentityName) or addresses that are not
 // ( D2: temporary-shaped IPv6, unscopable link-local). Callers skip that
 // peer's edge or fact and carry on, the way they treat a contested peer.
 var errPeerSyntheticNamesOnly = errors.New("the peer carries only synthetic names or rotating addresses, which are not identifiers")
-
-// peerNameIsSynthetic is the one test the peer path applies to a name: a
-// hostname or fqdn that is not identity ( D1).
-func peerNameIsSynthetic(kind identity.Kind, value string) bool {
-	return (kind == identity.KindHostname || kind == identity.KindFQDN) && !hostnamequality.IsIdentityName(value)
-}
-
-// peerSyntheticNames is every name on the peer reference that
-// peerObservation refused as an identifier, normalised and deduplicated.
-func peerSyntheticNames(peer di.PeerRef) []string {
-	var names []string
-	for _, id := range peer.Identifiers {
-		if peerNameIsSynthetic(identity.Kind(id.Kind), id.Value) {
-			names = append(names, id.Value)
-		}
-	}
-	return hostnamequality.MergeSyntheticNames(names, nil)
-}
-
-// recordSyntheticNames folds names into the asset's `synthetic_names`
-// attribute on the resolving transaction: most recent first, deduplicated,
-// capped at hostnamequality.MaxSyntheticNames. inventory-service's host
-// observation ingest writes the same attribute through the same
-// attrlist.Record; nothing is written when the list would not change, and there
-// is no history entry — the attribute explains an asset, it is not an event.
-func recordSyntheticNames(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, assetID string, names []string) error {
-	return attrlist.Record(ctx, tx, tenantID.String(), assetID, attrlist.KeySyntheticNames, names, hostnamequality.MaxSyntheticNames)
-}
-
-// derivedMACConfidence is the confidence a derived MAC is recorded with
-// ( Phase 2) — the same value inventory-service's host-observation ingest
-// uses. It does not affect voting; it tells a reviewer the value was worked
-// out, not reported.
-const derivedMACConfidence = 0.9
-
-// peerAddressEvidence is the IPv6 evidence on a peer reference that D2
-// keeps as ATTRIBUTES rather than identifiers, keyed by attribute
-// (attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal). scope is the peer's
-// segment scope (peerObservation's, and obs.Network.SegmentID): a link-local
-// address is an identifier inside a real segment and an attribute outside one.
-// The rule is attrlist.AddressAttribute — the one inventory-service applies.
-func peerAddressEvidence(peer di.PeerRef, scope string) map[string][]string {
-	segmentScoped := scope != "" && scope != identity.ScopeTenantDefault
-	var out map[string][]string
-	for _, id := range peer.Identifiers {
-		if identity.Kind(id.Kind) != identity.KindIPAddress {
-			continue
-		}
-		addr, err := netip.ParseAddr(strings.TrimSpace(id.Value))
-		if err != nil {
-			continue
-		}
-		if key := attrlist.AddressAttribute(addr, segmentScoped); key != "" {
-			if out == nil {
-				out = map[string][]string{}
-			}
-			out[key] = append(out[key], addr.Unmap().WithZone("").String())
-		}
-	}
-	return out
-}
-
-// recordAddressEvidence writes peerAddressEvidence onto the peer's asset, each
-// list capped at attrlist.MaxAddressEvidence, most recent first.
-func recordAddressEvidence(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, assetID string, evidence map[string][]string) error {
-	for _, key := range []string{attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal} {
-		if err := attrlist.Record(ctx, tx, tenantID.String(), assetID, key, evidence[key], attrlist.MaxAddressEvidence); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// scopeFor resolves the network segment a peer's address falls in, which is the
-// scope its hostname and IP identify within (ADR-0002 D3).
-//
-// It is the one place in this file that asks the question, so that when the
-// resolver moves — the shared `ScopeForAddress` the identity layer is growing —
-// there is a single call site to move rather than one per identifier.
-func (s *ObservationSink) scopeFor(ctx context.Context, tenantID uuid.UUID, peer di.PeerRef) (string, bool) {
-	ip := peer.Identifier(di.IdentifierIPAddress)
-	hostname := peer.Identifier(di.IdentifierHostname)
-	if hostname == "" {
-		hostname = peer.Identifier(di.IdentifierFQDN)
-	}
-	_, repo, err := s.engine()
-	if err != nil {
-		repo = nil
-	}
-	return newDeviceScopeResolver(s.db, repo).segmentScope(ctx, tenantID, ip, hostname, "")
-}
 
 // applyPeerClassRules asks the classifier what a peer is, and returns its full
 // answer so the caller can raise the proposal it owes.
@@ -1074,7 +789,7 @@ func (s *ObservationSink) scopeFor(ctx context.Context, tenantID uuid.UUID, peer
 // Until workstream 4.6a the second half was simply dropped: this service had no
 // proposal writer, so a model's answer and a rule's answer about an EXISTING
 // peer were both computed and discarded.
-func (s *ObservationSink) applyPeerClassRules(ctx context.Context, obs *identity.Observation, peer di.PeerRef) classify.ClassProposal {
+func (s *ObservationSink) applyPeerClassRules(ctx context.Context, peer di.PeerRef) classify.ClassProposal {
 	var macs []string
 	for _, id := range peer.Identifiers {
 		if id.Kind == string(di.IdentifierMACAddress) {
@@ -1109,16 +824,9 @@ func (s *ObservationSink) applyPeerClassRules(ctx context.Context, obs *identity
 
 	// Unknown stays unknown, and so does a conflict — but a CONFLICT is still
 	// returned, because naming the classes that disagreed is how the catalogue
-	// gets fixed rather than the asset guessed at.
-	classproposal.Apply(obs, out)
+	// gets fixed rather than the asset guessed at. The caller applies a rule's
+	// class to the sighting (applyClassToSighting).
 	return out
-}
-
-type observedDHCPKey struct{}
-
-func observedDHCP(ctx context.Context) []vlanSegmentSpec {
-	specs, _ := ctx.Value(observedDHCPKey{}).([]vlanSegmentSpec)
-	return specs
 }
 
 // dhcpPosture is what an interrogated device said about DHCP on one of its
@@ -1153,21 +861,6 @@ type vlanSegmentSpec struct {
 	DHCP        dhcpPosture
 	NetworkType string
 }
-
-// leaseScope reports whether an address on this network must be treated as a
-// possibly-reused lease: it may be recorded, but it cannot vote on identity.
-//
-// Unknown answers yes. That is the conservative direction for the one decision
-// it feeds — the cost of being wrong is that a bare address on a static network
-// cannot join two observations by itself (a MAC, serial or agent id still
-// can), while the cost of the other answer is two devices that held the same
-// lease merged into one asset.
-//
-// This is the in-run half. It matters where the network's persisted segment
-// does not carry the posture — an operator declared the same CIDR first, and
-// declared segments win. The persistent half is ScopeForAddress, which reads a
-// stored `dhcp: unknown` as dynamic for every later run and intake.
-func (s vlanSegmentSpec) leaseScope() bool { return s.DHCP != dhcpDisabled }
 
 // vlanSegmentSpecs extracts cidr segments from a net.vlans fact.
 //
@@ -1350,14 +1043,4 @@ func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID, asse
 		}
 		return nil
 	})
-}
-
-func peerIdentifierNames(ids []identity.Identifier) []string {
-	var names []string
-	for _, id := range ids {
-		if id.Kind == identity.KindHostname || id.Kind == identity.KindFQDN {
-			names = append(names, id.Value)
-		}
-	}
-	return names
 }

@@ -153,7 +153,7 @@ func TestIntegration_CIExport_AssetsDetail(t *testing.T) {
 		[]SourceFact{{Key: "os.name", Value: "Ubuntu"}}, time.Now().UTC()); err != nil {
 		t.Fatalf("write fact: %v", err)
 	}
-	if err := f.svc.identity.AttachIdentifiers(ctx, identity.AssetRef{TenantID: a.String(), ID: live.String()},
+	if _, err := f.svc.identity.AttachIdentifiers(ctx, identity.AssetRef{TenantID: a.String(), ID: live.String()},
 		[]identity.Identifier{{Kind: identity.KindCMDBSysID, Value: "SRV1", Scope: "profile-1", Confidence: 1,
 			Source: identity.Source{Kind: identity.SourceImported, Ref: "cmdb:profile-1"}}}); err != nil {
 		t.Fatalf("attach identifier: %v", err)

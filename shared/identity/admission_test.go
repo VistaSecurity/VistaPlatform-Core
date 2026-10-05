@@ -63,3 +63,30 @@ func TestObservationGroupingIsNotCorroboration(t *testing.T) {
 		t.Fatal("a delivery retry with an intake clock became another sighting")
 	}
 }
+
+// TestAdmissionTreatsAPinnedAddressAsStatic: an address whose owner holds it
+// pinned binds a direct sighting inside a dynamic scope exactly as an
+// address in a static segment does; any other address in that scope still
+// does not. obs.pinned is what Engine.Resolve fills from the store.
+//
+// Mutation check: drop `&& !obs.addressPinned(id)` from AssessAdmission → the
+// pinned case is refused with dynamic_address_without_device_binding.
+func TestAdmissionTreatsAPinnedAddressAsStatic(t *testing.T) {
+	addr := Identifier{Kind: KindIPAddress, Value: "192.0.2.1", Scope: "lan"}
+	o := Observation{
+		TenantID: "tenant", Source: Source{Kind: SourceMeasured, Ref: "sensor:a"}, ObservedAt: time.Now(), Confidence: 1,
+		Identifiers: []Identifier{addr}, Admission: AdmissionEvidence{Direct: true},
+		Network: Network{SegmentID: "lan"}, DynamicScopes: map[string]bool{"lan": true},
+	}
+	if got := AssessAdmission(o); got.Established || got.Reasons[0] != ReasonDynamicAddressWithoutDeviceBinding {
+		t.Fatalf("unpinned: admission = %+v, want refused as a dynamic address", got)
+	}
+	o.pinned = map[string]bool{addr.Key(): true}
+	if got := AssessAdmission(o); !got.Established || got.Reasons[0] != "direct_scoped_address" {
+		t.Fatalf("pinned: admission = %+v, want established as a direct scoped address", got)
+	}
+	o.pinned = map[string]bool{Identifier{Kind: KindIPAddress, Value: "192.0.2.9", Scope: "lan"}.Key(): true}
+	if got := AssessAdmission(o); got.Established {
+		t.Fatalf("a pin on another address established this one: %+v", got)
+	}
+}

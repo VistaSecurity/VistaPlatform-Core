@@ -152,3 +152,61 @@ func TestIntegration_JobMaterialization_ScopedToTheJob(t *testing.T) {
 		t.Fatalf("counts leaked across jobs: %+v", m)
 	}
 }
+
+//: the rows kept as observations are counted — how many and on how many
+// hosts — so the job can say where they went (Discovery → Observations)
+// instead of a silent "0 pending approval"; and the job's findings report the
+// hosts they are on, so a finding count is not read as a count of assets.
+// Only processed `observed` rows count: one the pipeline has not reached yet
+// is still awaiting processing, not an observation.
+func TestIntegration_JobMaterialization_CountsObservedRowsAndHosts(t *testing.T) {
+	svc, raw, tenant := materializationFixture(t)
+	jobID := uuid.New().String()
+
+	queueRow(t, raw, tenant, jobID, "192.0.2.41", "observed", true)
+	queueRow(t, raw, tenant, jobID, "192.0.2.41", "observed", true) // a second port on the same host
+	queueRow(t, raw, tenant, jobID, "192.0.2.42", "observed", true)
+	queueRow(t, raw, tenant, jobID, "192.0.2.43", "observed", false) // not dispositioned yet
+	queueRow(t, raw, tenant, jobID, "192.0.2.44", "pending", true)
+
+	m := svc.getJobMaterialization(jobID, 5)
+	if m == nil {
+		t.Fatal("materialization unavailable")
+	}
+	if m.Observed != 3 || m.ObservedHosts != 2 {
+		t.Errorf("observed = %d on %d host(s), want 3 on 2", m.Observed, m.ObservedHosts)
+	}
+	if m.PendingApproval != 1 || m.AwaitingProcessing != 1 {
+		t.Errorf("pending = %d, awaiting = %d; want 1 and 1 (observed must not move them)", m.PendingApproval, m.AwaitingProcessing)
+	}
+
+	// A job with nothing observed reports an explicit zero, not an absence.
+	other := svc.getJobMaterialization(uuid.New().String(), 0)
+	if other == nil || other.Observed != 0 || other.ObservedHosts != 0 {
+		t.Fatalf("a job with no observed rows = %+v, want explicit zeros", other)
+	}
+}
+
+// finding_hosts is the distinct hosts of the job's own findings: three
+// findings on two addresses are "3 open ports on 2 hosts", not 3 of anything.
+func TestIntegration_JobMaterialization_FindingHosts(t *testing.T) {
+	f, _ := newUnitFixture(t)
+	jobID := f.createPlanJob(t, "22", "10.183.4.0/24")
+	var targetID string
+	if err := f.raw.QueryRow(`SELECT id FROM discovery_targets WHERE job_id = $1 LIMIT 1`, jobID).Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct {
+		ip   string
+		port int
+	}{{"10.183.4.1", 22}, {"10.183.4.1", 443}, {"10.183.4.2", 22}} {
+		if _, err := f.raw.Exec(`INSERT INTO discovery_findings (job_id, target_id, tenant_id, executed_via, protocol, port, resolved_ip)
+			VALUES ($1, $2, $3, 'scan-engine', 'SSH', $4, $5)`, jobID, targetID, f.tenant, r.port, r.ip); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := f.svc.getJobMaterialization(jobID, 3)
+	if m == nil || m.Findings != 3 || m.FindingHosts != 2 {
+		t.Fatalf("materialization = %+v, want 3 findings on 2 hosts", m)
+	}
+}

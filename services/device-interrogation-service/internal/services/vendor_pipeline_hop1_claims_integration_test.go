@@ -343,9 +343,12 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 			dataSource = certs[0].(map[string]any)["data_source"]
 		}
 		return []pipelinetest.Expectation{
+			// P-04, fixed by W1.2: the profile's options leave TLS 1.2 and
+			// 1.3 possible, so no single version is stated.
 			{What: "F5 profile with no tlsVersion: the version is not fabricated (the writer spells unknown \"\")",
-				Got: metaValue(hardened, "version"), Want: "",
-				KnownGap: "P-04 / W1.2", Current: "TLS 1.2"},
+				Got: metaValue(hardened, "version"), Want: ""},
+			{What: "F5 profile with no tlsVersion is marked as having an unmeasured version",
+				Got: metaValue(hardened, "unmeasured_components"), Want: []any{"protocol_version"}},
 			// P-05,: the OpenSSL cipher string is parsed, so
 			// what it excludes is never read as what it enables.
 			{What: "F5 `!MD5` exclusion is not read as the hash",

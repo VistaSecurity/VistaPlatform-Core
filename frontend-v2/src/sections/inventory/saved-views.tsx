@@ -9,6 +9,7 @@ import { useState } from 'react';
 import { Icon, Modal, ModalField, ModalInput } from '../../components/ui';
 import { useCreateSavedView, useDeleteSavedView, useSavedViews, type SavedView } from './asset-queries';
 import { checkAssetQuery } from './query-editor';
+import { BUILTIN_VIEWS } from './builtin-views';
 
 /**
  * What the views menu should show.
@@ -40,6 +41,9 @@ export function SavedViews({ query, onApply }: { query: string; onApply: (q: str
   const views = viewsQ.data ?? [];
   const menu = savedViewsMenuState(viewsQ, views.length);
   const current = views.find((v) => v.query.trim() === query.trim());
+  // A built-in view is named in the button too, so a person who arrived from
+  // a link (the retired Active Scan page redirects here) sees what they are on.
+  const builtin = BUILTIN_VIEWS.find((v) => v.query === query.trim());
   // Only a VALID query can be saved. A saved view is a predicate other people
   // will run; storing one that does not parse would hand them an error card
   // with someone else's name on it.
@@ -57,7 +61,7 @@ export function SavedViews({ query, onApply }: { query: string; onApply: (q: str
         >
           <Icon name="bookmark" size={13} />
           <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {current ? current.name : 'Views'}
+            {current ? current.name : builtin ? builtin.name : 'Views'}
           </span>
           <Icon name="chevron-down" size={12} />
         </button>
@@ -68,6 +72,23 @@ export function SavedViews({ query, onApply }: { query: string; onApply: (q: str
               role="menu"
               style={{ position: 'absolute', zIndex: 31, top: 37, right: 0, minWidth: 268, maxHeight: 320, overflowY: 'auto', borderRadius: 11, border: '1px solid var(--app-border2)', background: 'var(--app-panel)', boxShadow: '0 12px 34px rgba(0,0,0,.24)', padding: 5 }}
             >
+              {/* Every tenant has these; they are not saved, shared or deletable. */}
+              {BUILTIN_VIEWS.map((v) => (
+                <button
+                  key={v.name}
+                  role="menuitem"
+                  className="row-hover"
+                  title={v.description}
+                  onClick={() => { onApply(v.query); setOpen(false); }}
+                  style={{ display: 'block', width: '100%', textAlign: 'left', padding: '7px 9px', border: 'none', borderRadius: 8, background: 'transparent', cursor: 'pointer', color: 'var(--app-t1)' }}
+                >
+                  <div style={{ fontSize: 12.5, fontWeight: builtin === v ? 700 : 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <Icon name="radar" size={12} style={{ color: 'var(--app-t3)' }} />{v.name}
+                  </div>
+                  <div style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{v.description}</div>
+                </button>
+              ))}
+              <div style={{ borderTop: '1px solid var(--app-border)', margin: '4px 0' }} />
               {menu === 'loading' && <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '9px 10px' }}>Loading views…</div>}
               {menu === 'failed' && (
                 <div data-testid="saved-views-error" style={{ fontSize: 12, color: 'var(--app-t2)', padding: '9px 10px', lineHeight: 1.5 }}>

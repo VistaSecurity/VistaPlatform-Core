@@ -1,6 +1,6 @@
 {
   "vendor": "paloalto",
-  "input_sha256": "bb0cf144587a6ed3692cfef8f9ce1381af5a1282a24afc822b4cbd535a4b6bb0",
+  "input_sha256": "b0c2d07eb3e6281f746b17fd47882236e036827903e193b76facf0389d93a7f7",
   "inventory": {
     "assets": [
       {
@@ -26,7 +26,9 @@
         "key_size": null,
         "risk_score": null,
         "risk_level": "Unknown",
-        "risk_factors": [],
+        "risk_factors": [
+          "Partially assessed: the protocol version was not measured; a legacy version cannot be ruled out"
+        ],
         "algorithm_links": {},
         "pqc_category": "unclassified",
         "has_certificate": false

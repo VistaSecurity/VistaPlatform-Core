@@ -20,7 +20,8 @@ describe('describeNotScanned', () => {
   it('names the imported-without-consent refusal and says what to do about it', () => {
     const [row] = describeNotScanned([{ reason: 'imported_without_scan_consent', count: 7 }]);
     expect(row.label).toBe('Imported, not cleared for scanning');
-    expect(row.detail).toContain('Active Scan');
+    // Scanning them yourself is Inventory's Scan now.
+    expect(row.detail).toContain('scan them yourself from Inventory');
     expect(row.detail).not.toContain('does not describe');
     // Registering a segment does not help: consent is per connection.
     expect(row.registerSegmentsHref).toBeUndefined();

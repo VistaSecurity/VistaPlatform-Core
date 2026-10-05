@@ -121,6 +121,22 @@ func TestIntegration_UnmodelledProtocol_CreatesNoPhantomTLSConfiguration(t *test
 			why: "the CloudFront collector stamps HTTP to record cleartext",
 		},
 		{
+			name:     "tls_handshake_refused",
+			hostname: "sni-only.example.test",
+			protocol: "TLS",
+			port:     443,
+			// What the scan engine produces for a TLS server that answers an
+			// address scan's ClientHello with an alert (shared/jobunits).
+			rawData: map[string]interface{}{
+				"transport":           "tcp",
+				"unidentified":        false,
+				"service_hint":        "tls",
+				"identification_note": "tls-handshake-refused",
+				"tls_handshake_alert": "internal error",
+			},
+			why: "the port speaks TLS but nothing was negotiated",
+		},
+		{
 			name:     "unknown_vendor_string",
 			hostname: "vendor-box.example.test",
 			protocol: "Custom-Vendor-Thing",
@@ -140,7 +156,7 @@ func TestIntegration_UnmodelledProtocol_CreatesNoPhantomTLSConfiguration(t *test
 				Protocol: tc.protocol,
 				RawData:  tc.rawData,
 			}
-			if err := svc.processDiscoveryCryptoData(tenant, assetID, f, nil, nil, nil); err != nil {
+			if err := materializeForTest(svc, tenant, assetID, f, nil, nil, nil); err != nil {
 				t.Fatalf("processDiscoveryCryptoData: %v", err)
 			}
 			if n := countImplementationRows(t, raw, tenant, assetID); n != 0 {
@@ -181,7 +197,7 @@ func TestIntegration_ModelledProtocol_StillMaterializes(t *testing.T) {
 			CipherSuite:     &suite,
 			RawData:         map[string]interface{}{},
 		}
-		if err := svc.processDiscoveryCryptoData(tenant, assetID, f, nil, nil, nil); err != nil {
+		if err := materializeForTest(svc, tenant, assetID, f, nil, nil, nil); err != nil {
 			t.Fatalf("processDiscoveryCryptoData: %v", err)
 		}
 		if n := countImplementationRows(t, raw, tenant, assetID); n != 1 {
@@ -217,7 +233,7 @@ func TestIntegration_ModelledProtocol_StillMaterializes(t *testing.T) {
 				"device_type": "cisco_asa",
 			},
 		}
-		if err := svc.processDiscoveryCryptoData(tenant, assetID, f, nil, nil, nil); err != nil {
+		if err := materializeForTest(svc, tenant, assetID, f, nil, nil, nil); err != nil {
 			t.Fatalf("processDiscoveryCryptoData: %v", err)
 		}
 		var stored string

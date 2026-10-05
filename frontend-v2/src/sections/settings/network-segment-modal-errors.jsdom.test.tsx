@@ -24,7 +24,7 @@ const segment = {
   id: 'seg-1', tenant_id: 't', name: 'Everything', segment_type: 'cidr', value: '0.0.0.0/0', network_type: 'public',
   environment: 'production', location_id: null, is_active: true, auto_approve_discoveries: false, tags: null,
   metadata: {}, created_at: '2026-09-24T00:00:00Z', updated_at: '2026-09-24T00:00:00Z',
-  dynamic: null, dynamic_source: null,
+  dynamic: null, dynamic_source: null, gateway: null, coverage: null,
 };
 
 let host: HTMLDivElement; let root: Root;
@@ -63,4 +63,11 @@ it('keeps the generic message for a server failure', async () => {
   await saveAndSettle();
   expect(document.body.textContent).toContain('Failed to save network segment');
   expect(document.body.textContent).not.toContain('Failed to update network segment');
+});
+
+it('shows the server reason when the range is already a segment', async () => {
+  const LEARNED = "segment already exists: this range was learned from fw-edge (segment \"wan\"); use 'Claim as mine' on it instead of declaring it again";
+  api.PUT.mockResolvedValue({ data: undefined, error: { error: LEARNED }, response: { ok: false, status: 409 } });
+  await saveAndSettle();
+  expect(document.body.textContent).toContain("use 'Claim as mine' on it");
 });

@@ -16,10 +16,10 @@ const cloudHandshakeSites = 6
 // Every cloud collector that makes a handshake must carry its key-exchange
 // measurement onto the crypto config it builds from it. The measurement is
 // made inside TLSHandshakeService, so a site that forgets
-// applyHandshakeKeyExchange compiles, passes every other test and silently
+// applyHandshakeMeasurements compiles, passes every other test and silently
 // drops the group — which is exactly what removing it from all six sites used
 // to do. This walks the source: in every function that calls
-// cloudTLSHandshake, there must be as many applyHandshakeKeyExchange calls as
+// cloudTLSHandshake, there must be as many applyHandshakeMeasurements calls as
 // handshakes. The CloudFront path is additionally driven for real by
 // TestIntegration_CloudFrontCollector_CarriesTLSKeyExchange.
 func TestCloudHandshakeSitesApplyKeyExchange(t *testing.T) {
@@ -44,7 +44,7 @@ func TestCloudHandshakeSitesApplyKeyExchange(t *testing.T) {
 				switch id.Name {
 				case "cloudTLSHandshake":
 					handshakes++
-				case "applyHandshakeKeyExchange":
+				case "applyHandshakeMeasurements":
 					applies++
 				}
 			}
@@ -55,7 +55,7 @@ func TestCloudHandshakeSitesApplyKeyExchange(t *testing.T) {
 			return true
 		})
 		if handshakes != applies {
-			t.Errorf("%s makes %d handshake(s) but applies the key-exchange measurement %d time(s)", fn.Name.Name, handshakes, applies)
+			t.Errorf("%s makes %d handshake(s) but applies the handshake measurements (key exchange, certificate validation) %d time(s)", fn.Name.Name, handshakes, applies)
 		}
 		total += handshakes
 	}

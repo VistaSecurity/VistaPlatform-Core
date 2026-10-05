@@ -213,28 +213,48 @@ func (h *AutoScanHandler) UpdateAutoScan(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid payload"})
 		return
 	}
-	if body.Enabled == nil || body.ScanOnFirstObservation == nil || body.RescanIntervalHours == nil ||
-		body.Protocols == nil || body.Ports == nil {
+	if body.Enabled == nil || body.ScanOnFirstObservation == nil || body.RescanIntervalHours == nil || body.Ports == nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "enabled, scan_on_first_observation, rescan_interval_hours, protocols and ports are all required",
+			"error": "enabled, scan_on_first_observation, rescan_interval_hours and ports are all required",
 		})
 		return
 	}
 
 	ctx := c.Request.Context()
-	// The routing switch is the one optional field: an older client omitting
-	// it must not flip it, so the current value is carried forward.
+	// Two optional fields, each carried forward from the stored policy when
+	// omitted so a client that does not send it cannot change it:
+	//   - prefer_observing_sensor: an older client that predates the switch;
+	// - protocols (deprecated, D1): automatic scans run on the shared
+	//     engine and identify TLS and SSH from what answers, so the page no
+	//     longer edits it. The stored value is still what a sensor too old to
+	//     run a plan probes (cluster-sensor-service's legacy fallback), so
+	//     saving the page must not wipe or reset it. A client that does send
+	//     it is still honoured and validated, as before.
 	preferObserving := true
+	protocols := body.Protocols
+	if body.PreferObservingSensor == nil || protocols == nil {
+		current, err := h.store.GetPolicy(ctx, tenantID)
+		if err != nil && protocols == nil {
+			// Saving over a policy that could not be read would replace its
+			// protocols with whatever the empty read returned.
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read the automatic-scan policy"})
+			return
+		}
+		if body.PreferObservingSensor == nil && err == nil {
+			preferObserving = current.PreferObservingSensor
+		}
+		if protocols == nil {
+			protocols = current.Protocols
+		}
+	}
 	if body.PreferObservingSensor != nil {
 		preferObserving = *body.PreferObservingSensor
-	} else if current, err := h.store.GetPolicy(ctx, tenantID); err == nil {
-		preferObserving = current.PreferObservingSensor
 	}
 	saved, _, err := h.store.SetPolicy(ctx, tenantID, userID, autoscan.Policy{
 		Enabled:                *body.Enabled,
 		ScanOnFirstObservation: *body.ScanOnFirstObservation,
 		RescanIntervalHours:    *body.RescanIntervalHours,
-		Protocols:              body.Protocols,
+		Protocols:              protocols,
 		Ports:                  body.Ports,
 		PreferObservingSensor:  preferObserving,
 	})

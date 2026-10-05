@@ -238,6 +238,29 @@ only needed when you move a live backend to `Recreate`, not on a fresh install.
   and provide a `database-url` key in your platform secret, per the comments
   above the `datastores:` block in `values.yaml`
 
+### PostgreSQL JIT (your own or a managed PostgreSQL)
+
+PostgreSQL's just-in-time (JIT) compiler speeds up long analytical queries and
+slows down short ones. Vista Platform's tables are split into partitions, so
+even a simple lookup builds a large query plan, and with JIT on the compile time
+can dwarf the work itself (the same query went from tens of seconds to about a
+tenth of a second with JIT off). The platform therefore asks for `jit=off` on
+every connection it opens. Nothing needs to be configured for this, and your
+other databases and applications on the same server are not affected.
+
+- To keep your server's own JIT setting instead, set `appConfig.dbJit: true` in
+  your values. It is one value for every backend service (the chart passes it
+  to them as the `DB_JIT` environment variable), and the backends restart on
+  the upgrade that changes it. A `DB_JIT` entry under `backends.<service>.extraEnv` overrides it for that
+  one service.
+- If a connection pooler such as PgBouncer sits between the platform and
+  PostgreSQL and rejects the connection with `unsupported startup parameter:
+  jit`, either add `jit` to the pooler's `ignore_startup_parameters` setting, or
+  set `appConfig.dbJit: true` and set `jit = off` for the platform's database or
+  role on the PostgreSQL side (`ALTER DATABASE crypto_inventory SET jit = off;`).
+  Running behind a pooler or a managed database proxy is described here but is
+  not something the project tests.
+
 ### Frontend not loading
 
 - Verify `tls.dnsName` / `tls.adminDnsName` resolve to your ingress controller

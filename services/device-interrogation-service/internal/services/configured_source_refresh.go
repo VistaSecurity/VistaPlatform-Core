@@ -108,7 +108,10 @@ func (s *ConfiguredSourceRefresh) Refresh(ctx context.Context, req SourceRefresh
 		if reason != "" {
 			out.State = "blocked"
 			out.Reason = reason
-			if reason == "no_configured_source" {
+			// Nothing a configured source could add is a SUCCESSFUL source
+			// stage, not a blocker: "blocked" is reserved for a matching
+			// source an operator has to repair.
+			if reason == "no_configured_source" || reason == reasonSourceProducedObservation || reason == reasonSourceAlreadyReportedPeer {
 				out.State = "completed"
 			}
 		}
@@ -178,11 +181,23 @@ func (s *ConfiguredSourceRefresh) Refresh(ctx context.Context, req SourceRefresh
 				} else if !errors.Is(err, sql.ErrNoRows) {
 					return err
 				} else {
-					job, err = s.queue.createJobTx(ctx, tx, uuid.New(), plan)
+					recent, err := sourceRefreshedRecentlyTx(ctx, tx, req.TenantID, plan.AssetID, sourceKey)
 					if err != nil {
 						return err
 					}
-					child = &job.ID
+					if recent {
+						// Nothing in flight to share, and this source was already
+						// asked within minSourceRefreshInterval. The stage is
+						// done: what it said then is what it would say now.
+						out.State = "completed"
+						out.Reason = reasonSourceRefreshedRecently
+					} else {
+						job, err = s.queue.createJobTx(ctx, tx, uuid.New(), plan)
+						if err != nil {
+							return err
+						}
+						child = &job.ID
+					}
 				}
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO identity_source_refreshes(tenant_id,id,observation_id,fingerprint,state,reason,device_job_id,attempts,next_attempt_at)
@@ -304,21 +319,31 @@ func (s *ConfiguredSourceRefresh) plan(ctx context.Context, tenant, observationI
 		return s.planCloud(ctx, tenant, observationID, obs, linked)
 	}
 	var asset, agent, integration uuid.NullUUID
-	var prior bool
+	var prior, fromSource bool
 	err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
 		if strings.HasPrefix(obs.Source.Ref, "interrogation:") {
-			id, err := uuid.Parse(strings.TrimPrefix(obs.Source.Ref, "interrogation:"))
-			if err != nil {
-				return nil
+			// `interrogation:<id>` names the run that produced the observation,
+			// and the two runtimes spell the id differently: the agent path
+			// (ResultProcessor) writes the DEVICE job id, the platform path
+			// (DeviceInterrogationService.persistObservations) the DISCOVERY job
+			// id, which RecordDiscoveryJob stamps on the device job's
+			// parameters. Looking only in device_jobs.id missed every platform
+			// run, and the early return that followed skipped the linked-asset
+			// check too, so those observations completed `no_configured_source`
+			// by accident instead of being planned against their device.
+			// A malformed id or an unknown run falls through to that check.
+			if id, err := uuid.Parse(strings.TrimPrefix(obs.Source.Ref, "interrogation:")); err == nil {
+				err = tx.QueryRowContext(ctx, `SELECT asset_id,agent_id,integration_id FROM device_jobs
+   WHERE tenant_id=$1 AND deleted_at IS NULL AND (id=$2 OR parameters->>'discovery_job_id'=$2::text)
+   ORDER BY (id=$2) DESC,created_at DESC LIMIT 1`, tenant, id).Scan(&asset, &agent, &integration)
+				switch {
+				case err == nil:
+					prior = true
+					fromSource = asset.Valid
+				case !errors.Is(err, sql.ErrNoRows):
+					return err
+				}
 			}
-			err = tx.QueryRowContext(ctx, `SELECT asset_id,agent_id,integration_id FROM device_jobs WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`, tenant, id).Scan(&asset, &agent, &integration)
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			prior = true
 		}
 		if !asset.Valid && linked.Valid {
 			var managed bool
@@ -345,6 +370,26 @@ func (s *ConfiguredSourceRefresh) plan(ctx context.Context, tenant, observationI
 	if !asset.Valid {
 		return plan, "no_configured_source", nil
 	}
+	// The observation IS that interrogation's answer: re-running the
+	// interrogation that produced it can only return what it just returned
+	// (the rule planCloud applies to a linked cloud observation).
+	//
+	// That holds for an UNLINKED one too. It used to be planned against the
+	// device, on the theory that a fresh run gave it another chance to resolve.
+	// It cannot: the device already said everything it knows about that peer,
+	// and the next run says it again under a new `interrogation:<run>` source
+	// ref — which is a new observation row, unlinked for the same reason, which
+	// was planned against the device again. One controller with a dozen peers
+	// that never resolve was re-interrogated every few minutes for as long as
+	// it was configured. What holds such a peer (its network, a binding)
+	// is not something this source can change; the network stage after this one
+	// still runs as before.
+	if fromSource {
+		if linked.Valid {
+			return plan, reasonSourceProducedObservation, nil
+		}
+		return plan, reasonSourceAlreadyReportedPeer, nil
+	}
 	device, err := s.devices.GetDevice(ctx, tenant, asset.UUID)
 	if errors.Is(err, ErrDeviceNotFound) {
 		return plan, "configured_source_unavailable", nil
@@ -358,7 +403,7 @@ func (s *ConfiguredSourceRefresh) plan(ctx context.Context, tenant, observationI
 	if !prior {
 		return plan, "executor_scope_unknown", nil
 	}
-	if !agent.Valid && device.Metadata["identity_enrichment_executor"] != "platform" {
+	if !agent.Valid && !platformReinterrogationAllowed(device.Metadata) {
 		return plan, "executor_scope_unknown", nil
 	}
 	if agent.Valid {
@@ -392,37 +437,95 @@ func (s *ConfiguredSourceRefresh) plan(ctx context.Context, tenant, observationI
 	return plan, "", nil
 }
 
+// reasonSourceProducedObservation completes the source stage for an
+// observation whose own producer IS the configured source a refresh would ask.
+// Re-running that collector can only return what it just returned.
+const reasonSourceProducedObservation = "observation_from_configured_source"
+
+// reasonSourceAlreadyReportedPeer completes the source stage for an UNLINKED
+// observation that an interrogation of the source itself produced: a peer the
+// device reported and identity could not place. Asking the same device again
+// returns the same answer (see plan).
+const reasonSourceAlreadyReportedPeer = "configured_source_already_reported_this_peer"
+
+// reasonSourceRefreshedRecently completes the source stage when identity
+// enrichment already asked this source within minSourceRefreshInterval and no
+// run of it is in flight to share.
+const reasonSourceRefreshedRecently = "configured_source_refreshed_recently"
+
+// minSourceRefreshInterval is the least time between two interrogations of one
+// configured source that identity enrichment starts on its own.
+//
+// It bounds the source, not the observation. Every observation that wants a
+// refresh carries its own receipt and its own retry clock, so without a
+// per-source bound N observations pointing at one controller can keep it busy
+// for ever, each one starting the next run as soon as the last one is more than
+// five minutes old (Refresh's reuse window). That is how one controller was
+// re-interrogated every 8-20 minutes indefinitely.
+//
+// Six hours: an interrogation is a credentialed login to a device somebody
+// configured, and an unattended re-check four times a day is plenty for
+// evidence that changes when the network does. The tenant's own interrogation
+// schedule and a person's Interrogate or Test connection never come through
+// here and are not limited by it.
+//
+// Every refresh job counts, whatever became of it: a failed or unclaimed run
+// still asked the source, and retrying a failing one sooner is the same loop.
+const minSourceRefreshInterval = 6 * time.Hour
+
+// sourceRefreshedRecentlyTx reports whether identity enrichment started a run of
+// this source within minSourceRefreshInterval. A device source is the device —
+// whichever executor or parameters a run had — and a cloud source, which has no
+// asset, is its source key (integration and resource scope).
+func sourceRefreshedRecentlyTx(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, asset *uuid.UUID, sourceKey string) (bool, error) {
+	var recent bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM device_jobs WHERE tenant_id=$1 AND deleted_at IS NULL
+   AND parameters?'identity_refresh_source_key' AND created_at>now()-$4*interval '1 second'
+   AND CASE WHEN $2::uuid IS NOT NULL THEN asset_id=$2::uuid ELSE parameters->>'identity_refresh_source_key'=$3 END)`,
+		tenant, asset, sourceKey, int64(minSourceRefreshInterval/time.Second)).Scan(&recent)
+	return recent, err
+}
+
 func (s *ConfiguredSourceRefresh) planCloud(ctx context.Context, tenant, observationID uuid.UUID, obs identity.Observation, linked uuid.NullUUID) (models.CreateDeviceJobRequest, string, error) {
 	plan := models.CreateDeviceJobRequest{TenantID: tenant, JobType: models.JobTypeCloudDiscovery, Parameters: map[string]interface{}{}}
-	var device *models.Device
+	// A `cloud:<provider>` observation IS the provider API's answer, and once it
+	// is linked to an asset there is nothing for a refresh to add: it would
+	// re-run the collector that produced it, and the coordinator then closes a
+	// linked observation regardless ("evidence_linked_existing_asset..."). The
+	// source stage is therefore complete, not blocked.
+	//
+	// This path used to read the linked asset's management and credentials
+	// rows, which cloud discovery deliberately stopped writing ("nothing found
+	// through a cloud API is a managed device"), and then fall back to the
+	// retained cloud context, which is deliberately kept only for observations
+	// that did NOT produce an asset. Every cloud-discovered asset's observation
+	// therefore ended `blocked / cloud_source_not_identified` after burning its
+	// retries — a permanent fault an operator could do nothing about.
+	//
+	// An UNLINKED cloud observation still refreshes through its retained
+	// context below: re-observing it is how it gets another chance to resolve.
 	if linked.Valid {
-		var err error
-		device, err = s.devices.GetDevice(ctx, tenant, linked.UUID)
-		if err != nil && !errors.Is(err, ErrDeviceNotFound) {
-			return plan, "", err
-		}
+		return plan, reasonSourceProducedObservation, nil
 	}
-	if device == nil {
-		var sealed string
-		err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
-			return tx.QueryRowContext(ctx, `SELECT context_enc FROM identity_observation_cloud_contexts WHERE tenant_id=$1 AND observation_id=$2 ORDER BY observed_at DESC LIMIT 1`, tenant, observationID).Scan(&sealed)
-		})
-		if errors.Is(err, sql.ErrNoRows) {
-			return plan, "cloud_source_not_identified", nil
-		}
-		if err != nil {
-			return plan, "", err
-		}
-		raw, err := s.devices.cipher.DecryptValue(sealed)
-		if err != nil {
-			return plan, "configured_credentials_unavailable", nil
-		}
-		var payload retainedCloudContext
-		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-			return plan, "", err
-		}
-		device = &payload.Device
+	var sealed string
+	err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT context_enc FROM identity_observation_cloud_contexts WHERE tenant_id=$1 AND observation_id=$2 ORDER BY observed_at DESC LIMIT 1`, tenant, observationID).Scan(&sealed)
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return plan, "cloud_source_not_identified", nil
 	}
+	if err != nil {
+		return plan, "", err
+	}
+	raw, err := s.devices.cipher.DecryptValue(sealed)
+	if err != nil {
+		return plan, "configured_credentials_unavailable", nil
+	}
+	var payload retainedCloudContext
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return plan, "", err
+	}
+	device := &payload.Device
 	if device.CredentialID == nil {
 		return plan, "cloud_source_not_identified", nil
 	}
@@ -434,7 +537,7 @@ func (s *ConfiguredSourceRefresh) planCloud(ctx context.Context, tenant, observa
 	// Tenant-owned configuration only. A shared integration does not by itself
 	// authorize automatic enrichment for every tenant.
 	var configured bool
-	err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
+	err = database.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM platform_integrations WHERE tenant_id=$1 AND id=$2 AND integration_type=$3 AND is_active AND COALESCE(is_enabled, true) AND deleted_at IS NULL AND config IS NOT NULL AND config<>'{}'::jsonb)`, tenant, *device.CredentialID, provider).Scan(&configured)
 	})
 	if err != nil {

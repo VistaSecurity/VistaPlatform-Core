@@ -179,16 +179,16 @@ func TestIntegration_CreateDevice_IsAnAssetWithManagement(t *testing.T) {
 
 // TestIntegration_CreateDevice_IsOneUnitOfWork.
 //
-// The engine's writes (asset, identifiers, last-seen, history) and this
-// service's (management, credentials, declared facts) run on ONE transaction,
-// via Repository.Tx(). One observation is one fact about the world: an asset
-// whose history says it was created and whose management configuration is
-// absent is a state no later run repairs, because the next observation MATCHES
-// the asset that exists and never takes the create path again.
+// The engine's writes (asset, identifiers, last-seen, history) commit in
+// inventory-service and this service's (management, credentials, declared
+// facts) commit here, after. An asset whose history says it was
+// created and whose management configuration is absent is a state no later
+// run repairs, so a configuration that is known to fail is refused BEFORE the
+// sighting is sent (deviceFieldUpdate.preflight).
 //
 // The failure is injected at the configuration half — a metadata value that
-// cannot be marshalled — and the assertion is that NOTHING survived, not even
-// the asset the engine had already written.
+// cannot be marshalled — and the assertion is that NOTHING was written, not
+// even the asset: the sighting was never sent.
 func TestIntegration_CreateDevice_IsOneUnitOfWork(t *testing.T) {
 	db := testdb.Connect(t)
 	tenant := testdb.NewTenant(t, db)
@@ -613,7 +613,9 @@ func TestIntegration_ObservationSink_PeerBecomesAPendingAssetAndAPendingEdge(t *
 		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	peerMAC := "aa:bb:cc:dd:ee:01"
+	// Globally administered: a locally administered MAC in a neighbour table is
+	// a randomised Wi-Fi address, which Intake withholds.
+	peerMAC := "a8:bb:cc:dd:ee:01"
 	peer := di.PeerRef{DisplayName: "Access Point 1", ClassHint: "access_point"}
 	if !peer.AddIdentifier(di.IdentifierMACAddress, peerMAC) {
 		t.Fatal("AddIdentifier rejected a valid MAC")
@@ -717,7 +719,7 @@ func TestIntegration_ObservationSink_EdgeIsActiveWhenBothEndsAreApproved(t *test
 		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	peerMAC := "aa:bb:cc:dd:ee:02"
+	peerMAC := "a8:bb:cc:dd:ee:02"
 	peerAsset := uuid.New()
 	if _, err := db.Exec(`
 		INSERT INTO assets (id, tenant_id, class_key, class_path, asset_status)
@@ -787,7 +789,7 @@ func TestIntegration_ObservationSink_SecretsNeverReachAssetFacts(t *testing.T) {
 	// a per-device auth key, which used to be persisted verbatim on every run.
 	const psk = "sup3r-s3cret-mesh-psk"
 	peer := di.PeerRef{DisplayName: "neighbour"}
-	peer.AddIdentifier(di.IdentifierMACAddress, "aa:bb:cc:dd:ee:03")
+	peer.AddIdentifier(di.IdentifierMACAddress, "a8:bb:cc:dd:ee:03")
 
 	sink := NewObservationSink(db)
 	if err := sink.Persist(ctx, tenant, dev.ID, interrogationSource(uuid.New()), InterrogationObservations{
@@ -1064,7 +1066,7 @@ func TestIntegration_ObservationSink_PeerSyntheticNamesAreAttributes(t *testing.
 	}
 
 	const castName = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b.local"
-	peerMAC := "aa:bb:cc:dd:ee:21"
+	peerMAC := "a8:bb:cc:dd:ee:21"
 	peer := di.PeerRef{DisplayName: "Living room"}
 	peer.AddIdentifier(di.IdentifierMACAddress, peerMAC)
 	for _, name := range []string{castName, "speaker-7", "192-0-2-5.local"} {
@@ -1146,7 +1148,7 @@ func TestIntegration_SubmitJobResult_PersistsObservationsWithoutCryptoAssets(t *
 	}
 
 	peer := di.PeerRef{DisplayName: "neighbour-sw2"}
-	peer.AddIdentifier(di.IdentifierMACAddress, "aa:bb:cc:dd:ee:07")
+	peer.AddIdentifier(di.IdentifierMACAddress, "a8:bb:cc:dd:ee:07")
 
 	// No Assets: the device presented no cryptography this run.
 	if err := svc.SubmitJobResult(ctx, agentID, &models.JobResult{
@@ -1176,5 +1178,5 @@ func TestIntegration_SubmitJobResult_PersistsObservationsWithoutCryptoAssets(t *
 	// map rather than a string in a payload.
 	assertCount(t, db, 1, `
 		SELECT count(*) FROM asset_identifiers
-		WHERE tenant_id = $1 AND kind = 'mac_address' AND value = 'aa:bb:cc:dd:ee:07'`, tenant)
+		WHERE tenant_id = $1 AND kind = 'mac_address' AND value = 'a8:bb:cc:dd:ee:07'`, tenant)
 }

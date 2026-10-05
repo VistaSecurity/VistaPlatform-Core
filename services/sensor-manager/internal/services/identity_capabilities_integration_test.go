@@ -7,6 +7,7 @@ import (
 	"github.com/lib/pq"
 	sensordb "github.com/vistasecurity/vistaplatform/sensor-manager/internal/database"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -55,5 +56,40 @@ func TestIntegration_HeartbeatCapabilitiesTrackCurrentBinary(t *testing.T) {
 		if !found {
 			t.Fatal("sensor omitted from list")
 		}
+	}
+}
+
+// WP2b: a sensor build that runs planned scans reports scan_plan_v1 and
+// is recorded as such — which is what makes the platform hand it a scan-plan
+// job (cluster-sensor-service reads reported_capabilities). The same sensor
+// replaced by a build that does not report it loses the capability on its
+// next heartbeat, so it stops being eligible at once.
+func TestIntegration_HeartbeatScanPlanCapabilityFlipsWithTheReport(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+	tenant := testdb.NewTenant(t, db)
+	sensor := insertAddrTestSensor(t, db, tenant, "scan-plan-capability")
+	svc := &SensorService{db: db, bypassDB: db}
+	has := func() bool {
+		t.Helper()
+		var capable bool
+		if err := db.QueryRow(`SELECT $2 = ANY(reported_capabilities) FROM sensors WHERE id = $1`, sensor, sensordispatch.ScanPlanCapability).Scan(&capable); err != nil {
+			t.Fatal(err)
+		}
+		return capable
+	}
+	beat := func(caps ...string) {
+		t.Helper()
+		if err := svc.UpdateSensorHealthWithIP(sensor.String(), &models.SensorHealth{SensorID: sensor, Status: "active", Version: "test", Capabilities: caps}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beat(sensordispatch.IdentityDNSCapability, sensordispatch.ScanPlanCapability)
+	if !has() {
+		t.Fatal("a heartbeat reporting scan_plan_v1 was not recorded — the sensor would never be handed a planned scan")
+	}
+	beat(sensordispatch.IdentityDNSCapability)
+	if has() {
+		t.Fatal("an older build kept scan_plan_v1 after a heartbeat without it — it would be handed scans it cannot run")
 	}
 }

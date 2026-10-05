@@ -40,9 +40,9 @@ function withCrypto(over: Partial<NetworkMapAsset> = {}, crypto: Partial<Network
 function map(assets: NetworkMapAsset[], over: Partial<NetworkMap> = {}): NetworkMap {
   return {
     segments: [
-      { segment_id: SEG_A, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr' },
-      { segment_id: SEG_B, name: 'Servers', value: '10.0.1.0/24', segment_type: 'cidr' },
-      { segment_id: SEG_EMPTY, name: 'Guest', value: '10.0.9.0/24', segment_type: 'cidr' },
+      { segment_id: SEG_A, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr', gateway: null },
+      { segment_id: SEG_B, name: 'Servers', value: '10.0.1.0/24', segment_type: 'cidr', gateway: null },
+      { segment_id: SEG_EMPTY, name: 'Guest', value: '10.0.9.0/24', segment_type: 'cidr', gateway: null },
     ],
     assets,
     total_assets: assets.length,

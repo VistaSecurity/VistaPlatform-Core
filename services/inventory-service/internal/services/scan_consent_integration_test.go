@@ -63,34 +63,24 @@ func TestIntegration_ScanConsent_GatesOnlyImportedOnlyAssetsOnTheAutomaticPath(t
 		}
 		return *res[0].AssetID
 	}
+	// Evidence is written through the identity repository's real writers:
+	// they are what settle the stored import-only state (shared/identity/
+	// postgres import_only.go), and a raw INSERT would bypass exactly that.
 	measured := func(asset uuid.UUID, ref, mac string) {
 		t.Helper()
-		if _, err := f.db.Exec(`INSERT INTO asset_identifiers (tenant_id, asset_id, kind, value, source_kind, source_ref)
-			VALUES ($1, $2, 'mac_address', $3, 'measured', $4)`, tenant, asset, mac, ref); err != nil {
-			t.Fatal(err)
-		}
+		writeIdentifier(t, f, tenant, asset, identity.KindMACAddress, mac, identity.SourceMeasured, ref)
 	}
-
 	fact := func(asset uuid.UUID, kind, ref string) {
 		t.Helper()
-		if _, err := f.db.Exec(`INSERT INTO asset_facts (tenant_id, asset_id, key, value, source_kind, source_ref)
-			VALUES ($1, $2, 'os.name', '"linux"', $3, $4)`, tenant, asset, kind, ref); err != nil {
-			t.Fatal(err)
-		}
+		writeFact(t, f, tenant, asset, identity.SourceKind(kind), ref)
 	}
 	endpoint := func(asset uuid.UUID, ip, kind, ref string) {
 		t.Helper()
-		if _, err := f.db.Exec(`INSERT INTO asset_endpoints (tenant_id, asset_id, address, port, source_kind, source_ref)
-			VALUES ($1, $2, $3::inet, 443, $4, $5)`, tenant, asset, ip, kind, ref); err != nil {
-			t.Fatal(err)
-		}
+		writeEndpoint(t, f, tenant, asset, ip, identity.SourceKind(kind), ref)
 	}
 	reportedID := func(asset uuid.UUID, ref, serial string) {
 		t.Helper()
-		if _, err := f.db.Exec(`INSERT INTO asset_identifiers (tenant_id, asset_id, kind, value, source_kind, source_ref)
-			VALUES ($1, $2, 'serial_number', $3, 'imported', $4)`, tenant, asset, serial, ref); err != nil {
-			t.Fatal(err)
-		}
+		writeIdentifier(t, f, tenant, asset, identity.KindSerialNumber, serial, identity.SourceImported, ref)
 	}
 
 	imp := imported(conn1, "SC-IMP-1", "10.61.0.11")

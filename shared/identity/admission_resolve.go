@@ -39,6 +39,14 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 			return Resolution{}, err
 		}
 	}
+	// Which of the observation's dynamic-scope addresses their owner has
+	// pinned (pinned.go). Read once, under the identifier locks, so admission
+	// and the precedence walk below decide on the same answer.
+	pinned, err := e.pinnedAddresses(ctx, obs)
+	if err != nil {
+		return Resolution{}, err
+	}
+	obs.pinned = pinned
 	recorder, ok := e.repo.(ObservationRepository)
 	if !ok {
 		return e.resolve(ctx, obs)

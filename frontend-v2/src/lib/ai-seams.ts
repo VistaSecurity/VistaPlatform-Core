@@ -33,11 +33,38 @@ export type AISeamStatus = {
   rule_default: string;
 };
 
+/** The provider this organization has stored — in effect or not. */
+export type AITenantProvider = {
+  kind: string;
+  /** The endpoint's host. Never the path. Absent for the provider's public default. */
+  host?: string;
+  model?: string;
+  has_key: boolean;
+  /** The last four characters of the stored API key. */
+  api_key_hint?: string;
+};
+
 export type AIStatus = {
   provider_configured: boolean;
   provider_name?: string;
   model_id?: string;
   edition_linked: boolean;
+  /**
+   * Whose provider answers for THIS organization: one it connected itself, the
+   * one whoever runs the deployment set, or none. The API always sends it; it
+   * is optional here only so the other consumers' fixtures, which care about
+   * one seam row, do not each have to spell out the provider half.
+   */
+  provider_source?: 'tenant' | 'deployment' | 'none';
+  /** Set when a provider is configured for this tenant but cannot be used. */
+  provider_problem?: string;
+  /** The provider kinds this build can connect to. Empty in Core. */
+  provider_kinds?: string[];
+  /** Whether this organization may connect a provider of its own. */
+  tenant_provider_allowed?: boolean;
+  /** Who decided, when it may not: the plan, or whoever runs the deployment. */
+  tenant_provider_blocked_by?: 'plan' | 'deployment';
+  tenant_provider?: AITenantProvider;
   seams: AISeamStatus[];
   tenant: { record_questions: boolean; assistant_disabled: boolean; authoring_disabled: boolean };
 };
@@ -56,11 +83,12 @@ export function useAIStatus() {
       if (error || !data) throw new Error('Failed to load the AI assistant settings');
       return data;
     },
-    // A deployment's provider configuration and edition do not change between
-    // requests — the environment is injected at pod start — and the tenant's two
-    // switches change when somebody saves the settings page, which invalidates
-    // this key itself. So a surface that asks on every open re-uses the answer
-    // rather than re-fetching it.
+    // The edition does not change between requests, and the tenant's own
+    // settings — the two switches and its provider — change when somebody saves
+    // the settings page, which replaces this key's data itself. What CAN change
+    // underneath is the deployment's provider, when a platform administrator
+    // sets or clears it; a surface learns of that within this window, which is
+    // a fair price for not re-fetching on every open.
     staleTime: 5 * 60_000,
   });
 }

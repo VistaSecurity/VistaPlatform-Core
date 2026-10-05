@@ -230,3 +230,30 @@ func TestTLSKeyExchangeGroupName_AgreesWithPQCTokenLogic(t *testing.T) {
 		}
 	}
 }
+
+// The exchange size travels with the group: it is what lets ingest finish a
+// strength assessment. A named classical group has a defined size; a hybrid
+// group, an unknown id and "no group" have none and must record none.
+func TestTLSKeyExchange_ApplyToRecordsExchangeSizeOnlyWhenKnown(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		kx   TLSKeyExchange
+		want interface{}
+	}{
+		{"active X25519", MeasureTLSKeyExchange(tls.ConnectionState{Version: tls.VersionTLS13, CurveID: tls.X25519}, nil, nil, 0), 256},
+		{"active P-384", MeasureTLSKeyExchange(tls.ConnectionState{Version: tls.VersionTLS12, CurveID: tls.CurveP384}, nil, nil, 0), 384},
+		{"hybrid", MeasureTLSKeyExchange(tls.ConnectionState{Version: tls.VersionTLS13, CurveID: tls.X25519MLKEM768}, nil, nil, 0), nil},
+		{"unknown id", MeasureTLSKeyExchange(tls.ConnectionState{Version: tls.VersionTLS13, CurveID: 0x1234}, nil, nil, 0), nil},
+		{"no group (RSA key transport)", MeasureTLSKeyExchange(tls.ConnectionState{Version: tls.VersionTLS12}, nil, nil, 0), nil},
+		{"observed x448, a group with no catalogue name", ObservedTLSKeyExchange(30, 0), 448},
+		{"observed ffdhe3072", ObservedTLSKeyExchange(257, 0), 3072},
+		{"observed custom DHE prime", ObservedTLSKeyExchange(0, 2048), 2048},
+		{"a named group's size is the group's, not a stray prime length", ObservedTLSKeyExchange(23, 1024), 256},
+	} {
+		meta := map[string]interface{}{}
+		c.kx.ApplyTo(meta)
+		if got, ok := meta[MetaKeyExchangeKeySize]; (c.want == nil && ok) || (c.want != nil && got != c.want) {
+			t.Errorf("%s: key_exchange_key_size = %v (present=%v), want %v", c.name, got, ok, c.want)
+		}
+	}
+}

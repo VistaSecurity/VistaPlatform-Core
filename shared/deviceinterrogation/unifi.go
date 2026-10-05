@@ -597,15 +597,12 @@ func (c *unifiClient) getManagementInterfaceAsset() CryptoAsset {
 	host, port := unifiHostPort(c.baseURL)
 
 	prober := &TLSProber{InsecureSkipVerify: c.insecureSkipVerify}
-	if asset, err := prober.ProbeTLS(host, port); err == nil {
+	if asset, err := prober.ProbeTLSWithVersions(host, port); err == nil {
 		asset.AssetType = "appliance"
 		asset.ServiceHints = &ServiceHints{
 			ServiceName:          "UniFi Controller",
 			Confidence:           "high",
 			IdentificationMethod: "device_interrogation",
-		}
-		if versions := prober.EnumerateTLSVersions(host, port); len(versions) > 0 {
-			asset.TLSVersions = versions
 		}
 		if asset.Metadata == nil {
 			asset.Metadata = make(map[string]interface{})

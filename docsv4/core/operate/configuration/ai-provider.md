@@ -18,21 +18,68 @@ what it never does.
 > behaviour, and the AI assistant page reports the edition as the reason rather
 > than blaming the configuration.
 
-## What you are configuring
+## Who can set a provider, and which one answers
 
-Two decisions belong to you as the operator, and neither is a tenant's:
+There are three places a provider can come from. For any one organization, the
+first of these that exists is the one its prompts go to:
 
-1. **Which endpoint**, because it is your egress and your data-processing
-   relationship.
-2. **The credential**, because it belongs with the database password and the
-   certificates rather than in a settings screen.
+1. **The organization's own**, connected by its administrator on
+   **Settings → AI assistant** — where you allow that (see
+   [Letting organizations connect their own](#letting-organizations-connect-their-own)).
+2. **The default you set in the admin console**, under **Settings → AI
+   assistant**. No restart, no Helm.
+3. **The one named at install**, in the chart's `ai.*` values (below).
+
+A default set in the admin console **overrides** the one set at install; the
+admin page shows both and says which is in effect. Platform features that belong
+to no organization — the catalogue's **Propose with AI**, drafting into the
+shared framework catalogue — use 2 or 3 and never an organization's own
+provider.
+
+Two decisions stay with you as the operator whichever route you use:
+
+1. **Whether organizations may use their own endpoint at all**, because it is
+   your egress.
+2. **Whether an organization's endpoint may be on a private address**, because
+   an address someone else types should not be able to reach into your network
+   unless you have said so. Off by default.
 
 Two others belong to each tenant, on their own AI assistant page: a kill switch
 that stops every generative call for their organization, and an opt-in to storing
 the text of their questions in their audit trail. You do not set those and cannot
 override them.
 
-## Helm values
+## In the admin console
+
+**Settings → AI assistant** (platform administrator, `platform.settings`).
+
+**Default model provider.** Choose the provider, enter the address, model and
+API key, press **Test connection** to try exactly what is in the form, then
+**Save**. It takes effect on the next request. For a model on a private or
+in-cluster address — your own Ollama beside the platform — turn on **This
+endpoint is on a private network**. **Clear** removes it, and the provider set
+at install (if any) takes over.
+
+The API key is stored encrypted under the deployment's encryption key
+(`platform.encryptionMasterKey`) and is never shown again; the page shows its
+last four characters. A deployment with no encryption key cannot store an API
+key, and the page says so.
+
+### Letting organizations connect their own
+
+Two switches on the same page:
+
+| Switch | Default | What it does |
+|---|---|---|
+| **Organizations may connect their own provider** | On | When on, an organization can connect its own provider, which then answers for that organization instead of the default. Off makes the default the only provider anyone uses; providers organizations already saved are kept but not used. |
+| **Their endpoint may be on a private network** | Off | When off, an organization can only connect a provider at a public address. |
+
+
+## At install: Helm values
+
+The rest of this page is the install-time route. It is still fully supported,
+and it is the one to use when the credential should live with your other
+Kubernetes Secrets rather than in the platform's database.
 
 ```yaml
 ai:
@@ -90,13 +137,15 @@ the full path — and the client appends the rest.
 
 Each service that owns a generative capability calls the provider from its own
 pod: `compliance-engine`, `cbom-service`, `inventory-service` and
-`admin-service`. All four are in the chart's
+`admin-service`. `auth-service` calls it too, for the **Test connection** button
+on an organization's AI assistant page. All five are in the chart's
 `networkPolicy.externalEgressBackends`, so `networkPolicy.egressEnabled: true`
-lets them reach an endpoint outside the cluster.
+lets them reach an endpoint outside the cluster — the default's, and any an
+organization connects.
 
 A model served **inside the cluster** is different: its address falls in
 `networkPolicy.clusterInternalCIDRs`, which that rule excludes. Add a
-NetworkPolicy of your own that lets those four services reach it, as for an
+NetworkPolicy of your own that lets those five services reach it, as for an
 in-cluster proxy — see
 [Outbound connections](outbound-connections.md#restricting-egress-with-networkpolicy).
 
@@ -116,11 +165,18 @@ in-cluster proxy — see
 
 ## Where the credential goes, and why everywhere
 
-The platform's configuration object **has no field that can hold a key**. It
-holds the *name* of an environment variable, and reads that variable at the
-moment of use — so rotating the key is picked up by the next request with no
-restart, and a configuration row that leaks is a configuration row. That is why
-you will never see a credential on the AI assistant page or in the app ConfigMap.
+For the install-time route, the platform's configuration **has no field that can
+hold a key**. It holds the *name* of an environment variable, and reads that
+variable at the moment of use — so rotating the key is picked up by the next
+request with no restart, and a configuration row that leaks is a configuration
+row. That is why you will never see a credential on the AI assistant page or in
+the app ConfigMap.
+
+A provider set in the admin console, or by an organization, stores its key in
+the database instead, encrypted under `platform.encryptionMasterKey`. Nothing
+returns it: the settings pages show its last four characters. A provider stored
+that way never falls back to the install-time key — an organization's endpoint
+that has no key of its own is sent none.
 
 The chart injects the Secret as an environment variable on **every backend**, not
 only the four that own a generative capability. That is deliberate:
@@ -132,12 +188,13 @@ capability underneath worked perfectly.
 
 ## Checking it took
 
-Open **Settings → AI assistant** as a tenant administrator. The deployment
-section names the provider kind and the model; the capabilities table shows
-**On** for the five generative rows. Status **No provider** there means the
-image line has the clients and the environment did not reach them — check the
-pod log for the warning `ai-settings` writes on startup, and confirm the
-ConfigMap actually carries the keys:
+Open **Settings → AI assistant** as a tenant administrator. The **Model
+provider** row names the provider kind and says **Provided by this deployment**;
+the capabilities table shows **On** for the five generative rows. Status **No
+provider** there means the image line has the clients and nothing is set for
+that organization. For the install-time route, check the pod log for the warning
+`ai-settings` writes on startup, and confirm the ConfigMap actually carries the
+keys:
 
 ```bash
 kubectl -n vista get cm vista-vistaplatform-config -o jsonpath='{.data.AI_PROVIDER}'
@@ -148,9 +205,13 @@ upgraded with that file.
 
 ## Turning it off
 
-Set `ai.provider: ""` (or `none`) and upgrade. Every capability reverts to the
-behaviour in the **Without AI** column of the AI assistant page, and nothing
-else changes. Delete the Secret separately if you want the credential gone.
+Clear the default in the admin console, and set `ai.provider: ""` (or `none`)
+and upgrade if one was named at install. Every capability reverts to the
+behaviour in the **Without AI** column of the AI assistant page for every
+organization that has not connected its own, and nothing else changes. Delete
+the Secret separately if you want the install-time credential gone. To stop
+organizations' own providers as well, turn off **Organizations may connect
+their own provider**.
 
 ## Related
 

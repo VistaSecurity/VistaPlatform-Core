@@ -26,7 +26,8 @@ editions:
     label: Core
     tagline: Free and source-available. One team securing its own estate.
     summary: >-
-      Everything not listed as Enterprise or MSP below. Full discovery, the
+      Everything not listed as Enterprise or MSP below. Full discovery
+      (active OT/ICS probing included), the
       complete crypto inventory and CMDB, compliance evaluation against the
       free frameworks, CBOM generation and CycloneDX export, RBAC, local users
       and invitations, audit logging, RLS tenant isolation, the mTLS service
@@ -70,8 +71,8 @@ docs:
   custom_branding:     enterprise/features/custom-branding.md
   cmdb_sync:           enterprise/integrations/cmdb-integrations.md
   connector_netbox:    enterprise/integrations/netbox.md
+  ai_tenant_provider:  core/features/ai-assistant.md
   siem_export:         enterprise/features/siem-export.md
-  ot_active_probing:   null   # see no_self_service below
   ot_primary_lens:     null   # see no_self_service below
 
 # Capabilities that are GATED but have no user-facing surface yet.
@@ -84,15 +85,14 @@ docs:
 #
 #   threshold_overrides  the self-service threshold-override UI is explicitly
 #                        deferred by ADR-0014 ("do not rebuild unprompted").
-#   ot_active_probing    no OT surface in the frontend: the inventory lens
-#   ot_primary_lens      registry has no OT lens and nothing references the OT
+#   ot_primary_lens      no OT surface in the frontend: the inventory lens
+#                        registry has no OT lens and nothing references the OT
 #                        protocols. Backend/sensor only today.
 #
 # Every key here must also be `null` in docs: above — the generator enforces
 # that, so a capability cannot claim both a guide and no surface.
 no_self_service:
   - threshold_overrides
-  - ot_active_probing
   - ot_primary_lens
 
 # The five generative AI seams (ADR-0008; AI_SEAMS.md).

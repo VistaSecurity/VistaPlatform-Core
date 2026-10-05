@@ -170,9 +170,9 @@ func TestNormalize(t *testing.T) {
 	})
 
 	t.Run("refuses an OT protocol", func(t *testing.T) {
-		// Modbus et al. are gated by the ot_active_probing tier flag through a
-		// job's separate ot_probe_protocols field. Accepting one here would be
-		// a way to probe a PLC unattended, on a schedule, past that gate.
+		// Modbus et al. run only on a person's per-job opt-in (a job's separate
+		// ot_probe_protocols field). Accepting one here would be a way to probe
+		// a PLC unattended, on a schedule, without anyone asking.
 		for _, proto := range []string{"Modbus", "OPC_UA", "BACnet", "EtherNet_IP", "SMB"} {
 			if _, err := Normalize(Policy{RescanIntervalHours: 24, Protocols: []string{proto}, Ports: []int{502}}); err == nil {
 				t.Errorf("protocol %q was accepted for automatic scanning", proto)
@@ -289,5 +289,15 @@ func TestConfigRoundTripsThroughJSON(t *testing.T) {
 	}
 	if got := FromConfig(decoded); !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip gave %+v, want %+v", got, want)
+	}
+}
+
+// Every protocol an automatic scan (and therefore identity-enrichment probing,
+// which is authorized against this policy) may request must pass the job
+// `protocols` allowlist, or cluster-sensor-service would refuse the sweep's own
+// jobs. The reverse is deliberately not asserted: the allowlist is wider.
+func TestSupportedProtocols_PassTheJobProtocolAllowlist(t *testing.T) {
+	if err := shareddisc.ValidateJobProtocols(SupportedProtocols); err != nil {
+		t.Fatalf("automatic-scan protocols %v are refused by the job allowlist: %v", SupportedProtocols, err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // Connect opens a PostgreSQL connection and configures pool settings.
@@ -13,7 +14,7 @@ func Connect(databaseURL string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	db, err := sqlx.Connect("postgres", databaseURL)
+	db, err := sqlx.Connect("postgres", shareddatabase.ApplyServerDefaults(databaseURL))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}

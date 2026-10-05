@@ -63,12 +63,8 @@ func TestIntegration_PeerObservation_MarksGenericHostnames(t *testing.T) {
 		for _, n := range names {
 			peer.AddIdentifier(di.IdentifierHostname, n)
 		}
-		obs, _, err := sink.peerObservation(ctx, tenantID, peer,
-			identity.Source{Kind: identity.SourceMeasured, Ref: "test", Mode: identity.ModeActive}, now)
-		if err != nil {
-			t.Fatalf("peerObservation: %v", err)
-		}
-		return obs
+		return peerIntakeObservation(t, sink, tenantID, peer,
+			identity.Source{Kind: identity.SourceMeasured, Ref: "test", Mode: identity.ModeActive})
 	}
 
 	obs := observe(tenant, "lobby-display", "iphone", "office-plotter", "printer.corp.example", "printer.local")
@@ -109,12 +105,13 @@ func TestIntegration_DeviceObservation_DeclaredNameIsNeverMarkedGeneric(t *testi
 	svc := NewDeviceService(raw)
 	tenant := testdb.NewTenant(t, raw)
 
-	obs, err := svc.deviceObservation(context.Background(), tenant, deviceObservationInput{
+	sighting, err := deviceSighting(tenant, deviceSightingInput{deviceObservationInput: deviceObservationInput{
 		DeviceType: "cisco_ios", Hostname: "printer", Source: declaredSource(), ObservedAt: time.Now().UTC(),
-	})
+	}})
 	if err != nil {
-		t.Fatalf("build the observation: %v", err)
+		t.Fatalf("build the sighting: %v", err)
 	}
+	obs := intakeObservation(t, NewObservationSink(svc.db), sighting).Observation
 	id := peerIdentifier(t, obs, identity.KindHostname, "printer")
 	if id.Generic || id.Confidence != 1 {
 		t.Errorf("a declared name was marked: %+v, want it untouched", id)

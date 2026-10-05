@@ -37,7 +37,7 @@ func TestIntegration_SourceRefreshAtomicReplayAndCompletion(t *testing.T) {
 	}
 	other := testdb.NewTenant(t, db)
 	deviceService := NewDeviceServiceWithKey(db, testMasterKey)
-	device, err := deviceService.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("controller.example.test"), ManagementURL: strptr("https://192.0.2.2"), Metadata: map[string]interface{}{"identity_enrichment_executor": "platform"}})
+	device, err := deviceService.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("controller.example.test"), ManagementURL: strptr("https://192.0.2.2"), PlatformReinterrogationAllowed: boolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,13 @@ func TestIntegration_SourceRefreshAtomicReplayAndCompletion(t *testing.T) {
 	}
 	service := NewConfiguredSourceRefresh(db, queue, deviceService, prepare)
 	enableSourceRefresh(t, db, tenant)
-	req := refreshObservation(t, db, tenant, "interrogation:"+previous.ID.String(), nil)
+	// A sensor's sighting linked to the managed controller: the shape a source
+	// refresh is for. (An observation the controller's OWN run produced is never
+	// planned against it — TestIntegration_SourceRefresh_NoSelfFeedingLoop.)
+	if _, err := db.Exec(`UPDATE device_jobs SET status='completed',completed_at=now()-interval '1 day' WHERE id=$1`, previous.ID); err != nil {
+		t.Fatal(err)
+	}
+	req := refreshObservation(t, db, tenant, "sensor:"+uuid.NewString(), &device.ID)
 	// A single data connection must work: dedup uses the separate control pool.
 	db.SetMaxOpenConns(1)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -153,6 +159,20 @@ func TestIntegration_SourceRefreshAtomicReplayAndCompletion(t *testing.T) {
 	if _, err := db.Exec(`UPDATE identity_source_refreshes SET next_attempt_at=now()-interval '1 minute' WHERE tenant_id=$1 AND id=$2`, tenant, req.RequestID); err != nil {
 		t.Fatal(err)
 	}
+	// Past the five-minute reuse window, but the controller was asked less than
+	// minSourceRefreshInterval ago: another observation wanting it completes its
+	// source stage without asking again, failed run or not.
+	sibling := refreshObservation(t, db, tenant, "sensor:"+uuid.NewString(), &device.ID)
+	result, err = service.Refresh(ctx, sibling)
+	if err != nil || result.State != "completed" || result.Reason != reasonSourceRefreshedRecently {
+		t.Fatalf("second observation inside the source interval %+v: %v", result, err)
+	}
+	assertNoRefreshJob(t, db, tenant, sibling)
+	// Once the interval has passed, the failed receipt's retry gets a fresh
+	// child under its stable logical ID.
+	if _, err := db.Exec(`UPDATE device_jobs SET created_at=now()-$2*interval '1 second'-interval '1 minute' WHERE id=$1`, child, int64(minSourceRefreshInterval/time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	result, err = service.Refresh(ctx, req)
 	if err != nil || result.State != "queued" {
 		t.Fatalf("retry %+v: %v", result, err)
@@ -178,15 +198,14 @@ func TestIntegration_SourceRefreshNoGuessingAndBlockedCredentials(t *testing.T) 
 	if err != nil || result.State != "completed" || result.Reason != "no_configured_source" {
 		t.Fatalf("weak alias %+v: %v", result, err)
 	}
-	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("controller.example.test"), ManagementURL: strptr("https://192.0.2.2"), Metadata: map[string]interface{}{"identity_enrichment_executor": "platform"}})
+	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("controller.example.test"), ManagementURL: strptr("https://192.0.2.2"), PlatformReinterrogationAllowed: boolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := queue.CreateJob(context.Background(), models.CreateDeviceJobRequest{TenantID: tenant, JobType: models.JobTypeDeviceInterrogation, AssetID: &device.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req = refreshObservation(t, db, tenant, "interrogation:"+job.ID.String(), nil)
+	// A sighting linked to the controller, which has been interrogated before
+	// (the executor the planner reuses).
+	completedJob(t, db, queue, tenant, device.ID, nil)
+	req = refreshObservation(t, db, tenant, "sensor:"+uuid.NewString(), &device.ID)
 	result, err = service.Refresh(context.Background(), req)
 	if err != nil || result.State != "blocked" || result.Reason != "configured_credentials_unavailable" {
 		t.Fatalf("credentials %+v: %v", result, err)
@@ -239,10 +258,21 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	enableSourceRefresh(t, db, tenant)
-	req := refreshObservation(t, db, tenant, "cloud:aws", &device.ID)
-	result, err := service.Refresh(context.Background(), req)
+	// A LINKED cloud observation is the provider's own answer: the source stage
+	// completes without dispatching the collector that produced it.
+	linked := refreshObservation(t, db, tenant, "cloud:aws", &device.ID)
+	result, err := service.Refresh(context.Background(), linked)
+	if err != nil || result.State != "completed" || result.Reason != reasonSourceProducedObservation {
+		t.Fatalf("linked cloud %+v: %v", result, err)
+	}
+	assertNoRefreshJob(t, db, tenant, linked)
+	// Retained provider context identifies the configured integration for an
+	// observation that has no asset, without manufacturing one or reading
+	// another tenant's credential — and the dispatch is bounded.
+	req := retainedCloudRefresh(t, db, devices, tenant, *device)
+	result, err = service.Refresh(context.Background(), req)
 	if err != nil || result.State != "queued" {
-		t.Fatalf("cloud %+v: %v", result, err)
+		t.Fatalf("retained cloud %+v: %v", result, err)
 	}
 	var selected uuid.UUID
 	var params []byte
@@ -256,20 +286,11 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 	if selected != integration || parameters["source_refresh_only"] != true || len(parameters["resource_types"].([]interface{})) != 1 {
 		t.Fatalf("unbounded/wrong source %s %v", selected, parameters)
 	}
-	// Retained provider context can identify the same configured integration
-	// without manufacturing an asset or reading another tenant's credential.
-	retained := refreshObservation(t, db, tenant, "cloud:aws", nil)
-	raw, _ := json.Marshal(retainedCloudContext{Device: *device, Observation: retained.Evidence})
-	sealed, err := devices.cipher.EncryptValue(string(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO identity_observation_cloud_contexts(tenant_id,observation_id,receipt_key,context_enc,observed_at) VALUES($1,$2,'refresh-test',$3,now())`, tenant, retained.ObservationID, sealed); err != nil {
-		t.Fatal(err)
-	}
+	// A second retained observation of the same source shares the dispatch.
+	retained := retainedCloudRefresh(t, db, devices, tenant, *device)
 	result, err = service.Refresh(context.Background(), retained)
 	if err != nil || result.State != "queued" {
-		t.Fatalf("retained cloud %+v: %v", result, err)
+		t.Fatalf("second retained cloud %+v: %v", result, err)
 	}
 	var sharedJobs int
 	if err := db.QueryRow(`SELECT count(DISTINCT device_job_id) FROM identity_source_refreshes WHERE tenant_id=$1`, tenant).Scan(&sharedJobs); err != nil || sharedJobs != 1 {
@@ -278,7 +299,7 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 	if _, err := db.Exec(`UPDATE platform_integrations SET tenant_id=$2 WHERE id=$1`, integration, other); err != nil {
 		t.Fatal(err)
 	}
-	denied := refreshObservation(t, db, tenant, "cloud:aws", &device.ID)
+	denied := retainedCloudRefresh(t, db, devices, tenant, *device)
 	result, err = service.Refresh(context.Background(), denied)
 	if err != nil || result.State != "blocked" {
 		t.Fatalf("foreign integration %+v: %v", result, err)
@@ -286,7 +307,7 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 	if _, err := db.Exec(`UPDATE tenant_admin_settings SET config='{}' WHERE tenant_id=$1`, tenant); err != nil {
 		t.Fatal(err)
 	}
-	controller, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("controller.example.test"), ManagementURL: strptr("https://192.0.2.2"), Metadata: map[string]interface{}{"identity_enrichment_executor": "platform"}})
+	controller, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("controller.example.test"), ManagementURL: strptr("https://192.0.2.2"), PlatformReinterrogationAllowed: boolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,11 +315,10 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO device_agents(id,tenant_id,registration_key,platform,version,profile,status,last_heartbeat) VALUES($1,$2,$3,'linux','0.9.9','full','active',now())`, agent, other, uuid.NewString()); err != nil {
 		t.Fatal(err)
 	}
-	job, err := queue.CreateJob(context.Background(), models.CreateDeviceJobRequest{TenantID: tenant, JobType: models.JobTypeDeviceInterrogation, AssetID: &controller.ID, AgentID: &agent})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req = refreshObservation(t, db, tenant, "interrogation:"+job.ID.String(), nil)
+	// The controller's last run was by that foreign agent; a sighting linked to
+	// the controller must not be handed to it.
+	completedJob(t, db, queue, tenant, controller.ID, &agent)
+	req = refreshObservation(t, db, tenant, "sensor:"+uuid.NewString(), &controller.ID)
 	result, err = service.Refresh(context.Background(), req)
 	if err != nil || result.State != "blocked" || result.Reason != "executor_unreachable_or_unsuitable" {
 		t.Fatalf("foreign executor %+v: %v", result, err)
@@ -388,7 +408,7 @@ func TestIntegration_SourceRefreshRechecksPolicyAtClaim(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Claim network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
-	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", ManagementURL: strptr("https://192.0.2.2"), Metadata: map[string]interface{}{"identity_enrichment_executor": "platform"}})
+	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", ManagementURL: strptr("https://192.0.2.2"), PlatformReinterrogationAllowed: boolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,5 +452,109 @@ func enableSourceRefresh(t *testing.T, db *sql.DB, tenant uuid.UUID) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_enrichment":{"enabled":true},"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// retainedCloudRefresh is an UNLINKED cloud observation with the retained
+// provider context cloud discovery keeps for an observation that produced no
+// asset (retainCloudContext) — the one shape a cloud source refresh is for.
+func retainedCloudRefresh(t *testing.T, db *sql.DB, devices *DeviceService, tenant uuid.UUID, device models.Device) SourceRefreshRequest {
+	t.Helper()
+	req := refreshObservation(t, db, tenant, "cloud:aws", nil)
+	raw, err := json.Marshal(retainedCloudContext{Device: device, Observation: req.Evidence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := devices.cipher.EncryptValue(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO identity_observation_cloud_contexts(tenant_id,observation_id,receipt_key,context_enc,observed_at) VALUES($1,$2,$3,$4,now())`, tenant, req.ObservationID, "refresh-test-"+req.ObservationID.String(), sealed); err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func assertNoRefreshJob(t *testing.T, db *sql.DB, tenant uuid.UUID, req SourceRefreshRequest) {
+	t.Helper()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM device_jobs WHERE tenant_id=$1 AND parameters->>'identity_refresh_request_id'=$2`, tenant, req.RequestID.String()).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("refresh dispatched %d device jobs for %s: %v", count, req.RequestID, err)
+	}
+}
+
+// TestIntegration_SourceRefresh_CloudDiscoveredAssetCompletes is the reported
+// shape, produced by the REAL cloud producer: upsertDeviceAsset records a
+// resource as an unmanaged asset (no asset_management, no asset_credentials —
+// "nothing found through a cloud API is a managed device") and, because the
+// observation produced an asset, keeps no retained cloud context. The
+// coordinator then asks for a configured-source refresh of that observation.
+//
+// It used to end `blocked / cloud_source_not_identified` (23 rows on a live deployment,
+// each after 4–5 attempts): the planner looked for the linked asset's
+// management row, found none, fell back to the retained context, found none.
+// The observation IS the cloud source's answer, so the stage is complete.
+//
+// Mutations performed, each observed red:
+//   - delete the `if linked.Valid` early return in planCloud → blocked /
+//     cloud_source_not_identified, the reported case.
+//   - drop reasonSourceProducedObservation from Refresh's completed mapping →
+//     state "blocked".
+func TestIntegration_SourceRefresh_CloudDiscoveredAssetCompletes(t *testing.T) {
+	owner := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, owner)
+	tenant := testdb.NewTenant(t, owner)
+	ctx := context.Background()
+	appDB := testdb.ConnectAsAppRole(t, owner)
+	integration := seedCloudIntegration(t, owner, tenant)
+	if _, err := owner.Exec(`UPDATE platform_integrations SET config='{"region":"us-east-1"}', is_active=true WHERE id=$1`, integration); err != nil {
+		t.Fatal(err)
+	}
+
+	cloud := NewCloudDiscoveryService(appDB, owner, testMasterKey)
+	bucket := s3Bucket("enrichment-" + uuid.NewString()[:8])
+	bucket.TenantID = tenant
+	bucket.CredentialID = &integration
+	if err := cloud.upsertDeviceAsset(ctx, &bucket, getStringFromMap(bucket.Metadata, "arn")); err != nil {
+		t.Fatalf("upsertDeviceAsset: %v", err)
+	}
+	asset := bucket.ID
+
+	// The preconditions that made the planner block, read back rather than
+	// assumed: unmanaged, and no retained context for its observation.
+	if row := managementFor(t, owner, tenant, asset); row.exists {
+		t.Fatal("precondition: a cloud-discovered asset has a management row")
+	}
+	if hasCredentialsRow(t, owner, tenant, asset) {
+		t.Fatal("precondition: a cloud-discovered asset has a credentials row")
+	}
+	var contexts int
+	if err := owner.QueryRow(`SELECT count(*) FROM identity_observation_cloud_contexts WHERE tenant_id=$1`, tenant).Scan(&contexts); err != nil || contexts != 0 {
+		t.Fatalf("precondition: retained cloud context for an observation that produced an asset: %d %v", contexts, err)
+	}
+
+	// The linked `cloud:aws` observation the coordinator schedules for — in
+	// production written by inventory-service's intake of the run's discovery
+	// rows (findingSource), which this package cannot host, so it is written here
+	// in that shape: measured, `cloud:aws`, linked to the asset above.
+	enableSourceRefresh(t, owner, tenant)
+	req := refreshObservation(t, owner, tenant, "cloud:aws", &asset)
+	devices := NewDeviceServiceWithKey(owner, testMasterKey)
+	service := NewConfiguredSourceRefresh(owner, NewJobQueueService(owner, owner, nil), devices, nil)
+
+	result, err := service.Refresh(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "completed" || result.Reason != reasonSourceProducedObservation {
+		t.Fatalf("cloud-discovered asset's refresh = %+v, want completed / %s", result, reasonSourceProducedObservation)
+	}
+	assertNoRefreshJob(t, owner, tenant, req)
+
+	// The durable receipt the coordinator polls says the same, so the row an
+	// operator reads is not a blocker.
+	status, err := service.Status(ctx, tenant, req.RequestID)
+	if err != nil || status.State != "completed" {
+		t.Fatalf("receipt %+v: %v", status, err)
 	}
 }

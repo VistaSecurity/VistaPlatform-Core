@@ -65,7 +65,7 @@ func buildSyntheticRootCAs(certPath string) *x509.CertPool {
 
 func NewHealthService(cfg *config.Config) *HealthService {
 	// Initialize database connection
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(cfg.DatabaseURL))
 	if err != nil {
 		panic(fmt.Sprintf("Failed to connect to database: %v", err))
 	}

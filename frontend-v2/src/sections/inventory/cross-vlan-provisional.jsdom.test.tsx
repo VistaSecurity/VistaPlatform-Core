@@ -73,6 +73,7 @@ const advert: Observation = {
   enrichment_reason: 'no_eligible_collector_in_target_network',
   last_attempt_at: null,
   next_attempt_at: null,
+  network_name: null, source_name: 'crossvlan-sensor-a', needs: 'needs_sensor', suggested_action: 'sensor_options', explanation_code: 'relayed_advertisement', suggested_reason: '', summary: [], link_asset: null, evidence_held: false,
   collector: {
     observer: { sensor_id: 'aaaaaaaa-0000-4000-8000-000000000001', name: 'crossvlan-sensor-a', reachable: false, reason: 'collector_has_no_interface_in_target_network' },
     executor: null,
@@ -87,6 +88,7 @@ const direct: Observation = {
   ...advert,
   id: 'obs-direct',
   source_ref: 'sensor:bbbbbbbb-0000-4000-8000-000000000002',
+  source_name: 'crossvlan-sensor-b',
   evidence: { admission: { direct: true }, identifiers: [{ kind: 'hostname', value: 'crossvlan-printer.local' }] },
   admission_reasons: [],
   state: 'linked',
@@ -246,9 +248,19 @@ it('phase 2: a sensor on the device’s own VLAN establishes the SAME item, keep
   // Both sensors' observations are on the item, and the advert still carries
   // the time it was first heard — corroboration adds evidence, it does not
   // restart the record.
-  const obs = await show(`/discovery/observations?asset_id=${ASSET_ID}`);
-  expect(obs).toContain('sensor:aaaaaaaa-0000-4000-8000-000000000001');
-  expect(obs).toContain('sensor:bbbbbbbb-0000-4000-8000-000000000002');
+  //
+  // Since the review table each source is shown by its NAME, never the
+  // `sensor:<uuid>` ref, and the timestamps live in a row's expanded evidence.
+  await show(`/discovery/observations?asset_id=${ASSET_ID}`);
+  const sources = [...host.querySelectorAll('tr[data-observation]')].map((tr) => tr.children[2]?.textContent);
+  expect(sources).toEqual(['crossvlan-sensor-a', 'crossvlan-sensor-b']);
+  for (const toggle of host.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')) {
+    await act(async () => { toggle.click(); });
+  }
+  for (let i = 0; i < 4; i++) await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+  const obs = host.textContent ?? '';
+  expect(obs).not.toContain('sensor:aaaaaaaa');
+  expect(obs).not.toContain('sensor:bbbbbbbb');
   expect(obs).toContain(new Date(ADVERT_SEEN).toLocaleString());
   expect(obs).toContain('Open linked asset');
   expect(obs).not.toContain('Provisional inventory item');

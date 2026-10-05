@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -64,15 +63,19 @@ func (s *AssetService) identityEngine() (*identity.Engine, error) {
 		s.identityRepo = pgidentity.New(s.db.DB.DB)
 		s.identityEng, s.identityErr = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission,
 			Repo: s.identityRepo,
-			// ProvisionalInventory is D2/D3, and THIS is the one
-			// constructor that turns it on. The flag defaults to false so every
-			// other engine — device-interrogation-service's, the memory-repo
-			// tests', a tool's — keeps behaving exactly as it did; inventory-service
-			// owns the asset table, the observation table and the enrichment
-			// worker, so it is the only place that can honour the whole rule
-			// (create provisional, corroborate in place, materialise retained
-			// evidence). A second caller enabling it without those pieces would
-			// create provisional assets nothing ever promotes.
+			// ProvisionalInventory is D2 (create a provisional asset) and
+			// the provisional half of D3 (corroborate it, hearsay yields), and
+			// THIS is the one constructor that turns it on. The flag defaults
+			// to false so every other engine — device-interrogation-service's,
+			// the memory-repo tests', a tool's — never creates a provisional
+			// asset; inventory-service owns the asset table, the observation
+			// table and the enrichment worker, so it is the only place that can
+			// honour the whole rule (create provisional, corroborate in place,
+			// materialise retained evidence). A second caller enabling it
+			// without those pieces would create provisional assets nothing
+			// ever promotes. The flag does NOT change the single-owner
+			// shortcut (every identifier one asset's -> OutcomeSupporting):
+			// that is ownership, unconditional in every engine.
 			ProvisionalInventory: true,
 			// AutoAcceptThreshold is left at zero HERE — never auto-merge
 			// (ADR-0002 D5) — and supplied per observation by
@@ -149,6 +152,21 @@ func (s *AssetService) resolveObservationWithRepo(
 	obs identity.Observation,
 	after func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error,
 ) (identity.Resolution, error) {
+	return s.resolveObservationAttributed(ctx, obs, nil, after)
+}
+
+// resolveObservationAttributed is [AssetService.resolveObservationWithRepo]
+// with an optional `attribute` hook, run on the engine's transaction before
+// Resolve, that may supply a verified person's scan request for this
+// observation (operator_scan_attribution.go). Read there, not before, so the
+// asset's lifecycle and Active Scan record are read under the same
+// transaction that links the observation to it.
+func (s *AssetService) resolveObservationAttributed(
+	ctx context.Context,
+	obs identity.Observation,
+	attribute func(ctx context.Context, tx *sqlx.Tx) (*identity.OperatorScanRequest, error),
+	after func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error,
+) (identity.Resolution, error) {
 	engine, err := s.identityEngine()
 	if err != nil {
 		return identity.Resolution{}, fmt.Errorf("identification engine unavailable: %w", err)
@@ -180,10 +198,36 @@ func (s *AssetService) resolveObservationWithRepo(
 				return mErr
 			}
 
+			eng := engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r)
+			if attribute != nil {
+				req, aErr := attribute(ctx, tx)
+				if aErr != nil {
+					return aErr
+				}
+				if req != nil {
+					eng = eng.WithOperatorScanRequest(*req)
+				}
+			}
 			var rErr error
-			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).Resolve(ctx, obs)
+			res, rErr = eng.Resolve(ctx, obs)
 			if rErr != nil {
 				return rErr
+			}
+			// An asset in a located segment takes that segment's location when
+			// it records none, on every intake path that resolves through here
+			// (findings, host observations, posted sightings, source imports).
+			// The engine writes network_segment_id when it creates an asset,
+			// and nothing else on these paths gave the asset the segment's
+			// location — so a hearsay-created asset (a UniFi client table's
+			// peer) sat in the segment under "No site recorded" on the map
+			// while its neighbours sat under the segment's site. Only the
+			// asset's OWN segment is used, never the observation's, and a
+			// conflict places nothing. Runs before `after`, so a source that
+			// states a site still writes it.
+			if !res.Asset.Zero() && res.Outcome != identity.OutcomeConflict {
+				if pErr := r.InheritSegmentLocation(ctx, res.Asset, obs.Source); pErr != nil {
+					return pErr
+				}
 			}
 			if after == nil {
 				return nil
@@ -202,6 +246,9 @@ func (s *AssetService) resolveObservationWithRepo(
 	// AFTER the commit. An audit event announcing a merge that then rolled back
 	// would be a record of something that did not happen.
 	s.auditAutoAcceptedMerge(ctx, obs, res)
+	// The same reason: a host key rotation announced for a resolution that
+	// rolled back never happened ( Decision 4).
+	s.publishIdentityDrift(ctx, obs, res)
 	return res, nil
 }
 
@@ -291,34 +338,6 @@ func (s *AssetService) lookupExistingAsset(ctx context.Context, tenantID uuid.UU
 	return uuid.Nil, "", false, nil
 }
 
-// addPriorDefaultScopeIdentifier bridges the collection immediately before and
-// after a private network is registered. The first observation has only the
-// tenant-default scope; the next has the new segment scope. When the older key
-// actually has an owner, carry it alongside the new key so the identity engine
-// matches that pending asset and attaches the segment-scoped key instead of
-// creating a duplicate. Callers restrict this to measured host connections.
-func (s *AssetService) addPriorDefaultScopeIdentifier(ctx context.Context, obs identity.Observation) (identity.Observation, error) {
-	if _, err := s.identityEngine(); err != nil {
-		return obs, err
-	}
-	for _, id := range append([]identity.Identifier(nil), obs.Identifiers...) {
-		if id.Kind != identity.KindIPAddress || id.Scope == "" || id.Scope == identity.ScopeTenantDefault {
-			continue
-		}
-		refs, err := s.identityRepo.FindByIdentifier(ctx, obs.TenantID, id.Kind, id.Value, identity.ScopeTenantDefault)
-		if err != nil {
-			return obs, err
-		}
-		if len(refs) == 0 {
-			continue
-		}
-		prior := id
-		prior.Scope = identity.ScopeTenantDefault
-		obs.Identifiers = append(obs.Identifiers, prior)
-	}
-	return obs, nil
-}
-
 // assetStatusOf reads one asset's approval status. A soft-deleted asset reports
 // false: the identifier still belongs to it (the unique index spans deleted rows
 // too), but for the purpose of "is this thing in the inventory" it is not.
@@ -362,32 +381,38 @@ func (s *AssetService) matchedAssetStatus(tenantID, assetID uuid.UUID, fallback 
 	return status
 }
 
+// errEndpointNotAttached is resolveEndpointForFinding's answer for a finding
+// that describes a socket the asset does not have: no identity decision
+// attached it (platform ADR-0003 D2). The caller skips whatever it was going
+// to hang off that socket — a service name, a crypto configuration — with a
+// log line; it never creates the endpoint itself.
+var errEndpointNotAttached = errors.New("the identity decision attached no endpoint for this socket")
+
 // resolveEndpointForFinding returns the id of the endpoint a finding was
-// measured on, creating it if the asset does not have it yet.
+// measured on. It LOOKS IT UP; it never creates it.
+//
+// Endpoints follow the identity decision (platform ADR-0003 D2): the engine
+// writes the observation's endpoints inside its own transaction when it
+// matches, creates or provisionally creates an asset, and writes none when the
+// evidence only supports an established asset. A post-engine writer that
+// upserted here — as this did until — put a supporting scan's ports on
+// the asset the engine had just declined to attach anything to. So this finds
+// the endpoint the engine (or an operator's Link / Confirm, or the
+// interrogated-device path) already wrote, and returns errEndpointNotAttached
+// when there is none.
 //
 // It returns uuid.Nil, nil when the finding describes no socket — an at-rest
 // cloud resource. That is the replacement for the "AT-REST" port sentinel: the
 // old model needed a fake port because an asset WAS a port, and the new one does
 // not because an asset may simply have no endpoint.
 //
-// The dedupe key is EndpointKey from shared/identity, the same spelling the
-// engine's UpsertEndpoints uses, so an endpoint created here and one created by
-// an observation are one row rather than two.
+// The lookup spells the endpoint exactly as the engine's UpsertEndpoints keys
+// it (EndpointKey from shared/identity), so the row the engine wrote is the row
+// found here.
 func (s *AssetService) resolveEndpointForFinding(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) (uuid.UUID, error) {
-	effectiveIP := f.IPAddress
-	if effectiveIP != nil && (*effectiveIP == "" || isUnspecifiedIP(*effectiveIP)) {
-		effectiveIP = nil
-	}
-	ep, ok := findingEndpoint(f, effectiveIP)
+	ep, ok := findingEndpoint(f, nonPlaceholderIP(f.IPAddress))
 	if !ok {
 		return uuid.Nil, nil
-	}
-	if _, err := s.identityEngine(); err != nil {
-		return uuid.Nil, err
-	}
-	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
-	if err := s.identityRepo.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{ep}); err != nil {
-		return uuid.Nil, fmt.Errorf("upsert endpoint %s: %w", ep.Key(), err)
 	}
 
 	// Matched on the INET value, not on its text rendering. `address::text`
@@ -403,7 +428,7 @@ func (s *AssetService) resolveEndpointForFinding(ctx context.Context, tenantID, 
 	// an at-rest endpoint has both.
 	//
 	// The address branch below deliberately does NOT also require fqdn to
-	// match. identity/postgres.Repository.UpsertEndpoints, just called above,
+	// match. identity/postgres.Repository.UpsertEndpoints, which wrote the row,
 	// matches an address-bearing endpoint on (address, port, transport) alone
 	// and merges fqdn into the existing row ("empty never wins" — see its
 	// mergeEndpointByAddress) rather than requiring an exact match. A read-back
@@ -434,10 +459,64 @@ func (s *AssetService) resolveEndpointForFinding(ctx context.Context, tenantID, 
 			tenantID, assetID,
 			nullableText(ep.FQDN), nullablePort(ep.Port), endpointTransport(ep)).Scan(&id)
 	})
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, fmt.Errorf("endpoint %s on asset %s: %w", ep.Key(), assetID, errEndpointNotAttached)
+	}
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("read back endpoint %s: %w", ep.Key(), err)
+		return uuid.Nil, fmt.Errorf("look up endpoint %s: %w", ep.Key(), err)
 	}
 	return id, nil
+}
+
+// attachFindingEndpoint writes the finding's endpoint onto an asset that an
+// identity decision made OUTSIDE the engine has already chosen: an
+// interrogation finding that verifiably belongs to the device that was
+// interrogated (interrogation_owned_ingest.go). That claim is checked before
+// this runs, and is the same decision a match is, so it attaches the socket
+// the way the engine's match would. Every other path leaves endpoint writes to
+// the engine.
+func (s *AssetService) attachFindingEndpoint(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) error {
+	ep, ok := findingEndpoint(f, nonPlaceholderIP(f.IPAddress))
+	if !ok {
+		return nil
+	}
+	if _, err := s.identityEngine(); err != nil {
+		return err
+	}
+	src := identity.Source{Kind: identity.SourceMeasured, Ref: "device_interrogation"}
+	if f.SourceSensorID != nil && *f.SourceSensorID != "" {
+		src.Ref = "sensor:" + *f.SourceSensorID
+	}
+	eps := identity.ObservationEndpoints(identity.Observation{Source: src, Endpoints: []identity.EndpointObservation{ep}}, findingObservedAt(f))
+	if len(eps) == 0 {
+		return nil
+	}
+	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
+	if _, err := s.identityRepo.UpsertEndpoints(ctx, ref, eps); err != nil {
+		return fmt.Errorf("upsert endpoint %s: %w", ep.Key(), err)
+	}
+	return nil
+}
+
+// attachObservationEndpoints writes an observation's evidence endpoints onto
+// the asset a decision linked it to, inside the caller's transaction. It is
+// what Link and Confirm do with supporting evidence the engine held (platform
+// ADR-0003 D2): the operator's decision is the attachment the engine declined
+// to make. Endpoints are stamped with the observation's own source and time,
+// so the asset's Services & Endpoints tab says who measured them, not who
+// clicked.
+func attachObservationEndpoints(ctx context.Context, repo *pgidentity.Repository, ref identity.AssetRef, obs identity.Observation, at time.Time) error {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	eps := identity.ObservationEndpoints(obs, at)
+	if len(eps) == 0 {
+		return nil
+	}
+	if _, err := repo.UpsertEndpoints(ctx, ref, eps); err != nil {
+		return fmt.Errorf("attach the observation's endpoints to %s: %w", ref.ID, err)
+	}
+	return nil
 }
 
 // endpointTransport applies the same default EndpointKey does, so the key the
@@ -485,11 +564,15 @@ func observationLabel(obs identity.Observation) string {
 // discoveryObservation builds the observation for the sensor / active-scan /
 // PCAP / cloud intake, all of which arrive as an IngestFinding.
 //
-// Scope is the network segment the address falls in, resolved by the existing
-// segment service. It is what makes hostname and ip_address able to decide a
-// match at all: unscoped, ADR-0002 D3 says they do not vote, because "printer-2"
-// and 10.0.0.5 are answers to a question only once you say where you were
-// standing. FromLegacyAsset in shared/identity documents the same gap.
+// The finding becomes an identity.Sighting (discoverySighting) and the intake
+// decides the rest: which segment the address and the name are in — what
+// makes hostname and ip_address able to decide a match at all (ADR-0002 D3) —
+// whether that segment is dynamic, the admission flags from the channel the
+// evidence came through, and identifier hygiene. What stays here is the two
+// checks only this service can make about who WROTE the row: that a collector
+// claiming a sensor id is a sensor of this tenant, and whether a cloud listing
+// is the platform's own collector (cloudCollectorAuthoritative), which picks
+// the `api` channel.
 func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership string) (identity.Observation, error) {
 	if f.SourceSensorID != nil && findingCollectorSource(f) {
 		sensorID, err := uuid.Parse(strings.TrimSpace(*f.SourceSensorID))
@@ -510,119 +593,16 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 	if err != nil {
 		return identity.Observation{}, err
 	}
-	obs := identity.Observation{
-		TenantID:   tenantID.String(),
-		Source:     findingSource(f),
-		ObservedAt: findingObservedAt(f),
-		Admission: identity.AdmissionEvidence{
-			Direct:           f.Port != nil && *f.Port > 0 && (strings.TrimSpace(derefString(f.CipherSuite)) != "" || rawDataString(f.RawData, "ssh_host_key_fingerprint", "host_key_fingerprint") != ""),
-			CollectorVersion: rawDataString(f.RawData, "collector_version", "sensor_version"), ReceiptID: rawDataString(f.RawData, "discovery_id"),
-		},
-		Confidence: findingConfidence(f),
-		Network: identity.Network{
-			Ownership: ownership,
-			Type:      findingNetworkType(f),
-		},
-	}
-
-	segmentID, dynamicScope := s.observationScope(tenantID, effectiveIP, f.Hostname)
-	obs.Network.SegmentID = segmentID
-	if dynamicScope {
-		obs.DynamicScopes = map[string]bool{segmentID: true}
-	}
-
-	host := strings.TrimSpace(derefString(f.Hostname))
-	if host != "" {
-		obs.Hostname = strings.ToLower(host)
-		obs.DisplayName = obs.Hostname
-		// A dotted name is an FQDN, which is globally unique and needs no
-		// scope; a single label is a hostname and identifies only within one.
-		kind := identity.KindHostname
-		scope := segmentID
-		if strings.Contains(strings.TrimSuffix(host, "."), ".") {
-			kind = identity.KindFQDN
-			scope = ""
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: kind, Value: host, Scope: scope, Confidence: 1,
-		})
-	}
-	if ip := strings.TrimSpace(derefString(effectiveIP)); ip != "" {
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindIPAddress, Value: ip, Scope: segmentID, Confidence: 1,
-		})
-		if obs.DisplayName == "" {
-			obs.DisplayName = ip
-		}
-	}
-
-	// Cloud findings carry the strongest identifier we ever get for them: the
-	// provider's own resource id. It outranks everything else in the precedence
-	// list for a cloud class, which is why a bucket with no address still
-	// deduplicates correctly — the old path collapsed every such resource onto
-	// one asset through the shared 0.0.0.0 placeholder.
-	if rid := cloudResourceID(f); rid != "" {
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindCloudResourceID, Value: rid, Confidence: 1,
-		})
-		// The provider's API listing the resource IS the authoritative source
-		// for it — see cloudCollectorAuthoritative for why this is decided from
-		// the row's writer and not from anything in the finding.
-		obs.Admission.Authoritative = cloudAuthoritative
-	}
-	if mac := rawDataString(f.RawData, "mac_address", "mac"); mac != "" {
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindMACAddress, Value: mac, Confidence: 1,
-		})
-	}
-	if serial := rawDataString(f.RawData, "serial_number", "serial"); serial != "" {
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindSerialNumber, Value: serial, Confidence: 1,
-		})
-	}
-	if fp := rawDataString(f.RawData, "ssh_host_key_fingerprint", "host_key_fingerprint"); fp != "" {
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindSSHHostKeyFingerprint, Value: fp, Confidence: 1,
-		})
-	}
-
-	obs.ClassHint = findingClassHint(f)
-	if ep, ok := findingEndpoint(f, effectiveIP); ok {
-		obs.Endpoints = append(obs.Endpoints, ep)
-	}
-
-	// An APPLICATION has no identity of its own (ADR-0002 D3): it is identified
-	// by its position under a host, plus what it is and which instance. Give it
-	// that key, or it can never be recognised a second time — see
-	// applicationDependentIdentifier for what went wrong without one.
-	if id, ok := applicationDependentIdentifier(obs.ClassHint, host, derefString(effectiveIP), f); ok {
-		obs.Identifiers = append(obs.Identifiers, id)
-	}
-	if isHostInventoryConnectionRawData(f.RawData) {
-		var err error
-		obs, err = s.addPriorDefaultScopeIdentifier(context.Background(), obs)
-		if err != nil {
-			return identity.Observation{}, fmt.Errorf("looking up the host connection's prior identity scope: %w", err)
-		}
-	}
-
 	// Leniency is a decision made HERE and visible: one malformed MAC in a batch
-	// must not lose the whole finding, but the reject is logged rather than
-	// dropped.
-	clean, rejected := obs.Sanitize()
-	for _, r := range rejected {
-		log.Printf("[AssetService] identity: %s dropped a %s identifier: %v", findingLabel(f), r.Identifier.Kind, r.Err)
-	}
-	if len(clean.Identifiers) == 0 {
+	// must not lose the whole finding, and assessSighting logs every reject.
+	res, err := s.assessSighting(context.Background(), findingLabel(f), discoverySighting(tenantID, f, effectiveIP, ownership, cloudAuthoritative))
+	if errors.Is(err, identity.ErrNoUsableIdentifier) {
 		return identity.Observation{}, fmt.Errorf("%w: %s", errNoIdentifiers, findingLabel(f))
 	}
-	// A finding is a MEASUREMENT (findingSource is always SourceMeasured): the
-	// name came off the wire or out of a collector, so a generic one (`iphone`,
-	// `printer`, or a name three assets here already carry) is marked and cannot
-	// decide a match ( B2). Same rule, same decider, as the host-observation
-	// path; MarkAll touches only `hostname` identifiers.
-	clean.Identifiers = s.genericNames().MarkAll(context.Background(), tenantID.String(), clean.Identifiers)
-	return clean, nil
+	if err != nil {
+		return identity.Observation{}, err
+	}
+	return res.Observation, nil
 }
 
 // applicationDependentIdentifier builds the `name` identifier that carries an
@@ -721,7 +701,13 @@ func dependentApplicationIdentity(parent, product, instance string) (identity.De
 // Source kind is declared or imported, never measured — nobody probed anything.
 // ADR-0002 D4 ranks those below a measurement for identity facts and ABOVE it
 // for context (owner, business unit, environment), which is the engine's job,
-// not this builder's.
+// not this builder's. The declaration becomes a `person` sighting (an `api`
+// one for a connection import) and the intake scopes it; an identifier the
+// caller wrote its own scope on keeps that scope (withExplicitScopes).
+//
+// The name is NOT judged generic or synthetic ( B2): a `printer` somebody
+// typed or curated is a statement about which device this is, and the intake
+// grades only what a collector measured.
 func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInput, source identity.Source) (identity.Observation, error) {
 	body, err := json.Marshal(in)
 	if err != nil {
@@ -732,217 +718,29 @@ func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInpu
 	if receiptID == "" {
 		receiptID = hex.EncodeToString(receipt[:])
 	}
-	observedAt := in.ObservationTime
-	if observedAt.IsZero() {
-		observedAt = time.Now().UTC()
+	if in.ObservationTime.IsZero() {
+		in.ObservationTime = time.Now().UTC()
 	}
-	obs := identity.Observation{
-		TenantID:   tenantID.String(),
-		Source:     source,
-		ObservedAt: observedAt,
-		Admission:  identity.AdmissionEvidence{ReceiptID: receiptID, Authoritative: identity.IsConnectionSource(source)},
-		Confidence: 1, // a person or a system of record asserted it
-		// The class attributes, so the matcher seam has a vendor and a model to
-		// COMPARE when this turns out to be contested (workstream 4.6). The
-		// engine does not write them — reconciling an attribute against what an
-		// asset already holds is ADR-0002 D4's job and stays with the caller —
-		// and it reads only identity.SummaryAttributeKeys out of the map.
-		//
-		// This path is where they come from in practice: a CMDB pull and a
-		// spreadsheet import both carry make and model for hardware, and a
-		// disagreement about either is real evidence that two records are two
-		// things rather than one.
-		Attributes: in.Attributes,
+	sg, scoped, err := declaredSighting(tenantID, in, source, receiptID)
+	if err != nil {
+		return identity.Observation{}, err
 	}
-	segmentID, dynamicScope := s.observationScope(tenantID, in.IPAddress, in.Hostname)
-	obs.Network.SegmentID = segmentID
-	if dynamicScope {
-		obs.DynamicScopes = map[string]bool{segmentID: true}
+	res, err := s.assessSighting(context.Background(), "declared asset", sg)
+	if err != nil && !errors.Is(err, identity.ErrNoUsableIdentifier) {
+		return identity.Observation{}, err
 	}
-	if in.AssetOwnership != nil {
-		obs.Network.Ownership = *in.AssetOwnership
-	}
-
-	for _, id := range in.Identifiers {
-		kind := identity.Kind(strings.TrimSpace(strings.ToLower(id.Kind)))
-		if kind == identity.KindDeclarationID {
-			return identity.Observation{}, fmt.Errorf("declaration identifiers are issued only by identity confirmation")
-		}
-		if !kind.Valid() {
-			log.Printf("[AssetService] identity: ignoring identifier of unknown kind %q", id.Kind)
-			continue
-		}
-		scope := strings.TrimSpace(derefString(id.Scope))
-		if kind.RequiresScope() && scope == "" {
-			// An unscoped hostname or IP is still RECORDED — it is true — but
-			// it cannot decide a match. Defaulting it to the segment the
-			// address resolves to is the honest scope when we have one.
-			//
-			// A `name` is NOT scoped by segment: it identifies within a CLASS
-			// (ADR-0002 D3's erratum), and the builder ten lines below already
-			// scopes the display-name form that way. A user-supplied `name`
-			// arriving through the identifiers array got the segment instead,
-			// so the same service declared twice — once by display name, once
-			// as an explicit identifier — produced two rows for one thing and
-			// neither matched the other.
-			scope = defaultScopeForKind(kind, in.ClassKey, segmentID)
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: kind, Value: strings.TrimSpace(id.Value), Scope: scope, Confidence: 1,
-		})
-	}
-
-	// The name is NOT marked generic here ( B2), deliberately. Every caller
-	// of this builder is a person or a system of record — manual create,
-	// elevation and SBOM subjects (declared), spreadsheet, CMDB and NetBox
-	// imports (imported) — and a `printer` somebody typed or curated is a
-	// statement about which device this is, not a default a device announced.
-	host := strings.TrimSpace(derefString(in.Hostname))
-	if host != "" {
-		obs.Hostname = strings.ToLower(host)
-		obs.DisplayName = obs.Hostname
-		kind := identity.KindHostname
-		scope := segmentID
-		if strings.Contains(strings.TrimSuffix(host, "."), ".") {
-			kind = identity.KindFQDN
-			scope = ""
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: kind, Value: host, Scope: scope, Confidence: 1,
-		})
-	}
-	if ip := strings.TrimSpace(derefString(in.IPAddress)); ip != "" {
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindIPAddress, Value: ip, Scope: segmentID, Confidence: 1,
-		})
-		if obs.DisplayName == "" {
-			obs.DisplayName = ip
-		}
-	}
-
-	obs.ClassHint = in.ClassKey
-
-	// A DECLARED service is identified by its name and nothing else
-	// (ADR-0002 D3 erratum: "services identify by (tenant, class, name),
-	// realised as the `name` identifier kind"). The scope is the class key:
-	// a business service and a technical service may share a name, and the
-	// class is what says they are different things.
-	//
-	// Before this the three service classes had an EMPTY precedence, so a
-	// tenant picking "Business service" in the class picker got "an asset needs
-	// a hostname, an address or an identifier" and had no way to satisfy it.
-	if name := strings.TrimSpace(derefString(in.DisplayName)); name != "" {
-		obs.DisplayName = name
-		if assetclass.IsAncestor(assetclass.KeyService, in.ClassKey) {
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindName, Value: name, Scope: in.ClassKey, Confidence: 1,
-			})
-		}
-	}
-
-	for _, ep := range in.Endpoints {
-		transport := strings.TrimSpace(ep.Transport)
-		if transport == "" {
-			transport = "tcp"
-		}
-		port := 0
-		if ep.Port != nil {
-			port = *ep.Port
-		}
-		obs.Endpoints = append(obs.Endpoints, identity.EndpointObservation{
-			Address:   derefString(ep.Address),
-			FQDN:      derefString(ep.FQDN),
-			Port:      port,
-			Transport: transport,
-			Protocol:  derefString(ep.Protocol),
-		})
-	}
-
-	clean, rejected := obs.Sanitize()
+	obs, rejected := withExplicitScopes(res, scoped)
 	for _, r := range rejected {
 		log.Printf("[AssetService] identity: declared %s identifier rejected: %v", r.Identifier.Kind, r.Err)
 	}
-	if len(clean.Identifiers) == 0 {
+	if len(obs.Identifiers) == 0 {
 		if assetclass.IsAncestor(assetclass.KeyService, in.ClassKey) {
 			return identity.Observation{}, fmt.Errorf("%w: a %s is identified by its name, so display_name is required",
 				errNoIdentifiers, in.ClassKey)
 		}
 		return identity.Observation{}, fmt.Errorf("%w: an asset needs a hostname, an address or an identifier", errNoIdentifiers)
 	}
-	return clean, nil
-}
-
-// observationScope resolves the scope hostname and ip_address identify within,
-// and whether that scope hands addresses out dynamically.
-//
-// It NEVER returns an empty scope. "This tenant has no segments" — which is
-// every fresh tenant — is a fact about their topology, not the absence of one,
-// and the tenant-wide default scope (ADR-0002 D3 erratum) is what it means.
-// Returning "" here is what made one host, ingested three times, into three
-// assets: neither its hostname nor its IP could vote, so nothing matched, and
-// every asset after the first carried no identifier at all.
-//
-// The ADDRESS half is shared/identity/postgres's ScopeForAddress, so this
-// service and device-interrogation-service cannot disagree about which segment
-// an address is in — one more spelling of this lookup is one more dedupe key.
-// The NAME half is still local: a `domain` segment is matched by hostname, which
-// an address-keyed lookup cannot answer, and dropping it would silently
-// un-scope every host in a domain segment.
-func (s *AssetService) observationScope(tenantID uuid.UUID, ip, hostname *string) (string, bool) {
-	// s.db nil is the pure-unit-test shape: the builders are testable without a
-	// database, and with no database there are no segments to resolve against —
-	// the tenant default is the right answer, not a panic.
-	if addr, ok := parseObservedAddr(ip); ok && s.db != nil && s.db.DB != nil {
-		if _, err := s.identityEngine(); err == nil {
-			// The empty cloud-network ref is an ANSWER, not a placeholder, and
-			// it is the right one for every intake that reaches here: a
-			// cryptographic finding off the wire and a passive host observation
-			// are both seen on a network the sensor watches, and neither
-			// carries a VPC. The segment rows they must match are exactly the
-			// ones with a NULL `cloud_network_ref`, which the unique index
-			// folds to '' — so "" selects them and nothing else.
-			//
-			// Only the path that ENUMERATED a cloud network knows its ref, and
-			// that is device-interrogation's (managed_asset.go passes one
-			// through). Passing a ref we did not observe would scope a LAN host
-			// into a VPC's segment; passing "" from the cloud path would do the
-			// reverse, which is the collision fixed.
-			scope, dynamic, err := s.identityRepo.ScopeForAddress(context.Background(), tenantID.String(), addr, "")
-			if err == nil && scope != "" {
-				return scope, dynamic
-			}
-			if err != nil {
-				// A failed lookup is not a reason to lose the observation, but
-				// it must not be silent: it degrades every identifier in this
-				// batch to the tenant default.
-				log.Printf("[AssetService] identity: resolving the segment for %s failed; scoping to the tenant default: %v", addr, err)
-			}
-		}
-	}
-	// No address, or none that resolved: a domain segment may still place it by
-	// name.
-	if s.networkSegmentService != nil {
-		if seg, err := s.networkSegmentService.GetSegmentForIP(tenantID, ip, hostname); err == nil && seg != nil {
-			return seg.ID.String(), false
-		}
-	}
-	return identity.ScopeTenantDefault, false
-}
-
-// parseObservedAddr turns the address an intake observed into a netip.Addr.
-// The second result is false for absent, empty or unparseable values — and for
-// the unspecified address, which cloud collectors use as a placeholder and
-// which is inside nothing.
-func parseObservedAddr(ip *string) (netip.Addr, bool) {
-	v := strings.TrimSpace(derefString(ip))
-	if v == "" {
-		return netip.Addr{}, false
-	}
-	addr, err := netip.ParseAddr(v)
-	if err != nil || !addr.IsValid() || addr.IsUnspecified() {
-		return netip.Addr{}, false
-	}
-	return addr.Unmap().WithZone(""), true
+	return obs, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,7 +803,10 @@ func (s *AssetService) cloudCollectorAuthoritative(ctx context.Context, tenantID
 
 func findingCollectorSource(f IngestFinding) bool {
 	ref := findingSource(f).Ref
-	return ref == "sensor" || strings.HasPrefix(ref, "sensor:") || ref == "scan" || strings.HasPrefix(ref, "scan:")
+	// "interrogation" is a collector too: the converter now preserves
+	// device_interrogation on a sensor_discoveries row, and that row's
+	// sensor id must be verified like any other collector's.
+	return ref == "sensor" || strings.HasPrefix(ref, "sensor:") || ref == "scan" || strings.HasPrefix(ref, "scan:") || ref == "interrogation"
 }
 
 func findingSource(f IngestFinding) identity.Source {
@@ -1226,4 +1027,39 @@ func derefString(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// findingLeafCertFingerprints returns the SHA-256 fingerprints of the LEAF
+// certificates in a finding's canonical `certificates` array (CLAUDE.md "Single
+// certificate format"): entries at chain_order 0, or with no chain_order, that
+// are not CA certificates. An intermediate or root is the CA's identity, not
+// the device's. Only the fingerprint is read.
+func findingLeafCertFingerprints(raw map[string]interface{}) []string {
+	certs, _ := raw["certificates"].([]interface{})
+	var out []string
+	seen := map[string]bool{}
+	for _, c := range certs {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if order, has := m["chain_order"]; has {
+			if n, ok := order.(float64); !ok || n != 0 {
+				if i, ok := order.(int); !ok || i != 0 {
+					continue
+				}
+			}
+		}
+		if ca, _ := m["is_ca"].(bool); ca {
+			continue
+		}
+		fp, _ := m["fingerprint_sha256"].(string)
+		fp = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fp), ":", ""))
+		if fp == "" || seen[fp] {
+			continue
+		}
+		seen[fp] = true
+		out = append(out, fp)
+	}
+	return out
 }

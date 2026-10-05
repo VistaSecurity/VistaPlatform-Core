@@ -34,7 +34,7 @@ func main() {
 	cfg := config.Load()
 
 	// Initialize database connection for log storage
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(cfg.DatabaseURL))
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}

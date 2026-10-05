@@ -131,6 +131,10 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			// ...and a platform admin's edits to shipped content, made before
 			// the release that started protecting them (decision 4, RC-12).
 			editSeededContentBeforeUpgrade(t, scratch)
+			// ...and the rows a purged tenant left behind in tables that had
+			// no FK to tenants, which this release's cascade FKs must clean
+			// up before adding (schema_upgrade_orphan_tenant_rows_integration_test.go).
+			orphans := seedOrphanTenantRows(t, scratch, tenant)
 
 			// 3. The assertion. This is the exact operation the chart's
 			//    schema-migration Job performs on `helm upgrade`.
@@ -149,6 +153,8 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			//    successful upgrade, even though psql exited 0.
 			assertTenantDataSurvived(t, scratch, tenant, tag)
 			assertSeededContentEditsSurvived(t, scratch, tag)
+			assertOTActiveProbingOnAfterUpgrade(t, scratch, tag)
+			assertOrphanTenantRowsRemoved(t, scratch, tenant, orphans, tag)
 		})
 	}
 }
@@ -530,4 +536,41 @@ func assertTenantDataSurvived(t *testing.T, db *sql.DB, tenant uuid.UUID, tag st
 		return
 	}
 	t.Logf("upgrade from %s preserved %d assets row(s) for the test tenant", tag, assets)
+}
+
+// assertOTActiveProbingOnAfterUpgrade: releases before OT active probing moved
+// to Core seeded `ot_active_probing` {"enabled": false} on every tier, and the
+// tier_entitlements INSERT is ON CONFLICT DO NOTHING — so only seed.sql's
+// one-shot correction turns those rows on. Without it an upgraded install
+// would keep OT probing off on every plan while a fresh one has it on.
+func assertOTActiveProbingOnAfterUpgrade(t *testing.T, db *sql.DB, tag string) {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT st.name, te.included_value->>'enabled'
+		FROM tier_entitlements te
+		JOIN subscription_tiers st ON st.id = te.tier_id
+		JOIN billable_items bi ON bi.id = te.item_id
+		WHERE bi.key = 'ot_active_probing'
+		  AND st.name IN ('community', 'free', 'starter', 'pro', 'enterprise')`)
+	if err != nil {
+		t.Fatalf("read ot_active_probing tier rows after upgrading from %s: %v", tag, err)
+	}
+	defer func() { _ = rows.Close() }()
+	seen := 0
+	for rows.Next() {
+		var tier, enabled string
+		if err := rows.Scan(&tier, &enabled); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		seen++
+		if enabled != "true" {
+			t.Errorf("after upgrading from %s: %s tier ot_active_probing enabled=%s, want true (Core, on by default)", tag, tier, enabled)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+	if seen != 5 {
+		t.Errorf("after upgrading from %s: found %d seeded-tier ot_active_probing rows, want 5", tag, seen)
+	}
 }

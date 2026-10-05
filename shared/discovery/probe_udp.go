@@ -220,6 +220,14 @@ func classifyUDPProbeError(err error) ProbeOutcome {
 	if errors.Is(err, syscall.ECONNREFUSED) {
 		return ProbeRefused
 	}
+	// Windows surfaces an ICMP port-unreachable on a connected UDP socket as
+	// WSAECONNRESET / WSAECONNREFUSED on the next read. Go's net package
+	// disables that reporting by default (SIO_UDP_CONNRESET), so in practice a
+	// closed UDP port reads as a timeout (no-answer) there; this branch keeps
+	// the classification correct for any stack or build that does surface it.
+	if hasWinsockErrno(err, wsaECONNRESET, wsaECONNREFUSED) {
+		return ProbeRefused
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return ProbeNoAnswer

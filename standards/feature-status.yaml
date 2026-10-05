@@ -121,6 +121,13 @@ features:
     status: available
     edition: core
     docs: features/inventory-and-lenses
+  - id: identity_intake
+    group: discover_inventory
+    name: One identity for every sighting
+    summary: Every discovery path identifies a device the same way, explains key and address changes, and lets you link or pin what it cannot tell.
+    status: available
+    edition: core
+    docs: features/identity-evidence
   - id: network_map
     group: discover_inventory
     name: Network and crypto map

@@ -14,7 +14,7 @@ Anything not listed on this page is Core.
 
 *Free and source-available. One team securing its own estate.*
 
-Everything not listed as Enterprise or MSP below. Full discovery, the complete crypto inventory and CMDB, compliance evaluation against the free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source. Subscription tiers and the entitlements they compose are Core too — a Core deployment authors, assigns and enforces them; what Core lacks is any way to charge for them.
+Everything not listed as Enterprise or MSP below. Full discovery (active OT/ICS probing included), the complete crypto inventory and CMDB, compliance evaluation against the free frameworks, CBOM generation and CycloneDX export, RBAC, local users and invitations, audit logging, RLS tenant isolation, the mTLS service mesh, and the sensor and agent source. Subscription tiers and the entitlements they compose are Core too — a Core deployment authors, assigns and enforces them; what Core lacks is any way to charge for them.
 
 ## Enterprise
 
@@ -34,13 +34,13 @@ Enterprise, plus the multi-tenant management plane. Note that tenant isolation i
 
 | Capability | Edition | What it does | Documentation |
 |---|---|---|---|
+| **Own AI Model Provider** | Enterprise | Tenant may connect its own AI model provider (Anthropic, or any OpenAI-compatible endpoint) from Settings → AI assistant, instead of using the one this deployment provides | [Guide](features/ai-assistant.md) |
 | **Self-Service Billing** | MSP | Tenant-facing subscription, invoices, plan change and payment portal (admin-service /my-billing). Absent from Core; usage-against-limits is unconditional. | in MSP docs |
 | **CBOM Signing & Attestation** | Enterprise | Cryptographic signing of CBOM artifacts with compliance-attestation layers | in Enterprise docs |
 | **CMDB / ITSM Sync** | Enterprise | Sync inventory out to an external CMDB or ITSM (ServiceNow, Device42, SolarWinds) | in Enterprise docs |
 | **NetBox Connector** | Enterprise | Pull sites, prefixes, VLANs, device types and devices from a NetBox network source of truth, and see the drift between NetBox and discovered inventory. Read-only towards NetBox. | in Enterprise docs |
 | **Custom Branding** | Enterprise | White-label admin and web UI with custom logos and colors | in Enterprise docs |
 | **Custom Compliance Policies** | Enterprise | Tenant may author their own compliance frameworks beyond platform-published ones | in Enterprise docs |
-| **OT Active Probing** | Enterprise | Active TLS/protocol probing of OT/ICS devices (Modbus, DNP3, BACnet, etc.); risk-managed feature | *No self-service UI yet* |
 | **OT Inventory Lens** | Enterprise | OT-specific inventory view and dashboards | *No self-service UI yet* |
 | **SIEM Export** | Enterprise | Forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook) | in Enterprise docs |
 | **SSO / SAML** | Enterprise | Single sign-on via your own identity provider — OIDC (Google, Microsoft, Azure AD) or SAML 2.0 — with group-to-role mapping and an org-wide authentication policy | in Enterprise docs |
@@ -84,6 +84,12 @@ Core keeps every discovery path that FINDS a device. Reading a customer's NetBox
 
 `connector_netbox`
 
+**Enterprise: bring your own AI model provider**
+
+Core has no model clients at all (ADR-0008 edition placement), so there is nothing for a Core tenant to connect. On Enterprise every tenant may connect its own provider; on MSP a plan decides, which is what lets a service provider choose between including a model in the plan and letting customers bring theirs.
+
+`ai_tenant_provider`
+
 **Enterprise + MSP: audit forwarding**
 
 Core logs every audit event and serves every audit query. Forwarding them to an external SIEM (Splunk, Datadog, Elastic, webhook) is paid. Listed as Enterprise because MSP is a superset — EditionFor returns the MINIMUM edition that may grant the item.
@@ -92,9 +98,9 @@ Core logs every audit event and serves every audit query. Forwarding them to an 
 
 **Enterprise: OT/ICS**
 
-Retains the platform's existing gating: OT active probing and the OT lens have only ever shipped enabled on the paid tiers. Core keeps the full TLS/SSH/SMB discovery pipeline. Revisit if OT proves to be an adoption driver rather than a vertical upsell.
+The OT-specific inventory lens. OT active probing is deliberately NOT listed: it is Core, an ordinary switch that every tier ships turned on and that a plan or a per-tenant exception can turn off. Its safety never rested on a paywall — OT probes run only when a person asks for them on a scan, and automatic scanning refuses them outright.
 
-`ot_active_probing` · `ot_primary_lens`
+`ot_primary_lens`
 
 **MSP: monetization**
 

@@ -33,8 +33,14 @@ import (
 // convention in probeTLS: the numeric wire value, under a name no consumer
 // could mistake for the canonical string.
 const (
-	MetaKeyExchangeAlgorithm    = "key_exchange_algorithm"
-	MetaKeyExchangeGroupRaw     = "key_exchange_group_raw"
+	MetaKeyExchangeAlgorithm = "key_exchange_algorithm"
+	MetaKeyExchangeGroupRaw  = "key_exchange_group_raw"
+	// MetaKeyExchangeKeySize is the size in bits of the key exchange itself —
+	// the named group's, or a custom finite-field prime's. It is a separate
+	// key from the generic key_size, which producers use for certificate and
+	// cipher bits as well; the external-connection ingest accepts only this
+	// one as an exchange size.
+	MetaKeyExchangeKeySize      = "key_exchange_key_size"
 	MetaTLSSupportsClassicalKex = "tls_supports_classical_kex"
 	MetaTLSSupportsPQCHybridKex = "tls_supports_pqc_hybrid_kex"
 	// MetaTLSPQCHybridKexGroup names the hybrid group the server was seen to
@@ -63,6 +69,33 @@ var tlsGroupCatalogueCodes = map[tls.CurveID]string{
 	tls.X25519MLKEM768:     "X25519MLKEM768",
 	tls.SecP256r1MLKEM768:  "SecP256r1MLKEM768",
 	tls.SecP384r1MLKEM1024: "SecP384r1MLKEM1024",
+}
+
+// tlsGroupKeyBits is the key size of each classical IANA TLS named group: the
+// curve's field size or the finite-field prime's length (RFC 8422, RFC 7919,
+// RFC 7027). It is a property of the group's definition, not an opinion about
+// it — whether that size is adequate stays with the catalogue and the
+// SP 800-131A floors in shared/cryptoparse. X25519 is recorded as 256, the
+// convention this codebase already uses for Ed25519 keys.
+//
+// It is wider than tlsGroupCatalogueCodes on purpose: passive capture reports
+// whatever a third party's server selected, including groups crypto/tls never
+// offers. The hybrid post-quantum groups are absent — their sizes are not
+// comparable to a classical floor and nothing gates on them.
+var tlsGroupKeyBits = map[tls.CurveID]int{
+	19: 192, 20: 224, 21: 224, 22: 256, // secp192r1, secp224k1, secp224r1, secp256k1
+	tls.CurveP256: 256, tls.CurveP384: 384, tls.CurveP521: 521,
+	26: 256, 27: 384, 28: 512, // brainpoolP256r1, brainpoolP384r1, brainpoolP512r1
+	tls.X25519: 256, 30: 448, // x448
+	31: 256, 32: 384, 33: 512, // brainpool*tls13
+	256: 2048, 257: 3072, 258: 4096, 259: 6144, 260: 8192, // ffdhe2048..ffdhe8192
+}
+
+// TLSKeyExchangeGroupKeyBits returns the key size in bits of a classical TLS
+// named group, or 0 when the id is not one whose size this package knows.
+// Unknown stays unknown: the caller records no size rather than a guess.
+func TLSKeyExchangeGroupKeyBits(id tls.CurveID) int {
+	return tlsGroupKeyBits[id]
 }
 
 // ClassicalTLSGroups and PQCHybridTLSGroups are the two disjoint offers the
@@ -142,6 +175,11 @@ type TLSKeyExchange struct {
 	// else the hybrid-only support handshake's. "" when no handshake proved
 	// hybrid support.
 	PQCHybridGroup string
+	// KeyBits is a MEASURED exchange size for a key exchange that used no
+	// named group: the length of the custom prime in a TLS <= 1.2 DHE
+	// ServerKeyExchange. 0 otherwise; a named group's size comes from the
+	// group.
+	KeyBits int
 }
 
 // TLSDialFunc opens a fresh TCP connection to the endpoint the main handshake
@@ -260,9 +298,20 @@ const (
 	alertInsufficientSecurity = 71
 )
 
+// ObservedTLSKeyExchange is the key exchange a passively captured handshake
+// shows in clear: the group the server selected (the TLS 1.3 ServerHello
+// key_share, or the TLS <= 1.2 ECDHE ServerKeyExchange named_curve), or the
+// length of a custom DHE prime. The support flags stay nil — a capture answers
+// what one connection negotiated, not what else the server would accept.
+func ObservedTLSKeyExchange(groupID uint16, dhPrimeBits int) TLSKeyExchange {
+	id := tls.CurveID(groupID)
+	return TLSKeyExchange{GroupID: id, Group: TLSKeyExchangeGroupName(id), KeyBits: dhPrimeBits}
+}
+
 // ApplyTo writes the measurement into a discovery metadata map. Nothing is
 // written for a question with no answer: no group name for an unknown id, no
-// raw id when no named group was used, no flag that is nil.
+// raw id when no named group was used, no size for a group whose size is not
+// known, no flag that is nil.
 func (k TLSKeyExchange) ApplyTo(meta map[string]interface{}) {
 	if meta == nil {
 		return
@@ -272,6 +321,13 @@ func (k TLSKeyExchange) ApplyTo(meta map[string]interface{}) {
 	}
 	if k.Group != "" {
 		meta[MetaKeyExchangeAlgorithm] = k.Group
+	}
+	// The exchange size is what lets ingest finish a strength assessment: an
+	// elliptic-curve or finite-field exchange with no size stays unrated.
+	if bits := TLSKeyExchangeGroupKeyBits(k.GroupID); bits > 0 {
+		meta[MetaKeyExchangeKeySize] = bits
+	} else if k.GroupID == 0 && k.KeyBits > 0 {
+		meta[MetaKeyExchangeKeySize] = k.KeyBits
 	}
 	if k.SupportsClassical != nil {
 		meta[MetaTLSSupportsClassicalKex] = *k.SupportsClassical

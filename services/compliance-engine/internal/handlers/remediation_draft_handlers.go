@@ -64,10 +64,32 @@ type RemediationDraftHandlers struct {
 	plans    draftPlanStore
 	db       *sql.DB
 
-	// modelID is the model THIS DEPLOYMENT is configured with, read once at
-	// construction. It is what Accept stamps on the row, instead of the model
-	// id the client sent — see acceptRequest.ModelID.
+	// modelID is the model the ENVIRONMENT is configured with, read once at
+	// construction. It is what Accept stamps on the row when there is no
+	// resolver — see modelFor and acceptRequest.ModelID.
 	modelID string
+
+	// providers resolves the provider for the tenant a request is for: its
+	// own, if it connected one, else the deployment's. Nil in a process with
+	// no database handle, which keeps the environment's answer.
+	providers *ai.Resolver
+}
+
+// modelFor is the model id the SERVER is configured with for this tenant —
+// what Accept stamps as provenance instead of the one the client sent. With a
+// resolver that is the model of whichever provider answers for the tenant; a
+// resolution that fails falls back to the environment's rather than to the
+// caller's claim.
+func (h *RemediationDraftHandlers) modelFor(ctx context.Context, tenantID uuid.UUID) string {
+	if h.providers == nil {
+		return h.modelID
+	}
+	res, err := h.providers.ForTenant(ctx, tenantID)
+	if err != nil {
+		log.Printf("[remediation-draft] provider for %s could not be resolved (%v); stamping the environment's model", tenantID, err)
+		return h.modelID
+	}
+	return res.Config.Model
 }
 
 // findingResolver is the read half: one finding, projected onto the seam's
@@ -106,6 +128,7 @@ func NewRemediationDraftHandlers(
 	resolver findingResolver,
 	plans draftPlanStore,
 	rawDB *sql.DB,
+	providers *ai.Resolver,
 ) *RemediationDraftHandlers {
 	if rawDB == nil {
 		// Said out loud rather than never. Without a pool the tenant kill
@@ -122,7 +145,8 @@ func NewRemediationDraftHandlers(
 		// Read here rather than per request: it is process configuration, it
 		// cannot change under a running pod, and reading it at the call site
 		// would put an os.Getenv in the write path for no gain.
-		modelID: ai.ProviderConfigFromEnv().Model,
+		modelID:   ai.ProviderConfigFromEnv().Model,
+		providers: providers,
 	}
 }
 
@@ -233,6 +257,9 @@ func (h *RemediationDraftHandlers) Draft(c *gin.Context) {
 
 	ctx := seams.WithInvoker(c.Request.Context(), userID.String())
 	ctx = auditmw.WithAIActor(ctx, tenantID, "tenant")
+	// Which tenant is drafting decides which provider drafts: its own, if it
+	// connected one, and otherwise the deployment's.
+	ctx = ai.WithTenantScope(ctx, tenantID)
 
 	// The tenant's own controls (Settings → AI assistant), read once and used
 	// twice: the kill switch answers the request here, and both controls are
@@ -387,7 +414,7 @@ func (h *RemediationDraftHandlers) Accept(c *gin.Context) {
 	// been a constant here; source_ref is now the model this deployment is
 	// configured with rather than the one the body named.
 	item, err := h.plans.AddDraftedItem(tenantID, planID, userID, findingID,
-		renderPlanNotes(req), seams.SourceKindInferred, remediatorSourceRef(h.modelID))
+		renderPlanNotes(req), seams.SourceKindInferred, remediatorSourceRef(h.modelFor(c.Request.Context(), tenantID)))
 	switch {
 	case errors.Is(err, services.ErrItemAlreadyInPlan):
 		c.JSON(http.StatusConflict, gin.H{"error": "This finding is already in that plan."})

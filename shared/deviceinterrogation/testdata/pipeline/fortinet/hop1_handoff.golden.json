@@ -20,6 +20,12 @@
           "source_kind": "declared"
         },
         {
+          "kind": "ip_address",
+          "value": "198.51.100.1",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
           "kind": "serial_number",
           "value": "FGT60F0000000001",
           "scope": null,

@@ -98,6 +98,12 @@ func (s *MergeProposalService) ExecuteMerge(ctx context.Context, tenant, proposa
 					return err
 				}
 			}
+			// Import-only survives a merge only if every merged asset was
+			// import-only; evidence the sources brought is read too
+			// (shared/identity/postgres import_only.go).
+			if err := identitypg.MergeImportOnly(ctx, tx, tenant.String(), in.SurvivorAssetID, in.SourceAssetIDs); err != nil {
+				return err
+			}
 			if err := recomputeMergePackageCounts(ctx, tx, tenant, in.SurvivorAssetID); err != nil {
 				return err
 			}

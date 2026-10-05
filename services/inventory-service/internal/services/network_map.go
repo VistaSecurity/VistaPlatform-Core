@@ -39,6 +39,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/cryptoassess"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 )
 
 // NetworkMapAssetCap bounds the assets one network-map response carries.
@@ -60,6 +61,9 @@ type NetworkMapSegment struct {
 	Name        string    `json:"name" db:"name"`
 	Value       string    `json:"value" db:"value"`
 	SegmentType string    `json:"segment_type" db:"segment_type"`
+	// Gateway is the device that reported routing this network, null
+	// when none has. Always present on the wire.
+	Gateway *models.SegmentGateway `json:"gateway" db:"-"`
 }
 
 // NetworkMapComponent is one DISTINCT catalogue component linked to any of an
@@ -226,6 +230,17 @@ func (s *AssetService) getNetworkMap(ctx context.Context, tenantID uuid.UUID, as
 		}
 		if out.Segments == nil {
 			out.Segments = []NetworkMapSegment{}
+		}
+		segmentIDs := make([]uuid.UUID, len(out.Segments))
+		for i := range out.Segments {
+			segmentIDs[i] = out.Segments[i].SegmentID
+		}
+		gateways, err := readSegmentGateways(ctx, tx, tenantID, segmentIDs)
+		if err != nil {
+			return fmt.Errorf("network map: %w", err)
+		}
+		for i := range out.Segments {
+			out.Segments[i].Gateway = gateways[out.Segments[i].SegmentID]
 		}
 
 		if err := tx.QueryRowContext(ctx,

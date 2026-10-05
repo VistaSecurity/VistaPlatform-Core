@@ -167,6 +167,25 @@ func testEnrichmentCorroboration(t *testing.T, mode string) {
 			if err := raw.QueryRow(`SELECT count(*) FROM asset_history WHERE tenant_id=$1 AND changes_json->>'kind'='merge_proposal'`, tenant).Scan(&proposals); err != nil || proposals == 0 {
 				t.Fatalf("competing ownership lacked review evidence: %d %v", proposals, err)
 			}
+			// Materialize is the other path that re-resolves the stored
+			// evidence; it must leave a sighting under review alone too.
+			if err := backend.Materialize(ctx, tenant, o); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.QueryRow(`SELECT asset_id,state FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, o.ID).Scan(&linked, &state); err != nil || linked != nil || state != "unresolved" {
+				t.Fatalf("Materialize answered a pending merge proposal: %v %s %v", linked, state, err)
+			}
+			// Once a person decides the proposal the hold lifts: re-evaluation
+			// resumes rather than leaving the sighting stuck for ever.
+			if _, err := raw.Exec(`UPDATE asset_history SET changes_json=changes_json||'{"status":"rejected"}'::jsonb WHERE tenant_id=$1 AND action='merge_proposed'`, tenant); err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.Reevaluate(ctx, tenant, o); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.QueryRow(`SELECT asset_id FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, o.ID).Scan(&linked); err != nil || linked == nil {
+				t.Fatalf("a decided proposal still holds the sighting: %v %v", linked, err)
+			}
 		}
 		return
 	}

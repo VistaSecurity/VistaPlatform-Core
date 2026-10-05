@@ -9,6 +9,7 @@
 //   • legal         → SettingsLegalPage (Terms of Service / Privacy Policy authoring + acceptance audit)
 //   • notifications → NotificationDeliveryPage (channels, rules, delivery history)
 //   • license       → SettingsLicensePage (licence card, Enterprise data-retention cap)
+//   • ai            → SettingsAIPage (default model provider; whether organizations may connect their own)
 import { Navigate, Route, Routes } from 'react-router';
 import { SettingsEmailPage } from './settings-email-page';
 import { SettingsAccessPage } from './settings-access-page';
@@ -17,6 +18,7 @@ import { SettingsIdentityProvidersPage } from './settings-identity-providers-pag
 import { SettingsLegalPage } from './settings-legal-page';
 import { NotificationDeliveryPage } from './notification-delivery-page';
 import { SettingsLicensePage } from './settings-license-page';
+import { SettingsAIPage } from './settings-ai-page';
 import { RequireChildPermission } from '../../app/section-child';
 
 export function SettingsPage() {
@@ -30,6 +32,7 @@ export function SettingsPage() {
       <Route path="identity-providers" element={<SettingsIdentityProvidersPage />} />
       <Route path="notifications" element={<RequireChildPermission section="settings" child="notifications"><NotificationDeliveryPage /></RequireChildPermission>} />
       <Route path="license" element={<SettingsLicensePage />} />
+      <Route path="ai" element={<SettingsAIPage />} />
       <Route path="*" element={<Navigate to="/settings" replace />} />
     </Routes>
   );

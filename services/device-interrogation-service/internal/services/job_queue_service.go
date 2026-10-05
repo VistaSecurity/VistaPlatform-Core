@@ -196,6 +196,14 @@ func (s *JobQueueService) resolveAgentTenant(ctx context.Context, agentID uuid.U
 
 // GetNextJobForAgent retrieves the next pending job for a specific agent with Redis locking
 func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.UUID) (*models.DeviceJob, error) {
+	return s.GetNextJobForAgentWithCapabilities(ctx, agentID, nil)
+}
+
+// GetNextJobForAgentWithCapabilities is GetNextJobForAgent for an agent that
+// declared, on its poll, the job types it can run beyond device_interrogation
+// (di.AgentCapabilitiesHeader). nil or empty caps is an agent that predates
+// the header, and is offered exactly what GetNextJobForAgent always offered.
+func (s *JobQueueService) GetNextJobForAgentWithCapabilities(ctx context.Context, agentID uuid.UUID, caps map[string]bool) (*models.DeviceJob, error) {
 	// Resolve the agent's owning tenant up front and constrain every candidate
 	// job to it. Without this the `agent_id IS NULL` branch below would hand ANY
 	// tenant's unassigned device_interrogation job (credentials included) to the
@@ -224,7 +232,7 @@ func (s *JobQueueService) GetNextJobForAgent(ctx context.Context, agentID uuid.U
 	}
 	defer s.redis.Del(ctx, lockKey)
 
-	return s.claimAuthorizedJob(ctx, &agentID, &agentTenant)
+	return s.claimAuthorizedJobFor(ctx, &agentID, &agentTenant, caps)
 }
 
 // GetNextJobForPlatform retrieves the next pending job for platform internal agent

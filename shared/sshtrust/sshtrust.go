@@ -4,12 +4,11 @@
 //
 // The distinction matters and is the whole reason this package exists as a
 // policy rather than a helper. A prober whose job is to inventory a host's SSH
-// key material (shared/discovery.ProbeSSH, deviceinterrogation.TLSProber.ProbeSSH,
-// cluster-sensor-service's SSHKeyAnalyzer) legitimately accepts whatever key it
-// is shown: it never reaches the authentication phase, sends no credential, and
-// the key IS the thing it came to measure. Refusing an unrecognised key there
-// would mean refusing to inventory anything new. Those callers do not use this
-// package.
+// key material (shared/discovery.ProbeSSH, cluster-sensor-service's
+// SSHKeyAnalyzer) legitimately accepts whatever key it is shown: it never
+// reaches the authentication phase, sends no credential, and the key IS the
+// thing it came to measure. Refusing an unrecognised key there would mean
+// refusing to inventory anything new. Those callers do not use this package.
 //
 // A client that sends `ssh.Password(...)` is a different animal. Trust-on-first-
 // use only works if the "first use" capture is COMPARED on the second use, and

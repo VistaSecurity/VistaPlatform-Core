@@ -1,6 +1,6 @@
 {
   "vendor": "f5",
-  "input_sha256": "a5167ab44fbfb94d55b0de50505673dda3329003ada109cc5105c18e3f2064a5",
+  "input_sha256": "b0e9074fbf3e03e97561b5321ce1065682f8ac021bf35dc8a546f3a144fa2cf6",
   "imports": [
     {
       "asset_status": "pending_approval",
@@ -58,7 +58,7 @@
             "pqc_kex_detected": false,
             "profile_name": "clientssl-secure",
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "supported_ciphers": [
@@ -82,7 +82,7 @@
           "key_size": null,
           "port": 443,
           "protocol": "TLS",
-          "protocol_version": "TLS 1.2",
+          "protocol_version": "",
           "raw_data": {
             "asset_type": "load_balancer",
             "batch_id": "{{BATCH_ID}}",
@@ -99,14 +99,14 @@
             "pqc_kex_detected": false,
             "profile_name": "clientssl-hardened",
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
-            "tls_versions": [
-              "TLS 1.2"
+            "unmeasured_components": [
+              "protocol_version"
             ],
-            "version": "TLS 1.2"
+            "version": ""
           },
           "source_sensor_id": "{{SENSOR_ID}}"
         }
@@ -171,6 +171,18 @@
           "value": "{{APPLIANCE_IP}}",
           "scope": "tenant",
           "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.5",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.5",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
         }
       ]
     },

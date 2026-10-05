@@ -18,6 +18,18 @@
           "value": "{{APPLIANCE_IP}}",
           "scope": "tenant",
           "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.1",
+          "scope": "segment:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.1",
+          "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
         }
       ]
     },
@@ -164,6 +176,9 @@
         "mac_address": "78:8a:20:4b:ee:41",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "unmeasured_components": [
+          "protocol_version"
+        ],
         "version": ""
       }
     },
@@ -182,6 +197,9 @@
         "mac_address": "78:8a:20:4b:ee:52",
         "source_asset_id": "{{DEVICE_ASSET_ID}}",
         "source_device_id": "{{DEVICE_ASSET_ID}}",
+        "unmeasured_components": [
+          "protocol_version"
+        ],
         "version": ""
       }
     },

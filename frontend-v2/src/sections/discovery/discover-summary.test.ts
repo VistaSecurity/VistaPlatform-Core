@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
-import { describeMaterialization } from './discover-summary';
+import { describeMaterialization, findingsLabel, observationsNotice } from './discover-summary';
 
 // The wizard used to end on an "Import N findings" button: it fetched the job's
 // results into the browser and posted them back, choosing the approval status
@@ -69,6 +69,47 @@ describe('describeMaterialization', () => {
     });
     expect(s.parts.map((p) => p.text)).toContain('2 findings on denied or archived assets — not shown in Approvals');
     expect(s.parts.map((p) => p.text)).not.toContain('0 added to inventory');
+  });
+});
+
+//: "Found 15" read as fifteen new assets; it was fifteen open ports on
+// ten hosts, none of which became an asset (each was kept as an observation),
+// and nothing said where they went.
+describe('a finding count says what it counts', () => {
+  it('open ports on hosts when the host count is known; plain findings otherwise', () => {
+    expect(findingsLabel(15, 10)).toBe('15 open ports on 10 hosts');
+    expect(findingsLabel(1, 1)).toBe('1 open port on 1 host');
+    expect(findingsLabel(15, undefined)).toBe('15 findings');
+    expect(texts(15, { findings: 15, finding_hosts: 10, queued: 15, auto_approved: 0, pending_approval: 0, awaiting_processing: 0, observed: 15 })[0])
+      .toBe('Found 15 open ports on 10 hosts');
+  });
+
+  it('states the observations next to "0 added to inventory" — both are true', () => {
+    expect(texts(15, { findings: 15, queued: 15, auto_approved: 0, pending_approval: 0, awaiting_processing: 0, observed: 15 }))
+      .toEqual(['Found 15 findings', '15 kept as observations', '0 added to inventory']);
+  });
+});
+
+describe('observationsNotice', () => {
+  it('names how many findings on how many hosts, with DHCP only as an example, and points at Observations', () => {
+    const n = observationsNotice({ findings: 15, queued: 15, observed: 15, observed_hosts: 10 });
+    expect(n?.href).toBe('/discovery/observations');
+    expect(n?.text).toBe(
+      '15 findings on 10 hosts were kept as observations — they could not be tied to an asset yet (for example, on a network that uses DHCP an address alone does not identify a device).',
+    );
+    expect(n?.review).toBe('Review them in');
+  });
+
+  it('singular, and without the host count when the server did not send one', () => {
+    const n = observationsNotice({ findings: 1, queued: 1, observed: 1 });
+    expect(n?.text).toMatch(/^1 finding was kept as observations — it could not be tied/);
+    expect(n?.review).toBe('Review it in');
+  });
+
+  it('nothing at zero, and nothing when the count is unknown (never a zero)', () => {
+    expect(observationsNotice({ findings: 3, queued: 3, observed: 0 })).toBeUndefined();
+    expect(observationsNotice({ findings: 3, queued: 3 })).toBeUndefined();
+    expect(observationsNotice(undefined)).toBeUndefined();
   });
 });
 

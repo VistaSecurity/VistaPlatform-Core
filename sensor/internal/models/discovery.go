@@ -295,59 +295,6 @@ type SensorRegistration struct {
 	Host *HostIdentity `json:"host,omitempty"`
 }
 
-// DiscoveryOptions represents options for discovery operations
-type DiscoveryOptions struct {
-	Targets        []string `json:"targets"`
-	Protocols      []string `json:"protocols"`
-	Timeout        int      `json:"timeout"`
-	MaxRetries     int      `json:"max_retries"`
-	Concurrency    int      `json:"concurrency"`
-	TimeoutSeconds int      `json:"timeout_seconds"`
-	RetryCount     int      `json:"retry_count"`
-	RespectRobots  bool     `json:"respect_robots"`
-	BannerGrabbing bool     `json:"banner_grabbing"`
-	FollowDNS      bool     `json:"follow_dns"`
-	// DeepScan enables TLS version enumeration and deprecated-cipher detection
-	// by making additional handshakes per target port.  Off by default.
-	DeepScan bool `json:"deep_scan"`
-	// ActiveScanning controls whether the sensor performs active probing.
-	// When false, the sensor skips all active probing for this job.
-	// Defaults to true (active probing enabled).
-	ActiveScanning *bool `json:"active_scanning,omitempty"`
-}
-
-// DiscoveryJobRequest represents a discovery job request
-type DiscoveryJobRequest struct {
-	JobID             string           `json:"job_id"`
-	Targets           []string         `json:"targets"`
-	Protocols         []string         `json:"protocols"`
-	Ports             []int            `json:"ports"`
-	Options           DiscoveryOptions `json:"options"`
-	CreatedAt         time.Time        `json:"created_at"`
-	TenantID          string           `json:"tenant_id"`
-	RetentionCapMB    int              `json:"retention_cap_mb"`
-	RetentionTTLHours int              `json:"retention_ttl_hours"`
-}
-
-// DiscoveryJobResult represents the result of a discovery job
-type DiscoveryJobResult struct {
-	JobID             string             `json:"job_id"`
-	Target            string             `json:"target"`
-	Status            string             `json:"status"`
-	ExecutedVia       string             `json:"executed_via"`
-	CreatedAt         time.Time          `json:"created_at"`
-	SuccessfulTargets int                `json:"successful_targets"`
-	FailedTargets     int                `json:"failed_targets"`
-	Findings          []DiscoveryFinding `json:"findings"`
-	Errors            []string           `json:"errors"`
-	ErrorCode         string             `json:"error_code"`
-	ErrorMessage      string             `json:"error_message"`
-	ResolvedIP        string             `json:"resolved_ip"`  // first resolved IP (backward compat)
-	ResolvedIPs       []string           `json:"resolved_ips"` // all resolved IPs
-	ExecutionTime     int64              `json:"execution_time"`
-	CompletedAt       time.Time          `json:"completed_at"`
-}
-
 // DiscoveryFinding represents a single discovery finding
 type DiscoveryFinding struct {
 	Target           string                 `json:"target"`
@@ -368,8 +315,11 @@ type DiscoveryFinding struct {
 	CertValidationStatus string `json:"cert_validation_status,omitempty"` // "valid", "self_signed", "expired", "hostname_mismatch", "untrusted_ca"
 	CertValidationError  string `json:"cert_validation_error,omitempty"`  // raw error message when not "valid"
 
-	// SSH banner (available from passive capture and active probe)
-	SSHBanner   string   `json:"ssh_banner"`
+	// SSH banner (available from passive capture and active probe).
+	// omitempty: only an SSH finding has one, and an empty "ssh_banner" on
+	// every other finding reached discovery-processor as an invalid forwarded
+	// claim (forwardmeta.Sanitize) rather than as no claim at all.
+	SSHBanner   string   `json:"ssh_banner,omitempty"`
 	SSHKeyTypes []string `json:"ssh_key_types"`
 
 	// SSH algorithm negotiation (active probe only — requires completing key exchange)
@@ -402,20 +352,4 @@ type DiscoveryFinding struct {
 
 	// Key exchange algorithm parsed from selected cipher suite
 	KeyExchangeAlgorithm string `json:"key_exchange_algorithm,omitempty"`
-}
-
-// DiscoveryJobResponse represents a response to a discovery job
-type DiscoveryJobResponse struct {
-	SensorID          string               `json:"sensor_id"`
-	JobID             string               `json:"job_id"`
-	Status            string               `json:"status"`
-	TotalTargets      int                  `json:"total_targets"`
-	CreatedAt         time.Time            `json:"created_at"`
-	SuccessfulTargets int                  `json:"successful_targets"`
-	FailedTargets     int                  `json:"failed_targets"`
-	Findings          []DiscoveryFinding   `json:"findings"`
-	Results           []DiscoveryJobResult `json:"results"`
-	Errors            []string             `json:"errors"`
-	ExecutionTime     int64                `json:"execution_time"`
-	CompletedAt       time.Time            `json:"completed_at"`
 }

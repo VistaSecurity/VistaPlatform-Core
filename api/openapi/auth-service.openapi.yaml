@@ -338,10 +338,19 @@ paths:
         whatever the provider says.
 
 
-        **No credential and no endpoint ever crosses.** `provider_name` is the
-        provider KIND; the base URL and the name of the variable holding the API
-        key are deliberately absent, and `ai.ProviderConfig` has no key field at
-        all.
+        The provider half is **per tenant**. `provider_source` says whose
+        provider answers for the caller's organization: `tenant` (it connected
+        its own — see `PUT /tenant/ai/provider`), `deployment` (whoever runs
+        the deployment set one) or `none`. A tenant's own provider wins while
+        the tenant is permitted one (`tenant_provider_allowed`).
+
+
+        **No credential ever crosses, and the deployment's endpoint never
+        does.** `provider_name` is the provider KIND. For the deployment's
+        provider the base URL and the name of the variable holding the API key
+        are deliberately absent. For a provider the tenant connected itself,
+        `tenant_provider` carries the endpoint's HOST (never the path) and the
+        last four characters of the key, which is all that is stored in clear.
       responses:
         "200":
           description: The deployment's AI status and this tenant's controls.
@@ -358,7 +367,8 @@ paths:
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
-        - "The deployment half (provider, edition, per-seam `live`) is resolved ONCE at router-wiring time: neither the environment nor the build tags can change without a pod restart, and ai.NewFromEnv logs a warning for a misconfigured AI_PROVIDER that a per-request call would turn into a log flood."
+        - "The ENVIRONMENT's provider and the build's edition are read once at router-wiring time (neither can change without a pod restart). Which provider answers for the calling tenant is resolved per request: a tenant's own, then the platform default set in admin-ui, then the environment's."
+        - "`provider_problem` is a classification in a sentence, never the underlying error text: this endpoint is readable by any signed-in member."
         - "`tenant.authoring_disabled` is READ-ONLY and is not a tenant decision: it is the interim, deployment-wide disable of custom-policy authoring (#1439). PUT ignores it."
         - "`provider_name` and `model_id` are OMITTED (not present-but-empty) when nothing is configured, and `model_id` is omitted when the operator left the model to the provider's default."
     put:
@@ -407,6 +417,144 @@ paths:
       x-quirks:
         - "A body with neither field is 400 (`No settings to update`), not a no-op 200: a save that changed nothing and said it succeeded is indistinguishable from one that worked."
         - "A request with no resolvable userID is 401: the settings-audit trigger records `updated_by`, and an unattributed settings change is not recorded as one."
+
+  /tenant/ai/provider:
+    put:
+      operationId: putTenantAIProvider
+      tags: [ai]
+      summary: Connect (or change) the tenant's own model provider
+      description: >
+        Stores a model provider for the calling organization, which then
+        answers its generative capabilities in place of the deployment's.
+        Requires `settings.update`.
+
+
+        The API key is stored encrypted under the deployment's master key and is
+        never returned. Omit `api_key` to keep the stored one — permitted only
+        when `kind` and `base_url` are unchanged; a changed endpoint needs the
+        key again, so an editor cannot repoint the endpoint and have a
+        credential they were never shown delivered to it. Send `""` for an
+        endpoint that needs no key.
+
+
+        A tenant cannot allow itself a private or in-cluster address: that is
+        one switch held by whoever runs the deployment.
+
+
+        Returns the same body as `GET /tenant/ai`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantAIProviderUpdate"
+      responses:
+        "200":
+          description: The saved provider, as the status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantAIStatus"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "402":
+          description: >
+            This build has no model clients (Vista Platform Core), or the
+            tenant's plan does not include connecting its own provider.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "409":
+          description: >
+            The deployment has no encryption key, so a credential cannot be
+            stored; or the saved key can no longer be read and must be entered
+            again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+      x-quirks:
+        - "403 is ALSO returned (after the permission check passes) when whoever runs the deployment has switched tenant providers off; the body says so."
+    delete:
+      operationId: deleteTenantAIProvider
+      tags: [ai]
+      summary: Disconnect the tenant's own model provider
+      description: >
+        Removes the organization's provider and its stored credential. The
+        deployment's provider, if there is one, answers from then on. Requires
+        `settings.update`, and nothing else: disconnecting stays possible after
+        a plan change removed the capability, so a credential is never stranded.
+        Deleting when none is stored is not an error. Returns the same body as
+        `GET /tenant/ai`.
+      responses:
+        "200":
+          description: The status after disconnecting.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantAIStatus"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /tenant/ai/provider/test:
+    post:
+      operationId: testTenantAIProvider
+      tags: [ai]
+      summary: Test a provider configuration without saving it
+      description: >
+        Sends one short prompt ("Reply with the single word OK") to the
+        configuration in the request — which need not have been saved — through
+        the same redaction and audit boundary every generative call uses. It
+        carries no tenant data. Requires `settings.update`, and is refused with
+        409 while the organization's AI assistant is turned off.
+
+
+        A provider that could not be reached is a **200 with `ok: false`**: the
+        request succeeded, the connection did not.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TenantAIProviderUpdate"
+      responses:
+        "200":
+          description: The outcome of the test.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantAIProviderTestResult"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "402":
+          description: Core build, or the plan does not include it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "409":
+          description: The AI assistant is turned off for this organization, or the saved key cannot be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
 
   /auth/register:
     post:
@@ -3281,8 +3429,44 @@ components:
       description: >
         The deployment's AI status plus the calling tenant's own controls.
         Response body of both `GET` and `PUT /tenant/ai`.
-      required: [provider_configured, edition_linked, seams, tenant]
+      required: [provider_configured, provider_source, provider_kinds, tenant_provider_allowed, edition_linked, seams, tenant]
       properties:
+        provider_source:
+          type: string
+          enum: [tenant, deployment, none]
+          description: >
+            Whose provider answers for the calling organization: one it
+            connected itself, the one whoever runs the deployment set (in
+            admin-ui or at install — a tenant has no use for the difference),
+            or none.
+        provider_problem:
+          type: string
+          description: >
+            Present when a provider IS configured for this tenant but cannot be
+            used, as a sentence a reader can act on. A classification, never
+            the underlying error text.
+        provider_kinds:
+          type: array
+          description: >
+            The provider kinds this build can connect to. Empty in Core, which
+            is how a client knows not to offer the connect form.
+          items:
+            type: string
+            enum: [anthropic, openai_compat]
+        tenant_provider_allowed:
+          type: boolean
+          description: >
+            Whether this organization may connect a provider of its own.
+        tenant_provider_blocked_by:
+          type: string
+          enum: [plan, deployment]
+          description: >
+            Who decided, when `tenant_provider_allowed` is false in a build
+            that has the model clients: the organization's plan, or whoever
+            runs the deployment. Absent in Core, where the edition is the whole
+            answer.
+        tenant_provider:
+          $ref: "#/components/schemas/TenantAIProvider"
         provider_configured:
           type: boolean
           description: >
@@ -3386,6 +3570,67 @@ components:
             page can give one honest list of what is switched off; `PUT` ignores
             it.
 
+    TenantAIProvider:
+      type: object
+      additionalProperties: false
+      description: >
+        The provider this organization has stored — whether or not it is the
+        one in effect (`provider_source` says). Absent when it has none.
+      required: [kind, has_key]
+      properties:
+        kind:
+          type: string
+          enum: [anthropic, openai_compat]
+        host:
+          type: string
+          description: The endpoint's host. Never the path or query. Absent when the provider's public default is used.
+        model:
+          type: string
+        has_key:
+          type: boolean
+        api_key_hint:
+          type: string
+          description: The last four characters of the stored API key.
+
+    TenantAIProviderUpdate:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [anthropic, openai_compat]
+        base_url:
+          type: string
+          description: Optional for `anthropic`; required for `openai_compat`.
+        model:
+          type: string
+          description: Optional for `anthropic`; required for `openai_compat`.
+        api_key:
+          type: string
+          description: >
+            Write-only. Omit to keep the stored key (same `kind` and
+            `base_url` only); send `""` for an endpoint that needs none.
+
+    TenantAIProviderTestResult:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        model_id:
+          type: string
+          description: The model that answered.
+        latency_ms:
+          type: integer
+        reason:
+          type: string
+          enum: [unauthorized, unreachable, private_endpoint, rate_limited, error]
+        message:
+          type: string
+          description: The sentence to show.
+
     TenantAIControlsUpdate:
       type: object
       additionalProperties: false
@@ -3416,6 +3661,7 @@ components:
         - custom_branding
         - cmdb_sync
         - connector_netbox
+        - ai_tenant_provider
         - siem_export
         - billing_portal
       properties:
@@ -3457,6 +3703,11 @@ components:
             sites, prefixes, VLANs, device types and devices, and see the drift
             between NetBox and discovered inventory. Pull only: the platform
             never writes to NetBox.
+        ai_tenant_provider:
+          type: boolean
+          description: >
+            Tenant may connect its own AI model provider from Settings → AI
+            assistant instead of using the one the deployment provides.
         siem_export:
           type: boolean
           description: Tenant may forward audit events to an external SIEM (Splunk, Datadog, Elastic, webhook).

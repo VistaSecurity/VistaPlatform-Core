@@ -46,6 +46,11 @@ type stubNetworkSegmentService struct {
 	// cloud classification (B-49)
 	cloudSegment    *models.NetworkSegment
 	cloudSegmentErr error
+	// claim ( D8)
+	claimResult  *models.NetworkSegment
+	claimChanged bool
+	claimErr     error
+	revoked      map[string]interface{}
 }
 
 func (s *stubNetworkSegmentService) List(uuid.UUID, models.NetworkSegmentFilters) ([]models.NetworkSegment, int, error) {
@@ -81,6 +86,12 @@ func (s *stubNetworkSegmentService) FindOrCreateCloudSegment(uuid.UUID, string, 
 }
 func (s *stubNetworkSegmentService) ReclassifyAllAssets(uuid.UUID) (int, error)      { return 0, nil }
 func (s *stubNetworkSegmentService) MigrateFromNetworkSpaces(uuid.UUID) (int, error) { return 0, nil }
+func (s *stubNetworkSegmentService) Claim(uuid.UUID, uuid.UUID, uuid.UUID, string) (*models.NetworkSegment, bool, error) {
+	return s.claimResult, s.claimChanged, s.claimErr
+}
+func (s *stubNetworkSegmentService) RevokeClaim(uuid.UUID, uuid.UUID) (*models.NetworkSegment, map[string]interface{}, error) {
+	return s.claimResult, s.revoked, s.claimErr
+}
 
 func newSegmentEngine(svc *stubNetworkSegmentService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -88,6 +99,7 @@ func newSegmentEngine(svc *stubNetworkSegmentService) *gin.Engine {
 	grp := r.Group("/api/v2/inventory-service")
 	grp.Use(func(c *gin.Context) {
 		c.Set("tenantID", uuid.New())
+		c.Set("userID", uuid.New())
 		c.Next()
 	})
 	h := &NetworkSegmentHandler{segmentService: svc}
@@ -96,6 +108,8 @@ func newSegmentEngine(svc *stubNetworkSegmentService) *gin.Engine {
 	grp.GET("/network-segments/:id", h.GetNetworkSegment)
 	grp.PUT("/network-segments/:id", h.UpdateNetworkSegment)
 	grp.DELETE("/network-segments/:id", h.DeleteNetworkSegment)
+	grp.POST("/network-segments/:id/claim", h.ClaimNetworkSegment)
+	grp.DELETE("/network-segments/:id/claim", h.RevokeNetworkSegmentClaim)
 	return r
 }
 
@@ -416,3 +430,104 @@ func TestContract_UpdateNetworkSegment_400_dhcpNotApplicable(t *testing.T) {
 }
 
 func boolP(b bool) *bool { return &b }
+
+// --- claim a learned public range ( D8) --------------------------------
+
+// claimedSegment is a learned public segment as the claim leaves it: the
+// learned provenance AND the claim, which the spec types under metadata.
+func claimedSegment() models.NetworkSegment {
+	seg := minimalSegment()
+	seg.SegmentType, seg.Value, seg.NetworkType = "cidr", "198.51.100.0/28", "public"
+	seg.Metadata = models.JSONB{
+		"source": "interrogation", "source_device_type": "fortinet", "source_asset_id": uuid.NewString(),
+		"claimed": map[string]interface{}{"by": uuid.NewString(), "by_name": "Ada Admin", "at": "2026-10-01T12:00:00Z"},
+	}
+	return seg
+}
+
+func TestContract_ClaimNetworkSegment_200(t *testing.T) {
+	sv := loadSpec(t)
+	seg := claimedSegment()
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		eng := newSegmentEngine(&stubNetworkSegmentService{claimResult: &seg})
+		w := do(eng, method, nsBase+"/network-segments/"+aUUID+"/claim", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200; body=%s", method, w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "NetworkSegment", w.Body.Bytes())
+	}
+}
+
+// The spec types metadata.claimed: a claim missing who made it is drift.
+func TestContract_NetworkSegmentClaim_DriftIsCaught(t *testing.T) {
+	sv := loadSpec(t)
+	sch, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/NetworkSegmentClaim")
+	if err != nil {
+		t.Fatalf("compile NetworkSegmentClaim: %v", err)
+	}
+	bad, err := jsonschema.UnmarshalJSON(strings.NewReader(`{"at":"2026-10-01T12:00:00Z"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sch.Validate(bad); err == nil {
+		t.Fatal("a claim with no `by` validated — the spec is not checking the claim's shape")
+	}
+}
+
+func TestContract_ClaimNetworkSegment_Errors(t *testing.T) {
+	sv := loadSpec(t)
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		stub   *stubNetworkSegmentService
+		want   int
+	}{
+		{"bad id", http.MethodPost, "/network-segments/not-a-uuid/claim", &stubNetworkSegmentService{}, http.StatusBadRequest},
+		{"not found", http.MethodPost, "/network-segments/" + aUUID + "/claim", &stubNetworkSegmentService{}, http.StatusNotFound},
+		{"not claimable", http.MethodPost, "/network-segments/" + aUUID + "/claim",
+			&stubNetworkSegmentService{claimErr: fmt.Errorf("%w: declared", services.ErrSegmentNotClaimable)}, http.StatusConflict},
+		{"too broad", http.MethodPost, "/network-segments/" + aUUID + "/claim",
+			&stubNetworkSegmentService{claimErr: fmt.Errorf("%w: /7", services.ErrSegmentTooBroad)}, http.StatusBadRequest},
+		{"failure", http.MethodPost, "/network-segments/" + aUUID + "/claim", &stubNetworkSegmentService{claimErr: io.EOF}, http.StatusInternalServerError},
+		{"revoke declared", http.MethodDelete, "/network-segments/" + aUUID + "/claim",
+			&stubNetworkSegmentService{claimErr: fmt.Errorf("%w: declared", services.ErrSegmentNotClaimable)}, http.StatusConflict},
+		{"revoke not found", http.MethodDelete, "/network-segments/" + aUUID + "/claim", &stubNetworkSegmentService{}, http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(newSegmentEngine(tc.stub), tc.method, nsBase+tc.path, nil)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", w.Code, tc.want, w.Body.String())
+			}
+			sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+		})
+	}
+}
+
+// A claim is a person's statement: with no user on the request (a service
+// call), the handler refuses before asking the service.
+func TestContract_ClaimNetworkSegment_403_noUser(t *testing.T) {
+	sv := loadSpec(t)
+	seg := claimedSegment()
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	h := &NetworkSegmentHandler{segmentService: &stubNetworkSegmentService{claimResult: &seg, claimChanged: true}}
+	r.POST(nsBase+"/network-segments/:id/claim", func(c *gin.Context) { c.Set("tenantID", uuid.New()); c.Next() }, h.ClaimNetworkSegment)
+	w := do(r, http.MethodPost, nsBase+"/network-segments/"+aUUID+"/claim", nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// A value another segment already holds is a 409 whose error says which, not a
+// 500. The wording is the service's; this pins the status and shape.
+func TestContract_CreateNetworkSegment_409_duplicate(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newSegmentEngine(&stubNetworkSegmentService{createErr: fmt.Errorf("%w: this range was learned from fw-edge", services.ErrSegmentExists)})
+	w := do(eng, http.MethodPost, nsBase+"/network-segments", strings.NewReader(validSegmentBody))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "learned from fw-edge") {
+		t.Fatalf("status = %d, want 409 carrying the reason; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}

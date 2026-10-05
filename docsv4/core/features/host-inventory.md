@@ -17,7 +17,7 @@ was upgraded; somebody has to turn it on or queue a job.
 |---|---|
 | **Operating system** | Product name, version, kernel or build, host name, fully-qualified name, domain |
 | **Hardware** | Vendor, model, serial number, system UUID, firmware version |
-| **Interfaces** | Name, MAC address, addresses, whether the interface is up, whether it is virtual |
+| **Interfaces** | Name, MAC address, addresses, whether the interface is up, whether it is virtual, and — where the operating system says — which addresses are statically configured and which are DHCP leases |
 | **Software** | Installed packages — name, version, vendor, architecture, and the package manager that reported them |
 | **Listening sockets** | Transport, bound address, port, and the name of the process that owns it |
 | **UDP bindings** | Bound address, port, process where visible, and an explicit `unknown` role when the OS cannot prove listener versus client |
@@ -117,7 +117,15 @@ becomes four things on one asset:
   assigned interface. Virtual interfaces and randomised MAC addresses are
   deliberately ignored: they are regenerated per boot or per container start, so
   minting identity from one produces a brand-new asset every time the machine
-  restarts.
+  restarts. Each real interface address is an identity too, filed under the
+  network segment that address belongs to (a machine with two interfaces on
+  two networks is known on both). An address the operating system reports as
+  **statically configured** is pinned: it keeps identifying this host even on
+  a network flagged DHCP, so a later scan of that address updates this asset.
+  Linux reports it from the address's lease lifetime, Windows from the
+  address's origin (manual or DHCP), macOS from its configuration method; an
+  address the system says nothing about is recorded but not pinned. Loopback,
+  link-local and temporary IPv6 privacy addresses are not identities.
 - **Facts** — the operating system, hardware and interface values above, each
   recorded as measured by the agent.
 - **Endpoints** — one for every listening socket. A socket that has *stopped*

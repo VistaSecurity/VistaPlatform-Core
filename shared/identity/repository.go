@@ -231,6 +231,27 @@ const (
 	// schema.sql's `asset_history_action_check` convergence block — in BOTH
 	// schema copies — and to [AllHistoryActions] below.
 	ActionIdentifierReassigned HistoryAction = "identifier_reassigned"
+
+	// The drift verdicts (owner Decision 4 of, drift.go). Each is written
+	// on the matched asset when the drift classifier decided that a change in
+	// identifying material was the same device changing rather than a
+	// different device, and carries the classifier's verdict, rule,
+	// explanation and the old and new values. A `replaced` verdict writes none
+	// of these: it opens a merge proposal, which has its own entry.
+	//
+	// ActionSSHHostKeyRotated — `rotated`: the device presented a new SSH
+	// host key; the old one was retired from the asset.
+	ActionSSHHostKeyRotated HistoryAction = "ssh_host_key_rotated"
+	// ActionAddressMoved — `moved`: the device answered at a new address and
+	// the old, silent one was released.
+	ActionAddressMoved HistoryAction = "address_moved"
+	// ActionIdentityMaterialRotated — `reimaged`: same hardware, new host
+	// key, TLS certificate and name.
+	ActionIdentityMaterialRotated HistoryAction = "identity_material_rotated"
+	// ActionIdentityDriftFlagged — `unverified`: a host key changed and
+	// nothing else confirmed or contradicted it. Matched, and flagged for a
+	// person; nothing was retired.
+	ActionIdentityDriftFlagged HistoryAction = "identity_drift_flagged"
 )
 
 // AllHistoryActions returns every action this package writes, in declaration
@@ -252,6 +273,8 @@ func AllHistoryActions() []HistoryAction {
 		ActionEdgeRejected, ActionArchived, ActionSBOMImported,
 		ActionClassProposed, ActionClassAccepted, ActionClassRejected,
 		ActionIdentifierReassigned,
+		ActionSSHHostKeyRotated, ActionAddressMoved, ActionIdentityMaterialRotated,
+		ActionIdentityDriftFlagged,
 	}
 }
 
@@ -605,12 +628,22 @@ type Repository interface {
 	// different asset. The engine never provokes that — it resolves ownership
 	// first and reports foreign identifiers in Resolution.Unattached — so a
 	// caller that sees it has gone around the engine.
-	AttachIdentifiers(ctx context.Context, asset AssetRef, ids []Identifier) error
+	//
+	// The count is how many of them were NEWLY attached — inserted, not merely
+	// refreshed — which is what the engine reads to decide whether the match
+	// changed anything worth a timeline row. It comes from the write itself,
+	// so a pure re-observation costs no extra query.
+	AttachIdentifiers(ctx context.Context, asset AssetRef, ids []Identifier) (added int, err error)
 
 	// UpsertEndpoints writes endpoints under the asset, keyed by
 	// EndpointObservation.Key. Endpoints are dependent identity: they are
 	// never matched on their own.
-	UpsertEndpoints(ctx context.Context, asset AssetRef, eps []EndpointObservation) error
+	//
+	// The count is how many endpoints were newly inserted or had their
+	// recorded protocol or service name changed; a re-sighting that only moves
+	// last-seen is not counted. Like [Repository.AttachIdentifiers] it is
+	// reported by the write, not re-derived.
+	UpsertEndpoints(ctx context.Context, asset AssetRef, eps []EndpointObservation) (changed int, err error)
 
 	// Touch advances the asset's last-seen. It never moves it backwards: a
 	// late-arriving old observation is still evidence the asset existed then,
@@ -622,6 +655,16 @@ type Repository interface {
 	// source rank. It never demotes and never overwrites a declared (human
 	// edited) name. Empty incoming values are ignored.
 	PromoteNames(ctx context.Context, asset AssetRef, hostname, displayName, sourceKind string) error
+
+	// HistoryHasChange reports whether the asset's timeline already holds a row
+	// of this action whose changes contain `subset` — JSON containment, the
+	// semantics of jsonb `@>`: every key of an object must be present with a
+	// containing value, and every element of an array must appear in the
+	// stored array. The engine asks it only when an observation changed no
+	// stored state, to tell the FIRST time a condition (identifiers left
+	// unattached for a reason, a floating address, a kept-separate proposal)
+	// appears from every later observation repeating it.
+	HistoryHasChange(ctx context.Context, asset AssetRef, action HistoryAction, subset map[string]any) (bool, error)
 
 	// RecordHistory appends one `asset_history` row.
 	RecordHistory(ctx context.Context, e HistoryEntry) error
@@ -748,6 +791,18 @@ type Repository interface {
 	//     standing and the topology has two answers; picking one would be a
 	//     coin flip that decides an asset's identity.
 	ScopeForAddress(ctx context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (scope string, dynamic bool, err error)
+
+	// SegmentSnapshot returns the tenant's active `cidr`, `ip_range` and
+	// `domain` segments in one read, each with its STORED effective DHCP
+	// posture ([NetworkSegment.Dynamic]), in the store's stable creation order.
+	//
+	// It is the bulk form of [Repository.ScopeForAddress], for [Intake]: a
+	// sighting with three addresses and two names is scoped against one
+	// snapshot rather than five lookups, and both implementations answer
+	// ScopeForAddress through [SegmentSnapshot.ScopeForAddress] so the two
+	// forms cannot disagree. A tenant with no segments returns an empty
+	// snapshot and no error.
+	SegmentSnapshot(ctx context.Context, tenantID string) (SegmentSnapshot, error)
 
 	// HostnameCardinality is the number of distinct LIVE assets in the tenant
 	// carrying a `hostname` identifier with this value, in ANY scope (

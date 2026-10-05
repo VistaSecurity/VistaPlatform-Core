@@ -1,0 +1,81 @@
+{
+  "models.CryptoDiscovery": {
+    "CipherSuite": "string=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    "Confidence": "float64=0.95",
+    "CreatedAt": "dropped",
+    "DestIP": "string=10.20.30.40",
+    "DiscoveryMethod": "string=active_enrichment",
+    "DiscoveryType": "string=",
+    "ID": "string=",
+    "KeySize": "int=0",
+    "Port": "int=8443",
+    "Protocol": "string=TLS",
+    "RawMetadata": {
+      "map[string]interface {}": {
+        "cert_has_sct": "bool=false",
+        "cert_incomplete_chain": "bool=true",
+        "cert_sct_source": "string=none",
+        "cert_validation_error": "string=x509: certificate has expired or is not yet valid: current time NOW is after 2020-01-01T00:00:00Z",
+        "cert_validation_status": "string=expired",
+        "certificates": {
+          "[]interface {}": [
+            {
+              "map[string]interface {}": {
+                "certificate_pem": "string={{expired_self_signed.pem}}",
+                "chain_order": "int=0",
+                "extended_key_usage": {
+                  "[]string": [
+                    "string=ServerAuth"
+                  ]
+                },
+                "fingerprint_sha1": "string={{expired_self_signed.sha1}}",
+                "fingerprint_sha256": "string={{expired_self_signed.sha256}}",
+                "is_ca": "bool=false",
+                "issuer_dn": "string=CN=device.example.test",
+                "key_algorithm": "string=RSA",
+                "key_size": "int=2048",
+                "key_usage": {
+                  "[]string": [
+                    "string=DigitalSignature",
+                    "string=KeyEncipherment"
+                  ]
+                },
+                "not_after": "string=2020-01-01T00:00:00Z",
+                "not_before": "string=2015-01-01T00:00:00Z",
+                "serial_number": "string=3001",
+                "signature_alg": "string=SHA256-RSA",
+                "subject_alternative_names": {
+                  "[]string": [
+                    "string=device.example.test"
+                  ]
+                },
+                "subject_dn": "string=CN=device.example.test"
+              }
+            }
+          ]
+        },
+        "cipher_suite": "string=TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "enrichment_method": "string=active_probe_after_passive",
+        "handshake_types": {
+          "[]string": [
+            "string=ClientHello",
+            "string=ServerHello",
+            "string=Certificate"
+          ]
+        },
+        "key_exchange_algorithm": "string=X25519",
+        "key_exchange_group_raw": "uint16=29",
+        "key_exchange_key_size": "int=256",
+        "tls_supports_classical_kex": "bool=true",
+        "tls_supports_pqc_hybrid_kex": "bool=false",
+        "version": "string=TLS 1.2"
+      }
+    },
+    "SensorID": "string=sensor-1",
+    "ServiceHints": "*models.ServiceHints=nil",
+    "SessionID": "string=",
+    "SourceIP": "string=10.0.0.5",
+    "Timestamp": "dropped",
+    "Version": "string=TLS 1.2"
+  }
+}

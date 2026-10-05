@@ -25,7 +25,7 @@ import {
   type AssetClassChange, type AssetEndpoint, type AssetHistoryEntry, type AssetIdentifier,
 } from './asset-queries';
 import {
-  assetRisk, attr, classIcon, classLabel, confidenceLabel, identifierKindLabel, identifierProvenanceLabel,
+  addressPinLabel, assetRisk, attr, classIcon, classLabel, confidenceLabel, handshakeRefusal, identifierKindLabel, identifierProvenanceLabel,
   operatingSystem, primaryAddressPort, relativeSeen, sourceKindLabel, stripMask,
   type AssetLike,
 } from './asset-shape';
@@ -39,6 +39,7 @@ import {
 // would otherwise be fifty subject-filtered calls to compliance-engine.
 import { eolCell, installFindingsHref, vulnerabilityCell } from './software-state';
 import { ConfigDrawer, type CryptoConfig, type OpenConfig } from './drawers';
+import { ScanAssetButton } from './bulk-actions';
 import { AssetFormModal } from './asset-form-modal';
 // The Findings tab reads the compliance-engine per-asset route and the findings
 // vocabulary from the Risk & Compliance section, rather than restating either.
@@ -47,6 +48,9 @@ import { findingCitation, isOpenWf, sevLevel, type ComplianceFinding } from '../
 import { AssessmentLimitNotice } from '../findings/assessment-limit';
 import { CryptoRiskChip } from './crypto-risk-presentation';
 import { RelationshipsTab } from './relationships-tab';
+import { historySentence } from './history-sentence';
+import { dhcpText, reportedText, routedHostsHref, routedNetworks, viaGateway, vlanText, type SegmentGateway } from './segment-gateway';
+import { CoverageText, GatewayLink } from './segment-gateway-view';
 
 // ------------------------------------------------------------------ states --
 
@@ -74,8 +78,10 @@ function ErrorCard({ message, onRetry }: { message: string; onRetry?: () => void
   );
 }
 
-function Empty({ icon, title, message, action }: {
+function Empty({ icon, title, message, action, children }: {
   icon: string; title: string; message: string; action?: { label: string; to: string };
+  /** A control in place of a link — the Active Scan button, for one. */
+  children?: React.ReactNode;
 }) {
   return (
     <div data-testid="tab-empty" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '42px 20px', textAlign: 'center' }}>
@@ -83,8 +89,18 @@ function Empty({ icon, title, message, action }: {
       <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)' }}>{title}</div>
       <div style={{ fontSize: 12.5, color: 'var(--app-t3)', maxWidth: 480, lineHeight: 1.6 }}>{message}</div>
       {action && <Link to={action.to} className="ui-btn sm" style={{ marginTop: 4, textDecoration: 'none' }}>{action.label}</Link>}
+      {children && <div style={{ marginTop: 4 }}>{children}</div>}
     </div>
   );
+}
+
+// An empty tab's way forward: scan this asset from here. These used to
+// send the person to Discovery → Active Scan, which is retired; the dialog the
+// button opens is the same one, with its "Run from" choice. Not offered where
+// the header does not offer it either.
+function ScanHere({ asset }: { asset: Asset }) {
+  if (asset.deleted_at || asset.asset_status === 'archived') return null;
+  return <ScanAssetButton assetId={asset.id} activeScan={asset.active_scan} />;
 }
 
 function PhasePlaceholder({ tab }: { tab: AssetTab }) {
@@ -104,10 +120,22 @@ function IdentifierRow({ ident }: { ident: AssetIdentifier }) {
   // A DERIVED identifier ( Phase 2) says what it was derived from, so a
   // MAC worked out from an IPv6 address is never read as one a device reported.
   const provenance = identifierProvenanceLabel(ident);
+  const pin = addressPinLabel(ident);
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,150px) minmax(0,1.6fr) minmax(0,1fr) 96px 92px', gap: 12, alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
       <span style={{ fontSize: 12, color: 'var(--app-t2)', fontWeight: 600 }}>{identifierKindLabel(ident.kind)}</span>
-      <span className="mono" title={ident.value} style={{ fontSize: 12, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.value}</span>
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+        <span className="mono" title={ident.value} style={{ fontSize: 12, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.value}</span>
+        {pin && (
+          <span
+            data-testid="identifier-address-pin"
+            title="Pinned address: declared by an operator or reported static by the host's agent. It still matches this asset inside a network segment flagged DHCP."
+            style={{ flex: 'none', fontSize: 10.5, fontWeight: 600, color: 'var(--app-t2)', border: '1px solid var(--app-border)', borderRadius: 40, padding: '0 6px', lineHeight: '16px' }}
+          >
+            {pin}
+          </span>
+        )}
+      </span>
       <span
         data-testid="identifier-provenance"
         style={{ fontSize: 11.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
@@ -221,6 +249,7 @@ function OverviewTab({ asset }: { asset: Asset }) {
     .map((name) => ({ name, value: attr(asset, name), description: schema?.properties[name]?.description }))
     .filter((r) => r.value !== '');
   const tags = asset.tags && typeof asset.tags === 'object' ? Object.entries(asset.tags as Record<string, unknown>) : [];
+  const via = viaGateway(asset);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.35fr) minmax(0,1fr)', gap: 26, alignItems: 'start' }}>
@@ -332,7 +361,11 @@ function OverviewTab({ asset }: { asset: Asset }) {
         <MetaRow k="Support group" v={asset.support_group} />
         <MetaRow k="Owner" v={asset.owner_email} />
         <MetaRow k="Location" v={[asset.site, asset.region, asset.zone].filter(Boolean).join(' / ')} />
-        <MetaRow k="Network segment" v={asset.network_segment_name} />
+        {/* "via <gateway>" (#1973): the host's network AND the device it is
+            reached through, derived when read. Absent for the gateway itself
+            and for a network with no recorded gateway — the row is then the
+            bare name it always was. */}
+        <MetaRow k="Network segment" v={via ? <NetworkSegmentVia name={asset.network_segment_name} via={via} /> : asset.network_segment_name} />
         <MetaRow k="Description" v={asset.description} />
 
         <SectionLabel icon="activity">Status</SectionLabel>
@@ -356,6 +389,83 @@ function OverviewTab({ asset }: { asset: Asset }) {
           </>
         )}
       </div>
+
+      <RoutedNetworksCard asset={asset} />
+    </div>
+  );
+}
+
+/** The Overview's network line for a host reached through a recorded gateway:
+ *  "<network> · via <gateway> (address)", the gateway linking to its page. */
+function NetworkSegmentVia({ name, via }: { name?: string | null; via: SegmentGateway }) {
+  return (
+    <span data-testid="network-segment-via" style={{ display: 'inline-flex', alignItems: 'baseline', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 5, maxWidth: '100%' }}>
+      {name ? <span>{name}</span> : null}
+      <span style={{ color: 'var(--app-t3)', fontWeight: 400 }}>{name ? '· via' : 'via'}</span>
+      <GatewayLink gateway={via} size={12.5} />
+    </span>
+  );
+}
+
+const ROUTED_GRID = 'minmax(0,1.6fr) minmax(0,1.2fr) 74px 70px 62px minmax(0,1.4fr)';
+
+/**
+ * "Networks routed": every network this asset is the gateway of.
+ *
+ * Read from the single-asset response, so it has no loading state of its own —
+ * the page's skeleton covers it. Not rendered at all for an asset that routes
+ * nothing (`[]`). An ABSENT list is the server saying it could not read them,
+ * and gets a visible note in the card's place: an empty card there would read
+ * as "routes nothing", which nobody established.
+ */
+function RoutedNetworksCard({ asset }: { asset: Asset }) {
+  const routed = routedNetworks(asset);
+  if (routed.state === 'none') return null;
+  return (
+    <div data-testid="routed-networks" style={{ gridColumn: '1 / -1', minWidth: 0 }}>
+      <SectionLabel icon="router">
+        Networks routed{routed.state === 'rows' ? ` (${routed.rows.length})` : ''}
+      </SectionLabel>
+      {routed.state === 'error' ? (
+        <div data-testid="routed-networks-error" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12.5, color: 'var(--app-t3)', padding: '8px 0', lineHeight: 1.55 }}>
+          <Icon name="alert-triangle" size={14} style={{ color: 'var(--warn)', flex: 'none', marginTop: 2 }} />
+          <span>
+            Couldn't load routed networks, so whether this asset is the gateway of any network is not known right now.
+            The rest of this page is unaffected. Reload to try again.
+          </span>
+        </div>
+      ) : (
+        <div>
+          <div style={{ display: 'grid', gridTemplateColumns: ROUTED_GRID, gap: 12, padding: '0 0 5px' }}>
+            <span className="eyebrow-app">Network</span>
+            <span className="eyebrow-app">Gateway address</span>
+            <span className="eyebrow-app">VLAN</span>
+            <span className="eyebrow-app">DHCP</span>
+            <span className="eyebrow-app" style={{ textAlign: 'right' }}>Hosts</span>
+            <span className="eyebrow-app">Sensor coverage</span>
+          </div>
+          {routed.rows.map((r) => (
+            <div key={r.segment_id} data-testid="routed-network-row" style={{ display: 'grid', gridTemplateColumns: ROUTED_GRID, gap: 12, alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
+              <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <span title={r.name} style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name || '—'}</span>
+                <span className="mono" title={r.value} style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.value}</span>
+              </span>
+              <span className="mono" title={[stripMask(r.address), reportedText(r.observed_at)].filter(Boolean).join('\n')} style={{ fontSize: 12, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{stripMask(r.address) || '—'}</span>
+              <span className="mono" title={r.vlan_id == null ? 'The device reported no VLAN tag for this network' : `802.1Q tag ${r.vlan_id}`} style={{ fontSize: 12, color: r.vlan_id == null ? 'var(--app-t3)' : 'var(--app-t2)' }}>{vlanText(r.vlan_id)}</span>
+              <span title={r.dynamic == null ? 'Nobody has said whether this network hands out addresses' : undefined} style={{ fontSize: 12, color: r.dynamic == null ? 'var(--app-t3)' : 'var(--app-t2)' }}>{dhcpText(r.dynamic)}</span>
+              <Link
+                to={routedHostsHref(r)}
+                className="mono"
+                title={`Every asset in ${r.name}, this gateway included`}
+                style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none', textAlign: 'right' }}
+              >
+                {r.host_count.toLocaleString()}
+              </Link>
+              <span style={{ minWidth: 0 }}><CoverageText segmentType={r.segment_type} coverage={r.coverage} /></span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -446,8 +556,9 @@ function EndpointsTab({ asset }: { asset: Asset }) {
         icon="ethernet-port"
         title="No endpoints observed"
         message="An asset may genuinely have none — an object store or a declared service has nothing to connect to. If you expected one, an active scan will record what this asset exposes."
-        action={{ label: 'Go to Active Scan', to: '/discovery/active-scan' }}
-      />
+      >
+        <ScanHere asset={asset} />
+      </Empty>
     );
   }
   const GRID = 'minmax(0,1.3fr) 64px 72px minmax(0,1.1fr) 128px 88px 92px';
@@ -474,9 +585,9 @@ function EndpointsTab({ asset }: { asset: Asset }) {
             {e.port ?? '—'}
           </span>
           <span style={{ fontSize: 12, color: 'var(--app-t2)' }}>{e.transport === 'none' ? '—' : e.transport}</span>
-          <span style={{ fontSize: 12, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={serviceTitle(e)}>
-            {[e.service_name, e.service_version].filter(Boolean).join(' ') || '—'}
-            {e.service_identification_method && (
+          <span style={{ fontSize: 12, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={handshakeRefusal(e)?.hint ?? serviceTitle(e)}>
+            {handshakeRefusal(e)?.label ?? ([e.service_name, e.service_version].filter(Boolean).join(' ') || '—')}
+            {!handshakeRefusal(e) && e.service_identification_method && (
               <span style={{ color: 'var(--app-t3)' }}> · {confidenceWord(e)}</span>
             )}
           </span>
@@ -602,8 +713,9 @@ function CryptographyTab({ asset, onOpenConfig }: { asset: Asset; onOpenConfig: 
         icon="key-round"
         title="No cryptographic configurations"
         message="Nothing cryptographic has been observed on this asset. That is not a clean bill of health — it means no sensor or scan has measured a handshake here yet."
-        action={{ label: 'Go to Active Scan', to: '/discovery/active-scan' }}
-      />
+      >
+        <ScanHere asset={asset} />
+      </Empty>
     );
   }
   return (
@@ -705,8 +817,9 @@ function FindingsTab({ asset }: { asset: Asset }) {
             icon="circle-help"
             title="Not assessed"
             message="No producer has evaluated this asset, so there are no findings to show — and no clean bill of health either. Run an active scan, or wait for a sensor to observe it."
-            action={{ label: 'Go to Active Scan', to: '/discovery/active-scan' }}
-          />
+          >
+            <ScanHere asset={asset} />
+          </Empty>
         )}
       </div>
     );
@@ -902,15 +1015,30 @@ function ClassChangeRow({ change }: { change: AssetClassChange }) {
   );
 }
 
-function HistoryRow({ entry }: { entry: AssetHistoryEntry }) {
-  const changes = entry.changes && typeof entry.changes === 'object' ? Object.entries(entry.changes) : [];
+export function HistoryRow({ entry }: { entry: AssetHistoryEntry }) {
+  // Identity-drift entries (a rotated host key, a moved address, a reimage, an
+  // unconfirmed key change) read as a sentence with their old and new values;
+  // the raw changes dump would bury the one fact the reader came for.
+  const sentence = historySentence(entry);
+  const changes = !sentence && entry.changes && typeof entry.changes === 'object' ? Object.entries(entry.changes) : [];
   return (
     <div style={{ display: 'flex', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--app-border)' }}>
       <div style={{ width: 110, flex: 'none' }}>
         <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t2)' }} title={entry.created_at}>{relativeSeen(entry.created_at) || '—'}</div>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 600 }}>{entry.action.replace(/_/g, ' ')}</div>
+        <div style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 600 }}>
+          {sentence ? sentence.title : entry.action.replace(/_/g, ' ')}
+          {sentence?.needsReview && (
+            <span data-testid="history-needs-review" style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, color: 'var(--warn-strong)', textTransform: 'uppercase', letterSpacing: 0.4 }}>Needs review</span>
+          )}
+        </div>
+        {sentence && sentence.details.map((d) => (
+          <div key={d} className="mono" style={{ fontSize: 11, color: 'var(--app-t2)', marginTop: 3, wordBreak: 'break-all' }}>{d}</div>
+        ))}
+        {sentence?.explanation && (
+          <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 3 }}>{sentence.explanation}</div>
+        )}
         {/* The actor. `actor_user_id` is not populated by the context writer
             yet (carried note in the phase-1 spec), so the SOURCE is what we can
             name honestly — and naming the source beats inventing a person. */}
@@ -1168,6 +1296,12 @@ export function AssetPage() {
             {ident?.sub || (operatingSystem(asset) || 'no network endpoint')}
           </div>
         </div>
+        {/* The same button the drawer carries, under the same conditions: a
+            person looking at one asset can probe it from where they are. It
+            brings its own assets.update gate. */}
+        {!asset.deleted_at && asset.asset_status !== 'archived' && (
+          <ScanAssetButton assetId={asset.id} activeScan={asset.active_scan} />
+        )}
         <PermissionGate permission={TENANT_PERMISSIONS.assets.update}>
           {!survivorId && asset.asset_status !== 'archived' && asset.asset_status !== 'denied' && <button className="ui-btn" onClick={() => setMergeOpen(true)}><Icon name="git-merge" size={13} />Review merge</button>}
           <button className="ui-btn" onClick={() => setEditOpen(true)} style={{ height: 31, fontSize: 12.5 }}>

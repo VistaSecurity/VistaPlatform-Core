@@ -17,6 +17,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch/planrun"
 )
 
 // AvailableInterfaceNames returns the host's non-loopback NIC names. Single
@@ -405,6 +406,50 @@ func (c *OutboundClient) CompleteDiscoveryJob(jobID string, completion sensordis
 		return fmt.Errorf("completion failed with status %d: %s", resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+// ReportDiscoveryJobUnits sends one progress report of a planned scan (
+// WP2b): the hosts finished since the last one, or none as a progress ping.
+// The platform's answer says whether to go on; a 409 with a stop code is
+// returned as the answer with an error wrapping planrun.ErrJobStopped, so the
+// run stops.
+func (c *OutboundClient) ReportDiscoveryJobUnits(jobID string, batch sensordispatch.UnitBatch) (sensordispatch.UnitBatchResponse, error) {
+	var answer sensordispatch.UnitBatchResponse
+	if batch.Units == nil {
+		batch.Units = []sensordispatch.UnitResult{}
+	}
+	jsonData, err := json.Marshal(batch)
+	if err != nil {
+		return answer, fmt.Errorf("failed to marshal units: %v", err)
+	}
+	url := fmt.Sprintf("%s/api/v1/sensor-manager/sensors/%s/discovery-jobs/%s/units", c.baseURL, c.config.SensorID, jobID)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return answer, fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return answer, fmt.Errorf("failed to report units: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if err := json.Unmarshal(body, &answer); err != nil {
+			return answer, fmt.Errorf("failed to decode the units answer: %v", err)
+		}
+		return answer, nil
+	case http.StatusConflict:
+		if json.Unmarshal(body, &answer) == nil && answer.Stop() {
+			return answer, fmt.Errorf("%w: %s (job %s)", planrun.ErrJobStopped, answer.Code, answer.JobStatus)
+		}
+	case http.StatusNotFound:
+		// The job is not this sensor's (any more): nothing it reports can
+		// be stored, so going on would only scan for nobody.
+		return answer, fmt.Errorf("%w: the platform does not know this job as this sensor's", planrun.ErrJobStopped)
+	}
+	return answer, fmt.Errorf("unit report failed with status %d: %s", resp.StatusCode, string(body))
 }
 
 // GetConfig retrieves sensor configuration (outbound only)

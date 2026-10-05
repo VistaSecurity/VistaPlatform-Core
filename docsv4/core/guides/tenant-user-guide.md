@@ -133,10 +133,10 @@ is better. On the right, **External Exposure** counts observed third-party
 connections and the internal hosts making them — click it to open the **3rd
 Party** inventory lens.
 
-### The inventory health hero
+### The Assets Monitored hero
 
-Directly beneath, **Inventory Health** answers the operations question. It leads
-with the number of **configuration items** the platform tracks — everything, not
+Directly beneath, **Assets Monitored** answers the operations question. It leads
+with the number of assets under monitoring — whatever they are made of, not
 only the things that speak TLS — and two lifecycle counts you can click:
 
 - **Pending approval** — discovered assets waiting for someone to accept or deny
@@ -189,19 +189,68 @@ Two buttons in the header start work immediately:
 - **Import from spreadsheet** — brings in a CSV or Excel file of assets or
   network segments. See [Spreadsheet Import](../features/spreadsheet-import.md).
 
-**To run a discovery scan:** click **Discover assets**, then
+**To run a discovery scan:** click **Discover assets** — it finds everything
+that answers on a host or a network — then
 
 1. Type **Targets** — one per line or comma-separated; IP addresses, CIDR
-   ranges, or hostnames, up to 1000.
-2. Tick the **Protocols** to probe.
-3. Set **Ports** (comma-separated) and an **Execution mode** — *Auto* lets the
-   platform decide, *Cloud* runs it from the platform sensor.
-4. Start it. The dialog shows progress; you can leave it running and check
-   **Discovery → Discovery Jobs** later.
+   ranges, `a-b` ranges, hostnames or URLs, up to 1000. A single CIDR or range
+   can cover at most 4,096 addresses (a `/20`) and one scan 16,384 in all; a
+   larger network is refused with the count, so split it into smaller blocks.
+   For IPv6, list individual addresses: an IPv6 network is too large to sweep.
+2. Choose a **Scan depth**. You do not pick protocols — services are identified
+   from what answers.
+   - *Quick* — crypto and infrastructure ports only; the fastest look.
+   - *Standard* (the default) — about 1,400 common TCP ports plus common UDP
+     services.
+   - *Thorough* — all 65,535 TCP ports plus common UDP services. It can take a
+     long time.
+   - *Custom* — you choose the ports, under **Advanced**.
+3. Choose where it **Runs from**: *Auto* (one of your sensors when that sensor
+   serves every target, otherwise the platform sensor), the *Platform sensor*,
+   or one of your sensors by name. A sensor that has stopped checking in is
+   listed but cannot be chosen, and one whose software cannot run a scan by
+   depth is refused in the preview with **Run from the platform sensor
+   instead** (Auto never picks such a sensor, and says what it chose). The
+   platform sensor reaches only what the platform can route to; to scan a
+   private network from the inside, run from a sensor on it.
+4. **Advanced** (closed until you open it) holds:
+   - **TCP ports** and **UDP ports** for *Custom*: ports and ranges such as
+     `22,443,8000-8100`. A mistake is pointed out as you type, in the same words
+     the platform would use. For the other depths these show the ports the
+     depth covers, read-only. UDP is probed per service: a UDP port with no
+     known probe reports *no answer*, never *closed*.
+   - **Pace** — *Polite* for fragile or closely monitored networks, *Normal*,
+     or *Fast* for a well-provisioned LAN (it may report slow ports as
+     filtered).
+   - **Probe industrial (OT/ICS) devices** — off unless you tick it and choose
+     Modbus, OPC UA, EtherNet/IP or BACnet, and never part of a depth. It sends
+     only each chosen protocol's documented, read-only identification request,
+     to its standard port, one connection at a time per device. Industrial
+     controllers can be fragile: probe them only with their owner's agreement.
+     The box is not shown if your administrator has turned OT probing off.
+5. Read the **Preview**, which appears once the form is complete: how many
+   addresses and ports, a rough duration as a range (an estimate, not a promise
+   — checking which addresses are alive usually removes many from a sparse
+   range), where the scan will run and why, and any target that will be scanned
+   at less depth than you chose. A target outside your registered networks is
+   scanned at *Standard* at most; if the range is yours, register it under
+   **Settings → Infrastructure → Network Segments** and it is scanned at the
+   depth you choose. A scan too large for one job is refused here, with the
+   numbers. If the preview cannot be worked out, you can still start.
+6. Click **Start discovery**. Targets outside your registered networks ask you
+   to confirm first. The dialog then says what started and where, with **View
+   in Discovery Jobs**, which opens that scan's detail. Close it whenever you like — the scan does not depend
+   on it. **Discovery → Discovery Jobs** shows its progress, lets you stop it,
+   and shows what it found.
 
 What it finds flows into your inventory automatically: hosts on a network segment
 marked auto-approve are monitored straight away, everything else waits in
 **Approvals**.
+
+An address that sends nothing back is reported as **no answer**, not as empty:
+it may be switched off, filtered by a firewall, or out of reach of where the
+scan ran from. If a whole network gives no answer from the platform sensor, run
+the scan from a sensor on that network.
 
 ### Sensors & Agents
 
@@ -266,8 +315,55 @@ Full reference: [Sensor Registration & Management](../features/SENSOR_REGISTRATI
 ### Discovery Jobs
 
 **Discovery → Discovery Jobs** lists every job: id, type, target, source, how many
-assets it found, duration and status. A failed or cancelled job can be **retried**
-from its row; a running one can be **cancelled**. Click a row for the run detail.
+assets it found, duration and status. A failed or cancelled interrogation can be
+**retried** from its row; a running job can be **cancelled**. If a cancel is
+refused — the job finished in the meantime, say — the page says why. Click a row
+for the run detail.
+
+A scan started with a **scan depth** reads in plain words — *Queued*, *Waiting
+for sensor*, *Running*, *Finished*, *Failed — stopped responding*, *Cancelled* —
+and while it runs its row shows a progress bar and a live line such as
+"112 of 254 hosts · 31 responded · 9 open ports", with where it runs and its
+depth. The page refreshes itself while anything is still running.
+
+**Resume scan** (the play button on a failed or queued scan's row) puts the scan
+back in the queue: only the hosts it had not finished are scanned again; hosts
+already finished, and what they found, are kept. A scan that *stopped
+responding* (no heartbeat from the scanner) is the usual reason to resume. It
+needs the `discovery.create` permission, and the scanner also checks
+`discovery.update`; if either is missing, or the scan is no longer failed or
+queued, the dialog shows the reason.
+
+The detail of a scan started with a scan depth refreshes every few seconds until
+it ends, and shows, top to bottom:
+
+- **What this scan does** — depth, pace, ports, targets, where it ran and why
+  (*Auto* says what it chose), and every target scanned less deeply than you
+  asked, with the reason (for example, a target outside your registered
+  networks is scanned at Standard at most — register the range if it is yours).
+- **Coverage** — "254 addresses · 31 responded · 223 no answer", and the ports
+  open, closed and filtered. **No answer is not "down"**: a firewall that drops
+  everything looks exactly like an address with nothing on it. If nothing
+  answered at all, the detail says the scanner may not be able to reach that
+  network and suggests running the scan from a sensor on it. A scan that ended
+  early says where it stopped and why (cancelled, stopped responding, sensor
+  offline).
+- **Results by host** — every host that responded, a page at a time, so the
+  count matches **Coverage**. Click a host for its ports: the service on each,
+  or **open, unidentified** when nothing could name it (with a hint such as
+  "looks like smtp" when the service greeted us), and the certificate and
+  cipher detail for TLS. A host that answers on every port — usually a firewall
+  or proxy — is one line with a few sample ports instead of thousands of rows.
+  A host that answered with nothing open is one quieter line, such as
+  "answered, nothing open (78 ports scanned: all refused)" — refused means it
+  is there and nothing is listening.
+- **Findings** — **Open ports found** ("15 open ports on 10 hosts"; a finding
+  is an open port, not an asset), and where they went: how many were
+  auto-approved and how many wait in **Approvals**. Findings that could not be
+  tied to an asset yet — for example an address on a network that uses DHCP,
+  where an address alone does not identify a device — are **kept as
+  observations**; the detail says how many and links to **Discovery →
+  Observations**, where you confirm, link or dismiss them.
 
 ### Devices
 
@@ -295,14 +391,18 @@ See [Device Interrogation](../features/device-interrogation.md) and the
 
 ### Active Scan
 
-**Discovery → Active Scan** lists assets that have **never been actively
-scanned** — typically ones that arrived by import, by SBOM, or from a CMDB. Run a
-TLS probe to catalogue and verify their cryptography; the results flow back
-through the normal discovery pipeline.
+Scanning assets you already have is done from **Inventory**. **Inventory → All
+assets → Views → Never scanned** lists assets that have **never been actively
+scanned** — typically ones that arrived by import, by SBOM, or from a CMDB. Tick
+them (or **Select all matching**) and choose **Scan** in the bar above the list;
+pick where the scan runs with **Run from**. The results flow back through the
+normal discovery pipeline.
 
-Click **Scan** on a row, or **Scan all** in the header. When every active asset
-has been scanned at least once, the page says so and stays empty until something
-new arrives.
+While an asset's scan runs its row shows **Scanning…**; it leaves the *Never
+scanned* view once the scan has finished, even when nothing answered on the host.
+One whose scan could not reach the host stays, marked **Last scan failed**, so you
+can try again. The former **Discovery → Active Scan** page is now this view. See
+[Working with many assets at once](../features/inventory-and-lenses.md#working-with-many-assets-at-once).
 
 ### Scheduled Scans
 
@@ -317,6 +417,77 @@ new arrives.
 From the list you can **run a schedule now**, **edit** it, toggle it on and off,
 or **delete** it. The target is fixed once a schedule is created — to point at
 something else, create a new one.
+
+### Observations
+
+**Discovery → Observations** holds evidence the platform kept but could not
+turn into an asset by itself — most often a host on a network that uses DHCP,
+where an address alone does not identify a device. An observation is not
+necessarily a distinct device, and it is not in your inventory.
+
+The page opens on **Ready to confirm**. Chips across the top show the other
+groups, each with a count: **Matches an asset**, **Several match**, **Needs a
+network**, **Needs a sensor**, **Likely noise** and **All**. Under **All**, a **State** control also shows observations
+already linked, dismissed, expired or in an identity conflict. The page
+remembers the chip and the rows-per-page you last used, in this browser.
+
+Each row is one line: the host (its name, or its address) with the services it
+answered on, the **network** it was seen on, the **sensor or source** that saw
+it, when it was last seen (hover for the exact time), and what it **needs**.
+Search by address, name, network or sensor; click **Host**, **Network**, **Last
+seen** or **Needs** to sort.
+
+What each **Needs** means:
+
+- **Ready to confirm** — a real device answered at this address, but the
+  network uses DHCP, so the platform will not decide on the address alone, and
+  none of your assets owns the address or anything else seen with it.
+  Confirming says you recognise it; the asset is then created and follows its
+  network's approval rules.
+- **Matches an asset** — the address (or another identifier) already belongs
+  to one asset you have, so confirming would only create a second record of the
+  same device. The row says **Link to** that asset's name; linking attaches the
+  observation to it and keeps its approval and history.
+- **Several match** — its identifiers belong to more than one existing asset (or
+  to one that is archived or denied), so the platform cannot tell which it is. There is no one-click action: compare
+  those assets (merge them if they are the same device), link the observation
+  to the right one yourself, or dismiss it.
+- **Needs a network** — the address is not inside any network you have set up.
+  **Add network** opens **Settings → Network Segments**; one segment covering
+  the range resolves every host in it.
+- **Needs a sensor** — another device advertised this name, or no sensor can
+  reach the network it was seen on. **See options** explains: install a sensor
+  on that network (from **Sensors & Agents**) and the platform confirms it
+  without you, or link it to an asset or dismiss it.
+- **Likely noise** — only a name was seen, nothing answered, or nothing has
+  seen it for 30 days. **Dismiss** is suggested.
+
+Click a row to open it. On the left is all of its evidence: its identifiers,
+every endpoint, first and last seen with the number of sightings, enrichment
+status and which sensor can reach its network. On the right, **What this
+needs** says why the platform did not create an asset itself, what will fix
+it, and the alternatives: **Link to an asset**, **Dismiss**, and — for a DHCP
+host — **Treat this network as stable…**, a shortcut to Network Segments: if
+addresses on that network do not move, set its DHCP to off, and future scans
+can create and approve assets there directly.
+
+**Deciding many at once.** With asset-edit permission, tick rows (or the
+header box for the whole page). A bar shows how many are selected and the
+actions that fit the selection: **Confirm** only when every selected row is
+Ready to confirm, **Link to existing** only when every selected row Matches an
+asset (each is linked to the asset that already owns it — you never choose one
+in bulk), and **Dismiss** for any selection. Linking to an asset you choose
+yourself is one row at a time. Confirm opens "Create 14 assets —
+each then follows its network's approval rules"; Dismiss is a plain
+confirmation. Both carry one reason for the batch, already filled in from what
+was seen — edit it as you need; it is recorded with every decision. The result
+is reported per row ("14 confirmed, 2 need another look"): a row that could
+not be decided — the asset allowance is reached, or it changed since you
+looked — stays in the table with the reason on it.
+
+A single row's **Confirm…** and **Dismiss…** open the row with the same
+proposed reason filled in. Without asset-edit permission the page is
+read-only.
 
 ### Approvals
 
@@ -503,9 +674,14 @@ deep-links, so the link you copy off the first tab is the short one. Seven tabs:
 
 1. **Overview** — **Identity** (what this thing is called), **Identifiers** (every
    way it is known, each with its kind, value, source, confidence and when it was
-   last seen), the **class attributes** for its class, **Risk**, **Context**
-   (environment, business unit, owner, support group, location, segment),
-   **Status**, and **Tags**.
+   last seen; an address marked **static** is pinned, and still identifies this
+   asset on a network flagged DHCP), the **class attributes** for its class, **Risk**, **Context**
+   (environment, business unit, owner, support group, location, segment — with
+   *via* its gateway when the segment's router has been interrogated),
+   **Status**, and **Tags**. A router or firewall also shows **Networks
+   routed**: each network it is the gateway of, its address there, the VLAN,
+   DHCP, how many assets are on it (click for the list) and whether a sensor
+   covers it.
 2. **Services & Endpoints** — every network face it has: address, port, transport,
    service, exposure, status and last seen. An asset with no network face simply
    has none, rather than a fabricated port.
@@ -557,7 +733,11 @@ that first.
    SSH host key fingerprints and names. Two kinds are **collector-minted** —
    agent id and cloud resource id — and cannot be typed: they are identities the
    platform assigns, and being able to type one would let two real assets be
-   merged into one by hand with nothing to review.
+   merged into one by hand with nothing to review. An IP address you type is
+   **pinned**: it keeps identifying this asset even on a network flagged DHCP.
+   An address a sensor recorded shows a **Pin** box; tick it to pin that
+   address too (for example a router's own LAN address inside the range it
+   hands out).
 4. **Class attributes** — the fields that class declares.
 5. **Context** — Environment, Support group, Business unit, Owner email.
 6. **Description**, **Tags**, and optional **Metadata (JSON)** for anything the
@@ -634,12 +814,11 @@ See [The Map](../features/map.md) and [SBOM Upload](../features/sbom.md).
 number is the product's one definition of stale: the lens, the hygiene finding and
 the compliance control all mean the same thing by the word.
 
-Per row: **Rescan** (queue a revalidation job for that asset) and **Archive** (set
-its lifecycle to archived). A header bar acts on the whole current page —
-**Revalidate all** and **Archive all**, the latter behind a confirmation that says
-what archiving does: archived assets drop out of active inventory and reporting,
-discovery can resurface them, and you can restore one individually from its
-drawer.
+Tick the rows to act on — or the header, then **Select all matching** — and use
+the bar above the list: **Scan**, **Archive**, **Restore**, **Delete**, **Edit**
+or **Export**. Archiving asks first and says what it does: archived assets drop
+out of active inventory and reporting, discovery can resurface them, and you can
+restore them.
 
 Thresholds and auto-archive behaviour are set by a Tenant Admin under
 **Settings → Policies → Asset Lifecycle**. See
@@ -1086,7 +1265,7 @@ you, and you may hold up to 25 active at a time. See
 **"I ran a discovery and the inventory did not change."**
 New discoveries wait in **Discovery → Approvals** and are invisible to every lens
 until accepted. Check the pending count on the Inventory header, or **Pending
-approval** on the Dashboard's Inventory Health hero.
+approval** on the Dashboard's Assets Monitored hero.
 
 **"An asset I know exists is not in the list."**
 Look at the **Query applied** line under the query box. The default scope is

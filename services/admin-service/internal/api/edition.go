@@ -232,6 +232,11 @@ type CatalogEnricherDeps struct {
 
 	// AuditSink receives one audit record per provider call (ADR-0008 D4.7).
 	AuditSink ai.AuditSink
+
+	// Providers resolves which model provider answers a call. The enricher's
+	// calls are platform-scope, so that is the platform default (admin-ui →
+	// Settings → AI assistant) or the environment's — never a tenant's own.
+	Providers *ai.Resolver
 }
 
 // Edition reports the build's edition for startup logging, so an operator can

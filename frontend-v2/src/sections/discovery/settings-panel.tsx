@@ -11,12 +11,15 @@ import { useMemo, useState } from 'react';
 import { Icon, SectionLabel } from '../../components/ui';
 import {
   awaitingRestart,
+  builtInPortMeaning,
   changedKeys,
   confirmationsNeeded,
   failureFor,
   hasDeviceOverrides,
   originNote,
   overridesToSend,
+  formatPortList,
+  parsePortList,
   settingLabel,
   settingName,
   settingUnit,
@@ -161,14 +164,27 @@ export function SettingsPanel({
                 )}
                 {waiting && !failure && (
                   <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 5 }}>
-                    Accepted — adopted when the device restarts.
+                    <strong>Pending restart</strong> — accepted, and adopted when the device restarts.
                   </div>
                 )}
+                {/* Only for the port list, where "is it watching 9443 yet?"
+                    is the question a person came with. Every other setting
+                    leaves this to the status line above. */}
+                {s.kind === 'port_list' && scope === 'device' && !waiting && !failure && status?.state === 'applied' && (
+                  <div style={{ fontSize: 11, color: 'var(--ok)', marginTop: 5 }}>In effect on this sensor.</div>
+                )}
               </div>
-              <div style={{ flex: 'none' }}>
-                <SettingControl setting={s} value={value} unit={unit} disabled={!canEdit || saving} onChange={(v) => set(s.key, v)} />
-              </div>
+              {s.kind !== 'port_list' && (
+                <div style={{ flex: 'none' }}>
+                  <SettingControl setting={s} value={value} unit={unit} disabled={!canEdit || saving} onChange={(v) => set(s.key, v)} />
+                </div>
+              )}
             </div>
+            {/* A list needs the row's full width; a narrow right-hand column
+                would wrap two chips to a line. */}
+            {s.kind === 'port_list' && (
+              <PortListControl setting={s} value={String(value)} disabled={!canEdit || saving} onChange={(v) => set(s.key, v)} />
+            )}
           </div>
         );
       })}
@@ -295,6 +311,112 @@ function SettingControl({
         style={{ width: 96, textAlign: 'right' }}
       />
       {unit && <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>{unit}</span>}
+    </div>
+  );
+}
+
+/** Additional TLS ports ( WP5): one chip per port, an entry box that
+ *  takes one port or several, and a note for any port the device already
+ *  watches. Emits the canonical string the platform stores, so an add-then-
+ *  remove leaves the form clean rather than dirty with a reordered list. */
+function PortListControl({
+  setting,
+  value,
+  disabled,
+  onChange,
+}: {
+  setting: Setting;
+  value: string;
+  disabled: boolean;
+  onChange: (v: SettingValue) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const [problem, setProblem] = useState<string | null>(null);
+  // The value is the platform's (or the form's) canonical string; anything
+  // unparseable in it is the platform's to report, so show what parses.
+  const ports = parsePortList(value).ports;
+  const name = settingName(setting);
+
+  const add = () => {
+    const typed = parsePortList(draft);
+    if (typed.problems.length > 0) {
+      setProblem(typed.problems.join('; '));
+      return;
+    }
+    if (typed.ports.length === 0) return;
+    const combined = parsePortList(formatPortList([...ports, ...typed.ports]));
+    if (combined.problems.length > 0) {
+      setProblem(combined.problems.join('; '));
+      return;
+    }
+    setProblem(null);
+    setDraft('');
+    onChange(formatPortList(combined.ports));
+  };
+
+  const remove = (p: number) => {
+    setProblem(null);
+    onChange(formatPortList(ports.filter((x) => x !== p)));
+  };
+
+  const alreadyWatched = ports
+    .map((p) => ({ p, meaning: builtInPortMeaning(setting, p) }))
+    .filter((x): x is { p: number; meaning: string } => Boolean(x.meaning));
+
+  return (
+    <div style={{ marginTop: 8 }} data-testid={`port-list-${setting.key}`}>
+      {ports.length === 0 ? (
+        <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
+          No additional ports — sensors watch their built-in ports only.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {ports.map((p) => (
+            <span
+              key={p}
+              className="mono"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, padding: '2px 6px', border: '1px solid var(--app-border)', color: 'var(--app-t1)' }}
+            >
+              {p}
+              <button
+                type="button"
+                className="ui-btn sm ghost"
+                aria-label={`Remove port ${p}`}
+                disabled={disabled}
+                onClick={() => remove(p)}
+                style={{ padding: '0 4px', minHeight: 0, lineHeight: 1 }}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {alreadyWatched.map(({ p, meaning }) => (
+        <div key={p} style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 5 }}>
+          {p} is already monitored as {meaning}; listing it here changes nothing.
+        </div>
+      ))}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
+        <input
+          className="ui-input sm mono"
+          aria-label={`Add to ${name}`}
+          placeholder="e.g. 9443"
+          value={draft}
+          disabled={disabled}
+          onChange={(e) => { setDraft(e.target.value); setProblem(null); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+          style={{ width: 140 }}
+        />
+        <button type="button" className="ui-btn sm ghost" disabled={disabled || draft.trim() === ''} onClick={add}>
+          Add
+        </button>
+      </div>
+      {problem && (
+        <div role="alert" style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 5 }}>{problem}</div>
+      )}
     </div>
   );
 }

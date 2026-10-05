@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.4.0-rc.1] - 2026-10-05
+
+**Version 4.4.0 makes discovery and inventory trustworthy at the scale of a real estate.**
+Every way Vista learns about a device now decides *which asset this is* in one place, so
+the same device no longer lands as one asset on one path and a second on another. Scans
+are described by how deep you want them to go, run host by host from your own sensors or
+the platform's, and report real progress. Inventory gains multi-select and bulk actions.
+And a run of fixes found by running the product against a populated estate: automatic
+scans that no longer re-queue everything on each pass, an asset timeline that no longer
+grows with every sighting, and passive TLS captures that are finally rated. Both product
+lines are cut from the same commit: `v4.4.0` (commercial) and `core-v4.4.0` (Core).
+Upgrade from 4.3.1.
+
+**Read Breaking / Upgrading first** — older sensors keep working but several features
+need a sensor from this release, and the create-scan API is stricter about what it accepts.
+
+### Highlights
+
+- **One identity intake for every inventory path.** Discovery findings, host agents,
+  devices added by hand, DNS lookups, CMDB links and everything device interrogation reports
+  now share the same rules for which network an address belongs to and how much a piece of
+  evidence may prove. An address on a DHCP network can be **pinned** as static; an
+  observation an existing asset already owns offers **Link to** that asset; and when a
+  device's host key or address changes, the History tab says whether it was rotated, moved,
+  reimaged or replaced.
+
+- **Scans described by depth, run host by host.** Discover assets asks for a **scan depth**
+  (Quick, Standard, Thorough or Custom) and a **Run from**, shows a preview of the size,
+  duration and refusals before you start, and then runs one durable unit per address.
+  Progress, coverage and results by host fill in while it runs on **Discovery → Discovery
+  Jobs**; a crash of the scanner resumes only the hosts not done. The same engine now runs
+  automatic scans, identity checks and Active Scan, and your own sensors can run these
+  scans.
+
+- **Select many assets and act on them at once.** Inventory's All assets and Stale lists
+  have row checkboxes and a bar offering **Scan**, **Edit**, **Archive**, **Restore**,
+  **Delete** and **Export**, each shown only to people with the permission it needs. Active
+  Scan is now a view of Inventory.
+
+- **Discovery → Observations is a review table you can work through,** with counts, a
+  plain "what this needs" for every row and bulk confirm, link or dismiss.
+
+- **Networks show their gateway.** Interrogating a router records its address on every
+  network it reports; **Inventory → Map**, the router's asset page and **Settings → Network
+  Segments** name the gateway and the sensor coverage of each network.
+
+- **Passive capture records what the server negotiated,** so connections to third
+  parties carry a protocol version, cipher suite and certificate, and are rated.
+
+- **Automatic scanning holds up on a large estate.** Creating an automatic-scan job took
+  minutes on an install whose timeline had grown; it takes seconds. The timeline gets an
+  entry only when an observation changes something, and one interrogation of a network
+  controller no longer identifies each device hundreds of times.
+
+- **OT/ICS active probing is part of Core** and on by default; it still runs only when a
+  person asks for it on a scan.
+
+- **A model provider can be set from the product** (Enterprise) — a default in the admin
+  console and an organization's own on its Settings page — instead of only in the chart.
+
+- **A Quick Start guide** walks from first sign-in to a populated inventory.
+
+### Breaking / Upgrading
+
+Back up your database (`pg_dump`) first, as always. Upgrade from 4.3.1; the schema changes
+are additive except as noted.
+
+- **Upgrade your sensors.** Sensors older than this release keep working, and are marked
+  *Needs upgrading to run scans on the current engine* on **Discovery → Sensors & Agents**.
+  They cannot run scans by depth, report the key-exchange group of a passive TLS
+  handshake (so those connections stay unrated), apply **Additional TLS ports**, or detect
+  WireGuard and OpenVPN. A sensor from this release refuses a protocols × ports job and asks
+  for the platform to be upgraded. Device agents older than this release keep sending a
+  protocol version they did not measure until upgraded.
+- **The create-scan API is stricter.** `POST /discovery/jobs` accepts `protocols` of `TLS`,
+  `SSH`, `SMB` and the TLS-wrapped names only (anything else is a 400 `validation_error`; OT
+  probes go through `ot_probe_protocols`); a target over 4,096 addresses, or targets over
+  16,384 together, is refused (422 `scan_target_too_large`); and `protocols` is deprecated
+  and ignored when a request names ports. The Protocols checkboxes are gone from **Settings →
+  Active Scanning**.
+- **Deprecated routes still work.** `POST /infrastructure-assets/stale/rescan`,
+  `/stale/archive` and `/revalidate` (and their v1 forms) now carry a `Deprecation` header
+  and a `Link` to their successors.
+- **compliance-engine needs `ENCRYPTION_MASTER_KEY`.** The chart, the compose files and the
+  registry pass it; a hand-maintained deployment must do the same.
+- **The database server's JIT is off for platform connections.** To keep the server's own
+  setting, set `appConfig.dbJit: true` (or `DB_JIT` under a backend's `extraEnv`). Behind
+  PgBouncer or a managed proxy, tell it to ignore the `jit` start-up parameter.
+- **`backends.monitoring-service.extraEnv` no longer replaces the chart's probe targets.**
+  Alerts "Service down: api-gateway" and "Service down: nats" raised by the old behaviour
+  clear after the upgrade.
+- **OT/ICS probing is on in every plan.** Turn it off for a plan in Plans & Pricing, or for
+  one tenant with an exception, if you do not want it available.
+- **The schema upgrade cleans up.** It removes rows that earlier organization purges left
+  behind, drops the unused `api_usage_logs` table, repairs the source of addresses you
+  added to an asset that a sensor had already recorded, and adds an index on the asset
+  address text. The index is used once PostgreSQL next analyses the assets table.
+- **Counts recorded before this release are not corrected.** Relationship observation
+  counts are inflated by the old replays, and asset timeline entries written by repeated
+  sightings are not removed.
+- **Every upgrade waits for its schema migration.** As in 4.2.0, pass a `helm upgrade
+  --timeout` that covers the migration plus the rollout; a backend on `strategy: Recreate`
+  is down for the migration.
+
+### Editions
+
+**Core** includes everything above except what is named below: the identity intake, scans by
+depth from sensors and the platform, inventory bulk actions, the Observations review table,
+gateways, passive TLS capture, OT/ICS active probing and the Quick Start guide.
+
+**Enterprise** adds the model-provider settings (the admin console default and an
+organization's own). On MSP a plan decides whether an organization may use its own, through
+the **Own AI Model Provider** entitlement, off in every plan by default. Core answers `402
+Payment Required` at the edge for an Enterprise capability rather than hiding that it
+exists. The authoritative list is generated, not asserted:
+[`docsv4/core/editions.md`](docsv4/core/editions.md).
+
+### Verify
+
+Core: there is no key to trust, because the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.4.0 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.4.0` for the image.
+Enterprise and MSP customers verify the commercial images and chart against the commercial
+release workflow's identity, exactly as for 4.3.1.
+
+The complete per-change list is in
+[Vista Platform 4.4.0 — full list of changes](docsv4/core/releases/4.4.0.md).
+
+<!-- release-notes-end -->
+
 ## [4.3.1] - 2026-10-01
 
 **Version 4.3.1 publishes a feature status list for each release.** The project

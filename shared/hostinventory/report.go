@@ -205,7 +205,35 @@ type Interface struct {
 	// a bridge, a container veth, a tunnel. Identity must not be minted from
 	// one.
 	Virtual bool `json:"virtual,omitempty"`
+	// StaticAddresses and DynamicAddresses say how each of Addresses is
+	// assigned, where the host's own configuration says so:
+	// statically configured, or handed out by DHCP / router advertisement.
+	// Each entry is spelled exactly as it appears in Addresses; an address in
+	// neither list is UNKNOWN, which is the answer whenever the platform's
+	// tooling does not say — never a guess in either direction, because a
+	// static address decides identity matches its lease neighbours cannot.
+	StaticAddresses  []string `json:"static_addresses,omitempty"`
+	DynamicAddresses []string `json:"dynamic_addresses,omitempty"`
 }
+
+// assign records how one of the interface's addresses is assigned.
+func (i *Interface) assign(addr string, a addressAssignment) {
+	switch a {
+	case assignedStatic:
+		i.StaticAddresses = append(i.StaticAddresses, addr)
+	case assignedDynamic:
+		i.DynamicAddresses = append(i.DynamicAddresses, addr)
+	}
+}
+
+// addressAssignment is a collector's reading of one address's configuration.
+type addressAssignment int
+
+const (
+	assignedUnknown addressAssignment = iota
+	assignedStatic
+	assignedDynamic
+)
 
 // Package is one installed software package.
 type Package struct {

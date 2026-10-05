@@ -25,6 +25,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	sharedautoscan "github.com/vistasecurity/vistaplatform/shared/autoscan"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 )
 
 // Policy is re-exported so callers do not have to import both packages for one
@@ -281,12 +282,31 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 		importOnly bool
 	}
 	var rows []row
+	// declared: segments a person registered. An import-only asset there
+	// needs no connection consent (dispatchguard.SegmentDeclaresAutomaticScope,
+	// the same reading the dispatch guard makes).
+	var declared []netip.Prefix
 	err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		var sensitiveSegments []string
 		if err := tx.SelectContext(ctx, &sensitiveSegments, `SELECT value FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr' AND (COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')`, tenantID); err != nil {
 			return err
 		}
 		excluded = append(excluded, sharedautoscan.ParsePrefixes(sensitiveSegments)...)
+		// The consent clause only when the tenant has an import-only asset at
+		// all; a tenant without connections never pays for it.
+		importOnlySQL := "false"
+		var anyImportOnly bool
+		if err := tx.QueryRowContext(ctx, sharedautoscan.AnyImportOnlySQL, tenantID).Scan(&anyImportOnly); err != nil {
+			return err
+		}
+		if anyImportOnly {
+			importOnlySQL = sharedautoscan.ImportedWithoutConsentSQL("a")
+			prefixes, derr := dispatchguard.DeclaredSegmentPrefixes(tx, tenantID.String())
+			if derr != nil {
+				return derr
+			}
+			declared = prefixes
+		}
 		// The CASE — rather than an OR chain — is what keeps a malformed stored
 		// timestamp from erroring the whole query: Postgres may reorder the arms
 		// of an OR and evaluate the cast anyway, while CASE is evaluated in
@@ -297,7 +317,7 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
        SELECT 1 FROM assets protected WHERE protected.tenant_id=a.tenant_id
        AND (protected.id=ANY($4::uuid[]) OR protected.class_key=ANY($5::text[]) OR protected.class_key LIKE '%industrial%' OR protected.class_key LIKE '%medical%' OR protected.class_key LIKE 'ot\_%' ESCAPE '\')
        AND (protected.primary_address=a.primary_address OR EXISTS(SELECT 1 FROM asset_endpoints e WHERE e.tenant_id=protected.tenant_id AND e.asset_id=protected.id AND e.address=a.primary_address))),
-       `+sharedautoscan.ImportedWithoutConsentSQL("a")+`
+       `+importOnlySQL+`
    FROM assets a
 			WHERE a.tenant_id = $1
 			  AND a.deleted_at IS NULL
@@ -340,10 +360,13 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 			continue
 		}
 		// Per-source scan consent is an ADDITIONAL requirement: it only ever
-		// removes a candidate the rules below would otherwise accept.
+		// removes a candidate the rules below would otherwise accept. It does
+		// not apply inside a segment a person declared.
 		if r.importOnly {
-			refusals[sharedautoscan.ReasonImportedWithoutConsent]++
-			continue
+			if addr, _, ok := sharedautoscan.ParseTarget(r.address); !ok || !dispatchguard.InAnyPrefix(addr, declared) {
+				refusals[sharedautoscan.ReasonImportedWithoutConsent]++
+				continue
+			}
 		}
 		addr, reason, ok := sharedautoscan.ParseTarget(r.address)
 		if !ok {
@@ -607,9 +630,10 @@ func (s *Store) RecordScanned(ctx context.Context, tenantID uuid.UUID, assetIDs 
 // endpoint an automatic scan actually reached, once the job that reached it has
 // completed. It returns how many endpoints it stamped.
 //
-// The manual Active Scan stamps at DISPATCH (revalidation_service.go): a person
-// asked for that scan, and the optimistic stamp is what takes the asset off the
-// coverage list they are looking at. An automatic scan stamps at COMPLETION,
+// The manual Active Scan marks its endpoints `scanning` at dispatch and is
+// settled by FinishActiveScans (active_scan.go) when its jobs end: a person
+// asked for that scan, so an endpoint it probed is scanned whether or not
+// anything answered. An automatic scan stamps at COMPLETION,
 // and only where the job wrote a finding for that endpoint — a sweep that
 // stamped every target it queued would retire hosts from the manual coverage
 // list on the strength of a connect attempt that may never have answered.
@@ -658,6 +682,38 @@ func (s *Store) StampCompletedScans(ctx context.Context, tenantID uuid.UUID) (in
 			return err
 		}
 		stamped, err = res.RowsAffected()
+		if err != nil {
+			return err
+		}
+
+		// The asset-level fact (metadata.last_scanned_at, read by the
+		// unscanned_only predicate) under the SAME two gates: a monitoring
+		// asset, and a finding the completed job wrote for the asset's own
+		// address. An endpoint may not exist yet when the job completes —
+		// ingest creates it from that finding — so without this the asset
+		// would read as unscanned until the next pass found its endpoint.
+		// Not counted in the return value, which is about endpoints.
+		_, err = tx.ExecContext(ctx, `
+			UPDATE assets a
+			SET metadata   = a.metadata || jsonb_build_object('`+MetaLastScannedAt+`', to_jsonb(GREATEST(j.completed_at, `+lastScannedGuardSQL("a")+`))),
+			    updated_at = now()
+			FROM discovery_jobs j
+			WHERE a.tenant_id = $1
+			  AND a.deleted_at IS NULL
+			  AND a.asset_status = 'monitoring'
+			  AND a.primary_address IS NOT NULL
+			  AND j.tenant_id = a.tenant_id
+			  AND j.id::text = a.metadata ->> 'last_auto_scan_job_id'
+			  AND j.status = 'completed'
+			  AND j.completed_at IS NOT NULL
+			  AND j.metadata @> $2::jsonb
+			  AND (`+lastScannedGuardSQL("a")+` IS NULL OR `+lastScannedGuardSQL("a")+` < j.completed_at)
+			  AND EXISTS (
+			        SELECT 1 FROM discovery_findings f
+			        WHERE f.tenant_id = j.tenant_id AND f.job_id = j.id
+			          AND f.resolved_ip IS NOT NULL
+			          AND host(f.resolved_ip) = host(a.primary_address))`,
+			tenantID, originFilterJSON)
 		return err
 	})
 	if err != nil {
@@ -723,4 +779,79 @@ func (s *Store) ClearUnstartedScanStamps(ctx context.Context, tenantID uuid.UUID
 		return 0, fmt.Errorf("clear stamps for automatic scans that never started: %w", err)
 	}
 	return int(cleared), nil
+}
+
+// AdoptRecentJobs stamps the assets that a recent automatic job covers but
+// whose stamp is missing or older than that job. It returns how many assets it
+// stamped.
+//
+// [RecordScanned] is only reached when the dispatch call returns a job. That
+// call is a signed HTTP request to cluster-sensor-service, and it can time out
+// after the job has already been created (creating a large job is slow on a
+// loaded database). The sweep then sees an error, writes no stamp, and the next
+// sweep queues the same hosts again, so the whole estate is re-queued every
+// pass. The job itself is the durable record of what was dispatched, so this
+// reads it back: an asset whose address is a target of an automatic job
+// created at or after `since` (the start of the tenant's rescan interval) is
+// stamped with that job's creation time and id, exactly as RecordScanned would
+// have.
+//
+// Three rules keep it from lying:
+//   - A job that FAILED WITHOUT EVER STARTING is not adopted. It scanned
+//     nothing, which is the same fact [ClearUnstartedScanStamps] acts on; the
+//     two must agree or one would undo the other on every pass.
+//   - A newer stamp is never overwritten. Only an absent, unparseable or
+//     older stamp is replaced, so a later sweep's record always wins.
+//   - Only jobs carrying the automatic-scan origin count. A person's Active
+//     Scan is settled by FinishActiveScans and has its own coverage record.
+//
+// An asset whose stamp already NAMES the job is skipped: RecordScanned stamps
+// with the sweep's clock, a moment before the job row's own created_at, so
+// without that check every healthy dispatch would be "adopted" once.
+//
+// Where an asset is a target of several recent jobs the newest one is used.
+// Idempotent: once stamped, the asset's stamp names the job.
+func (s *Store) AdoptRecentJobs(ctx context.Context, tenantID uuid.UUID, since time.Time) (int, error) {
+	var adopted int64
+	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			WITH adoptable AS (
+				SELECT DISTINCT ON (a.id) a.id AS asset_id, j.id AS job_id, j.created_at
+				FROM discovery_jobs j
+				JOIN discovery_targets t ON t.job_id = j.id AND t.tenant_id = j.tenant_id
+				JOIN assets a ON a.tenant_id = j.tenant_id
+				             AND a.primary_address IS NOT NULL
+				             AND host(a.primary_address) = t.input
+				WHERE j.tenant_id = $1
+				  AND j.created_at >= $2
+				  AND j.metadata @> $3::jsonb
+				  AND NOT (j.status = 'failed' AND j.started_at IS NULL)
+				  AND a.deleted_at IS NULL
+				  AND a.metadata ->> 'last_auto_scan_job_id' IS DISTINCT FROM j.id::text
+				  AND CASE
+				        WHEN a.metadata ->> 'last_auto_scan_at' ~ '^\d{4}-\d{2}-\d{2}T'
+				          THEN (a.metadata ->> 'last_auto_scan_at')::timestamptz < j.created_at
+				        ELSE true
+				      END
+				ORDER BY a.id, j.created_at DESC
+			)
+			UPDATE assets a
+			SET metadata = COALESCE(a.metadata, '{}'::jsonb) || jsonb_build_object(
+			        'last_auto_scan_at',
+			        to_char(ad.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+			        'last_auto_scan_job_id', ad.job_id::text),
+			    updated_at = now()
+			FROM adoptable ad
+			WHERE a.tenant_id = $1 AND a.id = ad.asset_id`,
+			tenantID, since.UTC(), originFilterJSON)
+		if err != nil {
+			return err
+		}
+		adopted, err = res.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("adopt recent automatic scan jobs: %w", err)
+	}
+	return int(adopted), nil
 }

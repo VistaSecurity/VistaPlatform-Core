@@ -10,7 +10,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestIntegration_UniFiExistingDHCPAndPreparationFailure(t *testing.T) {
@@ -47,21 +46,19 @@ func TestIntegration_UniFiExistingDHCPAndPreparationFailure(t *testing.T) {
 	if ev, _ := meta["dynamic_evidence"].(map[string]any); ev["observed_at"] == nil || ev["source_asset_id"] == nil {
 		t.Fatalf("a measurement carries no evidence of where it came from: %s", metadata)
 	}
-	ctx = context.WithValue(ctx, observedDHCPKey{}, vlanSegmentSpecs(vlans))
+	// The posture the controller measured is now the segment's STORED
+	// posture, which is all Intake reads ( item 7: no per-run overlay).
 	peer := di.PeerRef{DisplayName: "Office Alias"}
 	peer.AddIdentifier(di.IdentifierIPAddress, "192.0.2.68")
 	peer.AddIdentifier(di.IdentifierHostname, "client")
-	obs, _, err := sink.peerObservation(ctx, tenant, peer, identity.Source{Kind: identity.SourceMeasured, Ref: "unifi", Mode: identity.ModeActive}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
+	obs := peerIntakeObservation(t, sink, tenant, peer, identity.Source{Kind: identity.SourceMeasured, Ref: "unifi", Mode: identity.ModeActive})
 	if !obs.DynamicScopes[segment] || obs.Hostname != "client" {
 		t.Fatalf("unsafe peer: %+v", obs)
 	}
 	// A cancelled prerequisite cannot fall through and materialise any peers.
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	err = sink.Persist(cancelled, tenant, uuid.New(), identity.Source{Kind: identity.SourceMeasured, Ref: "unifi"}, InterrogationObservations{Facts: []di.FactObservation{{Key: facts.KeyNetVlans, Value: vlans}}})
+	err := sink.Persist(cancelled, tenant, uuid.New(), identity.Source{Kind: identity.SourceMeasured, Ref: "unifi"}, InterrogationObservations{Facts: []di.FactObservation{{Key: facts.KeyNetVlans, Value: vlans}}})
 	if err == nil || !strings.Contains(err.Error(), "vlan segments") && !strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("expected prerequisite failure, got %v", err)
 	}

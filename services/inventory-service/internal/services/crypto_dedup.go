@@ -126,6 +126,11 @@ type cryptoImplementationKey struct {
 	Hash            *string
 	KeySize         *int
 	DiscoveryMethod string
+	// VersionUnmeasured: the observation states that its protocol version
+	// was NOT measured (component_assessment.go). Not part of the natural
+	// key; it lets the upsert retract a version the same producer used to
+	// invent (see findVersionRetractionSQL).
+	VersionUnmeasured bool
 }
 
 // findCryptoImplementationSQL locates an existing configuration matching the
@@ -251,6 +256,55 @@ const findSupersetCryptoImplementationSQL = `
 		   AND ` + cryptoComponentCountSQL + ` > $12::integer
 		 ORDER BY first_discovered_at ASC, id ASC
 		 LIMIT 1`
+
+// findVersionRetractionSQL locates the row an unmeasured-version observation
+// is the same configuration as, when the only thing the row adds is a
+// protocol version ( W1.2).
+//
+// Until W1.2 the Cisco and F5 collectors wrote "TLS 1.2" (and Cisco and the
+// SSH prober "SSH-2.0") for a version they never read. After the fix, the same
+// configuration arrives with no version, and the superset rule would refresh
+// the old row and keep the invented value — and its score — indefinitely. The
+// row is retracted instead, under every one of these conditions:
+//
+//   - every other component is identical (null-safe), so it is the same
+//     configuration and the version is the only difference;
+//   - the row's provenance is this discovery method and nothing else, so no
+//     other producer (an active probe, the passive sensor) ever stated the
+//     version — a version another source measured is never removed;
+//   - the observation is not older than the row's last verification, so a
+//     delayed receipt cannot undo a newer reading.
+//
+// $1 tenant, $2 asset, $3 protocol, $4–$9 the other components, $10 method,
+// $11 endpoint, $12 observation time.
+const findVersionRetractionSQL = `
+		SELECT id FROM crypto_implementations
+		 WHERE tenant_id = $1
+		   AND asset_id = $2
+		   AND deleted_at IS NULL
+		   AND endpoint_id IS NOT DISTINCT FROM $11::uuid
+		   AND protocol = $3::public.protocol_type
+		   AND protocol_version IS NOT NULL
+		   AND cipher_suite           IS NOT DISTINCT FROM $4::text
+		   AND key_exchange_algorithm IS NOT DISTINCT FROM $5::text
+		   AND signature_algorithm    IS NOT DISTINCT FROM $6::text
+		   AND symmetric_encryption   IS NOT DISTINCT FROM $7::text
+		   AND hash_algorithm         IS NOT DISTINCT FROM $8::text
+		   AND key_size               IS NOT DISTINCT FROM $9::integer
+		   AND discovery_method = $10::public.discovery_method
+		   AND discovery_methods = ARRAY[$10::public.discovery_method]
+		   AND last_verified_at <= $12
+		 ORDER BY first_discovered_at ASC, id ASC
+		 LIMIT 1`
+
+// retractProtocolVersionSQL removes a retracted version and its catalogue
+// link, so neither the column nor the junction keeps scoring it.
+const retractProtocolVersionSQL = `
+		WITH unlinked AS (
+		    DELETE FROM crypto_implementation_algorithms
+		     WHERE crypto_implementation_id = $1 AND algorithm_type = 'protocol_version'
+		)
+		UPDATE crypto_implementations SET protocol_version = NULL, updated_at = NOW() WHERE id = $1`
 
 // recordDiscoveryMethodSQL is the provenance append every write path shares:
 // the observation's method joins `discovery_methods` once. Written as a CASE
@@ -522,6 +576,11 @@ const (
 	// component-subset of a live row; that row was refreshed and the
 	// observation's components changed nothing.
 	cryptoUpsertPartialReobserved
+	// cryptoUpsertVersionRetracted: a live row that this observation's own
+	// discovery method alone had written, differing from it only by a
+	// protocol version the observation says was never measured, had that
+	// version removed. It is re-scored like an enriched row.
+	cryptoUpsertVersionRetracted
 )
 
 // componentCount is how many of the seven component columns the observation
@@ -622,6 +681,34 @@ func upsertCryptoImplementation(
 		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up partial crypto implementation: %w", err)
 	}
 
+	// A version this producer used to invent ( W1.2). Checked before
+	// the superset lookup, which would otherwise keep the invented value
+	// forever: an observation without a version is a strict subset of the
+	// row that has one, and a subset re-observation changes nothing.
+	if k.VersionUnmeasured && k.ProtocolVersion == nil {
+		var retract uuid.UUID
+		err = tx.QueryRow(findVersionRetractionSQL,
+			tenantID, k.AssetID, k.Protocol,
+			k.CipherSuite, k.KeyExchange, k.Signature, k.Symmetric, k.Hash, k.KeySize,
+			k.DiscoveryMethod, endpoint, observedAt,
+		).Scan(&retract)
+		if err == nil {
+			if _, e := tx.Exec(reobserveCryptoImplementationSQL, retract, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
+				return uuid.Nil, cryptoUpsertVersionRetracted, fmt.Errorf("re-observe crypto implementation %s: %w", retract, e)
+			}
+			if _, e := tx.Exec(retractProtocolVersionSQL, retract); e != nil {
+				return uuid.Nil, cryptoUpsertVersionRetracted, fmt.Errorf("retract protocol version of %s: %w", retract, e)
+			}
+			if e := linkLeafCertificate(tx, retract, certificateID); e != nil {
+				return uuid.Nil, cryptoUpsertVersionRetracted, e
+			}
+			return retract, cryptoUpsertVersionRetracted, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up version retraction: %w", err)
+		}
+	}
+
 	var superset uuid.UUID
 	err = tx.QueryRow(findSupersetCryptoImplementationSQL, subsetArgs...).Scan(&superset)
 	if err == nil {
@@ -719,6 +806,13 @@ func (s *AssetService) deferredFindingFingerprint(f IngestFinding) string {
 		"keysize=" + derefInt(k.KeySize),
 		"method=" + k.DiscoveryMethod,
 	}
+
+	// The endpoint it was observed on. Replay materializes a configuration per
+	// endpoint — the approved path stores the same configuration on :443 and
+	// :8443 as two rows — so two ports serving the same certificate and suite
+	// are two deferred findings, not one: without this, approving a pending
+	// host kept that configuration on ONE of its ports ( H12).
+	parts = append(parts, "endpoint="+strings.TrimSpace(derefString(f.IPAddress))+"|"+strings.TrimSpace(derefString(f.Hostname))+"|"+derefInt(f.Port))
 
 	// The at-rest identity (which resource), not its posture (what the
 	// posture currently is).

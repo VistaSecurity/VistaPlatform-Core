@@ -9,7 +9,10 @@ import (
 )
 
 // maxSweepHosts caps target expansion so a wide CIDR (e.g. a /8) can't explode
-// into millions of probes. Callers that need more should chunk their input.
+// into millions of probes. The cap truncates SILENTLY, so a caller must first
+// refuse what it cannot fully expand with CheckTargetSizes — that is
+// what job creation and the standalone sensor do; ExpandTargets is not where
+// an oversize target is reported.
 const maxSweepHosts = 4096
 
 // IsNetworkRange reports whether a target string is a CIDR block or an

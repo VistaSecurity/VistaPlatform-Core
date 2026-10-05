@@ -29,6 +29,13 @@ func TestCipherSuiteName(t *testing.T) {
 	if got := CipherSuiteName(0x003D); got != "TLS_RSA_WITH_AES_256_CBC_SHA256" {
 		t.Errorf("CipherSuiteName(0x003D) = %q, want TLS_RSA_WITH_AES_256_CBC_SHA256", got)
 	}
+	// A suite outside the table that crypto/tls names — one a default Go
+	// client still offers, so a probe can negotiate it — takes that name
+	// rather than reading as unknown (the sensor TLS enricher always named it
+	// this way; WP6 moved the enricher onto this table).
+	if got := CipherSuiteName(tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA); got != "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA" {
+		t.Errorf("CipherSuiteName(0xC009) = %q, want TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA", got)
+	}
 	// Unknown suites preserve the raw id.
 	if got := CipherSuiteName(0xABCD); got != "Unknown-0xABCD" {
 		t.Errorf("CipherSuiteName(0xABCD) = %q, want Unknown-0xABCD", got)

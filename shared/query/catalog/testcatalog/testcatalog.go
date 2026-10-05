@@ -200,6 +200,13 @@ var assetFields = []catalog.FieldInfo{
 	col("class_confidence", ast.TypeNumber),
 	colAs("first_seen", "first_discovered_at", ast.TypeTimestamp),
 	colAs("last_seen", "last_seen_at", ast.TypeTimestamp),
+	// §4.3: the asset-level scan fact, a key of `assets.metadata` because a
+	// scan of an asset with no endpoint has no endpoint row to carry
+	// `endpoint.last_scanned`.
+	{
+		Name: "last_scanned", Type: ast.TypeTimestamp,
+		Accessor: ast.Accessor{Kind: ast.AccessorJSONB, JSONColumn: "metadata", Key: "last_scanned_at"},
+	},
 	col("created_at", ast.TypeTimestamp),
 	col("updated_at", ast.TypeTimestamp),
 	colAs("segment_id", "network_segment_id", ast.TypeUUID),

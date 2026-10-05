@@ -1,7 +1,7 @@
 package discovery
 
 import (
-	"crypto/tls"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -172,45 +172,9 @@ func (p *Prober) Probe(hostname, ip, protocol string, port int) (*ProbeResult, e
 // determine which versions the server accepts. Returns the accepted version
 // labels (e.g. "TLS 1.3"), newest first.
 func (p *Prober) EnumerateTLSVersions(hostname, ip string, port int) []string {
-	versions := []struct {
-		id   uint16
-		name string
-	}{
-		{tls.VersionTLS13, "TLS 1.3"},
-		{tls.VersionTLS12, "TLS 1.2"},
-		{tls.VersionTLS11, "TLS 1.1"},
-		{tls.VersionTLS10, "TLS 1.0"},
-	}
-
 	address := net.JoinHostPort(ip, strconv.Itoa(port))
-	var accepted []string
-	for _, ver := range versions {
-		conn, err := net.DialTimeout("tcp", address, p.timeout)
-		if err != nil {
-			continue
-		}
-		tlsCfg := &tls.Config{
-			ServerName:         hostname,
-			InsecureSkipVerify: true, //nolint:gosec // intentional — discovery probes any endpoint
-			MinVersion:         ver.id,
-			MaxVersion:         ver.id,
-		}
-		tlsConn := tls.Client(conn, tlsCfg)
-		// Without a deadline the handshake below can block indefinitely, so a
-		// failure here means this version cannot be tested — skip it rather
-		// than record an untested version as unaccepted.
-		if err := tlsConn.SetDeadline(time.Now().Add(p.timeout)); err != nil {
-			_ = tlsConn.Close()
-			_ = conn.Close()
-			continue
-		}
-		if err := tlsConn.Handshake(); err == nil {
-			accepted = append(accepted, ver.name)
-		}
-		_ = tlsConn.Close()
-		_ = conn.Close()
-	}
-	return accepted
+	dial := func(context.Context) (net.Conn, error) { return net.DialTimeout("tcp", address, p.timeout) }
+	return enumerateTLSVersions(context.Background(), dial, hostname, p.timeout, 0)
 }
 
 // CanonicalProtocolName normalizes a protocol value into the registry key:

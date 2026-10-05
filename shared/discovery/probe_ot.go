@@ -16,8 +16,11 @@ package discovery
 // protocols that lack a safe well-known probe (DNP3, MMS, ICCP, S7).
 //
 // Active probing of OT devices is gated externally:
-//   - subscription tier feature flag `ot_active_probing` (auth-service)
-//   - per-discovery-job opt-in (discovery_jobs.ot_probe_protocols)
+//   - per-discovery-job opt-in (discovery_jobs.ot_probe_protocols) — a person
+//     asks for each OT protocol; automatic scanning can never request one
+//   - the `ot_active_probing` switch (a Core capability, on by default), which
+//     an operator can turn off per plan or per tenant; CreateJob drops the
+//     opt-in when it is off
 //
 // This file just reacts to "go probe X for protocol Modbus" and returns
 // whatever the wire said.

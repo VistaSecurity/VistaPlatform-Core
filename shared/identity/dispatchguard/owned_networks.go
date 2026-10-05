@@ -32,7 +32,9 @@ import (
 //   - never a prefix too broad to be anybody's ([probeconsent.TooBroadToClaim]:
 //     shorter than /8 for IPv4 or /16 for IPv6, /0 above all).
 //   - LEARNED segments never. A firewall reporting its ISP transit /30 is not
-//     a claim of ownership (see [SegmentGrantsOwnership]).
+//     a claim of ownership (see [SegmentGrantsOwnership]). A learned segment a
+//     person has CLAIMED is no longer read as learned (learnedSegmentSQL) and
+//     is listed like a declared one.
 //   - every endpoint the tenant ELEVATED from an external connection to a
 // monitored asset whose asset still exists and is monitored. The
 //     elevation path keeps a promoted asset current by refreshing it in place

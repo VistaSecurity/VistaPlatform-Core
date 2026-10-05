@@ -25,11 +25,31 @@ func TestSingletonGuardContract(t *testing.T) {
 	identitytest.RunSingletonGuardContract(t, func() identity.Repository { return memory.New() })
 }
 
+// TestPinnedAddressContract is the same arrangement for's pinned-address
+// rule: an address its owner holds static votes inside a dynamic scope.
+func TestPinnedAddressContract(t *testing.T) {
+	identitytest.RunPinnedAddressContract(t, func() identity.Repository { return memory.New() })
+}
+
+// TestClaimedAddressContract is the same arrangement for's
+// claimed-address rule: a device's own address re-homes from a weaker holder
+// and is contested by a stronger one.
+func TestClaimedAddressContract(t *testing.T) {
+	identitytest.RunClaimedAddressContract(t, func() identity.Repository { return memory.New() })
+}
+
 // TestUnknownHostSerialContract is the same arrangement for ADR-0002 D3's
 // erratum — `unknown_host` identifies by serial_number — including
 // the half that must NOT have loosened: a differing serial is still contested.
 func TestUnknownHostSerialContract(t *testing.T) {
 	identitytest.RunUnknownHostSerialContract(t, func() identity.Repository { return memory.New() })
+}
+
+// TestIntakeContract runs identity.Intake over this store: the snapshot agrees
+// with ScopeForAddress, and posture reads as the stored effective value. The
+// Postgres store runs it too, against the real posture writer.
+func TestIntakeContract(t *testing.T) {
+	identitytest.RunIntakeContract(t, func() identity.Repository { return memory.New() })
 }
 
 func TestEndpointUpsertDoesNotDuplicate(t *testing.T) {
@@ -41,7 +61,7 @@ func TestEndpointUpsertDoesNotDuplicate(t *testing.T) {
 	}
 	ep := identity.EndpointObservation{Address: "192.0.2.1", Port: 443, Transport: "tcp"}
 	for range 3 {
-		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{ep}); err != nil {
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{ep}); err != nil {
 			t.Fatalf("UpsertEndpoints: %v", err)
 		}
 	}
@@ -52,7 +72,7 @@ func TestEndpointUpsertDoesNotDuplicate(t *testing.T) {
 	// A different port is a different endpoint.
 	other := ep
 	other.Port = 22
-	if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{other}); err != nil {
+	if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{other}); err != nil {
 		t.Fatalf("UpsertEndpoints: %v", err)
 	}
 	if got := r.Endpoints(ref); len(got) != 2 {
@@ -67,7 +87,7 @@ func TestUpsertEndpointsRejectsAnAddresslessEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateAsset: %v", err)
 	}
-	if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{{Port: 443, Transport: "tcp"}}); err == nil {
+	if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{{Port: 443, Transport: "tcp"}}); err == nil {
 		t.Fatal("an endpoint with neither address nor fqdn was accepted")
 	}
 }

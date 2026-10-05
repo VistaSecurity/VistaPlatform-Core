@@ -312,6 +312,16 @@ func TestEveryDefaultMatchesItsKind(t *testing.T) {
 			if f.Default.S == nil || !contains(f.Allowed, *f.Default.S) {
 				t.Errorf("%s defaults to a value outside its allowed set", k)
 			}
+		case KindPortList:
+			if f.Default.S == nil {
+				t.Errorf("%s is a port list with a non-string default", k)
+				continue
+			}
+			if ports, bad := ParsePortList(*f.Default.S); len(bad) > 0 || FormatPortList(ports) != *f.Default.S {
+				t.Errorf("%s defaults to %q, which is not a canonical port list: %v", k, *f.Default.S, bad)
+			}
+		default:
+			t.Errorf("%s has kind %q, which this test does not know how to check", k, f.Kind)
 		}
 	}
 }

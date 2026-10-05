@@ -384,3 +384,20 @@ func TestRunningHandsBackACopy(t *testing.T) {
 		t.Error("mutating the reported map changed the applier's own state")
 	}
 }
+
+// The unsupported-setting reason is a wire contract: the platform recognises
+// it to tell "older than this setting" from a real failure (agentconfig.
+// Reconcile), and builds already in the field send exactly this text. A new
+// wording here would make every NEW device's unsupported settings unreadable
+// as such.
+func TestUnsupportedReasonIsTheShippedWording(t *testing.T) {
+	SetAgentVersion("v9.9.9")
+	defer SetAgentVersion("unknown")
+	a := New()
+	a.Apply("rev-1", agentconfig.Values{agentconfig.KeyExtraTLSPorts: agentconfig.Text("")})
+
+	_, failures, _ := a.Report()
+	if got, want := failures[string(agentconfig.KeyExtraTLSPorts)], "this agent (v9.9.9) does not support extra_tls_ports"; got != want {
+		t.Errorf("reason = %q, want the shipped wording %q", got, want)
+	}
+}

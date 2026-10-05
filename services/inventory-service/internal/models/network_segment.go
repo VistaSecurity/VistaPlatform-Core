@@ -71,6 +71,19 @@ type NetworkSegment struct {
 	Dynamic           *bool   `json:"dynamic" db:"-"`
 	DynamicSource     *string `json:"dynamic_source" db:"-"`
 	DynamicSourceName *string `json:"dynamic_source_name,omitempty" db:"-"`
+	// The stored gateway link (D1), mirrored for the `SELECT ns.*`
+	// reads (see SourceKind above) and never serialized as such: the response
+	// carries Gateway, which also says whether the device still exists.
+	GatewayAssetID    *uuid.UUID `json:"-" db:"gateway_asset_id"`
+	GatewayAddress    *string    `json:"-" db:"gateway_address"`
+	GatewaySourceRef  *string    `json:"-" db:"gateway_source_ref"`
+	GatewayObservedAt *time.Time `json:"-" db:"gateway_observed_at"`
+	// Gateway is the device that reported being this network's gateway, null
+	// when none has (or it has since been deleted). Coverage is the tenant
+	// collector that can reach the network, null when none can — and always
+	// null for a segment that is not a cidr, where coverage does not apply.
+	Gateway  *SegmentGateway  `json:"gateway" db:"-"`
+	Coverage *SegmentCoverage `json:"coverage" db:"-"`
 	// Joined for responses (from locations join)
 	LocationName     *string `json:"location_name,omitempty" db:"location_name"`
 	LocationFullPath *string `json:"location_full_path,omitempty" db:"location_full_path"`

@@ -97,7 +97,7 @@ export function InventoryHealthHero() {
       <div style={{ position: 'relative', display: 'flex', gap: 34, alignItems: 'stretch', flexWrap: 'wrap' }}>
         {/* ---- the ops half: what is out there, and what needs a decision ---- */}
         <div style={{ flex: '0 0 320px', minWidth: 280, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-          <div className="eyebrow-app" style={{ marginBottom: 9 }}>Inventory Health</div>
+          <div className="eyebrow-app" style={{ marginBottom: 9 }}>Assets Monitored</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
             <Link
               to={inventoryQueryHref('')}

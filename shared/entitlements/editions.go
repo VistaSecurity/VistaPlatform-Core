@@ -91,6 +91,14 @@ var editionByItem = map[string]Edition{
 	// well want one without the other.
 	"connector_netbox": EditionEnterprise,
 
+	// --- Enterprise: bring your own AI model provider --------------------
+	// Core has no model clients at all (ADR-0008 edition placement), so there
+	// is nothing for a Core tenant to connect. On Enterprise every tenant may
+	// connect its own provider; on MSP a plan decides, which is what lets a
+	// service provider choose between including a model in the plan and
+	// letting customers bring theirs.
+	"ai_tenant_provider": EditionEnterprise,
+
 	// --- Enterprise + MSP: audit forwarding -----------------------------
 	// Core logs every audit event and serves every audit query. Forwarding
 	// them to an external SIEM (Splunk, Datadog, Elastic, webhook) is paid.
@@ -99,12 +107,12 @@ var editionByItem = map[string]Edition{
 	"siem_export": EditionEnterprise,
 
 	// --- Enterprise: OT/ICS ---------------------------------------------
-	// Retains the platform's existing gating: OT active probing and the OT
-	// lens have only ever shipped enabled on the paid tiers. Core keeps the
-	// full TLS/SSH/SMB discovery pipeline. Revisit if OT proves to be an
-	// adoption driver rather than a vertical upsell.
-	"ot_active_probing": EditionEnterprise,
-	"ot_primary_lens":   EditionEnterprise,
+	// The OT-specific inventory lens. OT active probing is deliberately NOT
+	// listed: it is Core, an ordinary switch that every tier ships turned on
+	// and that a plan or a per-tenant exception can turn off. Its safety never
+	// rested on a paywall — OT probes run only when a person asks for them on
+	// a scan, and automatic scanning refuses them outright.
+	"ot_primary_lens": EditionEnterprise,
 
 	// --- MSP: monetization ----------------------------------------------
 	// The tenant-facing self-service billing surface — subscription, invoices,

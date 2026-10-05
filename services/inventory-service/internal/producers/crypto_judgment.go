@@ -11,7 +11,8 @@ type configurationComponent = cryptoassess.Component
 func (c configSubject) assessment() cryptoassess.Configuration {
 	return cryptoassess.Configuration{Version: c.version, Suite: c.suite, KeyAlgorithm: c.keyAlg,
 		KeyBits: c.keyBits, Hash: c.hashAlg, Signature: c.sigAlg, Symmetric: c.symmetric,
-		StoredRisk: c.storedRisk, CatalogueRisk: c.catalogueRisk, Components: c.components, PreviousEvidence: c.previousEvidence, PreviousScore: c.previousScore}
+		StoredRisk: c.storedRisk, CatalogueRisk: c.catalogueRisk, Components: c.components, PreviousEvidence: c.previousEvidence, PreviousScore: c.previousScore,
+		VersionUnmeasured: c.versionUnmeasured}
 }
 func (c configSubject) judgment() cryptoassess.Judgment { return c.assessment().Judge() }
 

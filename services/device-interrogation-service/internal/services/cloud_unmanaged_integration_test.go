@@ -330,10 +330,6 @@ func TestIntegration_CloudDiscovery_SuppressionSurvivesReplay(t *testing.T) {
 	 ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
 		t.Fatalf("set admission mode: %v", err)
 	}
-	svc.devices.identityEng, err = identity.New(identity.Config{Repo: svc.devices.identityRepo, AdmissionEnabled: true})
-	if err != nil {
-		t.Fatalf("rebuild identity engine: %v", err)
-	}
 
 	plan := awsEnumerationPlanForTest(t)
 	instance := plan.Instances[0]

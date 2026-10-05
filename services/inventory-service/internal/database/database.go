@@ -41,7 +41,7 @@ func NewConnection(cfg *config.Config) (*DB, error) {
 	// container logs and any log aggregator downstream of them.
 	fmt.Printf("Connecting to database (%s): %s\n", source, redactDSN(dsn))
 
-	db, err := sqlx.Connect("postgres", dsn)
+	db, err := sqlx.Connect("postgres", shareddb.ApplyServerDefaults(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}

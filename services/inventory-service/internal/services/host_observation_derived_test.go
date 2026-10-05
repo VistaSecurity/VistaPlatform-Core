@@ -65,7 +65,7 @@ func TestHostObservationBuilder_D2Vector(t *testing.T) {
 	if len(ips) != 1 || ips[0].Value != testEUI64Addr {
 		t.Fatalf("ip identifiers = %+v, want exactly the EUI-64 address", ips)
 	}
-	evidence := hostObservationAddressEvidence(ho, obs.Network.SegmentID)
+	evidence := hostObsEvidence(t, unscopedService(), ho)
 	if !slices.Equal(evidence[attrlist.KeyIPv6Temporary], []string{testTempAddr}) {
 		t.Errorf("temporary addresses = %v, want [%s]", evidence[attrlist.KeyIPv6Temporary], testTempAddr)
 	}

@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,10 @@ type Repository struct {
 	// uniqueness invariant can be simulated. Always empty in normal use.
 	multi []multiOwner
 
+	// tlsCerts are the leaf certificate fingerprints
+	// [Repository.SetTLSCertificates] recorded, keyed tenant|asset.
+	tlsCerts map[string][]string
+
 	// segments are the tenant's network segments, keyed by CIDR, for
 	// [Repository.ScopeForAddress]. Empty is the normal state and the
 	// interesting one: a tenant with no segments must still get a usable scope.
@@ -77,13 +82,22 @@ type ProvisionalScopeAnswer struct {
 	Reason string
 }
 
-// memSegment is one configured network segment: a prefix, the scope id an
-// address inside it carries, and whether the segment hands addresses out
-// dynamically.
+// memSegment is one configured network segment: its type and literal (a CIDR
+// or a domain pattern), the scope id an identifier inside it carries, and its
+// DHCP posture.
 type memSegment struct {
-	prefix  netip.Prefix
+	segType string
+	value   string
 	scope   string
+	// dynamic is the EFFECTIVE posture — what the SQL store keeps in
+	// `metadata->>'dynamic'`.
 	dynamic bool
+	// bySource is each posture source's own statement, the twin of the SQL
+	// store's `dynamic_by_source`. Nil until [Repository.StateSegmentPosture]
+	// first writes: a segment registered with a bare `dynamic` is a LEGACY row,
+	// and the first posture write folds that bare value in as the operator's
+	// (segment_posture.go's rule for a row with no `source`).
+	bySource map[string]bool
 	// networkRef is the cloud network (VPC / VNet) the segment belongs to,
 	// empty for a LAN segment. It is part of the segment's identity on the SQL
 	// side (the unique index is over it), and it is here so this store can run
@@ -310,34 +324,44 @@ func (r *Repository) CreateAsset(_ context.Context, tenantID string, in identity
 	return ref, nil
 }
 
-func (a *asset) putIdentifier(id identity.Identifier) {
+// putIdentifier reports whether the identifier was new to the asset.
+func (a *asset) putIdentifier(id identity.Identifier) bool {
 	k := id.Key()
 	prev, ok := a.identifiers[k]
 	if !ok {
 		a.identOrder = append(a.identOrder, k)
-	} else if prev.SeenAt.After(id.SeenAt) {
-		// Last-seen never moves backwards, exactly as the SQL upsert's
-		// GREATEST(last_seen_at, EXCLUDED.last_seen_at) says: an older
-		// sighting attached late is still evidence the identifier existed
-		// then, not evidence it has not been seen since.
-		// Repository.IdentifierLastSeen reads this, and the lease rule of
-		// 1b compares against it.
-		id.SeenAt = prev.SeenAt
+		id.Assignment = id.StoredAssignment()
+		a.identifiers[k] = id
+		return true
 	}
-	if ok && id.Inferred() && !prev.Inferred() {
-		// A derived re-sighting of a value the asset holds natively does not
-		// demote it ( Phase 2): the SQL upsert keeps the native
-		// source_kind and source_ref the same way. The reverse — a native
-		// sighting of a value held as derived — upgrades it, which the plain
-		// assignment below already does.
-		id.Source = prev.Source
-	}
-	a.identifiers[k] = id
+	// A re-sighting folds into the stored copy under the SQL upsert's
+	// provenance rules (identity.UpsertIdentifier): last-seen never moves
+	// backwards (Repository.IdentifierLastSeen and the lease rule of 1b
+	// compare against it), source kind moves only up declared > measured >
+	// inferred with its ref travelling alongside, and a pinned address is
+	// never unpinned by a weaker or silent sighting.
+	a.identifiers[k] = identity.UpsertIdentifier(prev, id)
+	return false
 }
 
-func (a *asset) putEndpoint(ep identity.EndpointObservation) {
+// putEndpoint reports whether the endpoint is new, or an existing one whose
+// protocol or service name this sighting changed — the same two cases
+// [postgres.Repository.UpsertEndpoints] counts. An empty incoming value never
+// counts as a change, because it never overwrites there either.
+func (a *asset) putEndpoint(ep identity.EndpointObservation) bool {
 	k := ep.Key()
+	changed := true
 	if prev, ok := a.endpoints[k]; ok {
+		changed = (ep.Protocol != "" && ep.Protocol != prev.Protocol) ||
+			(ep.ServiceName != "" && ep.ServiceName != prev.ServiceName)
+		// Empty never wins here either: the SQL store coalesces these two, and
+		// the change count above would otherwise drift from it.
+		if ep.Protocol == "" {
+			ep.Protocol = prev.Protocol
+		}
+		if ep.ServiceName == "" {
+			ep.ServiceName = prev.ServiceName
+		}
 		// Upsert: keep the earliest sighting's first-seen semantics by not
 		// moving SeenAt backwards.
 		if ep.SeenAt.Before(prev.SeenAt) {
@@ -360,36 +384,41 @@ func (a *asset) putEndpoint(ep identity.EndpointObservation) {
 		a.epOrder = append(a.epOrder, k)
 	}
 	a.endpoints[k] = ep
+	return changed
 }
 
 // AttachIdentifiers implements identity.Repository.
-func (r *Repository) AttachIdentifiers(_ context.Context, ref identity.AssetRef, ids []identity.Identifier) error {
+func (r *Repository) AttachIdentifiers(_ context.Context, ref identity.AssetRef, ids []identity.Identifier) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
 	if !ok {
-		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+		return 0, fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
 	}
 	for _, id := range ids {
 		if owner, ok := r.owners[ownerKey(ref.TenantID, id)]; ok && owner.ID != ref.ID {
-			return fmt.Errorf("%w: %s=%q is %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, owner.ID)
+			return 0, fmt.Errorf("%w: %s=%q is %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, owner.ID)
 		}
 	}
+	added := 0
 	for _, id := range ids {
-		a.putIdentifier(id)
+		if a.putIdentifier(id) {
+			added++
+		}
 		r.owners[ownerKey(ref.TenantID, id)] = a.ref
 	}
-	return nil
+	return added, nil
 }
 
 // UpsertEndpoints implements identity.Repository.
-func (r *Repository) UpsertEndpoints(_ context.Context, ref identity.AssetRef, eps []identity.EndpointObservation) error {
+func (r *Repository) UpsertEndpoints(_ context.Context, ref identity.AssetRef, eps []identity.EndpointObservation) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
 	if !ok {
-		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+		return 0, fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
 	}
+	changed := 0
 	for _, ep := range eps {
 		// Defense in depth, mirroring postgres.Repository.UpsertEndpoints: a
 		// caller of the repository directly (bypassing the engine's
@@ -397,11 +426,13 @@ func (r *Repository) UpsertEndpoints(_ context.Context, ref identity.AssetRef, e
 		// the same "an IP is never a name" treatment.
 		ep = ep.Sanitized()
 		if ep.Address == "" && ep.FQDN == "" {
-			return fmt.Errorf("memory: UpsertEndpoints: endpoint has neither address nor fqdn")
+			return 0, fmt.Errorf("memory: UpsertEndpoints: endpoint has neither address nor fqdn")
 		}
-		a.putEndpoint(ep)
+		if a.putEndpoint(ep) {
+			changed++
+		}
 	}
-	return nil
+	return changed, nil
 }
 
 // Touch implements identity.Repository.
@@ -477,6 +508,19 @@ func (r *Repository) RecordHistory(_ context.Context, e identity.HistoryEntry) e
 	defer r.mu.Unlock()
 	r.history = append(r.history, e)
 	return nil
+}
+
+// HistoryHasChange implements identity.Repository.
+func (r *Repository) HistoryHasChange(_ context.Context, ref identity.AssetRef, action identity.HistoryAction, subset map[string]any) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.history {
+		if e.TenantID == ref.TenantID && e.AssetID == ref.ID && e.Action == action &&
+			identity.ChangesContain(e.Changes, subset) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // OpenMergeProposal implements identity.Repository.
@@ -832,6 +876,10 @@ type multiOwner struct {
 //
 // A more specific prefix wins, the same rule the SQL lookup applies: a /28
 // carved out of a /24 is the more precise answer about where an address is.
+//
+// `dynamic` is stored the way the SQL contract adapter stores it: as a bare
+// LEGACY value with no source, which the first [Repository.StateSegmentPosture]
+// folds in as the operator's statement.
 func (r *Repository) AddSegment(tenantID, cidr, scope string, dynamic bool) error {
 	return r.AddCloudSegment(tenantID, cidr, scope, dynamic, "")
 }
@@ -848,80 +896,113 @@ func (r *Repository) AddCloudSegment(tenantID, cidr, scope string, dynamic bool,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.segments[tenantID] = append(r.segments[tenantID], memSegment{
-		prefix: p.Masked(), scope: scope, dynamic: dynamic, networkRef: strings.TrimSpace(networkRef),
+		segType: identity.SegmentTypeCIDR, value: p.Masked().String(),
+		scope: scope, dynamic: dynamic, networkRef: strings.TrimSpace(networkRef),
 	})
 	return nil
 }
 
-// ScopeForAddress implements [identity.Repository].
+// AddDomainSegment registers a `domain` segment: a name pattern
+// (shared/network.MatchesDomainPattern) that scopes a hostname no address
+// placed. It implements identitytest.DomainSegmentWriter.
+func (r *Repository) AddDomainSegment(tenantID, pattern, scope string) error {
+	if strings.TrimSpace(pattern) == "" {
+		return fmt.Errorf("memory: domain segment %q has an empty pattern", scope)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.segments[tenantID] = append(r.segments[tenantID], memSegment{
+		segType: identity.SegmentTypeDomain, value: strings.TrimSpace(pattern), scope: scope,
+	})
+	return nil
+}
+
+// postureRank is the in-memory twin of the precedence the SQL store applies
+// in ONE statement (shared/identity/postgres/segment_posture.go): operator >
+// measured > inferred. The contract (identitytest.RunIntakeContract) holds the
+// two to the same answers, so a reordering on either side fails a test.
+func postureRank(source string) int {
+	switch source {
+	case "operator":
+		return 3
+	case "measured":
+		return 2
+	case "inferred":
+		return 1
+	}
+	return 0
+}
+
+// StateSegmentPosture records one source's statement of a segment's DHCP
+// posture — `dynamic` nil withdraws that source's statement — and recomputes
+// the effective value from the highest-ranked source still speaking, or false
+// when none is. It implements identitytest.SegmentPostureWriter, and it is the
+// only way this store's effective posture changes after registration.
+func (r *Repository) StateSegmentPosture(tenantID, scope, source string, dynamic *bool) error {
+	if postureRank(source) == 0 {
+		return fmt.Errorf("memory: unknown posture source %q", source)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	segs := r.segments[tenantID]
+	for i := range segs {
+		if segs[i].scope != scope {
+			continue
+		}
+		seg := &segs[i]
+		if seg.bySource == nil {
+			// The legacy fold: a bare value with no recorded source is an
+			// operator's, as segment_posture.go reads it.
+			seg.bySource = map[string]bool{"operator": seg.dynamic}
+		}
+		if dynamic == nil {
+			delete(seg.bySource, source)
+		} else {
+			seg.bySource[source] = *dynamic
+		}
+		best, eff := 0, false
+		for src, v := range seg.bySource {
+			if rk := postureRank(src); rk > best {
+				best, eff = rk, v
+			}
+		}
+		seg.dynamic = eff
+		return nil
+	}
+	return fmt.Errorf("memory: no segment %q in tenant %q", scope, tenantID)
+}
+
+// SegmentSnapshot implements [identity.Repository]: the tenant's segments in
+// registration order, with their effective posture.
+func (r *Repository) SegmentSnapshot(_ context.Context, tenantID string) (identity.SegmentSnapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snap := identity.SegmentSnapshot{TenantID: tenantID}
+	for _, seg := range r.segments[tenantID] {
+		snap.Segments = append(snap.Segments, identity.NetworkSegment{
+			ID: seg.scope, Type: seg.segType, Value: seg.value,
+			CloudNetworkRef: seg.networkRef,
+			Dynamic:         seg.dynamic && seg.segType != identity.SegmentTypeDomain,
+		})
+	}
+	return snap, nil
+}
+
+// ScopeForAddress implements [identity.Repository], through
+// [identity.SegmentSnapshot.ScopeForAddress] — the one implementation of the
+// rule, shared with the SQL store and identity.Intake.
 //
 // It returns the most specific matching segment's scope, and
 // [identity.ScopeTenantDefault] when nothing matches — including for a tenant
 // with no segments at all, which is the case that matters: an empty scope there
 // is what made one host observed three times into three assets.
-func (r *Repository) ScopeForAddress(_ context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (string, bool, error) {
-	if !addr.IsValid() {
-		// Not an address, so not inside any segment. The default scope is still
-		// the truthful answer about where we were standing.
-		return identity.ScopeTenantDefault, false, nil
+func (r *Repository) ScopeForAddress(ctx context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (string, bool, error) {
+	snap, err := r.SegmentSnapshot(ctx, tenantID)
+	if err != nil {
+		return "", false, err
 	}
-	a := addr.Unmap().WithZone("")
-	want := strings.TrimSpace(cloudNetworkRef)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Matches are collected per prefix length, not reduced to one as they
-	// arrive: the ambiguity that matters is between EQUALLY specific segments
-	// (10.0.1.0/24 in vpc-a and in vpc-b), and keeping only the first would
-	// hide it. Same shape as the SQL implementation, deliberately.
-	best := -1
-	var bestSegs []memSegment
-	for _, seg := range r.segments[tenantID] {
-		if want != "" && seg.networkRef != "" && seg.networkRef != want {
-			continue
-		}
-		if seg.prefix.Addr().BitLen() != a.BitLen() || !seg.prefix.Contains(a) {
-			continue
-		}
-		switch {
-		case seg.prefix.Bits() > best:
-			best, bestSegs = seg.prefix.Bits(), []memSegment{seg}
-		case seg.prefix.Bits() == best:
-			bestSegs = append(bestSegs, seg)
-		}
-	}
-	chosen, ok := pickMemSegment(bestSegs, want)
-	if !ok {
-		return identity.ScopeTenantDefault, false, nil
-	}
-	return chosen.scope, chosen.dynamic, nil
-}
-
-// pickMemSegment mirrors the SQL store's pickSegment: a network-matched segment
-// beats an unscoped one, and equally specific matches in two DIFFERENT cloud
-// networks are a question the caller did not answer — so no segment is chosen
-// and the address falls to the tenant default, where it decides nothing.
-func pickMemSegment(matches []memSegment, want string) (memSegment, bool) {
-	switch len(matches) {
-	case 0:
-		return memSegment{}, false
-	case 1:
-		return matches[0], true
-	}
-	if want != "" {
-		for _, m := range matches {
-			if m.networkRef == want {
-				return m, true
-			}
-		}
-		return matches[0], true
-	}
-	for _, m := range matches {
-		if m.networkRef != matches[0].networkRef {
-			return memSegment{}, false
-		}
-	}
-	return matches[0], true
+	scope, dynamic := snap.ScopeForAddress(addr, cloudNetworkRef)
+	return scope, dynamic, nil
 }
 
 // ── provisional inventory ──────────────────────────────────────────
@@ -1075,4 +1156,68 @@ func (a *asset) dropIdentifier(key string) {
 		}
 	}
 	a.identOrder = kept
+}
+
+// RetireIdentifier implements [identity.IdentifierRetirer]: the drift verdicts'
+// "replace the key" and "release the old address". A value the asset does not
+// hold is refused, as the postgres store refuses it.
+func (r *Repository) RetireIdentifier(_ context.Context, ref identity.AssetRef, id identity.Identifier) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
+	if !ok {
+		return fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+	}
+	key := ownerKey(ref.TenantID, id)
+	if owner, owned := r.owners[key]; !owned || owner.ID != ref.ID {
+		return fmt.Errorf("%w: %s=%q is not %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, ref.ID)
+	}
+	if _, held := a.identifiers[id.Key()]; !held {
+		return fmt.Errorf("%w: %s does not carry %s=%q", identity.ErrIdentifierConflict, ref.ID, id.Kind, id.Value)
+	}
+	a.dropIdentifier(id.Key())
+	delete(r.owners, key)
+	return nil
+}
+
+// SetTLSCertificates records the leaf certificate fingerprints an asset
+// presents. A test helper: certificates are written by inventory-service's
+// crypto path, never by the engine, so the fake has no other way to hold them.
+func (r *Repository) SetTLSCertificates(ref identity.AssetRef, fingerprints ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tlsCerts == nil {
+		r.tlsCerts = map[string][]string{}
+	}
+	r.tlsCerts[assetKey(ref.TenantID, ref.ID)] = fingerprints
+}
+
+// DriftMaterial implements [identity.DriftMaterialReader]: the certificates
+// [Repository.SetTLSCertificates] recorded, and the ports of the asset's
+// stored endpoints.
+func (r *Repository) DriftMaterial(_ context.Context, ref identity.AssetRef) (identity.StoredDriftMaterial, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
+	if !ok {
+		return identity.StoredDriftMaterial{}, nil
+	}
+	out := identity.StoredDriftMaterial{TLSCertFingerprints: append([]string(nil), r.tlsCerts[assetKey(ref.TenantID, ref.ID)]...)}
+	seen := map[string]bool{}
+	for _, k := range a.epOrder {
+		ep := a.endpoints[k]
+		if ep.Port <= 0 {
+			continue
+		}
+		t := strings.ToLower(ep.Transport)
+		if t == "" {
+			t = "tcp"
+		}
+		p := strconv.Itoa(ep.Port) + "/" + t
+		if !seen[p] {
+			seen[p] = true
+			out.Ports = append(out.Ports, p)
+		}
+	}
+	return out, nil
 }

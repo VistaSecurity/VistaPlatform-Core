@@ -18,6 +18,9 @@ type EventPublisherService struct {
 		Publish(context.Context, string, uuid.UUID, string, interface{}) error
 		PublishDurable(context.Context, invevents.Envelope) error
 	}
+	// notify publishes a tenant notification on `notifications.send`. Nil when
+	// NATS is unavailable, which drops the notification and nothing else.
+	notify func(sharedevents.NotificationEvent) error
 }
 
 // NewEventPublisherService creates a new event publisher service
@@ -41,6 +44,9 @@ func NewEventPublisherService() (*EventPublisherService, error) {
 	return &EventPublisherService{
 		publisher: publisher,
 		lifecycle: lifecycle,
+		notify: func(n sharedevents.NotificationEvent) error {
+			return sharedevents.PublishJSON(client, sharedevents.SubjectNotificationsSend, n)
+		},
 	}, nil
 }
 

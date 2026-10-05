@@ -1,14 +1,12 @@
 package services
 
 import (
-	"database/sql"
 	"fmt"
-	"sort"
-	"strings"
-	"time"
+	"net"
 
 	"github.com/google/uuid"
-	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/autoscan"
 )
 
 // A scan target must be a BARE host. Nothing downstream splits host from port:
@@ -23,67 +21,12 @@ import (
 // assets rather than widening every scan.
 var activeScanFallbackPorts = []int{443, 8443}
 
-// activeScanProbeProtocols is the set of protocols an Active Scan may request.
-// It is deliberately narrow:
-//   - both scan runtimes have a prober registered for TLS and SSH on any port
-//     (shared/discovery probe_tls.go / probe_ssh.go);
-//   - OT/ICS protocols are NOT included — those are gated by the
-//     ot_active_probing tier flag via the job's separate ot_probe_protocols
-//     field, and smuggling them in through Protocols would bypass that gate.
-var activeScanProbeProtocols = []string{"SSH", "TLS"}
-
-// tlsWrappedConfigProtocols maps a recorded crypto-configuration protocol onto
-// the canonical "TLS" prober. Canonicalized per shareddisc.CanonicalProtocolName.
-var tlsWrappedConfigProtocols = map[string]bool{
-	"TLS": true, "SSL": true, "HTTPS": true,
-	"LDAPS": true, "SMTPS": true, "IMAPS": true, "POP3S": true, "FTPS": true,
-}
-
-// probeableProtocol maps a protocol string recorded on a crypto configuration
-// onto the protocol name an Active Scan can actually request, or "" when the
-// value carries no probeable signal (e.g. "tcp", "udp", "unknown").
-func probeableProtocol(protocol string) string {
-	switch canonical := shareddisc.CanonicalProtocolName(protocol); {
-	case canonical == "SSH":
-		return "SSH"
-	case tlsWrappedConfigProtocols[canonical]:
-		return "TLS"
-	default:
-		return ""
-	}
-}
-
-// scanStamp is an asset's freshness value as it stood BEFORE an Active Scan
-// optimistically stamped it. Captured so a failed dispatch can restore the
-// exact prior value instead of guessing one.
-type scanStamp struct {
-	// assetID names the ENDPOINT the stamp belongs to since phase 1: scan
-	// freshness is a property of the socket that was probed, not of the thing
-	// that exposes it (DATA_MODEL §2). The field keeps its name because the
-	// restore statements address it by id and nothing else reads it.
-	assetID       uuid.UUID
-	lastScannedAt sql.NullTime
-}
-
-// planStampRestore splits captured stamps into the two restore groups:
-// assets whose last_scanned_at was NULL (restore to NULL — they were genuinely
-// never scanned and belong back on the Active Scan list) and assets that had a
-// real timestamp (restore that exact instant — their scan history is real and
-// must not be erased by a scan that merely failed to dispatch today).
-//
-// Timestamps are rendered RFC3339Nano so they survive the text form of the
-// ::timestamptz[] array with full precision and an explicit offset.
-func planStampRestore(prior []scanStamp) (nullIDs []uuid.UUID, tsIDs []string, tsValues []string) {
-	for _, stamp := range prior {
-		if stamp.lastScannedAt.Valid {
-			tsIDs = append(tsIDs, stamp.assetID.String())
-			tsValues = append(tsValues, stamp.lastScannedAt.Time.Format(time.RFC3339Nano))
-			continue
-		}
-		nullIDs = append(nullIDs, stamp.assetID)
-	}
-	return nullIDs, tsIDs, tsValues
-}
+// No protocol is chosen here. An Active Scan is a planned job on the shared
+// scan engine ( WP4), which identifies the service from what answers on
+// each port: it reads a banner, sends at most one TLS hello to a silent port,
+// and runs the SSH handshake only when the banner says SSH (spec V7). OT/ICS
+// probes run only through a job's explicit ot_probe_protocols opt-in, which an
+// Active Scan never sends.
 
 // activeScanAsset is one asset resolved into probe coordinates.
 type activeScanAsset struct {
@@ -91,29 +34,34 @@ type activeScanAsset struct {
 	name string // what a person calls it: the hostname, else the host
 	host string // BARE host — an IP or hostname, never "host:port"
 	port int    // 0 when the asset records no port
-	// configProtocols are the protocol values already recorded against this
-	// asset's crypto configurations — the best available evidence of what it
-	// actually speaks.
-	configProtocols []string
+	// sni are the names the asset is known by, offered as SNI to a TLS port of
+	// its address that refuses a nameless handshake (autoscan.SNICandidates).
+	sni []string
 }
 
 // activeScanBatch is one dispatchable discovery job: the assets that share a
-// scan shape, plus the ports and protocols to probe them with.
+// port list, plus those ports.
 type activeScanBatch struct {
-	assetIDs  []uuid.UUID
-	targets   []string
-	ports     []int
-	protocols []string
+	assetIDs []uuid.UUID
+	targets  []string
+	ports    []int
 	// assetsByHost keys the same assets by target host, so a batch split
 	// across executors stamps each asset by the job that actually
 	// probes its host.
 	assetsByHost map[string][]uuid.UUID
+	// sniByHost is the names to offer for each target that is an ADDRESS (a
+	// hostname target presents its own name already): the union over the assets
+	// sharing it, bounded.
+	sniByHost map[string][]string
 }
 
 // subset returns the part of this batch covering only the given hosts.
 func (b activeScanBatch) subset(hosts []string) activeScanBatch {
-	out := activeScanBatch{ports: b.ports, protocols: b.protocols, assetsByHost: make(map[string][]uuid.UUID, len(hosts))}
+	out := activeScanBatch{ports: b.ports, assetsByHost: make(map[string][]uuid.UUID, len(hosts)), sniByHost: map[string][]string{}}
 	for _, h := range hosts {
+		if names, ok := b.sniByHost[h]; ok {
+			out.sniByHost[h] = names
+		}
 		assets, ok := b.assetsByHost[h]
 		if !ok {
 			continue
@@ -125,71 +73,32 @@ func (b activeScanBatch) subset(hosts []string) activeScanBatch {
 	return out
 }
 
-// deriveActiveScanProtocols decides what to probe an asset with, instead of
-// assuming TLS. Evidence, best first:
-//  1. the protocols recorded on the asset's own crypto configurations;
-//  2. what its port is well known to speak (shared PortSpeaks).
-//
-// Falls back to TLS when nothing is known, matching
-// shareddisc.ProtocolsForPort's own fallback — most crypto-bearing listeners
-// speak TLS, and this is what the pre-fix code always sent.
-func deriveActiveScanProtocols(port int, configProtocols []string) []string {
-	seen := make(map[string]bool, 2)
-	var out []string
-	add := func(p string) {
-		if p == "" || seen[p] {
-			return
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-
-	for _, p := range configProtocols {
-		add(probeableProtocol(p))
-	}
-	if port > 0 {
-		for _, p := range activeScanProbeProtocols {
-			if shareddisc.PortSpeaks(port, p) {
-				add(p)
-			}
-		}
-	}
-	if len(out) == 0 {
-		add("TLS")
-	}
-
-	sort.Strings(out) // deterministic — the list is also a batch grouping key
-	return out
-}
-
 // maxActiveScanTargetsPerJob mirrors the 1000-target cap enforced by both
 // CreateJob implementations; batches larger than this are chunked.
 const maxActiveScanTargetsPerJob = 1000
 
-// planActiveScanBatches groups assets into discovery jobs by their scan shape
-// (ports × protocols).
+// planActiveScanBatches groups assets into discovery jobs by their port list.
 //
-// Grouping matters because cluster-sensor's CreateJob writes one target row per
-// input carrying ALL of the job's protocols × ALL of its ports. Pouring every
-// asset's port into one job would make the scan a cartesian product: N assets ×
-// P distinct ports × Q protocols, so probing 50 assets on 10 distinct ports
-// would mean 500 port probes, 450 of them against ports the asset does not even
-// listen on. Grouping keeps each job homogeneous, so total probe work stays
-// proportional to the number of assets (one port, one or two protocols each).
+// Grouping matters because a job scans ALL of its ports on EVERY target.
+// Pouring every asset's port into one job would make the scan a cartesian
+// product: probing 50 assets on 10 distinct ports would mean 500 port probes,
+// 450 of them against ports the asset does not even listen on. Grouping keeps
+// each job homogeneous, so total probe work stays proportional to the number
+// of assets (one port each, or the two fallback ports).
 //
 // Assets with no addressable host are dropped here and reported by the caller,
 // which is what keeps the freshness stamp honest.
 func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
-	// Accumulator for one scan shape. Assets are keyed by host because two
+	// Accumulator for one port list. Assets are keyed by host because two
 	// assets can share a host and port (e.g. one record per service on a box):
 	// cluster-sensor writes one target row per input, so emitting the host twice
 	// scans it twice for nothing. Every asset still rides along under its host —
 	// each one gets stamped, and each one must land in the job that probes it.
 	type shape struct {
 		ports        []int
-		protocols    []string
 		hosts        []string // deduped, insertion-ordered
 		assetsByHost map[string][]uuid.UUID
+		sniByHost    map[string][]string
 	}
 
 	var order []string
@@ -203,9 +112,8 @@ func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
 		if a.port > 0 {
 			ports = []int{a.port}
 		}
-		protocols := deriveActiveScanProtocols(a.port, a.configProtocols)
 
-		key := fmt.Sprintf("%v|%s", ports, strings.Join(protocols, ","))
+		key := fmt.Sprintf("%v", ports)
 		sh, ok := byKey[key]
 		if !ok {
 			sh = &shape{
@@ -213,8 +121,8 @@ func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
 				// alias the package-level activeScanFallbackPorts, handing
 				// callers a struct that shares storage with a package var.
 				ports:        append([]int(nil), ports...),
-				protocols:    protocols,
 				assetsByHost: make(map[string][]uuid.UUID),
+				sniByHost:    make(map[string][]string),
 			}
 			byKey[key] = sh
 			order = append(order, key)
@@ -223,6 +131,9 @@ func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
 			sh.hosts = append(sh.hosts, a.host)
 		}
 		sh.assetsByHost[a.host] = append(sh.assetsByHost[a.host], a.id)
+		if len(a.sni) > 0 && net.ParseIP(a.host) != nil {
+			sh.sniByHost[a.host] = autoscan.MergeSNICandidates(sh.sniByHost[a.host], a.sni)
+		}
 	}
 
 	var out []activeScanBatch
@@ -239,16 +150,20 @@ func planActiveScanBatches(assets []activeScanAsset) []activeScanBatch {
 			hosts := sh.hosts[start:end]
 			var assetIDs []uuid.UUID
 			byHost := make(map[string][]uuid.UUID, len(hosts))
+			sniByHost := map[string][]string{}
 			for _, h := range hosts {
 				assetIDs = append(assetIDs, sh.assetsByHost[h]...)
 				byHost[h] = sh.assetsByHost[h]
+				if names, ok := sh.sniByHost[h]; ok {
+					sniByHost[h] = names
+				}
 			}
 			out = append(out, activeScanBatch{
 				assetIDs:     assetIDs,
 				targets:      hosts,
 				ports:        sh.ports,
-				protocols:    sh.protocols,
 				assetsByHost: byHost,
+				sniByHost:    sniByHost,
 			})
 		}
 	}

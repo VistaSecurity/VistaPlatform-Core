@@ -22,7 +22,7 @@ import (
 //
 // The consumer's side of the deal is one call:
 //
-//	q, state := edition.NewQuery(catalogue, sink)
+//	q, state := edition.NewQuery(catalogue, sink, resolver)
 //
 // which returns seams.NullQuery in Core and the real thing in an Enterprise
 // build with a reachable provider — and, either way, a Description saying which
@@ -88,16 +88,16 @@ func QueryLinked() bool { return queryFactory != nil }
 // question's trail across two rails. Pass nil only where there is genuinely no
 // audit rail, which is not a configuration a deployment sending prompts
 // anywhere should run.
-func NewQuery(cat ql.LadderCatalog, sink ai.AuditSink) (seams.Query, seams.Description) {
-	provider, err := ai.NewFromEnv()
-	if err != nil {
-		// Not fatal and not silent. NewFromEnv always hands back a usable
-		// provider (NoneProvider here), so the only thing lost is the grounded
-		// query — and an operator who set AI_PROVIDER needs to be told it did
-		// not take.
-		log.Printf("[ai-edition] AI provider not configured: %v — natural-language query is unavailable", err)
-	}
-	provider = ai.Boundary(provider, sink)
+//
+// resolver decides, per request, which provider answers: the asking tenant's
+// own, the platform default, or the environment's (see [ai.Resolver]). With one,
+// the seam is selected whenever this build has the model clients, because a
+// tenant may connect a provider long after the process started; a request with
+// no provider behind it gets ai.ErrUnavailable from Answer, which the endpoint
+// already turns into the sentence a user reads. A nil resolver is a service
+// with no database handle and keeps the environment-only behaviour.
+func NewQuery(cat ql.LadderCatalog, sink ai.AuditSink, resolver *ai.Resolver) (seams.Query, seams.Description) {
+	provider := ai.SeamProvider(resolver, sink)
 
 	reg := seams.NewRegistry()
 	want := ""

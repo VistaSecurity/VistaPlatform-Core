@@ -111,6 +111,11 @@ $rows = Get-NetAdapter | ForEach-Object {
     Virtual   = $_.Virtual
     Addresses = @(Get-NetIPAddress -InterfaceIndex $ifIndex |
                   ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
+    Origins   = @(Get-NetIPAddress -InterfaceIndex $ifIndex |
+                  ForEach-Object { [pscustomobject]@{
+                    Address = "$($_.IPAddress)/$($_.PrefixLength)"
+                    Prefix  = "$($_.PrefixOrigin)"
+                    Suffix  = "$($_.SuffixOrigin)" } })
   }
 }
 ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress`
@@ -291,6 +296,30 @@ type winAdapter struct {
 	Status    string   `json:"Status"`
 	Virtual   bool     `json:"Virtual"`
 	Addresses []string `json:"Addresses"`
+	// Origins are Get-NetIPAddress's PrefixOrigin / SuffixOrigin per address,
+	// as strings (interpolated in the script, because ConvertTo-Json would
+	// otherwise emit the enums' integer values).
+	Origins []struct {
+		Address string `json:"Address"`
+		Prefix  string `json:"Prefix"`
+		Suffix  string `json:"Suffix"`
+	} `json:"Origins"`
+}
+
+// windowsAssignment reads Get-NetIPAddress's origins. Manual on both halves is
+// an address an administrator typed; Dhcp, or a router advertisement's prefix,
+// is a lease. WellKnown (loopback, link-local), Other and anything a future
+// build adds are unknown.
+func windowsAssignment(prefix, suffix string) addressAssignment {
+	p, s := strings.ToLower(strings.TrimSpace(prefix)), strings.ToLower(strings.TrimSpace(suffix))
+	switch {
+	case p == "manual" && s == "manual":
+		return assignedStatic
+	case p == "dhcp" || s == "dhcp" || p == "routeradvertisement":
+		return assignedDynamic
+	default:
+		return assignedUnknown
+	}
 }
 
 func collectWindowsInterfaces(ctx context.Context, r Runner, rep *Report) {
@@ -335,9 +364,14 @@ func ParseWindowsAdapters(b []byte) ([]Interface, error) {
 		default:
 			entry.State = "unknown"
 		}
+		origin := map[string]addressAssignment{}
+		for _, o := range a.Origins {
+			origin[strings.TrimSpace(o.Address)] = windowsAssignment(o.Prefix, o.Suffix)
+		}
 		for _, addr := range a.Addresses {
 			if strings.TrimSpace(addr) != "" && !strings.HasPrefix(addr, "/") {
 				entry.Addresses = append(entry.Addresses, addr)
+				entry.assign(addr, origin[strings.TrimSpace(addr)])
 			}
 		}
 		out = append(out, entry)

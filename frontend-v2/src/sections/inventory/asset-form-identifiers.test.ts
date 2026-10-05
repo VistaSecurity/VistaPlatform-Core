@@ -7,7 +7,7 @@
 // something the save asked to remove.
 import { describe, expect, it } from 'vitest';
 import type { Asset } from '@vistasecurity/api-contract';
-import { identifiersToRows, identifierUpdateError, keptIdentifiersMessage } from './asset-form-modal';
+import { identifierInputFor, identifiersToRows, identifierUpdateError, keptIdentifiersMessage } from './asset-form-modal';
 import { identifierLockReason, isEditableIdentifier } from './class-picker';
 
 const asset = {
@@ -113,5 +113,34 @@ describe('identifierUpdateError (gate1 C3)', () => {
 
   it('has something to say about an error with no message at all', () => {
     expect(identifierUpdateError(undefined)).toBe('Failed to update asset');
+  });
+});
+
+describe('pinning an address (#2205)', () => {
+  const measured = { kind: 'ip_address', value: '192.0.2.1', sourceKind: 'measured', scope: 'seg-1' };
+
+  it('sends an echoed address bare: an echo is not a declaration', () => {
+    expect(identifierInputFor(measured)).toEqual({ kind: 'ip_address', value: '192.0.2.1', scope: 'seg-1' });
+  });
+
+  it('asks the server to pin an address the person ticked on this save', () => {
+    expect(identifierInputFor({ ...measured, addressAssignment: 'static' })).toEqual({
+      kind: 'ip_address', value: '192.0.2.1', scope: 'seg-1', address_assignment: 'static',
+    });
+  });
+
+  it('does not repeat a pin the server already holds, and never pins another kind', () => {
+    expect(identifierInputFor({ ...measured, addressAssignment: 'static', storedAssignment: 'static' }))
+      .not.toHaveProperty('address_assignment');
+    expect(identifierInputFor({ kind: 'hostname', value: 'gw', addressAssignment: 'static' }))
+      .not.toHaveProperty('address_assignment');
+  });
+
+  it('carries the stored assignment onto the row, so the editor can show it', () => {
+    const rows = identifiersToRows({
+      id: 'a2',
+      identifiers: [{ kind: 'ip_address', value: '192.0.2.1', source_kind: 'declared', address_assignment: 'static', confidence: 1, first_seen_at: '', last_seen_at: '' }],
+    } as unknown as Asset);
+    expect(rows[0]).toMatchObject({ addressAssignment: 'static', storedAssignment: 'static' });
   });
 });

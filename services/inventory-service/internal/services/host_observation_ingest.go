@@ -50,6 +50,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/netip"
@@ -67,7 +68,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
-	"github.com/vistasecurity/vistaplatform/shared/identity/derive"
 	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
@@ -131,8 +131,8 @@ func isHostObservation(f IngestFinding) bool {
 	return f.Kind == KindHostObservation
 }
 
-// hostObservationObservation builds the identification-engine observation for a
-// passively observed host.
+// How a passively observed host is identified (hostObservationSighting states
+// it; identity.Intake scopes and grades it).
 //
 // Identifier kinds are ADR-0002 D3's, mapped from the payload as the wire
 // contract's consumer-obligations table says:
@@ -187,272 +187,45 @@ func classHintForSelfReport(ho *hostobs.HostObservation) assetclass.Key {
 	}
 }
 
+// hostObservationObservation is the observation a host observation resolves
+// as: the intake's reading of hostObservationSighting.
 func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.Observation, error) {
-	obs := identity.Observation{
-		TenantID:   tenantID.String(),
-		Source:     hostObservationSource(f),
-		ObservedAt: hostObservationTime(f, ho),
-		Confidence: hostObservationConfidence(f, ho),
-		Network: identity.Network{
-			Ownership: hostObservationOwnership,
-			Type:      findingNetworkType(f),
-		},
-		// Coarse and true, and the FLOOR rather than the answer. Workstream
-		// 2.10b hands this observation to the curated rule table before it is
-		// resolved (see ingestHostObservation); when the rules decide a class
-		// this is replaced, with `class_source_kind: rule` and a
-		// `class_source_ref` naming the row. When they do not — or when they
-		// contradict each other — it stands, which is the same honesty as the
-		// PQC classifier's `unclassified` bucket.
-		//
-		// A SELF-report (ho.AgentID set) starts from a smarter floor: the
-		// sensor's own registered platform/profile, which is real evidence
-		// about the host it runs on, not a guess. See
-		// classHintForSelfReport — it is still a HINT, exactly like
-		// KeyUnknownHost is, and the rule table below can still override it.
-		ClassHint: assetclass.KeyUnknownHost,
-	}
-	obs.Admission = identity.AdmissionEvidence{
-		Relayed: ho.Relayed(), CollectorVersion: rawDataString(f.RawData, "collector_version", "sensor_version"),
-		ReceiptID: rawDataString(f.RawData, "discovery_id"),
-	}
-	// Only protocols that directly bind a device/interface provide admission
-	// evidence. DNS replies and service advertisements never imply a device.
-	switch ho.Source {
-	case hostobs.SourceARP, hostobs.SourceDHCP, hostobs.SourceLLDP, hostobs.SourceCDP:
-		obs.Admission.Direct = true
-	}
+	res, err := s.hostObservationIntake(tenantID, f, ho)
+	return res.Observation, err
+}
 
+// hostObservationIntake builds the sighting a host observation is and runs it
+// through the intake. Everything this path used to decide for itself — the
+// segment of each address and of the names, which segments are dynamic, the
+// admission flags, which MACs and names and addresses are identity at all —
+// is the intake's now (intake_adapters.go). What stays is the one check only
+// this service can make: whether a self-report's AgentID is a sensor this
+// tenant registered AND the sensor that delivered the row.
+//
+// The result's AttributeEvidence is what the intake withheld as identity but
+// kept as evidence (synthetic names, temporary and unscoped link-local IPv6
+// addresses); applyHostObservationContext writes it onto the asset.
+//
+// NO ENDPOINTS. A passive frame proves an address is bound to this host, which
+// the ip_address identifier already records; an asset_endpoints row is a claim
+// about a reachable face, and nothing connected to anything here.
+func (s *AssetService) hostObservationIntake(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.IntakeResult, error) {
+	verified := false
 	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
 		if sensorID, err := uuid.Parse(agentID); err == nil && s.db != nil && f.SourceSensorID != nil && *f.SourceSensorID == agentID {
 			if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-				return tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sensors WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL)`, tenantID, sensorID).Scan(&obs.Admission.Authoritative)
+				return tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sensors WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL)`, tenantID, sensorID).Scan(&verified)
 			}); err != nil {
-				return identity.Observation{}, fmt.Errorf("verify sensor identity: %w", err)
+				return identity.IntakeResult{}, fmt.Errorf("verify sensor identity: %w", err)
 			}
 		}
-		// A sensor installation is distinct from a device-agent installation. Set
-		// ONLY on a sensor's self-report of the host it runs on — every
-		// passively decoded observation leaves AgentID empty. Confidence 1: an
-		// agent's own id is not graded on the arp/dhcp/mdns ladder that grades
-		// how directly a THIRD PARTY's frame states an identity.
-		if obs.Admission.Authoritative {
-			obs.ClassHint = classHintForSelfReport(ho)
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindSensorID, Value: agentID, Confidence: 1,
-			})
-		}
 	}
-
-	// The scope weak identifiers live in. Addresses are scoped individually
-	// below — a host with an address in two segments is a real thing, and
-	// scoping both to whichever one happened to be first would make one of them
-	// identify in a segment it is not in.
-	primaryAddr := hostObservationPrimaryAddress(ho)
-	bestName := hostObservationBestName(ho)
-	addrScopes := s.hostObservationAddressScopes(tenantID, ho)
-	nameScope, nameScopeDynamic := s.hostObservationNameScope(tenantID, addrScopes, primaryAddr, bestName)
-	obs.Network.SegmentID = nameScope
-	dynamic := map[string]bool{}
-	if nameScopeDynamic {
-		dynamic[nameScope] = true
+	label := "host observation " + hostObservationLabel(ho)
+	res, err := s.assessSighting(context.Background(), label, hostObservationSighting(tenantID, f, ho, verified))
+	if errors.Is(err, identity.ErrNoUsableIdentifier) {
+		return res, fmt.Errorf("%w: %s", errNoIdentifiers, label)
 	}
-
-	if mac := strings.TrimSpace(ho.MAC); mac != "" {
-		// Computed here as well as read from the payload: an older sensor
-		// binary sends no `mac_virtual`, and the rule has to hold for it too.
-		virtualProto, virtual := hostobs.VirtualMACProtocol(mac)
-		if virtual || ho.MACVirtual {
-			// A first-hop-redundancy virtual router MAC (VRRP, CARP, HSRP,
-			// GLBP — shared/hostobs/virtualmac.go). It belongs to the floating
-			// address's GROUP, not to a chassis, and moves to the standby
-			// router at failover: keying a node on it makes the standby
-			// "become" the active router every time. Same treatment as a
-			// locally-administered MAC, for the same reason — identifier
-			// confidence does not affect voting, so "attach weakly" is
-			// indistinguishable from attaching. Recorded as an attribute
-			// (hostObservationMetadata) so the row stays explicable.
-			log.Printf("[AssetService] host observation %s: MAC %s is a %s virtual router address; not used as an identifier (it moves with the floating address)",
-				hostObservationLabel(ho), mac, orDefault(virtualProto, "first-hop-redundancy"))
-		} else if ho.MACLocallyAdministered {
-			// The U/L bit is set: a randomised iOS/Android Wi-Fi address, a
-			// virtual NIC, or a spoofed one. It is not a stable key — the device
-			// rotates it — and attaching it would create a fresh asset on every
-			// rotation, each holding a MAC that will never be seen again.
-			//
-			// It is dropped as an IDENTIFIER rather than attached weakly,
-			// because identifier confidence does not affect whether a kind votes
-			// (Engine.kindVotes reads scope, not confidence), so "attach it with
-			// low confidence" would be indistinguishable from attaching it. The
-			// observation is then identified by its names and addresses if it
-			// carries any, and refused if it does not — which is the honest
-			// outcome for a frame whose only identity is a number that changes.
-			//
-			// The value is still RECORDED, as an attribute, so the row is
-			// explicable to a human looking at why no asset appeared.
-			log.Printf("[AssetService] host observation %s: MAC %s is locally administered; not used as an identifier (it rotates)",
-				hostObservationLabel(ho), mac)
-		} else {
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindMACAddress, Value: mac, Confidence: 1,
-			})
-		}
-	}
-
-	// An FQDN is globally unique and needs no scope; a short name identifies
-	// only within one. The producer has already filed each name under the right
-	// heading (shared/hostobs addName), so this does not re-derive it — and it
-	// must not: "an IP is never a hostname" is enforced at the source, where a
-	// name that parses as an address never becomes a name at all.
-	//
-	// EXCEPT `.local`. An mDNS name is link-scoped by definition (RFC 6762 §3):
-	// "printer.local" on one VLAN and "printer.local" on another are two hosts,
-	// and nothing about the name says which. Filing it as an unscoped, globally
-	// unique fqdn let one name DECIDE a match across segments — which is how a
-	// gateway that reflected a laptop's announcement onto the sensor's VLAN
-	// then absorbed the laptop's own observation from its home VLAN, decided
-	// by fqdn, and with it the laptop's SSH endpoint. The whole name is kept
-	// (a CMDB can still join on it) but as a hostname, scoped to the segment
-	// the observation was made in, so it identifies where mDNS says it does.
-	//
-	// And a name that is not IDENTITY — UUID-form, IP-encoded, `none`/`none-N`
-	// (hostnamequality.IsIdentityName) — is not an identifier at all ( D1).
-	// It is recorded as the `synthetic_names` attribute instead
-	// (hostObservationSyntheticNames → recordSyntheticNames), so a rotating
-	// service instance name stops minting an identifier per announcement.
-	for _, fqdn := range ho.FQDNs {
-		v := strings.TrimSpace(fqdn)
-		if v == "" || isIPLiteral(v) || !hostnamequality.IsIdentityName(v) {
-			continue
-		}
-		if isMDNSLocalName(v) {
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindHostname, Value: v, Scope: nameScope, Confidence: 1,
-			})
-			continue
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindFQDN, Value: v, Confidence: 1,
-		})
-	}
-	for _, name := range ho.Hostnames {
-		if v := strings.TrimSpace(name); v != "" && !isIPLiteral(v) && hostnamequality.IsIdentityName(v) {
-			obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-				Kind: identity.KindHostname, Value: v, Scope: nameScope, Confidence: 1,
-			})
-		}
-	}
-	// A hostname many unrelated devices carry (`iphone`, `printer`, or a name
-	// three assets in this tenant already hold) is still recorded — it is true —
-	// but marked generic at confidence 0.3, so a later reader of the observation
-	// does not mistake it for evidence of ONE device ( B2). A sensor's
-	// observation is measured, never declared, so every hostname here is
-	// eligible. FQDNs are not: the fqdn kind is issued by whoever owns the
-	// domain, and MarkAll leaves every kind but `hostname` alone.
-	obs.Identifiers = s.genericNames().MarkAll(context.Background(), tenantID.String(), obs.Identifiers)
-
-	// IPv6 hygiene ( D2) and derived MACs ( D3), one pass over the
-	// addresses:
-	//
-	//   - an EUI-64 address carries the MAC it was built from. When the sighting
-	//     stated NO MAC of its own, that MAC is appended as a DERIVED identifier
-	//     (Source inferred, ref derived:eui64:<addr>, confidence 0.9). A MAC the
-	//     sighting stated — even one dropped above as locally administered or
-	//     virtual — is strictly better evidence, and a derived one that differed
-	//     from it would be noise, not a conflict;
-	//   - a link-local address identifies only on its own link: it is scoped to
-	//     the sighting's real segment (nameScope), or kept as the
-	//     `link_local_addresses` attribute when there is none;
-	//   - a temporary-shaped IPv6 address (random, not EUI-64, not hand-assigned
-	//     — see derive.IPv6Role) rotates daily, so it is kept as the
-	//     `ipv6_temporary_addresses` attribute instead of an identifier nobody
-	//     will look up again.
-	//
-	// The attribute lists are written by applyHostObservationContext
-	// (hostObservationAddressEvidence applies the same rule).
-	statedMAC := strings.TrimSpace(ho.MAC) != ""
-	derivedMACs := map[string]bool{}
-	nameScopeReal := nameScope != "" && nameScope != identity.ScopeTenantDefault
-	for _, as := range addrScopes {
-		v, scope, scopeDynamic := as.value, as.scope, as.dynamic
-		addr, perr := netip.ParseAddr(v)
-		if perr == nil {
-			if mac, ok := derive.MACFromEUI64(addr); ok && !statedMAC && !derivedMACs[mac] {
-				derivedMACs[mac] = true
-				obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-					Kind: identity.KindMACAddress, Value: mac, Confidence: derivedMACConfidence,
-					Source: identity.Source{Kind: identity.SourceInferred, Ref: derive.RefEUI64(addr)},
-				})
-			}
-			if attrlist.AddressAttribute(addr, nameScopeReal) != "" {
-				continue
-			}
-			if addr.Is6() && addr.IsLinkLocalUnicast() {
-				scope, scopeDynamic = nameScope, nameScopeDynamic
-			}
-		}
-		if scopeDynamic {
-			// An address handed out by DHCP is today's lease and tomorrow's
-			// other host. The identifier is still RECORDED — it is true, and it
-			// is what the asset's primary_address is taken from — but naming the
-			// scope here is what stops it DECIDING a match (Engine.kindVotes).
-			dynamic[scope] = true
-		}
-		obs.Identifiers = append(obs.Identifiers, identity.Identifier{
-			Kind: identity.KindIPAddress, Value: v, Scope: scope, Confidence: 1,
-		})
-	}
-	if len(dynamic) > 0 {
-		obs.DynamicScopes = dynamic
-	}
-
-	// The ARP decoder's evidence, for the engine's floating-address rule. A
-	// gratuitous ARP is the announcer CLAIMING the address, which corroborates
-	// "node X announces VIP Y" when the MAC and the address resolve to two
-	// assets. Only these two keys travel: Observation.Attributes is read by
-	// the engine on an allowlist (SummaryAttributeKeys for the matcher; these
-	// for the rule), and the rest of the decoder's attributes stay in the
-	// asset's metadata where they always were.
-	for _, key := range []string{"arp_gratuitous", "arp_operation"} {
-		if v, ok := ho.Attributes[key]; ok {
-			if obs.Attributes == nil {
-				obs.Attributes = map[string]any{}
-			}
-			obs.Attributes[key] = v
-		}
-	}
-
-	// Display name and hostname are context, not identity: the authoritative
-	// list is Identifiers. A host with no name at all displays as its address,
-	// and one with neither displays as its MAC — which is the only thing we were
-	// told about it, and better than a blank row in Approvals.
-	if bestName != nil {
-		obs.Hostname = strings.ToLower(*bestName)
-		obs.DisplayName = obs.Hostname
-	} else if primaryAddr != nil {
-		obs.DisplayName = *primaryAddr
-	} else if ho.MAC != "" {
-		obs.DisplayName = ho.MAC
-	}
-
-	// NO ENDPOINTS. A passive frame proves an address is bound to this host,
-	// which the ip_address identifier already records and which the engine turns
-	// into the asset's primary_address. An asset_endpoints row is a claim about a
-	// reachable FACE — an address/port/transport something could connect to —
-	// and nothing connected to anything here. `port = 0` in the stored row means
-	// "not an endpoint", and this is what honouring that looks like.
-
-	clean, rejected := obs.Sanitize()
-	for _, r := range rejected {
-		// One malformed identifier must not lose the whole observation, but the
-		// reject is logged rather than dropped.
-		log.Printf("[AssetService] host observation %s: dropped a %s identifier: %v",
-			hostObservationLabel(ho), r.Identifier.Kind, r.Err)
-	}
-	if len(clean.Identifiers) == 0 {
-		return identity.Observation{}, fmt.Errorf("%w: host observation %s", errNoIdentifiers, hostObservationLabel(ho))
-	}
-	return clean, nil
+	return res, err
 }
 
 // genericNames returns the process's generic-hostname decider, building it on
@@ -472,30 +245,6 @@ func (s *AssetService) genericNames() *identity.GenericNames {
 	return s.genericNamesVal
 }
 
-// isMDNSLocalName reports whether a qualified name is in the mDNS link-local
-// domain (`.local`, RFC 6762 §3), which is the one TLD a name can carry and
-// still identify a host only on the link it was heard on.
-func isMDNSLocalName(name string) bool {
-	return hostnamequality.IsMDNSLocalName(name)
-}
-
-// isIPLiteral reports whether a name is really an address written down.
-//
-// AN IP IS NEVER A HOSTNAME (ADR-0002 D3). A name identifier holding "10.0.0.5"
-// would be matched against other NAMES, never against the ip_address identifier
-// for the same value — so one host reached by both would become two assets, and
-// the address-in-a-name-slot would be scoped as a hostname and vote in a dynamic
-// segment where the real ip_address identifier is forbidden to.
-//
-// shared/hostobs will not produce one (its names come from DNS/NetBIOS name
-// fields), so this is a second lock on a door that is already shut. It costs a
-// parse per name and removes the possibility of a hand-built or future payload
-// walking through.
-func isIPLiteral(name string) bool {
-	_, err := netip.ParseAddr(strings.TrimSpace(name))
-	return err == nil
-}
-
 // hostObservationPrimaryAddress returns the first real address, or nil when the
 // observation carries none — which is a normal and expected case (an LLDP frame
 // with only a chassis MAC, an ARP probe from a host that has not been given an
@@ -508,50 +257,6 @@ func hostObservationPrimaryAddress(ho *hostobs.HostObservation) *string {
 		}
 	}
 	return nil
-}
-
-// hostObservationAddress is one real address of a sighting and the scope its
-// ip_address identifier lives in.
-type hostObservationAddress struct {
-	value   string
-	scope   string
-	dynamic bool
-}
-
-// hostObservationAddressScopes resolves every real address in the sighting to
-// its OWN segment, in payload order. 0.0.0.0 is the `dest_ip NOT NULL` column
-// compromise, not an address; shared/hostobs already refuses to record it, so
-// skipping it here is belt and braces against a hand-built payload.
-func (s *AssetService) hostObservationAddressScopes(tenantID uuid.UUID, ho *hostobs.HostObservation) []hostObservationAddress {
-	out := make([]hostObservationAddress, 0, len(ho.Addresses))
-	for _, addr := range ho.Addresses {
-		if !addr.IsValid() || addr.IsUnspecified() {
-			continue
-		}
-		v := addr.String()
-		scope, dynamic := s.observationScope(tenantID, &v, nil)
-		out = append(out, hostObservationAddress{value: v, scope: scope, dynamic: dynamic})
-	}
-	return out
-}
-
-// hostObservationNameScope is the segment the sighting's NAMES are scoped to:
-// the segment of the first address that resolves to a real one ( B5).
-//
-// It used to be the scope of the first address, full stop. A sighting that
-// lists an IPv6 ULA or link-local address first — which no configured segment
-// covers — then scoped every name to the tenant default even though an IPv4
-// address in the same sighting sat in a real segment, so the same name ended up
-// under two scopes and never collided with itself. When no address resolves,
-// the old rule stands: the first address, and the best name for a domain
-// segment.
-func (s *AssetService) hostObservationNameScope(tenantID uuid.UUID, addrs []hostObservationAddress, primaryAddr, bestName *string) (string, bool) {
-	for _, a := range addrs {
-		if a.scope != "" && a.scope != identity.ScopeTenantDefault {
-			return a.scope, a.dynamic
-		}
-	}
-	return s.observationScope(tenantID, primaryAddr, bestName)
 }
 
 // hostObservationBestName picks the highest-quality name the host answered to.
@@ -567,25 +272,6 @@ func hostObservationBestName(ho *hostobs.HostObservation) *string {
 	return nil
 }
 
-// hostObservationSyntheticNames is every name the sighting carried that the
-// builder refused as an identifier because it is not identity
-// (hostnamequality.IsIdentityName), normalised and deduplicated, in payload
-// order. An address written in a name slot is not a name of any kind and is
-// not included.
-func hostObservationSyntheticNames(ho *hostobs.HostObservation) []string {
-	var names []string
-	for _, list := range [][]string{ho.FQDNs, ho.Hostnames} {
-		for _, n := range list {
-			v := strings.TrimSpace(n)
-			if v == "" || isIPLiteral(v) || hostnamequality.IsIdentityName(v) {
-				continue
-			}
-			names = append(names, v)
-		}
-	}
-	return hostnamequality.MergeSyntheticNames(names, nil)
-}
-
 // recordSyntheticNames folds names into the asset's `synthetic_names`
 // attribute (most recent first, deduplicated, capped at
 // hostnamequality.MaxSyntheticNames), on the caller's transaction.
@@ -599,38 +285,8 @@ func recordSyntheticNames(ctx context.Context, tx *sqlx.Tx, tenantID, assetID uu
 	return attrlist.Record(ctx, tx, tenantID.String(), assetID.String(), attrlist.KeySyntheticNames, names, hostnamequality.MaxSyntheticNames)
 }
 
-// derivedMACConfidence is the confidence a MAC derived from an EUI-64 address
-// is recorded with ( Phase 2). Below an observed MAC's 1.0 because the
-// device chose to build its address that way, and nothing checked the frame.
-// It does not affect voting — kindVotes never reads confidence — only what a
-// reviewer is told.
-const derivedMACConfidence = 0.9
-
-// hostObservationAddressEvidence is the IPv6 evidence a sighting carries that
-// D2 keeps as ATTRIBUTES rather than identifiers, keyed by attribute
-// (attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal), in payload order.
-// nameScope is the sighting's name scope (obs.Network.SegmentID): a link-local
-// address is an identifier when that is a real segment, an attribute when not —
-// the same rule hostObservationObservation applies, through the same
-// attrlist.AddressAttribute.
-func hostObservationAddressEvidence(ho *hostobs.HostObservation, nameScope string) map[string][]string {
-	segmentScoped := nameScope != "" && nameScope != identity.ScopeTenantDefault
-	var out map[string][]string
-	for _, addr := range ho.Addresses {
-		if !addr.IsValid() || addr.IsUnspecified() {
-			continue
-		}
-		if key := attrlist.AddressAttribute(addr, segmentScoped); key != "" {
-			if out == nil {
-				out = map[string][]string{}
-			}
-			out[key] = append(out[key], addr.WithZone("").String())
-		}
-	}
-	return out
-}
-
-// recordAddressEvidence writes hostObservationAddressEvidence onto the asset,
+// recordAddressEvidence writes the IPv6 evidence the intake withheld as
+// identity (attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal) onto the asset,
 // each list capped at attrlist.MaxAddressEvidence, most recent first.
 func recordAddressEvidence(ctx context.Context, tx *sqlx.Tx, tenantID, assetID uuid.UUID, evidence map[string][]string) error {
 	for _, key := range []string{attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal} {
@@ -859,10 +515,11 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 		return identity.Resolution{}, fmt.Errorf("finding is marked %s but carries no readable host_observation payload", KindHostObservation)
 	}
 
-	obs, err := s.hostObservationObservation(tenantID, f, ho)
+	intake, err := s.hostObservationIntake(tenantID, f, ho)
 	if err != nil {
 		return identity.Resolution{}, err
 	}
+	obs := intake.Observation
 
 	// The rules, over what the frames actually carried (workstream 2.10b). This
 	// is the path row 7 of the 2.5 note was waiting on: the OUI vendor, the
@@ -894,7 +551,7 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 			 VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenantID, res.ObservationID, identity.ObservationReceiptKey(obs), string(payload))
 			return err
 		}
-		return s.applyHostObservationContext(ctx, repo, tx, tenantID, f, ho, obs, res, assetStatus, classProp, ctxInput)
+		return s.applyHostObservationContext(ctx, repo, tx, tenantID, f, ho, obs, intake.AttributeEvidence, res, assetStatus, classProp, ctxInput)
 	})
 	if rerr == nil {
 		// After the observation has landed, and outside its transaction: what a
@@ -965,8 +622,15 @@ func (s *AssetService) inferDHCPPosture(ctx context.Context, tenantID uuid.UUID,
 	}
 	done := map[string]bool{}
 	for _, addr := range addrs {
-		v := addr.String()
-		scope, _ := s.observationScope(tenantID, &v, nil)
+		if _, err := s.identityEngine(); err != nil {
+			log.Printf("[AssetService] tenant %s: recording inferred DHCP posture skipped: %v", tenantID, err)
+			return
+		}
+		scope, _, err := s.identityRepo.ScopeForAddress(ctx, tenantID.String(), addr, "")
+		if err != nil {
+			log.Printf("[AssetService] tenant %s: resolving the segment of DHCP-assigned %s failed (the observation is unaffected): %v", tenantID, addr, err)
+			continue
+		}
 		segmentID, err := uuid.Parse(scope)
 		if err != nil || done[scope] {
 			// The tenant default scope is not a segment; there is nothing to mark.
@@ -1023,21 +687,22 @@ func (s *AssetService) materializeRetainedHostObservation(ctx context.Context, t
 	if !ok {
 		return fmt.Errorf("retained host observation has no typed payload")
 	}
-	obs, err := s.hostObservationObservation(tenantID, f, ho)
+	intake, err := s.hostObservationIntake(tenantID, f, ho)
 	if err != nil {
 		return err
 	}
+	obs := intake.Observation
 	classProp := s.applyClassProposal(ctx, &obs, hostObservationClassEvidence(ho))
 	ctxInput := s.hostObservationContextInput(tenantID, f, ho)
 	repo := pgidentity.New(s.db.DB.DB)
 	return repo.RunInTx(ctx, tenantID.String(), func(bound *pgidentity.Repository) error {
 		res := identity.Resolution{Outcome: identity.OutcomeMatched, Asset: identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}}
-		return s.applyHostObservationContext(ctx, bound, s.sqlxOver(bound.Tx()), tenantID, f, ho, obs, res, "", classProp, ctxInput)
+		return s.applyHostObservationContext(ctx, bound, s.sqlxOver(bound.Tx()), tenantID, f, ho, obs, intake.AttributeEvidence, res, "", classProp, ctxInput)
 	})
 }
 
 func (s *AssetService) applyHostObservationContext(ctx context.Context, repo *pgidentity.Repository, tx *sqlx.Tx, tenantID uuid.UUID,
-	f IngestFinding, ho *hostobs.HostObservation, obs identity.Observation, res identity.Resolution, assetStatus string, classProp classify.ClassProposal, ctxInput models.AssetInput) error {
+	f IngestFinding, ho *hostobs.HostObservation, obs identity.Observation, evidence map[string][]string, res identity.Resolution, assetStatus string, classProp classify.ClassProposal, ctxInput models.AssetInput) error {
 
 	facts := hostObservationFacts(ho, obs.Source, obs.ObservedAt, obs.Confidence)
 	assetID, perr := uuid.Parse(res.Asset.ID)
@@ -1052,10 +717,12 @@ func (s *AssetService) applyHostObservationContext(ctx context.Context, repo *pg
 	if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInput, obs.Source, res.Outcome); cerr != nil {
 		return cerr
 	}
-	if serr := recordSyntheticNames(ctx, tx, tenantID, assetID, hostObservationSyntheticNames(ho)); serr != nil {
+	// What the intake withheld as identity and kept as evidence: synthetic
+	// names ( D1) and rotating or unscoped IPv6 addresses ( D2).
+	if serr := recordSyntheticNames(ctx, tx, tenantID, assetID, hostnamequality.MergeSyntheticNames(evidence[attrlist.KeySyntheticNames], nil)); serr != nil {
 		return serr
 	}
-	if aerr := recordAddressEvidence(ctx, tx, tenantID, assetID, hostObservationAddressEvidence(ho, obs.Network.SegmentID)); aerr != nil {
+	if aerr := recordAddressEvidence(ctx, tx, tenantID, assetID, evidence); aerr != nil {
 		return aerr
 	}
 	if len(facts) > 0 {

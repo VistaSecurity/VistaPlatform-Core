@@ -113,10 +113,6 @@ func TestEveryRawProbeAndDatabaseRefusesLoopback(t *testing.T) {
 		_, err := (&TLSProber{timeout: 100 * time.Millisecond}).ProbeTLS("127.0.0.1", 443)
 		return err
 	})
-	assertGuarded("ssh", func() error {
-		_, err := (&TLSProber{timeout: 100 * time.Millisecond}).ProbeSSH("127.0.0.1", 22)
-		return err
-	})
 	assertGuarded("postgres", func() error {
 		_, err := InterrogatePostgreSQLConn(context.Background(), "postgres://audit:redacted@127.0.0.1:5432/postgres?sslmode=disable")
 		return err

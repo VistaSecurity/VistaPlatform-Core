@@ -158,7 +158,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		if err != nil {
 			t.Fatalf("CreateAsset(host-2): %v", err)
 		}
-		if err := r.AttachIdentifiers(ctx, second, []identity.Identifier{id}); !errors.Is(err, identity.ErrIdentifierConflict) {
+		if _, err := r.AttachIdentifiers(ctx, second, []identity.Identifier{id}); !errors.Is(err, identity.ErrIdentifierConflict) {
 			t.Fatalf("AttachIdentifiers with a taken identifier: err = %v, want ErrIdentifierConflict", err)
 		}
 	})
@@ -272,7 +272,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 		id := ident(identity.KindSerialNumber, "SN-1", "")
 		for i := range 3 {
-			if err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{id}); err != nil {
+			if _, err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{id}); err != nil {
 				t.Fatalf("AttachIdentifiers pass %d: %v", i, err)
 			}
 		}
@@ -317,7 +317,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		if err != nil {
 			t.Fatalf("CreateAsset: %v", err)
 		}
-		if err := r.AttachIdentifiers(ctx, native, []identity.Identifier{derived("aa:bb:cc:dd:ee:01", "derived:eui64:2001:db8::a8bb:ccff:fedd:ee01")}); err != nil {
+		if _, err := r.AttachIdentifiers(ctx, native, []identity.Identifier{derived("aa:bb:cc:dd:ee:01", "derived:eui64:2001:db8::a8bb:ccff:fedd:ee01")}); err != nil {
 			t.Fatalf("AttachIdentifiers(derived over native): %v", err)
 		}
 		if got := provenance(native, "aa:bb:cc:dd:ee:01"); got.Kind != identity.SourceMeasured || got.Ref != "contract" {
@@ -331,7 +331,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		if got := provenance(held, "aa:bb:cc:dd:ee:02"); got.Kind != identity.SourceInferred || got.Ref != "derived:serial:AABBCCDDEE02" {
 			t.Fatalf("a derived MAC was stored as %+v, want inferred with its evidence", got)
 		}
-		if err := r.AttachIdentifiers(ctx, held, []identity.Identifier{ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:02", "")}); err != nil {
+		if _, err := r.AttachIdentifiers(ctx, held, []identity.Identifier{ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:02", "")}); err != nil {
 			t.Fatalf("AttachIdentifiers(native over derived): %v", err)
 		}
 		if got := provenance(held, "aa:bb:cc:dd:ee:02"); got.Kind != identity.SourceMeasured || got.Ref != "contract" {
@@ -339,10 +339,125 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 	})
 
+	//: the identifier upsert's provenance ladder (identity.UpsertIdentifier)
+	// is declared > measured = imported > inferred, source_ref travels with
+	// source_kind, and a pinned address is never unpinned by a weaker or silent
+	// sighting. Before, only `inferred` could move: an operator declaring an
+	// address a sensor had measured left the row `measured` with the
+	// declaration's ref — and the gateway's own LAN address could never be told
+	// apart from a lease.
+	t.Run("AttachIdentifiers: a declaration upgrades a measured row, a weaker sighting never rewrites it, a pin is never lost", func(t *testing.T) {
+		r := newRepo()
+		stored := func(ref identity.AssetRef, kind identity.Kind, value string) identity.Identifier {
+			t.Helper()
+			sums, err := r.LoadSummaries(ctx, tenant, []string{ref.ID})
+			if err != nil || len(sums) != 1 {
+				t.Fatalf("LoadSummaries = %+v (err %v)", sums, err)
+			}
+			for _, id := range sums[0].Identifiers {
+				if id.Kind == kind && id.Value == value {
+					return id
+				}
+			}
+			t.Fatalf("%s=%s not on the asset", kind, value)
+			return identity.Identifier{}
+		}
+		with := func(id identity.Identifier, kind identity.SourceKind, ref string, a identity.AddressAssignment) identity.Identifier {
+			id.Source = identity.Source{Kind: kind, Ref: ref}
+			id.Assignment = a
+			return id
+		}
+		attach := func(ref identity.AssetRef, id identity.Identifier) {
+			t.Helper()
+			if _, err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{id}); err != nil {
+				t.Fatalf("AttachIdentifiers(%s %s/%s %q): %v", id.Value, id.Source.Kind, id.Source.Ref, id.Assignment, err)
+			}
+		}
+		want := func(step string, got identity.Identifier, kind identity.SourceKind, ref string, a identity.AddressAssignment) {
+			t.Helper()
+			if got.Source.Kind != kind || got.Source.Ref != ref || got.Assignment != a {
+				t.Errorf("%s: stored %s/%s assignment %q, want %s/%s assignment %q",
+					step, got.Source.Kind, got.Source.Ref, got.Assignment, kind, ref, a)
+			}
+		}
+
+		// A sensor measured the gateway's address; then an operator declared it.
+		addr := ident(identity.KindIPAddress, "192.0.2.1", "seg-pin")
+		gw, err := r.CreateAsset(ctx, tenant, newAsset("gateway", with(addr, identity.SourceMeasured, "sensor:1", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		want("measured on create", stored(gw, identity.KindIPAddress, "192.0.2.1"), identity.SourceMeasured, "sensor:1", "")
+		attach(gw, with(addr, identity.SourceDeclared, "manual", ""))
+		want("declared over measured", stored(gw, identity.KindIPAddress, "192.0.2.1"), identity.SourceDeclared, "manual", identity.AssignmentStatic)
+
+		// Every weaker sighting refreshes the row without rewriting who vouched
+		// for it, and none of them unpins it — not the sensor (which says
+		// nothing), not an agent saying "dhcp", not a derived value.
+		attach(gw, with(addr, identity.SourceMeasured, "sensor:2", ""))
+		want("measured over declared", stored(gw, identity.KindIPAddress, "192.0.2.1"), identity.SourceDeclared, "manual", identity.AssignmentStatic)
+		attach(gw, with(addr, identity.SourceMeasured, "agent:1", identity.AssignmentDynamic))
+		want("agent dhcp over declared", stored(gw, identity.KindIPAddress, "192.0.2.1"), identity.SourceDeclared, "manual", identity.AssignmentStatic)
+		attach(gw, with(addr, identity.SourceInferred, "derived:x", ""))
+		want("inferred over declared", stored(gw, identity.KindIPAddress, "192.0.2.1"), identity.SourceDeclared, "manual", identity.AssignmentStatic)
+		attach(gw, with(addr, identity.SourceDeclared, "operator:2", ""))
+		want("declared refresh", stored(gw, identity.KindIPAddress, "192.0.2.1"), identity.SourceDeclared, "operator:2", identity.AssignmentStatic)
+
+		// A host's own agent: its report is the assignment, and a later report
+		// of equal standing replaces it — the host was reconfigured. Silence
+		// (a sensor) never clears it.
+		hostAddr := ident(identity.KindIPAddress, "192.0.2.20", "seg-pin")
+		host, err := r.CreateAsset(ctx, tenant, newAsset("host", with(hostAddr, identity.SourceMeasured, "agent:1", identity.AssignmentStatic)))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		want("agent static on create", stored(host, identity.KindIPAddress, "192.0.2.20"), identity.SourceMeasured, "agent:1", identity.AssignmentStatic)
+		attach(host, with(hostAddr, identity.SourceMeasured, "sensor:1", ""))
+		want("sensor over agent static", stored(host, identity.KindIPAddress, "192.0.2.20"), identity.SourceMeasured, "sensor:1", identity.AssignmentStatic)
+		attach(host, with(hostAddr, identity.SourceMeasured, "agent:1", identity.AssignmentDynamic))
+		want("agent dhcp over agent static", stored(host, identity.KindIPAddress, "192.0.2.20"), identity.SourceMeasured, "agent:1", identity.AssignmentDynamic)
+		attach(host, with(hostAddr, identity.SourceInferred, "derived:y", identity.AssignmentStatic))
+		want("inferred static over measured dynamic", stored(host, identity.KindIPAddress, "192.0.2.20"), identity.SourceMeasured, "agent:1", identity.AssignmentDynamic)
+		attach(host, with(hostAddr, identity.SourceDeclared, "manual", ""))
+		want("declared over agent dhcp", stored(host, identity.KindIPAddress, "192.0.2.20"), identity.SourceDeclared, "manual", identity.AssignmentStatic)
+
+		// Intake's marker (Identifier.Pinned, PR 2210) is the same pin; an
+		// explicit "dhcp" from the host wins over it, because Intake marks
+		// every self-reported address Pinned.
+		marked := ident(identity.KindIPAddress, "192.0.2.21", "seg-pin")
+		marked.Pinned = true
+		mk, err := r.CreateAsset(ctx, tenant, newAsset("marked", marked))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		want("Pinned on create", stored(mk, identity.KindIPAddress, "192.0.2.21"), identity.SourceMeasured, "contract", identity.AssignmentStatic)
+		leased := ident(identity.KindIPAddress, "192.0.2.22", "seg-pin")
+		leased.Pinned, leased.Assignment = true, identity.AssignmentDynamic
+		ls, err := r.CreateAsset(ctx, tenant, newAsset("leased", leased))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		want("Pinned but dhcp", stored(ls, identity.KindIPAddress, "192.0.2.22"), identity.SourceMeasured, "contract", identity.AssignmentDynamic)
+
+		// Sideways: an import of a value a collector measured keeps the
+		// measured provenance and its ref — equal standing, first writer wins.
+		mac := ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:30", "")
+		side, err := r.CreateAsset(ctx, tenant, newAsset("side", with(mac, identity.SourceMeasured, "sensor:1", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		attach(side, with(mac, identity.SourceImported, "cmdb:1", ""))
+		want("imported over measured", stored(side, identity.KindMACAddress, "aa:bb:cc:dd:ee:30"), identity.SourceMeasured, "sensor:1", "")
+		// A declared MAC is upgraded like any identifier, and carries no
+		// assignment: that is a fact about addresses only.
+		attach(side, with(mac, identity.SourceDeclared, "manual", ""))
+		want("declared MAC", stored(side, identity.KindMACAddress, "aa:bb:cc:dd:ee:30"), identity.SourceDeclared, "manual", "")
+	})
+
 	t.Run("AttachIdentifiers and Touch reject an unknown asset", func(t *testing.T) {
 		r := newRepo()
 		ghost := identity.AssetRef{TenantID: tenant, ID: "no-such-asset"}
-		if err := r.AttachIdentifiers(ctx, ghost, []identity.Identifier{ident(identity.KindSerialNumber, "SN-x", "")}); !errors.Is(err, identity.ErrAssetNotFound) {
+		if _, err := r.AttachIdentifiers(ctx, ghost, []identity.Identifier{ident(identity.KindSerialNumber, "SN-x", "")}); !errors.Is(err, identity.ErrAssetNotFound) {
 			t.Errorf("AttachIdentifiers on a ghost: err = %v, want ErrAssetNotFound", err)
 		}
 		if err := r.Touch(ctx, ghost, now); !errors.Is(err, identity.ErrAssetNotFound) {
@@ -351,7 +466,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		if err := r.PromoteNames(ctx, ghost, "linux-2", "linux-2", "measured-passive"); !errors.Is(err, identity.ErrAssetNotFound) {
 			t.Errorf("PromoteNames on a ghost: err = %v, want ErrAssetNotFound", err)
 		}
-		if err := r.UpsertEndpoints(ctx, ghost, []identity.EndpointObservation{{Address: "192.0.2.1", Port: 443, Transport: "tcp"}}); !errors.Is(err, identity.ErrAssetNotFound) {
+		if _, err := r.UpsertEndpoints(ctx, ghost, []identity.EndpointObservation{{Address: "192.0.2.1", Port: 443, Transport: "tcp"}}); !errors.Is(err, identity.ErrAssetNotFound) {
 			t.Errorf("UpsertEndpoints on a ghost: err = %v, want ErrAssetNotFound", err)
 		}
 	})
@@ -363,13 +478,13 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 			t.Fatalf("CreateAsset: %v", err)
 		}
 		ep := identity.EndpointObservation{Address: "192.0.2.10", Port: 443, Transport: "tcp", SeenAt: now}
-		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{ep}); err != nil {
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{ep}); err != nil {
 			t.Fatalf("UpsertEndpoints: %v", err)
 		}
 		later := ep
 		later.Protocol = "https"
 		later.SeenAt = now.Add(time.Hour)
-		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{later}); err != nil {
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{later}); err != nil {
 			t.Fatalf("UpsertEndpoints again: %v", err)
 		}
 		reader, ok := r.(EndpointReader)
@@ -378,6 +493,108 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 		if eps := reader.Endpoints(ref); len(eps) != 1 {
 			t.Errorf("endpoints after a repeat upsert = %v, want exactly 1", eps)
+		}
+	})
+
+	// The engine writes an `updated` timeline row only when a match changed
+	// something, and decides that from these counts — so the two backends must
+	// agree on what "changed" means.
+	t.Run("AttachIdentifiers and UpsertEndpoints report what they newly wrote", func(t *testing.T) {
+		r := newRepo()
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-count"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		serial := ident(identity.KindSerialNumber, "SN-count", "")
+		mac := ident(identity.KindMACAddress, "aa:bb:cc:dd:ee:41", "")
+		added, err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{serial})
+		if err != nil || added != 1 {
+			t.Fatalf("attaching a new identifier: added=%d err=%v, want 1", added, err)
+		}
+		serial.SeenAt = now.Add(time.Hour)
+		added, err = r.AttachIdentifiers(ctx, ref, []identity.Identifier{serial})
+		if err != nil || added != 0 {
+			t.Errorf("re-attaching a held identifier: added=%d err=%v, want 0 (a refreshed last-seen is not new)", added, err)
+		}
+		added, err = r.AttachIdentifiers(ctx, ref, []identity.Identifier{serial, mac})
+		if err != nil || added != 1 {
+			t.Errorf("one held and one new identifier: added=%d err=%v, want 1", added, err)
+		}
+
+		ep := identity.EndpointObservation{Address: "192.0.2.41", Port: 443, Transport: "tcp", SeenAt: now}
+		changed, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{ep})
+		if err != nil || changed != 1 {
+			t.Fatalf("a new endpoint: changed=%d err=%v, want 1", changed, err)
+		}
+		again := ep
+		again.SeenAt = now.Add(time.Hour)
+		changed, err = r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{again})
+		if err != nil || changed != 0 {
+			t.Errorf("the same endpoint again: changed=%d err=%v, want 0", changed, err)
+		}
+		named := again
+		named.Protocol = "https"
+		named.ServiceName = "nginx"
+		changed, err = r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{named})
+		if err != nil || changed != 1 {
+			t.Errorf("the endpoint gaining a protocol and service: changed=%d err=%v, want 1", changed, err)
+		}
+		changed, err = r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{named, again})
+		if err != nil || changed != 0 {
+			t.Errorf("the identified endpoint re-seen, once by name and once by a source that does not know the service: changed=%d err=%v, want 0 (empty never wins)", changed, err)
+		}
+		other := identity.EndpointObservation{Address: "192.0.2.41", Port: 8443, Transport: "tcp", SeenAt: now}
+		changed, err = r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{named, other})
+		if err != nil || changed != 1 {
+			t.Errorf("one held endpoint and one on another port: changed=%d err=%v, want 1", changed, err)
+		}
+	})
+
+	t.Run("HistoryHasChange answers by JSON containment, scoped to asset and action", func(t *testing.T) {
+		r := newRepo()
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-hist"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		other, err := r.CreateAsset(ctx, tenant, newAsset("host-hist-other"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		if err := r.RecordHistory(ctx, identity.HistoryEntry{
+			TenantID: tenant, AssetID: ref.ID, Action: identity.ActionUpdated,
+			Source: identity.Source{Kind: identity.SourceMeasured, Ref: "sensor"}, At: now,
+			Changes: map[string]any{
+				"unattached": []string{"mac_address|aa:bb:cc:dd:ee:51", "ip_address|192.0.2.51"},
+				"supporting": true,
+				"nested":     map[string]any{"announcer": "x", "macs": []string{"m1", "m2"}},
+			},
+		}); err != nil {
+			t.Fatalf("RecordHistory: %v", err)
+		}
+		for _, c := range []struct {
+			name   string
+			asset  identity.AssetRef
+			action identity.HistoryAction
+			subset map[string]any
+			want   bool
+		}{
+			{"the whole set", ref, identity.ActionUpdated, map[string]any{"unattached": []string{"mac_address|aa:bb:cc:dd:ee:51", "ip_address|192.0.2.51"}}, true},
+			{"a subset of the array", ref, identity.ActionUpdated, map[string]any{"unattached": []string{"ip_address|192.0.2.51"}}, true},
+			{"an element it does not hold", ref, identity.ActionUpdated, map[string]any{"unattached": []string{"ip_address|192.0.2.99"}}, false},
+			{"a superset of the array", ref, identity.ActionUpdated, map[string]any{"unattached": []string{"ip_address|192.0.2.51", "ip_address|192.0.2.99"}}, false},
+			{"a scalar that differs", ref, identity.ActionUpdated, map[string]any{"supporting": false}, false},
+			{"a nested object", ref, identity.ActionUpdated, map[string]any{"nested": map[string]any{"macs": []string{"m2"}}}, true},
+			{"another action", ref, identity.ActionCreated, map[string]any{"supporting": true}, false},
+			{"another asset", other, identity.ActionUpdated, map[string]any{"supporting": true}, false},
+		} {
+			got, err := r.HistoryHasChange(ctx, c.asset, c.action, c.subset)
+			if err != nil {
+				t.Errorf("%s: %v", c.name, err)
+				continue
+			}
+			if got != c.want {
+				t.Errorf("%s: HistoryHasChange = %v, want %v", c.name, got, c.want)
+			}
 		}
 	})
 
@@ -403,7 +620,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 
 		// 1. Passive observation: address known, no name.
 		passive := identity.EndpointObservation{Address: "192.0.2.230", Port: 443, Transport: "tcp", SeenAt: now}
-		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{passive}); err != nil {
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{passive}); err != nil {
 			t.Fatalf("UpsertEndpoints (passive): %v", err)
 		}
 
@@ -416,7 +633,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 			Address: "192.0.2.230", FQDN: "192.0.2.230", Port: 443, Transport: "tcp",
 			SeenAt: now.Add(time.Minute),
 		}
-		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{activeScanNoName}); err != nil {
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{activeScanNoName}); err != nil {
 			t.Fatalf("UpsertEndpoints (active scan, ip-literal fqdn): %v", err)
 		}
 		if eps := reader.Endpoints(ref); len(eps) != 1 {
@@ -430,7 +647,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 			Address: "192.0.2.230", FQDN: "host.corp.example", Port: 443, Transport: "tcp",
 			SeenAt: now.Add(2 * time.Minute),
 		}
-		if err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{named}); err != nil {
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{named}); err != nil {
 			t.Fatalf("UpsertEndpoints (named): %v", err)
 		}
 
@@ -503,7 +720,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 
 		later := addr
 		later.SeenAt = now.Add(time.Hour)
-		if err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{later}); err != nil {
+		if _, err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{later}); err != nil {
 			t.Fatalf("AttachIdentifiers(later): %v", err)
 		}
 		if got, _, _ := r.IdentifierLastSeen(ctx, tenant, probe); !got.Equal(now.Add(time.Hour)) {
@@ -512,7 +729,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 
 		earlier := addr
 		earlier.SeenAt = now.Add(-time.Hour)
-		if err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{earlier}); err != nil {
+		if _, err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{earlier}); err != nil {
 			t.Fatalf("AttachIdentifiers(earlier): %v", err)
 		}
 		if got, _, _ := r.IdentifierLastSeen(ctx, tenant, probe); !got.Equal(now.Add(time.Hour)) {
@@ -2116,6 +2333,115 @@ func runProvisionalContract(
 		}
 	})
 
+	t.Run("RetireIdentifier removes one value and refuses a foreign owner", func(t *testing.T) {
+		r := newRepo()
+		retirer, ok := r.(identity.IdentifierRetirer)
+		if !ok {
+			t.Fatalf("%T does not implement identity.IdentifierRetirer; the drift verdicts of #2205 "+
+				"Decision 4 cannot replace a rotated key or release a moved-away address against it", r)
+		}
+		oldKey := ident(identity.KindSSHHostKeyFingerprint, "SHA256:contract-retire-old", "")
+		newKey := ident(identity.KindSSHHostKeyFingerprint, "SHA256:contract-retire-new", "")
+		holder, err := r.CreateAsset(ctx, tenant, newAsset("host", oldKey, newKey))
+		if err != nil {
+			t.Fatalf("CreateAsset(holder): %v", err)
+		}
+		stranger, err := r.CreateAsset(ctx, tenant, newAsset("stranger", ident(identity.KindSerialNumber, "SN-RETIRE-2", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset(stranger): %v", err)
+		}
+		// The refusing polarity first, so a store that deletes by value alone
+		// cannot pass.
+		if err := retirer.RetireIdentifier(ctx, stranger, oldKey); err == nil {
+			t.Error("RetireIdentifier removed a value from an asset that does not hold it")
+		}
+		if owners, err := r.FindByIdentifier(ctx, tenant, oldKey.Kind, oldKey.Value, oldKey.Scope); err != nil || len(owners) != 1 {
+			t.Fatalf("owners after a REFUSED retire = %+v (%v), want the holder", owners, err)
+		}
+		if err := retirer.RetireIdentifier(ctx, holder, oldKey); err != nil {
+			t.Fatalf("RetireIdentifier: %v", err)
+		}
+		if owners, err := r.FindByIdentifier(ctx, tenant, oldKey.Kind, oldKey.Value, oldKey.Scope); err != nil || len(owners) != 0 {
+			t.Errorf("owners of a retired value = %+v (%v), want none", owners, err)
+		}
+		sums, err := r.LoadSummaries(ctx, tenant, []string{holder.ID})
+		if err != nil || len(sums) != 1 {
+			t.Fatalf("LoadSummaries: %+v %v", sums, err)
+		}
+		if got := countKind(sums[0].Identifiers, identity.KindSSHHostKeyFingerprint); got != 1 {
+			t.Errorf("the holder carries %d host keys after retiring one of two, want 1", got)
+		}
+		if err := retirer.RetireIdentifier(ctx, holder, oldKey); err == nil {
+			t.Error("retiring the same value twice succeeded; the second must report it is gone")
+		}
+	})
+
+	t.Run("an SSH host key's algorithm is stored and never forgotten", func(t *testing.T) {
+		r := newRepo()
+		known := ident(identity.KindSSHHostKeyFingerprint, "SHA256:contract-alg-known", "")
+		known.KeyAlgorithm = "ed25519"
+		legacy := ident(identity.KindSSHHostKeyFingerprint, "SHA256:contract-alg-legacy", "")
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("keys", known, legacy))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		algOf := func() map[string]string {
+			sums, err := r.LoadSummaries(ctx, tenant, []string{ref.ID})
+			if err != nil || len(sums) != 1 {
+				t.Fatalf("LoadSummaries: %+v %v", sums, err)
+			}
+			out := map[string]string{}
+			for _, id := range sums[0].Identifiers {
+				out[id.Value] = id.KeyAlgorithm
+			}
+			return out
+		}
+		if got := algOf(); got[known.Value] != "ed25519" || got[legacy.Value] != "" {
+			t.Fatalf("algorithms = %v, want ed25519 and unknown", got)
+		}
+		// A re-sighting that does not say the algorithm keeps it; one that
+		// does fills in a row stored without it.
+		bare := known
+		bare.KeyAlgorithm = ""
+		filled := legacy
+		filled.KeyAlgorithm = "rsa"
+		if _, err := r.AttachIdentifiers(ctx, ref, []identity.Identifier{bare, filled}); err != nil {
+			t.Fatalf("AttachIdentifiers: %v", err)
+		}
+		if got := algOf(); got[known.Value] != "ed25519" || got[legacy.Value] != "rsa" {
+			t.Errorf("algorithms after re-sighting = %v, want ed25519 kept and rsa filled in", got)
+		}
+	})
+
+	t.Run("DriftMaterial reports the ports an asset listens on", func(t *testing.T) {
+		r := newRepo()
+		reader, ok := r.(identity.DriftMaterialReader)
+		if !ok {
+			t.Fatalf("%T does not implement identity.DriftMaterialReader", r)
+		}
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("ports", ident(identity.KindSerialNumber, "SN-DRIFT-PORTS", "")))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{
+			{Address: "192.0.2.77", Port: 22, Transport: "tcp"},
+			{Address: "192.0.2.77", Port: 443, Transport: "tcp"},
+			{Address: "192.0.2.77", Port: 0, Transport: "none"},
+		}); err != nil {
+			t.Fatalf("UpsertEndpoints: %v", err)
+		}
+		got, err := reader.DriftMaterial(ctx, ref)
+		if err != nil {
+			t.Fatalf("DriftMaterial: %v", err)
+		}
+		if len(got.Ports) != 2 || got.Ports[0] != "22/tcp" || got.Ports[1] != "443/tcp" {
+			t.Errorf("ports = %v, want [22/tcp 443/tcp] — a port-less endpoint is not a listener", got.Ports)
+		}
+		if len(got.TLSCertFingerprints) != 0 {
+			t.Errorf("certificates = %v for an asset that presented none", got.TLSCertFingerprints)
+		}
+	})
+
 	t.Run("ArchiveAsset retires an emptied guess", func(t *testing.T) {
 		r := newRepo()
 		archiver, ok := r.(identity.AssetArchiver)
@@ -2238,7 +2564,7 @@ func runHostnameCardinalityContract(
 
 		// The same asset carrying the value under a second scope is still ONE
 		// asset. The count is of assets, not of identifier rows.
-		if err := r.AttachIdentifiers(ctx, a, []identity.Identifier{ident(identity.KindHostname, name, "segment-3")}); err != nil {
+		if _, err := r.AttachIdentifiers(ctx, a, []identity.Identifier{ident(identity.KindHostname, name, "segment-3")}); err != nil {
 			t.Fatalf("AttachIdentifiers: %v", err)
 		}
 		if got := count(tenant, name); got != 2 {
@@ -2294,6 +2620,154 @@ func runHostnameCardinalityContract(
 		}
 		if got != 1 {
 			t.Errorf("cardinality = %d after archiving one of two, want 1: a retired record still testified that the name is common", got)
+		}
+	})
+}
+
+// RunPinnedAddressContract holds an implementation to the pinned-address rule
+// (owner decision 1; ADR-0002 D3 erratum): an `ip_address` inside a
+// scope flagged dynamic still decides a match when its OWNER holds it as
+// [identity.AssignmentStatic], and helps no other asset.
+//
+// It runs against whichever store it is handed because the rule reads the
+// owner's copy back through [identity.Repository.LoadSummaries]: a store that
+// dropped `address_assignment` on the way out would make every pinned address
+// a lease again, silently, and only running the same assertions over both
+// stores says it does not.
+//
+// newRepo must return a FRESH, empty repository on every call.
+func RunPinnedAddressContract(t *testing.T, newRepo func() identity.Repository) {
+	t.Helper()
+
+	const (
+		tenant  = "tenant-a"
+		dynamic = "seg-dhcp"
+	)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+
+	ident := func(kind identity.Kind, value, scope string, src identity.SourceKind) identity.Identifier {
+		return identity.Identifier{
+			Kind: kind, Value: value, Scope: scope, Confidence: 1,
+			Source: identity.Source{Kind: src, Ref: "contract"}, SeenAt: now,
+		}
+	}
+	holder := func(r identity.Repository, name string, ids ...identity.Identifier) identity.AssetRef {
+		t.Helper()
+		ref, err := r.CreateAsset(ctx, tenant, identity.NewAsset{
+			ClassKey: "server", ClassSourceKind: identity.ClassSourceMeasured, DisplayName: name,
+			Status: identity.StatusMonitoring, Source: identity.Source{Kind: identity.SourceMeasured, Ref: "contract"},
+			Identifiers: ids, FirstSeenAt: now, LastSeenAt: now,
+		})
+		if err != nil {
+			t.Fatalf("CreateAsset(%s): %v", name, err)
+		}
+		return ref
+	}
+	// A plain sensor scan: measured, nothing declared, nothing pinned by the
+	// observation itself. The scope is dynamic per the OBSERVATION, which is
+	// how every intake adapter reports a DHCP segment today.
+	scan := func(ids ...identity.Identifier) identity.Observation {
+		return identity.Observation{
+			TenantID: tenant, ClassHint: "server",
+			Source:     identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:scan"},
+			ObservedAt: now.Add(time.Hour), Confidence: 1, Identifiers: ids,
+			DynamicScopes: map[string]bool{dynamic: true},
+		}
+	}
+	engineOver := func(r identity.Repository) *identity.Engine {
+		eng, err := identity.New(identity.Config{Repo: r})
+		if err != nil {
+			t.Fatalf("identity.New: %v", err)
+		}
+		return eng
+	}
+	addr := func(v string) identity.Identifier {
+		return identity.Identifier{Kind: identity.KindIPAddress, Value: v, Scope: dynamic, Confidence: 1}
+	}
+
+	t.Run("an address the operator declared matches its owner inside a dynamic scope", func(t *testing.T) {
+		r := newRepo()
+		gw := holder(r, "gateway", ident(identity.KindIPAddress, "192.0.2.1", dynamic, identity.SourceDeclared))
+
+		res, err := engineOver(r).Resolve(ctx, scan(addr("192.0.2.1")))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Outcome != identity.OutcomeMatched || res.Asset.ID != gw.ID || res.DecidedBy != identity.KindIPAddress {
+			t.Fatalf("resolution = %s on %q by %s, want matched on the gateway by ip_address", res.Outcome, res.Asset.ID, res.DecidedBy)
+		}
+	})
+
+	t.Run("an address the host's agent reported static matches its owner inside a dynamic scope", func(t *testing.T) {
+		r := newRepo()
+		pinned := ident(identity.KindIPAddress, "192.0.2.2", dynamic, identity.SourceMeasured)
+		pinned.Assignment = identity.AssignmentStatic
+		host := holder(r, "host", pinned)
+
+		res, err := engineOver(r).Resolve(ctx, scan(addr("192.0.2.2")))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Outcome != identity.OutcomeMatched || res.Asset.ID != host.ID {
+			t.Fatalf("resolution = %s on %q, want matched on the host", res.Outcome, res.Asset.ID)
+		}
+	})
+
+	// The rule's other half, unchanged: an address nobody pinned is still a
+	// lease and still decides nothing. The single owner makes it supporting
+	// evidence ( A1) — never `matched`.
+	t.Run("an address merely measured, or reported dhcp, still does not decide inside a dynamic scope", func(t *testing.T) {
+		for _, a := range []identity.AddressAssignment{"", identity.AssignmentDynamic} {
+			r := newRepo()
+			held := ident(identity.KindIPAddress, "192.0.2.3", dynamic, identity.SourceMeasured)
+			held.Assignment = a
+			holder(r, "leased", held)
+
+			res, err := engineOver(r).Resolve(ctx, scan(addr("192.0.2.3")))
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if res.Outcome == identity.OutcomeMatched {
+				t.Fatalf("assignment %q: a lease decided a match (%s on %s)", a, res.Outcome, res.Asset.ID)
+			}
+		}
+	})
+
+	// A pin is a fact about its owner's copy. An observation whose own
+	// device identifier names B, carrying A's pinned address, is two records
+	// named at once — a question for a reviewer, never a match for B on the
+	// strength of A's pin and never a silent match for A.
+	t.Run("an address pinned on one asset does not help an observation onto another", func(t *testing.T) {
+		r := newRepo()
+		a := holder(r, "a", ident(identity.KindIPAddress, "192.0.2.4", dynamic, identity.SourceDeclared))
+		b := holder(r, "b", ident(identity.KindSerialNumber, "SN-PIN-B", "", identity.SourceMeasured))
+
+		res, err := engineOver(r).Resolve(ctx, scan(
+			identity.Identifier{Kind: identity.KindSerialNumber, Value: "SN-PIN-B", Confidence: 1},
+			addr("192.0.2.4")))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Outcome == identity.OutcomeMatched {
+			t.Fatalf("resolution = matched on %s; want a conflict between %s and %s", res.Asset.ID, a.ID, b.ID)
+		}
+		owners, err := r.FindByIdentifier(ctx, tenant, identity.KindIPAddress, "192.0.2.4", dynamic)
+		if err != nil || len(owners) != 1 || owners[0].ID != a.ID {
+			t.Fatalf("the pinned address is held by %+v (err %v), want only %s", owners, err, a.ID)
+		}
+
+		// And the pin did not make B's own unpinned address in the same
+		// scope vote: a plain scan of it is still not a match.
+		r2 := newRepo()
+		holder(r2, "a2", ident(identity.KindIPAddress, "192.0.2.5", dynamic, identity.SourceDeclared))
+		holder(r2, "b2", ident(identity.KindIPAddress, "192.0.2.6", dynamic, identity.SourceMeasured))
+		res, err = engineOver(r2).Resolve(ctx, scan(addr("192.0.2.6")))
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if res.Outcome == identity.OutcomeMatched {
+			t.Fatalf("an unpinned neighbour of a pinned address decided a match (%s)", res.Asset.ID)
 		}
 	})
 }

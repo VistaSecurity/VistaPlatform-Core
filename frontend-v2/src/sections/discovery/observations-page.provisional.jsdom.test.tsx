@@ -8,7 +8,10 @@
 // unresolved on purpose so enrichment keeps working on it. Calling that "Open
 // linked asset" would have said the identity question was settled; showing both
 // links would have said it twice, differently.
-import { act } from 'react';
+//
+// Since the review table this lives in a row's expanded evidence, so
+// each test opens the row first — the assertions are unchanged.
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -20,6 +23,11 @@ import { ObservationsPage } from './observations-page';
 const api = vi.hoisted(() => ({ GET: vi.fn() }));
 vi.mock('../../lib/clients', () => ({ clients: { inventory: api } }));
 vi.mock('./observation-actions', () => ({ ObservationActions: () => null }));
+vi.mock('@vistasecurity/primitives/rbac', () => ({
+  TENANT_PERMISSIONS: { assets: { update: 'assets.update' } },
+  PermissionGate: ({ children }: { children: ReactNode }) => children,
+  usePermissions: () => ({ hasPermission: () => false }),
+}));
 
 type Observation = inventoryComponents['schemas']['IdentityObservation'];
 
@@ -41,6 +49,7 @@ const observation: Observation = {
   enrichment_reason: 'no_eligible_collector_in_target_network',
   last_attempt_at: null,
   next_attempt_at: null,
+  network_name: null, source_name: 'Sensor', needs: 'needs_sensor', suggested_action: 'sensor_options', explanation_code: 'relayed_advertisement', suggested_reason: '', summary: [], link_asset: null, evidence_held: false,
   collector: {
     observer: { sensor_id: 'aaaa', name: 'sensor-a', reachable: false, reason: 'collector_has_no_interface_in_target_network' },
     executor: null,
@@ -65,13 +74,19 @@ afterEach(() => { act(() => root.unmount()); cache.clear(); host.remove(); });
 async function render(observations: Observation[]) {
   api.GET.mockImplementation(async (path: string) => {
     if (path === '/identity/summary') return { response: { ok: true }, data: summary };
-    return { response: { ok: true }, data: { observations, total: observations.length, page: 1, page_size: 50 } };
+    if (path === '/discovery/observations/{id}') return { response: { ok: true }, data: observations[0] };
+    return { response: { ok: true }, data: { observations, total: observations.length, page: 1, page_size: 50, counts: { ready_to_confirm: 0, needs_network: 0, needs_sensor: 1, likely_noise: 0, all: 1 } } };
   });
   await act(async () => {
     root.render(<MemoryRouter initialEntries={['/discovery/observations']}>
       <QueryClientProvider client={cache}><ObservationsPage /></QueryClientProvider>
     </MemoryRouter>);
   });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  // Open every row: the evidence below is the expanded half.
+  for (const toggle of host.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')) {
+    await act(async () => { toggle.click(); });
+  }
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
 }
 
@@ -101,7 +116,7 @@ it('does not promise an item for an unresolved observation that produced none', 
   expect(hrefs().some((h) => h.startsWith('/inventory/assets/'))).toBe(false);
 });
 
-it('shows collector reachability on the card, for every observation that has one', async () => {
+it('shows collector reachability in the expanded row, for every observation that has one', async () => {
   await render([observation]);
   expect(host.querySelector('[aria-label="Collector reachability"]')).not.toBeNull();
   expect(host.textContent).toContain('Observed bysensor-a — cannot reach this network');

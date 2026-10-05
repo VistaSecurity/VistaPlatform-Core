@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/services"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // MetricsAggregator collects metrics from health checks and aggregates them into snapshots
@@ -28,7 +29,7 @@ type MetricsAggregator struct {
 
 // NewMetricsAggregator creates a new metrics aggregator
 func NewMetricsAggregator(cfg *config.Config, healthService *services.HealthService, metricsService *services.MetricsService) *MetricsAggregator {
-	db, err := sql.Open("postgres", cfg.DatabaseURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(cfg.DatabaseURL))
 	if err != nil {
 		panic(fmt.Sprintf("Failed to connect to database: %v", err))
 	}

@@ -171,7 +171,36 @@
         ]
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "from": "asset[hostname=linux-2,ip_address=192.0.2.68,mac_address=4c:6e:0a:87:d4:80]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
+        "type": "connects_to"
+      },
+      {
+        "from": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "device",
+        "type": "member_of"
+      },
+      {
+        "from": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
+        "type": "member_of"
+      },
+      {
+        "from": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "device",
+        "type": "member_of"
+      }
+    ],
     "assets": [
       {
         "asset": "asset[hostname=linux-2,ip_address=192.0.2.68,mac_address=4c:6e:0a:87:d4:80]",
@@ -196,18 +225,52 @@
     ],
     "retained_observations": [
       {
-        "admission_reasons": "{authoritative_identifier}",
+        "admission_reasons": "{direct_scoped_address}",
         "identifiers": [
           {
+            "claimed": true,
             "confidence": 1,
-            "kind": "mac_address",
-            "value": "78:8a:20:4b:ee:41"
+            "kind": "ip_address",
+            "pinned": true,
+            "scope": "segment:198.51.100.0/24",
+            "value": "198.51.100.1"
           },
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "unifi-gw.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{direct_scoped_interface}",
+        "identifiers": [
           {
             "confidence": 1,
             "kind": "ip_address",
             "scope": "segment:192.0.2.0/24",
             "value": "192.0.2.11"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "78:8a:20:4b:ee:41"
           },
           {
             "confidence": 1,
@@ -219,18 +282,18 @@
         "state": "linked"
       },
       {
-        "admission_reasons": "{authoritative_identifier}",
+        "admission_reasons": "{direct_scoped_interface}",
         "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "78:8a:20:4b:ee:52"
-          },
           {
             "confidence": 1,
             "kind": "ip_address",
             "scope": "segment:192.0.2.0/24",
             "value": "192.0.2.12"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "78:8a:20:4b:ee:52"
           },
           {
             "confidence": 1,
@@ -246,14 +309,14 @@
         "identifiers": [
           {
             "confidence": 1,
-            "kind": "mac_address",
-            "value": "4c:6e:0a:87:d4:80"
-          },
-          {
-            "confidence": 1,
             "kind": "ip_address",
             "scope": "segment:192.0.2.0/24",
             "value": "192.0.2.68"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "4c:6e:0a:87:d4:80"
           },
           {
             "confidence": 1,
@@ -266,17 +329,46 @@
         "state": "linked"
       },
       {
-        "admission_reasons": "{network_scope_unresolved}",
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "claimed": true,
+            "confidence": 1,
+            "kind": "ip_address",
+            "pinned": true,
+            "scope": "segment:192.0.2.0/24",
+            "value": "192.0.2.1"
+          },
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "unifi-gw.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved,no_device_or_address_binding}",
         "identifiers": [
           {
             "confidence": 1,
             "kind": "mac_address",
             "value": "00:1b:17:00:00:01"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "value": "core-sw-1.corp.example.test"
           },
           {
             "confidence": 1,
@@ -288,7 +380,7 @@
         "state": "unresolved"
       },
       {
-        "admission_reasons": "{network_scope_unresolved}",
+        "admission_reasons": "{network_scope_unresolved,no_device_or_address_binding}",
         "identifiers": [
           {
             "confidence": 1,
@@ -309,7 +401,7 @@
           }
         ],
         "source_kind": "measured",
-        "state": "unresolved"
+        "state": "linked"
       },
       {
         "admission_reasons": "{no_device_or_address_binding}",
@@ -324,15 +416,10 @@
             "confidence": 1,
             "kind": "fqdn",
             "value": "unifi-gw.corp.example.test"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "value": "unifi-gw.corp.example.test"
           }
         ],
         "source_kind": "measured",
-        "state": "unresolved"
+        "state": "linked"
       }
     ],
     "collection_warnings": [],

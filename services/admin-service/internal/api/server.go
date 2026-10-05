@@ -22,6 +22,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/jobs/catalogfeeds"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/middleware"
 	adminservices "github.com/vistasecurity/vistaplatform/admin-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/shared/ai"
+	aiedition "github.com/vistasecurity/vistaplatform/shared/ai/edition"
 	"github.com/vistasecurity/vistaplatform/shared/cache"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -71,6 +73,10 @@ type Server struct {
 	// catalogGapRunner works the gap list. Present in every edition; it simply
 	// has no proposer to call in Core.
 	catalogGapRunner *catalogsvc.GapRunner
+	// aiResolver decides which model provider answers a generative call. In
+	// this service every such call is platform-scope, so it resolves the
+	// platform default (Settings → AI assistant) or the environment's.
+	aiResolver *ai.Resolver
 }
 
 // NewServer creates and initializes a Core-edition HTTP server instance.
@@ -199,6 +205,7 @@ func NewServerWithConnections(cfg *config.Config, db, bypassDB *sql.DB, hooks Ed
 		config:              cfg,
 		db:                  db,
 		bypassDB:            bypassDB,
+		aiResolver:          aiedition.NewProviderResolver(bypassDB),
 		rbacService:         rbacService,
 		refreshTokenService: refreshTokenService,
 		cache:               cacheClient,
@@ -563,6 +570,23 @@ func (s *Server) setupRouter() {
 				platformSettings.POST("/test-email", handlers.SendTestEmail(s.db)) // Send SMTP test email
 			}
 
+			// Settings → AI assistant: the default model provider for every
+			// tenant, and the two switches that govern tenants' own. Written
+			// on the BYPASS pool — the platform_settings write guard refuses
+			// the `ai.*` rows from the tenant-scoped role, because they decide
+			// where every tenant's prompts are sent.
+			platformAI := protected.Group("/ai")
+			platformAI.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSettings))
+			{
+				aiSettings := handlers.NewPlatformAIHandlers(s.bypassDB, s.aiResolver,
+					auditmiddleware.NewAISink(handlers.PlatformAuditActivityLogger(), "admin-service"))
+				platformAI.GET("", aiSettings.Get)
+				platformAI.PUT("/provider", aiSettings.PutProvider)
+				platformAI.DELETE("/provider", aiSettings.DeleteProvider)
+				platformAI.POST("/provider/test", aiSettings.TestProvider)
+				platformAI.PUT("/tenant-policy", aiSettings.PutTenantPolicy)
+			}
+
 			// Settings → License & Usage: the install's licence as recorded in
 			// platform_license (never the token), and the Enterprise
 			// data-retention cap. CORE: a Core build answers "no licence
@@ -664,9 +688,24 @@ func (s *Server) setupRouter() {
 				proposer, enrichAvailability = s.hooks.NewCatalogEnricher(CatalogEnricherDeps{
 					Candidates: enrichStore,
 					AuditSink:  auditmiddleware.NewAISink(handlers.PlatformAuditActivityLogger(), "admin-service"),
+					Providers:  s.aiResolver,
 				})
 			}
 			s.catalogGapRunner = catalogsvc.NewGapRunner(enrichStore, proposer)
+			// Whether "Propose with AI" works is asked per request: the
+			// platform's model provider can be set or cleared in Settings → AI
+			// assistant while this process runs.
+			gapRunner, aiResolver := s.catalogGapRunner, s.aiResolver
+			enrichLive := func(ctx context.Context) handlers.CatalogEnrichAvailability {
+				out := handlers.CatalogEnrichAvailability{Reason: handlers.EnrichReasonNoProvider}
+				if res, err := aiResolver.ForPlatform(ctx); err == nil {
+					out.Provider = res.Provider.Name()
+				}
+				if gapRunner.Available() {
+					out.Available, out.Reason = true, ""
+				}
+				return out
+			}
 			// One line at startup saying what this deployment's enricher
 			// actually is, the way cbom-service logs its narrator. An operator
 			// reading "proposals=unavailable (edition)" in the first ten lines
@@ -704,7 +743,7 @@ func (s *Server) setupRouter() {
 				catalogs.POST("/eol/proposals/:id/reject", handlers.RejectEOLProposal(enrichStore))
 				catalogs.GET("/eol/misses", handlers.ListCatalogMisses(enrichStore))
 				catalogs.POST("/eol/enrich", handlers.RunCatalogEnrichment(s.catalogGapRunner))
-				catalogs.GET("/eol/enrich/availability", handlers.GetCatalogEnrichAvailability(enrichAvailability))
+				catalogs.GET("/eol/enrich/availability", handlers.GetCatalogEnrichAvailability(enrichAvailability, enrichLive))
 
 				// Catalog ▸ Classification rules (ADR-0004 D6, workstream
 				// 2.10a). The fingerprint rules behind every class proposal:

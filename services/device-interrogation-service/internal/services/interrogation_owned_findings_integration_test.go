@@ -180,6 +180,12 @@ func TestIntegration_ZeroAssetAgentRun_KeepsDeviceIdentity(t *testing.T) {
 	defer cancel()
 
 	device := subjectAsset(t, owner, tenant, "pa-edge-"+uuid.NewString()[:8])
+	// The identifier the device was added by: what binds the serial the
+	// interrogation reads to THIS asset when it is sent to the engine.
+	if _, err := owner.ExecContext(ctx, `INSERT INTO asset_identifiers (tenant_id, asset_id, kind, value, scope, source_kind, source_ref)
+		VALUES ($1, $2, 'fqdn', $3, NULL, 'declared', 'manual')`, tenant, device, "pa-edge.example.test"); err != nil {
+		t.Fatalf("seed the device's identifier: %v", err)
+	}
 	agent := insertDeviceAgent(t, owner, tenant)
 	jobID := uuid.New()
 	if _, err := owner.ExecContext(ctx, `INSERT INTO device_jobs (id, tenant_id, job_type, agent_id, asset_id, status)

@@ -14,6 +14,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/repository"
 	"github.com/vistasecurity/vistaplatform/services/tenant-health-service/internal/service"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // HealthCalculator periodically calculates health scores for all active tenants
@@ -34,7 +35,7 @@ func NewHealthCalculator(healthService *service.HealthService, repo *repository.
 		databaseURL = "postgres://crypto_user:crypto_pass_dev@localhost:5432/crypto_inventory?sslmode=disable"
 	}
 
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(databaseURL))
 	if err != nil {
 		log.Fatalf("Failed to connect to database for HealthCalculator: %v", err)
 	}

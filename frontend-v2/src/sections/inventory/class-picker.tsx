@@ -200,6 +200,14 @@ export interface IdentifierDraft {
   sourceKind?: string;
   /** The scope the server gave it, carried back verbatim on save. */
   scope?: string;
+  /**
+   * `static` when the address is pinned — as the server reported it,
+   * or because the person ticked "Pin" on a measured address this save. Sent
+   * back on save only for `ip_address`.
+   */
+  addressAssignment?: string;
+  /** The assignment the server reported, so the form can tell a new pin from an existing one. */
+  storedAssignment?: string;
 }
 
 /**
@@ -291,6 +299,7 @@ export function IdentifierEditor({ rows, onChange }: {
               <span style={{ flex: 'none', fontSize: 10.5, color: 'var(--app-t3)', padding: '0 7px' }}>
                 {row.sourceKind ?? 'measured'}
               </span>
+              {row.kind === 'ip_address' && <AddressPinToggle row={row} onChange={(next) => { const n = [...rows]; n[idx] = next; onChange(n); }} />}
             </div>
           );
         }
@@ -329,6 +338,46 @@ export function IdentifierEditor({ rows, onChange }: {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Pin a measured address. A segment flagged DHCP stops its addresses
+ * deciding which asset a sighting belongs to — today's lease is tomorrow's
+ * other device — and that includes a router's own static LAN address. Pinning
+ * declares this one address static on this asset, so a scan of it still
+ * matches here. It is per row and opt-in because the form sends every
+ * identifier back on every save: an echo is not a declaration.
+ *
+ * An address already pinned shows `static` and no control. An address typed
+ * into this form is a declaration and is pinned without asking.
+ */
+export function AddressPinToggle({ row, onChange }: { row: IdentifierDraft; onChange: (row: IdentifierDraft) => void }) {
+  if (row.storedAssignment === 'static') {
+    return (
+      <span
+        data-testid="identifier-pin-static"
+        title="Pinned: matches this asset even inside a network segment flagged DHCP."
+        style={{ flex: 'none', fontSize: 10.5, fontWeight: 600, color: 'var(--app-t2)' }}
+      >
+        static
+      </span>
+    );
+  }
+  const pinned = row.addressAssignment === 'static';
+  return (
+    <label
+      style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, color: 'var(--app-t2)', cursor: 'pointer' }}
+      title="Declare this address static on this asset. A pinned address still matches this asset inside a network segment flagged DHCP."
+    >
+      <input
+        type="checkbox"
+        aria-label={`Pin ${row.value} as a static address`}
+        checked={pinned}
+        onChange={(e) => onChange({ ...row, addressAssignment: e.target.checked ? 'static' : undefined })}
+      />
+      Pin
+    </label>
   );
 }
 

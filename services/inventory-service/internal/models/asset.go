@@ -52,14 +52,24 @@ type Asset struct {
 	OwnerEmail   *string `json:"owner_email" db:"owner_email"`
 	// SupportGroup is the team on the hook for it — ADR-0001 D3 Q5, the one
 	// context field the CMDB buyer asked for that the old model had no home for.
-	SupportGroup        *string                `json:"support_group,omitempty" db:"support_group"`
-	Description         *string                `json:"description" db:"description"`
-	Site                *string                `json:"site,omitempty" db:"site"`
-	Region              *string                `json:"region,omitempty" db:"region"`
-	Zone                *string                `json:"zone,omitempty" db:"zone"`
-	LocationID          *uuid.UUID             `json:"location_id,omitempty" db:"location_id"`
-	NetworkSegmentID    *uuid.UUID             `json:"network_segment_id,omitempty" db:"network_segment_id"`
-	NetworkSegmentName  *string                `json:"network_segment_name,omitempty" db:"network_segment_name"`
+	SupportGroup       *string    `json:"support_group,omitempty" db:"support_group"`
+	Description        *string    `json:"description" db:"description"`
+	Site               *string    `json:"site,omitempty" db:"site"`
+	Region             *string    `json:"region,omitempty" db:"region"`
+	Zone               *string    `json:"zone,omitempty" db:"zone"`
+	LocationID         *uuid.UUID `json:"location_id,omitempty" db:"location_id"`
+	NetworkSegmentID   *uuid.UUID `json:"network_segment_id,omitempty" db:"network_segment_id"`
+	NetworkSegmentName *string    `json:"network_segment_name,omitempty" db:"network_segment_name"`
+	// RoutedSegments are the segments this asset is the gateway of (
+	// the "Networks routed" card). Set by the single-asset read only: `[]` when
+	// it routes nothing, absent when the read could not load them (and on every
+	// list read).
+	RoutedSegments *[]RoutedSegment `json:"routed_segments,omitempty" db:"-"`
+	// SegmentGateway is the gateway of the asset's own segment ("via
+	// <gateway>"), derived when read and never stored per host. Single-asset
+	// read only; absent when the segment has no gateway, when the asset IS
+	// that gateway, or when it could not be loaded.
+	SegmentGateway      *SegmentGateway        `json:"segment_gateway,omitempty" db:"-"`
 	DiscoveryMethod     *string                `json:"discovery_method,omitempty" db:"discovery_method"`
 	ConfidenceScore     *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
 	Tags                map[string]interface{} `json:"tags" db:"tags"`
@@ -79,12 +89,17 @@ type Asset struct {
 	// and a pointer nobody can find in a schema is a pointer nobody follows.
 	//
 	// nil on every asset that was not merged away, which is almost all of them.
-	MergedInto        *uuid.UUID `json:"merged_into,omitempty" db:"merged_into"`
-	FirstDiscoveredAt time.Time  `json:"first_discovered_at" db:"first_discovered_at"`
-	LastSeenAt        time.Time  `json:"last_seen_at" db:"last_seen_at"`
-	CreatedAt         time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at" db:"updated_at"`
-	DeletedAt         *time.Time `json:"deleted_at" db:"deleted_at"`
+	MergedInto *uuid.UUID `json:"merged_into,omitempty" db:"merged_into"`
+	// ActiveScan is the asset's person-initiated scan (Active Scan or a
+	// stale-asset revalidation): in flight, or how the latest one ended.
+	// Projected from `metadata` on read; nil when no person has scanned it
+	// since the record was introduced.
+	ActiveScan        *AssetActiveScan `json:"active_scan,omitempty" db:"-"`
+	FirstDiscoveredAt time.Time        `json:"first_discovered_at" db:"first_discovered_at"`
+	LastSeenAt        time.Time        `json:"last_seen_at" db:"last_seen_at"`
+	CreatedAt         time.Time        `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time        `json:"updated_at" db:"updated_at"`
+	DeletedAt         *time.Time       `json:"deleted_at" db:"deleted_at"`
 
 	// RiskScore is recomputed as the MAX over the asset's scored crypto
 	// configurations (ADR-0005 D4), never the GREATEST(old, new) the old model
@@ -119,6 +134,20 @@ type Asset struct {
 	ProtocolSummary []AssetProtocolSummary `json:"protocol_summary,omitempty"`
 }
 
+// AssetActiveScan is an asset's person-initiated scan as the API shows it.
+//
+// Status is "scanning" from dispatch until every job the request created has
+// ended, then "completed" (a job finished and reached the asset) or "failed"
+// (none did: failed, cancelled, swept as a stale dispatch, or the host could
+// not be scanned). JobIDs are those jobs, for a client that wants to follow
+// them; FinishedAt is when the record was settled.
+type AssetActiveScan struct {
+	Status     string     `json:"status"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	JobIDs     []string   `json:"job_ids"`
+}
+
 // AssetProtocolSummary rolls up one protocol observed on an asset.
 //
 // MaxRiskScore follows the same convention as every other score in the
@@ -149,6 +178,11 @@ type Identifier struct {
 	Confidence  float64   `json:"confidence" db:"confidence"`
 	FirstSeenAt time.Time `json:"first_seen_at" db:"first_seen_at"`
 	LastSeenAt  time.Time `json:"last_seen_at" db:"last_seen_at"`
+	// AddressAssignment is how an `ip_address` is held: "static" (pinned by an
+	// operator's declaration or by the host's own agent), "dynamic" (the
+	// host's agent reported a DHCP lease), or nil when nobody said. A pinned
+	// address still matches its owner inside a segment flagged DHCP.
+	AddressAssignment *string `json:"address_assignment,omitempty" db:"address_assignment"`
 }
 
 // Endpoint is one network face of an asset: an (address|fqdn, port, transport)
@@ -192,6 +226,13 @@ type Endpoint struct {
 	LastSeenAt     time.Time  `json:"last_seen_at" db:"last_seen_at"`
 	LastScannedAt  *time.Time `json:"last_scanned_at,omitempty" db:"last_scanned_at"`
 	LastScanStatus *string    `json:"last_scan_status,omitempty" db:"last_scan_status"`
+
+	// TLSHandshakeOutcome is "refused" when the endpoint's last measurement was
+	// a TLS alert in answer to the ClientHello (it needs a server name, usually),
+	// and absent otherwise. Absent is not "negotiated fine": it is "nothing to
+	// report". Kept apart from LastScanStatus, which is the scan's own state
+	// machine (scanning / completed / failed) that other code settles by value.
+	TLSHandshakeOutcome *string `json:"tls_handshake_outcome,omitempty" db:"tls_handshake_outcome"`
 }
 
 // CryptoImplementation represents a cryptographic implementation found on an asset
@@ -339,7 +380,8 @@ type AssetFilters struct {
 	AssetOwnership   []string `json:"asset_ownership" form:"asset_ownership"`
 	AssetStatus      []string `json:"asset_status" form:"asset_status"`
 	// UnscannedOnly keeps only assets that have never been actively scanned
-	// (last_scanned_at IS NULL) — the "unscanned" coverage cut for Active Scan ().
+	// (no endpoint scan time and no finished asset-level scan) — the "unscanned"
+	// coverage cut for Active Scan ().
 	UnscannedOnly *bool `json:"unscanned_only" form:"unscanned_only"`
 	// LastSeenBefore (RFC3339) keeps only assets whose last_seen_at is strictly
 	// older than the cutoff; assets with NULL last_seen_at never match. Composes
@@ -464,6 +506,11 @@ type AssetIdentifierInput struct {
 	Kind  string  `json:"kind"`
 	Value string  `json:"value"`
 	Scope *string `json:"scope,omitempty"`
+	// AddressAssignment "static" pins an `ip_address` the asset already holds
+	//: the edit re-declares it, which upgrades a measured row to
+	// declared and pins it. An address newly added on the form is a
+	// declaration and pinned without saying so. Empty asks for nothing.
+	AddressAssignment string `json:"address_assignment,omitempty"`
 }
 
 // AssetEndpointInput is one declared endpoint on an AssetInput.

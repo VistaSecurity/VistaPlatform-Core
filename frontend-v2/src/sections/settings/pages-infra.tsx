@@ -9,10 +9,12 @@ import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SInput, SToggle, STable, STableRow, STag, StateNote, GREEN, AMBER } from './kit';
-import { LocationModal, NetworkSegmentModal, DeleteInfraModal } from './infra-modals';
+import { LocationModal, NetworkSegmentModal, DeleteInfraModal, ClaimSegmentModal } from './infra-modals';
 import { ImportSpreadsheetModal } from '../discovery/import-modal';
-import { segmentPosture, segmentProvenance } from './segment-provenance';
+import { claimChipText, isClaimableSegment, segmentClaim, segmentPosture, segmentProvenance } from './segment-provenance';
 import type { SettingsNavItem } from './nav';
+import { GATEWAY_NOT_RECORDED_TITLE } from '../inventory/segment-gateway';
+import { CoverageText, GatewayLink } from '../inventory/segment-gateway-view';
 
 type Location = inventoryComponents['schemas']['Location'];
 type NetworkSegment = inventoryComponents['schemas']['NetworkSegment'];
@@ -98,9 +100,15 @@ const SEGMENT_TYPE_LABEL: Record<string, string> = { cidr: 'CIDR', ip_range: 'IP
 // known about DHCP on it and whose word that is (measured by a device, inferred
 // from traffic, or set by you). "DHCP unknown" is the honest default: on a DHCP
 // network an address does not identify a device, so an unknown is worth a look.
-function SegmentName({ segment }: { segment: NetworkSegment }) {
+//
+// A learned PUBLIC range additionally offers "Claim as mine": until a
+// person claims it, it is not treated as theirs, and once claimed the row says
+// who and when and offers to revoke it.
+function SegmentName({ segment, onClaim }: { segment: NetworkSegment; onClaim: (mode: 'claim' | 'revoke') => void }) {
   const learned = segmentProvenance(segment.metadata);
   const posture = segmentPosture(segment);
+  const claimable = isClaimableSegment(segment);
+  const claim = claimable ? segmentClaim(segment.metadata) : null;
   return (
     <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
       <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)' }}>{segment.name}</span>
@@ -111,8 +119,33 @@ function SegmentName({ segment }: { segment: NetworkSegment }) {
           style={{ color: posture.dhcp === 'unknown' ? 'var(--app-t3)' : 'var(--app-t2)' }}
         >{posture.text}</span>
       </span>
+      {claimable && (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 2 }}>
+          {claim
+            ? <span data-testid="segment-claim-chip"><STag color={GREEN}>{claimChipText(claim)}</STag></span>
+            : <span data-testid="segment-unclaimed-note" style={{ fontSize: 11, color: 'var(--app-t3)' }}>Public range · not treated as yours</span>}
+          <PermissionGate permission={TENANT_PERMISSIONS.settings.update} fallback={null}>
+            <button
+              className="ui-btn sm ghost" style={{ padding: '0 6px', height: 20, fontSize: 11 }}
+              onClick={(e) => { e.stopPropagation(); onClaim(claim ? 'revoke' : 'claim'); }}
+            >{claim ? 'Revoke claim' : 'Claim as mine'}</button>
+          </PermissionGate>
+        </span>
+      )}
     </span>
   );
+}
+
+// The device that reported being this network's gateway, linking to
+// its asset page. A dash when none has — or when that device was deleted,
+// which the server reports the same way — with the reason on hover.
+function SegmentGatewayCell({ gateway }: { gateway: NetworkSegment['gateway'] }) {
+  if (!gateway) {
+    return (
+      <span data-testid="segment-gateway-missing" title={GATEWAY_NOT_RECORDED_TITLE} style={{ fontSize: 12, color: 'var(--app-t3)' }}>—</span>
+    );
+  }
+  return <span style={{ display: 'flex', minWidth: 0 }}><GatewayLink gateway={gateway} /></span>;
 }
 
 export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
@@ -120,6 +153,7 @@ export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
   const [importOpen, setImportOpen] = useState(false);
   const [editSeg, setEditSeg] = useState<NetworkSegment | null>(null);
   const [delSeg, setDelSeg] = useState<NetworkSegment | null>(null);
+  const [claimSeg, setClaimSeg] = useState<{ segment: NetworkSegment; mode: 'claim' | 'revoke' } | null>(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['settings', 'network-segments'],
@@ -132,6 +166,7 @@ export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
   const segments = data ?? [];
   const cols = [
     { label: 'Name' }, { label: 'Type', w: '100px' }, { label: 'Value' },
+    { label: 'Gateway', w: '180px' }, { label: 'Coverage', w: '150px' },
     { label: 'Environment', w: '110px' }, { label: 'Location', w: '140px' }, { label: 'Active', w: '64px', align: 'right' as const },
     { label: '', w: '88px', align: 'right' as const },
   ];
@@ -158,9 +193,11 @@ export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
         <STable cols={cols}>
           {segments.map((s: NetworkSegment, i) => (
             <STableRow key={s.id} first={i === 0} cols={cols} cells={[
-              <SegmentName segment={s} />,
+              <SegmentName segment={s} onClaim={(mode) => setClaimSeg({ segment: s, mode })} />,
               <STag>{SEGMENT_TYPE_LABEL[s.segment_type] || s.segment_type}</STag>,
               <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)' }}>{s.value}</span>,
+              <SegmentGatewayCell gateway={s.gateway} />,
+              <CoverageText segmentType={s.segment_type} coverage={s.coverage} />,
               <span style={{ fontSize: 12, color: 'var(--app-t2)', textTransform: 'capitalize' }}>{s.environment || '—'}</span>,
               <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>{s.location_name || s.location_full_path || '—'}</span>,
               <span style={{ display: 'inline-flex', justifyContent: 'flex-end' }}><STag color={s.is_active ? GREEN : 'var(--app-t3)'}>{s.is_active ? 'Yes' : 'No'}</STag></span>,
@@ -173,6 +210,7 @@ export function NetworkSegmentsPage({ meta }: { meta: SettingsNavItem }) {
       {(createOpen || editSeg) && <NetworkSegmentModal open segment={editSeg} onClose={() => { setCreateOpen(false); setEditSeg(null); }} />}
       <ImportSpreadsheetModal open={importOpen} lockedTarget="segments" onClose={() => setImportOpen(false)} />
       {delSeg && <DeleteInfraModal open kind="segment" id={delSeg.id} name={delSeg.name} onClose={() => setDelSeg(null)} />}
+      {claimSeg && <ClaimSegmentModal open segment={claimSeg.segment} mode={claimSeg.mode} onClose={() => setClaimSeg(null)} />}
     </SPage>
   );
 }

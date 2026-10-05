@@ -53,7 +53,7 @@ From there, **Open asset** goes to the asset's page and **Show neighbourhood** d
 ### What the network view does not guess
 
 - **Networks come from your data.** A device is drawn in the network it is assigned to, even if its address suggests another. If a device looks misplaced, the assignment is what needs fixing.
-- **Gateways are not inferred.** Until a device is recorded as a network's gateway, the network says *gateway not recorded*, rather than assuming the first address is the router.
+- **Gateways are not inferred.** A network names its gateway — the device's name and its address on that network, linking to its asset page — only once that device has reported it, which happens when you interrogate the router (see [What interrogating a gateway records](../guides/device-interrogation-user-guide.md#what-interrogating-a-gateway-records)). Until then the network says *gateway not recorded*, rather than assuming the first address is the router.
 - Very large estates are capped. When that happens a banner says how many devices are shown out of how many, highest risk first.
 
 The site you focus on and the device you open are in the address bar, so a view is a link you can paste into a ticket. Your layout, zoom and colour choices are remembered in your browser.
@@ -183,7 +183,7 @@ The map reads the same data as the inventory, so anyone who can view assets can 
 
 ## The topology view
 
-**Inventory → Map → Topology**, or straight to `/inventory?lens=map&view=topology`. The **Inventory health** panel on the Dashboard links here too.
+**Inventory → Map → Topology**, or straight to `/inventory?lens=map&view=topology`. The **Assets Monitored** panel on the Dashboard links here too.
 
 Topology answers *where is everything*. It is deliberately **not** a graph of every asset: a picture of several thousand nodes is unreadable everywhere it has been tried, and tells you less than the inventory list already does. It is a tree instead.
 
@@ -238,4 +238,4 @@ No full-screen mode and no export. The tree is a way into the list rather than a
 - [Query](./query.md) — the language the asset picker speaks
 - [Page-Local Exports](./page-local-exports.md) — the same convenience-not-evidence rule, for lists
 - [Operational Context](./operational-context.md) — the network segments the topology groups by
-- [The Dashboard](./dashboard.md) — the Inventory health panel that links here
+- [The Dashboard](./dashboard.md) — the Assets Monitored panel that links here

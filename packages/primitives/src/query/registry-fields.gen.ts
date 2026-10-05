@@ -211,6 +211,12 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       enum: ['legacy', 'established', 'provisional', 'operator_confirmed'],
     },
     {
+      name: 'last_scanned',
+      type: 'timestamp',
+      accessor: { kind: 'jsonb', jsonColumn: 'metadata', key: 'last_scanned_at' },
+      description: 'when the newest finished active or automatic scan reached this asset; absent if none has',
+    },
+    {
       name: 'last_seen',
       type: 'timestamp',
       accessor: { kind: 'column', column: 'last_seen_at' },

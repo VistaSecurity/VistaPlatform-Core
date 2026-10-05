@@ -497,10 +497,7 @@ func (s *CloudDiscoveryService) writeContainsEdge(ctx context.Context, tenantID 
 	// Repo() is the existing accessor for exactly this — the writes that are not
 	// a resolution — and borrowing it keeps ONE repository per service rather
 	// than a second handle that could disagree about which connection it is on.
-	repo, err := s.devices.Repo()
-	if err != nil {
-		return err
-	}
+	repo := s.devices.Repo()
 	source := cloudSource(stringPtr(provider))
 	return repo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
 		status, statusErr := r.EdgeStatusFor(ctx, tenantID.String(), source.Kind, from.String(), to.String())

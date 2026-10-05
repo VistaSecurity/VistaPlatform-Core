@@ -136,7 +136,26 @@ func (g *GapRunner) Stop() {
 // Available reports whether this deployment can propose at all. The console
 // asks before offering the button (the pattern) rather than after
 // clicking it.
-func (g *GapRunner) Available() bool { return g != nil && g.proposer != nil }
+//
+// A proposer that can say whether it is READY is asked: the model provider
+// behind it is resolved per call and a platform administrator can set or clear
+// one while this process runs, so "there is a proposer" stopped being the same
+// fact as "it can answer".
+func (g *GapRunner) Available() bool {
+	if g == nil || g.proposer == nil {
+		return false
+	}
+	if r, ok := g.proposer.(ReadyProposer); ok {
+		return r.Ready(context.Background())
+	}
+	return true
+}
+
+// ReadyProposer is a [Proposer] that can report whether it would answer right
+// now. Optional: a proposer without it is taken to be ready.
+type ReadyProposer interface {
+	Ready(ctx context.Context) bool
+}
 
 // GapSummary is what one pass did.
 //

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,6 +84,42 @@ type IdentityObservation struct {
 	EnrichmentReason string                        `json:"enrichment_reason"`
 	LastAttemptAt    *time.Time                    `json:"last_attempt_at"`
 	NextAttemptAt    *time.Time                    `json:"next_attempt_at"`
+
+	// The review table's fields, resolved server-side so the UI never
+	// joins a UUID to a name or re-derives what a row needs.
+	//
+	// NetworkName is the configured segment's name for NetworkScope, null when
+	// the scope is the tenant default or names no segment of this tenant.
+	NetworkName *string `json:"network_name"`
+	// SourceName is the collector's name for a `sensor:<id>`-shaped SourceRef,
+	// else a fixed label for the kind of source. Never the raw ref.
+	SourceName      string                         `json:"source_name"`
+	Needs           string                         `json:"needs"`
+	SuggestedAction string                         `json:"suggested_action"`
+	ExplanationCode string                         `json:"explanation_code"`
+	SuggestedReason string                         `json:"suggested_reason"`
+	Summary         []ObservationIdentifierSummary `json:"summary"`
+	// LinkAsset is the one existing asset that owns an identifier of this
+	// observation, set exactly when `suggested_action` is `link`.
+	LinkAsset *ObservationOwner `json:"link_asset"`
+	// EvidenceHeld is true for supporting evidence the engine linked to an
+	// established asset but attached nothing from (platform ADR-0003 D2):
+	// its endpoints are listed in the evidence and are NOT on the asset.
+	// Linking it to that asset (or confirming it) attaches them.
+	EvidenceHeld bool `json:"evidence_held"`
+}
+
+// ObservationNeedsCounts are the chip badges: the tenant's UNRESOLVED
+// observations in the active 30-day window, by needs, whatever the current
+// filter is.
+type ObservationNeedsCounts struct {
+	ReadyToConfirm int `json:"ready_to_confirm"`
+	LinkExisting   int `json:"link_existing"`
+	NeedsReview    int `json:"needs_review"`
+	NeedsNetwork   int `json:"needs_network"`
+	NeedsSensor    int `json:"needs_sensor"`
+	LikelyNoise    int `json:"likely_noise"`
+	All            int `json:"all"`
 }
 
 type IdentityObservationPage struct {
@@ -89,6 +127,22 @@ type IdentityObservationPage struct {
 	Total        int                   `json:"total"`
 	Page         int                   `json:"page"`
 	PageSize     int                   `json:"page_size"`
+	// Counts is filled by the list endpoint.
+	Counts *ObservationNeedsCounts `json:"counts,omitempty"`
+}
+
+// ObservationListFilter is the list endpoint's query. The zero Sort is
+// last_seen_desc.
+type ObservationListFilter struct {
+	State        string
+	Page         int
+	PageSize     int
+	AssetID      *uuid.UUID
+	Needs        []string
+	NetworkScope string
+	Source       string
+	Query        string
+	Sort         string
 }
 
 type IdentitySummary struct {
@@ -122,28 +176,55 @@ func (s *AssetService) UsesIdentityAdmission(ctx context.Context, tenant uuid.UU
 	return mode == "enforce" || mode == "paused", err
 }
 
-const identityObservationColumns = `id,source_kind,source_ref,collector_version,network_scope,evidence,
- admission_reasons,state,asset_id,proposal_id,first_seen_at,last_seen_at,occurrence_count,
- enrichment_state,enrichment_reason,last_attempt_at,next_attempt_at`
+// identityObservationColumns are read through observationReadFrom, which joins
+// the segment and the collector so a page resolves its names in the same
+// tenant-scoped statement as its rows: no query per row, and a name can only
+// come from a row the tenant's own predicate (and RLS) admits. The join keys
+// also carry tenant_id, so a scope or source_ref naming ANOTHER tenant's
+// segment or sensor finds nothing rather than that tenant's name.
+const identityObservationColumns = `o.id,o.source_kind,o.source_ref,o.collector_version,o.network_scope,o.evidence,
+ o.admission_reasons,o.state,o.asset_id,o.proposal_id,o.first_seen_at,o.last_seen_at,o.occurrence_count,
+ o.enrichment_state,o.enrichment_reason,o.last_attempt_at,o.next_attempt_at,ns.name,s.name,
+ (o.state='linked' AND o.resolution_outcome IS NOT DISTINCT FROM 'supporting'),
+ ` + observationOwnersJSONSQL
 
-func scanIdentityObservation(row interface{ Scan(...any) error }) (IdentityObservation, error) {
+const observationReadFrom = ` FROM identity_observations o
+ LEFT JOIN network_segments ns ON ns.tenant_id=o.tenant_id AND ns.id::text=o.network_scope
+ LEFT JOIN sensors s ON s.tenant_id=o.tenant_id AND s.id::text=(regexp_match(o.source_ref, ` + sourceSensorRefSQL + `))[1]`
+
+func scanIdentityObservation(row interface{ Scan(...any) error }, now time.Time) (IdentityObservation, error) {
 	var o IdentityObservation
 	var reasons pq.StringArray
+	var networkName, sensorName sql.NullString
+	var ownersJSON []byte
 	err := row.Scan(&o.ID, &o.SourceKind, &o.SourceRef, &o.CollectorVersion, &o.NetworkScope, &o.Evidence,
 		&reasons, &o.State, &o.AssetID, &o.ProposalID, &o.FirstSeenAt, &o.LastSeenAt, &o.OccurrenceCount,
-		&o.EnrichmentState, &o.EnrichmentReason, &o.LastAttemptAt, &o.NextAttemptAt)
+		&o.EnrichmentState, &o.EnrichmentReason, &o.LastAttemptAt, &o.NextAttemptAt, &networkName, &sensorName, &o.EvidenceHeld, &ownersJSON)
 	o.AdmissionReasons = []string(reasons)
 	if o.AdmissionReasons == nil {
 		o.AdmissionReasons = []string{}
 	}
-	return o, err
+	if err != nil {
+		return o, err
+	}
+	if networkName.Valid {
+		o.NetworkName = &networkName.String
+	}
+	var owners []ObservationOwner
+	if len(ownersJSON) > 0 {
+		if err := json.Unmarshal(ownersJSON, &owners); err != nil {
+			return o, err
+		}
+	}
+	annotateObservation(&o, sensorName.String, owners, now)
+	return o, nil
 }
 
 func (s *AssetService) GetIdentityObservation(ctx context.Context, tenant, id uuid.UUID) (IdentityObservation, error) {
 	var out IdentityObservation
 	err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sqlx.Tx) error {
 		var err error
-		out, err = scanIdentityObservation(tx.QueryRowContext(ctx, `SELECT `+identityObservationColumns+` FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, id))
+		out, err = scanIdentityObservation(tx.QueryRowContext(ctx, `SELECT `+identityObservationColumns+observationReadFrom+` WHERE o.tenant_id=$1 AND o.id=$2`, tenant, id), time.Now().UTC())
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrObservationNotFound
 		}
@@ -206,29 +287,95 @@ func (s *AssetService) IdentitySummary(ctx context.Context, tenant uuid.UUID) (I
 }
 
 func (s *AssetService) ListIdentityObservations(ctx context.Context, tenant uuid.UUID, state string, page, size int, assetID *uuid.UUID) (IdentityObservationPage, error) {
-	out := IdentityObservationPage{Observations: []IdentityObservation{}, Page: page, PageSize: size}
-	if page < 1 || size < 1 || size > 100 {
+	return s.ListIdentityObservationsFiltered(ctx, tenant, ObservationListFilter{State: state, Page: page, PageSize: size, AssetID: assetID})
+}
+
+// observationSorts maps the `sort` parameter to an ORDER BY. Every order ends
+// in o.id so a page boundary is stable between two reads.
+var observationSorts = map[string]string{
+	"":               `o.last_seen_at DESC, o.id`,
+	"last_seen_desc": `o.last_seen_at DESC, o.id`,
+	"last_seen_asc":  `o.last_seen_at ASC, o.id`,
+	"host":           `lower(COALESCE(NULLIF(o.evidence->>'hostname',''), jsonb_path_query_first(o.evidence, '$.identifiers[*] ? (@.kind == "ip_address").value') #>> '{}')) NULLS LAST, o.last_seen_at DESC, o.id`,
+	"network":        `lower(ns.name) NULLS LAST, o.last_seen_at DESC, o.id`,
+	"needs":          observationNeedsOrderSQL + `, o.last_seen_at DESC, o.id`,
+}
+
+// observationSearchSQL is the text `q` searches: names and addresses from the
+// evidence, the network's name and the collector's name. Built from the
+// identifier and endpoint arrays rather than evidence::text so a search for
+// "tcp" or a key name does not match every row.
+const observationSearchSQL = `concat_ws(' ', o.evidence->>'hostname', o.evidence->>'display_name', ns.name, s.name,
+ (SELECT string_agg(x->>'value', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.evidence->'identifiers')='array' THEN o.evidence->'identifiers' ELSE '[]'::jsonb END) x
+   WHERE x->>'kind' IN ('ip_address','hostname','fqdn','mac_address')),
+ (SELECT string_agg(e->>'address', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.evidence->'endpoints')='array' THEN o.evidence->'endpoints' ELSE '[]'::jsonb END) e))`
+
+// likeEscaper makes `q` a literal substring under ILIKE.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func (s *AssetService) ListIdentityObservationsFiltered(ctx context.Context, tenant uuid.UUID, f ObservationListFilter) (IdentityObservationPage, error) {
+	out := IdentityObservationPage{Observations: []IdentityObservation{}, Page: f.Page, PageSize: f.PageSize}
+	if f.Page < 1 || f.PageSize < 1 || f.PageSize > 100 {
 		return out, fmt.Errorf("invalid observation pagination")
 	}
-	switch state {
+	switch f.State {
 	case "unresolved", "linked", "conflict", "dismissed", "expired", "all":
 	default:
 		return out, fmt.Errorf("invalid observation state")
 	}
-	where := `tenant_id=$1 AND ($2='all' OR state=$2) AND ($3::uuid IS NULL OR asset_id=$3)
-	 AND ($2<>'unresolved' OR last_seen_at >= now()-interval '30 days')`
+	order, ok := observationSorts[f.Sort]
+	if !ok {
+		return out, fmt.Errorf("invalid observation sort")
+	}
+	for _, n := range f.Needs {
+		if !slices.Contains(ObservationNeedsValues, n) {
+			return out, fmt.Errorf("invalid observation needs")
+		}
+	}
+	args := []any{tenant, f.State, f.AssetID}
+	where := `o.tenant_id=$1 AND ($2='all' OR o.state=$2) AND ($3::uuid IS NULL OR o.asset_id=$3)
+	 AND ($2<>'unresolved' OR o.last_seen_at >= now()-interval '30 days')`
+	if len(f.Needs) > 0 {
+		args = append(args, pq.Array(f.Needs))
+		where += fmt.Sprintf(` AND %s = ANY($%d::text[])`, observationNeedsSQL, len(args))
+	}
+	if f.NetworkScope != "" {
+		args = append(args, f.NetworkScope)
+		where += fmt.Sprintf(` AND o.network_scope=$%d`, len(args))
+	}
+	if f.Source != "" {
+		args = append(args, f.Source)
+		where += fmt.Sprintf(` AND o.source_ref=$%d`, len(args))
+	}
+	if q := strings.TrimSpace(f.Query); q != "" {
+		args = append(args, "%"+likeEscaper.Replace(q)+"%")
+		where += fmt.Sprintf(` AND %s ILIKE $%d`, observationSearchSQL, len(args))
+	}
+	now := time.Now().UTC()
 	err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sqlx.Tx) error {
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM identity_observations WHERE `+where, tenant, state, assetID).Scan(&out.Total); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*)`+observationReadFrom+` WHERE `+where, args...).Scan(&out.Total); err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT `+identityObservationColumns+` FROM identity_observations WHERE `+where+
-			` ORDER BY last_seen_at DESC,id LIMIT $4 OFFSET $5`, tenant, state, assetID, size, (page-1)*size)
+		var counts ObservationNeedsCounts
+		if err := tx.QueryRowContext(ctx, `SELECT
+		 count(*) FILTER (WHERE needs='ready_to_confirm'), count(*) FILTER (WHERE needs='link_existing'),
+		 count(*) FILTER (WHERE needs='needs_review'), count(*) FILTER (WHERE needs='needs_network'),
+		 count(*) FILTER (WHERE needs='needs_sensor'), count(*) FILTER (WHERE needs='likely_noise'), count(*)
+		 FROM (SELECT `+observationNeedsSQL+` AS needs FROM identity_observations o
+		  WHERE o.tenant_id=$1 AND o.state='unresolved' AND o.last_seen_at >= now()-interval '30 days') n`, tenant).
+			Scan(&counts.ReadyToConfirm, &counts.LinkExisting, &counts.NeedsReview, &counts.NeedsNetwork, &counts.NeedsSensor, &counts.LikelyNoise, &counts.All); err != nil {
+			return err
+		}
+		out.Counts = &counts
+		pageArgs := append(append([]any{}, args...), f.PageSize, (f.Page-1)*f.PageSize)
+		rows, err := tx.QueryContext(ctx, `SELECT `+identityObservationColumns+observationReadFrom+` WHERE `+where+
+			fmt.Sprintf(` ORDER BY %s LIMIT $%d OFFSET $%d`, order, len(pageArgs)-1, len(pageArgs)), pageArgs...)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
-			o, err := scanIdentityObservation(rows)
+			o, err := scanIdentityObservation(rows, now)
 			if err != nil {
 				return err
 			}

@@ -11,9 +11,10 @@ package testdb_test
 // listener and its assertions are answered by the wrong socket.
 //
 // The whole 127.0.0.0/8 range is loopback, so the fix is free: each suite binds
-// its own address (sensor/internal/discovery uses 127.0.0.2,
-// cluster-sensor-service/internal/services uses 127.0.0.3) and gets its own
-// socket and its own datagrams.
+// its own address (shared/discovery's engine OT UDP test uses 127.0.0.31, its
+// parity fixture 127.0.0.21; the legacy executors' suites that used 127.0.0.2
+// and 127.0.0.3 were deleted in WP5) and gets its own socket and its own
+// datagrams.
 //
 // The rule is only checkable if something checks it — the comment on the first
 // suite to move said exactly this and the second suite stayed on 127.0.0.1

@@ -1,0 +1,106 @@
+{
+  "models.CryptoDiscovery": {
+    "CipherSuite": "string=TLS_AES_128_GCM_SHA256",
+    "Confidence": "float64=0.95",
+    "CreatedAt": "dropped",
+    "DestIP": "string=10.20.30.40",
+    "DiscoveryMethod": "string=active_enrichment",
+    "DiscoveryType": "string=",
+    "ID": "string=",
+    "KeySize": "int=0",
+    "Port": "int=8443",
+    "Protocol": "string=TLS",
+    "RawMetadata": {
+      "map[string]interface {}": {
+        "cert_has_sct": "bool=false",
+        "cert_sct_source": "string=none",
+        "cert_validation_error": "string=x509: certificate is valid for other.example.test, not device.example.test",
+        "cert_validation_status": "string=hostname_mismatch",
+        "certificates": {
+          "[]interface {}": [
+            {
+              "map[string]interface {}": {
+                "certificate_pem": "string={{other_leaf.pem}}",
+                "chain_order": "int=0",
+                "extended_key_usage": {
+                  "[]string": [
+                    "string=ServerAuth"
+                  ]
+                },
+                "fingerprint_sha1": "string={{other_leaf.sha1}}",
+                "fingerprint_sha256": "string={{other_leaf.sha256}}",
+                "is_ca": "bool=false",
+                "issuer_dn": "string=CN=Example Test ECDSA CA,O=Example Test",
+                "key_algorithm": "string=ECDSA",
+                "key_size": "int=256",
+                "key_usage": {
+                  "[]string": [
+                    "string=DigitalSignature"
+                  ]
+                },
+                "not_after": "string=2125-01-01T00:00:00Z",
+                "not_before": "string=2020-01-01T00:00:00Z",
+                "serial_number": "string=2003",
+                "signature_alg": "string=ECDSA-SHA256",
+                "subject_alternative_names": {
+                  "[]string": [
+                    "string=other.example.test"
+                  ]
+                },
+                "subject_dn": "string=CN=other.example.test"
+              }
+            },
+            {
+              "map[string]interface {}": {
+                "certificate_pem": "string={{ecdsa_ca.pem}}",
+                "chain_order": "int=1",
+                "extended_key_usage": "[]string=nil",
+                "fingerprint_sha1": "string={{ecdsa_ca.sha1}}",
+                "fingerprint_sha256": "string={{ecdsa_ca.sha256}}",
+                "is_ca": "bool=true",
+                "issuer_dn": "string=CN=Example Test ECDSA CA,O=Example Test",
+                "key_algorithm": "string=ECDSA",
+                "key_size": "int=256",
+                "key_usage": {
+                  "[]string": [
+                    "string=CertSign",
+                    "string=CRLSign"
+                  ]
+                },
+                "not_after": "string=2125-01-01T00:00:00Z",
+                "not_before": "string=2020-01-01T00:00:00Z",
+                "serial_number": "string=2001",
+                "signature_alg": "string=ECDSA-SHA256",
+                "subject_alternative_names": {
+                  "[]string": []
+                },
+                "subject_dn": "string=CN=Example Test ECDSA CA,O=Example Test"
+              }
+            }
+          ]
+        },
+        "cipher_suite": "string=TLS_AES_128_GCM_SHA256",
+        "enrichment_method": "string=active_probe_after_passive",
+        "handshake_types": {
+          "[]string": [
+            "string=ClientHello",
+            "string=ServerHello",
+            "string=Certificate"
+          ]
+        },
+        "key_exchange_algorithm": "string=X25519",
+        "key_exchange_group_raw": "uint16=29",
+        "key_exchange_key_size": "int=256",
+        "tls_supports_classical_kex": "bool=true",
+        "tls_supports_pqc_hybrid_kex": "bool=false",
+        "version": "string=TLS 1.3"
+      }
+    },
+    "SensorID": "string=sensor-1",
+    "ServiceHints": "*models.ServiceHints=nil",
+    "SessionID": "string=",
+    "SourceIP": "string=10.0.0.5",
+    "Timestamp": "dropped",
+    "Version": "string=TLS 1.3"
+  }
+}

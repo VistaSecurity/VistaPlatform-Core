@@ -15,7 +15,7 @@ func sourceClaimFixture(t *testing.T, db *sql.DB, agentLane bool) (*JobQueueServ
 	t.Helper()
 	tenant := testdb.NewTenant(t, db)
 	devices := NewDeviceServiceWithKey(db, testMasterKey)
-	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", ManagementURL: strptr("https://192.0.2.2"), Metadata: map[string]interface{}{"identity_enrichment_executor": "platform"}})
+	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", ManagementURL: strptr("https://192.0.2.2"), PlatformReinterrogationAllowed: boolPtr(true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,13 @@ func TestIntegration_SourceInsertionRechecksPolicyAfterPreparation(t *testing.T)
 		return models.CreateDeviceJobRequest{TenantID: tenant, JobType: models.JobTypeDeviceInterrogation, AssetID: &id, Parameters: map[string]interface{}{"management_url": "https://192.0.2.2"}}, err
 	}
 	service := NewConfiguredSourceRefresh(db, queue, devices, prepare)
-	req := refreshObservation(t, db, tenant, "interrogation:"+previous.ID.String(), nil)
+	// A sighting linked to the controller, whose earlier run is the executor the
+	// planner reuses. (A peer that run itself reported is never planned against
+	// it, so it could not reach preparation at all.)
+	if _, err := db.Exec(`UPDATE device_jobs SET status='completed',completed_at=now()-interval '1 day' WHERE id=$1`, previous.ID); err != nil {
+		t.Fatal(err)
+	}
+	req := refreshObservation(t, db, tenant, "sensor:"+uuid.NewString(), previous.AssetID)
 	got, err := service.Refresh(context.Background(), req)
 	if err != nil || got.State != "blocked" || got.Reason != "enrichment_paused" {
 		t.Fatalf("paused insert %+v: %v", got, err)

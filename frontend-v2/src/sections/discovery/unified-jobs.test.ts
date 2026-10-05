@@ -161,3 +161,52 @@ describe('distinctExecutors', () => {
     expect(distinctExecutors(rows)).toEqual(['agent-42', 'xps16-sensor']);
   });
 });
+
+// A scan-plan job ( WP4b) carries its depth and, while it runs, its
+// progress on the row; a legacy job's row is exactly what it was.
+describe('discoveryRow — scan-plan jobs', () => {
+  const plan = {
+    depth: 'standard',
+    pace: 'normal',
+    tcp_ports: '1-1000',
+    udp_ports: '',
+    tcp_port_count: 1000,
+    udp_port_count: 0,
+    run_from_requested: 'auto',
+    executor_resolved: 'platform',
+    executor_reason: 'no sensor observes these targets',
+    depth_adjustments: [],
+    targets: [{ target: '10.0.0.0/24', class: 'private', depth: 'standard', addresses: 254, tcp_ports: '1-1000', udp_ports: '', tcp_port_count: 1000, udp_port_count: 0, estimated_probes: 254000 }],
+    estimated_probes: 254000,
+    probe_limit: 25000000,
+  } as NonNullable<ScanJob['plan']>;
+  const cov = {
+    hosts_total: 254, hosts_responded: 31, hosts_no_answer: 81, hosts_undetermined: 0, hosts_failed: 0, hosts_pending: 142, hosts_cancelled: 0,
+    ports_requested: 112000, ports_open: 9, ports_closed: 4120, ports_filtered: 61, ports_local_errors: 0, ports_not_probed: 0,
+    tarpit_hosts: 0, ot_suspect_hosts: 0, udp_answered: 0, warnings: [],
+  };
+
+  it('a running plan job shows its progress, live line, depth and target', () => {
+    const row = discoveryRow(discovery({ status: 'running', targets: undefined, plan, progress: 44, coverage: cov }));
+    expect(row.progress).toEqual({ pct: 44, line: '112 of 254 hosts · 31 responded · 9 open ports' });
+    expect(row.depth).toBe('Standard');
+    expect(row.statusLabel).toBe('Running');
+    expect(row.target).toBe('10.0.0.0/24');
+    expect(row.executor).toBe('Platform sensor');
+  });
+
+  it('a queued or finished plan job has no progress bar; a finished one reads "Finished"', () => {
+    expect(discoveryRow(discovery({ status: 'queued', plan })).progress).toBeUndefined();
+    const done = discoveryRow(discovery({ status: 'completed', plan, progress: 0 }));
+    expect(done.progress).toBeUndefined();
+    expect(done.statusLabel).toBe('Finished');
+  });
+
+  it('a legacy job row is unchanged — no depth, no progress, the old wording', () => {
+    const row = discoveryRow(discovery({ status: 'completed', progress: 100 }));
+    expect(row.depth).toBeUndefined();
+    expect(row.progress).toBeUndefined();
+    expect(row.statusLabel).toBe('Completed');
+    expect(discoveryRow(discovery({ status: 'running', progress: 50 })).progress).toBeUndefined();
+  });
+});

@@ -191,6 +191,11 @@ func (r *Repository) UpsertFacts(ctx context.Context, asset identity.AssetRef, p
 					return fmt.Errorf("identity/postgres: upsert fact %s: %w", row.f.Key, err)
 				}
 			}
+			for _, row := range rows {
+				if vouches(sourceKindOr(row.f.SourceKind), factSourceRef(row.f.SourceRef)) {
+					return ClearImportOnlyIfVouched(ctx, tx, asset.TenantID, assetID)
+				}
+			}
 			return nil
 		})
 	})

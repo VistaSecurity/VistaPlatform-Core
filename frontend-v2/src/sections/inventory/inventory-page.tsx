@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -22,7 +22,8 @@ import { SoftwareLens } from './software-lens';
 import { MapShell } from './map-shell';
 import { CertificateUploadModal } from './certificate-upload-modal';
 import { ImportSpreadsheetModal } from '../discovery/import-modal';
-import { StaleRowActions, StaleBulkBar } from './bulk-actions';
+import { NO_SELECTION, isSelected, pageState, toggleRow, togglePage, type AssetSelection } from './asset-selection';
+import { ActiveScanJobsPanel, BulkActionBar, SelectAllBanner, SelectBox, nameFrom, useScanFeed } from './bulk-action-bar';
 import {
   DATA_PROTECTION_CSV_HEADER, dataProtectionCsvRow, resourceTypeParam, determinedParam,
   RESOURCE_TYPE_OPTS, ASSESSMENT_OPTS, type CryptoApplication,
@@ -239,7 +240,9 @@ type DrawerEntry =
 const CFG_GRID = '22px minmax(0,1.5fr) 1fr minmax(0,1.4fr) 1fr 110px';
 const CERT_GRID = '18px minmax(0,1.6fr) minmax(0,1.2fr) 1fr 90px 120px';
 const KEY_GRID = '18px minmax(0,1.6fr) minmax(0,1.2fr) 100px 90px 120px';
-const STALE_GRID = '22px minmax(0,1.6fr) 1fr 1fr 110px 70px 84px';
+// The first column is the row checkbox: the Stale lens acts on its
+// rows through the same bulk action bar as All assets.
+const STALE_GRID = '18px 22px minmax(0,1.6fr) 1fr 1fr 110px 70px';
 const CONN_GRID = '22px minmax(0,1.6fr) 1fr minmax(0,1.4fr) 90px 100px 90px 104px';
 
 /**
@@ -316,9 +319,37 @@ export function InventoryPage() {
   const openApp = (app: CryptoApplication) => setStack((s) => [...s, { kind: 'data', app }]);
   const popTop = () => setStack((s) => s.slice(0, -1));
 
+  // drawer stack — config (base) → asset → certificate; top closes first.
+  // Built before the early returns below because the class-faceted list opens
+  // asset drawers too, and a lens that returns early would otherwise queue
+  // entries nothing renders.
+  const drawerStack = stack.map((d, i) => {
+    const active = i === stack.length - 1;
+    if (d.kind === 'config') return <ConfigDrawer key={i} config={d.config} onOpenAsset={openAsset} onOpenCert={openCert} onClose={popTop} active={active} depth={i} />;
+    if (d.kind === 'asset') return <AssetDrawer key={i} assetId={d.assetId} seed={d.seed} onOpenConfig={openConfig} onClose={popTop} onEdit={(a) => { setEditAsset(a); setFormOpen(true); }} active={active} depth={i} />;
+    if (d.kind === 'data') return <DataProtectionDrawer key={i} app={d.app} onOpenAsset={(id) => openAsset(id)} onClose={popTop} active={active} depth={i} />;
+    if (d.kind === 'key') return <KeyDrawer key={i} keyId={d.keyId} onOpenAsset={openAsset} onClose={popTop} active={active} depth={i} />;
+    return <CertDrawer key={i} certId={d.certId} onClose={popTop} active={active} depth={i} />;
+  });
+
   // Reset page + close any drawers whenever the lens changes (filters persist —
   // they describe the user's slice of interest, not the lens).
   useEffect(() => { setPage(1); setStack([]); setFCertOwner('All'); setFResourceType('All'); setFAssessment('All'); }, [lens]);
+
+  // Stale lens multi-select. Declared up here, before the early returns
+  // of the lenses that own their own pages, because hooks must run every render.
+  // Kept with the view it was made under (lens, search, filters) and read as
+  // empty under any other, so a changed list never carries a stale selection.
+  const staleKey = JSON.stringify([lens, search, fEnv, fRisk]);
+  const [staleMade, setStaleMade] = useState<{ key: string; selection: AssetSelection }>({ key: staleKey, selection: NO_SELECTION });
+  const staleSelection = staleMade.key === staleKey ? staleMade.selection : NO_SELECTION;
+  const setStaleSelection = (next: AssetSelection | ((s: AssetSelection) => AssetSelection)) =>
+    setStaleMade((m) => {
+      const current = m.key === staleKey ? m.selection : NO_SELECTION;
+      return { key: staleKey, selection: typeof next === 'function' ? next(current) : next };
+    });
+  const [staleSeen] = useState(() => new Map<string, Asset>());
+  const staleFeed = useScanFeed(useMemo(() => nameFrom(staleSeen), [staleSeen]));
 
   // Re-seed search when the palette deep-links again while we're already mounted
   // (URL `?q=` changes without a remount). Only acts when q is present, so it
@@ -418,6 +449,14 @@ export function InventoryPage() {
   const apps = appsQ.data?.items ?? [];
   // Server already applied the staleness cut for the stale lens.
   const staleAssets = assets;
+  const stalePageIds = staleAssets.map((a) => a.id as string);
+  useEffect(() => { staleAssets.forEach((a) => staleSeen.set(a.id as string, a)); }, [staleAssets, staleSeen]);
+  // "Select all N stale" is offered only when the rows on screen are exactly
+  // what a query names: the server's staleness cut and nothing else. A search
+  // or a filter applied in the browser would make "all matching" mean more
+  // than was shown, so then only ticked rows can be acted on.
+  const staleQueryable = !search.trim() && !hasFilters && !!staleCutoff;
+  const staleQuery = staleCutoff ? `last_seen < "${staleCutoff}"` : '';
 
   // Keys aren't server-paginated, so their total is just the (search-filtered) length.
   const total = (isData ? appsQ.data?.total : isConn ? connsQ.data?.pagination?.total : isCert ? certsQ.data?.pagination?.total : isKey ? keys.length : isConfig ? configsQ.data?.pagination?.total : assetsQ.data?.pagination?.total) ?? 0;
@@ -592,14 +631,19 @@ export function InventoryPage() {
       if (staleAssets.length === 0) return <Center icon="clock-alert" tone="var(--ok)" title="No stale assets" message={`Nothing has gone unseen for over ${STALE_DAYS} days.`} />;
       return (
         <>
-          <StaleBulkBar assetIds={staleAssets.map((a) => a.id as string)} />
-          <Header grid={STALE_GRID} cols={['', 'Asset', 'Class', 'Segment', 'Status', 'Last seen', '']} />
+          <SelectAllBanner selection={staleSelection} pageIds={stalePageIds} total={total} query={staleQuery} queryable={staleQueryable} onChange={setStaleSelection} />
+          <div style={{ display: 'grid', gridTemplateColumns: STALE_GRID, gap: 12, padding: '0 16px', height: 34, alignItems: 'center', borderBottom: '1px solid var(--app-border2)', position: 'sticky', top: 0, background: 'var(--app-panel)', zIndex: 1 }}>
+            <SelectBox state={pageState(staleSelection, stalePageIds)} onChange={() => setStaleSelection((s) => togglePage(s, stalePageIds))} label="Select every stale asset on this page" />
+            {['', 'Asset', 'Class', 'Segment', 'Status', 'Last seen'].map((h, i) => <span key={i} className="eyebrow-app">{h}</span>)}
+          </div>
           {staleAssets.map((a) => {
             const risk = assetRisk(a);
             const ident = assetIdentity(a);
             const d = daysSince(a.last_seen_at);
+            const selected = isSelected(staleSelection, a.id as string);
             return (
-              <div key={a.id} className="row-hover" onClick={() => { void navigate(`/inventory/assets/${a.id}`); }} style={{ display: 'grid', gridTemplateColumns: STALE_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
+              <div key={a.id} className="row-hover" aria-selected={selected} onClick={() => { void navigate(`/inventory/assets/${a.id}`); }} style={{ display: 'grid', gridTemplateColumns: STALE_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer', background: selected ? 'color-mix(in srgb, var(--accent) 6%, transparent)' : undefined }}>
+                <SelectBox state={selected ? 'all' : 'none'} onChange={() => setStaleSelection((s) => toggleRow(s, a.id as string, stalePageIds))} label={`Select ${ident.primary}`} />
                 <RiskChip level={risk.level} assessed={risk.assessed} size={22} title={risk.title} />
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ident.primary}</div>
@@ -611,7 +655,6 @@ export function InventoryPage() {
                 <Txt v={a.network_segment_name || a.business_unit} />
                 <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 11%, transparent)', borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize' }}>{a.asset_status || 'unknown'}</span>
                 <span className="mono" style={{ fontSize: 12, color: 'var(--warn-strong)' }}>{d != null ? `${d}d` : '—'}</span>
-                <StaleRowActions assetId={a.id as string} />
               </div>
             );
           })}
@@ -682,7 +725,9 @@ export function InventoryPage() {
           // because on a fresh tenant "no assets yet" is a question about how to
           // get some, not a statement about the inventory.
           onImport={() => setImportOpen(true)}
+          onOpenAsset={openAsset}
         />
+        {drawerStack}
         {formOpen && (
           <AssetFormModal
             open={formOpen}
@@ -787,6 +832,17 @@ export function InventoryPage() {
         </div>
       )}
 
+      {lens === 'stale' && (
+        <>
+          <BulkActionBar selection={staleSelection} onChange={setStaleSelection} seen={staleSeen} onScanStarted={staleFeed.record} />
+          {(staleFeed.scans.length > 0 || staleFeed.skipped.length > 0) && (
+            <div style={{ margin: '0 26px' }}>
+              <ActiveScanJobsPanel scans={staleFeed.scans} skipped={staleFeed.skipped} onDismiss={staleFeed.clear} onScanSettled={() => { void assetsQ.refetch(); }} />
+            </div>
+          )}
+        </>
+      )}
+
       <div className="panel" style={{ flex: 1, minHeight: 0, margin: '0 26px 14px', overflow: 'auto', borderRadius: 14 }}>
         {renderBody()}
       </div>
@@ -799,15 +855,7 @@ export function InventoryPage() {
         </div>
       )}
 
-      {/* drawer stack — config (base) → asset → certificate; top closes first */}
-      {stack.map((d, i) => {
-        const active = i === stack.length - 1;
-        if (d.kind === 'config') return <ConfigDrawer key={i} config={d.config} onOpenAsset={openAsset} onOpenCert={openCert} onClose={popTop} active={active} depth={i} />;
-        if (d.kind === 'asset') return <AssetDrawer key={i} assetId={d.assetId} seed={d.seed} onOpenConfig={openConfig} onClose={popTop} onEdit={(a) => { setEditAsset(a); setFormOpen(true); }} active={active} depth={i} />;
-        if (d.kind === 'data') return <DataProtectionDrawer key={i} app={d.app} onOpenAsset={(id) => openAsset(id)} onClose={popTop} active={active} depth={i} />;
-        if (d.kind === 'key') return <KeyDrawer key={i} keyId={d.keyId} onOpenAsset={openAsset} onClose={popTop} active={active} depth={i} />;
-        return <CertDrawer key={i} certId={d.certId} onClose={popTop} active={active} depth={i} />;
-      })}
+      {drawerStack}
 
       {formOpen && (
         <AssetFormModal

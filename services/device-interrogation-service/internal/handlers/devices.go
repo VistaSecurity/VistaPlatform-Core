@@ -254,6 +254,8 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 		Username              string `json:"username" binding:"required"`
 		Password              string `json:"password" binding:"required"`
 		TLSInsecureSkipVerify bool   `json:"tls_insecure_skip_verify"`
+		// See models.Device.PlatformReinterrogationAllowed. Off unless sent.
+		PlatformReinterrogationAllowed *bool `json:"platform_reinterrogation_allowed"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
@@ -288,23 +290,9 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 	audit.outcome = outcomeOK
 	h.auditProbe(c, audit)
 
-	createReq := models.CreateDeviceRequest{
-		DeviceType:    req.DeviceType,
-		ManagementURL: &req.ManagementURL,
-		Username:      &req.Username,
-		Password:      &req.Password,
-		// Persisted as given. The probe just connected under this setting, so
-		// the first interrogation must run under it too — a device probed over
-		// its self-signed certificate and saved with verification on fails on
-		// the very certificate discovery accepted.
-		TLSInsecureSkipVerify: &req.TLSInsecureSkipVerify,
-		DiscoveryMethod:       "device_interrogation",
-		Metadata:              map[string]interface{}{},
-		Tags:                  map[string]interface{}{},
-	}
-	discovered.ApplyTo(&createReq, services.IsSSHManagedDeviceType(req.DeviceType))
-	createReq.Metadata["auto_discovered"] = true
-	createReq.Metadata["discovery_timestamp"] = time.Now().UTC().Format(time.RFC3339)
+	createReq := services.NewDiscoveredDeviceRequest(req.DeviceType, req.ManagementURL, req.Username, req.Password,
+		req.TLSInsecureSkipVerify, discovered, time.Now())
+	createReq.PlatformReinterrogationAllowed = req.PlatformReinterrogationAllowed
 
 	device, err := h.deviceService.CreateDevice(c.Request.Context(), tenantID, createReq)
 	if err != nil {
@@ -478,6 +466,15 @@ func (h *DeviceHandlers) UpdateDevice(c *gin.Context) {
 	}
 
 	device, err := h.deviceService.UpdateDevice(c.Request.Context(), tenantID, id, req)
+	var conflict *services.DeviceIdentifierConflictError
+	if errors.As(err, &conflict) {
+		body := gin.H{"error": "Device identifier conflict", "message": conflict.Error(), "reasons": conflict.Reasons}
+		if conflict.ProposalID != "" {
+			body["merge_proposal_id"] = conflict.ProposalID
+		}
+		c.JSON(http.StatusConflict, body)
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
@@ -590,6 +587,13 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 	}
 	if req.JobType == models.JobTypeCloudDiscovery {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cloud discovery is not queued against a device; use /cloud/discover"})
+		return
+	}
+	if req.JobType == models.JobTypeDeviceDiscovery {
+		// Discovery identifies a device that is not on record yet; an existing
+		// device is identified by Test connection and interrogated by this
+		// endpoint's default.
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Device discovery is not queued against an existing device; use Add device (POST /devices/discoveries)"})
 		return
 	}
 	if req.JobType == models.JobTypeHostInventory {

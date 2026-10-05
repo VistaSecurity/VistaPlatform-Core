@@ -73,12 +73,19 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 	if !scan.Enabled {
 		return denied("automatic probing is disabled")
 	}
-	for _, protocol := range payload.Protocols {
+	// The addresses and ports the sensor will contact, from the legacy
+	// payload or from a plan (planned.go, WP2). A DNS request carries
+	// neither and reads as an empty legacy scope.
+	probe, err := probeScopeOf(payload)
+	if err != nil {
+		return err
+	}
+	for _, protocol := range probe.Protocols {
 		if !slices.Contains(scan.Protocols, protocol) {
 			return denied("probe protocol is no longer authorized")
 		}
 	}
-	for _, port := range payload.Ports {
+	for _, port := range probe.Ports {
 		if !slices.Contains(scan.Ports, port) {
 			return denied("probe port is no longer authorized")
 		}
@@ -107,8 +114,12 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 	if err := json.Unmarshal(evidence, &obs); err != nil {
 		return denied("invalid observation evidence")
 	}
-	parts := strings.Split(obs.Source.Ref, ":")
-	if obs.Network.SegmentID != segment.String() || obs.Source.Kind != identity.SourceMeasured || len(parts) < 2 || (parts[0] != "sensor" && parts[0] != "scan") || parts[len(parts)-1] != sensor.String() {
+	// Re-read at dispatch, inside this transaction: the evidence must still be
+	// a measurement in the network scope the job was planned for, by a named
+	// collector. The OBSERVER is no longer required to be the collector the
+	// job runs on (see observerOf).
+	observer, ok := observerOf(obs, segment)
+	if !ok {
 		return denied("probe source or scope changed")
 	}
 	if class == "" {
@@ -126,7 +137,8 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 		// A public network learned from a device's VLAN data is where that
 		// device is connected — an ISP transit link, a carrier-NAT WAN — not an
 		// estate the tenant declared. It scopes identities; it never scopes a
-		// probe. See SegmentGrantsOwnership.
+		// probe — unless a person has claimed it, which learnedSegmentSQL
+		// already reads as declared. See SegmentGrantsOwnership.
 		return denied("probe network scope is a learned public network")
 	}
 	prefix, err := netip.ParsePrefix(cidr)
@@ -140,12 +152,30 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 	if overlaps {
 		return denied("probe network scope overlaps another segment")
 	}
+	// The EXECUTOR — the collector this work is dispatched to — must be a live
+	// tenant collector with an interface on the target network. This is the
+	// whole of the executor's authorization, so it also excludes the
+	// platform's own collectors, which identity enrichment never selects: the
+	// platform sensor serves every tenant.
 	var reachable bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_addresses a JOIN sensors s ON s.id=a.sensor_id WHERE s.id=$1 AND s.tenant_id=$2 AND s.deleted_at IS NULL AND s.status='active' AND NOT s.air_gapped AND s.version<>'' AND s.profile<>'' AND s.last_heartbeat>now()-interval '2 minutes' AND a.last_seen_at>now()-interval '5 minutes' AND a.interface_name=ANY(s.reported_dns_interfaces) AND a.prefix_length IS NOT NULL AND a.address << $3::cidr AND family(a.address)=family($3::cidr) AND set_masklen(a.address,a.prefix_length) && $3::cidr)`, sensor, payload.TenantID, cidr).Scan(&reachable); err != nil {
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_addresses a JOIN sensors s ON s.id=a.sensor_id WHERE s.id=$1 AND s.tenant_id=$2 AND s.deleted_at IS NULL AND NOT `+platformCollectorSQL+` AND s.status='active' AND NOT s.air_gapped AND s.version<>'' AND s.profile<>'' AND s.profile<>'system' AND s.last_heartbeat>now()-interval '2 minutes' AND a.last_seen_at>now()-interval '5 minutes' AND a.interface_name=ANY(s.reported_dns_interfaces) AND a.prefix_length IS NOT NULL AND a.address << $3::cidr AND family(a.address)=family($3::cidr) AND set_masklen(a.address,a.prefix_length) && $3::cidr)`, sensor, payload.TenantID, cidr).Scan(&reachable); err != nil {
 		return err
 	}
 	if !reachable {
-		return denied("observing collector network scope is no longer reachable")
+		return denied("executing collector network scope is no longer reachable")
+	}
+	// The OBSERVER is provenance only: the collector the evidence came from
+	// must be a current collector of THIS tenant, and not the platform's. It
+	// need not be live or reach the network — a sensor on one VLAN that heard
+	// an advert about another is exactly the case an executor exists for.
+	// Without this, a ref naming another tenant's sensor (or an unknown id)
+	// would pass, since nothing above compares it with anything any more.
+	var tenantObserver bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sensors s WHERE s.id=$1 AND s.tenant_id=$2 AND s.deleted_at IS NULL AND NOT `+platformCollectorSQL+`)`, observer, payload.TenantID).Scan(&tenantObserver); err != nil {
+		return err
+	}
+	if !tenantObserver {
+		return denied("probe source is not a collector of this tenant")
 	}
 	excluded := autoscan.PlatformExcludedPrefixes()
 	for _, raw := range policy.Enrichment.Excluded {
@@ -179,13 +209,14 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 		}
 		return denied("DNS hostname is no longer supported by observation evidence")
 	}
-	if len(payload.Protocols) == 0 || len(payload.Ports) == 0 {
+	// A plan names no protocols: services are identified from what answers.
+	if (!probe.Planned && len(probe.Protocols) == 0) || len(probe.Ports) == 0 {
 		return denied("probe requires explicit protocols and ports")
 	}
-	if len(payload.Targets) == 0 || len(payload.Targets) > 8 {
+	if len(probe.Targets) == 0 || len(probe.Targets) > 8 {
 		return denied("probe exceeds target bounds")
 	}
-	for _, target := range payload.Targets {
+	for _, target := range probe.Targets {
 		address, err := netip.ParseAddr(target)
 		if err != nil || !address.IsGlobalUnicast() || address.IsLoopback() || !prefix.Contains(address.Unmap()) {
 			return denied("probe target outside authorized scope")
@@ -195,15 +226,50 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 				return denied("probe target is excluded")
 			}
 		}
+		// Neither collector's own interface is ever a target. They were one
+		// collector when this check was written; now that they can differ,
+		// both are excluded, as the planner excludes both.
 		var collectorAddress bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_addresses WHERE sensor_id=$1 AND address=$2::inet)`, sensor, target).Scan(&collectorAddress); err != nil {
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_addresses WHERE (sensor_id=$1 OR sensor_id=$2) AND address=$3::inet)`, sensor, observer, target).Scan(&collectorAddress); err != nil {
 			return err
 		}
 		if collectorAddress {
-			return denied("probe target belongs to observing collector")
+			return denied("probe target belongs to a collector")
 		}
 	}
 	return nil
+}
+
+// platformCollectorSQL is true for a sensors row (alias s) that belongs to the
+// platform rather than to the tenant: any of the markers only platform
+// provisioning may set.
+const platformCollectorSQL = `(s.platform_managed OR s.platform='platform' OR COALESCE(s.tags,'{}'::text[]) && ARRAY['system','platform']::text[])`
+
+// observerOf returns the collector an observation names as its producer.
+//
+// The evidence must be a measurement, in the network scope the job was planned
+// for, from a `sensor:…:<id>` or `scan:…:<id>` ref. Anything else — an
+// interrogation, a cloud or imported source, a ref with no collector id — is
+// refused as it always was: only a collector's own measurement may direct
+// unattended probing. The id must be in canonical form, because until the
+// executor was split from the observer this was a string comparison with the
+// dispatched sensor's id, and a looser parse must not admit refs it refused.
+//
+// Since the executor was split from the observer (the planner prefers the
+// observer, otherwise any eligible tenant collector on the target network),
+// the id is NOT compared with the sensor the job is dispatched to. authorize
+// checks it separately for provenance, and checks the executor on its own.
+func observerOf(obs identity.Observation, segment uuid.UUID) (uuid.UUID, bool) {
+	parts := strings.Split(obs.Source.Ref, ":")
+	if obs.Network.SegmentID != segment.String() || obs.Source.Kind != identity.SourceMeasured || len(parts) < 2 || (parts[0] != "sensor" && parts[0] != "scan") {
+		return uuid.Nil, false
+	}
+	last := parts[len(parts)-1]
+	id, err := uuid.Parse(last)
+	if err != nil || id == uuid.Nil || id.String() != last {
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 // AuthorizeDNS applies the same tenant, evidence, sensitivity and reachability

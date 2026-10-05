@@ -61,6 +61,11 @@ func TestContract_CreateDiscoveryJob_TargetVerdictsPassThrough(t *testing.T) {
 		{http.StatusBadRequest,
 			`{"error":"targets_refused","message":"refused","refused_targets":[{"target":"169.254.169.254","reason":"link-local addresses include the cloud instance-metadata service (169.254.169.254)"}]}`,
 			"targets_refused", "refused_targets"},
+		//: a target the scanner cannot fully expand is refused, with the
+		// numbers, rather than scanned only in part.
+		{http.StatusUnprocessableEntity,
+			`{"error":"scan_target_too_large","message":"scan target too large","oversize_targets":[{"target":"10.20.0.0/19","addresses":"8192"}],"target_limit":4096}`,
+			"scan_target_too_large", "oversize_targets"},
 	} {
 		t.Run(tc.code, func(t *testing.T) {
 			engine, srv := newProxyEngine(t, func(w http.ResponseWriter, r *http.Request) {
@@ -101,5 +106,30 @@ func TestContract_CreateDiscoveryJob_CreatedJobCarriesItsExternalTargets(t *test
 	sv.assertConforms(t, "DiscoveryJobResponse", w.Body.Bytes())
 	if !strings.Contains(w.Body.String(), `"addresses":["93.184.216.34"]`) {
 		t.Fatalf("created job lost its external targets: %s", w.Body.String())
+	}
+}
+
+// The job-total flavour of the same verdict carries job_addresses/job_limit
+// instead of a target list, and both must reach the browser: the UI names them.
+func TestContract_CreateDiscoveryJob_ScanTargetTooLargeKeepsItsNumbers(t *testing.T) {
+	sv := loadSpec(t)
+	engine, srv := newProxyEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":"scan_target_too_large","message":"the targets together name 16640 addresses, and one scan may name at most 16384; split them across scans","job_addresses":"16640","job_limit":16384}`))
+	})
+	defer srv.Close()
+	w := postThrough(engine, externalJobBody+`}`)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "DiscoveryTargetVerdictError", w.Body.Bytes())
+	var got map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &got)
+	if got["error"] != "scan_target_too_large" || got["job_addresses"] != "16640" || got["job_limit"] != float64(16384) {
+		t.Fatalf("verdict lost its code or numbers through the proxy: %s", w.Body.String())
+	}
+	if d, _ := got["details"].(string); !strings.Contains(d, "16640") {
+		t.Fatalf("details does not carry the server's message: %s", w.Body.String())
 	}
 }

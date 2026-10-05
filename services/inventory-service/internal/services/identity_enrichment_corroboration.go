@@ -138,6 +138,20 @@ func (b *IdentityEnrichmentBackend) corroborateDNS(ctx context.Context, tenant u
 		if err := repo.LinkObservation(ctx, tenant.String(), o.ID.String(), resolved.Asset.ID, identity.IdentityEstablished); err != nil {
 			return err
 		}
+		// The proof's outcome is what linked the row (platform ADR-0003 D2): a
+		// `supporting` proof attached nothing, so the row's retained payload
+		// stays unmaterialised exactly as the engine's own link would leave it.
+		if err := repo.SetResolutionOutcome(ctx, tenant.String(), o.ID.String(), string(resolved.Outcome)); err != nil {
+			return err
+		}
+		// Otherwise the corroborated row's own sockets are now the asset's: the
+		// proof resolved its identifiers, not its endpoints.
+		if !resolved.EvidenceHeld {
+			current.TenantID = tenant.String()
+			if err := attachObservationEndpoints(ctx, repo, resolved.Asset, current, current.ObservedAt); err != nil {
+				return err
+			}
+		}
 		_, err = repo.Tx().ExecContext(ctx, `INSERT INTO asset_history(tenant_id,asset_id,source,action,changes_json)
    VALUES($1,$2,'identity_enrichment','updated',jsonb_build_object('kind','observation_corroborated','observation_id',$3::text,'dns_job_id',$4::text,'probe_job_id',$5::text,'proof_observed_at',$6::timestamptz))`, tenant, resolved.Asset.ID, o.ID, dnsJob.ID, probeJob, proof.ObservedAt)
 		return err

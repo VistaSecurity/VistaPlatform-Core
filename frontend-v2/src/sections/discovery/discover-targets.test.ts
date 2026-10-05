@@ -31,6 +31,39 @@ describe('targetVerdict', () => {
     if (v.kind === 'refused') expect(v.refused).toHaveLength(2);
   });
 
+  it('reads 422 scan_target_too_large with the server sentence and each oversize target', () => {
+    const v = targetVerdict(422, {
+      error: 'scan_target_too_large',
+      details: 'scan target too large: "10.20.0.0/19" names 8192 addresses',
+      oversize_targets: [{ target: '10.20.0.0/19', addresses: '8192' }],
+      target_limit: 4096,
+    });
+    expect(v).toEqual({ kind: 'too_large', oversize: [{ target: '10.20.0.0/19', addresses: '8192' }], message: 'scan target too large: "10.20.0.0/19" names 8192 addresses' });
+    // The job-total flavour has no target list but is still this verdict.
+    const total = targetVerdict(422, { error: 'scan_target_too_large', details: 'together 16640 addresses', job_addresses: '16640', job_limit: 16384 });
+    expect(total).toEqual({ kind: 'too_large', oversize: [], message: 'together 16640 addresses' });
+  });
+
+  it('reads 422 scan_budget_exceeded with the server sentence and the largest target (#2170)', () => {
+    const largest = { target: '10.0.0.0/22', addresses: 1024, tcp_port_count: 65535, udp_port_count: 11, estimated_probes: 67119104 };
+    expect(targetVerdict(422, { error: 'scan_budget_exceeded', details: 'scan too large: 67119104 probes', estimated_probes: 67119104, probe_limit: 25000000, largest_target: largest }))
+      .toEqual({ kind: 'budget', largest, message: 'scan too large: 67119104 probes' });
+    expect(targetVerdict(422, { error: 'scan_budget_exceeded' })).toMatchObject({ kind: 'budget', largest: undefined });
+  });
+
+  it('reads 422 scan_plan_unavailable as a calm notice in its own words, not the raw code (#2170)', () => {
+    const v = targetVerdict(422, { error: 'scan_plan_unavailable', details: 'scan depth is not available yet on this deployment; use protocols and ports' });
+    expect(v.kind).toBe('plan_unavailable');
+    expect(v.message).not.toMatch(/scan_plan_unavailable|protocols and ports/);
+    expect(v.message).toMatch(/not available on this installation/);
+  });
+
+  it('reads 409 sensor_scan_plan_unsupported as its own refusal, in the server\'s words (#2194)', () => {
+    const details = "sensor edge-a's software does not support scan depth — upgrade it, or run the scan from the platform; nothing was scanned";
+    expect(targetVerdict(409, { error: 'sensor_scan_plan_unsupported', details })).toEqual({ kind: 'sensor_unsupported', message: details });
+    expect(targetVerdict(409, { error: 'sensor_scan_plan_unsupported' }).message).toMatch(/does not support scan depth/);
+  });
+
   it('falls back to an error with the server sentence, then a status line — never the internal validation_error code', () => {
     expect(targetVerdict(409, { error: 'validation_error', details: 'sensor offline' })).toEqual({ kind: 'error', message: 'sensor offline' });
     expect(targetVerdict(400, { error: 'validation_error' })).toEqual({ kind: 'error', message: 'Failed to start discovery (400)' });
@@ -54,25 +87,30 @@ describe('confirmation wording', () => {
 
 describe('reachability', () => {
   const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-  it('Active Scan opens the target wizard, gated on discovery.create like the endpoint', () => {
-    const page = read('./active-scan-page.tsx');
-    expect(page).toMatch(/<DiscoverAssetsModal open=\{targetsOpen\}/);
-    expect(page).toMatch(/permission=\{TENANT_PERMISSIONS\.discovery\.create\}>\s*<button[^>]*onClick=\{\(\) => setTargetsOpen\(true\)\}/);
-  });
-  it('Active Scan sends the confirmation only from its "Scan anyway"', () => {
-    const page = read('./active-scan-page.tsx');
-    expect(page.match(/confirmed: true \}\)/g)).toHaveLength(1);
-    expect(page).toMatch(/Scan anyway/);
-    expect(page.match(/confirmed: false \}\)/g)?.length).toBeGreaterThanOrEqual(2);
+  it('Active Scan sends the confirmation only from its "Scan anyway", and only for the assets it asked about', () => {
+    // The scan dialog builds every body through scanBody; `true` is
+    // passed from exactly one place, the confirmation, with the asked-about
+    // assets rather than the whole selection (the retired page's C.4).
+    const dialog = read('../inventory/scan-dialog.tsx');
+    expect(dialog.match(/confirmed: true \}\)/g)).toHaveLength(1);
+    expect(dialog).toMatch(/sel: confirmSelection\(confirm\), confirmed: true/);
+    expect(dialog).toMatch(/Scan anyway/);
+    expect(dialog.match(/confirmed: false \}\)/g)).toHaveLength(1);
   });
   it('names the asset beside the address it would be scanned at', () => {
     expect(describeExternalAsset({ target: '93.184.216.34', addresses: ['93.184.216.34'], asset_name: 'partner-portal' })).toBe('partner-portal (93.184.216.34)');
     expect(describeExternalAsset({ target: '93.184.216.34', addresses: ['93.184.216.34'] })).toBe('93.184.216.34');
   });
   it('the wizard sends the confirmation only from the confirmation', () => {
+    // WP4a: the body is built by discover-plan.ts's buildJobRequest, which
+    // sets the flag only for `confirmed`; the dialog passes true from exactly
+    // one place, the confirmation's "Scan anyway".
     const modal = read('./discover-modal.tsx');
-    expect(modal).toMatch(/create\.mutate\(true\)/);
-    expect(modal.match(/create\.mutate\(true\)/g)).toHaveLength(1);
-    expect(modal).toMatch(/external_targets_confirmed: true/);
+    expect(modal.match(/start\(true\)/g)).toHaveLength(1);
+    expect(modal).toMatch(/onClick=\{\(\) => start\(true\)\}>\s*\{create\.isPending \? 'Starting…' : 'Scan anyway'\}/);
+    expect(modal).not.toMatch(/external_targets_confirmed/);
+    const plan = read('./discover-plan.ts');
+    expect(plan.match(/external_targets_confirmed = true/g)).toHaveLength(1);
+    expect(plan).toMatch(/else if \(opts\.confirmed\) body\.external_targets_confirmed = true/);
   });
 });

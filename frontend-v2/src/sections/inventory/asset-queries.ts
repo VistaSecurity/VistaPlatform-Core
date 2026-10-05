@@ -9,6 +9,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import toast from 'react-hot-toast';
 import type { Asset, inventoryComponents, inventoryPaths } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { SCANNING_POLL_MS, anyScanning, isScanning } from '../discovery/active-scan-row-state';
 
 export type AssetHistoryEntry = inventoryComponents['schemas']['AssetHistory'];
 export type AssetClassChange = inventoryComponents['schemas']['AssetClassChange'];
@@ -145,6 +146,10 @@ export function useAssetsQuery(query: string, page: number, enabled = true) {
     queryKey: ['inventory', 'assets', 'query', query, page],
     enabled,
     placeholderData: keepPreviousData,
+    // While a row on the page is mid-scan, re-read it, so the row says when the
+    // scan ends — and, on the "Never scanned" view, leaves the list (
+    // what the retired Active Scan page did).
+    refetchInterval: (q) => (anyScanning(q.state.data?.assets ?? []) ? SCANNING_POLL_MS : false),
     queryFn: async (): Promise<AssetsPage> => {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
         params: { query: { ...(query ? { query } : {}), page, page_size: ASSETS_PAGE_SIZE } },
@@ -176,6 +181,10 @@ export function useAsset(id: string | undefined) {
       if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load asset');
       return data.asset;
     },
+    // While a person's scan of this asset runs, re-read it so the Active Scan
+    // button changes when the scan finishes rather than when the page is
+    // reopened. The drawer does the same for its own read of this key.
+    refetchInterval: (query) => (isScanning(query.state.data) ? SCANNING_POLL_MS : false),
   });
 }
 

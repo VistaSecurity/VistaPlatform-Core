@@ -446,6 +446,11 @@ func TestIntegration_IdentityReplay_SaturatedDataPoolStillCompletesReplayAndMerg
 			source := seedAsset(t, f.db, f.tenant, "small-pool.example.test", "server", "hardware.computer.server", "production", 0, 0)
 			survivor := seedAsset(t, f.db, f.tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
 			finding := leafCertFinding("small-pool.example.test", "198.51.100.92", 443, strings.Repeat("f", 64))
+			// A deferred finding exists only after an identity decision attached
+			// its endpoint (platform ADR-0003 D2); the fixture makes that decision.
+			if err := f.svc.attachFindingEndpoint(context.Background(), f.tenant, source, finding); err != nil {
+				t.Fatal(err)
+			}
 			metadata, err := json.Marshal(map[string]any{"deferred_findings": []IngestFinding{finding}})
 			if err != nil {
 				t.Fatal(err)

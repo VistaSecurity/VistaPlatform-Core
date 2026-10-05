@@ -21,6 +21,12 @@ const (
 	EventTypeAssetArchived            = "asset.archived"
 	EventTypeCryptoConfigurationAdded = "crypto.configuration_added"
 	EventTypeCertificateExpiring      = "certificate.expiring"
+	// EventTypeAssetIdentityDrift — the identification engine matched an
+	// observation to an asset whose identifying material changed, and decided
+	// what the change was (owner Decision 4 of): a rotated SSH host
+	// key, a moved address, a reimage, or an unverified key change flagged for
+	// review. A notification, never a compliance finding.
+	EventTypeAssetIdentityDrift = "asset.identity_drift"
 )
 
 // Envelope is the standard event envelope (event_type, tenant_id, timestamp, payload).
@@ -106,4 +112,30 @@ type CertificateExpiringPayload struct {
 	CommonName    *string   `json:"common_name,omitempty"`
 	NotAfter      time.Time `json:"not_after"`
 	DaysRemaining int       `json:"days_remaining"`
+}
+
+// IdentityMaterialChange is one kind of identifying material that changed in
+// an asset.identity_drift event: the values the asset held before and the ones
+// it was seen with now. For an SSH host key these are fingerprints — public
+// identities, never key material.
+type IdentityMaterialChange struct {
+	Kind     string   `json:"kind"`
+	Previous []string `json:"previous,omitempty"`
+	Current  []string `json:"current,omitempty"`
+	Retired  bool     `json:"retired,omitempty"`
+}
+
+// AssetIdentityDriftPayload is the payload for asset.identity_drift.
+type AssetIdentityDriftPayload struct {
+	AssetID uuid.UUID `json:"asset_id"`
+	// AssetName is what the timeline and a notification call the asset.
+	AssetName string `json:"asset_name,omitempty"`
+	// Verdict is rotated, moved, reimaged or unverified.
+	Verdict string `json:"verdict"`
+	// Rule is the drift-table row that decided; Explanation the sentence a
+	// reviewer reads, with no identifier values in it.
+	Rule        string                   `json:"rule"`
+	Explanation string                   `json:"explanation"`
+	NeedsReview bool                     `json:"needs_review,omitempty"`
+	Changes     []IdentityMaterialChange `json:"changes,omitempty"`
 }

@@ -39,7 +39,13 @@ env:
 
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Public repository only. The private tree carries this file too, and its
+    # Release Core runs (and succeeds) as a guard no-op on every commercial tag;
+    # without this the job would take a GitHub-hosted runner there just to find
+    # out it has nothing to do. Public, not a repository name: names change.
+    if: >-
+      github.event.repository.private == false &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write   # push to the release-status branch

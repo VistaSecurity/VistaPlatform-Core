@@ -701,3 +701,83 @@ func TestUniFiManagedPeerIdentityEvidence(t *testing.T) {
 		t.Fatalf("station proof: %+v", client.IdentityEvidence)
 	}
 }
+
+// unifiGatewayFixture is a `stat/device` object for a UniFi gateway: its `ip`
+// names a LAN interface, and its two WAN objects carry the upstream
+// configuration a real controller returns beside each address.
+func unifiGatewayFixture() map[string]interface{} {
+	return map[string]interface{}{
+		"name":    "Edge Gateway",
+		"ip":      "192.0.2.1",
+		"mac":     "74:ac:b9:00:00:01",
+		"model":   "UDR",
+		"type":    "udm",
+		"serial":  "74ACB9000001",
+		"adopted": true,
+		"state":   float64(1),
+		"wan1": map[string]interface{}{
+			"ip":               "203.0.113.10",
+			"gateway":          poison,
+			"dns":              []interface{}{poison},
+			"netmask":          poison,
+			"type":             "pppoe",
+			"pppoe_username":   poison,
+			"x_pppoe_password": poison,
+		},
+		"wan2": map[string]interface{}{
+			"ip":      "198.51.100.20",
+			"gateway": poison,
+		},
+	}
+}
+
+// D2: a gateway's WAN addresses are identifiers of the gateway, read
+// from its own device record — and nothing else of the WAN configuration is
+// collected. To mutation-test: add "gateway" or "pppoe_username" to
+// unifiWANFields (poison appears), or drop the WAN loop in unifiDeviceSubject
+// (the WAN addresses go missing).
+func TestUnifiDeviceSubject_CarriesWANAddressesAndNothingElseOfTheWAN(t *testing.T) {
+	result := &InterrogateResult{}
+	unifiEmitDeviceObservations(result, unifiGatewayFixture(), unifiControllerPeer("192.0.2.1", nil), nil)
+
+	assertObservationsValid(t, "unifi gateway", result)
+	assertNoPoison(t, "unifi gateway", result)
+
+	if len(result.Facts) == 0 {
+		t.Fatal("no facts were emitted for the gateway")
+	}
+	subject := result.Facts[0].Subject
+	var addresses []string
+	for _, id := range subject.Identifiers {
+		if id.Kind == IdentifierIPAddress {
+			addresses = append(addresses, id.Value)
+		}
+	}
+	want := []string{"192.0.2.1", "203.0.113.10", "198.51.100.20"}
+	if strings.Join(addresses, ",") != strings.Join(want, ",") {
+		t.Fatalf("gateway subject addresses = %v, want %v", addresses, want)
+	}
+
+	c := &unifiClient{}
+	asset := c.convertDeviceToAsset(unifiGatewayFixture(), "default")
+	assertNoPoison(t, "unifi gateway metadata", asset)
+	for _, table := range unifiWANTables {
+		if _, present := asset.Metadata[table]; present {
+			t.Errorf("WAN object %q was copied into metadata", table)
+		}
+	}
+}
+
+// A WAN that is down reports no address (or the unspecified one); it adds no
+// identifier and the device's own address still identifies it.
+func TestUnifiDeviceSubject_DownWANAddsNothing(t *testing.T) {
+	device := unifiGatewayFixture()
+	device["wan1"] = map[string]interface{}{"ip": "0.0.0.0"}
+	device["wan2"] = map[string]interface{}{"ip": ""}
+	subject := unifiDeviceSubject(device)
+	for _, id := range subject.Identifiers {
+		if id.Kind == IdentifierIPAddress && id.Value != "192.0.2.1" {
+			t.Errorf("a down WAN contributed the address %q", id.Value)
+		}
+	}
+}

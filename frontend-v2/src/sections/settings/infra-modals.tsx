@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
-import { dhcpBody, initialDhcpChoice, segmentPosture, type DhcpChoice } from './segment-provenance';
+import { dhcpBody, initialDhcpChoice, segmentPosture, segmentProvenance, type DhcpChoice } from './segment-provenance';
 
 type Location = inventoryComponents['schemas']['Location'];
 type NetworkSegment = inventoryComponents['schemas']['NetworkSegment'];
@@ -262,8 +262,10 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
       if (!res.response.ok || res.error) {
         // A 400 carries a message written for the person at this form — for
         // example a CIDR too broad to be anybody's network ( W5.13), which
-        // they can only fix if they are told the rule.
-        const msg = res.response.status === 400 ? (res.error as { error?: unknown } | undefined)?.error : undefined;
+        // they can only fix if they are told the rule. A 409 names the segment
+        // already holding the value — and, for a range learned from a device,
+        // points at "Claim as mine" instead.
+        const msg = res.response.status === 400 || res.response.status === 409 ? (res.error as { error?: unknown } | undefined)?.error : undefined;
         throw new Error(typeof msg === 'string' && msg ? msg : 'Failed to save network segment');
       }
     },
@@ -432,5 +434,71 @@ export function DeleteInfraModal({ open, kind, id, name, onClose }: {
       secondary={<button className="ui-btn" onClick={onClose} disabled={del.isPending}>Cancel</button>}
       footerNote={del.isError ? <span style={{ color: 'var(--danger-text)' }}>{del.error.message}</span> : undefined}
     />
+  );
+}
+
+// ---- Claim a learned public range ----------------------------------
+//
+// One click with a confirmation that says, in plain words, what the person is
+// stating and what it lets the platform do. There is no proof-of-control step
+// behind it — the claim is the person's own word, recorded in the audit log —
+// so the dialog has to carry the warning about ranges they do not control.
+export function ClaimSegmentModal({ open, segment, mode, onClose }: {
+  open: boolean; segment: NetworkSegment; mode: 'claim' | 'revoke'; onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const learned = segmentProvenance(segment.metadata);
+  const from = learned ? learned.label.replace(/^Learned from /, '').replace(/^Learned by interrogation$/, 'a device') : 'a device';
+  const act = useMutation({
+    mutationFn: async () => {
+      const params = { params: { path: { id: segment.id } } };
+      const res = mode === 'claim'
+        ? await clients.inventory.POST('/network-segments/{id}/claim', params)
+        : await clients.inventory.DELETE('/network-segments/{id}/claim', params);
+      if (!res.response.ok || res.error) {
+        const msg = (res.error as { error?: string } | undefined)?.error;
+        throw new Error(msg ?? (mode === 'claim' ? 'The claim could not be saved.' : 'The claim could not be revoked.'));
+      }
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] });
+      onClose();
+    },
+  });
+
+  const claim = mode === 'claim';
+  return (
+    <Modal
+      open={open} onClose={act.isPending ? undefined : onClose} dismissible={!act.isPending}
+      size="md" tone={claim ? 'accent' : 'danger'} icon={claim ? 'shield-check' : 'shield-off'} eyebrow="Network Segments"
+      title={claim ? `Claim ${segment.value} as yours?` : `Revoke your claim on ${segment.value}?`}
+      description={claim
+        ? `Vista Platform learned this public range from ${from}. A device's settings cannot show whether a public range is yours or your internet provider's, so it is not treated as yours until someone says so.`
+        : 'Vista Platform will go back to treating this range as one it learned, not one you own.'}
+      primary={
+        <button className={claim ? 'ui-btn accent' : 'ui-btn'} style={claim ? undefined : { background: 'var(--danger)', color: '#fff', borderColor: 'var(--danger)' }}
+          disabled={act.isPending} onClick={() => act.mutate()}>
+          {act.isPending ? (claim ? 'Claiming…' : 'Revoking…') : (claim ? 'Claim as mine' : 'Revoke claim')}
+        </button>
+      }
+      secondary={<button className="ui-btn" onClick={onClose} disabled={act.isPending}>Cancel</button>}
+      footerNote={act.isError ? <span role="alert" style={{ color: 'var(--danger-text)' }}>{act.error.message}</span> : undefined}
+    >
+      {claim ? (
+        <ul data-testid="claim-consequences" style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 6, fontSize: 12.5, color: 'var(--app-t2)', lineHeight: 1.5 }}>
+          <li>You are stating that this range belongs to your organization.</li>
+          <li>Vista Platform will then be able to scan it when someone in your organization asks. It is never scanned automatically.</li>
+          <li>Sensors will treat it as yours, and may check the services they see your systems use on it.</li>
+          <li><strong>Do not claim a range you don&apos;t control</strong> — your internet provider&apos;s link, for example. Scanning it would be scanning someone else&apos;s network.</li>
+          <li>Vista Platform does not verify the claim. It is recorded in the audit log under your name, and you can revoke it at any time.</li>
+        </ul>
+      ) : (
+        <ul style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 6, fontSize: 12.5, color: 'var(--app-t2)', lineHeight: 1.5 }}>
+          <li>Scans of addresses in this range will need the same confirmation as any other external address.</li>
+          <li>Sensors will stop treating it as yours.</li>
+          <li>The range stays in your segment list, and you can claim it again later.</li>
+        </ul>
+      )}
+    </Modal>
   );
 }

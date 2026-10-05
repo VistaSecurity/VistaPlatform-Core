@@ -41,7 +41,7 @@ The core surfaces, in the order a tenant meets them:
 
 - [Concepts](./concepts.md) — the vocabulary: asset, endpoint, class, relationship, fact, finding, risk, alert, and more
 - [Getting Started](./features/getting-started.md) — the onboarding checklist
-- [The Dashboard](./features/dashboard.md) — the two heroes (cryptographic posture and inventory health) and what each number means
+- [The Dashboard](./features/dashboard.md) — the two heroes (cryptographic posture and assets monitored) and what each number means
 - [Inventory & Lenses](./features/inventory-and-lenses.md) — the unified inventory and its switchable lenses
 - [Asset Classes & Identification Rules](./features/asset-classes.md) — the class taxonomy, identifier precedence, and the auto-accept threshold
 - [Asset Approval](./features/asset-approval.md)

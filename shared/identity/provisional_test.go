@@ -276,6 +276,14 @@ func TestProvisionalDirectThenAdvertIsSupportingEvidence(t *testing.T) {
 	if got := repo.Endpoints(established.Asset); len(got) != 0 {
 		t.Errorf("the advert's endpoints were written to an established asset: %+v", got)
 	}
+	// Platform ADR-0003 D2: callers read this to write nothing either — no
+	// service name, no crypto — onto the asset from the held evidence.
+	if !res.EvidenceHeld {
+		t.Error("supporting evidence for an established asset is not marked EvidenceHeld; every intake path would hang its sockets' services and crypto off the asset anyway")
+	}
+	if eps := identity.ObservationEndpoints(repeated, later); len(eps) != 1 || eps[0].Source != repeated.Source || !eps[0].SeenAt.Equal(later) {
+		t.Errorf("ObservationEndpoints = %+v, want the held :631 stamped with the advert's source and time", eps)
+	}
 	var sawFQDN bool
 	for _, unattached := range res.Unattached {
 		sawFQDN = sawFQDN || unattached.Kind == identity.KindFQDN
@@ -307,6 +315,11 @@ func TestProvisionalRepeatedAdvertIsIdempotent(t *testing.T) {
 	if second.Asset.ID != first.Asset.ID || repo.AssetCount() != 1 {
 		t.Fatalf("second landed on %s (count %d), want the one provisional asset %s",
 			second.Asset.ID, repo.AssetCount(), first.Asset.ID)
+	}
+	// A provisional asset is filled in by supporting evidence, so nothing is
+	// held (platform ADR-0003 D2 holds only for an ESTABLISHED asset).
+	if second.EvidenceHeld {
+		t.Error("supporting evidence for a PROVISIONAL asset is marked EvidenceHeld; its sockets were attached")
 	}
 }
 
@@ -597,10 +610,15 @@ func TestProvisionalInventoryOffIsTodaysBehaviour(t *testing.T) {
 	}
 }
 
-// TestProvisionalInventoryOffStillLinksNothingForOwnedEvidence pins the other
-// half of the flag: the supporting-evidence rule is new too, and with the flag
-// off an advert whose identifiers an asset already owns is still `unresolved`.
-func TestProvisionalInventoryOffStillLinksNothingForOwnedEvidence(t *testing.T) {
+// TestProvisionalInventoryOffStillSupportsSingleOwnerEvidence pins the half of
+// rule D3 that is NOT behind the flag (owner decision 3): evidence
+// whose every identifier one asset already owns is another sighting of it —
+// OutcomeSupporting — whether or not Config.ProvisionalInventory is on. It
+// used to be `unresolved` with the flag off, which left the same evidence
+// answered differently by the two engine hosts (inventory-service on,
+// device-interrogation-service off). The floor's shortcut already said it was
+// about ownership; this makes the admission branch agree.
+func TestProvisionalInventoryOffStillSupportsSingleOwnerEvidence(t *testing.T) {
 	e, repo := newProvisionalEngine(t, false)
 
 	established := mustResolve(t, e, direct(advertAt, segmentB,
@@ -609,16 +627,18 @@ func TestProvisionalInventoryOffStillLinksNothingForOwnedEvidence(t *testing.T) 
 	if established.Outcome != identity.OutcomeCreated {
 		t.Fatalf("setup outcome = %s, want created", established.Outcome)
 	}
-	before := repo.LastSeen(established.Asset)
 
 	res := mustResolve(t, e, advert(advertAt.Add(3*time.Hour), segmentB,
 		scoped(identity.KindHostname, "printer.local", segmentB)))
 
-	if res.Outcome != identity.OutcomeUnresolved {
-		t.Fatalf("outcome = %s, want unresolved", res.Outcome)
+	if res.Outcome != identity.OutcomeSupporting {
+		t.Fatalf("outcome = %s, want supporting: one owner is another sighting, flag or no flag", res.Outcome)
 	}
-	if got := repo.LastSeen(established.Asset); !got.Equal(before) {
-		t.Errorf("last_seen moved to %s with the flag off; supporting evidence is #1898 D3", got)
+	if res.Asset != established.Asset {
+		t.Errorf("supported asset %+v, want the owner %+v", res.Asset, established.Asset)
+	}
+	if repo.AssetCount() != 1 {
+		t.Errorf("asset count %d, want 1: supporting evidence creates nothing", repo.AssetCount())
 	}
 }
 

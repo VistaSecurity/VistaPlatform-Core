@@ -19,6 +19,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -33,8 +34,6 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
-	"github.com/vistasecurity/vistaplatform/shared/identity/identityaudit"
-	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 )
@@ -119,10 +118,11 @@ type DeviceService struct {
 	// encryption.mjs enforces that this file imports the shared helper.
 	cipher *credentials.Cipher
 
-	identityOnce sync.Once
-	identityRepo *pgidentity.Repository
-	identityEng  *identity.Engine
-	identityErr  error
+	// The fact, history and admission-mode store (asset_facts,
+	// asset_history, tenant settings). Never used to resolve identity:
+	// identification is inventory-service's (sighting_poster.go).
+	storeOnce sync.Once
+	store     *pgidentity.Repository
 }
 
 // NewDeviceService creates a device service keyed from the environment.
@@ -181,154 +181,52 @@ func maskPassword(password string) string {
 // identification
 // ---------------------------------------------------------------------------
 
-// identityEngine returns the engine, building it on first use.
+// resolveSighting posts one sighting to inventory-service and then, once the
+// engine's decision is committed there, runs `after` on ONE transaction of
+// this service's with the repository bound to it: the management row, the
+// credentials, the declared facts, the retained context.
 //
-// AutoAcceptThreshold is left at zero HERE and supplied PER OBSERVATION by
-// resolveObservation, from the tenant's own setting (workstream 4.6a). It has
-// to be per-observation: the engine is built once per process and serves every
-// tenant, so a threshold fixed here would be one tenant's decision applied to
-// all of them, and a tenant turning auto-accept off would keep auto-merging
-// until the next deploy.
+// It used to be one transaction — the engine's — for both halves. The engine
+// is inventory-service's now (platform ADR-0003 D3), so the identity half
+// (asset, identifiers, history, the tenant's auto-accept threshold, the retry
+// on a racing identifier claim, the audit event for an auto-accepted merge)
+// commits there and this half commits here. What that costs: a failure in
+// `after` leaves the identity decision standing without its configuration.
+// Every write in `after` is an upsert, and the operator's retry (or the next
+// run of the cloud collector) re-posts a sighting that MATCHES the asset that
+// now exists and re-runs `after` — the repair the old single transaction made
+// unnecessary.
 //
-// Until 4.6a this service read the setting at all, and zero was the answer for
-// every tenant — so a tenant who set 95% got auto-accepted merges on the
-// inventory intake path and never on the interrogation one. That failed closed,
-// but the same HOST reaches both services, so which engine happened to resolve a
-// sighting decided whether the tenant's threshold applied to it. The four fences
-// that govern an auto-accept are [identity.Engine]'s and always were; what was
-// missing was the number.
-//
-// Merge proposals raised here are SCORED and explained whatever the threshold
-// is: the matcher seam's default is the learned model, and ranking a proposal
-// decides nothing.
-//
-// DynamicScopes is empty: this service does not know which of
-// the tenant's segments hand out addresses, and the safe answer to "we do not
-// know" is the empty set, which lets ip_address vote. Narrowing it belongs with
-// the segment's own dynamic flag, which is a later workstream.
-func (s *DeviceService) identityEngine() (*identity.Engine, error) {
-	s.identityOnce.Do(func() {
-		s.identityRepo = pgidentity.New(s.db)
-		s.identityEng, s.identityErr = identity.New(identity.Config{AdmissionEnabled: identity.AvailableCapabilities().Admission, Repo: s.identityRepo})
-	})
-	return s.identityEng, s.identityErr
-}
-
-// resolveObservation runs one observation through the engine inside ONE
-// transaction, so the asset, its identifiers, its last-seen and its history
-// rows land together or not at all.
-//
-// The retry mirrors inventory-service's: the engine resolves identifier
-// ownership before it writes, and between that read and the write another
-// intake of the same host can claim the same identifier. Resolving again sees
-// the row the racing writer committed and MATCHES it, which is the outcome that
-// was true all along. Once, not in a loop — a second conflict is a different
-// fact (a store that has lost the invariant) and retrying forever would hide it.
-// `after` runs on the ENGINE'S transaction once the resolution is known, so the
-// management row, the credentials and the declared facts land with the identity
-// rows or not at all. One observation is one fact about the world; splitting it
-// across two transactions leaves an asset whose history says it was created and
-// whose management configuration is absent, and no later run repairs that — the
-// next observation MATCHES the asset that exists and never takes the create path
-// again.
-//
-// A resolution that wrote nothing — the floor's contested path, where every
-// identifier belongs to some other asset — hands `after` a ZERO ref. The
-// callback is still run, and must check [identity.AssetRef.Zero] before writing
-// anything about "the" asset.
-func (s *DeviceService) resolveObservation(
+// A resolution that wrote nothing — the floor's contested path, or evidence
+// held for review — hands `after` a ZERO ref. The callback is still run, and
+// must check [identity.AssetRef.Zero] before writing anything about "the"
+// asset.
+func (s *DeviceService) resolveSighting(
 	ctx context.Context,
-	obs identity.Observation,
+	sighting identity.Sighting,
 	after func(r *pgidentity.Repository, res identity.Resolution) error,
 ) (identity.Resolution, error) {
-	engine, err := s.identityEngine()
-	if err != nil {
-		return identity.Resolution{}, fmt.Errorf("identification engine unavailable: %w", err)
-	}
-	var res identity.Resolution
-	run := func() error {
-		return s.identityRepo.RunInTx(ctx, obs.TenantID, func(r *pgidentity.Repository) error {
-			// The tenant's auto-accept threshold, read in THIS transaction.
-			//
-			// Per observation and uncached, for the reasons on
-			// identitysettings.ReadAutoAcceptThreshold: a cache would make a
-			// tenant turning auto-merge off take effect "soon", and "a config
-			// change that silently did not take effect" is a failure this
-			// codebase has hit repeatedly.
-			//
-			// A failure to READ is returned, not swallowed into the default: a
-			// threshold the database would not give us is not evidence the
-			// tenant set zero, and the observation is better refused and
-			// retried than resolved under a setting nobody chose. (A tenant who
-			// has simply never set one DOES get zero — that is the reader's
-			// answer, not an error.)
-			threshold, tErr := identitysettings.ReadAutoAcceptThresholdFor(ctx, r.Tx(), obs.TenantID)
-			if tErr != nil {
-				return tErr
-			}
-			// The rule-merge switch ( Phase 4), same transaction, same
-			// reasons: it decides whether a same-device verdict is stamped on
-			// this observation's proposal. The merge itself is inventory-service's
-			// rule-merge executor's, whichever service opened the proposal.
-			autoMerge, mErr := identitysettings.ReadAutoMergeExistingFor(ctx, r.Tx(), obs.TenantID)
-			if mErr != nil {
-				return mErr
-			}
-
-			var rErr error
-			res, rErr = engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).Resolve(ctx, obs)
-			if rErr != nil {
-				return rErr
-			}
-			if after == nil {
-				return nil
-			}
-			return after(r, res)
-		})
-	}
-	err = run()
-	if errors.Is(err, identity.ErrIdentifierConflict) {
-		log.Printf("[DeviceService] identity: %s raced another writer for an identifier; resolving again", observationLabel(obs))
-		err = run()
-	}
+	_, res, err := postSighting(ctx, s.db, sighting)
 	if err != nil {
 		return identity.Resolution{}, err
 	}
-	// AFTER the commit, and only for a merge the matcher made on the tenant's
-	// behalf. An audit event announcing a merge that then rolled back would be a
-	// record of something that did not happen — which is why this is here and
-	// not inside the closure above.
-	identityaudit.LogAutoAcceptedMerge(ctx, autoAcceptAuditLogger(), obs, res)
+	if after == nil {
+		return res, nil
+	}
+	if err := s.Repo().RunInTx(ctx, sighting.TenantID, func(r *pgidentity.Repository) error {
+		return after(r, res)
+	}); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
-// Repo exposes the identity repository so the interrogation paths in this
-// package can write facts and relationships against the same asset tables
-// without each opening their own.
-func (s *DeviceService) Repo() (*pgidentity.Repository, error) {
-	if _, err := s.identityEngine(); err != nil {
-		return nil, err
-	}
-	return s.identityRepo, nil
-}
-
-func observationLabel(obs identity.Observation) string {
-	if obs.DisplayName != "" {
-		return obs.DisplayName
-	}
-	if len(obs.Identifiers) > 0 {
-		return string(obs.Identifiers[0].Kind) + "=" + obs.Identifiers[0].Value
-	}
-	return "(no identifiers)"
-}
-
-func logDroppedIdentifier(in deviceObservationInput, r identity.RejectedIdentifier) {
-	log.Printf("[DeviceService] identity: device %q dropped a %s identifier: %v",
-		firstNonEmpty(in.Hostname, in.IPAddress, in.ManagementURL, in.DeviceType), r.Identifier.Kind, r.Err)
-}
-
-func logSegmentLookupFailed(tenantID uuid.UUID, err error) {
-	log.Printf("[DeviceService] identity: segment lookup for tenant %s failed; hostname and IP identifiers will be recorded unscoped and will not decide a match: %v", tenantID, err)
+// Repo is the fact, history and settings store the interrogation paths in
+// this package write through, so they do not each open their own. It never
+// resolves identity.
+func (s *DeviceService) Repo() *pgidentity.Repository {
+	s.storeOnce.Do(func() { s.store = pgidentity.New(s.db) })
+	return s.store
 }
 
 func firstNonEmpty(values ...string) string {
@@ -376,52 +274,63 @@ func (s *DeviceService) CreateDevice(ctx context.Context, tenantID uuid.UUID, re
 	}
 	now := time.Now().UTC()
 
-	obs, err := s.deviceObservation(ctx, tenantID, deviceObservationInput{
-		DeviceType:      req.DeviceType,
-		Hostname:        derefStr(req.Hostname),
-		IPAddress:       derefStr(req.IPAddress),
-		ManagementURL:   derefStr(req.ManagementURL),
-		SerialNumber:    derefStr(req.SerialNumber),
-		CloudResourceID: cloudResourceIDFromMetadata(req.Metadata),
-		DiscoveryMethod: discoveryMethod,
-		Source:          declaredSource(),
-		ObservedAt:      now,
-		Admission:       probeEvidence(req.ProbeEvidence),
+	sighting, err := deviceSighting(tenantID, deviceSightingInput{
+		deviceObservationInput: deviceObservationInput{
+			DeviceType:      req.DeviceType,
+			Hostname:        derefStr(req.Hostname),
+			IPAddress:       derefStr(req.IPAddress),
+			ManagementURL:   derefStr(req.ManagementURL),
+			SerialNumber:    derefStr(req.SerialNumber),
+			CloudResourceID: cloudResourceIDFromMetadata(req.Metadata),
+			DiscoveryMethod: discoveryMethod,
+			Source:          declaredSource(),
+			ObservedAt:      now,
+			Admission:       probeEvidence(req.ProbeEvidence),
+		},
+		ProbeMACAddress:     req.ProbeMACAddress,
+		ProbeRead:           req.ProbeRead,
+		ProbeSSHHostKey:     req.ProbeSSHHostKeyFingerprint,
+		ProbeSSHHostKeyType: req.ProbeSSHHostKeyType,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	fields := deviceFieldUpdate{
-		DeviceType:            req.DeviceType,
-		Hostname:              req.Hostname,
-		IPAddress:             req.IPAddress,
-		ManagementURL:         req.ManagementURL,
-		Vendor:                req.Vendor,
-		Model:                 req.Model,
-		FirmwareVersion:       req.FirmwareVersion,
-		TLSInsecureSkipVerify: sshSafeSkipFlag(req.DeviceType, req.TLSInsecureSkipVerify),
-		CredentialID:          req.CredentialID,
-		Username:              req.Username,
-		Password:              req.Password,
-		Metadata:              req.Metadata,
-		Tags:                  req.Tags,
-		DiscoveryMethod:       discoveryMethod,
-		CreateManagement:      true,
+		DeviceType:              req.DeviceType,
+		Hostname:                req.Hostname,
+		IPAddress:               req.IPAddress,
+		ManagementURL:           req.ManagementURL,
+		Vendor:                  req.Vendor,
+		Model:                   req.Model,
+		FirmwareVersion:         req.FirmwareVersion,
+		TLSInsecureSkipVerify:   sshSafeSkipFlag(req.DeviceType, req.TLSInsecureSkipVerify),
+		CredentialID:            req.CredentialID,
+		Username:                req.Username,
+		Password:                req.Password,
+		Metadata:                req.Metadata,
+		Tags:                    req.Tags,
+		DiscoveryMethod:         discoveryMethod,
+		CreateManagement:        true,
+		PlatformReinterrogation: req.PlatformReinterrogationAllowed,
+	}
+
+	// The configuration half commits in a transaction of its own after the
+	// identity half has committed in inventory-service, so anything about it
+	// that can be known to fail is refused BEFORE the sighting is sent: an
+	// asset with no management configuration is a state no later run repairs.
+	if err := fields.preflight(); err != nil {
+		return nil, fmt.Errorf("failed to record device: %w", err)
 	}
 
 	var assetID uuid.UUID
-	res, err := s.resolveObservation(ctx, obs, func(r *pgidentity.Repository, res identity.Resolution) error {
+	res, err := s.resolveSighting(ctx, sighting, func(r *pgidentity.Repository, res identity.Resolution) error {
 		if res.Asset.Zero() {
-			// The floor's contested path: every identifier the operator gave us
-			// belongs to some other asset, so nothing was created and there is
-			// nothing to configure.
-			//
-			// nil, NOT an error. The engine wrote a merge proposal in THIS
-			// transaction; returning an error rolls it back, and the message
-			// the operator then reads tells them to go and review the thing
-			// that was just erased. The outcome is mapped after the commit.
-			return s.retainManagement(ctx, r, obs, res, fields)
+			// The floor's contested path, or evidence held for review: nothing
+			// was created and there is nothing to configure — except, for a held
+			// observation, the configuration to install once it is linked.
+			// The outcome is mapped after the commit.
+			return s.retainManagement(ctx, r, sighting.TenantID, res, fields)
 		}
 		parsed, parseErr := uuid.Parse(res.Asset.ID)
 		if parseErr != nil {
@@ -464,6 +373,9 @@ type deviceFieldUpdate struct {
 	Tags                  map[string]interface{}
 	DiscoveryMethod       string
 	CreateManagement      bool
+	// PlatformReinterrogation is the explicit consent field (see
+	// PlatformReinterrogationKey). Nil means "not mentioned".
+	PlatformReinterrogation *bool
 	// Unmanaged says this observation configures NO management at all: no
 	// asset_management row and no asset_credentials row. It is what cloud
 	// discovery sets on everything it finds — see upsertDeviceAssetWith for why
@@ -484,6 +396,21 @@ type deviceFieldUpdate struct {
 	Unmanaged bool
 }
 
+// preflight refuses a field update that applyDeviceFields would fail to write
+// for a reason knowable before anything is written: metadata or tags that do
+// not serialise.
+func (in deviceFieldUpdate) preflight() error {
+	for name, v := range map[string]map[string]interface{}{"metadata": in.Metadata, "tags": in.Tags} {
+		if len(v) == 0 {
+			continue
+		}
+		if _, err := json.Marshal(v); err != nil {
+			return fmt.Errorf("device %s cannot be stored: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // applyDeviceFields writes everything about a device that is not its identity:
 // the management row, the credentials, the declared hardware facts, and the
 // pipeline metadata.
@@ -499,12 +426,28 @@ func (s *DeviceService) applyDeviceFields(ctx context.Context, r *pgidentity.Rep
 		return fmt.Errorf("failed to record device address: %w", err)
 	}
 
+	// The free-form metadata can neither grant nor withdraw the platform
+	// re-interrogation consent; only its explicit field can. The merge below
+	// replaces the nested map wholesale — with whatever key the client put in
+	// it — so whenever it runs, the consent is read first and written back
+	// afterwards (applyPlatformReinterrogation): the requested value if the
+	// request names one, the prior value otherwise.
+	metadata := in.Metadata
+	consentTouched := in.PlatformReinterrogation != nil || len(metadata) > 0
+	var priorConsent bool
+	if consentTouched {
+		var err error
+		if priorConsent, err = readPlatformReinterrogation(ctx, tx, tenantID, assetID); err != nil {
+			return err
+		}
+	}
+
 	metaPatch := map[string]interface{}{}
 	if strings.TrimSpace(in.DeviceType) != "" {
 		metaPatch[deviceTypeKey] = strings.ToLower(strings.TrimSpace(in.DeviceType))
 	}
-	if len(in.Metadata) > 0 {
-		metaPatch[deviceMetadataKey] = in.Metadata
+	if len(metadata) > 0 {
+		metaPatch[deviceMetadataKey] = metadata
 	}
 	if in.DiscoveryMethod != "" {
 		metaPatch[deviceDiscoveryMethodKey] = in.DiscoveryMethod
@@ -514,6 +457,11 @@ func (s *DeviceService) applyDeviceFields(ctx context.Context, r *pgidentity.Rep
 	}
 	if err := mergeAssetTags(ctx, tx, tenantID, assetID, in.Tags); err != nil {
 		return fmt.Errorf("failed to record device tags: %w", err)
+	}
+	if consentTouched {
+		if err := applyPlatformReinterrogation(ctx, tx, tenantID, assetID, in.PlatformReinterrogation, priorConsent); err != nil {
+			return err
+		}
 	}
 
 	// An unmanaged observation writes neither row — not an empty management row,
@@ -551,25 +499,9 @@ func (s *DeviceService) applyDeviceFields(ctx context.Context, r *pgidentity.Rep
 		}
 	}
 
-	// A serial supplied on an UPDATE is a new identifier for an asset that
-	// already exists, so it does not go through Resolve (which would be a
-	// second observation of a thing we have already identified). Attaching it
-	// directly is the same write Resolve would have made.
-	if serial := strings.TrimSpace(derefStr(in.SerialNumber)); serial != "" {
-		attachErr := r.AttachIdentifiers(ctx, ref, []identity.Identifier{{
-			Kind:       identity.KindSerialNumber,
-			Value:      serial,
-			Confidence: 1,
-			Source:     declaredSource(),
-		}})
-		if errors.Is(attachErr, identity.ErrIdentifierConflict) {
-			// The serial belongs to a different asset. That is a merge question
-			// for a human, not something to force: reported, not written.
-			log.Printf("[DeviceService] serial %q already belongs to another asset in tenant %s; not attached", serial, tenantID)
-		} else if attachErr != nil {
-			return fmt.Errorf("failed to record device serial: %w", attachErr)
-		}
-	}
+	// A serial supplied on an UPDATE is identity, not configuration: it goes
+	// to the engine with the update's sighting (UpdateDevice), never straight
+	// into asset_identifiers.
 	return nil
 }
 
@@ -654,6 +586,9 @@ func (s *DeviceService) queryDevices(ctx context.Context, tenantID uuid.UUID, su
 	if err := s.hydrateDeviceIdentity(ctx, tenantID, devices); err != nil {
 		return nil, err
 	}
+	if err := s.hydrateInterrogatedByAgent(ctx, tenantID, devices); err != nil {
+		return nil, err
+	}
 	return devices, nil
 }
 
@@ -684,24 +619,26 @@ func (s *DeviceService) UpdateDevice(ctx context.Context, tenantID, assetID uuid
 		Password:              req.Password,
 		Metadata:              req.Metadata,
 		Tags:                  req.Tags,
+
+		PlatformReinterrogation: req.PlatformReinterrogationAllowed,
 	}
 
-	// One transaction, same as create: the management row, the credentials, the
-	// declared facts and the new address identifiers land together or not at
-	// all. An edit that half-applied would leave the form and the database
-	// disagreeing with no record of which.
-	//
-	// A new hostname or address is a new identifier for an asset we have ALREADY
-	// identified, so it is attached rather than re-resolved — re-resolving would
-	// be a second observation of a thing we have already named.
-	if _, err := s.identityEngine(); err != nil {
+	// Identity first: a hostname, address or serial the operator typed is a
+	// statement about WHICH device this is, and the engine decides what it
+	// means ( item 4). It used to be attached straight onto the asset
+	// with no scope check, and a value another asset owned was logged and
+	// skipped while the operator was told the edit succeeded. Now it is a
+	// declared sighting bound to this device through the identifiers it
+	// already holds (knownAssetIdentifiers): a value nobody owns attaches to
+	// it, one another asset owns opens a merge proposal for a human.
+	if err := s.postDeviceUpdate(ctx, tenantID, assetID, derefStr(req.Hostname), derefStr(req.IPAddress), derefStr(req.SerialNumber)); err != nil {
 		return nil, err
 	}
-	err = s.identityRepo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
-		if applyErr := s.applyDeviceFields(ctx, r, tenantID, assetID, fields); applyErr != nil {
-			return applyErr
-		}
-		return s.attachAddressIdentifiers(ctx, r, tenantID, assetID, derefStr(req.Hostname), derefStr(req.IPAddress))
+
+	// Then the configuration, on one transaction: the management row, the
+	// credentials and the declared facts land together or not at all.
+	err = s.Repo().RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
+		return s.applyDeviceFields(ctx, r, tenantID, assetID, fields)
 	})
 	if err != nil {
 		return nil, err
@@ -710,48 +647,41 @@ func (s *DeviceService) UpdateDevice(ctx context.Context, tenantID, assetID uuid
 	return s.GetDevice(ctx, tenantID, assetID)
 }
 
-// attachAddressIdentifiers records a hostname or address an operator supplied
-// on an existing asset.
-//
-// A value that already belongs to ANOTHER asset is reported and skipped, never
-// forced: one identifier value maps to at most one asset, and overriding that
-// here would be the merge the engine deliberately refuses to make on its own.
-func (s *DeviceService) attachAddressIdentifiers(ctx context.Context, repo *pgidentity.Repository, tenantID, assetID uuid.UUID, hostname, ip string) error {
-	if strings.TrimSpace(hostname) == "" && strings.TrimSpace(ip) == "" {
+// postDeviceUpdate sends an operator's identity edit to the engine. Nothing
+// to send is not an error.
+func (s *DeviceService) postDeviceUpdate(ctx context.Context, tenantID, assetID uuid.UUID, hostname, ip, serial string) error {
+	sighting, ok := deviceUpdateSighting(tenantID, time.Now().UTC(), hostname, ip, serial)
+	if !ok {
 		return nil
 	}
-	segmentID, _ := s.deviceSegmentScope(ctx, tenantID, strings.TrimSpace(ip), strings.TrimSpace(hostname), "", "")
-	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
-
-	var ids []identity.Identifier
-	if h := strings.TrimSpace(hostname); h != "" {
-		kind, scope := identity.KindHostname, segmentID
-		if strings.Contains(strings.TrimSuffix(h, "."), ".") {
-			kind, scope = identity.KindFQDN, ""
-		}
-		ids = append(ids, identity.Identifier{Kind: kind, Value: h, Scope: scope, Confidence: 1, Source: declaredSource()})
+	r, res, err := postDeclaration(ctx, s.db, sighting, assetID.String())
+	if err != nil {
+		return fmt.Errorf("failed to record the device's identity: %w", err)
 	}
-	if a := strings.TrimSpace(ip); a != "" {
-		ids = append(ids, identity.Identifier{Kind: identity.KindIPAddress, Value: a, Scope: segmentID, Confidence: 1, Source: declaredSource()})
-	}
-
-	for _, id := range ids {
-		normalized, normErr := id.Normalized()
-		if normErr != nil {
-			log.Printf("[DeviceService] identity: not attaching %s=%q: %v", id.Kind, id.Value, normErr)
-			continue
-		}
-		attachErr := repo.AttachIdentifiers(ctx, ref, []identity.Identifier{normalized})
-		if errors.Is(attachErr, identity.ErrIdentifierConflict) {
-			log.Printf("[DeviceService] identity: %s=%q already belongs to another asset in tenant %s; not attached",
-				normalized.Kind, normalized.Value, tenantID)
-			continue
-		}
-		if attachErr != nil {
-			return fmt.Errorf("failed to record device %s: %w", normalized.Kind, attachErr)
-		}
+	if res.Outcome == identity.OutcomeConflict {
+		// Nothing was written: a value the operator typed belongs to another
+		// asset (a merge proposal is open), or is a second serial for a device
+		// that has one. The edit is refused whole, configuration included, as
+		// the identifier edit refuses it.
+		return &DeviceIdentifierConflictError{ProposalID: r.ProposalID, Reasons: r.Reasons}
 	}
 	return nil
+}
+
+// DeviceIdentifierConflictError refuses a Devices-form edit whose hostname,
+// address or serial the engine would not attach to the device: another asset
+// owns it (ProposalID names the merge proposal opened for a human), or the
+// device already holds a different serial. Nothing was written.
+type DeviceIdentifierConflictError struct {
+	ProposalID string
+	Reasons    []string
+}
+
+func (e *DeviceIdentifierConflictError) Error() string {
+	if e.ProposalID != "" {
+		return "a value in this edit already belongs to another asset; review merge proposal " + e.ProposalID + " in Approvals"
+	}
+	return "this device already holds a different serial number; nothing was changed"
 }
 
 // DeleteDevice stops managing an asset.
@@ -793,11 +723,7 @@ func (s *DeviceService) DeleteDevice(ctx context.Context, tenantID, assetID uuid
 		return ErrDeviceNotFound
 	}
 
-	repo, err := s.Repo()
-	if err != nil {
-		return err
-	}
-	if histErr := repo.RecordHistory(ctx, identity.HistoryEntry{
+	if histErr := s.Repo().RecordHistory(ctx, identity.HistoryEntry{
 		TenantID: tenantID.String(),
 		AssetID:  assetID.String(),
 		Action:   identity.ActionUpdated,

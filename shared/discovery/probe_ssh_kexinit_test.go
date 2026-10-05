@@ -3,6 +3,7 @@ package discovery
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 
@@ -133,7 +134,7 @@ func modernServer() *fakeSSHServer {
 func captureFrom(t *testing.T, srv *fakeSSHServer) *sshKexInitCapture {
 	t.Helper()
 	addr := srv.start(t)
-	capture, err := sshprobeKexInit(NewProber(5*time.Second), addr)
+	capture, err := sshprobeKexInit(context.Background(), NewProber(5*time.Second), nil, addr)
 	if err != nil {
 		t.Fatalf("sshprobeKexInit: %v", err)
 	}
@@ -315,7 +316,7 @@ func TestSSHKexInitBoundsAPeerThatNeverSendsKexInit(t *testing.T) {
 	srv.omitKexInit = true
 	addr := srv.start(t)
 
-	if _, err := sshprobeKexInit(NewProber(5*time.Second), addr); err == nil {
+	if _, err := sshprobeKexInit(context.Background(), NewProber(5*time.Second), nil, addr); err == nil {
 		t.Fatal("expected an error when the peer never sends SSH_MSG_KEXINIT")
 	}
 }
@@ -341,7 +342,7 @@ func TestSSHReadIdentificationRejectsANonSSHPeer(t *testing.T) {
 		}
 	}()
 
-	if _, err := sshprobeKexInit(NewProber(5*time.Second), ln.Addr().String()); err == nil {
+	if _, err := sshprobeKexInit(context.Background(), NewProber(5*time.Second), nil, ln.Addr().String()); err == nil {
 		t.Fatal("expected an error for a peer that never sends an SSH identification string")
 	}
 }
@@ -594,7 +595,7 @@ func TestSSHKexInitExchangeSendsAWellFormedKexInit(t *testing.T) {
 		done <- result{ident: string(identBuf), payload: payload}
 	}()
 
-	if _, err := sshprobeKexInit(NewProber(5*time.Second), ln.Addr().String()); err != nil {
+	if _, err := sshprobeKexInit(context.Background(), NewProber(5*time.Second), nil, ln.Addr().String()); err != nil {
 		t.Fatalf("sshprobeKexInit: %v", err)
 	}
 
@@ -840,7 +841,7 @@ func TestSSHKexInitBoundsAStreamingPeer(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := sshprobeKexInit(NewProber(10*time.Second), ln.Addr().String())
+		_, err := sshprobeKexInit(context.Background(), NewProber(10*time.Second), nil, ln.Addr().String())
 		done <- err
 	}()
 

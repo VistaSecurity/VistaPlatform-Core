@@ -68,7 +68,7 @@ func (r *Repository) finishObservation(ctx context.Context, obs identity.Observa
 	if res.Outcome == identity.OutcomeConflict {
 		return r.withTx(ctx, obs.TenantID, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET state='conflict',proposal_id=NULLIF($3,'')::uuid,
-			 updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Proposal.ID)
+			 resolution_outcome=$4,updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Proposal.ID, string(res.Outcome))
 			return err
 		})
 	}
@@ -93,11 +93,25 @@ func (r *Repository) finishObservation(ctx context.Context, obs identity.Observa
 	// stays `unresolved` and enrichment keeps working on it until something
 	// direct corroborates it. Supporting evidence for an ESTABLISHED asset is
 	// resolved, because there is nothing left to find out.
+	//
+	// resolution_outcome records WHICH decision linked it (platform ADR-0003
+	// D2). A supporting row on an established asset is `linked` like a match,
+	// but the engine attached none of its endpoints, and the retained-evidence
+	// worker reads this column to leave its payload unmaterialised until an
+	// operator links or confirms it.
+	outcome := string(res.Outcome)
+	if res.OperatorScanJob != "" {
+		// A person's scan request decided this link, not the evidence
+		// (operator_scan.go in package identity). Recorded as such so a
+		// reviewer can tell it from a match, and so the retained-evidence
+		// worker materialises only the receipts that scan produced.
+		outcome = ResolutionOperatorScanRequest
+	}
 	switch res.Outcome {
 	case identity.OutcomeProvisional:
 		return r.withTx(ctx, obs.TenantID, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET asset_id=$3,state='unresolved',
-			 updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID)
+			 resolution_outcome=$4,updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID, outcome)
 			return err
 		})
 	case identity.OutcomeSupporting:
@@ -105,7 +119,7 @@ func (r *Repository) finishObservation(ctx context.Context, obs identity.Observa
 			_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET asset_id=$3,
 			 state=CASE WHEN (SELECT identity_status FROM assets WHERE tenant_id=$1 AND id=$3)='provisional'
 			            THEN 'unresolved' ELSE 'linked' END,
-			 updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID)
+			 resolution_outcome=$4,updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID, outcome)
 			return err
 		})
 	}
@@ -114,11 +128,38 @@ func (r *Repository) finishObservation(ctx context.Context, obs identity.Observa
 		if obs.Admission.OperatorConfirmed && obs.Source.Kind == identity.SourceDeclared {
 			status = identity.IdentityOperatorConfirmed
 		}
-		return r.LinkObservation(ctx, obs.TenantID, observationID, res.Asset.ID, status)
+		if err := r.LinkObservation(ctx, obs.TenantID, observationID, res.Asset.ID, status); err != nil {
+			return err
+		}
+		return r.SetResolutionOutcome(ctx, obs.TenantID, observationID, outcome)
 	}
 	return r.withTx(ctx, obs.TenantID, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET asset_id=$3,state='linked',updated_at=now()
-		 WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID)
+		_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET asset_id=$3,state='linked',resolution_outcome=$4,updated_at=now()
+		 WHERE tenant_id=$1 AND id=$2`, obs.TenantID, observationID, res.Asset.ID, outcome)
+		return err
+	})
+}
+
+// Resolution outcomes recorded for an operator's decision rather than the
+// engine's: they are never `supporting`, so the retained-evidence worker
+// materialises the observation's payload once the decision has linked it.
+const (
+	ResolutionOperatorLinked    = "operator_linked"
+	ResolutionOperatorConfirmed = "operator_confirmed"
+	// ResolutionOperatorScanRequest is the engine's link made on a person's
+	// scan request ([identity.DecidedByOperatorScanRequest]). Unlike the two
+	// above it covers only the receipts that scan produced: the retained-
+	// evidence worker materialises a payload of such a row only when ingest
+	// marked it as the scan's own.
+	ResolutionOperatorScanRequest = identity.DecidedByOperatorScanRequest
+)
+
+// SetResolutionOutcome records what linked an observation to its asset (see
+// identity_observations.resolution_outcome).
+func (r *Repository) SetResolutionOutcome(ctx context.Context, tenantID, observationID, outcome string) error {
+	return r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE identity_observations SET resolution_outcome=$3,updated_at=now()
+		 WHERE tenant_id=$1 AND id=$2`, tenantID, observationID, outcome)
 		return err
 	})
 }

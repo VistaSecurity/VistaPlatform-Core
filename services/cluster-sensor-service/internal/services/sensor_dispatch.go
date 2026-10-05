@@ -43,6 +43,19 @@ var ErrSensorNotFound = errors.New("sensor not found")
 // this whole feature exists to replace.
 var ErrSensorOffline = errors.New("sensor offline")
 
+// ErrSensorScanPlanUnsupported is returned when a scan-plan job (scan depth,
+// ports, pace) names a tenant sensor whose software does not report
+// sensordispatch.ScanPlanCapability (409). Such a sensor reads a plan job as
+// "no protocols" and would finish it having scanned almost nothing, so the job
+// is refused — at creation, and again at dispatch — rather than handed over.
+var ErrSensorScanPlanUnsupported = errors.New("sensor cannot run scan-plan jobs")
+
+// ErrSensorLegacyJobUnsupported is returned when a protocols × ports (legacy)
+// job names a tenant sensor that reports sensordispatch.ScanPlanCapability
+// (409). Such a sensor's software has no legacy executor ( WP5) and
+// refuses the payload, so the platform never sends it one.
+var ErrSensorLegacyJobUnsupported = errors.New("sensor runs only scan-plan jobs")
+
 // dispatchSensor is what the dispatch rules need to know about a sensor row.
 type dispatchSensor struct {
 	ID                uuid.UUID
@@ -53,6 +66,9 @@ type dispatchSensor struct {
 	Tags              []string
 	AirGapped         bool
 	Platform          string
+	// Capabilities is what the sensor's software reported on its last
+	// heartbeat (sensors.reported_capabilities).
+	Capabilities []string
 }
 
 // system reports whether this is the platform's own in-cluster sensor rather
@@ -83,9 +99,11 @@ func isSensorExecutionMode(mode string) bool {
 
 // decideSensorDispatch is the pure rule. `lookup` resolves a sensor id within
 // the caller's tenant; it returns ok=false for an unknown or cross-tenant id.
+// plan says the job is a scan-plan job, which only a sensor reporting
+// sensordispatch.ScanPlanCapability may be handed.
 //
 // Returns the sensor to dispatch to, or nil when the mode does not dispatch.
-func decideSensorDispatch(mode string, preferred []string, lookup func(uuid.UUID) (dispatchSensor, bool), now time.Time) (*dispatchSensor, error) {
+func decideSensorDispatch(mode string, preferred []string, plan bool, lookup func(uuid.UUID) (dispatchSensor, bool), now time.Time) (*dispatchSensor, error) {
 	if !isSensorExecutionMode(mode) {
 		if len(preferred) > 0 {
 			return nil, fmt.Errorf("%w: preferred_sensor_ids only applies to execution_mode \"sensors\"", ErrSensorDispatchInvalid)
@@ -104,10 +122,22 @@ func decideSensorDispatch(mode string, preferred []string, lookup func(uuid.UUID
 		return nil, fmt.Errorf("%w: %s", ErrSensorNotFound, id)
 	}
 	if sensor.system() {
-		return nil, fmt.Errorf("%w: %s is the platform sensor; use execution_mode \"auto\" or \"cloud\" to run from the platform", ErrSensorDispatchInvalid, sensor.Name)
+		return nil, fmt.Errorf("%w: %s is the platform sensor; run from the platform instead (run_from \"platform\")", ErrSensorDispatchInvalid, sensor.Name)
 	}
 	if sensor.AirGapped {
 		return nil, fmt.Errorf("%w: %s is air-gapped and cannot receive commands", ErrSensorDispatchInvalid, sensor.Name)
+	}
+	if plan && !sensordispatch.HasCapability(sensor.Capabilities, sensordispatch.ScanPlanCapability) {
+		return nil, fmt.Errorf("%w: %s", ErrSensorScanPlanUnsupported, sensordispatch.ScanPlanUnsupportedMessage(sensor.Name))
+	}
+	// The other direction ( WP5): a sensor that reports scan plans has
+	// no protocols × ports executor, so it is never handed that payload. The
+	// legacy shape exists only for sensors without the capability (D3); a
+	// legacy job that names a capable sensor was created before the sensor
+	// was upgraded (or by an older release) and is refused — at creation, and
+	// failed at dispatch — rather than sent to a sensor that would refuse it.
+	if !plan && sensordispatch.HasCapability(sensor.Capabilities, sensordispatch.ScanPlanCapability) {
+		return nil, fmt.Errorf("%w: sensor %s runs scans from a scan plan only, and this job was created in the protocols × ports shape (before the sensor was upgraded); nothing was sent to it — run the scan again", ErrSensorLegacyJobUnsupported, sensor.Name)
 	}
 	if !sensor.live(now) {
 		return nil, fmt.Errorf("%w: %s", ErrSensorOffline, sensordispatch.SensorOfflineMessage(sensor.Name, sensor.LastHeartbeat))
@@ -125,12 +155,14 @@ func lookupTenantSensor(tx *sqlx.Tx, tenantID, id uuid.UUID) (dispatchSensor, bo
 		s        dispatchSensor
 		interval *int
 		tags     pq.StringArray
+		caps     pq.StringArray
 	)
 	err := tx.QueryRow(`
-		SELECT id, name, status, last_heartbeat, reporting_interval, COALESCE(tags, '{}'), air_gapped, platform
+		SELECT id, name, status, last_heartbeat, reporting_interval, COALESCE(tags, '{}'), air_gapped, platform,
+		       COALESCE(reported_capabilities, '{}')
 		FROM sensors
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL`, id, tenantID,
-	).Scan(&s.ID, &s.Name, &s.Status, &s.LastHeartbeat, &interval, &tags, &s.AirGapped, &s.Platform)
+	).Scan(&s.ID, &s.Name, &s.Status, &s.LastHeartbeat, &interval, &tags, &s.AirGapped, &s.Platform, &caps)
 	if err != nil {
 		return dispatchSensor{}, false
 	}
@@ -138,14 +170,16 @@ func lookupTenantSensor(tx *sqlx.Tx, tenantID, id uuid.UUID) (dispatchSensor, bo
 		s.ReportingInterval = *interval
 	}
 	s.Tags = []string(tags)
+	s.Capabilities = []string(caps)
 	return s, true
 }
 
 // resolveDispatchSensor applies decideSensorDispatch against the database for
 // one tenant. It is the check job creation runs (so a job that cannot run is
 // refused with a reason) AND the check the dispatcher repeats at dispatch
-// time (a sensor can go offline between the two).
-func (s *DiscoveryService) resolveDispatchSensor(ctx context.Context, tenantID, mode string, preferred []string, now time.Time) (*dispatchSensor, error) {
+// time (a sensor can go offline, or be replaced by older software, between
+// the two). plan: the job is a scan-plan job.
+func (s *DiscoveryService) resolveDispatchSensor(ctx context.Context, tenantID, mode string, preferred []string, plan bool, now time.Time) (*dispatchSensor, error) {
 	if !isSensorExecutionMode(mode) && len(preferred) == 0 {
 		return nil, nil
 	}
@@ -156,7 +190,7 @@ func (s *DiscoveryService) resolveDispatchSensor(ctx context.Context, tenantID, 
 	var chosen *dispatchSensor
 	err = s.withTenantTxx(ctx, tenantUUID, func(tx *sqlx.Tx) error {
 		var derr error
-		chosen, derr = decideSensorDispatch(mode, preferred, func(id uuid.UUID) (dispatchSensor, bool) {
+		chosen, derr = decideSensorDispatch(mode, preferred, plan, func(id uuid.UUID) (dispatchSensor, bool) {
 			return lookupTenantSensor(tx, tenantUUID, id)
 		}, now)
 		return derr

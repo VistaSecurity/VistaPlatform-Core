@@ -108,7 +108,7 @@ func proposalEngine(store CatalogProposalStore, runner CatalogEnrichRunner, enri
 	grp.POST("/admin/catalogs/eol/proposals/:id/reject", RejectEOLProposal(store))
 	grp.GET("/admin/catalogs/eol/misses", ListCatalogMisses(store))
 	grp.POST("/admin/catalogs/eol/enrich", RunCatalogEnrichment(runner))
-	grp.GET("/admin/catalogs/eol/enrich/availability", GetCatalogEnrichAvailability(av))
+	grp.GET("/admin/catalogs/eol/enrich/availability", GetCatalogEnrichAvailability(av, nil))
 	return r
 }
 

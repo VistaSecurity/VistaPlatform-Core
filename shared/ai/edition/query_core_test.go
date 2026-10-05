@@ -35,7 +35,7 @@ func TestNewQuery_IsTheNullSeamInCore(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			t.Setenv("AI_PROVIDER", kind)
 
-			q, desc := NewQuery(ql.DefaultCatalog(), nil)
+			q, desc := NewQuery(ql.DefaultCatalog(), nil, nil)
 			if _, isNull := q.(seams.NullQuery); !isNull {
 				t.Fatalf("Core resolved AI_PROVIDER=%s to %T, want seams.NullQuery", kind, q)
 			}

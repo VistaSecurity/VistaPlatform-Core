@@ -28,7 +28,7 @@ func TestRetainedPeerKey_IsStorableAndUnforgeable(t *testing.T) {
 		t.Error("a value containing the separator forged another peer's retained key")
 	}
 
-	state := retainedPeerContext{Peers: map[string]identity.Observation{retainedPeerKey(two): {DisplayName: "two"}}}
+	state := retainedPeerContext{Sightings: map[string]identity.Sighting{retainedPeerKey(two): {DisplayName: "two"}}}
 	body, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -48,17 +48,17 @@ func TestRetainedPeerKey_IsStorableAndUnforgeable(t *testing.T) {
 	}
 }
 
-// TestRetainedPeer_ReadsPreFixContexts: a context persisted before the key
-// changed can only hold single-identifier keys in identifierKey's form (any NUL
-// failed the insert), and must still read back exactly.
-func TestRetainedPeer_ReadsPreFixContexts(t *testing.T) {
+// TestRetainedPeer_ObservationContextsRebuild: a context retained before
+// this service posted sightings holds hand-built observations, never a
+// sighting. It must read as "nothing retained" for every peer, so the replay
+// rebuilds each peer's sighting from the PeerRef it still carries rather than
+// posting an observation-shaped envelope.
+func TestRetainedPeer_ObservationContextsRebuild(t *testing.T) {
 	one := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierHostname, Value: "printer.local"}}}
-	legacy := retainedPeerContext{Peers: map[string]identity.Observation{identifierKey(one): {DisplayName: "legacy"}}}
-	if got, ok := legacy.retainedPeer(one); !ok || got.DisplayName != "legacy" {
-		t.Error("a pre-fix context no longer reads its own envelope")
-	}
-	other := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierHostname, Value: "scanner.local"}}}
-	if _, ok := legacy.retainedPeer(other); ok {
-		t.Error("a pre-fix context answered for a peer it never held")
+	legacy := retainedPeerContext{Peers: map[string]identity.Observation{
+		identifierKey(one): {DisplayName: "legacy"}, retainedPeerKey(one): {DisplayName: "legacy"},
+	}}
+	if _, ok := legacy.retainedPeer(one); ok {
+		t.Error("an observation-era context answered with a sighting it never held")
 	}
 }

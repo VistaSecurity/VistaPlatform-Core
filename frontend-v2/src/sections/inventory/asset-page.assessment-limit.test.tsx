@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { Asset } from '@vistasecurity/api-contract';
 import { AssetPage } from './asset-page';
 import type { ComplianceFinding } from '../findings/model';
+
+// The page renders the Active Scan button, which reads the query client; none of
+// these tests reads a query through it.
+const queryClient = new QueryClient();
 
 const state = vi.hoisted(() => ({
   asset: {} as Asset,
@@ -30,9 +35,11 @@ function vulnerability(cves: unknown[]): ComplianceFinding {
 
 function renderOverview(): string {
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={['/inventory/assets/asset-1']}>
-      <Routes><Route path="/inventory/assets/:id" element={<AssetPage />} /></Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/inventory/assets/asset-1']}>
+        <Routes><Route path="/inventory/assets/:id" element={<AssetPage />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

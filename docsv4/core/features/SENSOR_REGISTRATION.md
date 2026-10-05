@@ -400,6 +400,34 @@ more traffic and platform load; longer intervals suit low-change or
 bandwidth-constrained environments. For large fleets, standardising on a few
 intervals keeps load predictable.
 
+## Scans run from a sensor
+
+A discovery scan described by **scan depth** can run from one of your sensors
+(*Run from: Auto* picks the sensor on the target's network, or you name it). The
+sensor runs it with the same scan engine as the platform sensor and reports each
+host back as soon as it is done — see [Discovery → From one of your
+sensors](./discovery.md#scan-depth-ports-pace-and-where-it-runs-api) for what
+the scan does and how progress, cancel and Retry behave.
+
+What this means for the sensor and its host:
+
+- **Version.** The sensor tells the platform on every check-in that it can run
+  such scans; only a sensor that does is handed one. An older sensor is never
+  chosen by *Auto*, and naming it is refused with "upgrade it, or run the scan
+  from the platform" — upgrade the sensor binary to run these scans from it.
+- **Its own limits.** Whatever a scan names, the sensor never contacts its own
+  loopback, link-local (including cloud metadata), multicast or broadcast
+  addresses, an address in a range you excluded from probing, or one outside
+  your networks as the platform last told it. Such an address is reported as
+  *could not be scanned*, with the reason.
+- **Traffic.** Besides the scan itself, the sensor sends one small report per
+  host finished and a check-in at least once a minute while a scan runs, over
+  the same authenticated connection as its heartbeat. A sensor that cannot
+  reach the platform for 15 minutes has its scan marked failed; what it had
+  reported is kept.
+- **One scan at a time.** A sensor runs one scan; up to 8 more wait in its
+  queue. Cancelling a waiting scan drops it unstarted.
+
 ## API
 
 Registration and management are available over the API for automation.

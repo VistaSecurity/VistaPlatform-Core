@@ -12,6 +12,7 @@
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { jobMeta, jobTypeLabel, relTime, durationFmt } from './kit';
 import { type ScanJob, dispatchTimeline, executorLabel, scanJobState, type TimelineStep } from './scan-job-state';
+import { depthLabel, isJobLive, planJobState, progressLine, progressPercent } from './scan-plan-view';
 
 export type InterrogationJob = deviceInterrogationComponents['schemas']['InterrogationJob'];
 
@@ -81,6 +82,10 @@ export interface UnifiedJobRow {
   found: number | string;
   startedAt?: string | null;
   durationSec?: number | null;
+  /** A scan-plan job's depth ("Standard"), shown under the executor. Absent for a legacy job. */
+  depth?: string;
+  /** A running scan-plan job's progress: the bar's percent and the live line ("112 of 254 hosts · 31 responded"). */
+  progress?: { pct: number; line?: string };
   sortKey: number;
   raw: { source: 'interrogation'; job: InterrogationJob } | { source: 'discovery'; job: ScanJob };
 }
@@ -116,20 +121,26 @@ export function interrogationRow(job: InterrogationJob): UnifiedJobRow {
 }
 
 function discoveryTarget(job: ScanJob): string {
-  const targets = job.targets ?? [];
+  // The list does not carry a job's target rows; a scan-plan job's plan names them.
+  const targets = job.targets?.length ? job.targets : (job.plan?.targets ?? []).map((t) => t.target);
   if (targets.length === 0) return '—';
   return targets.length <= 2 ? targets.join(', ') : `${targets.slice(0, 2).join(', ')} +${targets.length - 2}`;
 }
 
+/** A scan-plan job reads in plain words with live progress; a legacy job reads exactly as before. */
 export function discoveryRow(job: ScanJob): UnifiedJobRow {
   const kind = discoveryJobKind(job);
-  const state = scanJobState(job);
+  const plan = job.plan;
+  const state = plan ? planJobState(job) : scanJobState(job);
+  const running = !!plan && isJobLive(job.status) && statusBucket(job.status) !== 'queued';
   return {
     kind,
     id: job.id,
     label: kindLabel(kind),
     target: discoveryTarget(job),
-    targetCount: job.targets?.length,
+    targetCount: plan && !job.targets?.length ? plan.targets.length : job.targets?.length,
+    depth: plan ? depthLabel(plan.depth) : undefined,
+    progress: running ? { pct: progressPercent(job.progress), line: progressLine(job.coverage) } : undefined,
     executor: executorLabel(job),
     statusLabel: state.label,
     statusColor: state.color,

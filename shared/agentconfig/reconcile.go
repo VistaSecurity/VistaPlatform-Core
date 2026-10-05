@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -116,13 +117,17 @@ type Status struct {
 // even if its revision matches, because "I am running revision X but three of
 // its settings did not take" is a failure, not a success. Reporting the match
 // first is how a console ends up showing green over a broken device.
+//
+// A failure is first passed through visibleFailures, which is where a device
+// too old for a setting nobody has changed stops counting as failed.
 func Reconcile(rt Runtime, desired Values, rep Report) Status {
 	want := Revision(rt, desired)
+	failures := visibleFailures(rt, desired, rep.Failures)
 	st := Status{
 		Desired:        want,
 		Reported:       rep.Revision,
 		At:             rep.At,
-		Failures:       rep.Failures,
+		Failures:       failures,
 		PendingRestart: rep.PendingRestart,
 	}
 	switch {
@@ -130,7 +135,7 @@ func Reconcile(rt Runtime, desired Values, rep Report) Status {
 		st.State = StateNeverReported
 	case rep.Revision == "":
 		st.State = StateNotReporting
-	case len(rep.Failures) > 0:
+	case len(failures) > 0:
 		st.State = StateFailed
 	case rep.Revision != want:
 		st.State = StatePending
@@ -179,6 +184,16 @@ type Change struct {
 
 func (c Change) String() string {
 	from, to := c.From.String(), c.To.String()
+	if f, ok := Registry[c.Key]; ok && f.Kind == KindPortList {
+		// The empty list is a value — "no additional ports" — and an empty
+		// string after the arrow reads as a rendering bug.
+		if c.From.S != nil && *c.From.S == "" {
+			from = "none"
+		}
+		if c.To.S != nil && *c.To.S == "" {
+			to = "none"
+		}
+	}
 	if c.From.IsZero() {
 		from = "unset"
 	}
@@ -197,6 +212,65 @@ func RestartRequired(changes []Change) []Key {
 		if f, ok := Registry[c.Key]; ok && f.Apply == ApplyOnRestart {
 			out = append(out, c.Key)
 		}
+	}
+	return out
+}
+
+// UnsupportedReason is the failure a device reports for a setting its build
+// has no handler for.
+//
+// Its wording is a WIRE CONTRACT, not prose: binaries already in the field
+// send exactly this string, with "agent" for both runtimes, and Reconcile
+// recognises an unsupported setting by it. Changing it here changes what new
+// builds send, not what old ones do — so it is pinned by a test.
+func UnsupportedReason(version string, k Key) string {
+	return fmt.Sprintf("this agent (%s) does not support %s", version, k)
+}
+
+// unsupportedVersion recognises UnsupportedReason for key k and returns the
+// version it names.
+func unsupportedVersion(k Key, reason string) (string, bool) {
+	const prefix = "this agent ("
+	suffix := ") does not support " + string(k)
+	if !strings.HasPrefix(reason, prefix) || !strings.HasSuffix(reason, suffix) {
+		return "", false
+	}
+	return reason[len(prefix) : len(reason)-len(suffix)], true
+}
+
+// visibleFailures is the failures a console should show.
+//
+// A device reporting a setting as UNSUPPORTED is dropped when the setting
+// declares OlderDevicesRunDefault and the desired value is still the default:
+// nobody asked that device for anything it is not already doing, so it is not
+// failing — it is older than the setting. Every other unsupported failure is
+// kept, and reworded to say what to do, because then an operator's choice (or
+// a default an older build does not honour) is not in force.
+//
+// Decided here rather than in the console so the status, the state and every
+// client agree, and so a future setting gets it by declaring the flag.
+func visibleFailures(rt Runtime, desired Values, reported map[Key]string) map[Key]string {
+	if len(reported) == 0 {
+		return reported
+	}
+	out := make(map[Key]string, len(reported))
+	for k, reason := range reported {
+		version, unsupported := unsupportedVersion(k, reason)
+		if !unsupported {
+			out[k] = reason
+			continue
+		}
+		f, known := Registry[k]
+		if known && f.OlderDevicesRunDefault {
+			v, set := desired[k]
+			if !set || v.IsZero() || v.Equal(f.Default) {
+				continue
+			}
+		}
+		out[k] = fmt.Sprintf("This %s's version (%s) does not support this setting — upgrade the %s to apply it.", rt, version, rt)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

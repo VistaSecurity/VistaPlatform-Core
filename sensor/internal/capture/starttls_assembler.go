@@ -409,7 +409,7 @@ func (s *STARTTLSStream) parseServerHello(msg []byte) {
 	if extEnd > len(msg) {
 		extEnd = len(msg)
 	}
-	version, selectedALPN := parseServerHelloExtensions(msg, offset, extEnd)
+	version, selectedALPN, _ := parseServerHelloExtensions(msg, offset, extEnd)
 	if version != "" {
 		s.state.version = version
 	}

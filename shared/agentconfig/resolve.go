@@ -3,6 +3,7 @@ package agentconfig
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Origin says where an effective value came from. It exists so the console can
@@ -116,6 +117,15 @@ func Validate(rt Runtime, vals Values) error {
 			if !contains(f.Allowed, *v.S) {
 				problems = append(problems, fmt.Sprintf("%s: %q is not one of %v", k, *v.S, f.Allowed))
 			}
+		case KindPortList:
+			if v.S == nil {
+				problems = append(problems, fmt.Sprintf("%s: expected a list of port numbers, got %q", k, v.String()))
+				continue
+			}
+			_, bad := ParsePortList(*v.S)
+			for _, b := range bad {
+				problems = append(problems, fmt.Sprintf("%s: %s", k, b))
+			}
 		}
 	}
 	if len(problems) == 0 {
@@ -142,15 +152,36 @@ func (e *ValidationError) Error() string {
 // raises a sub-hour host-inventory interval itself and logs that it did, which
 // is invisible to the operator who typed it. Storing the raised value means the
 // console shows what is really running.
+//
+// Port lists are rewritten in canonical form here too, so one set of ports is
+// one stored value and one revision however it was typed.
 func Normalize(rt Runtime, vals Values) (Values, []string) {
 	out := vals.Clone()
 	var notes []string
 	for _, k := range out.Keys() {
 		f, ok := Registry[k]
-		if !ok || !AppliesTo(k, rt) || f.Kind != KindInt {
+		if !ok || !AppliesTo(k, rt) {
 			continue
 		}
 		v := out[k]
+		if f.Kind == KindPortList {
+			if v.S == nil {
+				continue
+			}
+			ports, bad := ParsePortList(*v.S)
+			if len(bad) > 0 {
+				// Validate's to refuse, not ours to repair.
+				continue
+			}
+			if dropped := countEntries(*v.S) - len(ports); dropped > 0 {
+				notes = append(notes, fmt.Sprintf("%s: removed %d duplicate port(s)", k, dropped))
+			}
+			out[k] = Text(FormatPortList(ports))
+			continue
+		}
+		if f.Kind != KindInt {
+			continue
+		}
 		if v.I == nil || f.Floor == 0 || *v.I >= f.Floor {
 			continue
 		}
@@ -185,6 +216,12 @@ func NeedsConfirmation(rt Runtime, current, proposed Values) []Field {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
+}
+
+// countEntries counts the entries in a port list as typed, duplicates
+// included, using ParsePortList's own separators.
+func countEntries(s string) int {
+	return len(strings.FieldsFunc(s, isPortListSeparator))
 }
 
 func contains(haystack []string, needle string) bool {

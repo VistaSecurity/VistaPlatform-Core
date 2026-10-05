@@ -44,20 +44,28 @@ const (
 	// owner decision Q10). Off by default; see shared/probeconsent for what
 	// "the tenant's own" means.
 	KeyThirdPartyTLSEnrichment Key = "third_party_tls_enrichment"
+	// KeyExtraTLSPorts lists TCP ports, beyond the built-in ones, on which the
+	// sensor decodes TLS ( WP5). A port list — see ports.go for why it
+	// travels as a canonical string.
+	KeyExtraTLSPorts Key = "extra_tls_ports"
 
 	// Both.
 	KeyLogLevel Key = "log_level"
 )
 
-// Kind is a setting's value type. There are three because there are three;
-// resist adding a free-text kind, which is how unbounded operator input reaches
-// a device.
+// Kind is a setting's value type. Resist adding a free-text kind, which is how
+// unbounded operator input reaches a device: the port list is a string on the
+// wire but not free text — ParsePortList refuses anything that is not a
+// bounded list of port numbers, on the platform and on the sensor alike.
 type Kind string
 
 const (
 	KindBool Kind = "bool"
 	KindInt  Kind = "int"
 	KindEnum Kind = "enum"
+	// KindPortList is a list of TCP port numbers, carried as a canonical
+	// comma-separated string (ports.go).
+	KindPortList Kind = "port_list"
 )
 
 // Apply says when a change takes effect on the device.
@@ -99,6 +107,25 @@ type Field struct {
 	Floor int64
 	// Allowed lists an enum's values.
 	Allowed []string
+
+	// BuiltInPorts names the ports a port-list setting needs no entry for,
+	// because the device already gives them a meaning. Sent to the console so
+	// it can say "already monitored as HTTPS" without a second copy of the
+	// sensor's port table.
+	BuiltInPorts map[int]string
+
+	// OlderDevicesRunDefault says a device built before this setting existed
+	// already behaves exactly as Default does. Only then may Reconcile hide
+	// that device's "does not support" failure while nobody has asked for
+	// anything else — the setting is new, the device is not wrong, and a
+	// whole fleet showing Failed on upgrade day for a value no operator
+	// chose would bury the failures that matter.
+	//
+	// Leave it false where an older build behaves DIFFERENTLY from the
+	// default: third_party_tls_enrichment defaults off, but a sensor that
+	// predates it handshakes with third parties regardless, and that failure
+	// is the only sign the tenant's "off" is not being honoured.
+	OlderDevicesRunDefault bool
 
 	// Confirm marks a setting an operator must confirm explicitly, with the
 	// consequence named. Host-observation DNS carries one: an answers-only
@@ -211,6 +238,22 @@ var Registry = func() map[Key]Field {
 				"vendors, SaaS and other third parties — to read their certificates. Those third parties may see these connections.",
 			Description: "Off by default. When on, sensors actively connect to external TLS services your network talks to, " +
 				"to read their certificates. Third parties may see these connections.",
+		},
+		{
+			// ApplyOnRestart for the reason host observation is: a listed port
+			// is a term in the capture filter, which is fixed when the
+			// interface handle opens. The sensor records the list at once and
+			// adopts it when the capture reopens — a restart, or an interface
+			// change, which rebuilds it.
+			Key: KeyExtraTLSPorts, Runtimes: []Runtime{RuntimeSensor},
+			Kind: KindPortList, Apply: ApplyOnRestart, Default: Text(""),
+			Label:        "Additional TLS ports",
+			BuiltInPorts: SensorBuiltInTCPPorts,
+			// A sensor older than the setting decodes no additional ports —
+			// exactly the empty default.
+			OlderDevicesRunDefault: true,
+			Description: "Ports where your organisation runs TLS on a non-standard port. Sensors will decode TLS handshakes seen on them. " +
+				"Built-in ports such as 443 and 8443 are always watched. Each added port slightly increases capture load.",
 		},
 		{
 			Key: KeyLogLevel, Runtimes: []Runtime{RuntimeSensor, RuntimeAgent},

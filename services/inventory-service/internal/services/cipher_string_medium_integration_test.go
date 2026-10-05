@@ -168,7 +168,7 @@ func TestIntegration_CryptoAddedEvent_CarriesTheStoredScore(t *testing.T) {
 		var risk []*events.AssetRiskChangedPayload
 		var added []*events.CryptoConfigurationAddedPayload
 		var certs []*events.CertificateExpiringPayload
-		if err := svc.processDiscoveryCryptoData(f.tenant, assetID, finding, &risk, &added, &certs); err != nil {
+		if err := materializeForTest(svc, f.tenant, assetID, finding, &risk, &added, &certs); err != nil {
 			t.Fatalf("%q: %v", tc.cipher, err)
 		}
 		if len(added) != 1 {

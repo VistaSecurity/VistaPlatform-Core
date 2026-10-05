@@ -263,7 +263,34 @@ type ipJSONAddr struct {
 		Local     string `json:"local"`
 		PrefixLen int    `json:"prefixlen"`
 		Family    string `json:"family"`
+		// Dynamic is iproute2's rendering of the kernel's IFA_F_DYNAMIC-ish
+		// state: the address carries a finite lifetime because something —
+		// a DHCP client, SLAAC — leased it. ValidLifeTime is the remaining
+		// valid lifetime in seconds, 4294967295 ("forever") for an address
+		// configured with none.
+		Dynamic       bool    `json:"dynamic"`
+		ValidLifeTime *uint64 `json:"valid_life_time"`
 	} `json:"addr_info"`
+}
+
+// ipForever is the valid_life_time iproute2 reports for an address with no
+// lifetime: INFINITY_LIFE_TIME.
+const ipForever = 4294967295
+
+// linuxAssignment reads one `ip -j addr` entry's assignment. A lease is
+// marked `dynamic`; an address configured by hand (ifupdown `static`,
+// NetworkManager `manual`, systemd-networkd `Address=`) has no lifetime and no
+// flag. Anything else — including output from an iproute2 too old to print
+// lifetimes — is unknown, because "no flag" alone is not a statement.
+func linuxAssignment(dynamic bool, validLifeTime *uint64) addressAssignment {
+	switch {
+	case dynamic:
+		return assignedDynamic
+	case validLifeTime != nil && *validLifeTime == ipForever:
+		return assignedStatic
+	default:
+		return assignedUnknown
+	}
 }
 
 // ParseIPJSON turns `ip -j addr` output into interfaces.
@@ -287,7 +314,9 @@ func ParseIPJSON(b []byte) ([]Interface, error) {
 			if a.Local == "" {
 				continue
 			}
-			entry.Addresses = append(entry.Addresses, fmt.Sprintf("%s/%d", a.Local, a.PrefixLen))
+			addr := fmt.Sprintf("%s/%d", a.Local, a.PrefixLen)
+			entry.Addresses = append(entry.Addresses, addr)
+			entry.assign(addr, linuxAssignment(a.Dynamic, a.ValidLifeTime))
 		}
 		out = append(out, entry)
 	}

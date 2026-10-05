@@ -6,16 +6,18 @@
 // and the two switches they own — which is more useful than an upgrade card, and
 // is the honest version of "AI-native, never AI-dependent" (ADR-0008).
 //
-// One endpoint behind it: GET/PUT /api/v1/auth-service/tenant/ai. The status half
-// is the deployment's (provider, edition, which seams can answer); the controls
-// half is the tenant's.
+// One endpoint family behind it: GET/PUT /api/v1/auth-service/tenant/ai, plus
+// /tenant/ai/provider for an organization's own provider (./ai-provider.tsx).
+// The status says which provider answers for this organization and whose it is
+// — its own, or the one whoever runs the deployment set — the edition, and
+// which seams can answer; the controls are the tenant's.
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { AI_QUERY_KEY, useAIStatus, type AIStatus } from '../../lib/ai-seams';
-import { Icon } from '../../components/ui';
 import { settingsPageMeta, type SettingsNavItem } from './nav';
+import { ProviderRow } from './ai-provider';
 import {
   AMBER, GREEN, SCard, SPage, SRow, SSection, STable, STableRow, STag, SToggle, StateNote,
   type STableCol,
@@ -171,26 +173,16 @@ function AIAssistantBody({ status }: { status: AIStatus }) {
 }
 
 function ProviderCard({ status }: { status: AIStatus }) {
-  const tone = status.provider_configured ? GREEN : 'var(--app-t3)';
   const liveCount = status.seams.filter((s) => s.live).length;
 
   return (
-    <SSection title="This deployment" desc={HONEST_LINE}>
+    <SSection title="Model provider" desc={HONEST_LINE}>
       <SCard>
-        <SRow label="Model provider" hint="Configured by whoever runs this deployment, not from this page.">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Icon name={status.provider_configured ? 'plug-zap' : 'unplug'} size={14} style={{ color: tone }} />
-            <span style={{ fontSize: 12.5, color: 'var(--app-t1)' }}>
-              {status.provider_configured
-                ? status.provider_name
-                : status.edition_linked
-                  ? 'None configured'
-                  : 'Not included in this edition'}
-            </span>
-          </div>
-        </SRow>
+        {/* Whose provider answers for this organization, and — where the
+            organization may have its own — the form to connect one. */}
+        <ProviderRow status={status} />
         {status.provider_configured && status.model_id && (
-          <SRow label="Model" hint="The model id this deployment asks for.">
+          <SRow label="Model" hint="The model id that is asked for.">
             <span className="mono" style={{ fontSize: 12, color: 'var(--app-t1)' }}>{status.model_id}</span>
           </SRow>
         )}

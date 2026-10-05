@@ -20,7 +20,7 @@ import (
 //
 // The consumer's side of the deal is one call:
 //
-//	rem, state := edition.NewRemediator(sink)
+//	rem, state := edition.NewRemediator(sink, resolver)
 //
 // which returns seams.NullRemediator in Core and the real thing in an Enterprise
 // build with a reachable provider — and, either way, a Description saying which
@@ -87,16 +87,12 @@ func RemediatorLinked() bool { return remediatorFactory != nil }
 // sink receives the boundary's per-call audit records AND the seam's own
 // per-finding record (ADR-0008 D4.7). Pass the same one; two would split a
 // single question's trail across two rails.
-func NewRemediator(sink ai.AuditSink) (seams.Remediator, seams.Description) {
-	provider, err := ai.NewFromEnv()
-	if err != nil {
-		// Not fatal and not silent. NewFromEnv always hands back a usable
-		// provider (NoneProvider here), so the only thing lost is the drafting
-		// — the Findings page still shows the guidance, which is what the
-		// drafting was going to sharpen.
-		log.Printf("[ai-edition] AI provider not configured: %v — drafting remediation plans is unavailable", err)
-	}
-	provider = ai.Boundary(provider, sink)
+//
+// resolver decides, per request, which provider answers — the tenant's own,
+// the platform default or the environment's; see [NewQuery]. Nil keeps the
+// environment-only behaviour.
+func NewRemediator(sink ai.AuditSink, resolver *ai.Resolver) (seams.Remediator, seams.Description) {
+	provider := ai.SeamProvider(resolver, sink)
 
 	reg := seams.NewRegistry()
 	want := ""

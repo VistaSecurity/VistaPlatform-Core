@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -32,6 +33,10 @@ const AuditEventExternalTargets = "discovery.job.external_targets_confirmed"
 //	400 targets_refused              refused_targets: [{target, reason}] — never scannable as entered
 //	403 external_targets_disabled    external_targets: [{target, addresses}] — the operator turned it off
 //	422 external_targets_unconfirmed external_targets: [{target, addresses}] — resend with the flag
+//	422 scan_target_too_large        oversize_targets: [{target, addresses}], target_limit — or, when only the
+//	                                 total is over, job_addresses and job_limit: split the scan
+//	422 scan_budget_exceeded         estimated_probes, probe_limit, largest_target — a scan-plan job's
+//	                                 addresses × ports is over the budget: lower the depth or split ( H19)
 //
 // Before this, every refusal was the generic "failed to create job", so a
 // person could not tell a typo from a reserved range from a missing segment.
@@ -53,6 +58,35 @@ func writeTargetAuthorizationError(c *gin.Context, err error) bool {
 			"error":            external.Code,
 			"message":          external.Error(),
 			"external_targets": external.Targets,
+		})
+		return true
+	}
+	var tooLarge *shareddisc.TargetTooLargeError
+	if errors.As(err, &tooLarge) {
+		body := gin.H{"error": shareddisc.CodeScanTargetTooLarge, "message": tooLarge.Error()}
+		if len(tooLarge.Targets) > 0 {
+			body["oversize_targets"] = tooLarge.Targets
+			body["target_limit"] = tooLarge.Limit
+		} else {
+			body["job_addresses"] = tooLarge.JobAddresses
+			body["job_limit"] = tooLarge.JobLimit
+		}
+		c.JSON(http.StatusUnprocessableEntity, body)
+		return true
+	}
+	if budget, ok := shareddisc.IsScanBudgetError(err); ok {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":            shareddisc.CodeScanBudgetExceeded,
+			"message":          budget.Error(),
+			"estimated_probes": budget.Estimated,
+			"probe_limit":      budget.Limit,
+			"largest_target": gin.H{
+				"target":           budget.Largest.Target,
+				"addresses":        budget.Largest.Addresses,
+				"tcp_port_count":   budget.Largest.TCPPortCount,
+				"udp_port_count":   budget.Largest.UDPPortCount,
+				"estimated_probes": budget.Largest.EstimatedProbes,
+			},
 		})
 		return true
 	}

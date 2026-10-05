@@ -44,6 +44,13 @@ import (
 // token for userID/tenantID, and issues one request to /tenant/ai.
 func aiRouteRequest(t *testing.T, db *sql.DB, method string, body io.Reader, userID, tenantID uuid.UUID) *httptest.ResponseRecorder {
 	t.Helper()
+	return aiRouteRequestTo(t, db, method, "", body, userID, tenantID)
+}
+
+// aiRouteRequestTo is aiRouteRequest for a path under /tenant/ai ("" for the
+// page's own endpoint, "/provider" and "/provider/test" for the provider half).
+func aiRouteRequestTo(t *testing.T, db *sql.DB, method, suffix string, body io.Reader, userID, tenantID uuid.UUID) *httptest.ResponseRecorder {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	cfg := &config.Config{JWTSecret: "test-secret-for-tenant-ai"}
@@ -58,7 +65,7 @@ func aiRouteRequest(t *testing.T, db *sql.DB, method string, body io.Reader, use
 		t.Fatalf("mint token: %v", err)
 	}
 
-	req := httptest.NewRequest(method, "/api/v1/auth-service/tenant/ai", body)
+	req := httptest.NewRequest(method, "/api/v1/auth-service/tenant/ai"+suffix, body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+access)
 	w := httptest.NewRecorder()
@@ -86,6 +93,21 @@ func expectAIControlsRead(mock sqlmock.Sqlmock, tenantID uuid.UUID) {
 	mock.ExpectCommit()
 }
 
+// expectAIProviderReads mocks what resolving a tenant's provider reads: the
+// platform's AI settings (none set) and the tenant's stored provider (none).
+// A build without the model clients asks nothing else — the plan gate decides
+// nothing there — and one with them asks the entitlement (expectAIPlanGate).
+func expectAIProviderReads(mock sqlmock.Sqlmock, tenantID uuid.UUID) {
+	mock.ExpectQuery(`FROM platform_settings`).
+		WillReturnRows(sqlmock.NewRows([]string{"setting_key", "setting_value"}))
+	mock.ExpectBegin()
+	mock.ExpectExec(`set_tenant_context`).WithArgs(tenantID).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT config -> $2`)).
+		WillReturnRows(sqlmock.NewRows([]string{"config"}).AddRow(nil))
+	mock.ExpectCommit()
+	expectAIPlanGate(mock, tenantID)
+}
+
 // TestTenantAIRoute_GetNeedsOnlyAuthentication.
 //
 // The mock queues the settings read and NOTHING else: if the route still
@@ -102,6 +124,7 @@ func TestTenantAIRoute_GetNeedsOnlyAuthentication(t *testing.T) {
 	userID, tenantID := uuid.New(), uuid.New()
 	expectLiveTenantState(mock, tenantID)
 	expectAIControlsRead(mock, tenantID)
+	expectAIProviderReads(mock, tenantID)
 
 	w := aiRouteRequest(t, db, http.MethodGet, nil, userID, tenantID)
 	if w.Code != http.StatusOK {
@@ -184,11 +207,80 @@ func TestTenantAIRoute_PutAllowedWithSettingsUpdate(t *testing.T) {
 	mock.ExpectExec(`INSERT INTO tenant_admin_settings`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`UPDATE tenant_admin_settings`).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
+	expectAIProviderReads(mock, tenantID)
 
 	w := aiRouteRequest(t, db, http.MethodPut,
 		strings.NewReader(`{"assistant_disabled":true}`), userID, tenantID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// The provider half — connect, disconnect, test — is settings.update on every
+// route. One table rather than three tests, because the property is the same
+// line of router.go three times and a route added without it should fail here
+// by being listed.
+func TestTenantAIProviderRoutes_RefusedWithoutSettingsUpdate(t *testing.T) {
+	routes := []struct{ method, suffix, body string }{
+		{http.MethodPut, "/provider", `{"kind":"anthropic","api_key":"sk-ant-000000000000"}`},
+		{http.MethodDelete, "/provider", ``},
+		{http.MethodPost, "/provider/test", `{"kind":"anthropic","api_key":"sk-ant-000000000000"}`},
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.suffix, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			userID, tenantID := uuid.New(), uuid.New()
+			expectLiveTenantState(mock, tenantID)
+			expectSettingsUpdateCheck(mock, userID, tenantID, false)
+
+			w := aiRouteRequestTo(t, db, rt.method, rt.suffix, strings.NewReader(rt.body), userID, tenantID)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "settings.update") {
+				t.Fatalf("403 body does not name the required permission: %s", w.Body.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sqlmock expectations (did the middleware run?): %v", err)
+			}
+		})
+	}
+}
+
+// The other polarity for the provider routes: with settings.update the request
+// REACHES the handler. Disconnect is the one that needs no model clients, so it
+// is the one that can prove it in a Core build — the handler's own UPDATE runs.
+func TestTenantAIProviderRoute_DeleteAllowedWithSettingsUpdate(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	userID, tenantID := uuid.New(), uuid.New()
+	expectLiveTenantState(mock, tenantID)
+	expectSettingsUpdateCheck(mock, userID, tenantID, true)
+	mock.ExpectBegin()
+	mock.ExpectExec(`set_tenant_context`).WithArgs(tenantID).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`UPDATE tenant_admin_settings`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	expectAIControlsRead(mock, tenantID)
+	expectAIProviderReads(mock, tenantID)
+
+	w := aiRouteRequestTo(t, db, http.MethodDelete, "/provider", nil, userID, tenantID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"provider_source":"none"`) {
+		t.Fatalf("the response is not the status body: %s", w.Body.String())
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)

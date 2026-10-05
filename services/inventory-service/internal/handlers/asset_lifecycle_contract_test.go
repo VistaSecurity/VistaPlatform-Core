@@ -63,13 +63,15 @@ type stubRevalidationStore struct {
 	scan         *services.ActiveScanResult
 	gotRunFrom   services.RunFrom
 	gotConfirmed bool
+	gotAssetIDs  []uuid.UUID
 }
 
 func (s *stubRevalidationStore) CreateRevalidationJob(_, _ uuid.UUID, _ []uuid.UUID, _ string) (string, error) {
 	return s.jobID, s.err
 }
 
-func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, _ []uuid.UUID, _ string, runFrom services.RunFrom, externalConfirmed bool) (services.ActiveScanResult, error) {
+func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, assetIDs []uuid.UUID, _ string, runFrom services.RunFrom, externalConfirmed bool) (services.ActiveScanResult, error) {
+	s.gotAssetIDs = assetIDs
 	s.gotConfirmed = externalConfirmed
 	s.gotRunFrom = runFrom
 	if s.err != nil {
@@ -87,6 +89,11 @@ func (s *stubRevalidationStore) CreateActiveScanJob(_, _ uuid.UUID, _ []uuid.UUI
 // --- harness ---------------------------------------------------------------
 
 func newLifecycleEngine(lc lifecycleStore, rv revalidationStore) *gin.Engine {
+	return newLifecycleEngineWith(lc, rv, nil)
+}
+
+// newLifecycleEngineWith also wires the query-selection resolver.
+func newLifecycleEngineWith(lc lifecycleStore, rv revalidationStore, sel selectionResolver) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	grp := r.Group("/api/v2")
@@ -95,7 +102,7 @@ func newLifecycleEngine(lc lifecycleStore, rv revalidationStore) *gin.Engine {
 		c.Set("userID", uuid.New())
 		c.Next()
 	})
-	h := &AssetLifecycleHandler{lifecycleService: lc, revalidationService: rv}
+	h := &AssetLifecycleHandler{lifecycleService: lc, revalidationService: rv, selections: sel}
 	grp.GET("/inventory-service/infrastructure-assets/stale", h.GetStaleAssets)
 	grp.POST("/inventory-service/infrastructure-assets/stale/rescan", h.RescanAssets)
 	grp.POST("/inventory-service/infrastructure-assets/stale/archive", h.ArchiveAssets)

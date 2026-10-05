@@ -6,6 +6,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 type DB struct {
@@ -18,7 +19,7 @@ func NewConnection(cfg *config.Config) (*DB, error) {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	db, err := sqlx.Connect("postgres", dsn)
+	db, err := sqlx.Connect("postgres", shareddatabase.ApplyServerDefaults(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}

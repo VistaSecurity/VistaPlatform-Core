@@ -239,10 +239,16 @@ func main() {
 	// The audit sink is the SAME one the author seam gets: the boundary's
 	// per-call records and the seam's own per-finding record belong on one rail,
 	// and two sinks would split a single question's trail across two.
+	//
+	// One resolver for the process, shared by this seam and the author seam
+	// below: it is what makes the provider PER TENANT — a tenant's own
+	// (Settings → AI assistant), else the platform default, else the
+	// environment's.
+	aiResolver := aiedition.NewProviderResolver(db.DB)
 	remediatorSeam, remediatorDesc := aiedition.NewRemediator(
-		auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"))
+		auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"), aiResolver)
 	remediationDraftHandlers := handlers.NewRemediationDraftHandlers(
-		remediatorSeam, services.NewRemediationDraftService(db), planService, db.DB)
+		remediatorSeam, services.NewRemediationDraftService(db), planService, db.DB, aiResolver)
 	log.Printf("🛠  remediation drafting (remediator seam): implementation=%s state=%s linked=%t",
 		remediatorDesc.Implementation, remediatorDesc.State, aiedition.RemediatorLinked())
 
@@ -528,11 +534,12 @@ func main() {
 	// having to infer a missing capability from a 404, which cannot be told
 	// apart from a broken route.
 	authorAvailability := models.AuthorAvailability{Reason: models.AuthorReasonEdition}
+	var authorLive func(context.Context) models.AuthorAvailability
 	if hooks.RegisterAuthorRoutes != nil {
-		authorAvailability = hooks.RegisterAuthorRoutes(compliance, adminCatalog, db, rawDB,
-			auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"))
+		authorAvailability, authorLive = hooks.RegisterAuthorRoutes(compliance, adminCatalog, db, rawDB,
+			auditmiddleware.NewAISink(auditMiddleware, "compliance-engine"), aiResolver)
 	}
-	authorHandlers := handlers.NewAuthorHandlers(authorAvailability)
+	authorHandlers := handlers.NewAuthorHandlers(authorAvailability).WithLive(authorLive)
 	compliance.GET("/custom-policies/draft-controls/availability", authorHandlers.GetAvailability)
 	adminCatalog.GET("/frameworks/draft-controls/availability", authorHandlers.GetAvailability)
 	log.Printf("🖉  control drafting (author seam): available=%t reason=%q provider=%q",

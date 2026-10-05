@@ -130,6 +130,7 @@ func main() {
 	// Confirming a scan of assets outside the registered networks needs
 	// discovery.create as well as the route's assets.update ( W5.13b).
 	assetLifecycleHandler := newAssetLifecycleHandler(lifecycleService, revalidationService, assetService, db.DB.DB)
+	assetBulkHandler := handlers.NewAssetBulkHandler(assetService, lifecycleService)
 	certificateHandler := handlers.NewCertificateHandler(certificateService)
 	algorithmHandler := handlers.NewAlgorithmHandler(algorithmService)
 	unifiedInventoryHandler := handlers.NewUnifiedInventoryHandler(unifiedInventoryService)
@@ -242,9 +243,15 @@ func main() {
 	// The sink is the service's audit rail, so the boundary's per-call records
 	// and the seam's own grounding record land together; two sinks would split
 	// one question's trail across two.
+	//
+	// The resolver is what makes the provider PER TENANT: a tenant's own
+	// (Settings → AI assistant), else the platform default, else the
+	// environment's. It reads the same pool the handler reads the tenant's AI
+	// controls from.
 	querySeam, queryDesc := aiedition.NewQuery(
 		services.AssetQueryCatalog(),
-		auditmiddleware.NewAISink(auditMiddleware, "inventory-service"))
+		auditmiddleware.NewAISink(auditMiddleware, "inventory-service"),
+		aiedition.NewProviderResolver(rawDB))
 	askHandler := handlers.NewAskHandlers(querySeam, assetService, assetClassService, rawDB, 0)
 	log.Printf("🔎 natural-language query (query seam): implementation=%s state=%s linked=%t",
 		queryDesc.Implementation, queryDesc.State, aiedition.QueryLinked())
@@ -258,6 +265,11 @@ func main() {
 		handlers.NewSourceImportHandler(services.NewSourceImportService(db, assetService).WithArchiver(lifecycleService)),
 		handlers.NewCIExportHandler(services.NewCIExportService(db, assetService)),
 		os.Getenv("INTERNAL_AUTH_SECRET"))
+
+	// The internal sightings intake (platform ADR-0003 D3 step 2): what
+	// device-interrogation-service saw, resolved by THIS service's one engine.
+	// Same gate as the source routes. See sighting_routes.go.
+	mountSightingRoutes(r, handlers.NewSightingHandler(assetService), os.Getenv("INTERNAL_AUTH_SECRET"))
 
 	// API routes with JWT middleware
 	// Apply middleware to all routes under /api/v1
@@ -582,9 +594,9 @@ func main() {
 
 		// Asset lifecycle endpoints
 		api.GET("/inventory-service/assets/stale", assetLifecycleHandler.GetStaleAssets)
-		api.POST("/inventory-service/assets/stale/rescan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RescanAssets)
-		api.POST("/inventory-service/assets/stale/archive", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ArchiveAssets)
-		api.POST("/inventory-service/assets/revalidate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RevalidateAssets)
+		api.POST("/inventory-service/assets/stale/rescan", deprecatedRoute(lifecycleRoutesDeprecatedAt, successorScan), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RescanAssets)
+		api.POST("/inventory-service/assets/stale/archive", deprecatedRoute(lifecycleRoutesDeprecatedAt, successorArchive), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ArchiveAssets)
+		api.POST("/inventory-service/assets/revalidate", deprecatedRoute(lifecycleRoutesDeprecatedAt, successorScan), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RevalidateAssets)
 		// Active Scan (): on-demand crypto scan of selected assets.
 		api.POST("/inventory-service/assets/scan", assetScanChain(rawDB, assetLifecycleHandler)...)
 		api.GET("/inventory-service/lifecycle/policy", assetLifecycleHandler.GetPolicy)
@@ -669,11 +681,18 @@ func main() {
 		apiv2.POST("/inventory-service/infrastructure-assets/approve", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetApprovalHandler.ApproveAssets)
 		apiv2.POST("/inventory-service/infrastructure-assets/deny", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetApprovalHandler.DenyAssets)
 		apiv2.GET("/inventory-service/infrastructure-assets/stale", assetLifecycleHandler.GetStaleAssets)
-		apiv2.POST("/inventory-service/infrastructure-assets/stale/rescan", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RescanAssets)
-		apiv2.POST("/inventory-service/infrastructure-assets/stale/archive", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ArchiveAssets)
-		apiv2.POST("/inventory-service/infrastructure-assets/revalidate", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RevalidateAssets)
+		apiv2.POST("/inventory-service/infrastructure-assets/stale/rescan", deprecatedRoute(lifecycleRoutesDeprecatedAt, successorScan), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RescanAssets)
+		apiv2.POST("/inventory-service/infrastructure-assets/stale/archive", deprecatedRoute(lifecycleRoutesDeprecatedAt, successorArchive), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.ArchiveAssets)
+		apiv2.POST("/inventory-service/infrastructure-assets/revalidate", deprecatedRoute(lifecycleRoutesDeprecatedAt, successorScan), sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetLifecycleHandler.RevalidateAssets)
 		// Active Scan (): on-demand crypto scan of selected assets.
 		apiv2.POST("/inventory-service/infrastructure-assets/scan", assetScanChain(rawDB, assetLifecycleHandler)...)
+		// Bulk actions on a selection of assets: ticked rows or every
+		// asset matching an Inventory query. Each through assetBulkChain, which
+		// carries the action's own permission.
+		apiv2.POST("/inventory-service/infrastructure-assets/bulk-actions/archive", assetBulkChain(rawDB, assetBulkHandler, "archive")...)
+		apiv2.POST("/inventory-service/infrastructure-assets/bulk-actions/restore", assetBulkChain(rawDB, assetBulkHandler, "restore")...)
+		apiv2.POST("/inventory-service/infrastructure-assets/bulk-actions/update", assetBulkChain(rawDB, assetBulkHandler, "update")...)
+		apiv2.POST("/inventory-service/infrastructure-assets/bulk-actions/delete", assetBulkChain(rawDB, assetBulkHandler, "delete")...)
 		apiv2.POST("/inventory-service/infrastructure-assets/enrich-all", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), assetHandler.EnrichAllAssets)
 		apiv2.PUT("/inventory-service/infrastructure-assets/:id/service", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), assetHandler.UpdateAssetService)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id", assetHandler.GetAssetByID)
@@ -797,6 +816,8 @@ func main() {
 		apiv2.GET("/inventory-service/network-segments/:id", networkSegmentHandler.GetNetworkSegment)
 		apiv2.PUT("/inventory-service/network-segments/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.UpdateNetworkSegment)
 		apiv2.DELETE("/inventory-service/network-segments/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.DeleteNetworkSegment)
+		apiv2.POST("/inventory-service/network-segments/:id/claim", segmentClaimChain(rawDB, networkSegmentHandler.ClaimNetworkSegment)...)
+		apiv2.DELETE("/inventory-service/network-segments/:id/claim", segmentClaimChain(rawDB, networkSegmentHandler.RevokeNetworkSegmentClaim)...)
 
 		// Operational overview and remediation queue (materialized views).
 		// Ticket CRUD lives in compliance-engine under
@@ -819,6 +840,7 @@ func main() {
 		apiv2.PUT("/inventory-service/settings/identity-discovery", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), identityDiscoverySettingsHandler.Update)
 		apiv2.GET("/inventory-service/discovery/observations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), identityObservationHandler.List)
 		apiv2.GET("/inventory-service/discovery/observations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), identityObservationHandler.Detail)
+		apiv2.POST("/inventory-service/discovery/observations/bulk", observationBulkChain(rawDB, identityObservationHandler)...)
 		apiv2.POST("/inventory-service/discovery/observations/:id/confirm", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identityObservationHandler.Confirm)
 		apiv2.POST("/inventory-service/discovery/observations/:id/link", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identityObservationHandler.Link)
 		apiv2.POST("/inventory-service/discovery/observations/:id/dismiss", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), identityObservationHandler.Dismiss)
@@ -984,6 +1006,13 @@ func main() {
 		Enabled: identity.AvailableCapabilities().Enrichment, Excluded: autoscan.PlatformExcludedPrefixes(),
 	})
 	go autoScanJob.Start(ctx)
+	// Person-initiated Active Scans and revalidations are recorded as finished
+	// by their own worker, started whatever the automatic-scan flag says: a
+	// scan somebody asked for must not read "scanning" for good because
+	// automatic scanning is switched off. TestActiveScanFinish_MainStartsTheWorker
+	// pins both lines.
+	activeScanFinishJob := jobs.NewActiveScanFinishJob(autoScanStore, bypassDB)
+	go activeScanFinishJob.Start(ctx)
 	if natsClient != nil {
 		autoScanSubscriber := subscribers.NewAutoScanSubscriber(natsClient, autoScanJob)
 		if err := autoScanSubscriber.Start(); err != nil {

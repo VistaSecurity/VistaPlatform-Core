@@ -319,6 +319,7 @@ For Application Gateways with public-facing endpoints, the service performs a **
    - Subject Alternative Names (SANs)
    - Key algorithm, key size, and signature algorithm
    - Validity period and CA flag
+   - Whether the chain validates against the platform's trust store (`cert_validation_status`, with the verifier's reason in `cert_validation_error`), certificate quality flags (Certificate Transparency SCT, Extended Validation, known-bad CA), the OCSP revocation status and detail, and whether the endpoint asked for a client certificate. The OCSP, SCT and known-bad-CA results appear under Trust & revocation on the certificate's drawer in Inventory.
 3. The certificates flow through the standard `sensor_discoveries` → `discovery-processor-service` → `inventory-service` pipeline, creating proper `certificates` records linked to `crypto_implementations`
 
 #### Fallback Behavior

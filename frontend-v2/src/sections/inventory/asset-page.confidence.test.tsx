@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { AssetPage } from './asset-page';
 import type { Asset } from '@vistasecurity/api-contract';
+
+// The page renders the Active Scan button, which reads the query client; none of
+// these tests reads a query through it.
+const queryClient = new QueryClient();
 
 const state = vi.hoisted(() => ({ asset: {} as Asset }));
 vi.mock('./asset-queries', async (importOriginal) => ({
@@ -26,9 +31,11 @@ function renderConfidence(confidence: number | null | undefined): string {
     identifiers: [{ kind: 'hostname', value: 'host.example', source_kind: 'declared', confidence }],
   } as Asset;
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={['/inventory/assets/asset-1']}>
-      <Routes><Route path="/inventory/assets/:id" element={<AssetPage />} /></Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/inventory/assets/asset-1']}>
+        <Routes><Route path="/inventory/assets/:id" element={<AssetPage />} /></Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

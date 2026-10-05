@@ -6,19 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
+	"sync"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
-	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
-	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/lib/pq"
 	"github.com/nats-io/nats.go"
 )
 
@@ -33,34 +31,98 @@ type JobProcessor struct {
 	discoveryService *DiscoveryService
 	rateLimiter      *RateLimiter
 	alertService     *AlertService
-	portScanner      targetScanner
 	natsClient       *events.NATSClient
 	subscriber       *events.Subscriber
-	ctx              context.Context
-	cancel           context.CancelFunc
+	// ctx is the processor's lifetime. Every job's context derives from it
+	// (never from the NATS handler's context — see Start), and Stop cancels it
+	// with errProcessorStopping so a running job hands itself back.
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	// leaseInterval is how often a running job's message is told InProgress
+	// and its row's updated_at is touched; zero means jobLeaseInterval.
+	// heartbeatLease is how stale that touch may get before the reaper fails
+	// the job; zero means jobHeartbeatLease. touchJob, when set, replaces the
+	// heartbeat write. All three are fields so a test can shorten or break them.
+	leaseInterval  time.Duration
+	heartbeatLease time.Duration
+	touchJob       func(jobID string) (bool, error)
+	// sweepTenant confines the stuck-job sweeps to one tenant (tests only;
+	// see sweepScope).
+	sweepTenant string
+	// planEngineOptions are extra shared-engine options for scan-plan jobs
+	// (work_unit_executor.go). Tests set a dialer here to see — and to stand in
+	// for — every address the engine contacts; production sets nothing.
+	planEngineOptions []shareddisc.Option
+	// detachPlanJobs runs a claimed scan-plan job off the message handler (see
+	// processDiscoveryJobByID). On in production; a processor built as a
+	// literal (most tests) runs every job in the handler, synchronously.
+	detachPlanJobs bool
+	// units shares the replica's unit slots out between tenants
+	// (unit_scheduler.go). Nil means unlimited (a processor built as a
+	// literal).
+	units *unitScheduler
+	// inflight counts jobs being processed, so Stop can wait for them to hand
+	// their rows back; stopping (under stopMu) refuses new ones.
+	stopMu   sync.Mutex
+	stopping bool
+	inflight sync.WaitGroup
+	// republished remembers this replica's recent republishes, so the
+	// stuck-job poll does not stack copies of a job whose message is still
+	// waiting in the stream (republishInterval, job_reaper.go).
+	republishMu sync.Mutex
+	republished map[string]republishMark
+	// clock replaces time.Now for the republish memory (tests only).
+	clock func() time.Time
 }
 
-// targetScanner is the one PortScanner method the processor drives. It is an
-// interface so a test can record WHICH address a dispatch contacts — the
-// observable that pins a hostname scan to the addresses it was authorized on.
-type targetScanner interface {
-	ScanTarget(target string, ports []int32, protocols []string, originalHostname *string, probeOpts map[string]interface{}) ([]models.DiscoveryFinding, error)
-}
+// jobAckWait is how long JetStream waits for an ack before redelivering a job
+// message, and jobLeaseInterval how often a running job resets that clock with
+// InProgress. The interval must sit well under the wait: a missed beat or two
+// (a GC pause, a slow NATS round trip) must not let the broker conclude the
+// processor died and hand the job to another replica mid-scan.
+const (
+	jobAckWait       = 5 * time.Minute
+	jobLeaseInterval = 1 * time.Minute
+)
+
+// jobHeartbeatLease is how long a `running` job's row may go without a
+// heartbeat before the stuck-job poll fails it as abandoned (reapStalledJobs).
+//
+// Five heartbeats' worth. The owner touches the row every jobLeaseInterval
+// from a goroutine the scan cannot block, and again at every host boundary, so
+// a live job's row is never more than a minute old in steady state; four
+// consecutive missed writes (a database failover, a long GC pause, a saturated
+// pool) are tolerated before the job is declared dead. It equals jobAckWait, so
+// a crashed owner's job is failed at about the time its message is redelivered
+// — and that redelivery is a no-op either way. The cost is that a crashed job
+// holds its tenant's concurrency slot for up to this long plus one poll.
+const jobHeartbeatLease = 5 * time.Minute
+
+// stopGrace bounds how long Stop waits for running jobs to notice the stop and
+// put their rows back to queued. Kept under the pod's default 30s termination
+// grace so the hand-back is written before the kill.
+const stopGrace = 15 * time.Second
+
+// errProcessorStopping is the cause the processor's context is cancelled with
+// on shutdown. A job that sees it is not failed — it is put back to queued for
+// the stuck-job sweep to republish, and resumes after its completed targets.
+var errProcessorStopping = errors.New("job processor stopping")
 
 // NewJobProcessor creates a new job processor using the shared NATSClient.
 func NewJobProcessor(db, bypassDB *sqlx.DB, discoveryService *DiscoveryService, rateLimiter *RateLimiter, alertService *AlertService, natsClient *events.NATSClient) *JobProcessor {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	return &JobProcessor{
 		db:               db,
 		bypassDB:         bypassDB,
 		discoveryService: discoveryService,
 		rateLimiter:      rateLimiter,
 		alertService:     alertService,
-		portScanner:      NewPortScanner(),
 		natsClient:       natsClient,
 		subscriber:       events.NewSubscriber(natsClient),
 		ctx:              ctx,
 		cancel:           cancel,
+		detachPlanJobs:   true,
+		units:            newUnitScheduler(unitConcurrencyFromEnv()),
 	}
 }
 
@@ -94,14 +156,21 @@ func (jp *JobProcessor) Start() {
 		return
 	}
 
-	// Subscribe to discovery jobs via JetStream with durable consumer
+	// Subscribe to discovery jobs via JetStream with durable consumer.
+	//
+	// A job can run for hours; AckWait is not a job deadline and neither is
+	// ProcessingTimeout. The handler keeps the message alive with InProgress
+	// while the job runs (keepLeaseAlive) and does not hand the subscriber's
+	// context to the scan — that context expires after ProcessingTimeout, and
+	// a scan bound to it would be cut off at four minutes. What makes a
+	// redelivery harmless anyway is the claim in processDiscoveryJobByID.
 	err := jp.subscriber.Subscribe(events.SubscriptionConfig{
 		Stream:            "DISCOVERY_JOBS",
 		Subject:           events.SubjectDiscoveryJobsSubmit,
 		Durable:           "discovery-job-processor",
 		QueueGroup:        "cluster-sensor",
 		MaxDeliver:        3,
-		AckWait:           5 * time.Minute,
+		AckWait:           jobAckWait,
 		ProcessingTimeout: 4 * time.Minute,
 	}, jp.handleDiscoveryJobJS)
 	if err != nil {
@@ -120,10 +189,12 @@ func (jp *JobProcessor) Start() {
 
 // pollForStuckJobs periodically checks for queued jobs that haven't been processed
 // and republishes them to NATS. This handles cases where jobs were published but
-// failed to process due to temporary errors.
+// failed to process due to temporary errors. It also fails `running` jobs whose
+// owner stopped heartbeating (reapStalledJobs, job_reaper.go).
 // Note: Only retries 'queued' jobs, not 'failed' jobs. Failed jobs have already
 // been processed and marked as failed — retrying them indefinitely would cause
-// duplicate notifications and spam downstream channels.
+// duplicate notifications and spam downstream channels. A reaped job is failed
+// too, and resumes only when a person retries it.
 func (jp *JobProcessor) pollForStuckJobs() {
 	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds
 	defer ticker.Stop()
@@ -131,36 +202,8 @@ func (jp *JobProcessor) pollForStuckJobs() {
 	for {
 		select {
 		case <-ticker.C:
-			// RLS: cross-tenant — runs on the bypass role (Phase 4). This is a
-			// platform-wide background sweep across ALL tenants' queued jobs (no
-			// tenant filter), so it cannot set a single app.tenant_id. Belongs
-			// on bypassDB once the non-owner role split lands.
-			// Find queued jobs older than 1 minute that haven't been picked up yet
-			var stuckJobs []string
-			query := `SELECT id FROM discovery_jobs
-			          WHERE status = 'queued'
-			          AND created_at < NOW() - INTERVAL '1 minute'
-			          AND created_at > NOW() - INTERVAL '24 hours'
-			          ORDER BY created_at ASC
-			          LIMIT 10`
-
-			err := jp.bypassDB.Select(&stuckJobs, query)
-			if err != nil {
-				log.Printf("Error checking for stuck jobs: %v", err)
+			if !jp.stuckJobPass(jp.republishJob) {
 				continue
-			}
-
-			if len(stuckJobs) > 0 {
-				log.Printf("Found %d stuck queued jobs, republishing to NATS...", len(stuckJobs))
-				for _, jobID := range stuckJobs {
-					if err := events.PublishJSON(jp.natsClient, events.SubjectDiscoveryJobsSubmit, events.DiscoveryJobEvent{
-						JobID: jobID,
-					}); err != nil {
-						log.Printf("Failed to republish job %s: %v", jobID, err)
-					} else {
-						log.Printf("Republished stuck job %s to NATS", jobID)
-					}
-				}
 			}
 
 			// Jobs handed to a tenant sensor that never collected the command,
@@ -173,9 +216,68 @@ func (jp *JobProcessor) pollForStuckJobs() {
 	}
 }
 
+// stuckJobPass is one tick of pollForStuckJobs before the sensor-dispatch
+// sweep: fail abandoned running jobs, then republish queued ones. It reports
+// false when the queued-job read failed, as the loop always has. A function of
+// its own so a test can drive the wiring — publish is the NATS publish.
+func (jp *JobProcessor) stuckJobPass(publish func(jobID string) error) bool {
+	// RLS: cross-tenant — runs on the bypass role (Phase 4). This is a
+	// platform-wide background sweep across ALL tenants' queued jobs (no
+	// tenant filter), so it cannot set a single app.tenant_id. Belongs
+	// on bypassDB once the non-owner role split lands.
+	// A `running` job whose owner stopped heartbeating (a crashed or
+	// killed replica) is failed first, so it stops holding a
+	// concurrency slot and a person can Retry it.
+	jp.reapStalledJobs(publish)
+
+	queued, err := jp.findQueuedJobsToRepublish()
+	if err != nil {
+		log.Printf("Error checking for stuck jobs: %v", err)
+		return false
+	}
+
+	// A job republished within republishInterval that nobody has touched
+	// since already has a message in the stream; another copy adds nothing.
+	stuckJobs := jp.republishDue(queued)
+	if len(stuckJobs) > 0 {
+		log.Printf("Found %d stuck queued jobs, republishing to NATS...", len(stuckJobs))
+		for _, job := range stuckJobs {
+			if err := publish(job.ID); err != nil {
+				log.Printf("Failed to republish job %s: %v", job.ID, err)
+			} else {
+				jp.markRepublished(job)
+				log.Printf("Republished stuck job %s to NATS", job.ID)
+			}
+		}
+	}
+	return true
+}
+
+func (jp *JobProcessor) republishJob(jobID string) error {
+	return events.PublishJSON(jp.natsClient, events.SubjectDiscoveryJobsSubmit, events.DiscoveryJobEvent{
+		JobID: jobID,
+	})
+}
+
 func (jp *JobProcessor) Stop() {
 	log.Println("Stopping job processor...")
-	jp.cancel()
+	jp.stopMu.Lock()
+	jp.stopping = true
+	jp.stopMu.Unlock()
+	jp.cancel(errProcessorStopping)
+
+	// Give a running job the chance to put its row back to queued. Without
+	// this wait the process exits before it is written and the job is left
+	// `running` with nothing running it, until the stuck-job reaper fails it a
+	// heartbeat lease later — and a failed job resumes only on a person's Retry.
+	done := make(chan struct{})
+	go func() { jp.inflight.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(stopGrace):
+		log.Printf("Job processor: a running job did not hand itself back within %s; it stays 'running' until the reaper fails it (%s without a heartbeat)", stopGrace, jobHeartbeatLease)
+	}
+
 	if jp.subscriber != nil {
 		if err := jp.subscriber.Drain(); err != nil {
 			log.Printf("Job processor: draining NATS subscriber failed: %v", err)
@@ -184,16 +286,120 @@ func (jp *JobProcessor) Stop() {
 }
 
 // handleDiscoveryJobJS processes discovery jobs from JetStream with ack/nack.
-func (jp *JobProcessor) handleDiscoveryJobJS(ctx context.Context, msg *nats.Msg) error {
+//
+// The subscriber's ctx is deliberately unused: it expires after
+// ProcessingTimeout, and a job is allowed to run far longer (see Start).
+func (jp *JobProcessor) handleDiscoveryJobJS(_ context.Context, msg *nats.Msg) error {
+	return jp.handleDiscoveryJob(msg, msg)
+}
+
+// messageLease is the one *nats.Msg method that keeps a delivery from being
+// redelivered while it is still being worked on. An interface so a test can
+// count the beats.
+type messageLease interface {
+	InProgress(opts ...nats.AckOpt) error
+}
+
+// handleDiscoveryJob runs one delivery of a job message, holding its lease for
+// as long as the job runs.
+func (jp *JobProcessor) handleDiscoveryJob(msg *nats.Msg, lease messageLease) error {
 	var jobEvent events.DiscoveryJobEvent
 	if err := events.UnmarshalMsg(msg, &jobEvent); err != nil {
 		log.Printf("Failed to unmarshal discovery job event: %v", err)
 		return nil // Don't redeliver bad data
 	}
+	stop := jp.keepLeaseAlive(lease, jobEvent.JobID)
+	defer stop()
 	return jp.processDiscoveryJobByID(jobEvent.JobID)
 }
 
+// keepLeaseAlive tells the broker every leaseInterval that this delivery is
+// still being worked on, until the returned func is called ( H1).
+//
+// Without it a job that outlived AckWait (5 minutes) was redelivered while it
+// was still running, and the redelivery scanned every target again. The claim
+// in processDiscoveryJobByID is what guarantees a redelivery cannot re-scan;
+// this keeps the broker from making one at all while the processor is alive,
+// so the delivery stays with the replica that is running the job and is acked
+// once, when the job has ended.
+func (jp *JobProcessor) keepLeaseAlive(lease messageLease, jobID string) func() {
+	interval := jp.leaseInterval
+	if interval <= 0 {
+		interval = jobLeaseInterval
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := lease.InProgress(); err != nil {
+					log.Printf("Discovery job %s: could not extend the message lease (the broker may redeliver it; the claim keeps that from re-scanning): %v", jobID, err)
+				}
+				// The database half of the heartbeat, which the reaper reads.
+				// Only while THIS replica runs the job: a duplicate delivery
+				// held here must not vouch for a job another replica owns.
+				if jp.discoveryService != nil && jp.discoveryService.runningJobs().has(jobID) {
+					jp.heartbeat(jobID)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		wg.Wait()
+	}
+}
+
+// heartbeat touches a running job's updated_at, which is what tells the
+// stuck-job reaper the job still has a live owner. It reports whether the row
+// is still `running`. A failed write is logged and otherwise ignored: losing
+// one beat must not stop a scan — the lease allows several.
+func (jp *JobProcessor) heartbeat(jobID string) bool {
+	touch := jp.touchJob
+	if touch == nil {
+		touch = jp.discoveryService.TouchRunningJob
+	}
+	running, err := touch(jobID)
+	if err != nil {
+		log.Printf("Discovery job %s: heartbeat write failed, scan continues: %v", jobID, err)
+		return false
+	}
+	return running
+}
+
+// lifetime is the processor's context, or Background for a processor built
+// as a literal (tests).
+func (jp *JobProcessor) lifetime() context.Context {
+	if jp.ctx == nil {
+		return context.Background()
+	}
+	return jp.ctx
+}
+
+// enter registers a job as in flight, or refuses it once Stop has begun.
+func (jp *JobProcessor) enter() bool {
+	jp.stopMu.Lock()
+	defer jp.stopMu.Unlock()
+	if jp.stopping {
+		return false
+	}
+	jp.inflight.Add(1)
+	return true
+}
+
 func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
+	if !jp.enter() {
+		// Nak: another replica (or this one, restarted) takes it.
+		return fmt.Errorf("job processor stopping; not starting job %s", jobID)
+	}
+	defer jp.inflight.Done()
 	log.Printf("Processing discovery job: %s", jobID)
 
 	// Get job details
@@ -202,16 +408,36 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 		return fmt.Errorf("failed to get job %s: %w", jobID, err)
 	}
 
+	// A job that is not queued is already being run, has been handed to its
+	// sensor, or has ended: this delivery is a duplicate (a broker redelivery,
+	// the stuck-job sweep's republish, a second replica's copy) and must not
+	// scan or dispatch anything. Cheap early exit only — ClaimJob below, and
+	// for a `sensors` job the dispatcher's conditional UPDATE, are what
+	// actually decide, atomically. It used to skip `sensors` jobs, so every
+	// duplicate of a dispatched one ran the rate-limit check and the dispatch
+	// transaction and then logged itself as a failed dispatch.
+	if job.Status != "queued" {
+		log.Printf("Discovery job %s is %s, not queued — duplicate or late delivery, nothing to do", jobID, job.Status)
+		return nil
+	}
+
 	// Check rate limits
 	err = jp.rateLimiter.CheckRateLimit(job.TenantID)
 	if err != nil {
 		log.Printf("Rate limit exceeded for tenant %s: %v", job.TenantID, err)
+		errorMsg := err.Error()
+		// Only a job still queued is failed for this: a duplicate delivery that
+		// trips the limit must not fail the copy another replica is running.
+		statusErr := jp.discoveryService.UpdateJobStatusFrom(jobID, "failed", &errorMsg, "queued")
+		if errors.Is(statusErr, ErrJobStatusConflict) {
+			log.Printf("Job %s left the queue before the rate-limit verdict landed: %v", jobID, statusErr)
+			return nil
+		}
+		if statusErr != nil {
+			log.Printf("Failed to mark job %s failed after rate limit — job may be stuck in its previous state: %v", jobID, statusErr)
+		}
 		if alertErr := jp.alertService.SendRateLimitExceededAlert(job.TenantID); alertErr != nil {
 			log.Printf("Failed to send rate-limit alert for tenant %s: %v", job.TenantID, alertErr)
-		}
-		errorMsg := err.Error()
-		if statusErr := jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg); statusErr != nil {
-			log.Printf("Failed to mark job %s failed after rate limit — job may be stuck in its previous state: %v", jobID, statusErr)
 		}
 		return nil // Permanent failure, don't redeliver
 	}
@@ -225,31 +451,100 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 		return jp.dispatchToSensor(job)
 	}
 
-	// Update job status to running
-	err = jp.discoveryService.UpdateJobStatus(jobID, "running", nil)
+	// Claim the job: queued → running in one conditional UPDATE ( H1).
+	// Exactly one delivery wins; every other — redelivered, republished, or
+	// racing on another replica — finds it no longer queued and scans nothing.
+	claimed, err := jp.discoveryService.ClaimJob(jobID)
 	if err != nil {
-		return fmt.Errorf("failed to update job status: %w", err)
+		return fmt.Errorf("failed to claim job: %w", err)
+	}
+	if !claimed {
+		log.Printf("Discovery job %s was claimed elsewhere or has ended; this delivery does nothing", jobID)
+		return nil
 	}
 
+	// A scan-plan job can run for hours, and the subscription hands this
+	// replica one message at a time: run in the handler, it would hold every
+	// other job delivered here — any tenant's — until it ended ( WP2,
+	// item 9). Once claimed it no longer needs its message: the claim makes a
+	// redelivery a no-op, the row's heartbeat and the stuck-job reaper cover a
+	// crash, and Stop hands it back to the queue. So it runs on its own and the
+	// delivery is acked; the units it runs are what the unit scheduler shares
+	// out between tenants (unit_scheduler.go).
+	if job.Plan != nil && jp.detachPlanJobs {
+		jp.inflight.Add(1)
+		go func() {
+			defer jp.inflight.Done()
+			stop := jp.keepLeaseAlive(noLease{}, jobID)
+			defer stop()
+			if err := jp.runClaimedJob(job); err != nil {
+				log.Printf("Discovery job %s: %v", jobID, err)
+			}
+		}()
+		return nil
+	}
+	return jp.runClaimedJob(job)
+}
+
+// noLease is the message lease of a job that no longer holds its message: the
+// heartbeat ticker still touches the row, there is nothing to extend.
+type noLease struct{}
+
+func (noLease) InProgress(...nats.AckOpt) error { return nil }
+
+// runClaimedJob runs a job this processor has claimed, to its end: the scan,
+// then the guarded transition to completed, failed, or back to queued.
+func (jp *JobProcessor) runClaimedJob(job *models.DiscoveryJob) error {
+	jobID := job.ID
+
+	// The job's own context: cancelled by a cancel of this job (CancelJob, via
+	// the registry) or by Stop. Derived from the processor's lifetime, never
+	// from the NATS handler's context, whose ProcessingTimeout would otherwise
+	// become the deadline of every scan.
+	jobCtx, release := jp.discoveryService.runningJobs().start(jp.lifetime(), jobID)
+	defer release()
+
 	// Process the job
-	err = jp.processDiscoveryJob(job)
-	if errors.Is(err, dispatchguard.ErrPaused) {
-		return jp.discoveryService.UpdateJobStatus(jobID, "queued", nil)
+	err := jp.processDiscoveryJob(jobCtx, job)
+	if errors.Is(err, dispatchguard.ErrPaused) || errors.Is(err, errProcessorStopping) {
+		// Back to the queue, from running only: a cancel that landed meanwhile
+		// stays a cancel. The stuck-job sweep republishes it and the next run
+		// skips the targets this one completed.
+		if statusErr := jp.discoveryService.UpdateJobStatusFrom(jobID, "queued", nil, "running"); statusErr != nil && !errors.Is(statusErr, ErrJobStatusConflict) {
+			return statusErr
+		}
+		return nil
+	}
+	if errors.Is(err, errJobNoLongerRunning) {
+		// Cancelled (here or on another replica). The row already says so;
+		// nothing to write and nothing to announce.
+		log.Printf("Discovery job %s stopped: %v", jobID, err)
+		return nil
 	}
 	if err != nil {
 		log.Printf("Failed to process job %s: %v", jobID, err)
+		errorMsg := err.Error()
+		statusErr := jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg)
+		if errors.Is(statusErr, ErrJobStatusConflict) {
+			log.Printf("Job %s ended before its failure could be recorded: %v", jobID, statusErr)
+			return nil
+		}
+		if statusErr != nil {
+			log.Printf("Failed to mark job %s failed — job may be stuck in 'running': %v", jobID, statusErr)
+		}
 		if alertErr := jp.alertService.SendJobFailedAlert(job.TenantID, jobID, err.Error()); alertErr != nil {
 			log.Printf("Failed to send job-failed alert for job %s: %v", jobID, alertErr)
-		}
-		errorMsg := err.Error()
-		if statusErr := jp.discoveryService.UpdateJobStatus(jobID, "failed", &errorMsg); statusErr != nil {
-			log.Printf("Failed to mark job %s failed — job may be stuck in 'running': %v", jobID, statusErr)
 		}
 		return nil // Job marked as failed, don't redeliver
 	}
 
-	// Update job status to completed
+	// Update job status to completed — refused if the job was cancelled after
+	// its last target, so a late success never overwrites a cancel.
 	err = jp.discoveryService.UpdateJobStatus(jobID, "completed", nil)
+	if errors.Is(err, ErrJobStatusConflict) {
+		log.Printf("Job %s finished scanning but had already ended: %v", jobID, err)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update job status: %w", err)
 	}
@@ -288,7 +583,7 @@ func (jp *JobProcessor) getJobOptions(tenantID, jobID string) (map[string]interf
 	return nil, nil
 }
 
-func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
+func (jp *JobProcessor) processDiscoveryJob(ctx context.Context, job *models.DiscoveryJob) error {
 	// Check execution mode - cloud jobs should be handled by device-interrogation-service
 	if job.ExecutionMode == "cloud" {
 		log.Printf("Job %s is a cloud discovery job, delegating to device-interrogation-service", job.ID)
@@ -299,7 +594,7 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 	// dispatcher (sensor_dispatcher.go) is where such a job goes —
 	// processDiscoveryJobByID routes it there before this function is ever
 	// called. This branch is the last line: before the dispatcher existed, a
-	// `sensors` job fell through to the in-cluster nmap path below, the scan
+	// `sensors` job fell through to the in-cluster scan path below, the scan
 	// ran from the platform cluster, could not reach a target only the
 	// tenant's sensor can see, and the job finished `completed` with zero
 	// findings and no indication the sensor was never involved. Any `sensors`
@@ -324,80 +619,29 @@ func (jp *JobProcessor) processDiscoveryJob(job *models.DiscoveryJob) error {
 		return nil
 	}
 
-	// For sensor/network mode, proceed with port scanning
-	// Get job targets - handle PostgreSQL arrays properly
-	type TargetRow struct {
-		ID          string         `db:"id"`
-		JobID       string         `db:"job_id"`
-		Input       string         `db:"input"`
-		Protocols   pq.StringArray `db:"protocols"`
-		Ports       pq.Int32Array  `db:"ports"`
-		Status      string         `db:"status"`
-		CreatedAt   time.Time      `db:"created_at"`
-		UpdatedAt   time.Time      `db:"updated_at"`
-		CompletedAt *time.Time     `db:"completed_at"`
-	}
-	var targetRows []TargetRow
-	query := `SELECT id, job_id, input, protocols, ports, status, created_at, updated_at, completed_at
-	          FROM discovery_targets WHERE job_id = $1`
-	// RLS-scoped read over discovery_targets; job.TenantID scopes the tx.
-	err = jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-		return tx.Select(&targetRows, query, job.ID)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to get job targets: %w", err)
+	// A scan-plan job runs on the shared engine, one durable unit per
+	// address (work_unit_executor.go). It is the only kind of scan this
+	// processor runs.
+	if job.Plan != nil {
+		return jp.processPlanJob(ctx, job, opts)
 	}
 
-	// Convert to DiscoveryTarget models
-	targets := make([]*models.DiscoveryTarget, len(targetRows))
-	for i, row := range targetRows {
-		targets[i] = &models.DiscoveryTarget{
-			ID:          row.ID,
-			JobID:       row.JobID,
-			Input:       row.Input,
-			Protocols:   []string(row.Protocols),
-			Ports:       []int32(row.Ports),
-			Status:      row.Status,
-			CreatedAt:   row.CreatedAt,
-			UpdatedAt:   row.UpdatedAt,
-			CompletedAt: row.CompletedAt,
-		}
-	}
-
-	// Process each target
-	for _, target := range targets {
-		if dispatchguard.IsAutomaticScan(opts) && target.Status == "completed" {
-			continue
-		}
-		err := jp.processTarget(job, target, opts)
-		if err != nil && (dispatchguard.IsAutomaticScan(opts) || errors.Is(err, dispatchguard.ErrPaused) || errors.Is(err, dispatchguard.ErrDenied)) {
-			return err
-		}
-		if err != nil {
-			log.Printf("Failed to process target %s: %v", target.Input, err)
-			// Continue with other targets
-		}
-	}
-
-	// Count findings and send alert if any. RLS-scoped read over
-	// discovery_findings; job.TenantID scopes the tx.
-	var findingCount int
-	countQuery := `SELECT COUNT(*) FROM discovery_findings WHERE job_id = $1`
-	err = jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-		return tx.Get(&findingCount, countQuery, job.ID)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to count findings: %w", err)
-	}
-
-	if findingCount > 0 {
-		if alertErr := jp.alertService.SendNewFindingsAlert(job.TenantID, job.ID, findingCount); alertErr != nil {
-			log.Printf("Failed to send new-findings alert for job %s: %v", job.ID, alertErr)
-		}
-	}
-
-	return nil
+	// Anything else is a protocols × ports job, and the platform has no
+	// executor for one any more ( WP5): CreateJob translates every such
+	// request into a plan and creates the legacy shape only for a tenant
+	// sensor that cannot run a plan, which the dispatcher above hands to that
+	// sensor rather than this path. A row that still reaches here (created by
+	// an older release and queued across the upgrade) is FAILED with a reason
+	// a person can act on, never completed with nothing scanned.
+	// Mutation-tested: TestProcessDiscoveryJob_FailsALegacyPlatformJob.
+	log.Printf("Job %s is a protocols × ports job with no scan plan; the platform no longer runs that shape — failing it", job.ID)
+	return errLegacyPlatformJob
 }
+
+// errLegacyPlatformJob is the failure of a platform job that carries no scan
+// plan. Its text is what the person reads in Discovery Jobs.
+var errLegacyPlatformJob = errors.New("this job was created in the protocols × ports shape, which the platform no longer runs: " +
+	"every scan now runs on the shared scan engine. Nothing was scanned. Run the scan again to create it as a planned job")
 
 // delegateToDeviceInterrogation creates device_jobs for cloud discovery
 // to be processed by device-interrogation-service
@@ -479,276 +723,57 @@ func (jp *JobProcessor) delegateToDeviceInterrogation(job *models.DiscoveryJob) 
 	return nil
 }
 
-func (jp *JobProcessor) processTarget(job *models.DiscoveryJob, target *models.DiscoveryTarget, probeOpts map[string]interface{}) error {
-	// Update target status to running. RLS-scoped UPDATE over discovery_targets;
-	// job.TenantID scopes the tx.
-	query := `UPDATE discovery_targets SET status = 'running', started_at = NOW(), updated_at = NOW() WHERE id = $1`
-	var grant jobTargetGrant
+// stopReason reports why a job's context ended — errJobNoLongerRunning for a
+// cancel, errProcessorStopping for shutdown — or nil while it is live.
+func stopReason(ctx context.Context) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if errors.Is(cause, errJobNoLongerRunning) || errors.Is(cause, errProcessorStopping) {
+		return cause
+	}
+	return fmt.Errorf("%w: %v", errProcessorStopping, cause)
+}
+
+// isJobStop reports whether err means "stop this job now", as opposed to a
+// failure of one target.
+func isJobStop(err error) bool {
+	return errors.Is(err, errJobNoLongerRunning) || errors.Is(err, errProcessorStopping)
+}
+
+// checkStillRunning is the between-targets and between-hosts cancel check
+// ( H2). The context covers a cancel handled on this replica and
+// shutdown; the row covers a cancel handled by ANOTHER replica, whose
+// registry cannot reach this process. One indexed read per host. Only an ENDED
+// job stops the scan — the row is cancelled (or otherwise terminal), and
+// nothing this run writes can change that.
+//
+// A failed read does not stop the scan: hours of work are not thrown away for
+// one dropped query, and a cancel that lands meanwhile is still final —
+// terminal states are sticky, so this run cannot overwrite it.
+func (jp *JobProcessor) checkStillRunning(ctx context.Context, job *models.DiscoveryJob) error {
+	if err := stopReason(ctx); err != nil {
+		return err
+	}
+	// Each boundary is also a heartbeat. A row still `running` needs no read.
+	if jp.heartbeat(job.ID) {
+		return nil
+	}
+	var status string
 	err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-		ports := make([]int, len(target.Ports))
-		for i, p := range target.Ports {
-			ports[i] = int(p)
-		}
-		if err := dispatchguard.AuthorizeAutomaticScan(tx, sensordispatch.Payload{TenantID: job.TenantID, Targets: []string{target.Input}, Protocols: target.Protocols, Ports: ports, Options: probeOpts}); err != nil {
-			return err
-		}
-		g, e := loadJobTargetGrant(tx, job.ID, target.Input)
-		if e != nil {
-			return e
-		}
-		grant = g
-		_, e = tx.Exec(query, target.ID)
-		return e
+		return tx.Get(&status, `SELECT status FROM discovery_jobs WHERE id = $1`, job.ID)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to update target status: %w", err)
+		log.Printf("Discovery job %s: could not re-check status, continuing: %v", job.ID, err)
+		return nil
 	}
-
-	// Expand the target input to individual IP addresses. A hostname the job
-	// PINNED at creation is scanned at exactly the addresses that were
-	// authorized then — it is never resolved again, so a DNS answer that
-	// changed since (a rebinding to 169.254.169.254, or simply to someone
-	// else's host) cannot redirect the scan ( W5.13b). CIDRs and ranges
-	// go through the shared expander, the same logic the standalone sensor
-	// uses; an unpinned hostname (a job created before pinning) is resolved
-	// through the service's resolver and then authorized below like any other.
-	expandedTargets := jp.expandTarget(target.Input, grant.pinned)
-	if len(expandedTargets) == 0 {
-		expandedTargets = []string{target.Input}
-	}
-
-	// Authorize the addresses this dispatch will actually contact, on EVERY
-	// path — not only the automatic one AuthorizeAutomaticScan covers (#H5).
-	//
-	// This runs AFTER expansion deliberately. The stored target row can be a
-	// CIDR, a range or a hostname; only the expanded list names the hosts a
-	// packet is sent to, and a hostname is the one form whose addresses cannot
-	// be known at creation time. Re-checking here also means a segment the
-	// tenant withdrew, or an exclusion they added, between creation and
-	// dispatch is honoured.
-	//
-	// An address outside the registered networks passes only when it lies
-	// inside what a person confirmed at creation (the ranges and pinned
-	// addresses recorded server-side in metadata.external_targets — not the
-	// whole job) AND the operator switch is still on now.
-	if err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-		return dispatchguard.AuthorizeDispatchAddresses(tx, job.TenantID, expandedTargets, grant.consent)
-	}); err != nil {
-		// Settle the row rather than leaving it 'running' forever: a refused
-		// target is a terminal outcome with a reason a person can read.
-		if settleErr := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-			_, e := tx.Exec(`UPDATE discovery_targets SET status='failed', error_message=$2, completed_at=NOW(), updated_at=NOW() WHERE id=$1`, target.ID, err.Error())
-			return e
-		}); settleErr != nil {
-			log.Printf("Failed to settle unauthorized target %s: %v", target.ID, settleErr)
+	for _, terminal := range terminalJobStatuses {
+		if status == terminal {
+			return fmt.Errorf("%w: it is now %s", errJobNoLongerRunning, status)
 		}
-		return fmt.Errorf("target authorization failed for %s: %w", target.Input, err)
-	}
-
-	// Perform real port scanning for each expanded target
-	var allFindings []models.DiscoveryFinding
-	// Preserve original hostname for SNI and display (use original input if it's not an IP)
-	originalHostname := target.Input
-	if net.ParseIP(target.Input) != nil {
-		// If input is already an IP, don't use it as hostname
-		originalHostname = ""
-	}
-
-	for _, expandedTarget := range expandedTargets {
-		log.Printf("Scanning target: %s with ports: %v and protocols: %v (original hostname: %s)", expandedTarget, target.Ports, target.Protocols, originalHostname)
-
-		// Perform actual port scanning - pass original hostname for SNI and display
-		var originalHostnamePtr *string
-		if originalHostname != "" {
-			originalHostnamePtr = &originalHostname
-		}
-		findings, err := jp.portScanner.ScanTarget(expandedTarget, target.Ports, target.Protocols, originalHostnamePtr, probeOpts)
-		if err != nil {
-			log.Printf("Port scanning failed for target %s: %v", expandedTarget, err)
-			// Continue with other targets even if one fails
-			continue
-		}
-
-		// Set job and target IDs for all findings
-		for i := range findings {
-			findings[i].JobID = job.ID
-			findings[i].TargetID = target.ID
-			findings[i].TenantID = job.TenantID
-		}
-
-		allFindings = append(allFindings, findings...)
-		log.Printf("Found %d open ports for target %s", len(findings), expandedTarget)
-	}
-
-	// Every discovery job's findings are written to BOTH sinks, unconditionally:
-	//
-	//   discovery_findings  — the job's inspection record ("what did this run see?")
-	//   sensor_discoveries  — the ingestion queue every sensor already feeds, from
-	//                         which discovery-processor classifies, evaluates the
-	//                         tenant's segment auto-approval rules, and materializes
-	//                         inventory.
-	//
-	// The mirror used to be gated on a probe-option result sink, which only Active
-	// Scan ever set — so a wizard-created job produced findings
-	// that reached inventory only if a browser POSTed them back. That client-side
-	// round-trip is gone; the mirror is the only path, and it is the same one for
-	// every job.
-	//
-	// Provenance is carried in the mirrored row's metadata (discovery_source), not
-	// by which jobs get mirrored.
-	activeScan := false
-	if v, ok := probeOpts["active_scan"].(bool); ok {
-		activeScan = v
-	}
-
-	// Store findings
-	for i := range allFindings {
-		finding := allFindings[i]
-		// Use the original target ID for all findings
-		finding.TargetID = target.ID
-		err := jp.storeFinding(&finding)
-		if err != nil {
-			log.Printf("Failed to store finding: %v", err)
-			continue
-		}
-
-		if err := jp.mirrorFindingToSensorDiscoveries(job, &finding, activeScan); err != nil {
-			log.Printf("[JobProcessor] failed to mirror finding to sensor_discoveries (job %s, %s:%d): %v",
-				job.ID, finding.ResolvedIP, finding.Port, err)
-		}
-	}
-
-	// Update target status to completed. RLS-scoped UPDATE over discovery_targets.
-	query = `UPDATE discovery_targets SET status = 'completed', completed_at = NOW(), updated_at = NOW() WHERE id = $1`
-	err = jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(query, target.ID)
-		return e
-	})
-	if err != nil {
-		return fmt.Errorf("failed to update target status: %w", err)
-	}
-
-	return nil
-}
-
-func (jp *JobProcessor) storeFinding(finding *models.DiscoveryFinding) error {
-	// Serialize Data field to JSON for storage in details column
-	var detailsJSON *string
-	if len(finding.Data) > 0 {
-		jsonBytes, err := json.Marshal(finding.Data)
-		if err != nil {
-			log.Printf("Warning: Failed to marshal finding data to JSON: %v", err)
-		} else {
-			jsonStr := string(jsonBytes)
-			detailsJSON = &jsonStr
-			// Extract keys for logging
-			keys := make([]string, 0, len(finding.Data))
-			for k := range finding.Data {
-				keys = append(keys, k)
-			}
-			log.Printf("[JobProcessor] Storing finding with data: protocol=%s, port=%d, dataKeys=%v, hasCertificates=%v, hasCipherSuite=%v",
-				finding.Protocol, finding.Port, keys,
-				finding.Data["certificates"] != nil, finding.Data["cipher_suite"] != nil)
-		}
-	} else {
-		dataLen := 0
-		if finding.Data != nil {
-			dataLen = len(finding.Data)
-		}
-		log.Printf("[JobProcessor] Storing finding without data: protocol=%s, port=%d, dataLen=%d",
-			finding.Protocol, finding.Port, dataLen)
-	}
-
-	query := `
-		INSERT INTO discovery_findings (job_id, target_id, tenant_id, executed_via, protocol, port, resolved_ip, hostname, confidence_score, details, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		RETURNING id`
-
-	// resolved_ip is `inet` and nullable: an empty string is not a valid inet
-	// literal, so an unresolvable target must be stored as NULL rather than ''.
-	var resolvedIP interface{}
-	if finding.ResolvedIP != "" {
-		resolvedIP = finding.ResolvedIP
-	}
-
-	// RLS-scoped INSERT over discovery_findings; finding.TenantID scopes the tx
-	// so the row's tenant_id satisfies the policy WITH CHECK.
-	err := jp.withTenantTxx(context.Background(), finding.TenantID, func(tx *sqlx.Tx) error {
-		// Protocol is canonicalized on the way in so every discovery path stores
-		// one spelling — see cryptoparse.NormalizeProtocol.
-		return tx.QueryRow(query,
-			finding.JobID, finding.TargetID, finding.TenantID, finding.ExecutedVia,
-			cryptoparse.NormalizeProtocol(finding.Protocol),
-			finding.Port, resolvedIP, finding.Hostname, finding.ConfidenceScore, detailsJSON, finding.CreatedAt).Scan(&finding.ID)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to store finding: %w", err)
 	}
 	return nil
-}
-
-// mirrorMetadata builds the metadata envelope of a mirrored sensor_discoveries row:
-// the finding's own probe data plus a provenance stamp. Pure, so the stamp is
-// unit-tested directly.
-//
-// The stamp is the ONLY thing activeScan decides. It is not a routing switch —
-// every discovery job's findings are mirrored.
-func mirrorMetadata(data map[string]interface{}, activeScan bool) map[string]interface{} {
-	meta := make(map[string]interface{}, len(data)+1)
-	for k, v := range data {
-		meta[k] = v
-	}
-	if activeScan {
-		meta["discovery_source"] = "active_scan"
-	} else {
-		meta["discovery_source"] = "discovery_job"
-	}
-	return meta
-}
-
-// mirrorFindingToSensorDiscoveries writes a discovery-job finding into sensor_discoveries
-// so it flows through the unified discovery-processor → IngestFindings pipeline, which
-// classifies it, evaluates the tenant's segment auto-approval rules and materializes the
-// asset. finding.Data already carries the canonical certificate/cipher metadata (the shared
-// TLS prober produces it), so we pass it through as the discovery metadata.
-//
-// activeScan only selects the provenance stamp (discovery_source), which is what the UI
-// reads to tell "re-scan of a known asset" from "wizard discovery". It does NOT decide
-// whether the mirror happens — every job is mirrored.
-func (jp *JobProcessor) mirrorFindingToSensorDiscoveries(job *models.DiscoveryJob, finding *models.DiscoveryFinding, activeScan bool) error {
-	if finding.ResolvedIP == "" {
-		return nil // sensor_discoveries.dest_ip is NOT NULL — nothing to anchor on
-	}
-
-	meta := mirrorMetadata(finding.Data, activeScan)
-	metaJSON, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
-	}
-
-	var hostname interface{}
-	if finding.Hostname != "" {
-		hostname = finding.Hostname
-	}
-
-	// Both the sensors lookup and the sensor_discoveries write are RLS-scoped
-	// (sensors has a tenant_isolation policy; sensor_discoveries is a
-	// security_invoker view over the partitioned table whose partitions carry
-	// the policy). Run them on one tenant-scoped transaction keyed by
-	// finding.TenantID so app.tenant_id is set on the same connection.
-	return jp.withTenantTxx(context.Background(), finding.TenantID, func(tx *sqlx.Tx) error {
-		sensorID, e := jp.platformSensorIDTx(tx, finding.TenantID)
-		if e != nil {
-			return e
-		}
-		_, e = tx.Exec(`
-			INSERT INTO sensor_discoveries
-				(sensor_id, tenant_id, batch_id, protocol, dest_ip, port, confidence, metadata, hostname, "timestamp", created_at)
-			VALUES ($1, $2, $3, $4, $5::inet, $6, $7, $8::jsonb, $9, NOW(), NOW())
-		`, sensorID, finding.TenantID, job.ID, cryptoparse.NormalizeProtocol(finding.Protocol), finding.ResolvedIP, finding.Port,
-			finding.ConfidenceScore, string(metaJSON), hostname)
-		return e
-	})
 }
 
 // platformSensorIDTx returns the tenant's system "Platform Discovery Sensor" id
@@ -766,7 +791,3 @@ func (jp *JobProcessor) platformSensorIDTx(tx *sqlx.Tx, tenantID string) (string
 	}
 	return id, nil
 }
-
-// expandTarget expands a target input into individual IP addresses
-// Supports CIDR notation (192.168.1.0/24), IP ranges (10.0.0.1-10.0.0.10),
-// single IPs, and hostnames

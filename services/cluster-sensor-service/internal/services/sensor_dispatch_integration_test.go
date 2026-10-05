@@ -34,6 +34,11 @@ type dispatchFixture struct {
 	svc    *DiscoveryService
 	jp     *JobProcessor
 	tenant uuid.UUID
+	// net and banner are the platform engine's network in the lifecycle
+	// tests (lifecycleFixture): createPlatformJob registers each target
+	// address on net with its port 443 answering banner.
+	net    *FakeNet
+	banner string
 }
 
 func newDispatchFixture(t *testing.T) *dispatchFixture {
@@ -72,6 +77,10 @@ func (f *dispatchFixture) liveSensor(t *testing.T, name string) uuid.UUID {
 // rejected this fixture before any dispatch logic ran.
 func (f *dispatchFixture) createSensorsJob(t *testing.T, sensorID uuid.UUID) *models.DiscoveryJob {
 	t.Helper()
+	// A LEGACY job: the sensor reports no scan_plan_v1, so the request — a
+	// plan once translated — is created in the legacy shape that sensor's own
+	// software runs ( D3). The platform keeps dispatching that payload
+	// and recording its completion through the 4.5 line.
 	job, err := f.svc.CreateJob(f.tenant.String(), "system", models.CreateDiscoveryJobRequest{
 		Targets:            []string{"10.183.0.10", "10.183.0.11"},
 		ExecutionMode:      "sensors",
@@ -378,5 +387,149 @@ func TestIntegration_SensorDispatch_ProcessorNeverRunsASensorsJobInCluster(t *te
 	_ = f.raw.QueryRow(`SELECT COUNT(*) FROM discovery_targets WHERE job_id = $1 AND status <> 'pending'`, job.ID).Scan(&targetsRunning)
 	if findings != 0 || targetsRunning != 0 {
 		t.Errorf("in-cluster scan activity for a sensors job: findings=%d targets touched=%d", findings, targetsRunning)
+	}
+}
+
+// WP2b: a scan-plan job is handed only to a sensor whose software
+// reports scan_plan_v1, and that is re-checked at dispatch — a sensor replaced
+// by older software after the job was created gets no command, and the job
+// FAILS naming the sensor and what to do, instead of the sensor reading a plan
+// job as "no protocols" and finishing it having scanned almost nothing.
+func TestIntegration_SensorDispatch_ScanPlanJobNeedsTheCapabilityAtDispatch(t *testing.T) {
+	f := newDispatchFixture(t)
+	setCaps := func(id uuid.UUID, caps ...string) {
+		t.Helper()
+		if _, err := f.raw.Exec(`UPDATE sensors SET reported_capabilities = $2 WHERE id = $1`, id, pq.Array(caps)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commands := func(jobID string) int {
+		t.Helper()
+		var n int
+		if err := f.raw.QueryRow(`SELECT COUNT(*) FROM sensor_commands WHERE payload ->> 'job_id' = $1`, jobID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	planJob := func(sensorID uuid.UUID) *models.DiscoveryJob {
+		t.Helper()
+		job, err := f.svc.CreateJob(f.tenant.String(), "system", models.CreateDiscoveryJobRequest{
+			Targets: []string{"10.183.0.10"}, ScanDepth: "quick", RunFrom: "sensor", SensorID: sensorID.String(),
+		})
+		if err != nil {
+			t.Fatalf("CreateJob(run_from sensor): %v", err)
+		}
+		full, err := f.svc.GetJob(job.ID)
+		if err != nil || full.Plan == nil {
+			t.Fatalf("GetJob: %+v %v — want a scan-plan job", full, err)
+		}
+		return full
+	}
+
+	// Downgraded between creation and dispatch: refused, nothing sent.
+	downgraded := f.liveSensor(t, "branch-01")
+	setCaps(downgraded, sensordispatch.ScanPlanCapability)
+	job := planJob(downgraded)
+	setCaps(downgraded, sensordispatch.IdentityDNSCapability)
+	if err := f.jp.dispatchToSensor(job); err != nil {
+		t.Fatalf("dispatchToSensor: %v", err)
+	}
+	status, _, _, errMsg := f.jobRow(t, job.ID)
+	if status != "failed" || !errMsg.Valid || !strings.Contains(errMsg.String, "branch-01") ||
+		!strings.Contains(errMsg.String, "does not support scan depth") || !strings.Contains(errMsg.String, "upgrade it, or run the scan from the platform") {
+		t.Fatalf("job = %s / %v, want failed naming the sensor and what to do", status, errMsg)
+	}
+	if n := commands(job.ID); n != 0 {
+		t.Fatalf("%d command(s) written to a sensor that cannot run a scan plan", n)
+	}
+
+	// The other polarity: the capability present at dispatch, the job is
+	// handed over.
+	capable := f.liveSensor(t, "branch-02")
+	setCaps(capable, sensordispatch.ScanPlanCapability)
+	job = planJob(capable)
+	if err := f.jp.dispatchToSensor(job); err != nil {
+		t.Fatalf("dispatchToSensor: %v", err)
+	}
+	if status, _, _, errMsg := f.jobRow(t, job.ID); status != sensordispatch.StatusAwaitingSensor {
+		t.Fatalf("job on a capable sensor = %s / %v, want %s", status, errMsg, sensordispatch.StatusAwaitingSensor)
+	}
+	if n := commands(job.ID); n != 1 {
+		t.Fatalf("commands = %d, want 1", n)
+	}
+}
+
+// WP5: the old-sensor fallback (D3) still creates a legacy job and
+// dispatches its protocols × ports payload — and a sensor that reports scan
+// plans is never sent one. A legacy job created while the sensor was old and
+// dispatched after it was upgraded is failed with the reason and no command is
+// written. Mutation: delete the !plan capability rule in decideSensorDispatch
+// and the upgraded sensor gets the legacy command, turning this red.
+func TestIntegration_SensorDispatch_LegacyPayloadOnlyForASensorWithoutPlans(t *testing.T) {
+	f := newDispatchFixture(t)
+	commands := func(jobID string) int {
+		var n int
+		if err := f.raw.QueryRow(`SELECT COUNT(*) FROM sensor_commands WHERE payload ->> 'job_id' = $1`, jobID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	// Old sensor: the legacy payload is created and dispatched, and the
+	// sensor can parse it.
+	old := f.liveSensor(t, "old-sensor")
+	job := f.createSensorsJob(t, old)
+	if job.Plan != nil {
+		t.Fatalf("job for a sensor without plans was planned: %+v", job.Plan)
+	}
+	full, err := f.svc.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.jp.dispatchToSensor(full); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, _, errMsg := f.jobRow(t, job.ID); status != sensordispatch.StatusAwaitingSensor {
+		t.Fatalf("legacy job on an old sensor = %s / %v, want %s", status, errMsg, sensordispatch.StatusAwaitingSensor)
+	}
+	var raw []byte
+	if err := f.raw.QueryRow(`SELECT payload FROM sensor_commands WHERE payload ->> 'job_id' = $1`, job.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := sensordispatch.ParsePayload(m)
+	if err != nil || payload.Plan != nil || len(payload.Protocols) == 0 || len(payload.Ports) == 0 {
+		t.Fatalf("old sensor's command = %+v (err %v), want a protocols × ports payload", payload, err)
+	}
+
+	// Created while the sensor was old, dispatched after it was upgraded.
+	upgraded := f.liveSensor(t, "upgraded-sensor")
+	stale := f.createSensorsJob(t, upgraded)
+	if _, err := f.raw.Exec(`UPDATE sensors SET reported_capabilities = $2 WHERE id = $1`, upgraded, pq.Array([]string{sensordispatch.ScanPlanCapability})); err != nil {
+		t.Fatal(err)
+	}
+	full, err = f.svc.GetJob(stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.jp.dispatchToSensor(full); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _, errMsg := f.jobRow(t, stale.ID)
+	if status != "failed" || !strings.Contains(errMsg.String, "scan plan only") {
+		t.Fatalf("legacy job dispatched to an upgraded sensor = %s / %v, want failed with the reason", status, errMsg)
+	}
+	if n := commands(stale.ID); n != 0 {
+		t.Fatalf("%d legacy command(s) written to a sensor that runs only scan plans", n)
+	}
+
+	// And creation itself never makes a legacy job for a capable sensor: the
+	// same request is planned there.
+	planned := f.createSensorsJob(t, upgraded)
+	if planned.Plan == nil {
+		t.Fatal("a protocols × ports request for a sensor that reports scan plans was created in the legacy shape")
 	}
 }

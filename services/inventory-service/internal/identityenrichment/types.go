@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 const BatchSize = 20
@@ -186,6 +187,41 @@ type Result struct {
 	Reason   string
 	RemoteID string
 	Data     json.RawMessage
+	// Redispatch says the remote request ended WITHOUT running — its collector
+	// refused it for want of room — so the next attempt must send a new one:
+	// Finish clears RemoteID and issues a new RequestID (the remote side
+	// replays a known one). Only for a refusal that proves nothing was done.
+	Redispatch bool
+}
+
+// ReasonProbeCoalesced: another observation's probe of the same address
+// through the same collector is in flight, and this observation will use its
+// result instead of queueing a duplicate (Store.EnsureProbe).
+const ReasonProbeCoalesced = "probe_coalesced_with_in_flight_request"
+
+// ReasonCollectorBusy: the executing collector has no room for another job
+// right now. Back-pressure, retried with BusyRetryDelay — never a block and
+// never a tenant-facing failure.
+const ReasonCollectorBusy = "collector_busy_retry_later"
+
+// MaxCollectorJobsInFlight is how many discovery jobs, of ANY origin, may be in
+// flight on one sensor before identity enrichment stops handing it more.
+//
+// A sensor holds one running job and sensordispatch.JobQueueDepth waiting, and
+// refuses the rest. Enrichment is unattended background work, so it takes no
+// more than half of that queue: the rest stays free for a person's scan and
+// the automatic sweep, which share the same sensor and whose refusal a person
+// would see.
+const MaxCollectorJobsInFlight = sensordispatch.JobQueueDepth / 2
+
+// BusyRetryDelay is RetryDelay capped at sixteen minutes. A busy collector is
+// a transient condition, and the full 128-minute ceiling would leave the
+// observation waiting long after the sensor drained.
+func BusyRetryDelay(attempt int) time.Duration {
+	if d := RetryDelay(attempt); d < 16*time.Minute {
+		return d
+	}
+	return 16 * time.Minute
 }
 
 // Backend operations must be idempotent by RequestID. Probe results enter the

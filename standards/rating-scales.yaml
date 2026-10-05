@@ -1035,6 +1035,53 @@ bindings:
         - strong
         - recommended
         - unassessed
+  inventory-service.openapi.yaml#/components/schemas/Sighting/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+      minimum: 0
+      maximum: 1
+  inventory-service.openapi.yaml#/components/schemas/Sighting/properties/class_provenance/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+      minimum: 0
+      maximum: 1
+  inventory-service.openapi.yaml#/components/schemas/SightedIdentifier/properties/confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: false
+      minimum: 0
+      maximum: 1
+  inventory-service.openapi.yaml#/components/schemas/SightingEndpoint/properties/service_confidence:
+    concept: service_confidence
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: false
+      enum:
+        - low
+        - medium
+        - high
+  inventory-service.openapi.yaml#/components/schemas/DiscoveryHostPort/properties/confidence_score:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 1
   inventory-service.openapi.yaml#/components/schemas/RemediationQueueRow/properties/severity:
     concept: severity
     delivery: implement
@@ -2384,8 +2431,8 @@ storage_followups:
   ssh_keys.risk_score:
     concept: risk
     delivery: register_only
-    owner: services/device-interrogation-service/internal/handlers/experimental_actions.go
+    owner: scripts/database/schema.sql
     schema: scripts/database/schema.sql
     default: 50
-    unknown: Default alone does not establish assessment; active writer supplies a computed score.
+    unknown: Default alone does not establish assessment; no writer remains, so every row holds the default or a historical score.
     visible_dependency: No current UI, finding-producer or CBOM table reader found; experimental API only.

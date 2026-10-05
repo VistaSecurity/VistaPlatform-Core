@@ -353,3 +353,75 @@ func TestIntegration_UpdateAsset_DeclaredNameIsScopedByClass(t *testing.T) {
 		t.Errorf("the second declared name was not attached; rows = %v", rows)
 	}
 }
+
+// TestIntegration_UpdateAsset_PinsAnAddress is's operator pin through the
+// edit form. A measured address the asset already holds is left exactly as it
+// is by an ordinary save (the form echoes every identifier back), and pinned —
+// declared, address_assignment static — only when its row asks for it. An
+// address newly typed onto the form is a declaration and pinned without asking.
+//
+// Mutation check: restore the bare `continue` for identifiers the asset already
+// holds in updateAssetIdentifiers → the pin request leaves the row measured and
+// unpinned, and the second assertion fails.
+func TestIntegration_UpdateAsset_PinsAnAddress(t *testing.T) {
+	svc, _, tenant := newIdentityFixture(t)
+	ctx := context.Background()
+	created, err := svc.CreateAsset(tenant, models.AssetInput{ClassKey: assetclass.KeyServer, Hostname: ptr("pin-me.example.test")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := identity.AssetRef{TenantID: tenant.String(), ID: created.ID.String()}
+	if _, err := svc.identityRepo.AttachIdentifiers(ctx, ref, []identity.Identifier{{
+		Kind: identity.KindIPAddress, Value: "192.0.2.77", Scope: identity.ScopeTenantDefault, Confidence: 1,
+		Source: identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:a"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	row := func(value string) (string, string) {
+		t.Helper()
+		ids, err := svc.getAssetIdentifiers(tenant, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range ids {
+			if id.Kind == "ip_address" && id.Value == value {
+				return id.SourceKind, derefString(id.AddressAssignment)
+			}
+		}
+		t.Fatalf("%s is not on the asset", value)
+		return "", ""
+	}
+	scope := identity.ScopeTenantDefault
+	save := func(ids ...models.AssetIdentifierInput) {
+		t.Helper()
+		all := append([]models.AssetIdentifierInput{{Kind: "fqdn", Value: "pin-me.example.test"}}, ids...)
+		if _, _, err := svc.UpdateAsset(tenant, created.ID, models.AssetInput{Identifiers: all}, uuid.New()); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+	}
+
+	save(models.AssetIdentifierInput{Kind: "ip_address", Value: "192.0.2.77", Scope: &scope})
+	if kind, a := row("192.0.2.77"); kind != "measured" || a != "" {
+		t.Fatalf("an ordinary save changed a measured address to %s/%q; echoing an identifier back is not declaring it", kind, a)
+	}
+
+	save(models.AssetIdentifierInput{Kind: "ip_address", Value: "192.0.2.77", Scope: &scope, AddressAssignment: "static"})
+	if kind, a := row("192.0.2.77"); kind != "declared" || a != "static" {
+		t.Fatalf("after pinning, the address is %s/%q, want declared/static", kind, a)
+	}
+
+	save(models.AssetIdentifierInput{Kind: "ip_address", Value: "192.0.2.77", Scope: &scope},
+		models.AssetIdentifierInput{Kind: "ip_address", Value: "192.0.2.78", Scope: &scope})
+	if kind, a := row("192.0.2.78"); kind != "declared" || a != "static" {
+		t.Fatalf("a newly typed address is %s/%q, want declared/static", kind, a)
+	}
+	if _, a := row("192.0.2.77"); a != "static" {
+		t.Fatalf("a save that did not repeat the pin unpinned the address (%q)", a)
+	}
+
+	if _, _, err := svc.UpdateAsset(tenant, created.ID, models.AssetInput{Identifiers: []models.AssetIdentifierInput{
+		{Kind: "ip_address", Value: "192.0.2.77", Scope: &scope, AddressAssignment: "dynamic"},
+	}}, uuid.New()); err == nil {
+		t.Fatal(`address_assignment "dynamic" was accepted from a person; only the host's agent can report a lease`)
+	}
+}

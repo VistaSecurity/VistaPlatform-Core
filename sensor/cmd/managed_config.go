@@ -14,8 +14,10 @@ package main
 // cannot change live lands.
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/sensor/internal/config"
@@ -128,6 +130,37 @@ func (s *Sensor) registerManagedSettings(a *desiredstate.Applier) {
 		return nil
 	}))
 
+	// Additional TLS ports ( WP5). Recorded, not in force, for the
+	// reason the decoder toggles are not: each port is a term in the BPF
+	// filter, fixed when the capture handle opens. Persisted so the restart
+	// that brings it into force reads the same list, and reported
+	// pending-restart until then — the console says "Pending restart" rather
+	// than claiming a port the filter does not admit.
+	//
+	// The list is parsed with the platform's own rule, not trusted: a device
+	// may refuse an instruction, and a junk entry in a capture filter fails
+	// the whole filter compile and with it every other port.
+	a.Handle(agentconfig.KeyExtraTLSPorts, func(v agentconfig.Value) error {
+		if v.S == nil {
+			return fmt.Errorf("expected a list of port numbers, got %q", v.String())
+		}
+		ports, problems := agentconfig.ParsePortList(*v.S)
+		if len(problems) > 0 {
+			return errors.New(strings.Join(problems, "; "))
+		}
+		want := agentconfig.FormatPortList(ports)
+		if want != agentconfig.FormatPortList(s.config.Capture.ExtraPortsToMonitor) {
+			if err := s.persistCaptureSetting("extraPortsToMonitor", ports); err != nil {
+				return err
+			}
+		}
+		s.config.Capture.ExtraPortsToMonitor = ports
+		if want != agentconfig.FormatPortList(running.ExtraPortsToMonitor) {
+			return desiredstate.ErrNeedsRestart
+		}
+		return nil
+	})
+
 	a.Handle(agentconfig.KeyDedupTTLMinutes, func(v agentconfig.Value) error {
 		if v.I == nil {
 			return fmt.Errorf("expected a whole number of minutes, got %q", v.String())
@@ -195,6 +228,10 @@ func sensorLocalValues(cfg *config.Config) agentconfig.Values {
 		agentconfig.KeyNetworkDiscovery:   agentconfig.Bool(cfg.Capture.NetworkDiscovery),
 		agentconfig.KeyHostObservation:    agentconfig.Bool(cfg.Capture.HostObservation),
 		agentconfig.KeyHostObservationDNS: agentconfig.Bool(cfg.Capture.HostObservationDNS),
+		// Always, like the bools: "no additional ports" is a value, and the
+		// list is what the capture actually admits — invalid entries in the
+		// file are ignored by the capture, so they are left out here too.
+		agentconfig.KeyExtraTLSPorts: agentconfig.Text(agentconfig.FormatPortList(cfg.Capture.ExtraPortsToMonitor)),
 	}
 	if cfg.Capture.HostObservationWindowSeconds > 0 {
 		v[agentconfig.KeyHostObservationWindow] = agentconfig.Int(int64(cfg.Capture.HostObservationWindowSeconds))

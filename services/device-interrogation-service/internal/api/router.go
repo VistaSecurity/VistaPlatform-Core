@@ -22,8 +22,10 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	sharedinterrogation "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/identity/sightingclient"
 	sharedmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
@@ -108,6 +110,7 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 
 	// Initialize handlers
 	deviceHandlers := handlers.NewDeviceHandlers(deviceService, db, bypassDB, redis)
+	deviceDiscoveryHandlers := handlers.NewDeviceDiscoveryHandlers(services.NewDeviceDiscoveryJobs(db, bypassDB, redis, encryptionKey), deviceHandlers)
 	deviceHandlers.RegisterSourceRefresh(router, services.NewConfiguredSourceRefresh(db, jobQueueService, deviceService, deviceHandlers.PrepareSourceRefreshJob))
 	scheduleHandlers := handlers.NewScheduleHandlers(schedulerService)
 	healthHandlers := handlers.NewHealthHandlers(healthMetricsService)
@@ -185,6 +188,14 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		{
 			devices.POST("", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryCreate), deviceHandlers.CreateDevice)
 			devices.POST("/discover-and-create", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryCreate), deviceHandlers.DiscoverAndCreateDevice)
+			// Add device through a device agent ( slice B): the device is
+			// reachable only from that agent, so the identification is queued
+			// on it. Retry and dismiss act on an add, not on a device, so they
+			// carry the add's permission.
+			devices.POST("/discoveries", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryCreate), deviceDiscoveryHandlers.Create)
+			devices.GET("/discoveries", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), deviceDiscoveryHandlers.List)
+			devices.POST("/discoveries/:id/retry", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryCreate), deviceDiscoveryHandlers.Retry)
+			devices.DELETE("/discoveries/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryCreate), deviceDiscoveryHandlers.Dismiss)
 			devices.GET("", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), deviceHandlers.ListDevices)
 			devices.POST("/bulk-interrogate", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), deviceHandlers.BulkInterrogateDevices)
 			devices.GET("/:id", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), deviceHandlers.GetDevice)
@@ -298,7 +309,6 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 
 		// Experimental encryption detection routes
 		experimentalHandlers := handlers.NewExperimentalHandlers(db)
-		experimentalActionHandlers := handlers.NewExperimentalActionHandlers(db, bypassDB, encryptionKey)
 		experimental := deviceInterrogationGroup.Group("/experimental")
 		{
 			// Read endpoints
@@ -306,12 +316,6 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			experimental.GET("/kms-keys", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListKMSKeys)
 			experimental.GET("/database-encryption", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListDatabaseEncryptionStates)
 			experimental.GET("/ssh-keys", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalHandlers.ListSSHKeys)
-			experimental.GET("/aws-integrations", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryRead), experimentalActionHandlers.ListAWSIntegrations)
-
-			// Action endpoints — these actively scan/interrogate using cloud creds.
-			experimental.POST("/kms-keys/discover", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.DiscoverKMSKeys)
-			experimental.POST("/database-encryption/interrogate", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.InterrogateDatabase)
-			experimental.POST("/ssh-keys/scan", sharedrbac.RequireTenantPermission(db, rbac.PermissionDiscoveryManage), experimentalActionHandlers.ScanSSHKeys)
 		}
 	}
 
@@ -555,7 +559,10 @@ func getAgentJobsHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerF
 			return
 		}
 
-		job, err := agentService.GetNextJob(c.Request.Context(), agentID)
+		// What this agent build can run beyond device_interrogation. An older
+		// agent sends no header and is never offered a job type it predates.
+		caps := sharedinterrogation.ParseAgentCapabilities(c.GetHeader(sharedinterrogation.AgentCapabilitiesHeader))
+		job, err := agentService.GetNextJobWithCapabilities(c.Request.Context(), agentID, caps)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 			return
@@ -1091,6 +1098,29 @@ func interrogateCloudResourceHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 			"device":        targetDevice,
 		})
 	}
+}
+
+// NewSightingClient builds the inventory-service client every identity intake
+// in this service posts its sightings through (platform ADR-0003 D3).
+// Same transport as the agent-host approval: the peer URL follows the
+// process's mTLS mode, and under serviceMtls the client presents this
+// service's certificate — a plain client against https://inventory-service:8443
+// fails the handshake.
+//
+// Unlike the approver, a client that cannot be built is fatal at startup:
+// without it no device, peer or host can be identified, and every
+// interrogation would fail one by one instead.
+func NewSightingClient(cfg *config.Config) (*sightingclient.Client, error) {
+	baseURL := sharedconfig.PeerServiceURLAuto("INVENTORY_SERVICE_URL", "inventory-service")
+	var client *http.Client
+	if cfg.UseMTLS {
+		c, err := sharedhttp.NewMTLSClient(cfg.ClientCertPath, cfg.ClientKeyPath, cfg.PlatformCACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("mTLS client for inventory-service: %w", err)
+		}
+		client = c
+	}
+	return sightingclient.New(baseURL, client), nil
 }
 
 // newAgentHostApprover builds the inventory-service client that admits the

@@ -285,6 +285,15 @@ func (s *AssetService) attachToInterrogatedDevice(
 			retired = true
 			return nil
 		}
+		// The claim checked out, so this IS the identity decision for the
+		// finding — the device's own address, verified — and it attaches the
+		// socket the way the engine's match would (platform ADR-0003 D2).
+		// Written before the deferral too: an engine match on a pending asset
+		// writes its endpoint at once, and the replay at approval looks the
+		// endpoint up rather than creating it.
+		if err := s.attachFindingEndpoint(ctx, tenantID, current, owned); err != nil {
+			return err
+		}
 		if status != identity.StatusMonitoring {
 			s.storeDeferredFinding(tenantID, current, owned)
 			return nil

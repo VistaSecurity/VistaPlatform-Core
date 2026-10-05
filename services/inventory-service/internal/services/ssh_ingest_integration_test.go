@@ -48,7 +48,7 @@ func newSSHIngestFixture(t *testing.T, hostname string) (*AssetService, uuid.UUI
 // through the mapping code for a bug that is actually in the fixture.
 func ingestSSH(t *testing.T, svc *AssetService, tenant, asset uuid.UUID, f IngestFinding) {
 	t.Helper()
-	if err := svc.processDiscoveryCryptoData(tenant, asset, f, nil, nil, nil); err != nil {
+	if err := materializeForTest(svc, tenant, asset, f, nil, nil, nil); err != nil {
 		t.Fatalf("ingest returned error: %v", err)
 	}
 }

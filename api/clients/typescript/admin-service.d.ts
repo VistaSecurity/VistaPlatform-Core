@@ -2684,6 +2684,111 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/ai": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Settings → AI assistant — the platform's model provider and tenant policy
+         * @description What is set here, what the environment names, which of the two is in
+         *     effect, and the two switches that govern tenants' own providers. Needs
+         *     platform.settings.
+         *
+         *     A provider set here OVERRIDES the one the environment names (the
+         *     chart's `ai.*` values); a tenant's own, where tenants are permitted
+         *     one, wins over both for that tenant. The API key is never returned —
+         *     only whether one is stored and its last four characters.
+         */
+        get: operations["getPlatformAISettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/ai/provider": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set the default model provider for every tenant
+         * @description Stores the provider that answers for any tenant without one of its own,
+         *     and for platform-scope calls. The key is stored encrypted under the
+         *     deployment's master key. Omit `api_key` to keep the stored one —
+         *     permitted only when `kind` and `base_url` are unchanged. A loopback or
+         *     private address needs `allow_private_endpoints: true`. Returns the same
+         *     body as `GET /admin/ai`.
+         */
+        put: operations["putPlatformAIProvider"];
+        post?: never;
+        /**
+         * Clear the platform's default model provider
+         * @description Removes the provider set here and its stored credential. The
+         *     environment's provider, if it names one, answers from then on. Returns
+         *     the same body as `GET /admin/ai`.
+         */
+        delete: operations["deletePlatformAIProvider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/ai/provider/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a provider configuration without saving it
+         * @description Sends one short prompt to the configuration in the request through the
+         *     same redaction and audit boundary every generative call uses. It
+         *     carries no data. A provider that could not be reached is a 200 with
+         *     `ok: false`.
+         */
+        post: operations["testPlatformAIProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/ai/tenant-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set whether tenants may connect their own model provider
+         * @description Two switches, each optional (an omitted one is left unchanged; at least
+         *     one must be present): whether tenants may connect a provider of their
+         *     own at all, and whether a tenant's endpoint may be on a private or
+         *     in-cluster address. A tenant's plan must also include the capability
+         *     (`ai_tenant_provider`). Returns the same body as `GET /admin/ai`.
+         */
+        put: operations["putPlatformAITenantPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/settings": {
         parameters: {
             query?: never;
@@ -5298,12 +5403,74 @@ export interface components {
             status: string;
             message: string;
         };
+        /** @description The platform's model-provider settings. Body of every /admin/ai route but the test. */
+        PlatformAISettings: {
+            /** @description The provider kinds this build can connect to. Empty in Core. */
+            provider_kinds: ("anthropic" | "openai_compat")[];
+            /** @description Whether this deployment has the encryption key a stored API key needs. */
+            can_store_credentials: boolean;
+            provider?: components["schemas"]["PlatformAIProvider"];
+            environment?: components["schemas"]["PlatformAIEnvironment"];
+            /**
+             * @description Which provider answers for a tenant with none of its own: the one set here, the environment's, or none.
+             * @enum {string}
+             */
+            in_effect: "platform" | "environment" | "none";
+            /** @description Whether the provider in effect can answer. */
+            available: boolean;
+            /** @description Why not, when one is configured and cannot. */
+            problem?: string;
+            /** @description Whether tenants may connect a provider of their own. Default true. */
+            tenant_providers_allowed: boolean;
+            /** @description Whether a tenant's endpoint may be on a private or in-cluster address. Default false. */
+            tenant_private_endpoints_allowed: boolean;
+        };
+        /** @description The provider set here. Absent when none is. */
+        PlatformAIProvider: {
+            /** @enum {string} */
+            kind: "anthropic" | "openai_compat";
+            base_url?: string;
+            model?: string;
+            allow_private_endpoints: boolean;
+            has_key: boolean;
+            /** @description The last four characters of the stored API key. */
+            api_key_hint?: string;
+        };
+        /** @description The provider the environment (the chart's `ai.*` values) names. Absent when it names none. */
+        PlatformAIEnvironment: {
+            kind: string;
+            model?: string;
+        };
+        PlatformAIProviderUpdate: {
+            /** @enum {string} */
+            kind: "anthropic" | "openai_compat";
+            /** @description Optional for `anthropic`; required for `openai_compat`. */
+            base_url?: string;
+            /** @description Optional for `anthropic`; required for `openai_compat`. */
+            model?: string;
+            /** @description Required true for a loopback, private or link-local address. */
+            allow_private_endpoints?: boolean;
+            /** @description Write-only. Omit to keep the stored key (same `kind` and `base_url` only); send "" for an endpoint that needs none. */
+            api_key?: string;
+        };
+        PlatformAITenantPolicyUpdate: {
+            tenant_providers_allowed?: boolean;
+            tenant_private_endpoints_allowed?: boolean;
+        };
+        PlatformAIProviderTestResult: {
+            ok: boolean;
+            model_id?: string;
+            latency_ms?: number;
+            /** @enum {string} */
+            reason?: "unauthorized" | "unreachable" | "private_endpoint" | "rate_limited" | "error";
+            message?: string;
+        };
         /** @description Whether "Propose with AI" is offered on this deployment. Three fields rather than a bool because the two "no" answers have different fixes. */
         CatalogEnrichAvailability: {
             /** @description Whether a proposal run could succeed right now. */
             available: boolean;
             /**
-             * @description "edition" — this build has no generative enricher (Core). The lookup enricher, the gap list and the review queue are all still present. "no_provider" — the build has one, but AI_PROVIDER names nothing reachable; the operator configures a provider. Empty when available.
+             * @description "edition" — this build has no generative enricher (Core). The lookup enricher, the gap list and the review queue are all still present. "no_provider" — the build has one, but no model provider answers for the platform: none is set in Settings → AI assistant and the environment names none. Empty when available.
              * @enum {string}
              */
             reason?: "edition" | "no_provider";
@@ -9929,6 +10096,156 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["PlatformPermissionDenied"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getPlatformAISettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The platform's AI settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformAISettings"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putPlatformAIProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformAIProviderUpdate"];
+            };
+        };
+        responses: {
+            /** @description The saved settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformAISettings"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description This build has no model clients (Vista Platform Core). */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            403: components["responses"]["LegacyForbidden"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    deletePlatformAIProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The settings after clearing. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformAISettings"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    testPlatformAIProvider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformAIProviderUpdate"];
+            };
+        };
+        responses: {
+            /** @description The outcome of the test. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformAIProviderTestResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description This build has no model clients (Vista Platform Core). */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            403: components["responses"]["LegacyForbidden"];
+            409: components["responses"]["LegacyConflict"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    putPlatformAITenantPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformAITenantPolicyUpdate"];
+            };
+        };
+        responses: {
+            /** @description The saved settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformAISettings"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
         };
     };

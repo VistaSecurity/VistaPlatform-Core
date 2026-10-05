@@ -274,9 +274,10 @@ export interface paths {
          *     entirely.
          *
          *     Gated at SensorsManage. The sensor adopts the change at its next
-         *     heartbeat; settings marked `apply: restart` — host observation and DNS
-         *     decoding, whose BPF filter is fixed when the capture handle opens — are
-         *     listed in `needs_restart` and adopted when the sensor restarts.
+         *     heartbeat; settings marked `apply: restart` — host observation, DNS
+         *     decoding and the additional TLS ports, which shape the BPF filter fixed
+         *     when the capture handle opens — are listed in `needs_restart` and
+         *     adopted when the sensor restarts.
          */
         put: operations["putSensorDesiredConfig"];
         post?: never;
@@ -775,6 +776,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sensors/{sensor_id}/discovery-jobs/{job_id}/units": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sensor UUID. */
+                sensor_id: components["parameters"]["SensorId"];
+                /** @description Discovery job UUID — a planned scan the platform dispatched to this sensor. */
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A sensor reports the hosts of a planned scan as it finishes them
+         * @description A planned scan (a job with a scan depth) run by a tenant sensor
+         *. Sensor-agent-facing, like the completion callback: the caller
+         *     is authenticated **as the sensor** (mTLS/HMAC), not by a tenant JWT.
+         *
+         *     After each host the sensor posts its result — the engine's counts and
+         *     what it identified on the open ports — and the platform stores it as
+         *     the job's work unit, with the same mapping and the same idempotency
+         *     fence as a host the platform scans itself, and queues its findings for
+         *     inventory. An empty `units` list is a progress ping. Every report
+         *     renews the job's progress lease: a planned scan on a sensor is failed
+         *     only when the sensor goes silent for the lease (15 minutes), not when
+         *     it runs long.
+         *
+         *     A host is stored once for the dispatch attempt that handed it over:
+         *     a re-sent host is counted `duplicate`, one from an earlier attempt or
+         *     of a cancelled host `stale`, an address the job does not have
+         *     `unknown`. A batch the engine could not have produced (counts that do
+         *     not add up, an observation of another address) is refused whole (400).
+         *
+         *     409 with `code` tells the sensor to STOP: `discovery_job_cancelled`
+         *     (a person cancelled it) or `discovery_job_ended` (the platform failed
+         *     it, or it completed). Nothing in that batch was stored.
+         */
+        post: operations["reportDiscoveryJobUnits"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -847,8 +894,16 @@ export interface components {
              * @enum {string}
              */
             origin: "built_in" | "fleet" | "device";
-            /** @enum {string} */
-            kind: "bool" | "int" | "enum";
+            /**
+             * @description `port_list` is a list of TCP port numbers carried as a canonical
+             *     comma-separated string — `"9443,10443"`, `""` for none — not as an
+             *     array, because a device older than the setting decodes its whole
+             *     check-in answer through a type that accepts only a boolean, a whole
+             *     number or a string. Entries are 1-65535, at most 64 distinct; the
+             *     platform sorts and de-duplicates on save.
+             * @enum {string}
+             */
+            kind: "bool" | "int" | "enum" | "port_list";
             /**
              * @description When the device adopts a change. `restart` settings sit at
              *     `awaiting_restart` until the process restarts; showing them as
@@ -875,6 +930,20 @@ export interface components {
             /** Format: int64 */
             max?: number;
             allowed?: string[];
+            /**
+             * @description On a `port_list` setting only: the ports the device already
+             *     watches, keyed by port number, named as the console shows them —
+             *     so a client can say "already monitored as HTTPS" without its own
+             *     copy of the device's port table. Listing one is accepted and
+             *     ignored by the device.
+             * @example {
+             *       "22": "SSH",
+             *       "443": "HTTPS"
+             *     }
+             */
+            built_in_ports?: {
+                [key: string]: string;
+            };
         };
         /** @description How far the device has converged on the desired settings. */
         AgentConfigStatus: {
@@ -892,7 +961,14 @@ export interface components {
              * @description When the device last reported. Absent if it never has.
              */
             reported_at?: string;
-            /** @description The device's own reason, per setting it could not apply. */
+            /**
+             * @description Per setting the device could not apply, its own reason — except a
+             *     setting its build does not support, which is reworded to say to
+             *     upgrade the device, and omitted entirely when the setting is still
+             *     at a default that older builds already behave as (so a new
+             *     setting nobody has changed does not mark every older device
+             *     failed).
+             */
             failures?: {
                 [key: string]: string;
             };
@@ -1297,6 +1373,62 @@ export interface components {
             successful_targets?: number;
             failed_targets?: number;
             discoveries_submitted?: number;
+        };
+        /**
+         * @description One progress report of a planned scan. Mirrors
+         *     shared/sensordispatch.UnitBatch. At most 512 hosts; empty is a ping.
+         */
+        DiscoveryJobUnitBatch: {
+            units: components["schemas"]["DiscoveryJobUnitResult"][];
+        };
+        /**
+         * @description One host of a planned scan (shared/sensordispatch.UnitResult). `failed`
+         *     means the host was not scanned (the sensor's own rules refused it, or
+         *     the scan errored) and `error` says why; otherwise `host` holds the
+         *     engine's counts — `ports_requested` equals open + closed + filtered +
+         *     local errors + not probed — and `tcp`/`udp` what was identified.
+         */
+        DiscoveryJobUnitResult: {
+            /** Format: uuid */
+            target_id: string;
+            address: string;
+            attempt: number;
+            failed?: boolean;
+            error?: string;
+            /** @description The engine's per-host counts (shared/sensordispatch.UnitHost). */
+            host: {
+                /** @enum {string} */
+                liveness: "up" | "no_answer" | "assumed_up" | "undetermined";
+                ports_requested: number;
+                open_count: number;
+                closed: number;
+                filtered: number;
+                local_errors: number;
+                not_probed: number;
+            } & {
+                [key: string]: unknown;
+            };
+            tcp?: {
+                [key: string]: unknown;
+            }[];
+            udp?: {
+                [key: string]: unknown;
+            }[];
+            deadline_hit?: boolean;
+            deadline_seconds?: number;
+        };
+        /**
+         * @description The answer to a progress report (shared/sensordispatch.UnitBatchResponse).
+         *     `code` is set only with 409, when the sensor must stop.
+         */
+        DiscoveryJobUnitBatchResponse: {
+            /** @enum {string} */
+            code?: "discovery_job_cancelled" | "discovery_job_ended";
+            job_status: string;
+            accepted: number;
+            duplicate: number;
+            stale: number;
+            unknown: number;
         };
         /** @description POST /sensors/{sensor_id}/discovery-jobs/{job_id}/complete result. */
         DiscoveryJobCompletionResponse: {
@@ -2611,6 +2743,49 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyServiceUnavailable"];
+        };
+    };
+    reportDiscoveryJobUnits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Sensor UUID. */
+                sensor_id: components["parameters"]["SensorId"];
+                /** @description Discovery job UUID — a planned scan the platform dispatched to this sensor. */
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiscoveryJobUnitBatch"];
+            };
+        };
+        responses: {
+            /** @description Stored; go on. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryJobUnitBatchResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description The job was cancelled or has ended; stop. Nothing was stored. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryJobUnitBatchResponse"];
                 };
             };
             500: components["responses"]["LegacyServerError"];

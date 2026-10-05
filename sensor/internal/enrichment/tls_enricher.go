@@ -23,7 +23,7 @@
 package enrichment
 
 import (
-	"crypto/tls"
+	"context"
 	"crypto/x509"
 	"fmt"
 	"log"
@@ -306,121 +306,66 @@ func (e *TLSEnricher) probeAndEmit(req enrichRequest) {
 	}
 }
 
-// probeTLS performs an active TLS handshake and extracts cert chain + validation.
-// Uses the existing ActiveProber's extractCertificatesFromX509 via a direct TLS dial.
+// probeTLS handshakes ip:port through the shared TLS probe
+// (shared/discovery.ProbeTLSEndpoint) and maps its result onto the sensor's
+// finding: certificate chain, validation status, quality flags, OCSP, the
+// negotiated key exchange and whether the server asked for a client
+// certificate.
+//
+// Every connection — the handshake and any key-exchange support handshake —
+// goes through e.dial to ip:port. The standalone sensor keeps the default OCSP
+// client: its "inward" is the network it was deployed to scan.
 func (e *TLSEnricher) probeTLS(ip string, port int, sni string) (*models.DiscoveryFinding, error) {
-	address := net.JoinHostPort(ip, strconv.Itoa(port))
+	// The SNI, and the identity the certificate is checked against: the SNI
+	// the passive ClientHello carried, so validation matches the host the
+	// user's client asked for (wrong.host, expired.badssl.com, ...). Without
+	// one, the peer IP — crypto/tls sends no SNI for an address, and the
+	// shared probe resolves an address identity against the leaf exactly as
+	// tlsEnrichmentVerifyDNSName does, so a public certificate with only DNS
+	// SANs is not reported as hostname_mismatch.
+	hostname := sni
+	if hostname == "" {
+		hostname = ip
+	}
 
-	conn, err := e.dial(address, e.probeTimeout)
+	prober := shareddisc.NewProber(e.probeTimeout)
+	// The group comes from the handshake that happens anyway. The support
+	// flags need up to two EXTRA handshakes, and this enricher probes
+	// endpoints it saw passively — when the tenant opted in, that includes
+	// third parties a tenant's hosts merely talked to. The opt-in is consent
+	// to read their certificates, not to question them further, so for a
+	// destination that is not the tenant's own no extra handshake is made and
+	// the two flags stay absent (unknown, not false).
+	if !e.owned.Scope().Owns(ip, port) {
+		prober = prober.WithoutSupportHandshakes()
+	}
+
+	res, err := prober.ProbeTLSEndpoint(context.Background(), ip, port, shareddisc.TLSEndpointOptions{
+		Hostname: hostname,
+		Dial:     e.contextDial,
+		// The enricher records the version its handshake negotiated; it has
+		// never enumerated the others (one more connection per version to an
+		// endpoint seen only passively).
+		EnumerateVersions: false,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("tcp dial: %w", err)
+		return nil, fmt.Errorf("tls probe: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	return discovery.FindingFromProbeResult(res), nil
+}
 
-	// Track whether the server requests a client certificate (mTLS)
-	serverRequestsClientCert := false
-
-	tlsConfig := &tls.Config{
-		// Prefer SNI from passive ClientHello so validation matches the user's intended host
-		// (wrong.host, expired.badssl.com, etc.). Fall back to tlsEnrichmentVerifyDNSName when absent.
-		ServerName:         sni,
-		InsecureSkipVerify: true, //nolint:gosec // intentional — discovery requires seeing all certs
-		// GetClientCertificate is called when the server sends CertificateRequest.
-		// We don't have a client cert to present, but we record the fact that
-		// the server asked — this indicates mTLS is configured on the endpoint.
-		GetClientCertificate: func(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-			serverRequestsClientCert = true
-			return &tls.Certificate{}, nil // return empty cert — we're just detecting
-		},
-	}
-
-	tlsConn := tls.Client(conn, tlsConfig)
-	defer func() { _ = tlsConn.Close() }()
-
-	// The deadline is what bounds the handshake below. If it cannot be set the
-	// probe would block for however long the peer keeps the socket open, so
-	// fail the probe rather than proceeding without a timeout.
-	if err := tlsConn.SetDeadline(time.Now().Add(e.probeTimeout)); err != nil {
-		return nil, fmt.Errorf("set tls probe deadline: %w", err)
-	}
-
-	if err := tlsConn.Handshake(); err != nil {
-		return nil, fmt.Errorf("tls handshake: %w", err)
-	}
-
-	state := tlsConn.ConnectionState()
-
-	// No SupportedCiphers: one negotiated suite is not the server's supported
-	// set, and SelectedCipher already carries it (E-02).
-	finding := &models.DiscoveryFinding{
-		Protocol:       "TLS",
-		Port:           port,
-		TLSVersions:    []string{getTLSVersionName(state.Version)},
-		SelectedCipher: getCipherSuiteName(state.CipherSuite),
-		Certificates:   discovery.ExtractCertificatesFromX509(state.PeerCertificates),
-	}
-
-	// Resolve hostname for certificate validation. Do not pass the raw peer IP
-	// as DNSName: Go treats that as an IP identity check (IP SANs only), so
-	// public certs with only DNS SANs would always classify as hostname_mismatch.
-	var verifyHost string
-	if strings.TrimSpace(sni) != "" {
-		verifyHost = strings.TrimSpace(sni)
-	} else if len(state.PeerCertificates) > 0 {
-		verifyHost = tlsEnrichmentVerifyDNSName(state.PeerCertificates[0], ip)
-	}
-
-	// Validate chain, compute quality flags, and check OCSP in one call.
-	validation := discovery.ValidateAndClassifyCertChain(state.PeerCertificates, verifyHost, state.OCSPResponse)
-	finding.CertValidationStatus = validation.ValidationStatus
-	finding.CertValidationError = validation.ValidationError
-
-	// Refine cert_has_sct/cert_sct_source with the TLS extension + OCSP routes
-	// only this live handshake can see (the embedded route was already
-	// checked inside ValidateAndClassifyCertChain).
-	var sctIssuer *x509.Certificate
-	if len(state.PeerCertificates) > 1 {
-		sctIssuer = state.PeerCertificates[1]
-	}
-	discovery.RefineSCTFlags(validation.QualityFlags, state.SignedCertificateTimestamps, state.OCSPResponse, sctIssuer)
-
-	meta := make(map[string]interface{})
-	if validation.QualityFlags != nil {
-		for k, v := range validation.QualityFlags {
-			meta[k] = v
+// contextDial adapts the enricher's (address, timeout) dial seam to the shared
+// probe's context dialer, so the seam carries every connection the probe makes.
+func (e *TLSEnricher) contextDial(ctx context.Context, _, address string) (net.Conn, error) {
+	timeout := e.probeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			// net.DialTimeout reads a non-positive timeout as "none".
+			return nil, context.DeadlineExceeded
 		}
 	}
-	if validation.OCSPStatus != "" {
-		meta["ocsp_status"] = validation.OCSPStatus
-		if validation.OCSPDetail != "" {
-			meta["ocsp_detail"] = validation.OCSPDetail
-		}
-	}
-	if serverRequestsClientCert {
-		meta["server_requests_client_cert"] = true
-	}
-	// The negotiated key-exchange group and the server's classical / hybrid
-	// support, measured by the same shared code as every other TLS probe.
-	//
-	// The group comes from the handshake above, which happens anyway. The
-	// support flags need up to two EXTRA handshakes, and this enricher probes
-	// endpoints it saw passively, and — when the tenant opted in — that
-	// includes third parties a tenant's hosts merely talked to. The opt-in is
-	// consent to read their certificates, not to question them further, so
-	// for a destination that is not the tenant's own no extra handshake is
-	// made and the two flags stay absent (unknown, not false). Otherwise the
-	// extra handshakes go to the address this probe just reached, with this
-	// probe's config, and nowhere else.
-	var redial shareddisc.TLSDialFunc
-	if e.owned.Scope().Owns(ip, port) {
-		redial = func(t time.Duration) (net.Conn, error) {
-			return e.dial(address, t)
-		}
-	}
-	shareddisc.MeasureTLSKeyExchange(state, tlsConfig, redial, e.probeTimeout).ApplyTo(meta)
-	finding.RawMetadata = meta
-
-	return finding, nil
+	return e.dial(address, timeout)
 }
 
 // tlsEnrichmentVerifyDNSName returns a host string suitable for x509.VerifyOptions.DNSName
@@ -587,36 +532,4 @@ func hasCertificateHandshake(metadata map[string]interface{}) bool {
 		}
 	}
 	return false
-}
-
-// getTLSVersionName returns a human-readable TLS version string.
-func getTLSVersionName(version uint16) string {
-	switch version {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("Unknown-0x%04X", version)
-	}
-}
-
-// getCipherSuiteName returns the IANA name for a cipher suite ID.
-func getCipherSuiteName(suite uint16) string {
-	// Check standard library first
-	for _, cs := range tls.CipherSuites() {
-		if cs.ID == suite {
-			return cs.Name
-		}
-	}
-	for _, cs := range tls.InsecureCipherSuites() {
-		if cs.ID == suite {
-			return cs.Name
-		}
-	}
-	return fmt.Sprintf("Unknown-0x%04X", suite)
 }

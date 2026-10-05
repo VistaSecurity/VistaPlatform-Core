@@ -64,6 +64,8 @@ func (e *JobExecutor) Execute(job *models.Job) error {
 		return e.executeCloudDiscovery(job)
 	case JobTypeHostInventory:
 		return e.executeHostInventory(job)
+	case di.JobTypeDeviceDiscovery:
+		return e.executeDeviceDiscovery(job)
 	default:
 		return fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -138,6 +140,72 @@ func (e *JobExecutor) executeDeviceInterrogation(job *models.Job) error {
 
 	security.ClearCredentials(decryptedCreds)
 	return e.submitter.SubmitResult(jobResult)
+}
+
+// deviceDiscoveryTimeout bounds one identification, end to end. The platform's
+// synchronous Add device allows 20 s with an operator waiting; an agent run has
+// no one waiting, so a slow appliance login gets a little longer.
+const deviceDiscoveryTimeout = 45 * time.Second
+
+// executeDeviceDiscovery identifies a device the platform cannot reach, for an
+// Add device routed to this agent ( slice B).
+//
+// It is the platform's identification, not a copy of it: Registry.Identify is
+// the shared step Add device and Test connection run in-cluster, over each
+// vendor collector's own guarded client, sanitized by the Registry. What goes
+// home is the IdentificationReport allowlist or a typed failure code — never
+// the vendor's answer, and never free text a device wrote.
+func (e *JobExecutor) executeDeviceDiscovery(job *models.Job) error {
+	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.RegistrationKey)
+	if err != nil {
+		return e.submitDiscoveryFailure(job, di.IdentifyFailed)
+	}
+	defer security.ClearCredentials(decryptedCreds)
+
+	deviceType := job.DeviceType
+	if deviceType == "" {
+		deviceType, _ = job.Parameters["device_type"].(string)
+	}
+	device := buildDeviceInfo(deviceType, job.Parameters)
+	if device.ManagementURL == "" {
+		device.ManagementURL, _ = decryptedCreds["management_url"].(string)
+	}
+	creds := buildCredentials(decryptedCreds, job.Parameters)
+
+	ctx, cancel := context.WithTimeout(context.Background(), deviceDiscoveryTimeout)
+	defer cancel()
+	identification, err := e.registry.Identify(ctx, device, creds)
+	security.ClearCredentials(decryptedCreds)
+	if err != nil {
+		code := di.ClassifyIdentifyError(err).Code
+		if e.auditLogger != nil {
+			e.auditLogger.LogInterrogation(job.ID.String(), di.DisplayAddress(device.ManagementURL), deviceType, "failure",
+				map[string]interface{}{"job_type": job.Type, "failure_code": string(code)}, nil)
+		}
+		return e.submitDiscoveryFailure(job, code)
+	}
+	if e.auditLogger != nil {
+		e.auditLogger.LogInterrogation(job.ID.String(), di.DisplayAddress(device.ManagementURL), deviceType, "success",
+			map[string]interface{}{"job_type": job.Type}, nil)
+	}
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:          job.ID,
+		Success:        true,
+		Identification: di.NewIdentificationReport(identification),
+		CompletedAt:    time.Now(),
+	})
+}
+
+// submitDiscoveryFailure reports a failed identification by its typed code
+// alone. The cause can carry whatever the device answered, so it stays here.
+func (e *JobExecutor) submitDiscoveryFailure(job *models.Job, code di.IdentifyFailure) error {
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:       job.ID,
+		Success:     false,
+		Error:       string(code),
+		FailureCode: string(code),
+		CompletedAt: time.Now(),
+	})
 }
 
 // executeCloudDiscovery executes a cloud discovery job.

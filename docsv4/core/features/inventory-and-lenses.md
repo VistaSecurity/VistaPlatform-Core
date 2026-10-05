@@ -93,12 +93,15 @@ Some assets have **no address at all**, and the column is genuinely blank for th
 
 ## Opening an asset
 
-From **All assets** and from **Stale**, clicking a row opens the **asset page** at
-its own address (`/inventory/assets/…`), which you can link to. It has tabs:
+From **All assets**, clicking a row opens the asset **drawer**, a quick look that
+keeps your place in the list; its **Open full page** button goes to the **asset
+page**. Clicking a row on **Stale**, or ctrl/cmd-clicking (or middle-clicking) an
+asset's name on **All assets**, opens the asset page directly. It lives at its own
+address (`/inventory/assets/…`), which you can link to, and has tabs:
 
 | Tab | What's on it |
 |---|---|
-| **Overview** | Class and how it was decided; every identifier with its kind, source, confidence and when it was last seen; the class's attributes; ownership and context; status; and risk — with **who assessed it**, or an explicit *Not assessed*. |
+| **Overview** | Class and how it was decided; every identifier with its kind, source, confidence and when it was last seen; the class's attributes; ownership and context, including the asset's network segment and, when that network has a recorded gateway, *via* the gateway; status; and risk — with **who assessed it**, or an explicit *Not assessed*. A router or firewall also gets **Networks routed**: every network it is the gateway of, with its address there, VLAN, DHCP, host count and sensor coverage. |
 | **Services & Endpoints** | Every network face of the asset: address, port, transport, the identified service and how confidently it was identified, and when it was last seen. |
 | **Relationships** | What this asset is attached to — each edge with its type, its direction, where it came from, and whether it is confirmed or still proposed — plus the impact closure: what else is affected if this goes away. |
 | **Cryptography** | The crypto configurations discovered on the asset. Click one for the full configuration drawer. |
@@ -107,10 +110,62 @@ its own address (`/inventory/assets/…`), which you can link to. It has tabs:
 | **History** | Two lists. **Class history** first — every class this asset has held, what moved it, and who decided — then the general change log: context edits, merges, approvals, newest first. |
 
 From the cryptography lenses — where the row is a certificate, a key or a
-configuration rather than an asset — clicking through to an asset opens the
-quick-look **drawer** instead, so you keep your place in the list you were
-working. The asset drawer carries an **Open full page** button when the peek is
-not enough.
+configuration rather than an asset — clicking through to an asset opens the same
+quick-look drawer, so you keep your place in the list you were working. The asset
+drawer carries an **Open full page** button when the peek is not enough. Both the
+drawer and the asset page carry **Active Scan**, for people who can edit assets,
+to probe that one asset now. It opens the same scan dialog as the bulk bar below,
+with its **Run from** choice.
+
+### Working with many assets at once
+
+**All assets** and **Stale** have a checkbox on every row. Tick rows — on as many
+pages as you like — or tick the box in the header to select the page. When the
+whole page is ticked and the query matches more than one page, a banner offers
+**Select all *N* matching**: every asset the query matches, not only the ones on
+screen.
+
+While anything is selected, a bar above the list shows how many and what you can
+do with them:
+
+| Action | What it does | Needs |
+|---|---|---|
+| **Scan** | Opens the scan dialog: choose **Run from** (Auto, the platform sensor, or one of your sensors) and start an active scan of the selection. | update assets |
+| **Edit** | Sets owner email, environment, business unit or support group (or clears one), and adds or removes tags, on every selected asset. Other tags are kept. | update assets |
+| **Archive** | Archives the selection, after a confirmation. | update assets |
+| **Restore** | Returns archived assets in the selection to active inventory. One that stays unseen past your lifecycle policy is archived again. | update assets |
+| **Delete** | Soft-deletes the selection, after a confirmation. Each asset can be restored from its own page. | delete assets |
+| **Export** | Downloads the selection as CSV — every matching asset, not only the page. | — |
+
+Buttons you lack the permission for are not shown. Each result says how many
+assets changed and how many were already in that state. Every change is
+recorded in each asset's **History** under your name, and the whole action is
+recorded once in your organization's audit log.
+
+**"All matching" never means more than you saw.** The selection is sent as the
+query and the number of assets you confirmed. If discovery has added assets that
+match the query in the meantime, nothing is changed and you are told the new
+count; review the list and run the action again. A selection can hold up to
+**5,000** assets, and a scan up to **1,000** (one scan job's limit); above that,
+narrow the query.
+
+On **Stale**, *Select all matching* is offered only when no search or filter is
+applied, because those narrow the page in your browser rather than in the query.
+
+**Scans you start here.** Under the bar, **Scans started here** lists each scan
+with where it runs and its progress, and names **every** asset that was not
+scanned and why — for example, because the sensor that observed it is offline
+and no other sensor of yours covers its network segment.
+Each asset's name links to its page. A row whose scan is running shows
+**Scanning…**; one whose last scan did not reach it shows **Last scan failed**.
+
+### Assets nobody has scanned yet
+
+**Views → Never scanned** shows every asset no active or automatic scan has
+reached yet — typically assets that arrived by import, by SBOM or from a CMDB.
+Tick them and choose **Scan**. An asset leaves this view once a scan has finished
+on it, even when nothing answered. (This view replaces the former **Discovery →
+Active Scan** page; a bookmark to that page opens it.)
 
 ### Class history: was this ever something else?
 
@@ -146,6 +201,23 @@ this panel.
 The Overview tab lists the asset's **identifiers** — its FQDN, hostname, addresses, MAC, serial number, cloud resource id, and so on. These are what make one thing one asset: when a sensor sees a host, your CMDB exports it, and someone types it in by hand, the platform matches all three on their identifiers and keeps **one** record rather than three.
 
 Each identifier shows where it came from and how confident the platform is. When the evidence is ambiguous, you get a **merge proposal** in Discovery → Approvals rather than a silent guess. The order the platform tries identifiers in is documented, read-only, at **Settings → Policies → Identification rules**.
+
+### When a device's identifiers change
+
+Devices change what identifies them: an administrator rotates an SSH host key, a server is moved to a new address, a machine is wiped and reinstalled, or a different machine takes over an address. When a sighting matches an asset you already have but some of its identifiers are different, the platform compares what stayed the same with what changed and decides which of these happened:
+
+| Stayed the same | Changed | What the platform concludes | What it does |
+|---|---|---|---|
+| Hardware (MAC) address and IP address, or a serial number, agent id or cloud resource id | SSH host key **of the same type** (for example, the Ed25519 key) | The key was **rotated** | Keeps the sighting on the asset, replaces the old key of that type, records it in History and sends a notification |
+| Everything | A host key of a type the device has not shown before (for example, its RSA key after its Ed25519 key) | **Another key** of the same device: a server offers one key per type, and which one a scan sees depends on negotiation | Adds the key to the asset; nothing is replaced, recorded as a change or notified |
+| Hardware address and keys | IP address, and the old address has not been seen for two days | The device **moved** | Keeps the sighting on the asset, releases the old address and records the new one |
+| IP address | Hardware address (and host key) | A **different device** now answers there | Creates a merge proposal in **Discovery → Approvals**, as for any ambiguous evidence |
+| Hardware address | SSH host key (same type), TLS certificate and name | The device was **reimaged** | Keeps the sighting on the asset, replaces the old key of that type and records the change |
+| IP address only (no hardware address seen) | SSH host key | Decided by what else is known: the TLS certificate, the name and the set of open ports | All unchanged: rotated. All changed: a merge proposal. Nothing else known: kept on the asset **and flagged for review**, with both keys kept |
+
+An address you or the host's agent pinned (see [pinned addresses](identity-evidence.md)) is never treated as having gone silent, so a sighting elsewhere does not release it. A key whose type was never reported (for example, one recorded before the platform stored key types) is never treated as rotated and never replaced; at most the change is flagged for review.
+
+Each of these appears on the asset's **History** tab as a sentence that names the old and new values (for example, "SSH host key rotated", with both fingerprints), and every case but a different device sends a notification you can route under **Settings → Notifications & Alerts → Routing Rules** with alert source `inventory-service` and alert type `asset_identity_drift`. An address that changes inside a network that hands out addresses dynamically (DHCP) is recorded but not notified, because that is what DHCP does. None of these are compliance findings: they describe something that happened to the device, not a control that is failing.
 
 ## The cryptography lenses
 

@@ -12,6 +12,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -238,12 +239,77 @@ func TestContract_AutoScan_UpdateCanTurnItOff(t *testing.T) {
 	}
 }
 
+// The page no longer edits protocols ( D1) and saves without them. The
+// stored value is what the legacy fallback for an old sensor still probes, so
+// a save that omits it keeps it exactly — it is neither wiped nor reset to the
+// default — and the round trip (GET, then PUT what the page sends) changes
+// nothing but the fields the page edits.
+func TestContract_AutoScan_UpdateWithoutProtocolsKeepsTheStoredValue(t *testing.T) {
+	sv := loadSpec(t)
+	stored := sharedautoscan.DefaultPolicy()
+	stored.Protocols = []string{"TLS"} // not the default pair
+	store := &stubAutoScanStore{policy: stored}
+	eng := newAutoScanEngine(NewAutoScanHandler(store))
+
+	get := do(eng, http.MethodGet, "/api/v1/inventory-service/discovery/auto-scan", nil)
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET status = %d", get.Code)
+	}
+	var read struct {
+		AutoScan map[string]interface{} `json:"auto_scan"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &read); err != nil {
+		t.Fatal(err)
+	}
+	// What the page sends: every field it edits, no protocols.
+	body := map[string]interface{}{
+		"enabled": read.AutoScan["enabled"], "scan_on_first_observation": read.AutoScan["scan_on_first_observation"],
+		"rescan_interval_hours": 48, "ports": []int{443, 8443}, "prefer_observing_sensor": read.AutoScan["prefer_observing_sensor"],
+	}
+	raw, _ := json.Marshal(body)
+	w := do(eng, http.MethodPut, "/api/v1/inventory-service/discovery/auto-scan", strings.NewReader(string(raw)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "AutoScanResponse", w.Body.Bytes())
+	if len(store.got.Protocols) != 1 || store.got.Protocols[0] != "TLS" {
+		t.Fatalf("protocols saved = %v, want the stored [TLS] kept", store.got.Protocols)
+	}
+	if store.got.RescanIntervalHours != 48 || len(store.got.Ports) != 2 {
+		t.Fatalf("saved %+v, want the page's interval and ports", store.got)
+	}
+
+	// An API client that still sends protocols is honoured, and validated.
+	w = do(eng, http.MethodPut, "/api/v1/inventory-service/discovery/auto-scan",
+		strings.NewReader(`{"enabled":true,"scan_on_first_observation":true,"rescan_interval_hours":24,"protocols":["SSH","TLS"],"ports":[22]}`))
+	if w.Code != http.StatusOK || len(store.got.Protocols) != 2 {
+		t.Fatalf("explicit protocols: status %d, saved %v", w.Code, store.got.Protocols)
+	}
+}
+
+// A save without protocols over a policy that cannot be read is refused
+// rather than written with whatever the failed read returned.
+func TestContract_AutoScan_UpdateWithoutProtocolsRefusesWhenThePolicyIsUnreadable(t *testing.T) {
+	store := &failingReadAutoScanStore{stubAutoScanStore: stubAutoScanStore{policy: sharedautoscan.DefaultPolicy()}}
+	eng := newAutoScanEngine(NewAutoScanHandler(store))
+	w := do(eng, http.MethodPut, "/api/v1/inventory-service/discovery/auto-scan",
+		strings.NewReader(`{"enabled":true,"scan_on_first_observation":true,"rescan_interval_hours":24,"ports":[443]}`))
+	if w.Code != http.StatusInternalServerError || store.setCalls != 0 {
+		t.Fatalf("status %d, set calls %d: want 500 and nothing written", w.Code, store.setCalls)
+	}
+}
+
+type failingReadAutoScanStore struct{ stubAutoScanStore }
+
+func (s *failingReadAutoScanStore) GetPolicy(context.Context, uuid.UUID) (autoscan.Policy, error) {
+	return sharedautoscan.DefaultPolicy(), errors.New("settings unreadable")
+}
+
 func TestContract_AutoScan_RejectsBadInput(t *testing.T) {
 	cases := map[string]string{
 		"malformed":             `{`,
 		"empty object":          `{}`,
 		"missing ports":         `{"enabled":true,"scan_on_first_observation":true,"rescan_interval_hours":24,"protocols":["TLS"]}`,
-		"missing protocols":     `{"enabled":true,"scan_on_first_observation":true,"rescan_interval_hours":24,"ports":[443]}`,
 		"missing enabled":       `{"scan_on_first_observation":true,"rescan_interval_hours":24,"protocols":["TLS"],"ports":[443]}`,
 		"interval not a number": `{"enabled":true,"scan_on_first_observation":true,"rescan_interval_hours":"daily","protocols":["TLS"],"ports":[443]}`,
 	}
@@ -283,9 +349,9 @@ func TestContract_AutoScan_OutOfRangeIsRefused(t *testing.T) {
 	}
 }
 
-// The OT probes are gated by the `ot_active_probing` entitlement through a
-// discovery job's separate field. Accepting one here would be a way to probe a
-// PLC unattended, on a schedule, past that gate.
+// The OT probes run only on a person's explicit opt-in through a discovery job's
+// separate field. Accepting one here would be a way to probe a PLC unattended,
+// on a schedule, without anyone asking.
 func TestContract_AutoScan_RefusesAnOTProtocol(t *testing.T) {
 	for _, proto := range []string{"Modbus", "OPC_UA", "BACnet", "SMB"} {
 		store := &stubAutoScanStore{policy: sharedautoscan.DefaultPolicy()}

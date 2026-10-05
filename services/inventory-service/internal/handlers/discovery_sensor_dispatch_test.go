@@ -192,3 +192,102 @@ func TestCreateJob_DoesNotPassThroughDownstreamServerErrors(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+// `protocols` is allowlisted (H6 of): an OT/ICS name there would reach
+// cluster-sensor's OT probers without the explicit ot_probe_protocols opt-in, its
+// audit column and its one-standard-port restriction. The person is told why,
+// and nothing is forwarded.
+func TestCreateJob_RefusesProtocolsOutsideTheAllowlist(t *testing.T) {
+	cases := []struct {
+		name      string
+		protocols string
+		wantOT    bool
+	}{
+		{"modbus beside TLS", `["TLS","Modbus"]`, true},
+		{"OPC UA", `["OPC UA"]`, true},
+		{"opc_ua", `["opc_ua"]`, true},
+		{"EtherNet/IP", `["EtherNet/IP"]`, true},
+		{"BACnet", `["BACnet"]`, true},
+		{"DNP3", `["DNP3"]`, true},
+		{"HART-IP", `["HART-IP"]`, true},
+		{"garbage", `["TLS","garbage"]`, false},
+		{"empty name", `["TLS",""]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forwarded := false
+			engine, srv := newProxyEngine(t, func(w http.ResponseWriter, r *http.Request) {
+				forwarded = true
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+			defer srv.Close()
+
+			w := postThrough(engine, `{"targets":["198.51.100.10"],"protocols":`+tc.protocols+`,"ports":[443],"execution_mode":"auto"}`)
+			if forwarded {
+				t.Fatal("a job with a refused protocol reached cluster-sensor-service")
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400. body=%s", w.Code, w.Body.String())
+			}
+			var parsed struct {
+				Error   string `json:"error"`
+				Details string `json:"details"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+				t.Fatalf("decode body: %v (%s)", err, w.Body.String())
+			}
+			if parsed.Error != "validation_error" {
+				t.Errorf("error = %q, want validation_error", parsed.Error)
+			}
+			for _, allowed := range []string{"TLS", "SSH", "SMB"} {
+				if !strings.Contains(parsed.Details, allowed) {
+					t.Errorf("details %q do not name the allowed value %s", parsed.Details, allowed)
+				}
+			}
+			if got := strings.Contains(parsed.Details, "ot_probe_protocols"); got != tc.wantOT {
+				t.Errorf("details %q: points at ot_probe_protocols = %v, want %v", parsed.Details, got, tc.wantOT)
+			}
+		})
+	}
+}
+
+// The positive polarity: every shape the product sends today still goes
+// through, in the spellings people use. Without it "allowlist the field" could
+// quietly become "refuse the field".
+func TestCreateJob_ForwardsAllowedProtocols(t *testing.T) {
+	for _, protocols := range []string{
+		`["TLS"]`, `["SSH"]`, `["TLS","SSH"]`, `["SMB"]`, `["tls","ssh"]`,
+		`["HTTPS","LDAPS","SMTPS","IMAPS","POP3S","FTPS","SSL"]`,
+		`[]`, // service default: cluster-sensor decides what a job with no pair means
+	} {
+		t.Run(protocols, func(t *testing.T) {
+			forwarded := false
+			engine, srv := newProxyEngine(t, func(w http.ResponseWriter, r *http.Request) {
+				forwarded = true
+				w.WriteHeader(http.StatusInternalServerError) // stop before audit logging
+			})
+			defer srv.Close()
+			w := postThrough(engine, `{"targets":["198.51.100.10"],"protocols":`+protocols+`,"ports":[443],"execution_mode":"auto"}`)
+			if !forwarded {
+				t.Fatalf("a job with protocols %s never reached cluster-sensor-service; status=%d body=%s", protocols, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// A refusal that does reach this proxy from cluster-sensor-service (a caller
+// that skipped this handler's own check) must still say why: the code alone
+// is not an answer a person can act on.
+func TestCreateJob_PassesThroughDownstreamProtocolRefusal(t *testing.T) {
+	const reason = `protocols: "Modbus" not accepted; allowed values are TLS, SSH, SMB`
+	engine, srv := newProxyEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "validation_error", "details": reason})
+	})
+	defer srv.Close()
+	w := postThrough(engine, `{"targets":["198.51.100.10"],"protocols":["TLS"],"ports":[443],"execution_mode":"auto"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "Modbus") {
+		t.Fatalf("status=%d body=%s, want 400 carrying the downstream reason", w.Code, w.Body.String())
+	}
+}

@@ -52,7 +52,7 @@ func TestIntegration_AtRestFinding_CreatesNoPhantomTLSConfiguration(t *testing.T
 		},
 	}
 
-	if err := svc.processDiscoveryCryptoData(tenant, assetID, finding, nil, nil, nil); err != nil {
+	if err := materializeForTest(svc, tenant, assetID, finding, nil, nil, nil); err != nil {
 		t.Fatalf("processDiscoveryCryptoData: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestIntegration_AtRestFinding_CreatesNoPhantomTLSConfiguration(t *testing.T
 		CipherSuite:     &suite,
 		RawData:         map[string]interface{}{},
 	}
-	if err := svc.processDiscoveryCryptoData(tenant, assetID, tlsFinding, nil, nil, nil); err != nil {
+	if err := materializeForTest(svc, tenant, assetID, tlsFinding, nil, nil, nil); err != nil {
 		t.Fatalf("processDiscoveryCryptoData (TLS): %v", err)
 	}
 	if err := raw.QueryRow(

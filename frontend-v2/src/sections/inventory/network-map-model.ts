@@ -24,6 +24,7 @@ export type NetworkMap = inventoryComponents['schemas']['NetworkMap'];
 export type NetworkMapAsset = inventoryComponents['schemas']['NetworkMapAsset'];
 export type NetworkMapSegment = inventoryComponents['schemas']['NetworkMapSegment'];
 export type NetworkMapComponent = inventoryComponents['schemas']['NetworkMapComponent'];
+export type SegmentGateway = inventoryComponents['schemas']['SegmentGateway'];
 
 // ------------------------------------------------------------ view state ---
 
@@ -96,6 +97,10 @@ export interface Tray {
   /** The CIDR / range / cloud reference, or a line saying why there is none. */
   detail: string;
   segmentId: string | null;
+  /** The device that reported routing this network, or null when none
+   *  has — and always null for a tray that is not a network (Unsegmented, a
+   *  cloud region). Never inferred from the addresses in the tray. */
+  gateway: SegmentGateway | null;
   assets: NetworkMapAsset[];
 }
 
@@ -170,14 +175,15 @@ export function groupSites(map: NetworkMap | undefined, assets: readonly Network
         name: seg?.name ?? 'Inactive network',
         detail: seg?.value ?? 'Not an active segment',
         segmentId: a.segment_id,
+        gateway: seg?.gateway ?? null,
       };
     } else if (kind === 'cloud') {
       const region = (a.cloud_region ?? '').trim();
       trayKey = `region:${region}`;
-      tray = { key: trayKey, name: region || 'No region recorded', detail: region ? 'Cloud region' : '', segmentId: null };
+      tray = { key: trayKey, name: region || 'No region recorded', detail: region ? 'Cloud region' : '', segmentId: null, gateway: null };
     } else {
       trayKey = UNSEGMENTED_TRAY;
-      tray = { key: trayKey, name: 'Unsegmented', detail: 'No network assigned', segmentId: null };
+      tray = { key: trayKey, name: 'Unsegmented', detail: 'No network assigned', segmentId: null, gateway: null };
     }
     let t = group.trays.get(trayKey);
     if (!t) {

@@ -96,7 +96,7 @@ func TestIntegration_Ingest_RecordsIdentifiersAndHistory(t *testing.T) {
 		RawData: map[string]interface{}{
 			"source":        "sensor_discovery",
 			"serial_number": "SN-INGEST-1",
-			"mac_address":   "aa:bb:cc:00:11:22",
+			"mac_address":   "a8:bb:cc:00:11:22", // universally administered: a U/L-bit MAC on the wire is withheld as randomised
 		},
 	}
 	if _, err := svc.IngestFindings(tenant, []IngestFinding{f}, "monitoring"); err != nil {
@@ -130,7 +130,7 @@ func TestIntegration_Ingest_RecordsIdentifiersAndHistory(t *testing.T) {
 		{"fqdn", "identified.example.test"},
 		{"ip_address", "192.0.2.31"},
 		{"serial_number", "SN-INGEST-1"},
-		{"mac_address", "aa:bb:cc:00:11:22"},
+		{"mac_address", "a8:bb:cc:00:11:22"},
 	} {
 		if got := kinds[want.kind]; got != want.value {
 			t.Errorf("identifier %s = %q, want %q", want.kind, got, want.value)

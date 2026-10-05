@@ -103,7 +103,7 @@ func newRemediationDraftEngine(
 	// boundary's second lock is the backstop — and the kill switch's own
 	// behaviour is pinned where it can be driven honestly, in
 	// shared/ai/ee/remediator's tests.
-	h := NewRemediationDraftHandlers(seam, resolver, plans, nil)
+	h := NewRemediationDraftHandlers(seam, resolver, plans, nil, nil)
 	grp.POST("/findings/:id/remediation/draft", h.Draft)
 	grp.POST("/findings/:id/remediation/accept", h.Accept)
 	return r

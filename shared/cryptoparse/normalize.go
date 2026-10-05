@@ -65,3 +65,27 @@ func NormalizeProtocolVersion(observed string) string {
 	key := strings.ToUpper(NormalizeComponentCode(strings.TrimSpace(observed)))
 	return protocolVersionAliases[key]
 }
+
+// X509SignatureCatalogueCode maps the name Go's crypto/x509 gives a certificate
+// signature algorithm onto the catalogue's spelling of the same algorithm, or
+// returns the input unchanged when the two already agree or it is not one of
+// those names.
+//
+// Every certificate producer records x509.SignatureAlgorithm.String(), which
+// puts the hash FIRST for RSA ("SHA256-RSA", "SHA256-RSAPSS") while the
+// catalogue codes the same algorithms "RSA-SHA256" and "RSA-PSS". The ECDSA
+// and EdDSA names already match. Without this the lookup missed for every
+// RSA-signed certificate and the signature was reported as unassessed.
+//
+// It is a spelling bridge only: whether the algorithm is weak is still the
+// catalogue row's answer (RSA-SHA1 and RSA-MD5 are rows too).
+func X509SignatureCatalogueCode(name string) string {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	if hash, ok := strings.CutSuffix(upper, "-RSAPSS"); ok && hash != "" {
+		return "RSA-PSS"
+	}
+	if hash, ok := strings.CutSuffix(upper, "-RSA"); ok && hash != "" && !strings.Contains(hash, "-") {
+		return "RSA-" + hash
+	}
+	return name
+}

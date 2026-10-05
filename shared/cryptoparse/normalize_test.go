@@ -69,3 +69,23 @@ func TestNormalizeProtocolVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestX509SignatureCatalogueCode(t *testing.T) {
+	for in, want := range map[string]string{
+		"SHA256-RSA":    "RSA-SHA256",
+		"SHA1-RSA":      "RSA-SHA1",
+		"MD5-RSA":       "RSA-MD5",
+		"sha384-rsa":    "RSA-SHA384",
+		"SHA256-RSAPSS": "RSA-PSS",
+		"ECDSA-SHA256":  "ECDSA-SHA256",
+		"Ed25519":       "Ed25519",
+		"RSA-SHA256":    "RSA-SHA256",
+		"ECDHE-RSA":     "RSA-ECDHE", // not an x509 name; resolves to no row either way
+		"-RSA":          "-RSA",
+		"":              "",
+	} {
+		if got := cryptoparse.X509SignatureCatalogueCode(in); got != want {
+			t.Errorf("X509SignatureCatalogueCode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

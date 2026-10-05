@@ -186,6 +186,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/network-segments/{id}/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Network segment UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Claim a learned public range as the organization's own
+         * @description A person states that a PUBLIC CIDR range learned from an interrogated device (`metadata.source` `interrogation`, or the legacy `unifi`) belongs to the organization (RBAC-gated `settings.update`, the same bar as declaring a segment). From then on the range is treated exactly like a declared public segment: in scope for a scan a person asks for (never the automatic scan), and listed as owned to sensors. Exclusions still win: a segment marked sensitive or active-probes-disabled is never probed, and an inactive one grants nothing. There is no proof-of-control step — the claim is the person's own statement, recorded under `metadata.claimed` and audit-logged as `network_segment.claimed`. Idempotent: claiming an already-claimed segment returns it unchanged, keeps the original claim, and writes no second audit entry. A re-interrogation of the device keeps the claim.
+         */
+        post: operations["claimNetworkSegment"];
+        /**
+         * Withdraw a claim on a learned range
+         * @description Withdraws a claim made with POST (RBAC-gated `settings.update`). The segment goes back to being a learned public range: it scopes identities and is never scan scope. Audit-logged as `network_segment.claim_revoked` when a claim was actually withdrawn; revoking an unclaimed learned segment is a no-op that returns it.
+         */
+        delete: operations["revokeNetworkSegmentClaim"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/locations": {
         parameters: {
             query?: never;
@@ -1259,6 +1286,85 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/sightings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve device sightings through the identity engine (internal)
+         * @description How device-interrogation-service hands what it saw to the one identity
+         *     engine host (platform ADR-0003 D3 step 2). Each `identity.Sighting` goes
+         *     through `identity.Intake` (scope, dynamic scopes, admission flags from
+         *     its `channel`, hygiene) and then the engine, on one transaction, with
+         *     the tenant's own auto-accept and auto-merge settings and durable
+         *     observation receipts as in finding ingestion. `class_hint`,
+         *     `endpoints` and a self-reported or declared address (pinned, owner
+         *     decision 1) are honoured; endpoints reach an asset only where the
+         *     engine attaches them. A sighting naming another tenant, one the intake
+         *     cannot read, or one with nothing usable is `rejected` with a reason;
+         *     a sighting of a denied asset only moves its last-seen.
+         *
+         *     An item carrying `target_asset_id` is a declaration FOR that asset (an
+         *     operator editing a device): its source must be declared or imported,
+         *     and its identifiers are attached to the named asset by the identifier
+         *     edit's path (`Engine.ResolveDeclaredFor`: the same locks, ownership
+         *     re-check and singleton guard; a declared address is stored
+         *     `address_assignment = static`). It answers `matched` on that asset;
+         *     an identifier another asset owns writes nothing and answers
+         *     `conflict` with the merge proposal the edit opens
+         *     (`declared_identifier_conflict`), a second value of a singleton kind
+         *     `conflict` without one (`declared_singleton_conflict`); a target that
+         *     is not a live asset of the tenant is `rejected` (`unknown_target`).
+         *     Omitted, the item is an ordinary sighting. HMAC-signed service calls
+         *     only; denied at the edge.
+         */
+        post: operations["ingestSightings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/gateway-links": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Link an interrogated device to the networks it is the gateway of (internal)
+         * @description Called by device-interrogation-service after an interrogation's
+         *     claimed gateway addresses (one claimed-address sighting each) have
+         * settled ( slice B). The body is the run's COMPLETE list of the
+         *     device's own addresses on the networks it serves.
+         *
+         *     The device becomes the gateway of every network segment where it
+         *     HOLDS one of the listed addresses, scoped to that segment — what the
+         *     claim settled. A claim that opened a merge proposal instead (an
+         *     established asset holds the address) links nothing. The device is
+         *     unlinked from every segment where it no longer holds a listed address,
+         *     and only its own links are ever cleared. When two devices hold
+         *     addresses on one network, the most recent observation is the gateway
+         *     and the other claim is kept in the segment's
+         *     `metadata.gateway_candidates`. Idempotent. A device that is not a live
+         *     asset of the signed tenant is a 404. HMAC-signed service calls only;
+         *     denied at the edge.
+         */
+        post: operations["reconcileGatewayLinks"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/sources/assets/links": {
         parameters: {
             query?: never;
@@ -1608,8 +1714,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Queue a rescan (revalidation) job for stale assets
+         * Queue a rescan (revalidation) job for stale assets — deprecated
+         * @deprecated
          * @description Creates a revalidation job for the given assets (RBAC-gated `assets.update`). Returns the new job id and the count of valid asset ids accepted. Invalid UUIDs in the list are silently skipped; an all-invalid list returns 400.
+         * **Deprecated.** Still works. Every response carries `Deprecation: @1791158400` and `Link: </api/v2/inventory-service/infrastructure-assets/scan>; rel="successor-version"`. Instead, use POST /infrastructure-assets/scan, which takes the same asset ids (or a query selection) and a `run_from` executor.
          */
         post: operations["rescanStaleAssets"];
         delete?: never;
@@ -1628,8 +1736,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Archive stale assets
+         * Archive stale assets — deprecated
+         * @deprecated
          * @description Sets the lifecycle status of the given assets to `archived` (RBAC-gated `assets.update`). Returns the count archived. Invalid UUIDs are skipped; an all-invalid list returns 400.
+         * **Deprecated.** Still works. Every response carries `Deprecation: @1791158400` and `Link: </api/v2/inventory-service/infrastructure-assets/bulk-actions/archive>; rel="successor-version"`. Instead, use POST /infrastructure-assets/bulk-actions/archive, which takes the same `asset_ids` and reports how many it changed.
          */
         post: operations["archiveStaleAssets"];
         delete?: never;
@@ -1648,8 +1758,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Queue a revalidation job for assets
+         * Queue a revalidation job for assets — deprecated
+         * @deprecated
          * @description Creates a revalidation job for the given assets (RBAC-gated `assets.update`). Same shape as the stale/rescan action. Returns the new job id and accepted count.
+         * **Deprecated.** Still works. Every response carries `Deprecation: @1791158400` and `Link: </api/v2/inventory-service/infrastructure-assets/scan>; rel="successor-version"`. Instead, use POST /infrastructure-assets/scan, which takes the same asset ids (or a query selection) and a `run_from` executor.
          */
         post: operations["revalidateAssets"];
         delete?: never;
@@ -1674,6 +1786,86 @@ export interface paths {
          * An asset whose address is outside the tenant's registered networks is ASKED about rather than refused ( W5.13b): 422 `external_targets_unconfirmed` names the assets before anything is stamped or dispatched, and a resend with `external_targets_confirmed` scans them — which also needs `discovery.create`. Reserved and platform-excluded addresses stay refused; such an asset is reported under `skipped` with the reason.
          */
         post: operations["scanAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/infrastructure-assets/bulk-actions/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive a selection of assets
+         * @description Sets the selected assets' lifecycle to archived and records an `archived` history entry for each one it moved. RBAC-gated `assets.update`. The selection is `asset_ids`, or `query` + `expected_count`; at most 5000 assets. Answers how many assets the selection matched and how many the action changed; an asset already in the requested state is counted under `unchanged`.
+         */
+        post: operations["bulkArchiveAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/infrastructure-assets/bulk-actions/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Return a selection of archived assets to active inventory
+         * @description Moves the selected archived assets back to active. The lifecycle policy may archive an asset again if it stays unseen. RBAC-gated `assets.update`. The selection is `asset_ids`, or `query` + `expected_count`; at most 5000 assets. Answers how many assets the selection matched and how many the action changed; an asset already in the requested state is counted under `unchanged`.
+         */
+        post: operations["bulkRestoreAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/infrastructure-assets/bulk-actions/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Soft-delete a selection of assets
+         * @description Soft-deletes the selected assets, as DELETE /infrastructure-assets/{id} does for one. RBAC-gated `assets.delete`. The selection is `asset_ids`, or `query` + `expected_count`; at most 5000 assets. Answers how many assets the selection matched and how many the action changed; an asset already in the requested state is counted under `unchanged`.
+         */
+        post: operations["bulkDeleteAssets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/infrastructure-assets/bulk-actions/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Edit fields on a selection of assets
+         * @description Applies one field edit to every selected asset: owner email, environment, business unit, support group (an empty value clears the field), tags added and removed (merged, never replaced). Each changed asset gets an `updated` history entry naming the person. An edit that changes nothing is 400 `invalid_changes`. RBAC-gated `assets.update`. The selection is `asset_ids`, or `query` + `expected_count`; at most 5000 assets. Answers how many assets the selection matched and how many the action changed; an asset already in the requested state is counted under `unchanged`.
+         */
+        post: operations["bulkUpdateAssets"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2875,6 +3067,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/discovery/observations/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm, link or dismiss up to 200 observations with one reason
+         * @description Requires assets.update. Runs the single-item decision for each id, each in its own transaction; one item failing never fails the batch, so a valid request answers 200 with a result per id (a repeated id is decided once). Confirm accepts only observations whose `needs` is `ready_to_confirm`, checked on the locked row; others fail with `not_ready_to_confirm`. Link accepts only observations whose `needs` is `link_existing` and links each to the one asset that already owns its identifier (`link_asset`), judged on the locked row; no asset id is taken from the request, and others fail with `not_ready_to_confirm`. Every decided item is audited with the shared `batch_id`.
+         */
+        post: operations["bulkDecideIdentityObservations"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/discovery/observations/{id}": {
         parameters: {
             query?: never;
@@ -2987,9 +3199,11 @@ export interface paths {
          * Set the automatic active-scanning policy
          * @description Requires the `settings.update` permission: this decides whether the platform probes the tenant's own network without being asked.
          *
-         *     Every field is required. A partial update would be a trap here — the difference between "leave the ports alone" and "scan no ports" is one absent key, and the tenant would have no way to tell which they had asked for.
+         *     Every field is required except the deprecated `protocols` and the optional `prefer_observing_sensor`, each of which keeps its stored value when omitted. A partial update of the rest would be a trap here — the difference between "leave the ports alone" and "scan no ports" is one absent key, and the tenant would have no way to tell which they had asked for.
          *
-         *     Values outside the bounds are REFUSED rather than clamped, and the refusal names the bound that was broken. Protocols are restricted to `TLS` and `SSH`: the OT/ICS probes are gated by the `ot_active_probing` entitlement through a discovery job's separate field, and accepting one here would be a way to probe a PLC unattended, on a schedule, past that gate.
+         *     Each automatic scan checks `ports` on the shared scan engine and identifies the service from what answers (TLS and SSH); industrial (OT) probes are never run unattended.
+         *
+         *     Values outside the bounds are REFUSED rather than clamped, and the refusal names the bound that was broken. Protocols, when sent, are restricted to `TLS` and `SSH`: the OT/ICS probes run only on a person's explicit opt-in through a discovery job's separate field, and accepting one here would be a way to probe a PLC unattended, on a schedule, without anyone asking.
          */
         put: operations["updateAutoScanPolicy"];
         post?: never;
@@ -3014,6 +3228,13 @@ export interface paths {
          *     Proxied from cluster-sensor-service. This is what the unified
          *     Discovery → Discovery Jobs page merges with device-interrogation
          *     jobs (`GET /jobs` on device-interrogation-service).
+         *
+         *     A scan-plan job carries its `plan` on every row. One that has not
+         *     ended (queued, awaiting a sensor or running) also carries its live
+         *     `progress`, `target_counts` and — once its work units exist —
+         *     `coverage`, as the single-job read does, so the page can show a scan
+         *     moving without a read per row. A finished job's numbers are on the
+         *     single-job read; any other row carries `progress` 0.
          */
         get: operations["listDiscoveryJobs"];
         put?: never;
@@ -3033,6 +3254,70 @@ export interface paths {
          *     operator has switched that off (403), and never at all when reserved
          *     or platform-excluded (400) — see `DiscoveryTargetVerdictError`. Each
          *     such scan is audited.
+         *
+         *     A target the scanner cannot fully expand is refused (422
+         *     `scan_target_too_large`) rather than scanned only in part: one CIDR or
+         *     range may name at most 4,096 addresses (an IPv4 /20), and all of a
+         *     job's targets together at most 16,384. Split a larger network across
+         *     targets or scans.
+         *
+         * **Two request shapes**. The legacy shape names `protocols` and
+         * `ports`. It is deprecated and runs on the shared scan engine:
+         *     its `ports` are scanned as a `scan_depth: custom` plan on exactly
+         *     those ports, with services identified from what answers, and
+         *     `protocols` is accepted and ignored (still validated). A request that
+         *     names only `ot_probe_protocols`, or names them beside `ports`, is
+         *     planned the same way: each OT probe the tenant's `ot_active_probing`
+         *     switch allows adds its one standard port (TCP for Modbus and OPC UA,
+         *     UDP for BACnet and EtherNet/IP) and is probed there; an OT-only
+         *     request whose probes are all switched off is refused (400). Only a
+         *     request routed to a tenant sensor too old to run the engine still
+         *     runs as the legacy protocols × ports job, on that sensor's own
+         *     software. The platform's own callers (Active Scan, automatic scans, identity
+         *     checks) send the scan-plan shape. The scan-plan
+         *     shape names `scan_depth` (default
+         *     `standard` when neither shape's fields are present), optionally
+         *     `tcp_ports`/`udp_ports` (custom depth only), `pace` and `run_from`;
+         *     `protocols` and `ports` must then be absent (400 naming the
+         *     conflict). Services are identified from what answers rather than
+         *     requested up front. The server plans the job and returns the plan as
+         *     `job.plan` (`DiscoveryScanPlan`): per target, the class the
+         *     target-authorization guard gave it and the depth actually allowed. A
+         *     target outside the tenant's registered networks is scanned at
+         *     Standard depth at most — a guardrail for unclaimed targets, not an
+         *     access control: registering the range as a network segment makes it
+         *     internal. A plan whose addresses × ports exceeds the installation's
+         *     budget is refused (422 `scan_budget_exceeded`) with the numbers.
+         *
+         *     **Execution.** A scan-plan job run from the platform is executed in
+         *     durable per-host work units: progress on `GET /discovery/jobs/{id}`
+         *     is the share of the job's addresses finished, `coverage`
+         *     (`DiscoveryJobCoverage`) says what answered and what could not be
+         *     learned, findings are stored — and queued for inventory — as each host
+         *     finishes, and a Retry or a restart resumes only the hosts not done.
+         *     Every scan the platform runs is executed this way.
+         *     `scan_plan_unavailable` (422) is no longer returned (the switch that
+         *     produced it was removed with the legacy executors); the code stays
+         *     documented for older deployments.
+         *
+         *     **Dry run.** `dry_run: true` previews the job without creating it; a
+         *     legacy-shaped request previews the plan it is translated into. The
+         *     request goes through exactly the validation, target authorization and
+         *     classification, per-target external cap, Auto routing and budget check
+         *     a real create does — the same code, not a copy — and the answer is 200
+         *     `DiscoveryJobPreview`: the `plan` a real create would store, an
+         *     `estimate` of size and time, whether `confirmation_required` for
+         *     external targets, and those `external_targets`. Nothing is created: no
+         *     job or target rows, no sensor command, no notification to the executor,
+         *     none of the tenant's job allowance is used, and no job-created audit
+         *     entry is written. Every refusal a real create gives a dry run gives
+         *     with the same status and code (400, 403, 404, 409, 422
+         *     `scan_target_too_large`, `scan_budget_exceeded`, `scan_plan_unavailable`,
+         *     `targets_refused`, and 429 at the tenant's allowance) — except an
+         *     unconfirmed external target, which answers 200 with
+         *     `confirmation_required: true` instead of 422, so the person can see
+         *     what they are confirming. A dry run is gated by the same
+         *     `discovery.create` permission as the create.
          */
         post: operations["createDiscoveryJob"];
         delete?: never;
@@ -3052,7 +3337,8 @@ export interface paths {
          * Get a discovery job's status
          * @description Proxies the job record from cluster-sensor-service. The shape is
          *     forwarded verbatim, so additional fields beyond those documented here
-         *     may be present.
+         *     may be present. A scan-plan job carries its `plan`, and — once its
+         *     work units exist — its per-host `progress` and its `coverage`.
          */
         get: operations["getDiscoveryJob"];
         put?: never;
@@ -3074,8 +3360,13 @@ export interface paths {
         put?: never;
         /**
          * Re-run a discovery job
-         * @description Re-queues the job with the same targets/options. Gated by the
-         *     `discovery.create` permission.
+         * @description Re-queues a job that is `queued` or `failed`, with the same
+         *     targets/options, by asking cluster-sensor-service to retry it. A job
+         *     that is running or has finished is not re-runnable through this
+         *     endpoint (409 `job_not_rerunnable`). Gated by the `discovery.create`
+         *     permission; the caller's credential is also checked downstream, which
+         *     gates a retry on `discovery.update`, so a caller holding only
+         *     `discovery.create` is refused with 403.
          */
         post: operations["rerunDiscoveryJob"];
         delete?: never;
@@ -3096,6 +3387,10 @@ export interface paths {
          * @description Proxies the job's findings from cluster-sensor-service. The shape is
          *     forwarded verbatim (`{ "findings": [...] }` plus any extra fields the
          *     upstream service includes), so treat unknown fields as additive.
+         *
+         *     With `group=host` the findings are grouped by host and paged by HOST
+         *     (`DiscoveryJobResultsByHost`): each host with all its ports, so a host
+         *     is never split across pages; `page_size` then counts hosts.
          */
         get: operations["getDiscoveryJobResults"];
         put?: never;
@@ -3117,7 +3412,13 @@ export interface paths {
         put?: never;
         /**
          * Cancel a discovery job
-         * @description Marks the job cancelled. Gated by the `discovery.update` permission.
+         * @description Asks cluster-sensor-service to cancel the job and answers with its
+         *     verdict. A running scan stops between targets/hosts once the scanner
+         *     notices the cancel, so it can keep going briefly after the 200;
+         *     findings already stored are kept. A job that has already ended
+         *     (completed or failed) cannot be cancelled (409
+         *     `job_not_cancellable`); cancelling an already-cancelled job is a 200.
+         *     Gated by the `discovery.update` permission.
          */
         post: operations["cancelDiscoveryJob"];
         delete?: never;
@@ -3319,6 +3620,21 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** @description A person's claim that a learned public range belongs to the organization (POST /network-segments/{id}/claim). Present only while the claim stands. `by_name` is a display snapshot taken at claim time; the audit log, keyed by user id, is the record. */
+        NetworkSegmentClaim: {
+            /**
+             * Format: uuid
+             * @description The user who made the claim.
+             */
+            by: string;
+            /** @description That user's name (or email) when they claimed it. */
+            by_name?: string;
+            /**
+             * Format: date-time
+             * @description When the claim was made.
+             */
+            at: string;
+        };
         /**
          * @description A tenant network segment (models.NetworkSegment). The listed required
          *     fields are always present; `location_id`, `tags`, and `metadata` are
@@ -3335,6 +3651,10 @@ export interface components {
             name: string;
             /** @description cidr / ip_range / domain / cloud_vpc. */
             segment_type: string;
+            /** @description The device that reported being this network's gateway: an interrogation of it reported its own address on the network, and it holds that address. null when no device has reported it, or the device has since been deleted. Measured only; there is no declared override. */
+            gateway: components["schemas"]["SegmentGateway"] | null;
+            /** @description The tenant collector that can reach this network right now — the same eligibility the identity-enrichment executor selection uses (a live, non-platform sensor with a freshly reported interface inside the segment). null when none can ("No sensor on this network"). ALWAYS null for a segment whose `segment_type` is not `cidr`, where coverage does not apply: read it only for cidr segments. */
+            coverage: components["schemas"]["SegmentCoverage"] | null;
             value: string;
             /** @description private / public / vpn / cloud. */
             network_type: string;
@@ -3360,15 +3680,89 @@ export interface components {
             tags: {
                 [key: string]: unknown;
             } | null;
-            metadata: {
+            /** @description Free-form segment metadata. A segment learned from an interrogated device carries `source` (`interrogation`, or the legacy `unifi`), `source_device_type` and `source_asset_id`. Those keys and `claimed` are server-owned: a `metadata` object sent on create or update can neither set nor remove them. */
+            metadata: ({
+                claimed?: components["schemas"]["NetworkSegmentClaim"];
+            } & {
                 [key: string]: unknown;
-            } | null;
+            }) | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
             location_name?: string;
             location_full_path?: string;
+        };
+        /** @description A network's gateway (owner decision D1): the live asset that holds `address` on the segment, read over a session to itself. */
+        SegmentGateway: {
+            /** Format: uuid */
+            asset_id: string;
+            /** @description The asset's display name, else its hostname, else its primary address. */
+            display_name: string;
+            /** @description The gateway's own address on the network. */
+            address: string;
+            /**
+             * Format: date-time
+             * @description When the interrogation that last reported it observed the network.
+             */
+            observed_at: string;
+        };
+        /** @description The tenant collector that can reach a network. */
+        SegmentCoverage: {
+            /** Format: uuid */
+            sensor_id: string;
+            sensor_name: string;
+        };
+        /** @description One network an asset is the gateway of (the "Networks routed" card). */
+        RoutedSegment: {
+            /** Format: uuid */
+            segment_id: string;
+            name: string;
+            /** @description The segment definition (a CIDR for a network the device reported). */
+            value: string;
+            segment_type: string;
+            /** @description The gateway's own address on this network. */
+            address: string;
+            /** Format: date-time */
+            observed_at: string;
+            /** @description The 802.1Q tag the device reported for this network; null when it reported none (untagged). */
+            vlan_id: number | null;
+            /** @description The segment's effective DHCP posture (as NetworkSegment.dynamic); null when nobody has said. */
+            dynamic: boolean | null;
+            /** @description Assets placed in this segment that are not deleted, the gateway included — what the topology tree counts for the Inventory `segment_id:` query this count links to. */
+            host_count: number;
+            /** @description As NetworkSegment.coverage. */
+            coverage: components["schemas"]["SegmentCoverage"] | null;
+        };
+        /** @description One interrogation's statement about the networks one device serves. */
+        GatewayLinksRequest: {
+            /**
+             * Format: uuid
+             * @description The interrogated device.
+             */
+            asset_id: string;
+            /** @description The run (`interrogation:<job>`), recorded as the link's provenance. */
+            source_ref?: string;
+            /**
+             * Format: date-time
+             * @description When the run observed the networks. The most recent observation wins a network two devices both claim.
+             */
+            observed_at?: string;
+            /** @description EVERY gateway address the run reported (the device's own address on each network in its `net.vlans`), contested or not. The list is complete: the device is unlinked from every segment it no longer reaches, so an empty list unlinks it everywhere. */
+            addresses?: string[] | null;
+        };
+        GatewayLinkSegment: {
+            /** Format: uuid */
+            segment_id: string;
+            address: string;
+        };
+        GatewayLinksResult: {
+            /** @description Segments the device is now the gateway of. */
+            linked: components["schemas"]["GatewayLinkSegment"][];
+            /** @description Segments where the device holds an address but another device's more recent observation stands; the claim is kept in the segment's metadata.gateway_candidates. */
+            candidates: components["schemas"]["GatewayLinkSegment"][];
+            /** @description Segments whose link to this device was removed. */
+            cleared: string[];
         };
         /**
          * @description CURRENT envelope for GET /network-segments — `{ "network_segments": [...],
@@ -3816,6 +4210,11 @@ export interface components {
             first_seen_at: string;
             /** Format: date-time */
             last_seen_at: string;
+            /**
+             * @description How an `ip_address` is held. `static` is a pinned address: an operator declared it on the asset, or the host's own agent reported the interface as statically configured. A pinned address still matches its owner inside a segment flagged DHCP. `dynamic` is an address the host's agent reported as a DHCP lease. Absent when nobody said, which is every address a sensor merely saw, and on every other kind.
+             * @enum {string}
+             */
+            address_assignment?: "static" | "dynamic";
         };
         /** @description One network face of an asset: an (address|fqdn, port, transport) it was observed exposing. `port` is absent for an at-rest or declared endpoint — the "AT-REST" port sentinel the port-as-asset model needed is retired. */
         AssetEndpoint: {
@@ -3858,6 +4257,16 @@ export interface components {
             /** Format: date-time */
             last_scanned_at?: string;
             last_scan_status?: string;
+            /**
+             * @description Present and `refused` when the endpoint's last measurement was a TLS
+             *     alert in answer to the ClientHello: the port speaks TLS and nothing was
+             *     negotiated, usually because the server requires a server name (SNI) that
+             *     a scan of an address cannot offer. Absent means nothing to report, not
+             *     that the handshake succeeded. Cleared by a later measurement that
+             *     identifies the endpoint (for example a scan by name).
+             * @enum {string}
+             */
+            tls_handshake_outcome?: "refused";
         };
         IdentityIngestResult: {
             /** @enum {string} */
@@ -3868,6 +4277,71 @@ export interface components {
             observation_id?: string;
             /** Format: uuid */
             proposal_id?: string;
+        };
+        IdentityObservationPage: {
+            observations: components["schemas"]["IdentityObservation"][];
+            total: number;
+            page: number;
+            page_size: number;
+            counts: components["schemas"]["ObservationNeedsCounts"];
+        };
+        /**
+         * @description What the observation needs from a person. `link_existing`: exactly one existing asset already owns an identifier of it, so Confirm would be refused and Link to that asset is suggested. `needs_review`: more than one asset owns identifiers of it (or the owner cannot be linked), so there is no one-click action. `none` for any state other than unresolved, and for unresolved evidence no row of the suggestion table matches.
+         * @enum {string}
+         */
+        ObservationNeeds: "ready_to_confirm" | "link_existing" | "needs_review" | "needs_network" | "needs_sensor" | "likely_noise" | "none";
+        /** @description The tenant's unresolved observations in the active 30-day window, by needs, independently of the current filter. `all` includes rows whose needs is none. */
+        ObservationNeedsCounts: {
+            ready_to_confirm: number;
+            link_existing: number;
+            needs_review: number;
+            needs_network: number;
+            needs_sensor: number;
+            likely_noise: number;
+            all: number;
+        };
+        ObservationIdentifierSummary: {
+            /** @description The identifier kind */
+            kind: string;
+            /** @description The kind in plain words, e.g. "IP address", "SSH host key". */
+            label: string;
+            /** @description For display. Long opaque values are shortened; the full value stays in `evidence`. */
+            value: string;
+        };
+        BulkObservationDecisionInput: {
+            /** @enum {string} */
+            action: "confirm" | "link" | "dismiss";
+            ids: string[];
+            reason: string;
+            /** @description Display name for assets a confirm creates. */
+            name?: string;
+        };
+        BulkObservationDecisionResult: {
+            /**
+             * Format: uuid
+             * @description Recorded in each decided item's audit row.
+             */
+            batch_id: string;
+            results: {
+                /** Format: uuid */
+                id: string;
+                /** @enum {string} */
+                outcome: "ok" | "failed";
+                /** @description The status the single-item endpoint would have answered: 200, or 402 (asset allowance reached; evidence retained), 404 (not this tenant's), 409 (changed, conflicting, or a provisional item that needs merge review), 422 (not ready to confirm), 503 (the request ended first), 500. */
+                status: number;
+                /**
+                 * @description Present when outcome is failed.
+                 * @enum {string}
+                 */
+                code?: "not_found" | "provisional_item_requires_merge_review" | "observation_changed" | "asset_allowance_reached" | "not_ready_to_confirm" | "cancelled" | "internal_error";
+                /** @description The single-item endpoint's wording. */
+                message: string;
+                /**
+                 * Format: uuid
+                 * @description The asset a successful confirm created or promoted
+                 */
+                asset_id?: string;
+            }[];
         };
         ObservationDecisionInput: {
             reason: string;
@@ -4000,6 +4474,51 @@ export interface components {
             last_attempt_at: string | null;
             /** Format: date-time */
             next_attempt_at: string | null;
+            /** @description The configured segment's name for `network_scope`. Null when the scope is the tenant default or names no segment. */
+            network_name: string | null;
+            /** @description The collector's name for a `sensor:<id>`-shaped source, else a label for the kind of source. Never the raw ref. */
+            source_name: string;
+            needs: components["schemas"]["ObservationNeeds"];
+            /** @enum {string} */
+            suggested_action: "confirm" | "link" | "add_network" | "sensor_options" | "dismiss" | "none";
+            /**
+             * @description Which row of the suggestion table applied. Stable; the UI maps it to words.
+             * @enum {string}
+             */
+            explanation_code: "dynamic_address_answered" | "owned_by_asset" | "owned_by_several_assets" | "network_not_configured" | "relayed_advertisement" | "no_collector_in_network" | "name_only" | "no_address_or_service" | "not_seen_recently" | "no_suggestion" | "not_awaiting_review";
+            /** @description A proposed reason for the decision the row's suggestion leads to — "Confirmed from Observations: …" for ready_to_confirm, "Linked from Observations: …" for link_existing, "Dismissed from Observations: …" otherwise; empty for linked, conflict and dismissed rows. Names, never UUIDs. */
+            suggested_reason: string;
+            /** @description The identifiers in readable form, the way a person recognises a device first. */
+            summary: components["schemas"]["ObservationIdentifierSummary"][];
+            /** @description The one existing asset that owns an identifier of this observation; set exactly when `suggested_action` is `link`, so the row can say "Link to <name>". */
+            link_asset: components["schemas"]["ObservationLinkAsset"] | null;
+            /** @description True for supporting evidence linked to an established asset that attached nothing (platform ADR-0003 D2): the endpoints in `evidence` are NOT on the asset. Linking it to `asset_id` (or confirming it) attaches them; state stays `linked`. */
+            evidence_held: boolean;
+        };
+        /** @description The asset's latest person-initiated scan (Discovery → Active Scan, the asset's Active Scan button, or a stale-asset revalidation). Absent when no person has scanned the asset. `scanning` from dispatch until every job the request created has ended — the platform settles it within about a minute of the last job ending — then `completed` when a job finished and reached the asset (whether or not anything answered), or `failed` when none did (failed, cancelled, swept as a stale dispatch, or the host could not be scanned). An asset whose scan completed leaves the `unscanned_only` list even when it has no endpoint; one whose scan failed stays on it. */
+        AssetActiveScan: {
+            /** @enum {string} */
+            status: "scanning" | "completed" | "failed";
+            /**
+             * Format: date-time
+             * @description When the scan request was dispatched.
+             */
+            started_at?: string;
+            /**
+             * Format: date-time
+             * @description When the scan was settled. Absent while scanning.
+             */
+            finished_at?: string;
+            /** @description The discovery jobs the request created for this asset. */
+            job_ids: string[];
+        };
+        ObservationLinkAsset: {
+            /** Format: uuid */
+            id: string;
+            /** @description The asset's display name or hostname; empty when it has neither. */
+            name: string;
+            /** @description Always true on a link suggestion; an owner that cannot be linked yields needs_review instead. */
+            linkable: boolean;
         };
         /** @description An infrastructure asset (CMDB configuration item). Field presence follows models.Asset's json tags: fields without `omitempty` are always present (nullable pointers serialize as null); `omitempty` fields are omitted when zero/empty. */
         Asset: {
@@ -4048,6 +4567,10 @@ export interface components {
             /** Format: uuid */
             network_segment_id?: string;
             network_segment_name?: string;
+            /** @description The networks this asset is the gateway of (the "Networks routed" card), by name. Single-asset read only: `[]` when it routes nothing, ABSENT when they could not be read (and on every list read). */
+            routed_segments?: components["schemas"]["RoutedSegment"][];
+            /** @description The gateway of the asset's own network segment ("via <gateway>"), derived when read — a host's gateway is never stored. Single-asset read only; absent when the segment has no gateway, when this asset is that gateway, or when it could not be read. */
+            segment_gateway?: components["schemas"]["SegmentGateway"];
             discovery_method?: string;
             confidence_score?: number;
             /** @description Arbitrary tag map (JSONB). Always present (defaults to {}). */
@@ -4067,6 +4590,7 @@ export interface components {
              *     Accepting a merge archives the observation rather than deleting it, so its id keeps resolving: `GET /assets/{merged-away-id}` answers 200 with `asset_status: archived` and this field naming the survivor, rather than a 404 that tells a stale bookmark, ticket or dashboard tile nothing. A client holding an id that comes back with `merged_into` set should follow it and, where it stores ids, replace the one it held — the `inventory.lifecycle.asset.merged` event carries the same pair for clients that would rather be told than discover it on the next read.
              */
             merged_into?: string;
+            active_scan?: components["schemas"]["AssetActiveScan"];
             /** Format: date-time */
             first_discovered_at: string;
             /** Format: date-time */
@@ -4176,6 +4700,11 @@ export interface components {
                 kind: string;
                 value: string;
                 scope?: string;
+                /**
+                 * @description `static` pins an `ip_address` the asset already holds: the address is re-declared, so a row a collector measured becomes declared and keeps matching its owner inside a segment flagged DHCP. An address newly added by this request is a declaration and is pinned without it. Only `ip_address` accepts it.
+                 * @enum {string}
+                 */
+                address_assignment?: "static";
             }[];
             /** @description Declared endpoints. A manually created asset usually has none. */
             endpoints?: {
@@ -5103,6 +5632,8 @@ export interface components {
             /** @description The segment definition: a CIDR, a range, or a cloud network reference. */
             value: string;
             segment_type: string;
+            /** @description The device that reported routing this network (as NetworkSegment.gateway); null when none has. */
+            gateway: components["schemas"]["SegmentGateway"] | null;
         };
         /** @description One DISTINCT algorithm-catalogue component linked to any of the asset's live crypto configurations (`crypto_implementation_algorithms` joined to `algorithms`). The assessment is the catalogue's, so the map never holds a second opinion about an algorithm. */
         NetworkMapComponent: {
@@ -5638,10 +6169,14 @@ export interface components {
             assets: components["schemas"]["StaleAsset"][];
             pagination: components["schemas"]["PaginationMeta"];
         };
-        /** @description Body for POST /infrastructure-assets/scan. */
+        /** @description Body for POST /infrastructure-assets/scan. The assets are a selection: either `asset_ids`, or `query` with `expected_count` — never both. At most 1000 assets either way (the scan engine's per-job target limit); more answers 413. */
         ActiveScanRequest: {
             /** @description Asset UUIDs as strings. Unparseable entries are silently dropped. */
-            asset_ids: string[];
+            asset_ids?: string[];
+            /** @description Every asset GET /infrastructure-assets lists for this query, including its default `status:monitoring` scope. An empty string selects the whole default scope. */
+            query?: string;
+            /** @description Required with `query`: the number of assets the person confirmed. A query that now matches more answers 409 `selection_changed`; fewer is accepted. */
+            expected_count?: number;
             /**
              * @description Which executor scans the assets. Defaults to `auto`.
              * @enum {string}
@@ -5654,6 +6189,55 @@ export interface components {
             sensor_id?: string;
             /** @description The person's confirmation that assets whose address is outside the tenant's registered networks may be scanned. Without it such a scan answers 422 `external_targets_unconfirmed` naming the assets, and nothing is stamped or dispatched. Needs `discovery.create` in addition to `assets.update` (403 otherwise). Never admits a reserved or platform-excluded address. */
             external_targets_confirmed?: boolean;
+        };
+        /** @description A selection of assets for a bulk action: `asset_ids`, or `query` with `expected_count`, never both. */
+        AssetSelectionRequest: {
+            /** @description Asset UUIDs as strings. Unparseable entries are silently dropped. */
+            asset_ids?: string[];
+            /** @description Every asset GET /infrastructure-assets lists for this query, including its default `status:monitoring` scope. An empty string selects the whole default scope. */
+            query?: string;
+            /** @description Required with `query`: the number of assets the person confirmed. A query that now matches more answers 409; fewer is accepted. */
+            expected_count?: number;
+        };
+        /** @description An AssetSelectionRequest plus the field edit to apply. */
+        BulkAssetUpdateRequest: {
+            asset_ids?: string[];
+            query?: string;
+            expected_count?: number;
+            changes: components["schemas"]["BulkAssetChanges"];
+        };
+        /** @description A field edit. An absent field is left as it is; a field sent as an empty string is cleared. Tags are merged into each asset's tags (`add_tags`) and removed by name (`remove_tags`), at most 50 in all. */
+        BulkAssetChanges: {
+            owner_email?: string;
+            /** @enum {string} */
+            environment?: "" | "production" | "staging" | "development" | "test";
+            business_unit?: string;
+            support_group?: string;
+            add_tags?: {
+                [key: string]: string;
+            };
+            remove_tags?: string[];
+        };
+        /** @description What a bulk action did. */
+        BulkAssetActionResult: {
+            /** @enum {string} */
+            action: "archive" | "restore" | "delete" | "update";
+            /** @description Assets the selection resolved to. */
+            matched: number;
+            /** @description Assets the action changed. */
+            changed: number;
+            /** @description Assets already in the requested state, or not the tenant's. */
+            unchanged: number;
+        };
+        /** @description A refused selection. `selection_changed` (409) carries the confirmed `expected_count` and the current `count`; `selection_too_large` (413) carries the `limit`. Other 409s on the scan route (an offline sensor) carry `error` only. */
+        AssetSelectionError: {
+            error: string;
+            details?: string;
+            limit?: number;
+            expected_count?: number;
+            count?: number;
+        } & {
+            [key: string]: unknown;
         };
         /** @description One discovery job an Active Scan dispatched. */
         ActiveScanJob: {
@@ -6332,6 +6916,107 @@ export interface components {
             value: string;
             scope: string;
         };
+        SightingsRequest: {
+            sightings: components["schemas"]["Sighting"][];
+        };
+        /**
+         * @description `identity.Sighting` (shared/identity/intake.go): what a collector saw,
+         *     with no scope, dynamic flag or admission flag — those are the intake's
+         *     decisions. See the identity-intake design note.
+         */
+        Sighting: {
+            /** @description Optional; when present it must equal the signed X-Tenant-ID or the sighting is rejected. */
+            tenant_id?: string;
+            source: components["schemas"]["IdentitySource"];
+            /** @enum {string} */
+            channel: "l2_frame" | "advertisement" | "relayed" | "l3_probe" | "l3_traffic" | "authenticated_session" | "controller_inventory" | "api" | "person";
+            /** Format: date-time */
+            observed_at?: string;
+            receipt_id?: string;
+            collector_version?: string;
+            class_hint?: string;
+            class_provenance?: {
+                kind?: string;
+                ref?: string;
+                confidence?: number;
+            };
+            display_name?: string;
+            confidence?: number;
+            ownership?: string;
+            network_type?: string;
+            cloud_network_ref?: string;
+            identifiers?: components["schemas"]["SightedIdentifier"][];
+            endpoints?: components["schemas"]["SightingEndpoint"][];
+            attributes?: {
+                [key: string]: unknown;
+            };
+            tls_cert_fingerprints?: string[];
+            bridge_prior_scope?: boolean;
+            /**
+             * Format: uuid
+             * @description Request only. Names the asset a declared or imported sighting is
+             *     about; the route then resolves it as a declaration for that asset
+             *     (see the operation). Omitted for an ordinary sighting.
+             */
+            target_asset_id?: string;
+        };
+        IdentitySource: {
+            /** @enum {string} */
+            kind: "measured" | "declared" | "imported" | "inferred";
+            ref: string;
+            mode?: string;
+        };
+        SightedIdentifier: {
+            kind: string;
+            value: string;
+            /** @description For a hostname or fqdn, the address the name was seen at. */
+            address?: string;
+            /** @description The sync profile of a cmdb_sys_id (its scope). */
+            profile?: string;
+            confidence?: number;
+            key_algorithm?: string;
+            /**
+             * @description ip_address only. How the host said it holds the address; a dynamic one is never pinned.
+             * @enum {string}
+             */
+            assignment?: "static" | "dynamic";
+            provenance?: {
+                /**
+                 * @description This identifier's own provenance where it differs from the sighting's. A lower kind on a declared sighting (a value a probe read) is stored with that kind; never a higher one.
+                 * @enum {string}
+                 */
+                kind?: "measured" | "declared" | "imported" | "inferred";
+                ref?: string;
+                self_reported?: boolean;
+            };
+        };
+        SightingEndpoint: {
+            address?: string;
+            fqdn?: string;
+            port?: number;
+            transport?: string;
+            protocol?: string;
+            service_name?: string;
+            /** @enum {string} */
+            service_confidence?: "low" | "medium" | "high";
+            service_identification_method?: string;
+            bound_local?: boolean;
+        };
+        SightingResult: {
+            /** @description An engine outcome (matched, created, provisional, supporting, unresolved, conflict) or rejected. */
+            outcome: string;
+            /** Format: uuid */
+            asset_id?: string;
+            /** Format: uuid */
+            observation_id?: string;
+            /** Format: uuid */
+            proposal_id?: string;
+            /** @description The admission decision's reasons, why a sighting was rejected (tenant_mismatch, invalid_sighting, no_usable_identifier, asset_denied, unknown_target), or why a declaration for a named asset was refused (declared_identifier_conflict, declared_singleton_conflict). */
+            reasons?: string[];
+        };
+        SightingResultsResponse: {
+            results: components["schemas"]["SightingResult"][];
+        };
         SourceLinksRequest: {
             source: components["schemas"]["SourceWire"];
             links: components["schemas"]["SourceLink"][];
@@ -6481,14 +7166,45 @@ export interface components {
             targets: string[];
             /** @description The person's explicit confirmation that they are authorized to scan the targets outside the tenant's registered networks (public addresses, blocks and names not inside a network segment the tenant declared). Required when any target is external: without it the request answers 422 `external_targets_unconfirmed` listing them. It never admits a reserved or platform-excluded target, and it is ignored on unattended scans. */
             external_targets_confirmed?: boolean;
-            /** @description How the scan is dispatched: `auto` (platform decides), `cloud` (platform sensor), or `sensors` — run from the one tenant sensor named in `preferred_sensor_ids`, which must be live; an unknown sensor answers 404, the platform's own or an air-gapped one 400, an offline one 409, and the job is not created. A `sensors` job is never run from the platform instead. */
+            /** @description Legacy spelling of `run_from`. How the scan is dispatched: `auto` (the platform, on the legacy shape; Auto routing on the scan-plan shape), `cloud` or `async` (the platform sensor — `cloud` is an alias and is stored as the in-cluster mode, never as a cloud-account discovery), or `sensors` — run from the one tenant sensor named in `preferred_sensor_ids`, which must be live; an unknown sensor answers 404, the platform's own or an air-gapped one 400, an offline one 409, and the job is not created. A `sensors` job is never run from the platform instead. Not accepted together with `run_from`. */
             execution_mode?: string;
             /** @description With `execution_mode: sensors`, exactly one tenant sensor id. Not accepted with any other mode. */
             preferred_sensor_ids?: string[];
-            /** @description Protocols to probe (e.g. `TLS`, `SSH`). Empty = service default. */
+            /**
+             * @deprecated
+             * @description DEPRECATED and ignored. On the shared scan engine services are identified from what answers on each port, so a protocol list means nothing there: the legacy shape is translated, `ports` are scanned as a `scan_depth: custom` plan and `protocols` is accepted and ignored. It is still validated, and still used when the job runs as the legacy job on a tenant sensor too old to run the engine. Send `scan_depth: custom` with `tcp_ports` instead. Protocols to probe, with `ports`. Only `TLS`, `SSH`, `SMB` and the TLS-wrapped names `HTTPS`, `SSL`, `LDAPS`, `SMTPS`, `IMAPS`, `POP3S` and `FTPS` are accepted (case and `-`/`_`/space differences are ignored); anything else, including every OT/ICS protocol (Modbus, OPC UA, EtherNet/IP, BACnet, DNP3,...), answers 400 `validation_error` naming the allowed values. OT probes are requested only through the explicit `ot_probe_protocols` opt-in, never here. Legacy shape: a job needs at least one protocol and one port (or an OT opt-in). Not accepted with the scan-plan fields.
+             */
             protocols?: string[];
-            /** @description Ports to probe (e.g. 443, 22, 8443). Empty = service default. */
+            /** @description Legacy shape: ports to probe (e.g. 443, 22, 8443), with `protocols`. Not accepted with the scan-plan fields. The legacy shape is translated: these ports are scanned with the shared engine as a `scan_depth: custom` plan on exactly these ports, and services are identified from what answers. With `ot_probe_protocols` beside them, each allowed OT probe's standard port joins the plan. */
             ports?: number[];
+            /** @description The explicit opt-in to OT/ICS probes: `Modbus`, `OPC_UA`, `EtherNet_IP`, `BACnet` (spelling variants fold; anything else is dropped). Each probes its standard port only (TCP 502 Modbus, TCP 4840 OPC UA, UDP 44818 EtherNet/IP, UDP 47808 BACnet), one row per target; every other OT port a scan reaches stays connect-only. Honoured only while the tenant's `ot_active_probing` switch is on (dropped otherwise); never accepted on an automatic scan. Recorded on the job. Valid with either shape; on its own (no `ports`, no scan depth) it is a custom-depth plan on exactly those ports. */
+            ot_probe_protocols?: string[];
+            /**
+             * @description Scan-plan shape. `quick` — the curated crypto and infrastructure TCP ports (41); `standard` — every TCP port in 1–1024 plus a curated list of common service ports above it (1,364) and the curated UDP services (11); `thorough` — all 65,535 TCP ports plus the curated UDP services; `custom` — exactly `tcp_ports` and `udp_ports`. Default `standard`. A target outside the registered networks is scanned at `standard` at most (custom: at most 1,024 TCP ports and only curated UDP services); `plan.depth_adjustments` lists each such downgrade.
+             * @enum {string}
+             */
+            scan_depth?: "quick" | "standard" | "thorough" | "custom";
+            /** @description `scan_depth: custom` only. Comma-separated ports and inclusive ranges, e.g. `22,80,8000-8100` (at most 4,096 characters and 1,024 entries). A bad entry answers 400 naming it. */
+            tcp_ports?: string;
+            /** @description `scan_depth: custom` only. Same syntax as `tcp_ports`. UDP is probed per service: a port with no curated probe reports "no answer", never "closed". */
+            udp_ports?: string;
+            /**
+             * @description Scan-plan shape. Connection concurrency and timeouts; default `normal`.
+             * @enum {string}
+             */
+            pace?: "polite" | "normal" | "fast";
+            /**
+             * @description Scan-plan shape. `platform` — the in-cluster platform sensor; `sensor` — the tenant sensor named in `sensor_id` (same refusals as `execution_mode: sensors`); `auto` (default) — the one online, non-air-gapped tenant sensor whose reported networks (or, for a single address, whose last observation) cover EVERY target, and the platform otherwise: targets split across sensors, a target no sensor covers, a covering sensor that is offline, or any target outside the registered networks. The choice and the reason are in `plan.executor_resolved` / `plan.executor_reason`.
+             * @enum {string}
+             */
+            run_from?: "auto" | "platform" | "sensor";
+            /**
+             * Format: uuid
+             * @description With `run_from: sensor`, the tenant sensor to run from.
+             */
+            sensor_id?: string;
+            /** @description Scan-plan shape only. Preview the job — its plan, a time estimate and whether external targets need confirming — and create nothing. Answered 200 `DiscoveryJobPreview`; every other outcome is the one a real create would give. See the endpoint description. */
+            dry_run?: boolean;
             /** @description Per-job capture retention cap in MB (service default 25). */
             retention_cap_mb?: number | null;
             /** @description Per-job capture retention TTL in hours (service default 24). */
@@ -6545,6 +7261,10 @@ export interface components {
             /** Format: date-time */
             completed_at?: string | null;
             error_message?: string | null;
+            /** @description Percent of the job the scanner is finished with. For a scan-plan job run in work units it is per HOST: the job's addresses scanned, or refused with a reason, over all of them (see `coverage`). For any other job it is per TARGET, from its target rows: a CIDR is one target, so a job of one /24 reads 0 until the whole range is done. A host or target the job never reached because it was cancelled does not count. A job with nothing to count reads 100 once completed, else 0. Filled on the single-job read, and on the job list for a scan-plan job that has not ended; any other listed job carries 0. */
+            progress?: number;
+            target_counts?: components["schemas"]["DiscoveryJobTargetCounts"];
+            coverage?: components["schemas"]["DiscoveryJobCoverage"];
             fanout?: boolean;
             retention_cap_mb?: number;
             retention_ttl_hours?: number;
@@ -6556,8 +7276,189 @@ export interface components {
             origin?: string;
             /** @description Create response only: the confirmed targets outside the tenant's registered networks, each with the addresses it named when the job was created (a hostname's resolved — and pinned — addresses; a literal's own value). Absent when nothing was external. */
             external_targets?: components["schemas"]["DiscoveryExternalTarget"][];
+            plan?: components["schemas"]["DiscoveryScanPlan"];
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * @description What the server decided a scan-plan job does: stored on the job
+         *     as `metadata.scan_plan` and returned on the create response, the
+         *     single-job read and the job list. Absent for a legacy protocols × ports
+         *     job. The Go type
+         *     is `shared/discovery.ScanPlan`, which both services use.
+         */
+        DiscoveryScanPlan: {
+            /**
+             * @description The depth requested.
+             * @enum {string}
+             */
+            depth: "quick" | "standard" | "thorough" | "custom";
+            /** @enum {string} */
+            pace: "polite" | "normal" | "fast";
+            /** @description The requested TCP ports in `tcp_ports` syntax, runs collapsed (e.g. `1-65535`). */
+            tcp_ports: string;
+            udp_ports: string;
+            tcp_port_count: number;
+            udp_port_count: number;
+            /** @enum {string} */
+            run_from_requested: "auto" | "platform" | "sensor";
+            /**
+             * @description Where the job runs.
+             * @enum {string}
+             */
+            executor_resolved: "platform" | "sensor";
+            /** @description Why, in a sentence (e.g. "every target is on networks it reports, and sensor edge-a is online"). */
+            executor_reason: string;
+            /** @description The tenant sensor, when `executor_resolved` is `sensor`. */
+            sensor_id?: string;
+            sensor_name?: string;
+            /** @description Every target scanned at less than was requested, and why. */
+            depth_adjustments: components["schemas"]["DiscoveryDepthAdjustment"][];
+            targets: components["schemas"]["DiscoveryScanPlanTarget"][];
+            /** @description Σ addresses × (TCP + UDP ports) over the targets as planned. */
+            estimated_probes: number;
+            /** @description The installation's budget the estimate was checked against. */
+            probe_limit: number;
+        };
+        /**
+         * @description The answer to a create-job request with `dry_run: true`: what a
+         *     real create of the same request would do, without doing it. The Go type
+         *     is `shared/discovery.ScanPreview`, which both services use.
+         */
+        DiscoveryJobPreview: {
+            plan: components["schemas"]["DiscoveryScanPlan"];
+            estimate: components["schemas"]["DiscoveryScanEstimate"];
+            /** @description True when the request names targets outside the tenant's registered networks without `external_targets_confirmed`: a real create would answer 422 `external_targets_unconfirmed`. `plan` already shows the downgrades that apply once confirmed. */
+            confirmation_required: boolean;
+            /** @description The targets outside the registered networks (empty when none), whether or not the request already confirmed them. */
+            external_targets: components["schemas"]["DiscoveryExternalTarget"][];
+        };
+        /**
+         * @description A rough size and duration for a plan: a RANGE, not a prediction, in
+         *     whole seconds rounded up. It covers the TCP connect scan only; UDP is
+         *     paced separately and counted in `probes` but not timed. For the plan's
+         *     pace profile let G be the global concurrency, P the per-host
+         *     concurrency, T the connect timeout and D the pause between batches
+         *     (polite 128/16/2 s/100 ms; normal 512/128/1.5 s/none; fast
+         *     2048/512/1 s/none), H = floor(G / P) the hosts scanned at once, and,
+         *     for each target, A its addresses and N its planned TCP ports; a host's
+         *     ports go in ceil(N / P) batches.
+         *
+         *     - `seconds_best` — every address is up and every probe is answered at
+         *       once: ceil(max(Σ A·N / R, Σ A·ceil(N/P)·D / min(H, Σ A))), where R is
+         *       the engine's recorded loopback throughput (about 33,600 connection
+         *       attempts a second at polite and normal, 82,000 at fast).
+         *     - `seconds_worst` — every address is up but silently drops every probe,
+         *       so each batch waits out the timeout and the pause:
+         *       ceil(max(Σ A·ceil(N/P)·(T+D) / H, the slowest single host)), and never
+         *       below `seconds_best`.
+         *
+         *     Neither models the liveness pass, which usually removes many addresses
+         *     of a sparse range before any port is probed, nor the platform's
+         *     connection budget, nor round-trip time on a distant network.
+         */
+        DiscoveryScanEstimate: {
+            /** @description The plan's `estimated_probes` — Σ addresses × (TCP + UDP ports). */
+            probes: number;
+            /** @description Addresses the plan's targets name together (a hostname counts 1). */
+            addresses: number;
+            /** @description The fastest the TCP connect scan could finish. 0 for a plan with no TCP ports. */
+            seconds_best: number;
+            /** @description The slowest, if every address is up and drops every probe. 0 for a plan with no TCP ports. */
+            seconds_worst: number;
+            /** @description One plain sentence saying what the range assumes: that it is an estimate and not a promise, that liveness checks usually remove many addresses, and that UDP is paced separately and not counted. */
+            basis: string;
+        };
+        DiscoveryDepthAdjustment: {
+            target: string;
+            /** @enum {string} */
+            requested: "quick" | "standard" | "thorough" | "custom";
+            /** @enum {string} */
+            applied: "quick" | "standard" | "thorough" | "custom";
+            /** @description A sentence for a person, e.g. "outside your registered networks: Standard is the deepest scan allowed; register the range if it is yours". */
+            reason: string;
+        };
+        DiscoveryScanPlanTarget: {
+            target: string;
+            /**
+             * @description What the target-authorization guard decided: private address space, a network segment the tenant registered, or outside both.
+             * @enum {string}
+             */
+            class: "private" | "registered_segment" | "external";
+            /** @description With `registered_segment`: the network segment that made the target the tenant's — who claimed the range, then scanned it. */
+            segment_id?: string;
+            /**
+             * @description The depth applied to this target.
+             * @enum {string}
+             */
+            depth: "quick" | "standard" | "thorough" | "custom";
+            /** @description Addresses the target names; a hostname counts 1. */
+            addresses: number;
+            tcp_ports: string;
+            udp_ports: string;
+            tcp_port_count: number;
+            udp_port_count: number;
+            estimated_probes: number;
+            /** @description Names the target's asset is known by, offered as the server name (SNI) to a TLS port of this single-address target that answers an address-only handshake with a TLS alert. At most three DNS names; never resolved and never a place to connect to. Absent when none. */
+            sni_candidates?: string[];
+        };
+        /**
+         * @description What a scan-plan job's work units have learned: one unit per
+         *     address, so every host count is a count of addresses. Present on the
+         *     single-job read of a scan-plan job once its units exist, and on the
+         *     job list for such a job that has not ended; absent for any other job.
+         *
+         *     Hosts add up: `hosts_total` = `hosts_responded` + `hosts_no_answer` +
+         *     `hosts_undetermined` + `hosts_failed` + `hosts_pending` +
+         *     `hosts_cancelled`. Ports add up over the hosts scanned:
+         *     `ports_requested` = `ports_open` + `ports_closed` + `ports_filtered` +
+         *     `ports_local_errors` + `ports_not_probed`.
+         *
+         *     **No answer is not "down".** A firewall that drops everything looks
+         *     exactly like an empty address; a host that gave no answer is reported
+         *     as such, never as absent.
+         */
+        DiscoveryJobCoverage: {
+            hosts_total: number;
+            /** @description Answered at all — a TCP port open or refused, or a UDP service reply. */
+            hosts_responded: number;
+            /** @description Probed, and nothing answered. */
+            hosts_no_answer: number;
+            /** @description Scanned but no verdict (every probe failed on the scanner's own side). */
+            hosts_undetermined: number;
+            /** @description Not scanned — refused by the target-authorization guard (e.g. excluded since the job was created), or an error; see `warnings`. */
+            hosts_failed: number;
+            /** @description Not finished yet. */
+            hosts_pending: number;
+            /** @description Never reached because the job was cancelled. */
+            hosts_cancelled: number;
+            ports_requested: number;
+            ports_open: number;
+            /** @description Refused (a host is there; nothing listens). */
+            ports_closed: number;
+            /** @description No answer before the timeout, or unreachable. */
+            ports_filtered: number;
+            /** @description Probes that failed on the scanner's side (out of descriptors). Say nothing about the target. */
+            ports_local_errors: number;
+            /** @description Not probed — the host gave no answer to liveness, the tarpit guard stopped it, or it hit its time limit. */
+            ports_not_probed: number;
+            /** @description Hosts that accepted connections on almost every port probed; their open ports are a sample. */
+            tarpit_hosts: number;
+            /** @description Hosts on which an OT/ICS port answered, so the rest of their scan was throttled. */
+            ot_suspect_hosts: number;
+            /** @description UDP services that replied. A silent UDP port is not counted — silence is not an answer. */
+            udp_answered: number;
+            /** @description Sentences to show beside the numbers — e.g. "0 of 254 scanned addresses responded — the platform sensor may not be able to reach this network; run the scan from a sensor on that network", or that the scanner hit its resource limits. */
+            warnings: string[];
+        };
+        /** @description The job's targets by status — what `progress` is computed from. Present on the single-job read, and on the job list for a scan-plan job that has not ended. `cancelled` is a target the job never reached because it was cancelled first. */
+        DiscoveryJobTargetCounts: {
+            total: number;
+            pending: number;
+            running: number;
+            completed: number;
+            failed: number;
+            cancelled: number;
         };
         /** @description A target outside the tenant's registered networks and the addresses it names. */
         DiscoveryExternalTarget: {
@@ -6585,14 +7486,60 @@ export interface components {
          *       `external_targets_confirmed: true` to scan them.
          *     - `external_targets_disabled` (403) — the same, but the installation's
          *       operator has turned scanning outside the registered networks off.
+         *     - `scan_target_too_large` (422) — the scanner expands at most
+         *       `target_limit` addresses per CIDR or range, so each of
+         *       `oversize_targets` is refused instead of being scanned only in part;
+         *       or, with no `oversize_targets`, the targets together name
+         *       `job_addresses`, over the per-scan `job_limit`. `details` names the
+         *       numbers; split the block or the scan.
+         *     - `scan_plan_unavailable` (422) — plan execution is switched off on
+         *       this deployment (a code-level switch, on since work-unit execution
+         *       shipped), so the scan-plan shape (`scan_depth`, `run_from`, …) is
+         *       refused and nothing was created. Use `protocols` and `ports`.
+         *     - `scan_budget_exceeded` (422) — a scan-plan job's `estimated_probes`
+         *       (Σ addresses × ports) is over the installation's `probe_limit`
+         *       (`discovery.maxJobProbes`, default 25,000,000); `largest_target` is
+         *       the single biggest contributor. Lower the depth or split the
+         *       targets.
+         *     - `sensor_scan_plan_unsupported` (409) — a scan-plan job names a
+         *       tenant sensor (`run_from: sensor`) whose software does not support
+         *       scan depth. Upgrade the sensor, or run the scan from the platform;
+         *       nothing was created. (`run_from: auto` never picks such a sensor.)
          */
         DiscoveryTargetVerdictError: {
             /** @enum {string} */
-            error: "targets_refused" | "external_targets_unconfirmed" | "external_targets_disabled";
+            error: "targets_refused" | "external_targets_unconfirmed" | "external_targets_disabled" | "scan_target_too_large" | "scan_budget_exceeded" | "scan_plan_unavailable" | "sensor_scan_plan_unsupported";
             /** @description A sentence for a person. Do not branch on it. */
             details: string;
             external_targets?: components["schemas"]["DiscoveryExternalTarget"][];
             refused_targets?: components["schemas"]["DiscoveryRefusedTarget"][];
+            /** @description Only with `scan_target_too_large`. */
+            oversize_targets?: components["schemas"]["DiscoveryOversizeTarget"][];
+            /** @description Only with `scan_target_too_large` and `oversize_targets` — the most addresses one target may name. */
+            target_limit?: number;
+            /** @description Only with `scan_target_too_large` and no `oversize_targets` — how many addresses the job's targets name together, as a decimal string. */
+            job_addresses?: string;
+            /** @description Only with `job_addresses` — the most addresses one scan's targets may name together. */
+            job_limit?: number;
+            /** @description Only with `scan_budget_exceeded` — the job's estimated probes. */
+            estimated_probes?: number;
+            /** @description Only with `scan_budget_exceeded` — the most probes one scan may send. */
+            probe_limit?: number;
+            largest_target?: components["schemas"]["DiscoveryBudgetLargestTarget"];
+        };
+        /** @description Only with `scan_budget_exceeded` — the target contributing the most probes. */
+        DiscoveryBudgetLargestTarget: {
+            target: string;
+            addresses: number;
+            tcp_port_count: number;
+            udp_port_count: number;
+            estimated_probes: number;
+        };
+        /** @description A target that names more addresses than the scanner will expand. */
+        DiscoveryOversizeTarget: {
+            target: string;
+            /** @description How many addresses the target names, as a decimal string (an IPv6 /64 or /0 exceeds any integer a JSON client reads). */
+            addresses: string;
         };
         /** @description GET /discovery/jobs — a page of the tenant's discovery jobs, newest first. */
         DiscoveryJobsResponse: {
@@ -6642,12 +7589,88 @@ export interface components {
          *     and can legitimately disagree — a third-party endpoint is recorded as a
          *     connection rather than an asset, and processing is asynchronous — so
          *     both are reported, separately labelled, rather than as one number.
+         *
+         *     With `group=host` the body is `DiscoveryJobResultsByHost` instead: no
+         *     `findings`, and `hosts` / `total_hosts` / `group` below.
          */
         DiscoveryJobResults: {
             findings?: components["schemas"]["DiscoveryFinding"][];
             materialization?: components["schemas"]["DiscoveryMaterialization"];
+            /**
+             * @description Present (as `host`) only on a grouped page.
+             * @enum {string}
+             */
+            group?: "host";
+            /** @description Grouped page only — see `DiscoveryJobResultsByHost`. */
+            hosts?: components["schemas"]["DiscoveryHost"][];
+            /** @description Grouped page only. */
+            total_hosts?: number;
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * @description A job's hosts (`group=host`), one page in address order (a host that
+         *     never resolved, by the name it was scanned by, after every address),
+         *     each with all its findings. For a scan-plan job every host that
+         *     responded is listed — those with findings AND those that answered with
+         *     nothing open (`nothing_open`, no ports) — by the same rule the job's
+         *     `coverage.hosts_responded` counts with, so for a finished job
+         *     `total_hosts` equals it. An address that never answered is not listed.
+         *     A legacy job lists only hosts with at least one finding.
+         */
+        DiscoveryJobResultsByHost: {
+            job_id: string;
+            /** @enum {string} */
+            group: "host";
+            hosts: components["schemas"]["DiscoveryHost"][];
+            total_hosts: number;
+            page: number;
+            page_size: number;
+        };
+        DiscoveryHost: {
+            /** @description The host's IP address, or the name it was scanned by when it never resolved. */
+            address: string;
+            hostname?: string;
+            /** @description The host's findings in port order. An open port nothing could name has protocol `tcp` and `identified: false`; a host that accepted connections on almost every port has one entry carrying the sample. */
+            ports: components["schemas"]["DiscoveryHostPort"][];
+            /** @description True for a host listed only because it responded: it answered (refused ports, or a liveness reply) but nothing was open on the ports scanned, so `ports` is empty. `unit` carries how many ports were refused and filtered. Absent otherwise. */
+            nothing_open?: boolean;
+            unit?: components["schemas"]["DiscoveryHostUnit"];
+        };
+        DiscoveryHostPort: {
+            finding_id: string;
+            port: number;
+            protocol: string;
+            /** @enum {string} */
+            transport?: "tcp" | "udp";
+            /** @description False for an open port nothing could name ("open, unidentified"). */
+            identified: boolean;
+            /** @description A weak label from the service's greeting (e.g. `smtp`), when one was recognised. */
+            service_hint?: string;
+            /** @description How sure the scanner is of `protocol`, 0–1. */
+            confidence_score: number;
+            /** @description The finding's details, as in the flat results. */
+            data: {
+                [key: string]: unknown;
+            };
+        };
+        /** @description How the scan of this address went, for a scan-plan job; absent for a legacy job. */
+        DiscoveryHostUnit: {
+            /** @enum {string} */
+            status: "pending" | "running" | "done" | "failed" | "cancelled";
+            /** @enum {string} */
+            liveness_state?: "up" | "no_answer" | "assumed_up" | "undetermined";
+            /** @description What decided the liveness verdict, e.g. `tcp-refused:22`. */
+            liveness_evidence?: string;
+            ports_requested: number;
+            open_count: number;
+            closed_count: number;
+            filtered_count: number;
+            not_probed_count: number;
+            /** @description UDP services that replied. Absent when none did. */
+            udp_answered_count?: number;
+            responds_on_all_ports: boolean;
+            ot_suspect: boolean;
         };
         /**
          * @description What became of a job's findings after they left the job record. Omitted
@@ -6684,6 +7707,22 @@ export interface components {
              *     approval decision will ever be made about them.
              */
             suppressed?: number;
+            /**
+             * @description Queue rows kept as observations: recorded as evidence with no asset
+             *     and no approval decision to come. A finding identity could not tie
+             *     to an asset yet (for example an address on a DHCP network with
+             *     nothing else to identify the device) is an unresolved observation
+             *     in Discovery → Observations; host observations and third-party
+             *     endpoints recorded as connections are counted here too.
+             */
+            observed?: number;
+            /** @description Distinct addresses the `observed` rows are on. */
+            observed_hosts?: number;
+            /**
+             * @description Distinct hosts the job's own findings are on, so a finding count
+             *     ("15 open ports") is never read as a count of hosts or assets.
+             */
+            finding_hosts?: number;
         } & {
             [key: string]: unknown;
         };
@@ -6695,7 +7734,10 @@ export interface components {
             scan_on_first_observation: boolean;
             /** @description How stale an asset's last automatic scan may get before it is scanned again. 24 by default. */
             rescan_interval_hours: number;
-            /** @description Restricted to the values in `limits.supported_protocols`. */
+            /**
+             * @deprecated
+             * @description DEPRECATED. Restricted to the values in `limits.supported_protocols`. Automatic scans run on the shared scan engine, which identifies TLS and SSH from what answers on each of `ports`, so this no longer decides what a scan probes; it is kept, and still returned, because it is what a sensor too old to run the engine probes. Optional on PUT: a client that omits it leaves the stored value unchanged.
+             */
             protocols: string[];
             /** @description Route each automatic scan to the tenant sensor that most recently observed the host (or one bound to its network segment) instead of the platform sensor, so a host reachable only from inside the organization's network is scanned from where it can be reached. On by default. Off runs every automatic scan from the platform sensor. Optional on PUT: a client that omits it leaves the stored value unchanged. Manual scans choose per run via `run_from` and are not governed by this. */
             prefer_observing_sensor?: boolean;
@@ -6775,12 +7817,16 @@ export interface components {
             limits: components["schemas"]["AutoScanLimits"];
             summary: components["schemas"]["AutoScanSummary"];
         };
-        /** @description PUT /discovery/auto-scan body. Every field is required. */
+        /** @description PUT /discovery/auto-scan body. Every field is required except the deprecated `protocols`. */
         AutoScanUpdateRequest: {
             enabled: boolean;
             scan_on_first_observation: boolean;
             rescan_interval_hours: number;
-            protocols: string[];
+            /**
+             * @deprecated
+             * @description DEPRECATED. Automatic scans run on the shared scan engine, which identifies TLS and SSH from what answers on each port, so this list no longer decides what a scan probes. Omit it: the stored value is kept unchanged (it is what a sensor too old to run the engine still probes). A request that sends it is validated and saved as before.
+             */
+            protocols?: string[];
             ports: number[];
         };
         /** @description Simple message envelope for cancel/rerun — `{ "message": "..." }`. */
@@ -7075,6 +8121,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description Another segment already holds this value. `error` names it; when it is a public range learned from an interrogated device, it says so and points at POST /network-segments/{id}/claim ("Claim as mine") instead of declaring the range again. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7193,6 +8248,80 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    claimNetworkSegment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Network segment UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The claimed network segment. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkSegment"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description The segment is not a learned public CIDR range, so there is nothing to claim (or, for DELETE, no claim to revoke). `error` says which. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    revokeNetworkSegmentClaim: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Network segment UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The network segment, with no claim. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkSegment"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description The segment is not a learned public CIDR range, so there is nothing to claim (or, for DELETE, no claim to revoke). `error` says which. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -7841,7 +8970,7 @@ export interface operations {
                 asset_status?: string;
                 /** @description RFC3339 cutoff — keeps only assets whose last_seen_at is strictly older. Assets with no last_seen_at never match. ANDs with the other filters (the time arm of a staleness cut); a non-RFC3339 value is a 400. */
                 last_seen_before?: string;
-                /** @description Active Scan coverage cut (): when true, keeps only assets that have never been actively scanned (last_scanned_at IS NULL). ANDs with the other filters. */
+                /** @description Active Scan coverage cut (): when true, keeps only assets that have never been scanned: no endpoint has a scan time AND the asset carries no finished scan (`query=not endpoint:(exists(last_scanned)) and not exists(last_scanned)`). An asset whose scan completed leaves the list even when the scan found no listener; one whose scan failed, or is still running (see `active_scan`), stays. ANDs with the other filters. */
                 unscanned_only?: boolean;
                 /**
                  * @deprecated
@@ -8895,6 +10024,75 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    ingestSightings: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SightingsRequest"];
+            };
+        };
+        responses: {
+            /** @description One result per sighting, in order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SightingResultsResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    reconcileGatewayLinks: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GatewayLinksRequest"];
+            };
+        };
+        responses: {
+            /** @description What the reconcile did. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GatewayLinksResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description The device is not a live asset of the signed tenant. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     attachSourceLinks: {
         parameters: {
             query?: never;
@@ -9476,13 +10674,22 @@ export interface operations {
                 };
             };
             404: components["responses"]["LegacyNotFound"];
-            /** @description The named sensor is offline; nothing was scanned. */
+            /** @description The named sensor is offline, or (`selection_changed`) the query now matches more assets than `expected_count`; nothing was scanned. */
             409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LegacyError"];
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            /** @description The selection has more than 1000 assets (`selection_too_large`); nothing was scanned. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
                 };
             };
             /** @description Some assets are outside the registered networks; confirm to scan them. */
@@ -9492,6 +10699,222 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ActiveScanExternalTargetsError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    bulkArchiveAssets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetSelectionRequest"];
+            };
+        };
+        responses: {
+            /** @description The action ran. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkAssetActionResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description The caller lacks `assets.update`. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The query now matches more assets than `expected_count` (`selection_changed`); nothing changed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            /** @description The selection has more than 5000 assets (`selection_too_large`); nothing changed. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    bulkRestoreAssets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetSelectionRequest"];
+            };
+        };
+        responses: {
+            /** @description The action ran. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkAssetActionResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description The caller lacks `assets.update`. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The query now matches more assets than `expected_count` (`selection_changed`); nothing changed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            /** @description The selection has more than 5000 assets (`selection_too_large`); nothing changed. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    bulkDeleteAssets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssetSelectionRequest"];
+            };
+        };
+        responses: {
+            /** @description The action ran. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkAssetActionResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description The caller lacks `assets.delete`. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The query now matches more assets than `expected_count` (`selection_changed`); nothing changed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            /** @description The selection has more than 5000 assets (`selection_too_large`); nothing changed. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    bulkUpdateAssets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkAssetUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description The action ran. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkAssetActionResult"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            /** @description The caller lacks `assets.update`. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The query now matches more assets than `expected_count` (`selection_changed`); nothing changed. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
+                };
+            };
+            /** @description The selection has more than 5000 assets (`selection_too_large`); nothing changed. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetSelectionError"];
                 };
             };
             500: components["responses"]["LegacyServerError"];
@@ -11454,6 +12877,15 @@ export interface operations {
                 page?: number;
                 page_size?: number;
                 asset_id?: string;
+                /** @description Only rows whose computed `needs` is one of these. Repeatable, or a comma-separated list. */
+                needs?: components["schemas"]["ObservationNeeds"][];
+                /** @description Only rows whose network scope is this configured segment. */
+                network_scope?: string;
+                /** @description Only rows from this exact `source_ref`. */
+                source?: string;
+                /** @description Case-insensitive substring over the observed addresses and names, the network's name and the collector's name. */
+                q?: string;
+                sort?: "last_seen_desc" | "last_seen_asc" | "host" | "network" | "needs";
             };
             header?: never;
             path?: never;
@@ -11461,19 +12893,59 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Paginated observations with provenance and enrichment state */
+            /** @description Paginated observations with provenance and enrichment state. `total` counts the rows matching every filter. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        observations: components["schemas"]["IdentityObservation"][];
-                        total: number;
-                        page: number;
-                        page_size: number;
-                    };
+                    "application/json": components["schemas"]["IdentityObservationPage"];
                 };
+            };
+            /** @description An invalid filter */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    bulkDecideIdentityObservations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkObservationDecisionInput"];
+            };
+        };
+        responses: {
+            /** @description Per-item outcomes, in request order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkObservationDecisionResult"];
+                };
+            };
+            /** @description Missing or invalid action, ids (1–200) or reason */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Requires assets.update */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -11807,6 +13279,15 @@ export interface operations {
             };
         };
         responses: {
+            /** @description Only with `dry_run: true`: the preview. Nothing was created. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryJobPreview"];
+                };
+            };
             /** @description The created discovery job. */
             202: {
                 headers: {
@@ -11835,7 +13316,16 @@ export interface operations {
                     "application/json": components["schemas"]["DiscoveryTargetVerdictError"] | components["schemas"]["LegacyError"];
                 };
             };
-            /** @description `external_targets_unconfirmed` — resend with `external_targets_confirmed: true` to scan the listed targets. */
+            /** @description The named tenant sensor cannot run this job now: it is offline, or — `sensor_scan_plan_unsupported` — a scan-plan job names a sensor whose software does not support scan depth (upgrade it, or run from the platform). Nothing was created. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiscoveryTargetVerdictError"] | components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description `external_targets_unconfirmed` — resend with `external_targets_confirmed: true` to scan the listed targets (a dry run answers 200 with `confirmation_required` instead); `scan_target_too_large` — a target (or the job's targets together) names more addresses than the scanner will expand; or `scan_budget_exceeded` — a scan-plan job's estimated probes (addresses × ports) exceed the installation's budget; or `scan_plan_unavailable` — plan execution is switched off on this deployment; use `protocols` and `ports`. */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11893,7 +13383,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Re-run initiated. */
+            /** @description Re-run initiated — cluster-sensor-service re-queued the job. */
             202: {
                 headers: {
                     [name: string]: unknown;
@@ -11902,12 +13392,47 @@ export interface operations {
                     "application/json": components["schemas"]["DiscoveryMessageResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            /** @description No such discovery job for this tenant. A job belonging to another tenant is indistinguishable from a missing one. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The job is not `queued` or `failed`. The body is `{ "error": "job_not_rerunnable", "details": "<reason>" }`. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description cluster-sensor-service could not be reached or failed; nothing was re-queued. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     getDiscoveryJobResults: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `host` to group findings by host. Anything else is 400. */
+                group?: "host";
+                page?: number;
+                /** @description Findings per page, or hosts per page with `group=host`. */
+                page_size?: number;
+            };
             header?: never;
             path: {
                 /** @description Discovery job UUID. */
@@ -11917,7 +13442,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The job's findings. */
+            /** @description The job's findings — flat, or with `group=host` grouped by host (the exact grouped shape is `DiscoveryJobResultsByHost`). */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11951,7 +13476,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Job cancelled. */
+            /** @description Job cancelled — cluster-sensor-service confirmed it. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -11960,7 +13485,36 @@ export interface operations {
                     "application/json": components["schemas"]["DiscoveryMessageResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            /** @description No such discovery job for this tenant. A job belonging to another tenant is indistinguishable from a missing one. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The job has already ended. The body is `{ "error": "job_not_cancellable", "details": "<reason>" }`. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description cluster-sensor-service could not be reached or failed; the job was not cancelled. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
 }

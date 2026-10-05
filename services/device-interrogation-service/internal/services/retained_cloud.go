@@ -73,14 +73,29 @@ func recordCloudOutcome(ctx context.Context, resourceID string, res identity.Res
 	}
 }
 
+// retainedCloudContext is a cloud resource's context held until its
+// observation is linked. Sighting is what was sent; Observation is
+// what a context retained before then holds instead, read for its source and
+// observed-at only.
 type retainedCloudContext struct {
 	Device      models.Device
-	Observation identity.Observation
+	Sighting    identity.Sighting    `json:",omitzero"`
+	Observation identity.Observation `json:",omitzero"`
 	Enumeration *cloudEnumResource
 }
+
+// provenance is the context's source and observed-at, from whichever
+// envelope it holds.
+func (c retainedCloudContext) provenance() (identity.Source, time.Time) {
+	if c.Sighting.Channel != "" {
+		return c.Sighting.Source, c.Sighting.ObservedAt
+	}
+	return c.Observation.Source, c.Observation.ObservedAt
+}
+
 type cloudEnumerationContextKey struct{}
 
-func (s *CloudDiscoveryService) retainCloudContext(ctx context.Context, repo *pgidentity.Repository, obs identity.Observation, res identity.Resolution, device *models.Device) error {
+func (s *CloudDiscoveryService) retainCloudContext(ctx context.Context, repo *pgidentity.Repository, sighting identity.Sighting, res identity.Resolution, device *models.Device) error {
 	if res.ObservationID == "" {
 		return nil
 	}
@@ -88,7 +103,7 @@ func (s *CloudDiscoveryService) retainCloudContext(ctx context.Context, repo *pg
 		return fmt.Errorf("cloud context encryption unavailable")
 	}
 	enumeration, _ := ctx.Value(cloudEnumerationContextKey{}).(*cloudEnumResource)
-	raw, err := json.Marshal(retainedCloudContext{Device: *device, Observation: obs, Enumeration: enumeration})
+	raw, err := json.Marshal(retainedCloudContext{Device: *device, Sighting: sighting, Enumeration: enumeration})
 	if err != nil {
 		return err
 	}
@@ -97,7 +112,7 @@ func (s *CloudDiscoveryService) retainCloudContext(ctx context.Context, repo *pg
 		return err
 	}
 	_, err = repo.Tx().ExecContext(ctx, `INSERT INTO identity_observation_cloud_contexts(tenant_id,observation_id,receipt_key,context_enc,observed_at)
- VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, obs.TenantID, res.ObservationID, identity.ObservationReceiptKey(obs), sealed, obs.ObservedAt)
+ VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, sighting.TenantID, res.ObservationID, sightingReceiptKey(sighting), sealed, sighting.ObservedAt)
 	return err
 }
 
@@ -105,10 +120,7 @@ func (s *CloudDiscoveryService) retainCloudContext(ctx context.Context, repo *pg
 // discoveries and acknowledgement. It never re-observes identity or sets its
 // timestamp to replay time. Lifecycle locks exclude merge/approval changes.
 func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, tenant uuid.UUID) error {
-	repo, err := s.devices.Repo()
-	if err != nil {
-		return err
-	}
+	repo := s.devices.Repo()
 	for range 50 {
 		var observation, asset uuid.UUID
 		var receipt, sealed string
@@ -177,12 +189,12 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 					return nil
 				}
 				var current uuid.UUID
-				var status, class string
-				err = r.Tx().QueryRowContext(ctx, `SELECT a.id,a.asset_status,a.class_key FROM identity_observation_cloud_contexts p
+				var status, class, segment string
+				err = r.Tx().QueryRowContext(ctx, `SELECT a.id,a.asset_status,a.class_key,o.network_scope FROM identity_observation_cloud_contexts p
      JOIN identity_observations o ON o.tenant_id=p.tenant_id AND o.id=p.observation_id
      JOIN assets a ON a.tenant_id=o.tenant_id AND a.id=o.asset_id
      WHERE p.tenant_id=$1 AND p.observation_id=$2 AND p.receipt_key=$3 AND p.materialized_at IS NULL
-     AND o.state='linked' AND a.deleted_at IS NULL FOR UPDATE OF p,a SKIP LOCKED`, tenant, observation, receipt).Scan(&current, &status, &class)
+     AND o.state='linked' AND a.deleted_at IS NULL FOR UPDATE OF p,a SKIP LOCKED`, tenant, observation, receipt).Scan(&current, &status, &class, &segment)
 				if errors.Is(err, sql.ErrNoRows) {
 					return nil
 				}
@@ -193,9 +205,10 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 					return nil
 				}
 				ref := identity.AssetRef{TenantID: tenant.String(), ID: asset.String()}
+				source, observedAt := payload.provenance()
 				if payload.Enumeration != nil {
 					res := payload.Enumeration
-					if err := r.UpsertFacts(ctx, ref, facts.ProducerCloudCollector, cloudFactRows(res.Facts, payload.Observation.Source, payload.Observation.ObservedAt)); err != nil {
+					if err := r.UpsertFacts(ctx, ref, facts.ProducerCloudCollector, cloudFactRows(res.Facts, source, observedAt)); err != nil {
 						return err
 					}
 					attrs, err := json.Marshal(filterClassAttributes(class, res.Attributes, res.DeviceType))
@@ -218,17 +231,19 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 							return fmt.Errorf("cloud parent identity changed during replay")
 						}
 						if available {
-							edgeStatus, err := r.EdgeStatusFor(ctx, tenant.String(), payload.Observation.Source.Kind, parent.String(), asset.String())
+							edgeStatus, err := r.EdgeStatusFor(ctx, tenant.String(), source.Kind, parent.String(), asset.String())
 							if err != nil {
 								return err
 							}
-							if err := r.UpsertRelationship(ctx, tenant.String(), pgidentity.Edge{FromAssetID: parent.String(), ToAssetID: asset.String(), Type: string(relationships.Contains), SourceKind: payload.Observation.Source.Kind, SourceRef: payload.Observation.Source.Ref, Status: edgeStatus, ObservedAt: payload.Observation.ObservedAt}); err != nil {
+							if err := r.UpsertRelationship(ctx, tenant.String(), pgidentity.Edge{FromAssetID: parent.String(), ToAssetID: asset.String(), Type: string(relationships.Contains), SourceKind: source.Kind, SourceRef: source.Ref, Status: edgeStatus, ObservedAt: observedAt}); err != nil {
 								return err
 							}
 						}
 					}
 				}
-				if err := r.ProjectSegmentLocation(ctx, ref, payload.Observation.Network.SegmentID, payload.Observation.Source); err != nil {
+				// The segment inventory-service's Intake placed the observation in
+				// (identity_observations.network_scope), read rather than recomputed.
+				if err := r.ProjectSegmentLocation(ctx, ref, segment, source); err != nil {
 					return err
 				}
 				integration := uuid.Nil
@@ -236,7 +251,7 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 					integration = *payload.Device.CredentialID
 				}
 				provider := cloudProviderForDevice(payload.Device)
-				if _, err := s.writeSensorDiscoveriesTx(ctx, r.Tx(), tenant, observation.String()+":"+receipt, integration, provider, []models.Device{payload.Device}, payload.Observation.ObservedAt, false); err != nil {
+				if _, err := s.writeSensorDiscoveriesTx(ctx, r.Tx(), tenant, observation.String()+":"+receipt, integration, provider, []models.Device{payload.Device}, observedAt, false); err != nil {
 					return err
 				}
 				if _, err := r.Tx().ExecContext(ctx, `INSERT INTO asset_history(tenant_id,asset_id,source,action,changes_json)

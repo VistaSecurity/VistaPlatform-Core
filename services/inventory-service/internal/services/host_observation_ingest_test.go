@@ -21,6 +21,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
+	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
 )
 
 // hostObsFinding wraps a payload the way discovery-processor's converter does:
@@ -75,6 +77,36 @@ func buildHostObs(t *testing.T, svc *AssetService, ho *hostobs.HostObservation) 
 		t.Fatal("the finding this test built carries no readable payload")
 	}
 	return svc.hostObservationObservation(uuid.New(), f, payload)
+}
+
+// hostObsEvidence is what the intake withheld as identity but kept as
+// evidence for the asset (synthetic names, temporary and unscoped link-local
+// IPv6), exactly as applyHostObservationContext receives it.
+func hostObsEvidence(t *testing.T, svc *AssetService, ho *hostobs.HostObservation) map[string][]string {
+	t.Helper()
+	ho.Finalize()
+	f := hostObsFinding(t, ho, nil)
+	payload, ok := hostObservationPayload(f)
+	if !ok {
+		t.Fatal("the finding this test built carries no readable payload")
+	}
+	res, err := svc.hostObservationIntake(uuid.New(), f, payload)
+	if err != nil && !errors.Is(err, errNoIdentifiers) {
+		t.Fatalf("hostObservationIntake: %v", err)
+	}
+	return res.AttributeEvidence
+}
+
+// hostObsSyntheticNames is the `synthetic_names` list the asset would get.
+func hostObsSyntheticNames(t *testing.T, ho *hostobs.HostObservation) []string {
+	t.Helper()
+	return hostnamequality.MergeSyntheticNames(hostObsEvidence(t, unscopedService(), ho)[attrlist.KeySyntheticNames], nil)
+}
+
+// looksLikeIP reports whether a name slot holds an address written down.
+func looksLikeIP(name string) bool {
+	_, err := netip.ParseAddr(strings.TrimSpace(name))
+	return err == nil
 }
 
 // --- one case per source ----------------------------------------------------
@@ -475,7 +507,7 @@ func TestHostObservationBuilder_AnIPLiteralIsNeverAName(t *testing.T) {
 		if id.Kind != identity.KindHostname && id.Kind != identity.KindFQDN {
 			continue
 		}
-		if isIPLiteral(id.Value) {
+		if looksLikeIP(id.Value) {
 			t.Errorf("an address %q was attached as a %s identifier", id.Value, id.Kind)
 		}
 	}
@@ -794,7 +826,7 @@ func TestHostObservationBuilder_MDNSLocalNamesAreSegmentScoped(t *testing.T) {
 	}
 
 	for _, id := range obs.Identifiers {
-		if id.Kind == identity.KindFQDN && isMDNSLocalName(id.Value) {
+		if id.Kind == identity.KindFQDN && hostnamequality.IsMDNSLocalName(id.Value) {
 			t.Errorf("a .local name reached the fqdn kind: %q", id.Value)
 		}
 	}
@@ -984,7 +1016,7 @@ func TestHostObservationBuilder_SyntheticNamesAreNotIdentifiers(t *testing.T) {
 	if len(names) != 1 || names[0] != "real-name" {
 		t.Fatalf("name identifiers = %v, want exactly [real-name]", names)
 	}
-	synthetic := hostObservationSyntheticNames(ho)
+	synthetic := hostObsSyntheticNames(t, ho)
 	if strings.Join(synthetic, ",") != strings.Join([]string{"192-0-2-5.local", testCastInstance}, ",") &&
 		strings.Join(synthetic, ",") != strings.Join([]string{testCastInstance, "192-0-2-5.local"}, ",") {
 		t.Fatalf("synthetic_names = %v, want the UUID and the IP-encoded name", synthetic)
@@ -1009,7 +1041,7 @@ func TestHostObservationBuilder_SyntheticShortNamesAreNotIdentifiers(t *testing.
 			t.Errorf("synthetic short name became an identifier: %s %q", id.Kind, id.Value)
 		}
 	}
-	if got := hostObservationSyntheticNames(ho); len(got) != 3 {
+	if got := hostObsSyntheticNames(t, ho); len(got) != 3 {
 		t.Errorf("synthetic_names = %v, want all three", got)
 	}
 }
@@ -1035,7 +1067,7 @@ func TestHostObservationBuilder_HexLocalNameStaysAnIdentifier(t *testing.T) {
 	if !found {
 		t.Fatalf("12-hex .local name was dropped: %v", obs.Identifiers)
 	}
-	if got := hostObservationSyntheticNames(ho); len(got) != 0 {
+	if got := hostObsSyntheticNames(t, ho); len(got) != 0 {
 		t.Fatalf("12-hex name filed as synthetic: %v", got)
 	}
 }
@@ -1221,8 +1253,8 @@ func TestIsMDNSLocalName(t *testing.T) {
 		"app.corp.example":   false,
 		"":                   false,
 	} {
-		if got := isMDNSLocalName(name); got != want {
-			t.Errorf("isMDNSLocalName(%q) = %v, want %v", name, got, want)
+		if got := hostnamequality.IsMDNSLocalName(name); got != want {
+			t.Errorf("hostnamequality.IsMDNSLocalName(%q) = %v, want %v", name, got, want)
 		}
 	}
 }

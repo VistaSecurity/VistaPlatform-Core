@@ -245,6 +245,11 @@ type CatalogEnrichAvailability struct {
 // present; only the thing that FILLS the queue is Enterprise.
 const EnrichReasonEdition = "edition"
 
+// EnrichReasonNoProvider — the build has the enricher, and no model provider
+// answers for the platform: none is set in Settings → AI assistant and the
+// environment names none.
+const EnrichReasonNoProvider = "no_provider"
+
 // --- handlers ---------------------------------------------------------------
 
 // ListEOLProposals serves GET /admin/catalogs/eol/proposals.
@@ -405,17 +410,23 @@ func RunCatalogEnrichment(runner CatalogEnrichRunner) gin.HandlerFunc {
 
 // GetCatalogEnrichAvailability serves GET /admin/catalogs/eol/enrich/availability.
 //
-// Fixed at mount time rather than computed per request: the answer depends on
-// which binary is running and on the process's AI_PROVIDER configuration,
-// neither of which changes between requests.
-func GetCatalogEnrichAvailability(av CatalogEnrichAvailability) gin.HandlerFunc {
+// av is the answer fixed at mount time — which binary is running. In Core that
+// is the whole answer. In a build with the enricher, live answers per request:
+// a platform administrator can set or clear the model provider while the
+// process runs, so whether "Propose with AI" works is no longer a startup
+// fact. A nil live serves av.
+func GetCatalogEnrichAvailability(av CatalogEnrichAvailability, live func(context.Context) CatalogEnrichAvailability) gin.HandlerFunc {
 	if !av.Available && av.Reason == "" {
 		// The zero value is the honest Core answer, so a caller that wires
 		// nothing reports unavailable rather than available by omission.
 		av.Reason = EnrichReasonEdition
 	}
 	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, av)
+		if live == nil || av.Reason == EnrichReasonEdition {
+			c.JSON(http.StatusOK, av)
+			return
+		}
+		c.JSON(http.StatusOK, live(c.Request.Context()))
 	}
 }
 

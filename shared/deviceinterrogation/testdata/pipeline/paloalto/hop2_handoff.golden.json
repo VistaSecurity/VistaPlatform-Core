@@ -1,6 +1,6 @@
 {
   "vendor": "paloalto",
-  "input_sha256": "7b168abb96c73b0b7f68e5f2fa772b8a8fbbae9e107014675dbf9ceda2ab858e",
+  "input_sha256": "2712ba40582aa8154e31b6510018756aa2ecdbdf2658123846a0775a87bbfc89",
   "imports": [
     {
       "asset_status": "pending_approval",
@@ -31,10 +31,13 @@
             "network_type": "public",
             "pqc_kex_detected": false,
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
+            "unmeasured_components": [
+              "protocol_version"
+            ],
             "version": ""
           },
           "source_sensor_id": "{{SENSOR_ID}}"
@@ -66,10 +69,13 @@
             "pqc_kex_detected": false,
             "profile_name": "ssl-fwd-proxy-default",
             "sensor_id": "{{SENSOR_ID}}",
-            "source": "sensor_discovery",
+            "source": "device_interrogation",
             "source_asset_id": "{{DEVICE_ASSET_ID}}",
             "source_device_id": "{{DEVICE_ASSET_ID}}",
             "timestamp": "{{TIMESTAMP}}",
+            "unmeasured_components": [
+              "protocol_version"
+            ],
             "version": ""
           },
           "source_sensor_id": "{{SENSOR_ID}}"

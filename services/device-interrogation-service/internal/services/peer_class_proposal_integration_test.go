@@ -38,7 +38,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +49,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
-	"github.com/vistasecurity/vistaplatform/shared/identity/identityaudit"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -283,7 +281,7 @@ func peerSource(ref string) identity.Source {
 // identify a peer the inventory already holds, and that becomes a PROPOSAL
 // rather than nothing.
 //
-// MUTATION: delete the recordClassOutcome call in resolveObservationWith and
+// MUTATION: delete the recordClassOutcome call in resolveSightingWith and
 // this fails while every other test in the package stays green — which is
 // exactly how the gap survived from 2.10b to here.
 func TestIntegration_ObservationSink_RuleProposalForAnExistingPeer(t *testing.T) {
@@ -502,153 +500,6 @@ func normaliseMACForLookup(mac string) string {
 	return id.Value
 }
 
-// ---------------------------------------------------------------------------
-// the tenant's auto-accept threshold, on the SINK's engine
-// ---------------------------------------------------------------------------
-
-// TestIntegration_ObservationSink_AutoAcceptThresholdReachesTheEngine: the
-// second of this service's two identity engines honours the tenant's setting
-// too (workstream 4.6a).
-//
-// DeviceService's engine and this one are built separately and neither owns the
-// other — ObservationSink says so in its own doc comment — so wiring one proves
-// nothing about the other. A collector's LLDP neighbour and an operator's
-// manually added device are the same question asked twice, and a tenant whose
-// answer applied to one of them and not the other would have no way to tell
-// which.
-//
-// MUTATION: drop WithAutoAcceptThreshold from resolveObservationWith and this
-// goes red while every DeviceService test stays green.
-func TestIntegration_ObservationSink_AutoAcceptThresholdReachesTheEngine(t *testing.T) {
-	db := connectPeerTestDB(t)
-	audit := installCaptureAudit(t)
-	sink := NewObservationSink(db)
-
-	// ── the control: the default threshold never accepts ────────────────────
-	def := newPeerTenant(t, db)
-	defSelf := subjectAsset(t, db, def, "switch-peer-autoaccept-a")
-	stagePeerConflict(t, sink, db, def, defSelf, "a")
-	if n := autoAcceptedHistoryCount(t, db, def); n != 0 {
-		t.Fatalf("a tenant that has set NOTHING auto-accepted %d peer merge(s)", n)
-	}
-	if n := len(audit.all()); n != 0 {
-		t.Fatalf("%d audit events on a tenant that auto-accepted nothing", n)
-	}
-
-	score := topProposalScore(t, db, def)
-	t.Logf("the shipped model scored the contested peer %.4f", score)
-	if score < 0.1 {
-		t.Fatalf("the contested peer scored %.4f: nothing is scoring it, so this test cannot distinguish "+
-			"a wired threshold from an unwired one", score)
-	}
-	threshold := math.Floor(score*100) / 100
-	if threshold <= 0 {
-		t.Fatalf("derived threshold %v is not above zero", threshold)
-	}
-
-	// ── the subject ─────────────────────────────────────────────────────────
-	set := newPeerTenant(t, db)
-	writeAutoAcceptThreshold(t, db, set, threshold)
-	audit.reset()
-	setSelf := subjectAsset(t, db, set, "switch-peer-autoaccept-b")
-	stagePeerConflict(t, sink, db, set, setSelf, "a")
-	if n := autoAcceptedHistoryCount(t, db, set); n != 1 {
-		t.Fatalf("a tenant whose stored threshold is %v got %d auto-accepted peer merges on a candidate scoring %.4f, "+
-			"want 1: the setting is not reaching the ObservationSink's engine", threshold, n, score)
-	}
-
-	// The SAME audit event DeviceService writes. A tenant asking what the
-	// matcher has done to their inventory is asking one question.
-	events := audit.all()
-	if len(events) != 1 {
-		t.Fatalf("%d audit events for one auto-accepted peer merge, want 1", len(events))
-	}
-	if got, _ := events[0].Metadata["actor"].(string); got != identityaudit.ActorMatcher {
-		t.Errorf("actor = %q, want %q", got, identityaudit.ActorMatcher)
-	}
-	if events[0].EventType != identityaudit.EventType {
-		t.Errorf("event_type = %q, want %q", events[0].EventType, identityaudit.EventType)
-	}
-
-	// ── per tenant, read fresh ──────────────────────────────────────────────
-	stagePeerConflict(t, sink, db, def, defSelf, "b")
-	if n := autoAcceptedHistoryCount(t, db, def); n != 0 {
-		t.Fatalf("the default-threshold tenant auto-accepted %d peer merge(s) after ANOTHER tenant set a threshold", n)
-	}
-}
-
-// stagePeerConflict observes a peer whose every identifier already belongs to a
-// different in-service asset: the identity floor's contested shape, which is
-// where a peer merge can be auto-accepted at all.
-//
-// Both owners are promoted to `monitoring` because the auto-accept refuses to
-// merge into anything still in Approvals — leaving them pending would make this
-// pass for the wrong reason.
-func stagePeerConflict(t *testing.T, sink *ObservationSink, db *sql.DB, tenant, self uuid.UUID, run string) {
-	t.Helper()
-	ctx := context.Background()
-	mac := "02:00:5e:10:00:" + run + "1"
-	host := "peer-conflict-" + run
-	src := peerSource("interrogation:peer-conflict-" + run)
-
-	if err := sink.Persist(ctx, tenant, self, src, peerWith("owner-mac-"+run, mac)); err != nil {
-		t.Fatalf("stage the MAC owner: %v", err)
-	}
-	if err := sink.Persist(ctx, tenant, self, src, peerNamed("owner-host-"+run, host)); err != nil {
-		t.Fatalf("stage the hostname owner: %v", err)
-	}
-	byMAC := peerAssetByMAC(t, db, tenant, mac)
-	byHost := peerAssetByHostname(t, db, tenant, host)
-	if byMAC == byHost {
-		t.Fatal("the two staged peers resolved to ONE asset; the fixture is not contested")
-	}
-	promoteAssetToMonitoring(t, db, tenant, byMAC)
-	promoteAssetToMonitoring(t, db, tenant, byHost)
-
-	// Carries both: the MAC belongs to one asset, the hostname to another, and
-	// neither may decide — so the engine ranks them and either opens a proposal
-	// or accepts the winner.
-	peer := di.PeerRef{DisplayName: "contested-" + run}
-	peer.Identifiers = []di.PeerIdentifier{
-		{Kind: di.IdentifierMACAddress, Value: mac},
-		{Kind: di.IdentifierHostname, Value: host},
-	}
-	obs := InterrogationObservations{Relationships: []di.RelationshipObservation{{
-		Type:      string(relationships.ConnectsTo),
-		Peer:      peer,
-		Direction: di.SubjectToPeer,
-	}}}
-	// A contested peer is reported by Persist as a skipped EDGE, not as a
-	// failure of the interrogation, so an error here would be a real one.
-	if err := sink.Persist(ctx, tenant, self, src, obs); err != nil {
-		t.Fatalf("observe the contested peer: %v", err)
-	}
-}
-
-// peerNamed is a peer described only by a bare hostname.
-func peerNamed(display, hostname string) InterrogationObservations {
-	return InterrogationObservations{Relationships: []di.RelationshipObservation{{
-		Type: string(relationships.ConnectsTo),
-		Peer: di.PeerRef{
-			DisplayName: display,
-			Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierHostname, Value: hostname}},
-		},
-		Direction: di.SubjectToPeer,
-	}}}
-}
-
-func peerAssetByHostname(t *testing.T, db *sql.DB, tenant uuid.UUID, hostname string) uuid.UUID {
-	t.Helper()
-	var id uuid.UUID
-	if err := db.QueryRow(`
-		SELECT asset_id FROM asset_identifiers
-		 WHERE tenant_id = $1 AND kind = 'hostname' AND value = $2`,
-		tenant, hostname).Scan(&id); err != nil {
-		t.Fatalf("find the peer asset by hostname %s: %v", hostname, err)
-	}
-	return id
-}
-
 func TestIntegration_ObservationSink_RetainsWeakPeerFactsAndEdges(t *testing.T) {
 	owner := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, owner)
@@ -664,19 +515,7 @@ func TestIntegration_ObservationSink_RetainsWeakPeerFactsAndEdges(t *testing.T) 
 	if _, err := owner.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')`, tenant); err != nil {
 		t.Fatal(err)
 	}
-	enable := func(s *ObservationSink) {
-		t.Helper()
-		_, repo, err := s.engine()
-		if err != nil {
-			t.Fatal(err)
-		}
-		s.eng, err = identity.New(identity.Config{Repo: repo, AdmissionEnabled: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
 	sink := NewObservationSink(app)
-	enable(sink)
 	seen := oldSeen.Add(time.Hour)
 	peer := di.PeerRef{DisplayName: "mystery.local", Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierHostname, Value: "mystery.local"}}}
 	obs := InterrogationObservations{ObservedAt: seen,
@@ -711,7 +550,6 @@ func TestIntegration_ObservationSink_RetainsWeakPeerFactsAndEdges(t *testing.T) 
 		t.Fatal(err)
 	}
 	restarted := NewObservationSink(app)
-	enable(restarted)
 	if err := restarted.ReplayRetainedPeers(ctx, other); err != nil {
 		t.Fatal(err)
 	}
@@ -778,10 +616,7 @@ func TestIntegration_ObservationSink_UsesControllerProofWithoutTrustingAdvertise
 		{"offline inventory serial", di.PeerRef{IdentityEvidence: di.PeerIdentityEvidence{ControllerInventory: true}, Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierSerialNumber, Value: "DEVICE-SERIAL"}}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			obs, _, err := sink.peerObservation(context.Background(), tenant, tc.peer, source, time.Now())
-			if err != nil {
-				t.Fatal(err)
-			}
+			obs := peerIntakeObservation(t, sink, tenant, tc.peer, source)
 			if got := identity.AssessAdmission(obs); got.Established != tc.want {
 				t.Fatalf("admission=%+v want established=%t", got, tc.want)
 			}

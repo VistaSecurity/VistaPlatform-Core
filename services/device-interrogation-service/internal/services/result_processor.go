@@ -822,6 +822,7 @@ func buildSensorDiscoveryMetadata(deviceID *uuid.UUID, integrationID *uuid.UUID,
 		meta[k] = v
 	}
 	applySSHBannerVersion(meta, asset)
+	markUnmeasuredProtocolVersion(meta, asset)
 	if len(asset.Certificates) > 0 {
 		certs := make([]map[string]interface{}, 0, len(asset.Certificates))
 		for _, cert := range asset.Certificates {
@@ -936,6 +937,36 @@ func applySSHBannerVersion(meta map[string]interface{}, asset models.DiscoveredA
 		return
 	}
 	delete(meta, "version")
+}
+
+// unmeasuredComponentsKey is the raw_data key naming the components of a
+// configuration that its producer did NOT measure. Inventory reads it
+// (inventory-service cipher_assessment.go) to store the configuration as
+// partially assessed: a Low or Informational score there would be a verdict
+// nobody reached. The value is a list of algorithm roles.
+const unmeasuredComponentsKey = "unmeasured_components"
+
+// versionScoredProtocols are the protocols whose protocol VERSION the catalogue
+// scores and weak-protocol detection reads, so an absent one is a gap in the
+// assessment rather than a field that does not apply.
+var versionScoredProtocols = map[string]bool{"TLS": true, "DTLS": true, "SSH": true}
+
+// markUnmeasuredProtocolVersion records that a TLS, DTLS or SSH configuration
+// reached this writer with no protocol version ( W1.2, unknown stays
+// unknown). The collectors no longer fill one in; this is what stops the
+// absence reading downstream as "nothing weak about the version" — inventory
+// stores such a configuration as partially assessed, unassessed below Medium.
+//
+// Runs after applySSHBannerVersion, so an SSH row whose banner stated a version
+// is measured whatever its collector sent.
+func markUnmeasuredProtocolVersion(meta map[string]interface{}, asset models.DiscoveredAsset) {
+	if !versionScoredProtocols[cryptoparse.NormalizeProtocol(asset.Protocol)] {
+		return
+	}
+	if v, _ := meta["version"].(string); strings.TrimSpace(v) != "" {
+		return
+	}
+	meta[unmeasuredComponentsKey] = []string{"protocol_version"}
 }
 
 // applyVPNKeyExchange writes an IPsec tunnel's key exchange from the DH-group

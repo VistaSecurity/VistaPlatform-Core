@@ -320,7 +320,7 @@ func TestLease_LateArrivalNeverMovesTheAddressBack(t *testing.T) {
 func TestLease_NotMovedByANameMatch(t *testing.T) {
 	s := newLeaseSetup(t, identity.Config{})
 	kiosk := scoped(identity.KindHostname, "kiosk-b", leaseScope)
-	if err := s.repo.AttachIdentifiers(context.Background(), s.b, []identity.Identifier{kiosk}); err != nil {
+	if _, err := s.repo.AttachIdentifiers(context.Background(), s.b, []identity.Identifier{kiosk}); err != nil {
 		t.Fatalf("AttachIdentifiers: %v", err)
 	}
 
@@ -382,19 +382,14 @@ func TestLease_NotMovedWithoutAReassigner(t *testing.T) {
 //
 // Mutation checks, one per arm of holderDeclaredAddress: drop the
 // operator_confirmed arm → "operator-confirmed identity" fails; drop the
-// declaration_id arm → "declared record" fails; drop the declared-identifier
-// arm → "declared address" fails.
+// declaration_id arm → "declared record" fails. A declared ADDRESS is pinned
+// since and has its own test below
+// (TestLease_DeclaredAddressIsPinnedNotALease).
 func TestLease_NotMovedFromADeclaredHolder(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, repo *memory.Repository) identity.AssetRef
 	}{
-		{"declared address", func(t *testing.T, repo *memory.Repository) identity.AssetRef {
-			addr := leaseAddr
-			addr.Source = identity.Source{Kind: identity.SourceDeclared, Ref: "manual"}
-			addr.SeenAt = leaseAt
-			return createHolder(t, repo, "", addr)
-		}},
 		{"declared record", func(t *testing.T, repo *memory.Repository) identity.AssetRef {
 			// A serial of its own, so the holder is a device and ONLY the
 			// declaration_id arm stands between it and the move.
@@ -418,6 +413,44 @@ func TestLease_NotMovedFromADeclaredHolder(t *testing.T) {
 			s := leaseSetup{e: e, repo: repo, a: a, b: b.Asset}
 			s.assertNotMoved(t, res, "the previous holder is a record a person made about this address")
 		})
+	}
+}
+
+// TestLease_DeclaredAddressIsPinnedNotALease: an address a person put on a
+// record is stored pinned ([identity.AssignmentStatic], decision 1), so
+// inside a DHCP scope it still speaks for its holder. Another device's MAC seen
+// at it, with nothing else, is then exactly what it is on a static segment: a
+// node announcing an address that belongs to another record — the
+// floating-address rule — and in no case a lease move.
+//
+// Mutation checks: make Identifier.StoredAssignment ignore SourceDeclared, AND
+// drop the declared arm of holderDeclaredAddress → the address moves to B.
+// Drop only the pinned-address exception in Engine.dynamicAddress → the
+// address no longer votes, no floating address is recorded, and this fails on
+// FloatingAddress.
+func TestLease_DeclaredAddressIsPinnedNotALease(t *testing.T) {
+	e, repo := newLeaseEngine(t, identity.Config{})
+	addr := leaseAddr
+	addr.Source = identity.Source{Kind: identity.SourceDeclared, Ref: "manual"}
+	addr.SeenAt = leaseAt
+	a := createHolder(t, repo, "", addr)
+	b := mustResolve(t, e, arpSighting(leaseAt.Add(time.Minute), leaseMACB, otherAddr))
+
+	res := mustResolve(t, e, arpSighting(leaseAt.Add(time.Hour), leaseMACB, leaseAddr))
+
+	s := leaseSetup{e: e, repo: repo, a: a, b: b.Asset}
+	if got := s.ownerOf(t, leaseAddr); got != a.ID {
+		t.Fatalf("the declared address moved to %s; want it still on %s", got, a.ID)
+	}
+	if res.Outcome != identity.OutcomeMatched || res.Asset.ID != a.ID ||
+		res.FloatingAddress == nil || res.FloatingAddress.AnnouncerAssetID != b.Asset.ID {
+		t.Fatalf("resolution = %s on %s (floating %+v), want A's pinned address matched with B recorded as its announcer",
+			res.Outcome, res.Asset.ID, res.FloatingAddress)
+	}
+	for _, ref := range []identity.AssetRef{a, b.Asset} {
+		if n := len(leaseMovedEntries(repo.HistoryFor(ref))); n != 0 {
+			t.Errorf("%s has %d lease_moved entries, want 0", ref.ID, n)
+		}
 	}
 }
 

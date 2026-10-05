@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,6 +45,10 @@ type AgentService struct {
 	jobQueue        *JobQueueService
 	resultProcessor *ResultProcessor
 	encryptionKey   string
+	// discoveryCreator records the device a completed device_discovery job
+	// identified. Nil means a DeviceService over db (production); tests set a
+	// stub.
+	discoveryCreator discoveredDeviceCreator
 }
 
 // NewAgentService creates a new agent service. db is the RLS-scoped (crypto_app)
@@ -537,7 +542,16 @@ func (s *AgentService) ListAllAgents(ctx context.Context, tenantID string) ([]*m
 
 // GetNextJob retrieves the next pending job for an agent
 func (s *AgentService) GetNextJob(ctx context.Context, agentID uuid.UUID) (*models.Job, error) {
-	deviceJob, err := s.jobQueue.GetNextJobForAgent(ctx, agentID)
+	return s.GetNextJobWithCapabilities(ctx, agentID, nil)
+}
+
+// GetNextJobWithCapabilities is GetNextJob for an agent that declared, on its
+// poll, the job types it can run beyond device_interrogation. The declaration
+// is remembered briefly, so Add device can refuse to queue a discovery on an
+// agent that would never pick it up (see DeviceDiscoveryJobs.Enqueue).
+func (s *AgentService) GetNextJobWithCapabilities(ctx context.Context, agentID uuid.UUID, caps map[string]bool) (*models.Job, error) {
+	s.jobQueue.RecordAgentCapabilities(ctx, agentID, caps)
+	deviceJob, err := s.jobQueue.GetNextJobForAgentWithCapabilities(ctx, agentID, caps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get next job: %w", err)
 	}
@@ -772,8 +786,11 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 	if job.Status != models.JobStatusInProgress {
 		return ErrJobTenantMismatch
 	}
-	if job.JobType != models.JobTypeDeviceInterrogation && job.JobType != models.JobTypeHostInventory {
+	if job.JobType != models.JobTypeDeviceInterrogation && job.JobType != models.JobTypeHostInventory && job.JobType != models.JobTypeDeviceDiscovery {
 		return ErrJobTenantMismatch
+	}
+	if job.JobType == models.JobTypeDeviceDiscovery {
+		return s.submitDeviceDiscoveryResult(ctx, job, result)
 	}
 
 	// Collection warnings are free text a device wrote and an agent relayed.
@@ -822,6 +839,33 @@ func (s *AgentService) SubmitJobResult(ctx context.Context, agentID uuid.UUID, r
 		}
 	}
 
+	return nil
+}
+
+// submitDeviceDiscoveryResult finishes an agent-routed Add device (
+// slice B): the result is projected to its allowlisted parts, the device is
+// created from the identification exactly as the synchronous probe creates it,
+// and the job's stored credentials are dropped once the device holds them.
+func (s *AgentService) submitDeviceDiscoveryResult(ctx context.Context, job *models.DeviceJob, received *models.JobResult) error {
+	creator := s.discoveryCreator
+	if creator == nil {
+		creator = NewDeviceServiceWithKey(s.db, s.encryptionKey)
+	}
+	stored, status := completeDeviceDiscovery(ctx, creator, job, received, s.encryptionKey)
+	var errorMsg *string
+	if status == models.JobStatusFailed {
+		errorMsg = &stored.Error
+	}
+	if err := s.jobQueue.UpdateJobStatus(ctx, job.ID, status, stored, errorMsg); err != nil {
+		return fmt.Errorf("failed to update job status: %w", err)
+	}
+	if status == models.JobStatusCompleted {
+		// The device row now holds the credentials (encrypted under its own
+		// policy); a completed job has no further use for its copy.
+		if err := dropDiscoveryCredentials(ctx, s.bypassDB, job.TenantID, job.ID); err != nil {
+			log.Printf("[AgentService] discovery %s: could not drop its stored credentials: %v", job.ID, err)
+		}
+	}
 	return nil
 }
 

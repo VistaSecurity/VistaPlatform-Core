@@ -72,7 +72,7 @@ func main() {
 	}).Info("Starting Resource Tracker Service")
 
 	// Initialize database connection
-	db, err := sql.Open("postgres", databaseURL)
+	db, err := sql.Open("postgres", shareddatabase.ApplyServerDefaults(databaseURL))
 	if err != nil {
 		logger.WithError(err).Fatal("Failed to connect to database")
 	}

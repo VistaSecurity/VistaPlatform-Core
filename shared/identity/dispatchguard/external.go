@@ -63,9 +63,11 @@ const (
 	// DefaultExternalTargetAddresses is an IPv4 /20 or an IPv6 /116.
 	DefaultExternalTargetAddresses uint64 = 4096
 	// MaxExternalTargetAddresses is the ceiling on the operator's knob. The
-	// in-cluster scanner expands at most 4,096 hosts per target
-	// (shared/discovery maxSweepHosts), so a larger bound would accept a block
-	// and then silently scan only the front of it.
+	// scanner expands at most 4,096 hosts per target
+	// (shared/discovery.MaxTargetAddresses), so a larger bound could never be
+	// honoured: job creation refuses any target above that size
+	// (shared/discovery.CheckTargetSizes, "scan_target_too_large") before this
+	// bound is consulted, rather than scanning only the front of the block.
 	MaxExternalTargetAddresses uint64 = 4096
 	// DefaultExternalJobAddresses / MaxExternalJobAddresses: without a job
 	// total, 1,000 targets x 4,096 addresses is ~4.1 million third-party

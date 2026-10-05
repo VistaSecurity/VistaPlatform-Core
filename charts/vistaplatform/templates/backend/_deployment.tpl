@@ -594,6 +594,14 @@ spec:
               value: {{ $ext.maxAddressesPerTarget | default 4096 | int | toString | quote }}
             - name: DISCOVERY_EXTERNAL_JOB_MAX_ADDRESSES
               value: {{ $ext.maxAddressesPerJob | default 16384 | int | toString | quote }}
+            {{- /* Scan-plan probe budget (#2170 H19); the service fails closed to its default. */}}
+            - name: DISCOVERY_MAX_JOB_PROBES
+              value: {{ (($ctx.Values.discovery | default dict).maxJobProbes) | default 25000000 | int64 | toString | quote }}
+            {{- /* Scan-plan unit share-out per replica (#2170 H33); the service fails closed to its defaults. */}}
+            - name: DISCOVERY_MAX_CONCURRENT_UNITS
+              value: {{ (($ctx.Values.discovery | default dict).maxConcurrentUnits) | default 16 | int | toString | quote }}
+            - name: DISCOVERY_MAX_CONCURRENT_UNITS_PER_TENANT
+              value: {{ (($ctx.Values.discovery | default dict).maxConcurrentUnitsPerTenant) | default 4 | int | toString | quote }}
             {{- end }}
             {{- /*
               Backends that intentionally reach customer RFC1918 networks:
@@ -639,6 +647,33 @@ spec:
             {{- fail (printf "backends.%s.extraEnv must not set VISTA_PLATFORM_INTERNAL_CIDRS; configure networkPolicy.clusterInternalCIDRs so the application and NetworkPolicy use the same source of truth" $name) }}
             {{- end }}
             {{- end }}
+            {{- /*
+              monitoring-service's probe targets are rendered here, not kept in
+              its values.yaml extraEnv list: Helm replaces lists, so a customer
+              extraEnv (one entry is enough) dropped all of them, and the
+              service then fell back to compose-era hosts this chart never
+              creates (http://api-gateway:80, http://nats:8222) and reported
+              both as down. An extraEnv entry with the same name replaces the
+              chart's value, so each stays overridable without a duplicate env
+              name. The empty values are deliberate: no in-cluster api-gateway
+              pod exists, and "" opts those probes out.
+            */}}
+            {{- if eq $name "monitoring-service" }}
+            {{- $customerEnv := dict }}
+            {{- range $svc.extraEnv }}
+            {{- $_ := set $customerEnv (toString (.name | default "")) true }}
+            {{- end }}
+            {{- range $default := list
+                  (dict "name" "NATS_MONITOR_URL" "value" "http://nats-headless:8222")
+                  (dict "name" "API_GATEWAY_URL" "value" "")
+                  (dict "name" "TRAEFIK_API_URL" "value" "")
+                  (dict "name" "TRAEFIK_DASHBOARD_URL" "value" "") }}
+            {{- if not (hasKey $customerEnv $default.name) }}
+            - name: {{ $default.name }}
+              value: {{ $default.value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- with $svc.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -646,8 +681,8 @@ spec:
             Synthetic-edge checks: monitoring-service consumes a JSON-encoded
             list via SYNTHETIC_CHECKS_JSON. Sourced from .Values.monitoring.
             syntheticChecks so customers can declare checks in a structured
-            YAML list without copying the other extraEnv defaults
-            (NATS_MONITOR_URL etc.). See values.yaml `monitoring:` block.
+            YAML list rather than through extraEnv. See values.yaml
+            `monitoring:` block.
             */}}
             {{- if and (eq $name "monitoring-service") $ctx.Values.monitoring }}
             {{- with $ctx.Values.monitoring.syntheticChecks }}

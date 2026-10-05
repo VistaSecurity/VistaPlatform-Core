@@ -354,6 +354,12 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 	// reference to a merged-away asset lands on, so it is the one that most has
 	// to answer "this is now that".
 	setMergedInto(&asset)
+	// The networks it is the gateway of, and its own network's gateway
+	//. Absent, not empty, when they could not be read: the asset page
+	// shows its error note for the card rather than "routes nothing".
+	if err := s.loadAssetGatewayContext(context.Background(), tenantID, &asset); err != nil {
+		log.Printf("[AssetService] GetAssetByID: loading gateway context for %s failed: %v", assetID, err)
+	}
 	cryptoImpls, err := s.GetCryptoImplementations(tenantID, assetID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get crypto implementations: %w", err)

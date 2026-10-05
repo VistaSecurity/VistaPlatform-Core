@@ -122,7 +122,10 @@ func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []
 				riskFactors = append(riskFactors, "Outdated TLS version")
 			}
 		case "SSH":
-			if version < "2.0" {
+			// Stored as the catalogue code ("SSH-1.99", from the banner); the
+			// bare comparison read "SSH-1.99" < "2.0" as false and never
+			// flagged a server that still accepts SSH-1.
+			if v := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(version)), "SSH-"); v != "" && v < "2.0" {
 				riskFactors = append(riskFactors, "Outdated SSH version")
 			}
 		}
@@ -162,6 +165,12 @@ func (s *AssetService) AnalyzeCryptoRisk(crypto *models.CryptoImplementation) []
 		if partial, unexpanded := cryptoparse.CipherStringAssessment(*crypto.CipherSuite); partial {
 			riskFactors = append(riskFactors, partialCipherAssessmentFactor(unexpanded))
 		}
+	}
+	// Likewise a protocol version its producer says it did not measure
+	// (component_assessment.go): no "Outdated TLS version" above is not a
+	// clean bill when there was no version to judge.
+	if protocolVersionUnmeasured(crypto.RawData, crypto.ProtocolVersion) {
+		riskFactors = append(riskFactors, unmeasuredVersionFactor)
 	}
 	if crypto.HashAlgorithm != nil {
 		hash := strings.ToUpper(*crypto.HashAlgorithm)

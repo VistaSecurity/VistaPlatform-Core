@@ -90,8 +90,8 @@ const rowFor = {
   custom_branding: 'White-label branding',
   cmdb_sync: 'CMDB/ITSM sync',
   connector_netbox: 'NetBox network source of truth',
+  ai_tenant_provider: 'Bring your own AI model provider',
   siem_export: 'SIEM forwarding',
-  ot_active_probing: 'OT/ICS active probing',
   ot_primary_lens: 'OT inventory lens',
 };
 const matrix = readme.split('\n').filter((l) => /^\|/.test(l));

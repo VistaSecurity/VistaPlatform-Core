@@ -112,8 +112,21 @@
         "value": "11.1.4-h7"
       }
     ],
-    "edges": [],
+    "edges": [
+      {
+        "from": "device",
+        "source_kind": "measured",
+        "status": "pending",
+        "to": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+        "type": "connects_to"
+      }
+    ],
     "assets": [
+      {
+        "asset": "asset[fqdn=core-sw-1.example.net,ip_address=198.51.100.1,mac_address=00:1b:17:00:00:01]",
+        "class_key": "firewall",
+        "status": "pending_approval"
+      },
       {
         "asset": "device",
         "class_key": "firewall",
@@ -122,13 +135,39 @@
     ],
     "retained_observations": [
       {
-        "admission_reasons": "{insufficient_identity_evidence}",
+        "admission_reasons": "{authoritative_identifier}",
         "identifiers": [
           {
             "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:1b:17:00:00:01"
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
           },
+          {
+            "confidence": 1,
+            "kind": "serial_number",
+            "value": "013201001234"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "pa-edge-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{insufficient_identity_evidence}",
+        "identifiers": [
           {
             "confidence": 1,
             "kind": "ip_address",
@@ -137,8 +176,8 @@
           },
           {
             "confidence": 1,
-            "kind": "fqdn",
-            "value": "core-sw-1.example.net"
+            "kind": "mac_address",
+            "value": "00:1b:17:00:00:01"
           },
           {
             "confidence": 1,

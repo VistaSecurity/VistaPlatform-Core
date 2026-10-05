@@ -8,11 +8,12 @@ conflict path.
 It replaces the four ad hoc dedupe keys the survey found: six intake paths,
 four keys, no `ON CONFLICT` anywhere, and manual create not deduping at all.
 
-**Nothing is wired to it yet.** Workstream 0.4 builds the engine; workstream
-1.2 wires it into every intake path with per-path observation builders, and
-1.1 supplies the Postgres `Repository`. It is pure Go, CGO-free, with no
-database and no service dependency, so the sensor and the in-cluster services
-can both import it.
+Every inventory path resolves through it: inventory-service's own adapters and,
+since #2205 (platform ADR-0003 D3), device-interrogation-service's too, which
+posts `Sighting`s to inventory-service rather than running an engine of its own.
+The engine package is pure Go, CGO-free, with no database and no service
+dependency, so the sensor and the in-cluster services can both import it; the
+Postgres `Repository` is in `shared/identity/postgres`.
 
 ## How an intake path calls it
 
@@ -50,14 +51,56 @@ advances last-seen, opens the merge proposal, and writes `asset_history` — of
 which this package is the **first writer**. The caller acts on the outcome; it
 does not repeat the work.
 
+**A match writes an `updated` history row only when it changed something.**
+`asset_history` is the timeline people read, so a re-observation that attached
+nothing new leaves it alone, while every last-seen still advances. Changed means
+an identifier newly inserted or an endpoint newly inserted or whose protocol or
+service name changed (both reported by the repository write itself:
+`AttachIdentifiers` and `UpsertEndpoints` return counts), a better hostname or
+display name, or an outcome that carries its own key (`lease_moved`,
+`claimed_rehomed`, `corroborated_provisional`, ...). A standing *condition* —
+identifiers held back as `unattached`, a `floating_address`, an `announces`
+edge, an `address_only_link`, a `suppressed_proposal` — is written the first
+time it appears and not again, decided by `Repository.HistoryHasChange` (JSON
+containment on the asset's earlier rows). An import or declaration listing the
+asset (`listed_by`) is written once per source ref, because the auto-scan
+consent rule reads "a spreadsheet has listed it" off the timeline. `created`,
+`approved`, `merge_proposed`, merges and identity-status transitions are not
+affected.
+
+### Building the observation: `Intake`
+
+An intake path should not decide scopes, `DynamicScopes` or admission flags
+itself. It describes what it saw as an `identity.Sighting` (raw identifiers,
+each name with the address it was seen at, and the `Channel` the evidence came
+through) and `identity.NewIntake(repo).Build(ctx, sighting)` returns the
+`Observation`: every address and name scoped separately against one segment
+snapshot, dynamic scopes from the stored segment posture, admission flags from
+the channel table (`ChannelAdmission`), and hygiene applied once.
+`identity.Diff(a, b)` compares two observations for a shadow run before an
+adapter switches. Every inventory-service adapter uses it (#2205 phase 2), and
+device-interrogation-service posts its sightings to inventory-service's
+`/internal/sightings` route; the rules, the channel table and the migration
+steps are in
+`docsv4/internal/developer/design/asset-inventory/identity-intake.md`.
+`Sighting.BridgePriorScope` carries an owned tenant-default copy of each
+segment-scoped address across a network's registration.
+
+A declaration that NAMES its asset (an identifier edit, a connector's source
+link) is resolved with `Engine.ResolveDeclaredFor(obs, target)`: locked,
+ownership re-checked, singleton-guarded, attached and recorded in history —
+or refused whole with a `DeclaredTargetConflict` when another asset owns an
+identifier. It skips admission and the precedence walk: the declarer already
+chose the asset.
+
 ## The outcomes
 
 | Outcome | When | What the engine did |
 |---|---|---|
-| `matched` | Exactly one existing asset resolved from the identifiers | Attached the new identifiers, upserted the endpoints, advanced last-seen, history `updated`. `DecidedBy` names the highest-precedence kind that matched. A DHCP address still owned by the previous lease holder may MOVE to the matched asset — see **The address follows the MAC** below. |
+| `matched` | Exactly one existing asset resolved from the identifiers | Attached the new identifiers, upserted the endpoints, advanced last-seen, history `updated` **only if something changed** (see above). `DecidedBy` names the highest-precedence kind that matched. A DHCP address still owned by the previous lease holder may MOVE to the matched asset — see **The address follows the MAC** below. |
 | `created` | Nothing matched | Created a `pending_approval` asset with the class hint, or `unknown_host` / `external` per the network ownership. History `created`. |
 | `provisional` | Evidence that cannot establish anything, placed on a configured and unambiguous tenant segment, owned by nobody — and `Config.ProvisionalInventory` is on | Created a `pending_approval` asset with `identity_status = provisional`, WITHOUT an allowance check. See **Provisional identity** below. |
-| `supporting` | Evidence that cannot establish anything, every owned identifier belonging to ONE asset — and `Config.ProvisionalInventory` is on. **Or** the floor: every identifier owned, all by ONE asset, none allowed to vote — whatever the flag (#2081 A1) | Linked the observation to that asset. Advanced its last-seen — and, if the asset is itself provisional, attached the new identifiers — but ONLY when the observation is a sighting. Not a match: nothing was allowed to decide. A link that is a **lease alone** is the exception — see the address-only link rule below. |
+| `supporting` | Evidence that cannot establish anything, every owned identifier belonging to ONE asset — whatever `Config.ProvisionalInventory` says (#2205). **Or** the floor: every identifier owned, all by ONE asset, none allowed to vote (#2081 A1) | Linked the observation to that asset. Advanced its last-seen — and, if the asset is itself provisional, attached the new identifiers — but ONLY when the observation is a sighting. Not a match: nothing was allowed to decide. A link that is a **lease alone** is the exception — see the address-only link rule below. |
 | `conflict` | One kind matched several assets, **or** two kinds matched different assets, **or** every identifier is owned by TWO OR MORE other assets and none may vote | Opened a merge proposal listing every candidate with the identifiers that matched it. The observation becomes its own pending asset ONLY if it carries an identifier nobody owns (history `created` then `merge_proposed`); when everything is contested nothing is created and `Resolution.Asset` is ZERO — see the floor. **Never merged inside `Resolve`.** When the same-device rule holds the proposal is stamped `rule_verdict: same_device` and `Resolution.MergeRecommended` is set; inventory-service's rule-merge executor merges it later (see **The same-device rule**). A proposal always names at least two candidates. |
 
 ## The rules, and why each exists
@@ -84,8 +127,7 @@ after the first carrying no identifier at all. `ip_address` still never votes
 inside a scope flagged dynamic — today's DHCP lease is tomorrow's other host.
 
 `Repository.ScopeForAddress` is the one place that decides which scope an
-address is in, so inventory-service and device-interrogation-service cannot
-disagree about it. When a tenant later creates segments, an asset identified
+address is in, so no intake path can disagree with another about it. When a tenant later creates segments, an asset identified
 under the default scope keeps its identifiers and a re-observation inside a new
 segment adds the segment-scoped one alongside; the engine matches through the
 stronger kinds first, and a tenant reorganising its segments may see merge
@@ -118,16 +160,14 @@ scope its names to `tenant` while an IPv4 address beside it sat in a real
 segment, so one name lived under two scopes and never collided with itself.
 When no address resolves, the old rule stands: the first address, then a
 `domain` segment matched by name, then `tenant`. The Devices form follows the
-same rule over the IP field, an address typed into the name field, and the
-management URL's host (device-interrogation `deviceSegmentScope`). Existing
+same rule, now through `Intake`: each address and name scoped on its own. Existing
 rows are not rewritten.
 
 **Synthetic names are attributes, not identifiers.**
 `hostnamequality.IsIdentityName` is the one test: a name whose first label is
 UUID-form (a rotating service-instance name), IP-encoded (`192-0-2-5.local`, the
-lease written as a name) or `none` / `none-N` is not identity. Both intakes —
-inventory-service's host-observation ingest and device-interrogation's
-`peerObservation` — record such names in the asset's `synthetic_names`
+lease written as a name) or `none` / `none-N` is not identity. `Intake` applies it
+once for every path, and the adapters record such names in the asset's `synthetic_names`
 attribute (deduplicated, most recent first, at most
 `hostnamequality.MaxSyntheticNames` = 20) instead of minting a `hostname`
 identifier per announcement. A 12-hex `.local` name is **kept** as an
@@ -408,7 +448,7 @@ label plus the mDNS `.local` suffix. A multi-label name that is not `.local`
 never generic; ingest files those as `fqdn` and never asks. Only the
 **measured** intake paths mark: the sensor's host observation, discovery
 findings (inventory-service `discoveryObservation` — sensor, scan, PCAP and
-cloud), the scoped DNS enrichment lookup, and device-interrogation's peers. A
+cloud), the scoped DNS enrichment lookup, and device-interrogation's peers (as sightings). A
 name a person or a system of record supplied — manual create, elevation, SBOM
 subjects, spreadsheet/CMDB/NetBox imports (`manualObservation`), operator edits
 of an asset or a managed device — is a statement about which device this is and
@@ -471,8 +511,8 @@ the engine never invents an identifier:
 | Intake | Derives | Only when |
 |---|---|---|
 | inventory host-observation ingest | a MAC from every EUI-64 address (link-local included) | the sighting stated no MAC at all |
-| device-interrogation `peerObservation` | a MAC from an EUI-64 address or a 12-hex serial | the peer carries no MAC |
-| device-interrogation Devices form (`deviceObservation`) | a MAC from a 12-hex serial | always (the form has no MAC field) |
+| device-interrogation peer sighting (via `Intake`) | a MAC from an EUI-64 address or a 12-hex serial | the peer carries no MAC |
+| device-interrogation Devices form sighting (via `Intake`) | a MAC from a 12-hex serial | always (the form has no MAC field) |
 
 A derived identifier is marked `Source.Kind = inferred`, `Source.Ref =
 derived:eui64:<addr>` or `derived:serial:<serial>`, confidence 0.9. It is the
@@ -515,7 +555,9 @@ has something besides the lease to be recognised by.
 
 `Config.ProvisionalInventory` (off by default; inventory-service's production
 constructor is the only caller that turns it on) adds a third identity status
-and two outcomes, for the case #1898 names: a sensor on VLAN A hears a
+and the provisional creation and corroboration rules (the single-owner
+`supporting` shortcut is NOT behind it: that one is ownership, and runs in every
+engine, #2205). It adds, for the case #1898 names: a sensor on VLAN A hears a
 *reflected* mDNS advert for a printer that lives on VLAN B. The advert is
 hearsay — nothing touched the device — so admission refuses to establish
 anything from it, and without this the evidence is an observation no inventory
@@ -690,8 +732,8 @@ disagrees") — runtime data about the tenant's own records, which becomes the
 audit reason and the "Merged automatically" row's explanation.
 
 **The engine only stamps.** `Engine.WithAutoMergeExisting(on)` carries the
-tenant's setting for one observation (read on the resolving transaction by both
-inventory-service and device-interrogation-service, exactly like the
+tenant's setting for one observation (read on the resolving transaction by
+inventory-service, which hosts the engine for every path, exactly like the
 threshold; a freshly built engine is OFF). On a conflict — `resolveConflict`
 or `resolveContested` — `withSameDeviceVerdict` evaluates the rule over the
 ranked candidates and their summaries; when it holds, the proposal is opened
@@ -797,6 +839,171 @@ listed — a verdict awaiting its executor has done nothing yet. The window for 
 rule row is measured from `resolved_at` (falling back to when the proposal was
 opened if it is missing or unreadable), because a rule can merge a proposal that
 has been pending for weeks and that merge must be visible on the day it happens.
+
+## Drift: a changed binding is classified, not vetoed (#2205 Decision 4)
+
+Once the precedence walk has DECIDED a match, `Resolve` hands the observation
+and the decided asset to the drift classifier (`matcher.ClassifyDrift`,
+`matcher/drift.go`; engine side in `drift.go`). It compares seven signals —
+MAC, SSH host key, one-per-asset hardware ids (serial, agent, sensor, cloud
+id), leaf TLS certificate, hostname/FQDN (generic names excluded), address,
+and port profile — each as `agree` / `differ` / `unknown`, and returns the
+first row of `matcher.DriftTable` that applies.
+
+The SSH host key is compared **by algorithm** (`Identifier.KeyAlgorithm`,
+stored as `asset_identifiers.key_algorithm`, normalised to the key family by
+`NormalizeSSHKeyAlgorithm`: `rsa-sha2-512` and `ssh-rsa` are both `rsa`). A
+host offers one key per algorithm and a probe sees whichever negotiation
+picked, so a different fingerprint is only a change when it is the same
+algorithm:
+
+| Host key state | Meaning | Effect |
+|---|---|---|
+| `agree` | a shared fingerprint | — |
+| `differ` | same algorithm, different fingerprint | the rotation rows below can apply |
+| `added` | an algorithm the asset has not shown (all stored algorithms known) | another key of the host: attached, no event, nothing retired |
+| `unconfirmed` | different fingerprint, algorithm unknown on either side (e.g. a key stored before algorithms were recorded) | never a rotation, never a deletion; flagged at most (address-only row), otherwise a plain match |
+
+In the table, "host key" in the Different column means `differ` unless noted.
+
+| Row | Same | Different | Verdict | Engine does |
+|---|---|---|---|---|
+| `hardware_id_kept_key_changed` | serial / agent / cloud id | host key | **rotated** | match; retire old key; `ssh_host_key_rotated` |
+| `address_kept_hardware_changed` | IP | MAC (host key differs or unknown) | **replaced** | merge proposal (the singleton-conflict path, as before) |
+| `mac_kept_os_material_changed` | MAC | host key, TLS cert, hostname | **reimaged** | match; retire old key; `identity_material_rotated` |
+| `mac_and_address_kept_key_changed` | MAC, IP | host key | **rotated** | match; retire old key; `ssh_host_key_rotated` |
+| `keys_kept_address_changed` | MAC and/or host key (host key `agree`, `unknown` or `added`) | IP, old one silent | **moved** | match; release old address; `address_moved` |
+| `address_only_key_changed_rest_agrees` | IP, and every known one of TLS / hostname / ports (≥1 known) | host key (no MAC seen) | **rotated** | as rotated |
+| `address_only_key_changed_rest_changed` | IP | host key, and every known one of TLS / hostname / ports (≥1 known) | **replaced** | merge proposal |
+| `address_only_key_changed_unconfirmed` | IP | host key (`differ` or `unconfirmed`); nothing else known, or what is known disagrees | **unverified** | match, retire nothing, `identity_drift_flagged` with `needs_review` |
+
+No row → today's behaviour: the admission path's interface check
+(`interfaceBindingConflict`) still runs for a name- or address-decided match.
+
+Details that are rules, not accidents:
+
+- **The address only DIFFERS when the old one went silent.** An asset may hold
+  several addresses; a new one beside an address seen within `MovedSilence`
+  (48h) is an addition (`unknown`), not a move. Only same-family addresses
+  count, and a PINNED address (declared by an operator, or reported static by
+  the host's agent: `address_assignment = 'static'`) is never silent — it is
+  not released by a sensor. "Moved" releases this asset's own old address; the
+  lease rule (`lease.go`) still decides whether an address another asset holds
+  moves here. They never act on the same row.
+- **Ports need a profile.** Both sides must carry at least `MinPortProfile` (3)
+  ports; one open port 22 says nothing about which machine it is, and an
+  active scan reports one port per finding.
+- **Observed values only.** A derived (inferred) identifier on the observation
+  side is not evidence of a hardware change.
+- **Retiring needs a capable store.** `IdentifierRetirer` deletes the old
+  value; `DriftMaterialReader` supplies stored TLS fingerprints and ports. A
+  store without them still records the verdict, keeps the old value, and
+  treats those signals as unknown.
+- **A rotation retires only the same algorithm's key.** A host holding an
+  ed25519 and an RSA key whose ed25519 key rotates keeps its RSA key. Two
+  algorithms alternating between probes is `agree`/`added`, never a verdict.
+  The algorithm is metadata, not identity: the fingerprint stays the unique
+  value, rows stored without an algorithm keep matching, and the attach upsert
+  fills `key_algorithm` in (`coalesce`) on the next sighting that reports it.
+  Producers report it as `ssh_host_key_type` (`shared/discovery`'s probe, the
+  sensor, `jobunits`); one that does not leaves it unknown, which can only
+  flag.
+- **The verdict leaves on `Resolution.Drift`.** The engine writes the history
+  entry in the resolving transaction; inventory-service publishes the
+  `asset.identity_drift` lifecycle event and a `notifications.send` notification
+  (source `inventory-service`, type `asset_identity_drift`, old and new
+  fingerprints) after commit (`resolveObservationWithRepo`). A `moved` within a
+  dynamic segment is not notified. None of this is a compliance finding.
+- **Explanations carry no values.** `DriftResult.Explanation` names signals
+  ("changed: SSH host key"), never fingerprints; the values are on the history
+  entry and the event, read under the tenant's own access control.
+
+Tests: `matcher/drift_test.go` (one case per row and its edges),
+`drift_test.go` (each verdict through `Resolve` on the memory store; deleting
+the `classifyDrift` call in `Resolve` turns seven red), the repository contract
+(`RetireIdentifier`, `DriftMaterial`), and inventory-service's
+`TestIntegration_StableNetworkDrift_DifferentDeviceBindingNeedsReview`.
+
+## Pinned addresses (#2205 Decision 1)
+
+An `ip_address` in a scope flagged dynamic normally never decides a match
+(today's lease is tomorrow's other device). If the asset that OWNS that
+identifier holds it pinned (`asset_identifiers.address_assignment = 'static'`),
+it still decides, for that asset only.
+
+- **Who pins.** `Identifier.StoredAssignment` is the one rule: an explicit
+  `Assignment` (`static` / `dynamic`) wins; otherwise `Identifier.Pinned`, or a
+  `declared` source, stores `static`. `Intake` sets `Pinned` on an address an
+  operator declared (including the Devices form and a declared observation
+  through the engine) or the host reported about itself, unless the host said
+  `dynamic`. The asset form's **Pin** box sets it on a measured address.
+- **What the engine reads.** The OWNER's stored assignment, never the flag on
+  the incoming sighting: `Engine.pinnedAddresses` looks it up once per
+  observation, so a plain scan of a pinned address matches. A pin helps only its
+  owner (the key is unique per tenant); another asset's device identifier on the
+  same observation makes it a conflict, not a match.
+- **One test.** `Engine.dynamicAddress` is shared by `kindVotes`,
+  `leaseOnlyLink`, the lease rule and `AssessAdmission` (a pinned address is
+  `direct_scoped_address`), and the lease rule never moves a pinned address.
+- **Upsert.** `source_kind` moves only up declared > measured = imported >
+  inferred; `address_assignment` is replaced only by a non-NULL value from a
+  source at least as strong, so a pin is never lost to a sensor or to an agent's
+  "dhcp" against a declaration. Contract: `identitytest.RunPinnedAddressContract`.
+
+## Claimed addresses (#1973)
+
+A device's own address on a network it serves, read over a first-hand session
+(a gateway's `net.vlans` `gateway`), is sent with
+`IdentifierProvenance.Claimed`. Intake accepts it only on an `ip_address` of a
+measured `authenticated_session` sighting, and marks it `Pinned` and `Claimed`.
+Before the precedence walk the engine settles who else holds it
+(`claimed.go`):
+
+- **nobody, or the claimant itself** — an ordinary identifier, attached pinned;
+- **a provisional asset, or one holding nothing but addresses**, linked to the
+  sighting by that address alone — muted for the walk, then moved to the
+  decided asset through `IdentifierReassigner` (`identifier_reassigned`, reason
+  `claimed_by_device`, on both); an emptied provisional holder is archived;
+- **anything stronger** (a device identifier, a declaration or operator pin, an
+  announced VIP, or a holder the sighting also names) — it keeps the address,
+  which votes even in a dynamic scope, so the walk conflicts and a merge
+  proposal opens.
+
+With nothing else in the sighting owned by anyone, a claim is ordinary (there
+is no claimant to move it to). A claimed-address sighting never places its
+asset (`Sighting.ClaimsAddresses`). Contract:
+`identitytest.RunClaimedAddressContract`.
+
+## Endpoints follow the identity decision (#2205 Decision 2)
+
+Endpoints are written only where an identity decision attaches them. `matched`,
+`created` and `provisional` resolutions attach the sighting's endpoints inside
+the engine's transaction. A `supporting` resolution on an ESTABLISHED asset (and
+any non-sighting, such as a DNS answer) attaches nothing: `Resolution.EvidenceHeld`
+is true, the sockets stay on the observation, and every caller after the engine
+must write nothing from it either (no service identification, crypto
+configuration or deferred finding). `ObservationEndpoints` gives a caller the
+sanitised endpoints the engine would have written, for the moment an operator
+decides.
+
+`identity_observations.resolution_outcome` records what last attached the row:
+`matched`, `created`, `provisional`, `supporting`, `conflict`, the operator
+decisions `operator_linked` / `operator_confirmed`, or `operator_scan_request`
+— a link a person's Active Scan of a named asset decided
+([`WithOperatorScanRequest`](operator_scan.go); the caller verifies the request
+from the job and asset rows the platform wrote). `state = 'linked'` cannot tell a match from
+supporting evidence; the retained-evidence worker uses the outcome to skip
+`supporting` rows, and materialises an `operator_scan_request` row's payloads
+only when ingest marked them as that scan's own. NULL (a row from before the column) is treated
+as it always was. Link and Confirm in inventory-service
+(`DecideIdentityObservation`) attach the evidence endpoints at once; a Confirm
+that overlaps exactly one asset an earlier confirmation from the same collector
+and network created joins it. Existing endpoint rows are never deleted; they stop
+refreshing. The interrogated-device claim (`attachFindingEndpoint`) is the one
+non-engine path that still attaches, because the claim is verified first.
+The review table's ownership rule (`SuggestObservation`: ready to confirm when
+nothing owns an identifier of the row, link-existing when exactly one linkable
+asset does, needs-review otherwise) shares the owner query with the decision.
 
 ## Invariants
 

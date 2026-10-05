@@ -12,7 +12,7 @@ package services
 //   - metadata.external_targets.confirmed — that a person confirmed the job's
 //     targets outside the tenant's registered networks.
 //
-// processTarget reads both back here and re-authorizes the expanded addresses
+// The work units read both back here (ensureUnits) and re-authorize each expanded address
 // against the tenant's scope as it stands at scan time.
 
 import (
@@ -92,7 +92,8 @@ func jobHasConfirmedExternalTargets(tx *sqlx.Tx, jobID string) (bool, error) {
 }
 
 // expandTarget turns one stored target into the addresses a packet will be
-// sent to. See processTarget for why a pinned hostname is never re-resolved.
+// sent to. A pinned hostname is never re-resolved: a DNS answer that changed
+// since the job was authorized cannot redirect the scan.
 func (jp *JobProcessor) expandTarget(input string, pinned []string) []string {
 	if len(pinned) > 0 {
 		return append([]string{}, pinned...)

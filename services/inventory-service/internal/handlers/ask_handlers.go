@@ -283,6 +283,10 @@ func (h *AskHandlers) Ask(c *gin.Context) {
 	defer cancel()
 	ctx = seams.WithInvoker(ctx, userID.String())
 	ctx = auditmw.WithAIActor(ctx, tenantUUID, "tenant")
+	// Which tenant is asking decides which provider answers: its own, if it
+	// connected one, and otherwise the deployment's. Without this stamp the
+	// question would go to the deployment's provider whatever the tenant set.
+	ctx = ai.WithTenantScope(ctx, tenantUUID)
 
 	if h.db != nil {
 		controls, err := ai.TenantAIControls(ctx, h.db, tenantUUID)
@@ -367,7 +371,7 @@ func (h *AskHandlers) writeAskError(c *gin.Context, err error) {
 		// and not 402 — an operator can fix this one, and the two must not read
 		// the same.
 		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "Asking questions in words is not available: this deployment has no AI provider configured. " +
+			"error": "Asking questions in words is not available: no AI provider is configured for your organization. " +
 				"The query language searches the same inventory without one.",
 		})
 	default:

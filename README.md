@@ -38,9 +38,10 @@ actually deployed rather than what was documented.
 
 **Discovery.** A libpcap-based sensor observes TLS, SSH, SMB and OT/ICS
 (Modbus, DNP3, BACnet-SC) handshakes passively, and probes TLS and SSH actively
-when you ask it to. *Active* probing of OT/ICS protocols, and the OT-specific
-inventory lens, are Enterprise capabilities — Core's passive OT observation and
-its full TLS/SSH/SMB pipeline are not gated.
+when you ask it to. OT/ICS devices are probed actively only when you opt in on a
+scan, never by automatic scanning. Passive OT observation, OT active probing and
+the full TLS/SSH/SMB pipeline are all Core; the OT-specific inventory lens is an
+Enterprise capability.
 A separate interrogation agent queries network devices (F5, Palo Alto, Cisco,
 Fortinet) and cloud providers for their crypto configuration. Both are Go
 binaries you deploy inside your own network. Active probing and device
@@ -80,7 +81,7 @@ security in a security product is indefensible.
 
 | | Core | Enterprise | MSP |
 |---|---|---|---|
-| Discovery — sensor, agent, cloud; passive OT/ICS | ✅ | ✅ | ✅ |
+| Discovery — sensor, agent, cloud; passive and active OT/ICS | ✅ | ✅ | ✅ |
 | Inventory, CMDB model, all eleven lenses; software + lifecycle (ITAM) | ✅ | ✅ | ✅ |
 | Crypto assessment + PQC exposure | ✅ | ✅ | ✅ |
 | Compliance engine + 8 frameworks | ✅ | ✅ | ✅ |
@@ -96,9 +97,10 @@ security in a security product is indefensible.
 | NetBox network source of truth + drift view | | ✅ | ✅ |
 | SIEM forwarding, scheduled audit reports | | ✅ | ✅ |
 | White-label branding | | ✅ | ✅ |
-| OT/ICS active probing + OT inventory lens | | ✅ | ✅ |
+| OT inventory lens | | ✅ | ✅ |
 | Self-service billing — subscription, invoices, payment portal | | | ✅ |
 | Generative AI assistants (ask, author, enrich, narrate, remediate) | | ✅ | ✅ |
+| Bring your own AI model provider, per tenant | | ✅ | ✅ |
 | Multi-tenant management plane — tenant lifecycle, cross-tenant views | | | ✅ |
 
 The line is **generation vs. evidence**: Core produces a real CycloneDX CBOM

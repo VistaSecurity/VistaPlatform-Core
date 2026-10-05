@@ -294,15 +294,89 @@ func selectExecutor(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, out *Sco
 	if !out.CIDR.IsValid() || out.SegmentID == uuid.Nil {
 		return nil, nil
 	}
-	type candidate struct {
-		version    string
-		addresses  []netip.Prefix
-		dnsCapable bool
-		eligible   bool
+	collectors, err := EligibleCollectors(ctx, tx, tenant, now)
+	if err != nil {
+		return nil, err
 	}
-	order := make([]uuid.UUID, 0, 4)
-	candidates := make(map[uuid.UUID]*candidate, 4)
-	rows, err := tx.QueryContext(ctx, `SELECT s.id,s.version,s.status,s.last_heartbeat,COALESCE(s.reporting_interval,60),s.reported_capabilities,host(a.address),a.prefix_length
+	// The observer when it is eligible, otherwise the first eligible one.
+	observer := observerReaches(collectors, out)
+	var chosen *Collector
+	var excluded []netip.Prefix
+	for i := range collectors {
+		c := &collectors[i]
+		if !c.Reaches(out.CIDR) {
+			continue
+		}
+		excluded = append(excluded, c.Addresses...)
+		if chosen == nil && (!observer || c.ID == out.ObserverSensorID) {
+			chosen = c
+		}
+	}
+	if chosen == nil {
+		return excluded, nil
+	}
+	out.SensorID = chosen.ID
+	out.SensorVersion = chosen.Version
+	out.DNSCapable = chosen.DNSCapable
+	out.Reachable = true
+	return excluded, nil
+}
+
+// observerReaches reports whether the observer is itself an eligible collector
+// for the scope's network, which makes it the executor.
+func observerReaches(collectors []Collector, out *Scope) bool {
+	for i := range collectors {
+		if collectors[i].ID == out.ObserverSensorID && collectors[i].Reaches(out.CIDR) {
+			return true
+		}
+	}
+	return false
+}
+
+// Collector is one live, non-platform tenant sensor with freshly reported
+// interface addresses: a candidate to run work ON a network. It is the ONE
+// definition of "a tenant collector can reach this network", shared by the
+// executor selection above and by segment coverage (: Settings → Network
+// Segments and the "Networks routed" card say "No sensor on this network"
+// exactly when this finds none).
+type Collector struct {
+	ID         uuid.UUID
+	Name       string
+	Version    string
+	DNSCapable bool
+	// Addresses are every fresh interface address, as host prefixes.
+	Addresses []netip.Prefix
+	// reported are the addresses whose interface prefix length was reported.
+	reported []netip.Addr
+}
+
+// Reaches reports whether the collector has an interface inside network.
+// Only an interface whose prefix length was REPORTED counts — a guessed /24
+// or /64 does not.
+func (c Collector) Reaches(network netip.Prefix) bool {
+	if !network.IsValid() {
+		return false
+	}
+	for _, a := range c.reported {
+		if network.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// EligibleCollectors lists the tenant's collectors that can run work right now,
+// most recent heartbeat first (the best available proxy for "most likely to
+// still be there in a minute").
+//
+// Containment is decided in Go (Collector.Reaches), not as `a.address <<
+// $cidr` in SQL, for the same reason ProvisionalScope's overlap test is: the
+// comparison needs the reported prefix AND the segment's parsed value
+// together, and one malformed row must not be able to abort the query for the
+// whole tenant. The SQL narrows by the facts SQL is good at (ownership,
+// freshness, the DNS-interface allowlist) and Go decides the arithmetic.
+func EligibleCollectors(ctx context.Context, q sqlx.QueryerContext, tenant uuid.UUID, now time.Time) ([]Collector, error) {
+	rows, err := q.QueryContext(ctx, `SELECT s.id,s.name,s.version,s.status,s.last_heartbeat,COALESCE(s.reporting_interval,60),s.reported_capabilities,host(a.address),a.prefix_length
    FROM sensors s JOIN agent_addresses a ON a.sensor_id=s.id
    WHERE s.tenant_id=$1 AND s.deleted_at IS NULL AND NOT COALESCE('system'=ANY(s.tags),false)
     AND NOT s.air_gapped AND s.profile<>'system'
@@ -312,66 +386,42 @@ func selectExecutor(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, out *Sco
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
+	var out []Collector
+	index := map[uuid.UUID]int{}
 	for rows.Next() {
 		var id uuid.UUID
-		var version, status, address string
+		var name, version, status, address string
 		var heartbeat *time.Time
 		var interval int
 		var capabilities pq.StringArray
 		var bits *int
-		if err := rows.Scan(&id, &version, &status, &heartbeat, &interval, &capabilities, &address, &bits); err != nil {
+		if err := rows.Scan(&id, &name, &version, &status, &heartbeat, &interval, &capabilities, &address, &bits); err != nil {
 			return nil, err
 		}
 		if !sensordispatch.IsLive(status, heartbeat, interval, now) {
 			continue
 		}
-		c := candidates[id]
-		if c == nil {
-			c = &candidate{version: version}
+		i, ok := index[id]
+		if !ok {
+			c := Collector{ID: id, Name: name, Version: version}
 			for _, capability := range capabilities {
-				c.dnsCapable = c.dnsCapable || capability == "identity_dns_v1"
+				c.DNSCapable = c.DNSCapable || capability == "identity_dns_v1"
 			}
-			candidates[id] = c
-			order = append(order, id)
+			out = append(out, c)
+			i = len(out) - 1
+			index[id] = i
 		}
 		a, err := netip.ParseAddr(address)
 		if err != nil {
 			continue
 		}
-		c.addresses = append(c.addresses, netip.PrefixFrom(a, a.BitLen()))
+		out[i].Addresses = append(out[i].Addresses, netip.PrefixFrom(a, a.BitLen()))
 		// Reported interface prefixes are required, not a guessed /24 or /64.
-		if bits != nil && *bits >= 0 && *bits <= a.BitLen() && out.CIDR.Contains(a) {
-			c.eligible = true
+		if bits != nil && *bits >= 0 && *bits <= a.BitLen() {
+			out[i].reported = append(out[i].reported, a)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	chosen := uuid.Nil
-	if c, ok := candidates[out.ObserverSensorID]; ok && c.eligible {
-		chosen = out.ObserverSensorID
-	} else {
-		for _, id := range order {
-			if candidates[id].eligible {
-				chosen = id
-				break
-			}
-		}
-	}
-	var excluded []netip.Prefix
-	for _, id := range order {
-		if candidates[id].eligible {
-			excluded = append(excluded, candidates[id].addresses...)
-		}
-	}
-	if chosen == uuid.Nil {
-		return excluded, nil
-	}
-	out.SensorID = chosen
-	out.SensorVersion = candidates[chosen].version
-	out.DNSCapable = candidates[chosen].dnsCapable
-	out.Reachable = true
-	return excluded, nil
+	return out, rows.Err()
 }
 
 const jobColumns = `id,observation_id,request_id,plan,generation,state,reason,attempts,remote_id,result,next_attempt_at,request_evidence`
@@ -390,6 +440,78 @@ func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 }
 
 func (s *Store) Ensure(ctx context.Context, tenant uuid.UUID, o Observation, p Plan, now time.Time) (Job, error) {
+	return s.ensure(ctx, tenant, o, p, now, time.Time{})
+}
+
+// EnsureProbe is Ensure for a probe plan, coalesced across observations: at
+// most one probe per (executor sensor, target address) is in flight, however
+// many observations want it.
+//
+// Several observations routinely share an address — a passive sighting
+// (`sensor:<id>`) and an active-scan sighting (`scan:<id>`) of one host are two
+// observations — and each used to plan its own probe. On a lab deployment
+// that queued 15 single-target probes for about nine addresses in twelve
+// minutes, one address five times; the sensor's queue overflowed and then spent
+// a quarter of an hour probing one slow host three times over.
+//
+// So before this observation gets a job of its own, the store looks for
+// ANOTHER observation's probe through the same executor whose plan already
+// covers every address, port and protocol this one asks for, and that is either
+// still in flight or completed after `since` (the caller passes now minus the
+// rescan interval — the policy's own answer to "how fresh must a probe be").
+// That job is returned instead, with ObservationID naming its owner; the caller
+// must not advance it (it belongs to the owner's lease and authorization), only
+// wait for it or, once completed, re-evaluate its own evidence against what it
+// ingested. An observation's OWN active job still wins first, so work already
+// in flight is never orphaned.
+//
+// The search and the insert run under one advisory lock per (tenant,
+// executor), so two observations of one address planned at the same instant —
+// by two workers — cannot both miss each other and both insert.
+func (s *Store) EnsureProbe(ctx context.Context, tenant uuid.UUID, o Observation, p Plan, now, since time.Time) (Job, error) {
+	if p.Action != "probe" {
+		return Job{}, fmt.Errorf("EnsureProbe needs a probe plan, got %q", p.Action)
+	}
+	if since.IsZero() {
+		return Job{}, fmt.Errorf("EnsureProbe needs a freshness bound")
+	}
+	return s.ensure(ctx, tenant, o, p, now, since)
+}
+
+// coalescedProbe finds another observation's probe that satisfies p (see
+// EnsureProbe). sql.ErrNoRows when there is none.
+//
+// Coverage is JSONB containment on the stored plan, so a probe of a SUPERSET of
+// this plan's addresses, ports and protocols counts and a probe of a subset
+// does not — sharing must never narrow what this observation asked for. A
+// completed probe counts whatever became of its owner (its results are
+// ingested); an unfinished one only while its owner can still be advanced
+// (Claim's own condition), or a dismissed owner's dead job would hold every
+// follower for ever.
+func coalescedProbe(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, o Observation, p Plan, since time.Time) (Job, error) {
+	addresses, err := json.Marshal(p.Addresses)
+	if err != nil {
+		return Job{}, err
+	}
+	ports, err := json.Marshal(p.Ports)
+	if err != nil {
+		return Job{}, err
+	}
+	protocols, err := json.Marshal(p.Protocols)
+	if err != nil {
+		return Job{}, err
+	}
+	return scanJob(tx.QueryRowContext(ctx, `SELECT `+jobColumns+` FROM identity_enrichment_jobs j
+   WHERE j.tenant_id=$1 AND j.action='probe' AND j.observation_id<>$2
+    AND j.plan->>'sensor_id'=$3
+    AND j.plan->'addresses' @> $4::jsonb AND j.plan->'ports' @> $5::jsonb AND j.plan->'protocols' @> $6::jsonb
+    AND j.updated_at>$7
+    AND (j.state='completed' OR (j.state<>'blocked' AND EXISTS(SELECT 1 FROM identity_observations w
+      WHERE w.tenant_id=j.tenant_id AND w.id=j.observation_id AND w.state IN ('unresolved','linked'))))
+   ORDER BY (j.state='completed') DESC,j.created_at,j.id LIMIT 1`, tenant, o.ID, p.SensorID.String(), string(addresses), string(ports), string(protocols), since))
+}
+
+func (s *Store) ensure(ctx context.Context, tenant uuid.UUID, o Observation, p Plan, now, coalesceSince time.Time) (Job, error) {
 	// A cycle is the coordinator's scheduled cohort, not a delivery timestamp.
 	// Assign it here for every action so callers cannot silently omit or replace
 	// the cohort on DNS/probe jobs while recording it on configured sources.
@@ -430,6 +552,21 @@ func (s *Store) Ensure(ctx context.Context, tenant uuid.UUID, o Observation, p P
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+		if !coalesceSince.IsZero() {
+			// Taken after the observation lock, always in that order, so two
+			// observations' Ensures cannot deadlock on each other.
+			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,72049))`, tenant.String()+":"+p.SensorID.String()+":probe"); err != nil {
+				return err
+			}
+			shared, err := coalescedProbe(ctx, tx, tenant, o, p, coalesceSince)
+			if err == nil {
+				j = shared
+				return nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 		}
 		j, err = scanJob(tx.QueryRowContext(ctx, `INSERT INTO identity_enrichment_jobs(tenant_id,observation_id,generation,action,executor_scope,plan,next_attempt_at,request_evidence)
    VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,observation_id,generation,action,executor_scope)
@@ -474,12 +611,26 @@ func (s *Store) Finish(ctx context.Context, j Job, lease uuid.UUID, r Result, no
 		r.Data = json.RawMessage(`{}`)
 	}
 	next := now.Add(time.Minute)
-	if r.State == "failed" || r.State == "blocked" {
+	switch {
+	case r.State == "failed" || r.State == "blocked":
 		next = now.Add(RetryDelay(j.Attempts))
+	case r.Reason == ReasonCollectorBusy:
+		// Back-pressure: the executor has no room. Not a failure, but not
+		// something to ask again every minute either.
+		next = now.Add(BusyRetryDelay(j.Attempts))
+	}
+	if r.Redispatch {
+		// The remote request ended without running (see Result.Redispatch):
+		// forget it so the next attempt dispatches afresh.
+		r.RemoteID = ""
 	}
 	return database.WithTenantTx(ctx, s.DB, j.TenantID, func(tx *sqlx.Tx) error {
+		// A redispatch needs a NEW request ID: the remote side keys its replay
+		// on it (cluster-sensor returns the existing job for a known ID), and
+		// the one we hold names a job that ended without scanning anything.
 		result, err := tx.ExecContext(ctx, `UPDATE identity_enrichment_jobs SET state=$4,reason=$5,remote_id=$6,result=$7,
-   next_attempt_at=$8,lease_id=NULL,lease_until=NULL,updated_at=$9 WHERE tenant_id=$1 AND id=$2 AND lease_id=$3`, j.TenantID, j.ID, lease, r.State, r.Reason, r.RemoteID, string(r.Data), next, now)
+   next_attempt_at=$8,lease_id=NULL,lease_until=NULL,updated_at=$9,
+   request_id=CASE WHEN $10 THEN gen_random_uuid() ELSE request_id END WHERE tenant_id=$1 AND id=$2 AND lease_id=$3`, j.TenantID, j.ID, lease, r.State, r.Reason, r.RemoteID, string(r.Data), next, now, r.Redispatch)
 		if err != nil {
 			return err
 		}

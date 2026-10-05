@@ -16,7 +16,6 @@ export interface AutoScanDraft {
   enabled: boolean;
   scanOnFirstObservation: boolean;
   intervalHours: string;
-  protocols: string[];
   portsText: string;
   /** "Prefer the observing sensor". Absent from an older server's policy reads as ON, which is the server's default too. */
   preferObservingSensor: boolean;
@@ -27,7 +26,6 @@ export function draftFromPolicy(policy: AutoScanPolicy): AutoScanDraft {
     enabled: policy.enabled,
     scanOnFirstObservation: policy.scan_on_first_observation,
     intervalHours: String(policy.rescan_interval_hours),
-    protocols: [...policy.protocols],
     portsText: formatPorts(policy.ports),
     preferObservingSensor: policy.prefer_observing_sensor ?? true,
   };
@@ -69,7 +67,6 @@ export function validateDraft(draft: AutoScanDraft, limits: AutoScanLimits): str
   if (hours < limits.min_rescan_interval_hours || hours > limits.max_rescan_interval_hours) {
     return `The rescan interval must be between ${limits.min_rescan_interval_hours} and ${limits.max_rescan_interval_hours} hours.`;
   }
-  if (draft.protocols.length === 0) return 'Choose at least one protocol.';
   const { ports, error } = parsePorts(draft.portsText);
   if (error) return error;
   if (ports.length === 0) return 'List at least one port.';
@@ -79,13 +76,24 @@ export function validateDraft(draft: AutoScanDraft, limits: AutoScanLimits): str
   return null;
 }
 
+/**
+ * The PUT body. `protocols` is deliberately absent: automatic scans identify
+ * TLS and SSH from what answers on each port, so the page no longer edits it,
+ * and the server keeps its stored value when the field is omitted (that value
+ * is still what a sensor too old for the current scan engine probes). Sending
+ * back what was read would also work today, but would make this page the
+ * author of a setting it no longer shows.
+ */
+export type AutoScanUpdate = Omit<inventoryComponents['schemas']['AutoScanUpdateRequest'], 'protocols'> & {
+  prefer_observing_sensor: boolean;
+};
+
 /** The draft as the PUT body. Call only when validateDraft returned null. */
-export function draftToPayload(draft: AutoScanDraft): AutoScanPolicy {
+export function draftToPayload(draft: AutoScanDraft): AutoScanUpdate {
   return {
     enabled: draft.enabled,
     scan_on_first_observation: draft.scanOnFirstObservation,
     rescan_interval_hours: Number(draft.intervalHours),
-    protocols: [...draft.protocols].sort(),
     ports: parsePorts(draft.portsText).ports,
     prefer_observing_sensor: draft.preferObservingSensor,
   };
@@ -103,7 +111,6 @@ export function isDirty(draft: AutoScanDraft, saved: AutoScanPolicy): boolean {
   if (draft.scanOnFirstObservation !== saved.scan_on_first_observation) return true;
   if (draft.preferObservingSensor !== (saved.prefer_observing_sensor ?? true)) return true;
   if (Number(draft.intervalHours) !== saved.rescan_interval_hours) return true;
-  if ([...draft.protocols].sort().join(',') !== [...saved.protocols].sort().join(',')) return true;
   return parsePorts(draft.portsText).ports.join(',') !== [...saved.ports].sort((a, b) => a - b).join(',');
 }
 

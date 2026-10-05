@@ -1,0 +1,20 @@
+{
+  "services.TLSHandshakeResult": {
+    "ALPN": "string=",
+    "Certificates": "[]map[string]interface {}=nil",
+    "CipherSuite": "string=",
+    "Error": "string=connection failed: dial tcp 127.0.0.1:PORT: connect: connection refused",
+    "KeyExchange": {
+      "discovery.TLSKeyExchange": {
+        "Group": "string=",
+        "GroupID": "tls.CurveID=CurveID(0)",
+        "KeyBits": "int=0",
+        "PQCHybridGroup": "string=",
+        "SupportsClassical": "*bool=nil",
+        "SupportsPQCHybrid": "*bool=nil"
+      }
+    },
+    "Success": "bool=false",
+    "TLSVersion": "string="
+  }
+}

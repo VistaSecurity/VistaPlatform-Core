@@ -1,28 +1,21 @@
 package deviceinterrogation
 
 import (
-	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/asn1"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/internal/dialguard"
 	"github.com/vistasecurity/vistaplatform/shared/discovery"
-	"golang.org/x/crypto/ssh"
+	"github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // =============================================================================
@@ -244,20 +237,23 @@ func snmpEncodeLength(n int) []byte {
 // =============================================================================
 // TLS prober (helper type — NOT registered in the framework registry)
 //
-// Ported from device-agent/internal/devices/tls_prober.go. Performs active
-// TLS/SSH handshake probing against device management endpoints. Other code may
-// construct and call this directly. Certificate-chain extraction routes through
-// shared/certificates.ExtractCertificatesFromX509 so the output is the package
-// CertificateInfo shape. Unexported helpers carry the `tlsprobe` prefix; the
-// shared cipher/version/key-exchange/cert-validation helpers below are the
-// single deduped copies (the source defined some of these inline in
-// tls_prober and others — extractKeyExchangeFromCipher — in a sibling client).
+// Ported from device-agent/internal/devices/tls_prober.go. Performs active TLS
+// handshake probing against device management endpoints. Other code may
+// construct and call this directly. The TLS probe is the shared one
+// (shared/discovery.ProbeTLSEndpoint, WP6): its handshake, version and
+// cipher-suite names, certificate extraction (the package CertificateInfo
+// shape), chain validation, quality flags, OCSP and version enumeration, with
+// every connection dialled through the appliance dial guard. There is no SSH
+// probe here: the Cisco collector reads its SSH posture over its own
+// authenticated session, and an unauthenticated SSH probe is
+// shared/discovery.ProbeSSHEndpoint.
+// Unexported helpers carry the `tlsprobe` prefix.
 // =============================================================================
 
 // tlsprobeDefaultTimeout is used when a TLSProber is constructed with no timeout.
 const tlsprobeDefaultTimeout = 10 * time.Second
 
-// TLSProber performs active TLS/SSH probing on device management endpoints.
+// TLSProber performs active TLS probing on device management endpoints.
 // This provides the same data quality as the sensor's active prober but runs
 // from within an interrogator, allowing it to probe endpoints that may not be
 // reachable from the sensor's network position.
@@ -283,326 +279,106 @@ func (p *TLSProber) tlsprobeTimeout() time.Duration {
 	return p.timeout
 }
 
+// tlsprobeOCSPGuard is the address rule for the OCSP query certificate
+// validation makes. The responder URL comes from the probed device's own
+// certificate, and this prober runs inside device-interrogation-service — in
+// the platform's cluster — as well as in the on-premises device agent, so the
+// query may reach only public addresses and never follows a redirect
+// (shared/discovery/outbound.go). A private PKI's responder is therefore not
+// queried from here; its status reads as not checked. Built once, so the
+// platform CIDRs are read when the first probe runs.
+var tlsprobeOCSPGuard = sync.OnceValue(network.PublicFetchGuard)
+
 // ProbeTLS performs a TLS handshake against the given host:port, collecting
-// certificate chain, cipher suite, TLS version, and validation status.
+// certificate chain, cipher suite, TLS version, key exchange, validation
+// status, quality flags and OCSP status — the shared TLS probe
+// (shared/discovery.ProbeTLSEndpoint), mapped onto a CryptoAsset.
 func (p *TLSProber) ProbeTLS(hostname string, port int) (*CryptoAsset, error) {
+	return p.probeTLS(hostname, port, false)
+}
+
+// ProbeTLSWithVersions is ProbeTLS that also records, in TLSVersions, every TLS
+// version the server accepts: the negotiated one first, then the others newest
+// first. One forced-version handshake per version the main handshake did not
+// already prove.
+func (p *TLSProber) ProbeTLSWithVersions(hostname string, port int) (*CryptoAsset, error) {
+	return p.probeTLS(hostname, port, true)
+}
+
+func (p *TLSProber) probeTLS(hostname string, port int, enumerateVersions bool) (*CryptoAsset, error) {
 	timeout := p.tlsprobeTimeout()
-	address := net.JoinHostPort(hostname, strconv.Itoa(port))
 
-	conn, err := dialguard.Dial(timeout)(context.Background(), "tcp", address)
+	// Every connection — the handshake, the key-exchange support handshakes,
+	// the version enumeration — goes through the appliance dial guard.
+	// dialguard.Dial is read per dial (tests swap it). The later connections
+	// go to the ADDRESS the first one reached, not a fresh resolution of the
+	// hostname, so a name that resolves elsewhere cannot send them to a
+	// different host.
+	connected := false
+	dial := discovery.PinToReachedAddress(func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dialguard.Dial(timeout)(ctx, network, address)
+		if err == nil {
+			connected = true
+		}
+		return conn, err
+	})
+
+	prober := discovery.NewProber(timeout).WithOutboundAddressGuard(tlsprobeOCSPGuard())
+	res, err := prober.ProbeTLSEndpoint(context.Background(), hostname, port, discovery.TLSEndpointOptions{
+		Hostname:          hostname,
+		Dial:              dial,
+		EnumerateVersions: enumerateVersions,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("TCP connect failed: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	tlsConfig := &tls.Config{
-		ServerName:         hostname,
-		InsecureSkipVerify: true, //nolint:gosec // intentional — discovery requires seeing all certs
-	}
-
-	tlsConn := tls.Client(conn, tlsConfig)
-	defer func() { _ = tlsConn.Close() }()
-
-	if err := tlsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, fmt.Errorf("failed to set TLS probe deadline: %w", err)
-	}
-
-	if err := tlsConn.Handshake(); err != nil {
+		if !connected {
+			return nil, fmt.Errorf("TCP connect failed: %w", err)
+		}
 		return nil, fmt.Errorf("TLS handshake failed: %w", err)
 	}
 
-	state := tlsConn.ConnectionState()
-
-	selectedCipher := tlsprobeCipherSuiteName(state.CipherSuite)
-	tlsVersion := tlsprobeVersionName(state.Version)
-	kex := tlsprobeKeyExchangeFromCipher(selectedCipher)
+	tlsVersion := ""
+	if len(res.TLSVersions) > 0 {
+		tlsVersion = res.TLSVersions[0] // the negotiated version stays first
+	}
 
 	// No SupportedCiphers: one negotiated suite is not the supported set, and
-	// CipherSuite already carries it (E-02).
+	// CipherSuite already carries it (E-02). Metadata is the shared probe's
+	// TLS metadata (negotiated_protocol, the key-exchange keys, quality flags,
+	// OCSP, server_requests_client_cert) — posture only, no key material.
 	asset := &CryptoAsset{
-		Hostname:    hostname,
-		Port:        port,
-		Protocol:    "TLS",
-		TLSVersions: []string{tlsVersion},
-		Metadata: map[string]interface{}{
-			"negotiated_protocol": state.NegotiatedProtocol,
-		},
+		Hostname:        hostname,
+		Port:            port,
+		Protocol:        "TLS",
+		TLSVersions:     res.TLSVersions,
+		CipherSuite:     strPtr(res.SelectedCipher),
+		ProtocolVersion: strPtr(tlsVersion),
+		Metadata:        res.Metadata,
+	}
+	if asset.Metadata == nil {
+		asset.Metadata = map[string]interface{}{}
 	}
 
-	// The negotiated group, measured the same way as the shared prober; it is
-	// a more precise key exchange than the suite's label, and for TLS 1.3 the
-	// only one there is.
-	// The support handshakes redial the ADDRESS the main one reached, not the
-	// hostname, so a name that resolves elsewhere cannot send them to a
-	// different host; SNI is unchanged (they clone tlsConfig).
-	reached := conn.RemoteAddr().String()
-	kx := discovery.MeasureTLSKeyExchange(state, tlsConfig, func(t time.Duration) (net.Conn, error) {
-		return dialguard.Dial(t)(context.Background(), "tcp", reached)
-	}, timeout)
-	kx.ApplyTo(asset.Metadata)
-	if kx.Group != "" {
-		kex = kx.Group
+	// The negotiated group is a more precise key exchange than the suite's
+	// label, and for TLS 1.3 the only one there is.
+	kex := tlsprobeKeyExchangeFromCipher(res.SelectedCipher)
+	if group, _ := res.Metadata[discovery.MetaKeyExchangeAlgorithm].(string); group != "" {
+		kex = group
 	}
-
-	asset.CipherSuite = strPtr(selectedCipher)
-	asset.ProtocolVersion = strPtr(tlsVersion)
 	if kex != "" {
 		asset.KeyExchangeAlg = strPtr(kex)
 	}
 
-	// Extract full certificate chain via the shared canonical extractor.
-	asset.Certificates = certificates.ExtractCertificatesFromX509(state.PeerCertificates)
+	asset.Certificates = res.Certificates
 	if len(asset.Certificates) > 0 {
 		asset.Certificate = &asset.Certificates[0] // leaf = backward compat
-	}
-
-	// Calculate key size from leaf certificate.
-	if len(state.PeerCertificates) > 0 {
-		keySize := tlsprobePublicKeyBitLen(state.PeerCertificates[0].PublicKey)
-		if keySize > 0 {
+		if keySize := asset.Certificates[0].KeySize; keySize > 0 {
 			asset.KeySize = intPtr(keySize)
 		}
-	}
-
-	// Validate certificate.
-	if len(state.PeerCertificates) > 0 {
-		opts := x509.VerifyOptions{DNSName: hostname}
-		_, validationErr := state.PeerCertificates[0].Verify(opts)
-		asset.CertValidationStatus, asset.CertValidationError = tlsprobeClassifyCertError(validationErr)
+		asset.CertValidationStatus = res.CertValidationStatus
+		asset.CertValidationError = res.CertValidationError
 	}
 
 	return asset, nil
-}
-
-// EnumerateTLSVersions probes the target with each TLS version individually
-// to determine which versions are accepted by the server.
-func (p *TLSProber) EnumerateTLSVersions(hostname string, port int) []string {
-	timeout := p.tlsprobeTimeout()
-	versions := []struct {
-		id   uint16
-		name string
-	}{
-		{tls.VersionTLS13, "TLS 1.3"},
-		{tls.VersionTLS12, "TLS 1.2"},
-		{tls.VersionTLS11, "TLS 1.1"},
-		{tls.VersionTLS10, "TLS 1.0"},
-	}
-
-	address := net.JoinHostPort(hostname, strconv.Itoa(port))
-	var accepted []string
-
-	for _, ver := range versions {
-		conn, err := dialguard.Dial(timeout)(context.Background(), "tcp", address)
-		if err != nil {
-			continue
-		}
-
-		tlsCfg := &tls.Config{
-			ServerName:         hostname,
-			InsecureSkipVerify: true, //nolint:gosec // intentional — discovery
-			MinVersion:         ver.id,
-			MaxVersion:         ver.id,
-		}
-
-		tlsConn := tls.Client(conn, tlsCfg)
-		// Without a deadline the handshake below can block indefinitely, so a
-		// failure here means this version cannot be tested — skip it rather
-		// than record an untested version as unaccepted.
-		if err := tlsConn.SetDeadline(time.Now().Add(timeout)); err != nil {
-			_ = tlsConn.Close()
-			_ = conn.Close()
-			continue
-		}
-
-		if err := tlsConn.Handshake(); err == nil {
-			accepted = append(accepted, ver.name)
-		}
-
-		_ = tlsConn.Close()
-		_ = conn.Close()
-	}
-
-	return accepted
-}
-
-// ProbeSSH performs an SSH key exchange to collect algorithm negotiation data
-// without authenticating. Returns SSH metadata for the management interface.
-func (p *TLSProber) ProbeSSH(hostname string, port int) (*CryptoAsset, error) {
-	timeout := p.tlsprobeTimeout()
-	address := net.JoinHostPort(hostname, strconv.Itoa(port))
-
-	conn, err := dialguard.Dial(timeout)(context.Background(), "tcp", address)
-	if err != nil {
-		return nil, fmt.Errorf("TCP connect failed: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, fmt.Errorf("failed to set SSH probe deadline: %w", err)
-	}
-
-	asset := &CryptoAsset{
-		Hostname: hostname,
-		Port:     port,
-		Protocol: "SSH",
-		SSHInfo:  &SSHInfo{},
-		Metadata: map[string]interface{}{},
-	}
-
-	var hostKeyType, hostKeyFingerprint string
-
-	sshCfg := &ssh.ClientConfig{
-		User: "discovery-probe",
-		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-			hostKeyType = key.Type()
-			hostKeyFingerprint = ssh.FingerprintSHA256(key)
-			return nil
-		},
-		Config: ssh.Config{
-			KeyExchanges: []string{
-				"curve25519-sha256", "curve25519-sha256@libssh.org",
-				"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
-				"diffie-hellman-group14-sha256", "diffie-hellman-group14-sha1",
-			},
-			Ciphers: []string{
-				"aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
-				"chacha20-poly1305@openssh.com",
-				"aes128-ctr", "aes192-ctr", "aes256-ctr",
-			},
-			MACs: []string{
-				"hmac-sha2-256-etm@openssh.com", "hmac-sha2-512-etm@openssh.com",
-				"hmac-sha2-256", "hmac-sha2-512",
-			},
-		},
-		Timeout: timeout,
-	}
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, address, sshCfg)
-	if err != nil {
-		// Auth failure is expected — kex already succeeded if sshConn != nil.
-		if sshConn == nil {
-			return nil, fmt.Errorf("SSH handshake failed: %w", err)
-		}
-	}
-	if sshConn != nil {
-		go ssh.DiscardRequests(reqs)
-		go func() {
-			for range chans {
-			}
-		}()
-
-		asset.SSHInfo.Banner = strings.TrimSpace(string(sshConn.ServerVersion()))
-		_ = sshConn.Close()
-	}
-
-	asset.SSHInfo.HostKeyType = hostKeyType
-	asset.SSHInfo.HostKeyFingerprint = hostKeyFingerprint
-	if hostKeyType != "" {
-		asset.SSHInfo.KeyTypes = []string{hostKeyType}
-	}
-
-	asset.Metadata["ssh_banner"] = asset.SSHInfo.Banner
-	asset.Metadata["host_key_type"] = hostKeyType
-
-	version := "SSH-2.0"
-	asset.ProtocolVersion = &version
-
-	return asset, nil
-}
-
-// tlsprobeClassifyCertError maps an x509 verification error to a status label.
-func tlsprobeClassifyCertError(err error) (status, detail string) {
-	if err == nil {
-		return "valid", ""
-	}
-	msg := err.Error()
-
-	var unknownAuthorityErr x509.UnknownAuthorityError
-	if errors.As(err, &unknownAuthorityErr) && tlsprobeIsSelfSigned(unknownAuthorityErr.Cert) {
-		return "self_signed", msg
-	}
-
-	switch {
-	case strings.Contains(msg, "certificate has expired") || strings.Contains(msg, "not yet valid"):
-		return "expired", msg
-	case strings.Contains(msg, "certificate is valid for") || strings.Contains(msg, "IP SANs"):
-		return "hostname_mismatch", msg
-	case strings.Contains(msg, "self-signed"):
-		return "self_signed", msg
-	case strings.Contains(msg, "unknown authority"):
-		return "untrusted_ca", msg
-	default:
-		return "untrusted_ca", msg
-	}
-}
-
-func tlsprobeIsSelfSigned(cert *x509.Certificate) bool {
-	if cert == nil {
-		return false
-	}
-	return bytes.Equal(cert.RawSubject, cert.RawIssuer) && cert.CheckSignatureFrom(cert) == nil
-}
-
-func tlsprobePublicKeyBitLen(pubKey interface{}) int {
-	switch key := pubKey.(type) {
-	case *rsa.PublicKey:
-		return key.N.BitLen()
-	case *ecdsa.PublicKey:
-		return key.Curve.Params().BitSize
-	case ed25519.PublicKey:
-		return 256
-	default:
-		return 0
-	}
-}
-
-func tlsprobeVersionName(v uint16) string {
-	switch v {
-	case tls.VersionTLS10:
-		return "TLS 1.0"
-	case tls.VersionTLS11:
-		return "TLS 1.1"
-	case tls.VersionTLS12:
-		return "TLS 1.2"
-	case tls.VersionTLS13:
-		return "TLS 1.3"
-	default:
-		return fmt.Sprintf("Unknown-0x%04X", v)
-	}
-}
-
-func tlsprobeCipherSuiteName(suite uint16) string {
-	switch suite {
-	case tls.TLS_RSA_WITH_AES_128_CBC_SHA:
-		return "TLS_RSA_WITH_AES_128_CBC_SHA"
-	case tls.TLS_RSA_WITH_AES_256_CBC_SHA:
-		return "TLS_RSA_WITH_AES_256_CBC_SHA"
-	case tls.TLS_RSA_WITH_AES_128_CBC_SHA256:
-		return "TLS_RSA_WITH_AES_128_CBC_SHA256"
-	case tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:
-		return "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA"
-	case tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:
-		return "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA"
-	case tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
-		return "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
-	case tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
-		return "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
-	case tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
-		return "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
-	case tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
-		return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
-	case tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305:
-		return "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
-	case tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305:
-		return "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"
-	case tls.TLS_AES_128_GCM_SHA256:
-		return "TLS_AES_128_GCM_SHA256"
-	case tls.TLS_AES_256_GCM_SHA384:
-		return "TLS_AES_256_GCM_SHA384"
-	case tls.TLS_CHACHA20_POLY1305_SHA256:
-		return "TLS_CHACHA20_POLY1305_SHA256"
-	default:
-		return fmt.Sprintf("Unknown-0x%04X", suite)
-	}
 }
 
 // tlsprobeKeyExchangeFromCipher derives the key-exchange family from a cipher
@@ -803,16 +579,13 @@ func (*HTTPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cre
 			port = int(p)
 		}
 
-		if tlsAsset, err := prober.ProbeTLS(hostname, port); err == nil {
+		// Probe, and enumerate all supported TLS versions.
+		if tlsAsset, err := prober.ProbeTLSWithVersions(hostname, port); err == nil {
 			tlsAsset.AssetType = "server"
 			tlsAsset.ServiceHints = &ServiceHints{
 				ServiceName:          "HTTPS Management",
 				Confidence:           "medium",
 				IdentificationMethod: "port_heuristic",
-			}
-			// Enumerate all supported TLS versions.
-			if versions := prober.EnumerateTLSVersions(hostname, port); len(versions) > 0 {
-				tlsAsset.TLSVersions = versions
 			}
 			result.Assets = append(result.Assets, *tlsAsset)
 		}

@@ -20,7 +20,7 @@ import (
 func TestNewQuery_AlwaysUsable(t *testing.T) {
 	t.Setenv("AI_PROVIDER", "none")
 
-	q, desc := NewQuery(ql.DefaultCatalog(), nil)
+	q, desc := NewQuery(ql.DefaultCatalog(), nil, nil)
 	if q == nil {
 		t.Fatal("NewQuery returned a nil seam; a caller would panic on first use")
 	}
@@ -47,9 +47,9 @@ func TestNewQuery_AlwaysUsable(t *testing.T) {
 func TestNewQuery_NilCatalogueDoesNotPanic(t *testing.T) {
 	t.Setenv("AI_PROVIDER", "none")
 
-	q, desc := NewQuery(nil, nil)
+	q, desc := NewQuery(nil, nil, nil)
 	if q == nil {
-		t.Fatal("NewQuery(nil, nil) returned a nil seam")
+		t.Fatal("NewQuery(nil, nil, nil) returned a nil seam")
 	}
 	if desc.State != seams.StateInactive {
 		t.Errorf("state = %q with no catalogue, want %q", desc.State, seams.StateInactive)
@@ -63,7 +63,7 @@ func TestNewQuery_NilCatalogueDoesNotPanic(t *testing.T) {
 func TestNewQuery_UnknownProviderDegradesRatherThanFailing(t *testing.T) {
 	t.Setenv("AI_PROVIDER", "anthropicc")
 
-	q, desc := NewQuery(ql.DefaultCatalog(), nil)
+	q, desc := NewQuery(ql.DefaultCatalog(), nil, nil)
 	if q == nil {
 		t.Fatal("a typo in AI_PROVIDER produced a nil seam")
 	}

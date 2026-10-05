@@ -216,6 +216,7 @@ services:
       # HMAC secret for signing outbound service-to-service calls (resource
       # tracking metrics, audit logs). Required — see service-registry.yaml.
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
       # mTLS Configuration
       - USE_MTLS=true
       - TLS_PORT=8443

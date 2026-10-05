@@ -310,7 +310,7 @@ func TestIntegration_IdentityObservation_ConfirmationCorroboration(t *testing.T)
 		}
 		owner := seedAsset(t, db, tenant, "another-agent", "unknown_host", "hardware.unknown_host", "production", 0, 0)
 		agentID := identity.Identifier{Kind: identity.KindAgentID, Value: "another-registered-agent"}
-		if err := repo.AttachIdentifiers(ctx, identity.AssetRef{TenantID: tenant.String(), ID: owner.String()}, []identity.Identifier{agentID}); err != nil {
+		if _, err := repo.AttachIdentifiers(ctx, identity.AssetRef{TenantID: tenant.String(), ID: owner.String()}, []identity.Identifier{agentID}); err != nil {
 			t.Fatal(err)
 		}
 		obs.Identifiers = []identity.Identifier{{Kind: identity.KindMACAddress, Value: "00:11:22:33:44:55"}, agentID}
@@ -353,7 +353,7 @@ func TestIntegration_IdentityObservation_DecisionWaitsForIdentifierOwner(t *test
 				done := make(chan error, 1)
 				go func() {
 					done <- repo.RunInTx(ctx, tenant.String(), func(bound *pgrepo.Repository) error {
-						if err := bound.AttachIdentifiers(ctx, identity.AssetRef{TenantID: tenant.String(), ID: owner.String()}, obs.Identifiers); err != nil {
+						if _, err := bound.AttachIdentifiers(ctx, identity.AssetRef{TenantID: tenant.String(), ID: owner.String()}, obs.Identifiers); err != nil {
 							close(ready)
 							return err
 						}

@@ -19,6 +19,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/identityenrichment"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
@@ -66,8 +67,34 @@ func (b *IdentityEnrichmentBackend) Dispatch(ctx context.Context, j identityenri
 		}
 		return identityenrichment.Result{State: "queued", RemoteID: command.String()}, err
 	case "probe":
+		// Back-pressure: hand the executor nothing while it already holds its
+		// share of work (identityenrichment.MaxCollectorJobsInFlight). A full
+		// sensor refuses what it cannot queue, and on a lab deployment that refusal
+		// became a blocked observation plus a tenant-facing job_failed alert.
+		// Counted against EVERY origin, because the queue is shared. Two
+		// workers can both pass this check at once, so it can overshoot by the
+		// worker count; the sensor-busy path in Poll absorbs that.
+		var inFlight int
+		if err := database.WithTenantTx(ctx, b.assets.db, j.TenantID, func(tx *sqlx.Tx) error {
+			return tx.QueryRowContext(ctx, `SELECT count(*) FROM discovery_jobs
+   WHERE tenant_id=$1 AND status IN ('queued','awaiting_sensor','running')
+    AND (assigned_sensor_id=$2 OR (assigned_sensor_id IS NULL AND $2::text=ANY(requested_sensor_ids)))
+    AND updated_at>now()-interval '24 hours'`, j.TenantID, j.Plan.SensorID).Scan(&inFlight)
+		}); err != nil {
+			return identityenrichment.Result{}, err
+		}
+		if inFlight >= identityenrichment.MaxCollectorJobsInFlight {
+			return identityenrichment.Result{State: "waiting", Reason: identityenrichment.ReasonCollectorBusy}, nil
+		}
+		// A planned job on the shared scan engine ( WP4): scan depth
+		// "custom" on the plan's ports, no protocol list — the engine
+		// identifies TLS and SSH from what answers. cluster-sensor-service
+		// falls back to the legacy job for a sensor without plan support
+		// (owner decision D3), and answers with the stored job for a request
+		// ID a pre-upgrade build already dispatched in the legacy shape.
 		job, err := b.discovery.CreateJobInternal(j.TenantID.String(), models.CreateDiscoveryJobInput{
-			Targets: j.Plan.Addresses, ExecutionMode: "sensors", PreferredSensorIDs: []string{j.Plan.SensorID.String()}, Protocols: j.Plan.Protocols, Ports: j.Plan.Ports,
+			Targets: j.Plan.Addresses, ExecutionMode: "sensors", PreferredSensorIDs: []string{j.Plan.SensorID.String()},
+			ScanDepth: string(shareddisc.DepthCustom), TCPPorts: shareddisc.CustomPortList(j.Plan.Ports),
 			Options: map[string]interface{}{"origin": "identity_enrichment", "active_scan": true, "identity_enrichment_request_id": j.RequestID.String(), "identity_observation_id": o.ID.String(), "identity_network_scope": j.Plan.SegmentID.String()},
 		})
 		if err != nil {
@@ -88,14 +115,23 @@ func (b *IdentityEnrichmentBackend) Poll(ctx context.Context, j identityenrichme
 	case "dns":
 		return b.pollDNS(ctx, j, o)
 	case "probe":
-		var status string
+		var status, failureCode string
 		ready := false
 		err := database.WithTenantTx(ctx, b.assets.db, j.TenantID, func(tx *sqlx.Tx) error {
 			var submitted *int
-			if err := tx.QueryRowContext(ctx, `SELECT status,(metadata->'sensor_result'->>'discoveries_submitted')::integer FROM discovery_jobs WHERE tenant_id=$1 AND id=$2 AND metadata->'options'->>'identity_enrichment_request_id'=$3`, j.TenantID, j.RemoteID, j.RequestID.String()).Scan(&status, &submitted); err != nil {
+			var planned bool
+			if err := tx.QueryRowContext(ctx, `SELECT status,(metadata->'sensor_result'->>'discoveries_submitted')::integer,COALESCE(metadata->>$4,''),COALESCE(metadata ? $5,false) FROM discovery_jobs WHERE tenant_id=$1 AND id=$2 AND metadata->'options'->>'identity_enrichment_request_id'=$3`, j.TenantID, j.RemoteID, j.RequestID.String(), sensordispatch.FailureCodeKey, shareddisc.ScanPlanMetadataKey).Scan(&status, &submitted, &failureCode, &planned); err != nil {
 				return err
 			}
-			if status != "completed" || submitted == nil {
+			if status != "completed" {
+				return nil
+			}
+			if planned {
+				var err error
+				ready, err = plannedProbeResultsIngested(ctx, tx, j.TenantID, j.RemoteID)
+				return err
+			}
+			if submitted == nil {
 				return nil
 			}
 			var total, pending int
@@ -115,10 +151,48 @@ func (b *IdentityEnrichmentBackend) Poll(ctx context.Context, j identityenrichme
 			result.State = "blocked"
 			result.Reason = "probe_failed_review_collector_before_retry"
 		}
+		if status == "failed" && failureCode == sensordispatch.FailureCodeSensorBusy {
+			// The sensor refused it only because its queue was full: nothing
+			// ran, and nothing about the collector needs review. Send a new
+			// request later, with backoff (Store.Finish).
+			result = identityenrichment.Result{State: "waiting", Reason: identityenrichment.ReasonCollectorBusy, Redispatch: true}
+		}
 		return result, err
 	default:
 		return identityenrichment.Result{}, fmt.Errorf("unsupported identity enrichment action")
 	}
+}
+
+// plannedProbeResultsIngested reports whether every result a completed PLANNED
+// probe job queued for inventory has been processed ( WP3, spec V5).
+//
+// A planned job's results do not arrive the legacy way. The legacy sensor
+// counted what it pushed (sensor_result.discoveries_submitted) and stamped the
+// job id into each row's metadata; a planned job's hosts are stored one by one
+// through shared/jobunits, which mirrors each finding into sensor_discoveries
+// with batch_id = the job id, and its completion carries no submitted count —
+// so the legacy test read 0 >= 0 and declared the probe ingested the moment the
+// job completed, before the discovery processor had looked at a single row.
+//
+// The count is complete by the time the job is: a unit's mirror rows commit in
+// the same transaction as its `done`, and a report that arrives after the job
+// ended is refused (jobunits.RecordSensorBatch), so "every mirrored row of this
+// job has processed_at" is exactly "the results are ingested" — and zero rows
+// (a probe that found nothing) is ingested at once.
+//
+// The rows are queued under the executor: the tenant sensor the job was
+// assigned to, or the tenant's platform discovery sensor when the platform ran
+// it (assigned_sensor_id NULL; cluster-sensor-service's platformSensorIDTx).
+// Matching the executor, not just the batch, keeps a row some other sensor
+// submitted under a batch id that happens to equal the job id out of the count.
+func plannedProbeResultsIngested(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, jobID string) (bool, error) {
+	var pending int
+	err := tx.QueryRowContext(ctx, `SELECT count(*) FILTER(WHERE sd.processed_at IS NULL) FROM sensor_discoveries sd
+   JOIN discovery_jobs j ON j.tenant_id=sd.tenant_id AND j.id::text=sd.batch_id
+  WHERE sd.tenant_id=$1 AND sd.batch_id=$2
+    AND sd.sensor_id=COALESCE(j.assigned_sensor_id,(SELECT s.id FROM sensors s
+          WHERE s.tenant_id=$1 AND s.profile='discovery' AND 'system'=ANY(s.tags) ORDER BY s.id LIMIT 1))`, tenant, jobID).Scan(&pending)
+	return pending == 0, err
 }
 
 func (b *IdentityEnrichmentBackend) sourceRequest(ctx context.Context, method string, j identityenrichment.Job, o identityenrichment.Observation) (identityenrichment.Result, error) {
@@ -230,43 +304,23 @@ func (b *IdentityEnrichmentBackend) pollDNS(ctx context.Context, j identityenric
 		retained.Addresses = []string{}
 	}
 	result = &retained
-	evidence := identity.Observation{TenantID: j.TenantID.String(), ObservedAt: result.ObservedAt, Source: identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:identity-dns:" + j.Plan.SensorID.String(), Mode: identity.ModeActive}, Network: o.Evidence.Network,
-		Admission: identity.AdmissionEvidence{CollectorVersion: result.CollectorVersion, ReceiptID: j.RequestID.String()}, DynamicScopes: o.Evidence.DynamicScopes}
-	// DNS is name-to-address context, never direct device/interface proof. Keep
-	// it separate from the original source and never inflate corroboration.
-	kind, nameScope := identity.KindHostname, j.Plan.SegmentID.String()
-	for _, id := range o.Evidence.Identifiers {
-		if id.Value == result.Hostname && id.Kind == identity.KindFQDN {
-			kind = identity.KindFQDN
-			nameScope = id.Scope
-		}
-	}
-	evidence.DynamicScopes = make(map[string]bool, len(o.Evidence.DynamicScopes))
-	for key, value := range o.Evidence.DynamicScopes {
-		evidence.DynamicScopes[key] = value
-	}
-	if _, err := b.assets.identityEngine(); err != nil {
+	// The DNS answer as a sighting (dnsEvidenceSighting): name-to-address
+	// context, never direct device or interface proof, scoped and graded by
+	// the intake like every other sighting.
+	intake, err := b.assets.assessSighting(ctx, "DNS answer for "+result.Hostname, dnsEvidenceSighting(j, o, result))
+	if err != nil {
 		return out, err
 	}
-	for _, address := range result.Addresses {
-		matchedScope, dynamic, err := b.assets.identityRepo.ScopeForAddress(ctx, j.TenantID.String(), netip.MustParseAddr(address), "")
-		if err != nil {
-			return out, err
-		}
-		if matchedScope != j.Plan.SegmentID.String() {
+	evidence := intake.Observation
+	// The plan authorised addresses inside ONE segment. If the topology moved
+	// between planning and ingesting — the segment edited or deleted — the
+	// answer no longer means what was asked, and it is refused rather than
+	// filed under whatever segment the address is in now.
+	for _, id := range evidence.Identifiers {
+		if id.Kind == identity.KindIPAddress && id.Scope != j.Plan.SegmentID.String() {
 			return out, fmt.Errorf("DNS address scope changed before ingestion")
 		}
-		evidence.DynamicScopes[matchedScope] = evidence.DynamicScopes[matchedScope] || dynamic
 	}
-	evidence.Identifiers = append(evidence.Identifiers, identity.Identifier{Kind: kind, Value: result.Hostname, Scope: nameScope})
-	for _, address := range result.Addresses {
-		evidence.Identifiers = append(evidence.Identifiers, identity.Identifier{Kind: identity.KindIPAddress, Value: address, Scope: j.Plan.SegmentID.String()})
-	}
-	evidence, _ = evidence.Sanitize()
-	// A DNS answer is measured context: a generic name looked up here is marked
-	// exactly as it was at ingest, so the lookup cannot make it decide what the
-	// sighting could not ( B2). MarkAll touches only `hostname`.
-	evidence.Identifiers = b.assets.genericNames().MarkAll(ctx, j.TenantID.String(), evidence.Identifiers)
 	// Hold the tenant policy decision through the evidence transaction; a
 	// disable that commits first cannot be overtaken by a queued DNS result.
 	engine, err := b.assets.identityEngine()
@@ -286,6 +340,20 @@ func (b *IdentityEnrichmentBackend) pollDNS(ctx context.Context, j identityenric
 			return err
 		}
 		tx := b.assets.sqlxOver(repo.Tx())
+		// The DNS answer put the sighting's name and address in front of two
+		// different owners and the engine opened a merge proposal. The
+		// proposal names the DNS evidence row, not the sighting `o` that
+		// asked the question, and a later Reevaluate/Materialize re-resolves
+		// `o`'s bare stored evidence — which may now name only ONE of the
+		// owners and would link, silently picking a side of the conflict the
+		// system just flagged. Record the proposal on `o`; those two
+		// paths skip an observation whose proposal is still pending.
+		if res.Outcome == identity.OutcomeConflict && res.Proposal.ID != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE identity_observations SET proposal_id=$3::uuid,updated_at=now()
+ WHERE tenant_id=$1 AND id=$2 AND state='unresolved' AND asset_id IS NULL AND proposal_id IS NULL`, j.TenantID, o.ID, res.Proposal.ID); err != nil {
+				return err
+			}
+		}
 		if res.ObservationID == "" {
 			return nil
 		}
@@ -368,10 +436,13 @@ func (b *IdentityEnrichmentBackend) Reevaluate(ctx context.Context, tenant uuid.
 		}
 		var state string
 		var raw []byte
-		if err := repo.Tx().QueryRowContext(ctx, `SELECT state,evidence FROM identity_observations WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenant, o.ID).Scan(&state, &raw); err != nil {
+		var underReview bool
+		if err := repo.Tx().QueryRowContext(ctx, `SELECT state,evidence,`+observationUnderReviewSQL+` FROM identity_observations o WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, tenant, o.ID).Scan(&state, &raw, &underReview); err != nil {
 			return err
 		}
-		if state != "unresolved" {
+		// A pending merge proposal is a question for a person; re-resolving the
+		// bare evidence must not answer it by linking one side.
+		if state != "unresolved" || underReview {
 			return nil
 		}
 		var current identity.Observation
@@ -435,11 +506,11 @@ func (b *IdentityEnrichmentBackend) Materialize(ctx context.Context, tenant uuid
 		var state string
 		var assetID sql.NullString
 		var raw []byte
-		var due bool
+		var due, underReview bool
 		if err := repo.Tx().QueryRowContext(ctx, `SELECT state,asset_id::text,evidence,
-   (materialized_at IS NULL OR materialized_at<now()-$3::interval)
-   FROM identity_observations WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
-			tenant, o.ID, identityenrichment.MaterializationInterval.String()).Scan(&state, &assetID, &raw, &due); err != nil {
+   (materialized_at IS NULL OR materialized_at<now()-$3::interval),`+observationUnderReviewSQL+`
+   FROM identity_observations o WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
+			tenant, o.ID, identityenrichment.MaterializationInterval.String()).Scan(&state, &assetID, &raw, &due, &underReview); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
@@ -448,7 +519,7 @@ func (b *IdentityEnrichmentBackend) Materialize(ctx context.Context, tenant uuid
 		// Anything that already has an asset, or that a reviewer has decided,
 		// is not this pass's business. Re-resolving a dismissed observation
 		// would resurrect a decision somebody made on purpose.
-		if state != "unresolved" || assetID.Valid || !due {
+		if state != "unresolved" || assetID.Valid || !due || underReview {
 			return nil
 		}
 		var current identity.Observation
@@ -463,6 +534,14 @@ func (b *IdentityEnrichmentBackend) Materialize(ctx context.Context, tenant uuid
 		return err
 	})
 }
+
+// observationUnderReviewSQL is true while the observation (aliased `o`) is the
+// subject of a merge proposal nobody has decided. identity_observations.
+// proposal_id is the durable link; a decided proposal no longer holds the
+// observation, so a resolved review lets re-evaluation resume.
+const observationUnderReviewSQL = `EXISTS (SELECT 1 FROM public.asset_history h
+   WHERE h.tenant_id=o.tenant_id AND h.id=o.proposal_id AND h.action='merge_proposed'
+     AND COALESCE(h.changes_json->>'status','pending')='pending')`
 
 var errEnrichmentPaused = errors.New("identity enrichment is paused")
 
@@ -497,4 +576,41 @@ func enrichmentActiveTx(ctx context.Context, tx *sql.Tx, tenant uuid.UUID) (bool
 	}
 	policy, err := identityenrichment.ParsePolicy(raw)
 	return policy.Active(), err
+}
+
+// dnsEvidenceSighting is what a DNS lookup SAW: a name, and the addresses it
+// resolved to inside the requested segment.
+//
+// A DNS answer is name-to-address context, never device or interface proof,
+// so the channel is `advertisement` and the answer can neither bind an
+// interface nor inflate corroboration.
+//
+// The name is scoped with the address of the sighting that asked the question
+// — the first address the original observation held in the requested segment
+// — so a lookup that returned nothing in scope still names the host where it
+// was asked about, instead of drifting to the tenant default.
+func dnsEvidenceSighting(j identityenrichment.Job, o identityenrichment.Observation, result *sensordispatch.IdentityDNSResult) identity.Sighting {
+	segment := j.Plan.SegmentID.String()
+	asked := ""
+	for _, id := range o.Evidence.Identifiers {
+		if id.Kind == identity.KindIPAddress && id.Scope == segment {
+			asked = id.Value
+			break
+		}
+	}
+	sg := identity.Sighting{
+		TenantID:         j.TenantID.String(),
+		Source:           identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:identity-dns:" + j.Plan.SensorID.String(), Mode: identity.ModeActive},
+		Channel:          identity.ChannelAdvertisement,
+		ObservedAt:       result.ObservedAt,
+		ReceiptID:        j.RequestID.String(),
+		CollectorVersion: result.CollectorVersion,
+		Ownership:        o.Evidence.Network.Ownership,
+		NetworkType:      o.Evidence.Network.Type,
+		Identifiers:      []identity.SightedIdentifier{{Kind: identity.KindHostname, Value: result.Hostname, Address: asked}},
+	}
+	for _, address := range result.Addresses {
+		sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindIPAddress, Value: address})
+	}
+	return sg
 }

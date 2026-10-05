@@ -54,6 +54,12 @@ type Payload struct {
 	Protocols []string               `json:"protocols"`
 	Ports     []int                  `json:"ports"`
 	Options   map[string]interface{} `json:"options,omitempty"`
+	// Plan is a planned scan's per-target plan ( WP2b, plan.go). Only a
+	// sensor that reports ScanPlanCapability is ever handed one. A plan
+	// payload carries NO top-level targets, so a sensor too old to know
+	// "plan" — whose parser requires targets — refuses it as malformed
+	// instead of running something unrelated with protocols=[].
+	Plan *PlanPayload `json:"plan,omitempty"`
 }
 
 // ToMap renders the payload as the generic map sensor_commands.payload stores
@@ -72,6 +78,9 @@ func (p Payload) ToMap() map[string]interface{} {
 			opts[k] = v
 		}
 		out["options"] = opts
+	}
+	if p.Plan != nil {
+		out["plan"] = p.Plan.planMap()
 	}
 	return out
 }
@@ -109,7 +118,18 @@ func ParsePayload(m map[string]interface{}) (Payload, error) {
 	if err != nil {
 		return p, fmt.Errorf("%w: targets: %v", ErrMalformedPayload, err)
 	}
-	if len(targets) == 0 {
+	if raw, ok := m["plan"]; ok && raw != nil {
+		// A planned scan: its targets are in the plan, and a payload naming
+		// targets in both places is not one the platform writes.
+		if len(targets) > 0 {
+			return p, fmt.Errorf("%w: a planned scan carries its targets in the plan, not beside it", ErrMalformedPayload)
+		}
+		plan, err := parsePlan(raw)
+		if err != nil {
+			return p, fmt.Errorf("%w: %v", ErrMalformedPayload, err)
+		}
+		p.Plan = plan
+	} else if len(targets) == 0 {
 		return p, fmt.Errorf("%w: targets is empty", ErrMalformedPayload)
 	}
 	p.Targets = targets
@@ -253,10 +273,12 @@ func DispatchTimeout(reportingIntervalSeconds int) time.Duration {
 	return LivenessWindow(reportingIntervalSeconds)
 }
 
-// ExecutionTimeout bounds how long a sensor that DID collect a command may run
-// it before the platform stops waiting. Generous: a thousand-target sweep on a
-// slow link is legitimate work. It exists so a sensor that dies mid-job leaves
-// a failed job with a reason, not one that says "awaiting sensor" forever.
+// ExecutionTimeout bounds how long a sensor that DID collect a protocols ×
+// ports command may run it before the platform stops waiting. Generous: a
+// thousand-target sweep on a slow link is legitimate work. It exists so a
+// sensor that dies mid-job leaves a failed job with a reason, not one that
+// says "awaiting sensor" forever. A planned scan is not bound by it: it runs
+// for as long as it keeps reporting progress (PlanProgressLease).
 const ExecutionTimeout = 2 * time.Hour
 
 // Completion is what the sensor reports when a dispatched job finishes, through
@@ -303,3 +325,35 @@ func SensorOfflineMessage(sensorName string, lastHeartbeat *time.Time) string {
 	}
 	return msg
 }
+
+// JobQueueDepth is how many dispatched discovery jobs a sensor holds waiting
+// behind the one it is running. A command that arrives while the queue is full
+// is refused with a SensorBusyPrefix reason and nothing is scanned.
+//
+// It lives here, beside the payload, because the platform needs it too: an
+// unattended producer (identity enrichment) budgets what it hands one sensor
+// against it, instead of discovering the limit by having its jobs refused.
+const JobQueueDepth = 8
+
+// SensorBusyPrefix starts the reason a sensor gives when it refuses a
+// discovery_job (or scoped DNS) command because its queue is full. Sensors
+// since 4.3 send "sensor busy: …"; IsSensorBusyRefusal is how the platform
+// tells that apart from a refusal that means the job itself is wrong.
+const SensorBusyPrefix = "sensor busy"
+
+// IsSensorBusyRefusal reports whether a command's refusal reason says only that
+// the sensor had no room — the job was well-formed and may simply be sent again
+// later.
+func IsSensorBusyRefusal(reason string) bool {
+	return strings.HasPrefix(strings.TrimSpace(reason), SensorBusyPrefix)
+}
+
+// FailureCodeKey is the discovery_jobs.metadata key under which the dispatcher
+// records WHY a sensor job failed, in a form a program may branch on. The
+// error_message beside it is for people and its wording may change.
+const FailureCodeKey = "failure_code"
+
+// FailureCodeSensorBusy is the failure code of a job its sensor refused only
+// because its queue was full (IsSensorBusyRefusal). Nothing was scanned, and
+// the same job sent later would be accepted.
+const FailureCodeSensorBusy = "sensor_busy"

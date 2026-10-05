@@ -14,6 +14,17 @@
 // individually-verified incidents — not a comprehensive CA distrust database.
 // See the doc comment on knownBadCAFingerprints before treating its absence as
 // "this CA is fine."
+//
+// The connect-scan engine (Scanner, in scan.go and its scan_*.go siblings) is
+// the shared TCP port-discovery pass: liveness by TCP connect (accepted or
+// refused both mean up; silence is "no answer", never "down"), a
+// high-concurrency connect scan bounded by a pace profile and a process-wide
+// file-descriptor budget, a tarpit guard, and OT-safe handling of industrial
+// ports (serialized, connect-only, or skipped). It contacts only the
+// netip.Addr values it is given — no name resolution, no derived addresses —
+// so callers must pass addresses already cleared by
+// shared/identity/dispatchguard. It writes no payload; identification and UDP
+// are separate passes. See the comment at the top of scan.go.
 package discovery
 
 import (
@@ -37,9 +48,30 @@ func TLSVersionName(version uint16) string {
 	}
 }
 
-// CipherSuiteName maps a TLS cipher-suite id to its IANA name. Unknown suites
-// are rendered as "Unknown-0x%04X" so the raw id is preserved.
+// CipherSuiteName maps a TLS cipher-suite id to its IANA name. A suite outside
+// the table below takes crypto/tls's own name for it when the standard library
+// knows one (the ECDHE-ECDSA CBC suites a default Go client still offers, for
+// instance); anything else is rendered as "Unknown-0x%04X" so the raw id is
+// preserved.
 func CipherSuiteName(suite uint16) string {
+	if name := cipherSuiteTableName(suite); name != "" {
+		return name
+	}
+	for _, cs := range tls.CipherSuites() {
+		if cs.ID == suite {
+			return cs.Name
+		}
+	}
+	for _, cs := range tls.InsecureCipherSuites() {
+		if cs.ID == suite {
+			return cs.Name
+		}
+	}
+	return fmt.Sprintf("Unknown-0x%04X", suite)
+}
+
+// cipherSuiteTableName is the explicit table, "" for a suite it does not list.
+func cipherSuiteTableName(suite uint16) string {
 	switch suite {
 	case tls.TLS_RSA_WITH_RC4_128_SHA:
 		return "TLS_RSA_WITH_RC4_128_SHA"
@@ -82,6 +114,6 @@ func CipherSuiteName(suite uint16) string {
 	case tls.TLS_CHACHA20_POLY1305_SHA256:
 		return "TLS_CHACHA20_POLY1305_SHA256"
 	default:
-		return fmt.Sprintf("Unknown-0x%04X", suite)
+		return ""
 	}
 }

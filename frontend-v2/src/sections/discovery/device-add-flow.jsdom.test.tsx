@@ -113,7 +113,7 @@ describe('Add device', () => {
     expect(path).toBe('/devices/discover-and-create');
     expect(init.body).toEqual({
       device_type: 'f5', management_url: 'https://192.0.2.10', username: 'admin', password: 'correct-horse',
-      tls_insecure_skip_verify: true,
+      tls_insecure_skip_verify: true, platform_reinterrogation_allowed: false,
     });
     expect(mocks.navigate).not.toHaveBeenCalled();
   });

@@ -348,6 +348,9 @@ export const SECTIONS: NavItem[] = [
       // Core: a Core build answers "no licence installed", which is this
       // page's Core state (GET /admin/license is Core code).
       { id: 'license', label: 'License & Usage', title: 'License & Usage', subtitle: 'The licence this install runs under, and the data-retention cap' },
+      // Core serves GET /admin/ai too: a Core build answers with no provider
+      // kinds, and the page says the model clients are part of Enterprise.
+      { id: 'ai', label: 'AI assistant', title: 'AI assistant', subtitle: 'The default model provider, and whether organizations may connect their own' },
     ] },
 
   { id: 'staff', label: 'Staff & Access', icon: 'UsersRound', group: 'Governance',

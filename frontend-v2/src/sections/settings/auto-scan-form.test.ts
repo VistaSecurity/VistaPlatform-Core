@@ -109,8 +109,7 @@ describe('validateDraft', () => {
     }
   });
 
-  it('requires at least one protocol and one port', () => {
-    expect(validateDraft(draft({ protocols: [] }), limits)).toMatch(/at least one protocol/i);
+  it('requires at least one port', () => {
     expect(validateDraft(draft({ portsText: '' }), limits)).toMatch(/at least one port/i);
   });
 
@@ -140,7 +139,6 @@ describe('isDirty', () => {
     expect(isDirty(draft({ enabled: false }), policy)).toBe(true);
     expect(isDirty(draft({ scanOnFirstObservation: false }), policy)).toBe(true);
     expect(isDirty(draft({ intervalHours: '48' }), policy)).toBe(true);
-    expect(isDirty(draft({ protocols: ['TLS'] }), policy)).toBe(true);
     expect(isDirty(draft({ portsText: '443' }), policy)).toBe(true);
   });
 
@@ -157,7 +155,17 @@ describe('draftToPayload', () => {
     const payload = draftToPayload(draft({ intervalHours: '72', portsText: '8443, 443' }));
     expect(payload.rescan_interval_hours).toBe(72);
     expect(payload.ports).toEqual([443, 8443]);
-    expect(payload.protocols).toEqual(['SSH', 'TLS']);
+  });
+
+  // The page no longer edits protocols (the engine identifies TLS and SSH from
+  // what answers), so it never sends them: the server keeps its stored value.
+  it('omits protocols, so saving cannot change the stored value', () => {
+    const payload = draftToPayload(draft());
+    expect('protocols' in payload).toBe(false);
+  });
+
+  it('a stored policy with non-default protocols reads back as an unchanged form', () => {
+    expect(isDirty(draftFromPolicy({ ...policy, protocols: ['TLS'] }), { ...policy, protocols: ['TLS'] })).toBe(false);
   });
 
   it('carries an explicit false rather than omitting it', () => {
