@@ -166,7 +166,7 @@ func (jp *JobProcessor) newPlanRun(job *models.DiscoveryJob, opts map[string]int
 	activeScan, _ := opts["active_scan"].(bool)
 	return &planRun{
 		jp: jp, job: job, targets: targetByRow(targets),
-		auth:   &unitAuthorizer{jp: jp, tenantID: job.TenantID, options: opts, otProbes: otProbes},
+		auth:   &unitAuthorizer{jp: jp, tenantID: job.TenantID, options: opts, otProbes: otProbes, platformExecutor: true},
 		engine: engine, liveness: live, sweepSlots: sweepSlots, activeScan: activeScan,
 	}, targets, nil
 }

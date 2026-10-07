@@ -43,6 +43,11 @@ type Config struct {
 	BillingDunningCronSchedule  string
 	BillingGracePeriodDays      int
 
+	// LoginRateLimit is the sign-in attempts allowed per minute against one
+	// platform-admin account (ADMIN_LOGIN_RATE_LIMIT). The per-address limit is
+	// twice this. Zero selects the default (5); it is never "unlimited".
+	LoginRateLimit int
+
 	// mTLS Configuration
 	UseMTLS            bool
 	TLSPort            string
@@ -89,6 +94,7 @@ func Load() *Config {
 		BillingDunningWorkerEnabled: sharedconfig.GetEnvAsBool("BILLING_DUNNING_WORKER_ENABLED", true),
 		BillingDunningCronSchedule:  sharedconfig.GetEnv("BILLING_DUNNING_CRON_SCHEDULE", "0 */6 * * *"),
 		BillingGracePeriodDays:      sharedconfig.GetEnvAsInt("BILLING_GRACE_PERIOD_DAYS", 7),
+		LoginRateLimit:              sharedconfig.GetEnvAsInt("ADMIN_LOGIN_RATE_LIMIT", 5),
 		// mTLS Configuration
 		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
 		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),

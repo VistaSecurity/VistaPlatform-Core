@@ -248,10 +248,11 @@ func TestDiscoverySink_DedupAndCap(t *testing.T) {
 func TestUnprocessableCapture_IsNotRedelivered(t *testing.T) {
 	p := newTestProcessor(t, &recordingSink{})
 
+	tenantID := uuid.New()
 	job := &events.PcapJobEvent{
 		JobID:            uuid.New(),
-		TenantID:         uuid.New(),
-		FilePath:         filepath.Join(t.TempDir(), "does-not-exist.pcap"),
+		TenantID:         tenantID,
+		FilePath:         uploadPathFor(p, tenantID, "does-not-exist.pcap"),
 		OriginalFilename: "does-not-exist.pcap",
 	}
 
@@ -287,14 +288,17 @@ func TestMalformedJobEvent_IsNotRedelivered(t *testing.T) {
 // about the file, so it must stay retryable — marking it permanent would
 // silently discard a tenant's upload on every rolling restart.
 func TestCancelledProcessing_StaysRetryable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ordinary.pcap")
-	writeSSHFloodPcap(t, path, 2000)
-
 	p := newTestProcessor(t, &recordingSink{})
+	tenantID := uuid.New()
+	path := uploadPathFor(p, tenantID, "ordinary.pcap")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeSSHFloodPcap(t, path, 2000)
 
 	job := &events.PcapJobEvent{
 		JobID:            uuid.New(),
-		TenantID:         uuid.New(),
+		TenantID:         tenantID,
 		FilePath:         path,
 		OriginalFilename: "ordinary.pcap",
 	}

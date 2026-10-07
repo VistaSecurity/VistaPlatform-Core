@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
+	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	cryptostrength "github.com/vistasecurity/vistaplatform/shared/strength"
 )
 
@@ -895,6 +896,16 @@ func isVersionUpgrade(prev, next string) bool {
 	return parseTLSVer(next) > parseTLSVer(prev)
 }
 
+// externalConnectionSearchClause is the WHERE fragment and bound pattern for
+// the external-connections search box: a case-insensitive "contains" over the
+// destination hostname and address, matched literally. `_` is common in
+// hostnames and `%` would otherwise match every row.
+func externalConnectionSearchClause(argIdx int, search string) (clause, pattern string) {
+	esc := shareddatabase.LikeEscapeClause
+	clause = fmt.Sprintf("(dest_hostname ILIKE $%[1]d%[2]s OR dest_ip::text ILIKE $%[1]d%[2]s)", argIdx, esc)
+	return clause, shareddatabase.ContainsPattern(search)
+}
+
 // List returns paginated external connections for the tenant.
 func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalConnectionFilters) ([]models.ExternalConnection, int, error) {
 	if f.Page <= 0 {
@@ -930,8 +941,9 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 	where := []string{"tenant_id = $1"}
 
 	if f.Search != "" {
-		where = append(where, fmt.Sprintf("(dest_hostname ILIKE $%d OR dest_ip::text ILIKE $%d)", argIdx, argIdx))
-		args = append(args, "%"+f.Search+"%")
+		clause, pattern := externalConnectionSearchClause(argIdx, f.Search)
+		where = append(where, clause)
+		args = append(args, pattern)
 		argIdx++
 	}
 	if f.Strength == "unassessed" {

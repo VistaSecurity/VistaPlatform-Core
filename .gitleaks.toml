@@ -31,9 +31,16 @@ paths = [
   # force_password_change so it grants only a change-password-only session.
   '''scripts/database/seed\.sql''',
   '''democorp-seed/.*''',
-  # Documentation showing the SHAPE of a credential, with placeholder values.
-  '''docsv4/.*\.md''',
+  # Operator guides that show the SHAPE of a credential with placeholder values.
+  # docsv4/ is deliberately NOT allowlisted wholesale: the published docs are
+  # exactly where a pasted credential would do the most damage, so a doc is
+  # scanned like any other file and only the specific placeholder shapes in the
+  # `regexes` below are exempt.
   '''.*/CERTIFICATE_MANAGEMENT\.md''',
+  # SBOM parser redaction fixture: PEM markers around a few base64 characters
+  # (verified not to parse as a key), because the test asserts a key block in an
+  # uploaded SBOM's free text never survives parsing.
+  '''shared/sbom/testdata/cyclonedx-pem\.json''',
   # The code scanner's own rule table. It contains the literal string
   # "-----BEGIN RSA PRIVATE KEY-----" because that is the PATTERN it hunts for
   # in customer source. A secret scanner flagging another secret scanner's
@@ -44,6 +51,9 @@ paths = [
 regexes = [
   # Cryptographic algorithm identifiers, not secrets.
   '''key_exchange(_algorithm)?''',
+  # Hybrid PQC key-exchange group names (standardized TLS group identifiers) that
+  # the generic-api-key rule reads as high-entropy tokens.
+  '''X25519MLKEM768|SecP256r1MLKEM768|SecP384r1MLKEM1024''',
   # Documentation placeholders, including the literal token stand-ins used in
   # example curl commands ("Authorization: Bearer YOUR_TOKEN").
   '''REPLACE_ME|CHANGE_ME|YOUR_TOKEN|your-[a-z-]+-here|xxxxx+|T00000000''',

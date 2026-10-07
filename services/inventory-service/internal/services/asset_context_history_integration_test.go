@@ -19,7 +19,7 @@ package services
 // MUTATION (each goes red): make applyAssetContext record unconditionally
 // (skip the `moved` filter) — the repeat-observation, real-change, repeat-pull
 // and listing tests fail; drop metadataProvenanceKeys from the metadata
-// comparison — the repeat-observation and real-change tests fail; make the
+// comparison — the repeat-observation, alternating-descriptor and real-change tests fail; make the
 // gate drop every `updated` row — the real-change and repeat-pull tests fail;
 // filter `created` rows by `moved` too — the repeat-observation test fails (a
 // created row would lose the ownership that matched the column default); drop
@@ -102,9 +102,16 @@ func describeTimeline(rows []contextHistoryRow) string {
 // window: the same host, a later observation time, and the window's own batch.
 func hostObservationBatch(t *testing.T, i int, attrs map[string]interface{}) IngestFinding {
 	t.Helper()
+	return hostObservationBatchHeardBy(t, i, attrs, []string{hostobs.SourceMDNS})
+}
+
+// hostObservationBatchHeardBy is hostObservationBatch with the collectors that
+// heard the host named, for a host two of them alternate on.
+func hostObservationBatchHeardBy(t *testing.T, i int, attrs map[string]interface{}, sources []string) IngestFinding {
+	t.Helper()
 	f := observationFinding(t, &hostobs.HostObservation{
 		Source:     hostobs.SourceMDNS,
-		Sources:    []string{hostobs.SourceMDNS},
+		Sources:    sources,
 		MAC:        "28:cf:da:77:00:01",
 		Addresses:  addrsFor(t, "192.0.2.70"),
 		FQDNs:      []string{"office-speaker.local"},
@@ -195,26 +202,85 @@ func TestIntegration_AssetContextHistory_RepeatObservationWritesNoRow(t *testing
 	}
 }
 
+// The defect found on a quiet install after 4.4.0: one host announcing two mDNS
+// services (ports 7000 and 53696), heard sometimes through a reflector and
+// sometimes by mDNS and ARP together. Each observation describes ITSELF, and
+// the metadata merge replaces `host_observation_attributes` and
+// `host_observation_sources` wholesale, so they flipped on every observation
+// and each flip wrote an `updated` row (840 of 861 in six hours, one asset
+// ~100 an hour). They are sighting provenance, like the batch id.
+//
+// MUTATION: take host_observation_attributes (or host_observation_sources) out
+// of metadataProvenanceKeys — this test fails.
+func TestIntegration_AssetContextHistory_AlternatingSightingDescriptorsWriteNoRow(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	observe := func(i int) {
+		t.Helper()
+		attrs := map[string]interface{}{"capture_interface": "eth0", "mdns_service_port": 53696}
+		sources := []string{hostobs.SourceMDNS}
+		if i%2 == 0 {
+			attrs = map[string]interface{}{"capture_interface": "eth0", "mdns_service_port": 7000, "mdns_relayed": true}
+			sources = []string{hostobs.SourceMDNS, hostobs.SourceARP}
+		}
+		if _, err := svc.IngestFindings(tenant, []IngestFinding{hostObservationBatchHeardBy(t, i, attrs, sources)}); err != nil {
+			t.Fatalf("ingest %d: %v", i, err)
+		}
+	}
+	observe(1)
+	asset := onlyAsset(t, db, tenant)
+	observe(2)
+	base := len(assetTimeline(t, db, tenant, asset))
+
+	for i := 3; i <= 8; i++ {
+		observe(i)
+	}
+	rows := assetTimeline(t, db, tenant, asset)
+	if len(rows) != base {
+		t.Errorf("six alternating observations of one host wrote %d rows, want 0:%s", len(rows)-base, describeTimeline(rows[base:]))
+	}
+
+	// Still STORED: the metadata carries the latest sighting's description,
+	// as before; it just is not news.
+	var port float64
+	var relayed bool
+	if err := db.QueryRow(`
+		SELECT COALESCE((metadata->'host_observation_attributes'->>'mdns_service_port')::float, 0),
+		       COALESCE((metadata->'host_observation_attributes'->>'mdns_relayed')::bool, false)
+		  FROM assets WHERE id = $1`, asset).Scan(&port, &relayed); err != nil {
+		t.Fatal(err)
+	}
+	if port != 7000 || !relayed {
+		t.Errorf("stored attributes = port %v relayed %v, want the eighth observation's (7000, true)", port, relayed)
+	}
+}
+
 // A real change on the observation path writes exactly one row, and the row
 // names what changed and nothing that did not.
 func TestIntegration_AssetContextHistory_RealChangesWriteOneRowNamingThem(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
-	ingest := func(i int, attrs map[string]interface{}) {
+	// `source` is what discoverySourceMetadata turns into the discovery source
+	// the Approvals filters read; the rest of the finding is the same host.
+	ingest := func(i int, source string) {
 		t.Helper()
-		if _, err := svc.IngestFindings(tenant, []IngestFinding{hostObservationBatch(t, i, attrs)}); err != nil {
+		f := hostObservationBatch(t, i, map[string]interface{}{"capture_interface": "eth0"})
+		if source != "" {
+			f.RawData["source"] = source
+		}
+		if _, err := svc.IngestFindings(tenant, []IngestFinding{f}); err != nil {
 			t.Fatalf("ingest %d: %v", i, err)
 		}
 	}
-	ingest(1, map[string]interface{}{"capture_interface": "eth0"})
+	ingest(1, "")
 	asset := onlyAsset(t, db, tenant)
-	ingest(2, map[string]interface{}{"capture_interface": "eth0"})
+	ingest(2, "")
 	base := len(assetTimeline(t, db, tenant, asset))
 
-	// A new value of a host-observation attribute is news about the host.
-	ingest(3, map[string]interface{}{"capture_interface": "eth1"})
+	// A new discovery source is news about the asset: which collector put it
+	// in front of a reviewer.
+	ingest(3, "cloud_discovery")
 	rows := assetTimeline(t, db, tenant, asset)
 	if len(rows) != base+1 {
-		t.Fatalf("a changed host-observation attribute wrote %d rows, want 1:%s", len(rows)-base, describeTimeline(rows[base:]))
+		t.Fatalf("a changed discovery source wrote %d rows, want 1:%s", len(rows)-base, describeTimeline(rows[base:]))
 	}
 	got := rows[base]
 	if got.Action != string(identity.ActionUpdated) || got.Changes["metadata"] == nil {
@@ -224,9 +290,9 @@ func TestIntegration_AssetContextHistory_RealChangesWriteOneRowNamingThem(t *tes
 		t.Errorf("the row names asset_ownership, which did not change: %+v", got.Changes)
 	}
 	// The same new value again is not news.
-	ingest(4, map[string]interface{}{"capture_interface": "eth1"})
+	ingest(4, "cloud_discovery")
 	if n := len(assetTimeline(t, db, tenant, asset)); n != base+1 {
-		t.Errorf("re-stating the new attribute value wrote %d more rows, want 0", n-base-1)
+		t.Errorf("re-stating the new discovery source wrote %d more rows, want 0", n-base-1)
 	}
 
 	// Ownership changed underneath (here by hand) is written again by the
@@ -235,7 +301,7 @@ func TestIntegration_AssetContextHistory_RealChangesWriteOneRowNamingThem(t *tes
 	if _, err := db.Exec(`UPDATE assets SET asset_ownership = 'third_party' WHERE id = $1`, asset); err != nil {
 		t.Fatal(err)
 	}
-	ingest(5, map[string]interface{}{"capture_interface": "eth1"})
+	ingest(5, "cloud_discovery")
 	rows = assetTimeline(t, db, tenant, asset)
 	if len(rows) != base+2 {
 		t.Fatalf("an ownership change wrote %d rows, want 1:%s", len(rows)-base-1, describeTimeline(rows[base+1:]))

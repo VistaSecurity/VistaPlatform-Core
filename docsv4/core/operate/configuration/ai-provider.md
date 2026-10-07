@@ -119,7 +119,7 @@ ai:
   provider: openai_compat
   baseUrl: http://ollama.internal:11434/v1
   model: llama3.3:70b
-  allowPrivateEndpoints: true     # required for a private or loopback address
+  allowPrivateEndpoints: true     # required for a private (RFC 1918) address
   # apiKey may be omitted entirely — openai_compat treats it as optional
 ```
 
@@ -129,6 +129,14 @@ private target means someone has aimed a tenant-supplied URL at your own cluster
 and the platform refuses it. Here it may be your own model beside the platform,
 so the guard becomes a decision you record rather than a rule. Leave it `false`
 unless the endpoint really is yours.
+
+The setting lifts only the private-address refusal. Loopback (`127.0.0.1`,
+`localhost`) and link-local addresses (which include the cloud metadata
+services) are refused whatever it says, at connect time and on every redirect,
+so run the model on an address the platform can route to rather than on the
+pod's own loopback. If you set
+`CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` for the platform, that switch wins and
+a private model endpoint is refused too.
 
 Write `baseUrl` as far as the server's own documentation does — `…`, `…/v1`, or
 the full path — and the client appends the rest.
@@ -156,7 +164,7 @@ in-cluster proxy — see
 | `ai.provider` | `""` / `none` · `anthropic` · `openai_compat`. A misspelling is refused at install time, naming the field. |
 | `ai.baseUrl` | Endpoint. Optional for `anthropic`, required for `openai_compat`. |
 | `ai.model` | Model id. Optional for `anthropic`, required for `openai_compat`. |
-| `ai.allowPrivateEndpoints` | Permit a loopback or RFC1918 address. Default `false`. |
+| `ai.allowPrivateEndpoints` | Permit a private (RFC 1918) address. Loopback and link-local addresses stay refused. Default `false`. |
 | `ai.maxTokens` | Response cap. Default 16000. |
 | `ai.timeout` | Per-**attempt** HTTP timeout, e.g. `"120s"`. A call may be retried up to three times. |
 | `ai.apiKey.envVar` | Name of the variable the client reads the credential from. Defaults to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`. |

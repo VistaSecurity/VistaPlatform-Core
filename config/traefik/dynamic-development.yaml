@@ -1117,12 +1117,14 @@ http:
       headers:
         frameDeny: true
         contentTypeNosniff: true
-        browserXssFilter: true
+        browserXssFilter: false
         referrerPolicy: strict-origin-when-cross-origin
         contentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
-          https:; font-src 'self' data:; connect-src 'self' http: https:; frame-ancestors 'none';"
+          https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; base-uri 'self';
+          frame-ancestors 'none';"
         customResponseHeaders:
           Permissions-Policy: camera=(), microphone=(), geolocation=()
+          X-XSS-Protection: "0"
     strip-backend-cors:
       headers:
         customResponseHeaders:

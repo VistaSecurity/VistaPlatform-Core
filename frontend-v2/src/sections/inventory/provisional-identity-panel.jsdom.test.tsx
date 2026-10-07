@@ -86,8 +86,10 @@ it('announces loading and offers a retry when the evidence cannot be read', asyn
     root.render(<MemoryRouter><QueryClientProvider client={cache}><ProvisionalIdentityPanel assetID="asset-1" /></QueryClientProvider></MemoryRouter>);
   });
   expect(host.querySelector('[role="status"]')?.textContent).toContain('Loading the evidence');
-  await act(async () => { resolve({ response: { ok: false }, data: undefined }); await new Promise((r) => setTimeout(r, 10)); });
-  expect(host.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded');
+  await act(async () => { resolve({ response: { ok: false }, data: undefined }); });
+  // Poll rather than sleep a fixed 10ms: under a loaded CI runner the error
+  // render can land after the sleep, and the alert is not there yet.
+  await vi.waitFor(() => expect(host.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded'));
   expect([...host.querySelectorAll('button')].some((b) => b.textContent === 'Retry')).toBe(true);
 });
 

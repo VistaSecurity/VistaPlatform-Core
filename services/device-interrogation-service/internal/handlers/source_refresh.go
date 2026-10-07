@@ -17,11 +17,17 @@ import (
 // RegisterSourceRefresh exposes only signed service-to-service orchestration.
 // No JWT, spoofable tenant header, or caller-supplied credential enables probes.
 func (h *DeviceHandlers) RegisterSourceRefresh(router *gin.Engine, service *services.ConfiguredSourceRefresh) {
-	verifier := serviceauth.NewVerifier(os.Getenv("INTERNAL_AUTH_SECRET"))
+	// Fail CLOSED when the secret is unset: serviceauth.NewVerifier("") is an
+	// HMAC keyed on the empty string, a publicly computable MAC that would verify
+	// for any caller who signs with it. Every peer gate refuses outright instead.
+	var verifier *serviceauth.Verifier
+	if secret := os.Getenv("INTERNAL_AUTH_SECRET"); secret != "" {
+		verifier = serviceauth.NewVerifier(secret)
+	}
 	group := router.Group("/internal/enrichment/refresh")
 	group.Use(func(c *gin.Context) {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
-		if !verifier.Verify(c) {
+		if verifier == nil || !verifier.Verify(c) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "internal authentication required"})
 			return
 		}

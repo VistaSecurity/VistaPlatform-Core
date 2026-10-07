@@ -127,7 +127,6 @@ func TestServiceMiddlewareStack_DoesNotDrainTheBodyAheadOfAHandlersCap(t *testin
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/upload", &countingBody{remaining: bodySize, read: &read})
-	req.Header.Set("X-Tenant-ID", uuid.NewString())
 	req.ContentLength = bodySize
 	r.ServeHTTP(httptest.NewRecorder(), req)
 
@@ -149,6 +148,10 @@ func TestServiceMiddlewareStack_LeavesTheBodyReadableAndStillMetersIt(t *testing
 
 	var got string
 	r, posted := newServiceRouter(t, func(c *gin.Context) {
+		// The tenant is whoever the auth middleware established. It is NOT read
+		// from the X-Tenant-ID header any more: a caller-typed tenant id must
+		// never be metered (see TestExtractTenantID_IgnoresCallerChosenTenant).
+		c.Set("tenantID", uuid.New())
 		b, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			t.Errorf("reading the body in the handler: %v", err)
@@ -159,7 +162,6 @@ func TestServiceMiddlewareStack_LeavesTheBodyReadableAndStillMetersIt(t *testing
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/upload", io.NopCloser(newStringBody(payload)))
-	req.Header.Set("X-Tenant-ID", uuid.NewString())
 	req.ContentLength = int64(len(payload))
 	r.ServeHTTP(httptest.NewRecorder(), req)
 

@@ -2,7 +2,14 @@ package hostinventory
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,9 +184,68 @@ func scriptUbuntu(t *testing.T, f *fakeRunner) *fakeRunner {
 	// /etc/pki/tls/certs does not exist on a Debian derivative.
 	f.cmd(certFindArgv("/etc/ssl/certs"), "/etc/ssl/certs/ca-certificates.crt\n")
 	f.cmdExit(certFindArgv("/etc/pki/tls/certs"), 1, "find: '/etc/pki/tls/certs': No such file or directory")
-	f.file("/etc/ssl/certs/ca-certificates.crt", fixture(t, "linux", "ca-certificates.crt"))
+	f.file("/etc/ssl/certs/ca-certificates.crt", trustBundleFixture(t))
 
 	return f
+}
+
+var (
+	trustBundleOnce sync.Once
+	trustBundlePEM  string
+	trustBundleErr  error
+)
+
+// trustBundleFixture returns a Linux trust-store bundle: one self-signed CA
+// certificate followed by a PEM PRIVATE KEY block, which is what a misplaced
+// server.key in a trust directory looks like.
+//
+// It is generated at test time, in memory, and is deliberately NOT a file under
+// testdata/. A committed bundle had to carry a key block, and the key it carried
+// was the real private half of its own CA certificate; that is a published
+// signing key whatever the fixture's intent. Generating it means the repository
+// holds no key bytes at all, and the key here exists only for the life of the
+// test binary and signs nothing but its own certificate.
+//
+// The bundle is built once per process so that the parity tests, which build two
+// runners from one script, see byte-identical content on both sides.
+func trustBundleFixture(t *testing.T) string {
+	t.Helper()
+	trustBundleOnce.Do(func() {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			trustBundleErr = err
+			return
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(1),
+			Subject: pkix.Name{
+				Country:      []string{"US"},
+				Organization: []string{"Example Org"},
+				CommonName:   "Example Fixture Root CA",
+			},
+			NotBefore:             time.Date(2026, 9, 11, 0, 0, 0, 0, time.UTC),
+			NotAfter:              time.Date(2036, 9, 8, 0, 0, 0, 0, time.UTC),
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			BasicConstraintsValid: true,
+			IsCA:                  true,
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+		if err != nil {
+			trustBundleErr = err
+			return
+		}
+		keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			trustBundleErr = err
+			return
+		}
+		trustBundlePEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})) +
+			string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
+	})
+	if trustBundleErr != nil {
+		t.Fatalf("generate trust bundle fixture: %v", trustBundleErr)
+	}
+	return trustBundlePEM
 }
 
 // certFindArgv rebuilds the argv listCertFiles issues, so the script and the

@@ -628,6 +628,20 @@ func (h *WorkspaceHandlers) GetComplianceScore(c *gin.Context) {
 	c.JSON(http.StatusOK, score)
 }
 
+const (
+	// maxEvaluateFrameworks bounds how many frameworks one evaluate/multiple
+	// call may name. A tenant holds the platform catalogue (a few dozen at the
+	// outside) plus its own custom policies; an array of millions of UUIDs is
+	// never a real request. Every ID, even one that matches nothing, costs the
+	// service database round-trips, so the list is capped before any of them is
+	// looked at.
+	maxEvaluateFrameworks = 100
+	// maxEvaluateBodyBytes bounds the request body: 100 UUIDs, a version map
+	// and the scenario filters are a few kilobytes. Without it the array above
+	// is only as short as the edge's 100 MiB body cap makes it.
+	maxEvaluateBodyBytes = 1 << 20
+)
+
 // EvaluateMultipleFrameworks evaluates multiple frameworks simultaneously
 func (h *WorkspaceHandlers) EvaluateMultipleFrameworks(c *gin.Context) {
 	tenantUUID, ok := sharedmw.GetTenantIDFromContext(c)
@@ -644,7 +658,19 @@ func (h *WorkspaceHandlers) EvaluateMultipleFrameworks(c *gin.Context) {
 		EntityType        string                 `json:"entity_type"` // certificates, algorithms, systems, network
 	}
 
+	// The ceiling goes in front of the decoder, not behind it: a cap that
+	// applies after the body is parsed only decides whether to throw away what
+	// was already allocated.
+	if c.Request.ContentLength > maxEvaluateBodyBytes {
+		sharedapi.PayloadTooLarge(c, "the request body exceeds the 1 MiB limit")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxEvaluateBodyBytes)
 	if err := c.ShouldBindJSON(&input); err != nil {
+		if sharedapi.RequestBodyTooLarge(err) {
+			sharedapi.PayloadTooLarge(c, "the request body exceeds the 1 MiB limit")
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Invalid request format",
 		})
@@ -655,9 +681,19 @@ func (h *WorkspaceHandlers) EvaluateMultipleFrameworks(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one framework_id is required"})
 		return
 	}
+	if len(input.FrameworkIDs) > maxEvaluateFrameworks {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Too many frameworks",
+			"details": fmt.Sprintf("framework_ids may name at most %d frameworks per request", maxEvaluateFrameworks),
+		})
+		return
+	}
 
-	// Parse framework IDs
+	// Parse framework IDs, dropping repeats: evaluating the same framework
+	// twice in one call is wasted work, and the result carries one entry per
+	// framework.
 	frameworkUUIDs := make([]uuid.UUID, 0, len(input.FrameworkIDs))
+	seen := make(map[uuid.UUID]struct{}, len(input.FrameworkIDs))
 	for _, idStr := range input.FrameworkIDs {
 		id, err := uuid.Parse(idStr)
 		if err != nil {
@@ -667,6 +703,10 @@ func (h *WorkspaceHandlers) EvaluateMultipleFrameworks(c *gin.Context) {
 			})
 			return
 		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		frameworkUUIDs = append(frameworkUUIDs, id)
 	}
 

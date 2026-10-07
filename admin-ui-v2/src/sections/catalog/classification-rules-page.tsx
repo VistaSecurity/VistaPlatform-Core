@@ -42,6 +42,7 @@ import {
   RULE_KIND_LABEL, RULE_KIND_HINT, MIN_CONFIDENCE, MAX_CONFIDENCE, PAGE_SIZE,
   type ClassificationRule, type ClassificationRuleInput, type ClassificationRuleKind,
 } from './catalog-queries';
+import { safeHttpUrl } from '../../lib/url';
 
 const KIND_COLOR: Record<string, string> = {
   oui: 'var(--chart-1)',
@@ -335,8 +336,8 @@ export function ClassificationRulesPage() {
                 <td className="t-muted">{r.model ?? '—'}</td>
                 <td className="mono" style={{ fontSize: 12 }}>{r.confidence.toFixed(2)}</td>
                 <td>
-                  {r.source_url
-                    ? <a href={r.source_url} target="_blank" rel="noreferrer" style={{ fontSize: 11.5 }}>source</a>
+                  {safeHttpUrl(r.source_url)
+                    ? <a href={safeHttpUrl(r.source_url)!} target="_blank" rel="noreferrer" style={{ fontSize: 11.5 }}>source</a>
                     : <span className="t-muted" style={{ fontSize: 11.5 }} title="This rule cites nothing.">uncited</span>}
                 </td>
                 <td style={{ whiteSpace: 'nowrap' }}>

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
@@ -64,25 +65,43 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 		)
 
 		if err == sql.ErrNoRows {
-			var userExists bool
-			var isActive bool
-			var hasRole bool
+			// No ACTIVE, role-bearing, undeleted account matched. Every outcome
+			// of this branch answers with the same "Invalid credentials" and
+			// spends the same password-verification time, unless the caller
+			// proves they know the account's password: this endpoint is the
+			// front door of the platform-admin plane, and it used to name the
+			// state ("deleted" / "inactive" / "missing a role") of any address
+			// given to it, with no credential at all.
+			var passwordHash sql.NullString
+			var isActive, hasRole, userExists bool
 			var deletedAt sql.NullTime
-			_ = db.QueryRow(`
-				SELECT true, pu.is_active, pu.role_id IS NOT NULL, pu.deleted_at
+			if scanErr := db.QueryRow(`
+				SELECT true, pu.password_hash, pu.is_active, pu.role_id IS NOT NULL, pu.deleted_at
 				FROM platform_users pu
 				WHERE pu.email = $1
-			`, req.Email).Scan(&userExists, &isActive, &hasRole, &deletedAt)
+			`, req.Email).Scan(&userExists, &passwordHash, &isActive, &hasRole, &deletedAt); scanErr != nil {
+				userExists = false
+			}
 
-			if !userExists {
+			if !userExists || !passwordHash.Valid || passwordHash.String == "" {
+				burnPlatformPasswordHash(req.Password)
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-			} else if deletedAt.Valid {
+				return
+			}
+			valid, verr := platformPasswordService.VerifyPassword(req.Password, passwordHash.String)
+			if verr != nil || !valid {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+				return
+			}
+			// The caller proved the password, so the account state is theirs to know.
+			switch {
+			case deletedAt.Valid:
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Account has been deleted"})
-			} else if !isActive {
+			case !isActive:
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Account is inactive"})
-			} else if !hasRole {
+			case !hasRole:
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "User account is missing a role. Please contact an administrator."})
-			} else {
+			default:
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 			}
 			return
@@ -150,6 +169,24 @@ func Login(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefre
 			ExpiresIn:           3600,
 			ForcePasswordChange: user.ForcePasswordChange,
 		})
+	}
+}
+
+// burnPlatformPasswordHash spends one password verification against a dummy
+// Argon2id hash so that an unknown address costs what a real account costs.
+var (
+	platformDummyHashOnce sync.Once
+	platformDummyHash     string
+)
+
+func burnPlatformPasswordHash(password string) {
+	platformDummyHashOnce.Do(func() {
+		if h, err := platformPasswordService.HashPassword("login-timing-equalizer-not-a-credential"); err == nil {
+			platformDummyHash = h
+		}
+	})
+	if platformDummyHash != "" {
+		_, _ = platformPasswordService.VerifyPassword(password, platformDummyHash)
 	}
 }
 
@@ -493,7 +530,7 @@ func ChangePassword(db *sql.DB, jwtSecret string, refreshTokenService *auth.Plat
 // ResetPassword resets a platform user's password using a time-limited token that was
 // delivered via email (by InvitePlatformUser or AdminSendPasswordReset).
 // Route: POST /api/v1/admin-service/auth/reset-password  (unauthenticated)
-func ResetPassword(db *sql.DB) gin.HandlerFunc {
+func ResetPassword(db *sql.DB, refreshTokenService *auth.PlatformRefreshTokenService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			Token           string `json:"token" binding:"required"`
@@ -563,6 +600,14 @@ func ResetPassword(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
 			return
 		}
+
+		// A reset is the remedy for a suspected account compromise, so it must
+		// end every session minted under the old password. The tenant flow
+		// (auth-service ResetPassword) and ChangePassword above both do; this one
+		// did not, which left an attacker's refresh token alive for the whole
+		// session lifetime (7 days by default) after the owner "recovered" the
+		// account.
+		_ = refreshTokenService.RevokeAllUserTokens(userID)
 
 		c.JSON(http.StatusOK, gin.H{"message": "Password has been reset successfully. You can now log in."})
 	}
@@ -637,7 +682,18 @@ func ForgotPassword(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
-// Logout revokes all platform refresh tokens for the authenticated user and
+// accessTokenRevoker writes the access-token jti denylist (nil when the service
+// has no Redis, in which case Logout can only end the refresh tokens). Set once
+// at start-up by InitializeAccessTokenRevoker, like the other handler-package
+// dependencies.
+var accessTokenRevoker sharedmw.RevocationWriter
+
+// InitializeAccessTokenRevoker configures where Logout denylists the presented
+// access token. Pass nil to disable.
+func InitializeAccessTokenRevoker(w sharedmw.RevocationWriter) { accessTokenRevoker = w }
+
+// Logout revokes all platform refresh tokens for the authenticated user,
+// denylists the presented access token (when a denylist is configured) and
 // clears the three platform auth cookies. Route: POST /admin/auth/logout (protected).
 func Logout(db *sql.DB, refreshTokenService *auth.PlatformRefreshTokenService) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -653,6 +709,15 @@ func Logout(db *sql.DB, refreshTokenService *auth.PlatformRefreshTokenService) g
 			return
 		}
 		_ = refreshTokenService.RevokeAllUserTokens(userID)
+		// End the presented access token too, not only the refresh tokens: it is
+		// valid for up to an hour and otherwise survives sign-out (a copied
+		// cookie or Bearer token keeps working). The denylist is the one every
+		// service's JWT middleware already consults. Best effort, like the
+		// refresh revocation above: the user is signing out and the cookies are
+		// cleared regardless, so a denylist failure is logged, not surfaced.
+		if _, err := sharedmw.RevokeRequestAccessToken(c.Request.Context(), accessTokenRevoker, c.Request, "platform_access_token"); err != nil {
+			fmt.Printf("[ADMIN] ERROR: failed to denylist the access token of platform user %s on logout: %v\n", userID, err)
+		}
 		clearPlatformAuthCookies(c)
 		c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 	}

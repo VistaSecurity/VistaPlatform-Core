@@ -40,8 +40,10 @@ func Logging() gin.HandlerFunc {
 
 	return func(c *gin.Context) {
 		start := time.Now()
+		// Path only. The query string is deliberately NOT logged: on the SSO
+		// callbacks it carries the OAuth authorization code and state, and a
+		// credential must not land in a retained, shipped pod log.
 		path := c.Request.URL.Path
-		raw := c.Request.URL.RawQuery
 
 		// Process request
 		c.Next()
@@ -54,7 +56,6 @@ func Logging() gin.HandlerFunc {
 			"status":     c.Writer.Status(),
 			"method":     c.Request.Method,
 			"path":       path,
-			"query":      raw,
 			"ip":         c.ClientIP(),
 			"user_agent": c.Request.UserAgent(),
 			"latency":    latency,

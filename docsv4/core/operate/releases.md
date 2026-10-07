@@ -70,6 +70,30 @@ See **`INSTALL.md`**'s "Run it" section for cross-version upgrade mechanics
 caveats). The chart's `NOTES.txt` echoes the key upgrade flags on every
 `helm upgrade`.
 
+### Bundled NATS server: 2.10 to 2.14
+
+This release upgrades the NATS server bundled with the chart
+(`datastores.nats`) from 2.10, which the NATS project no longer patches, to
+2.14.
+
+- **JetStream data is preserved.** Streams, durable consumers, their
+  acknowledgement state and stored messages are read in place from the existing
+  volume. Nothing needs to be re-created.
+- **Rolling the chart back is not clean.** If you later roll back to a release
+  that ships NATS 2.10, the server rebuilds the stream index on its first start
+  and logs `Filestore [<stream>] Recovering stream state from index errored:
+  corrupt state file`. The messages and consumer state were intact in testing,
+  but the rebuild is expected, not a fault.
+- **Take a backup of the NATS volume before upgrading if you need a clean
+  rollback.** The bundled server stores its data on the PVC named
+  `nats-data-nats-0`; snapshot it with your CSI driver or storage layer.
+- **A pinned tag keeps the old server.** If your values file sets
+  `datastores.nats.image.tag`, that value wins over the chart default, so
+  remove it (or set it to `2.14-alpine`) to take this change. Use
+  `--reset-then-reuse-values` as described above. If you run an external NATS
+  (`datastores.nats.enabled: false`), nothing changes for you; keep it on a
+  release line the NATS project still patches.
+
 
 **1.0.0 is a fresh install only — there is no upgrade path from a `core-v0.x`
 release.** See `INSTALL.md`'s "Run it" section and the "Breaking / Upgrading"

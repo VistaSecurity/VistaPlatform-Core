@@ -32,12 +32,17 @@ import (
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
+	"github.com/vistasecurity/vistaplatform/shared/security/loginthrottle"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
 )
+
+// maxAnonymousBodyBytes is the request-body ceiling on the anonymous
+// /admin-service/auth routes. See setupRouter.
+const maxAnonymousBodyBytes = 1 << 20
 
 // Server represents the HTTP server instance with configuration,
 // database connection, and router setup.
@@ -189,6 +194,16 @@ func NewServerWithConnections(cfg *config.Config, db, bypassDB *sql.DB, hooks Ed
 		}
 	}
 
+	// The access-token denylist's write side (read side: RequireJWTAuth, which
+	// builds its checker from REDIS_URL). Always (re)set, so a nil clears any
+	// writer left by an earlier server in the same process.
+	if cacheClient != nil {
+		handlers.InitializeAccessTokenRevoker(sharedmw.NewRedisRevocationWriter(cacheClient.Redis()))
+	} else {
+		handlers.InitializeAccessTokenRevoker(nil)
+		log.Printf("Warning: no Redis; platform logout cannot denylist the access token (refresh tokens are still revoked)")
+	}
+
 	// Billing — Stripe, subscriptions, invoices, coupons, dunning, trials,
 	// contract renewals and billing analytics — is an Enterprise/MSP
 	// capability and is constructed inside the ee/ tree by the RegisterBilling
@@ -236,7 +251,9 @@ func (s *Server) setupRouter() {
 
 	// Initialize Gin router with basic middleware
 	s.router = gin.New()
-	s.router.Use(gin.Logger())   // Request logging
+	// Request logging, path only: the staff SSO callback carries the OAuth
+	// code and state in the query string.
+	s.router.Use(sharedmw.AccessLog())
 	s.router.Use(gin.Recovery()) // Panic recovery
 	s.router.Use(sharedmw.SecurityHeaders())
 
@@ -308,15 +325,28 @@ func (s *Server) setupRouter() {
 	// 4. Future-proof for additional services
 	api := s.router.Group("/api/v1")
 	adminGroup := api.Group("/admin-service")
+
+	// Sign-in throttle (Redis-backed when the cache client is up, in-process
+	// otherwise). Built here, not per request, so the in-process counters persist.
+	loginThrottle := loginthrottle.NewFromCache(s.cache, s.config.LoginRateLimit, loginthrottle.DefaultWindow)
 	{
 		// Authentication routes - Handle platform admin login and token refresh
 		// These endpoints use platform user tables with same security features as tenant users
 		auth := adminGroup.Group("/auth")
+		// Every route in this group is anonymous (login, refresh, and the two
+		// password-reset entry points), so none of them has authenticated the
+		// caller before it reads a body. A credential or a token is a few
+		// hundred bytes; the ceiling stops one anonymous POST making this pod
+		// buffer whatever the edge lets through (100 MiB).
+		auth.Use(sharedmw.MaxBody(maxAnonymousBodyBytes))
 		{
-			auth.POST("/login", handlers.Login(s.db, s.config.JWTSecret, s.refreshTokenService))          // Platform admin login with device fingerprinting
-			auth.POST("/refresh", handlers.RefreshToken(s.db, s.config.JWTSecret, s.refreshTokenService)) // Token refresh with rotation and reuse detection
+			// Throttled by address AND by account BEFORE the handler runs, so a
+			// flood is refused (429) without reaching password verification or the
+			// lockout counter (which is otherwise a lock-out DoS). See loginthrottle.
+			auth.POST("/login", loginThrottle.Middleware(true), handlers.Login(s.db, s.config.JWTSecret, s.refreshTokenService)) // Platform admin login with device fingerprinting
+			auth.POST("/refresh", handlers.RefreshToken(s.db, s.config.JWTSecret, s.refreshTokenService))                        // Token refresh with rotation and reuse detection
 			// Unauthenticated: validates a time-limited token (from invite or admin reset email) and sets a new password
-			auth.POST("/reset-password", handlers.ResetPassword(s.db))
+			auth.POST("/reset-password", handlers.ResetPassword(s.db, s.refreshTokenService))
 			// Unauthenticated: self-service forgot-password (sends a reset email to the supplied address)
 			auth.POST("/forgot-password", handlers.ForgotPassword(s.db))
 		}
@@ -327,7 +357,7 @@ func (s *Server) setupRouter() {
 		staffSSO := adminGroup.Group("/admin/sso")
 		{
 			staffSSO.GET("/providers", handlers.ListStaffSsoProviders(s.db))
-			staffSSO.GET("/:provider/authorize", handlers.StaffSsoAuthorize(s.db))
+			staffSSO.GET("/:provider/authorize", loginThrottle.Middleware(false), handlers.StaffSsoAuthorize(s.db))
 			staffSSO.GET("/:provider/callback", handlers.StaffSsoCallback(s.db, s.config.JWTSecret, s.refreshTokenService))
 		}
 
@@ -335,6 +365,7 @@ func (s *Server) setupRouter() {
 		// Registered outside the /auth group so it uses the protected middleware (JWT required).
 		adminLogoutGroup := adminGroup.Group("/admin/auth")
 		adminLogoutGroup.Use(middleware.AuthMiddleware(s.config.JWTSecret))
+		adminLogoutGroup.Use(middleware.RequirePlatformIdentity())
 		adminLogoutGroup.Use(middleware.StringifyUserID())
 		{
 			adminLogoutGroup.POST("/logout", handlers.Logout(s.db, s.refreshTokenService))
@@ -347,7 +378,10 @@ func (s *Server) setupRouter() {
 		// These routes are protected by JWT authentication and permission-based authorization
 		protected := adminGroup.Group("/admin")
 		protected.Use(middleware.AuthMiddleware(s.config.JWTSecret)) // JWT authentication
-		protected.Use(middleware.StringifyUserID())                  // Compat: handlers expect userID as string
+		// Identity before permission: only a platform session may reach anything
+		// under /admin. See RequirePlatformIdentity.
+		protected.Use(middleware.RequirePlatformIdentity())
+		protected.Use(middleware.StringifyUserID()) // Compat: handlers expect userID as string
 		// RLS: Tenant isolation uses WHERE tenant_id=$X in queries (primary) and PostgreSQL
 		// RLS policies (defense-in-depth). For RLS session-variable enforcement, use
 		// shared/database.WithTenantContext() at the repository level — never db.Exec().
@@ -381,11 +415,11 @@ func (s *Server) setupRouter() {
 				manageUsers.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformUsersManage))
 				{
 					manageUsers.POST("", handlers.CreatePlatformUser(s.db))
-					manageUsers.PUT("/:id", handlers.UpdatePlatformUser(s.db))
+					manageUsers.PUT("/:id", handlers.UpdatePlatformUser(s.db, s.refreshTokenService))
 					// Invite: creates user and sends branded invitation email with one-time set-password link
 					manageUsers.POST("/invite", handlers.InvitePlatformUser(s.db))
 					// Admin directly sets a new password for a user (optionally forces change on next login)
-					manageUsers.PUT("/:id/set-password", handlers.AdminSetPassword(s.db))
+					manageUsers.PUT("/:id/set-password", handlers.AdminSetPassword(s.db, s.refreshTokenService))
 					// Admin triggers a branded password-reset email to an existing user
 					manageUsers.POST("/:id/send-password-reset", handlers.AdminSendPasswordReset(s.db))
 				}
@@ -394,7 +428,7 @@ func (s *Server) setupRouter() {
 				deleteUsers := users.Group("")
 				deleteUsers.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformUsersDelete))
 				{
-					deleteUsers.DELETE("/:id", handlers.DeletePlatformUser(s.db))
+					deleteUsers.DELETE("/:id", handlers.DeletePlatformUser(s.db, s.refreshTokenService))
 				}
 			}
 

@@ -38,8 +38,6 @@ func setupIntegrationTest(t *testing.T) *gin.Engine {
 			handler.GetPendingSensors(c)
 		})
 		sensorManager.DELETE("/sensors/pending/:key", handler.DeletePendingSensor)
-		sensorManager.GET("/admin/settings", handler.GetAdminSettings)
-		sensorManager.PUT("/admin/settings", handler.UpdateAdminSettings)
 	}
 
 	return router
@@ -186,70 +184,5 @@ func TestSensorRegistrationWorkflow_ErrorCases(t *testing.T) {
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		assert.NoError(t, err)
 		assert.Contains(t, response["error"], "Invalid IP address format")
-	})
-}
-
-func TestAdminSettings_Integration(t *testing.T) {
-	router := setupIntegrationTest(t)
-
-	t.Run("GetAdminSettings", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/api/v1/sensor-manager/admin/settings", nil)
-		w := httptest.NewRecorder()
-
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, 200, w.Code)
-
-		var response map[string]interface{}
-		err := json.Unmarshal(w.Body.Bytes(), &response)
-		assert.NoError(t, err)
-
-		assert.Contains(t, response, "key_expiration_minutes")
-		assert.Contains(t, response, "max_pending_sensors")
-		assert.Contains(t, response, "require_ip_validation")
-	})
-
-	t.Run("UpdateAdminSettings_Valid", func(t *testing.T) {
-		payload := map[string]interface{}{
-			"key_expiration_minutes": 120,
-			"max_pending_sensors":    100,
-			"require_ip_validation":  true,
-		}
-
-		jsonBody, _ := json.Marshal(payload)
-		req := httptest.NewRequest("PUT", "/api/v1/sensor-manager/admin/settings", bytes.NewBuffer(jsonBody))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, 200, w.Code)
-
-		var response map[string]interface{}
-		err := json.Unmarshal(w.Body.Bytes(), &response)
-		assert.NoError(t, err)
-		assert.Equal(t, "Admin settings updated successfully", response["message"])
-	})
-
-	t.Run("UpdateAdminSettings_Invalid", func(t *testing.T) {
-		payload := map[string]interface{}{
-			"key_expiration_minutes": 2, // Too short
-			"max_pending_sensors":    100,
-			"require_ip_validation":  true,
-		}
-
-		jsonBody, _ := json.Marshal(payload)
-		req := httptest.NewRequest("PUT", "/api/v1/sensor-manager/admin/settings", bytes.NewBuffer(jsonBody))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-
-		router.ServeHTTP(w, req)
-
-		assert.Equal(t, 400, w.Code)
-
-		var response map[string]interface{}
-		err := json.Unmarshal(w.Body.Bytes(), &response)
-		assert.NoError(t, err)
-		assert.Contains(t, response["error"], "Key expiration must be between 5 and 1440 minutes")
 	})
 }

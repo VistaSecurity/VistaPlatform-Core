@@ -25,6 +25,7 @@
 {{- if eq $tlsMode "existingSecret" -}}{{- $tlsSecret = .Values.tls.existingSecretName -}}{{- end -}}
 {{- if eq $tlsMode "none" -}}{{- $entryPoints = list "web" -}}{{- end -}}
 {{- $adminPlaneSplit := and $adminDnsName .Values.adminPlane.restrictToAdminHost -}}
+{{- $edgeRateLimit := .Values.edgeRateLimit | default dict -}}
 {{- $adminAllowList := "" -}}
 {{- if and $adminPlaneSplit .Values.adminPlane.ipAllowList.enabled -}}
 {{- if not .Values.adminPlane.ipAllowList.sourceRange -}}
@@ -79,13 +80,13 @@ spec:
   headers:
     frameDeny: true
     contentTypeNosniff: true
-    browserXssFilter: true
+    browserXssFilter: false
     referrerPolicy: strict-origin-when-cross-origin
-    contentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'
-      https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https:;
-      connect-src 'self' https:; frame-ancestors 'none';"
+    contentSecurityPolicy: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:;
+      img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';"
     customResponseHeaders:
       Permissions-Policy: camera=(), microphone=(), geolocation=()
+      X-XSS-Protection: "0"
     {{- if ne .Values.tls.mode "none" }}
     stsSeconds: 31536000
     stsIncludeSubdomains: true
@@ -115,8 +116,23 @@ metadata:
     {{- include "vistaplatform.labels" . | nindent 4 }}
 spec:
   rateLimit:
-    average: 1000
-    burst: 2000
+    average: {{ dig "api" "average" 1000 $edgeRateLimit | int }}
+    burst: {{ dig "api" "burst" 2000 $edgeRateLimit | int }}
+  {{- with $edgeRateLimit.ipStrategy }}
+  {{- if or .depth .excludedIPs }}
+    sourceCriterion:
+      ipStrategy:
+        {{- if .depth }}
+        depth: {{ .depth | int }}
+        {{- end }}
+        {{- with .excludedIPs }}
+        excludedIPs:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+  {{- end }}
+  {{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -126,8 +142,23 @@ metadata:
     {{- include "vistaplatform.labels" . | nindent 4 }}
 spec:
   rateLimit:
-    average: 200
-    burst: 400
+    average: {{ dig "auth" "average" 50 $edgeRateLimit | int }}
+    burst: {{ dig "auth" "burst" 100 $edgeRateLimit | int }}
+  {{- with $edgeRateLimit.ipStrategy }}
+  {{- if or .depth .excludedIPs }}
+    sourceCriterion:
+      ipStrategy:
+        {{- if .depth }}
+        depth: {{ .depth | int }}
+        {{- end }}
+        {{- with .excludedIPs }}
+        excludedIPs:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+  {{- end }}
+  {{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware

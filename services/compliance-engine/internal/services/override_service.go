@@ -107,27 +107,6 @@ func (s *OverrideService) CreateOverride(tenantID, userID uuid.UUID, scenarioID 
 	return override, nil
 }
 
-// GetOverride retrieves a specific override by ID.
-// Control join is attempted across all three control tables via COALESCE.
-func (s *OverrideService) GetOverride(overrideID uuid.UUID) (*models.Override, error) {
-	override := &models.Override{}
-
-	// RLS: looked up by primary key without a tenant in scope; relies on the WHERE on caller-supplied id. See Phase 4 follow-up.
-	query := `
-		SELECT o.id, o.tenant_id, o.scenario_id, o.control_id, o.override_type, o.severity_from,
-		       o.severity_to, o.rationale, o.framework_type, o.created_by, o.created_at, o.updated_at
-		FROM compliance_overrides o
-		WHERE o.id = $1
-	`
-
-	err := s.db.Get(override, query, overrideID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get override: %w", err)
-	}
-
-	return override, nil
-}
-
 // ListOverrides retrieves overrides for a tenant with optional scenario filter
 func (s *OverrideService) ListOverrides(tenantID uuid.UUID, scenarioID *uuid.UUID) ([]models.Override, error) {
 	var overrides []models.Override
@@ -239,26 +218,6 @@ func (s *OverrideService) DeleteOverride(tenantID, overrideID uuid.UUID) error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
-	}
-
-	return nil
-}
-
-// DeleteOverridesByScenario deletes all overrides for a specific scenario.
-//
-// BROKEN UNDER ENFORCED RLS, AND CURRENTLY UNCALLED. compliance_overrides is
-// RLS-scoped and this deletes by scenario_id with no tenant in scope, so on the
-// crypto_app handle it matches zero rows and returns nil — a cascade cleanup
-// that silently cleans nothing. It has no callers today, which is the only
-// reason it is not an active bug. Before wiring it up, either give
-// OverrideService a bypass handle (this is legitimately cross-tenant) or change
-// the signature to take the tenant and use WithTenantTx. Do not call it as-is.
-func (s *OverrideService) DeleteOverridesByScenario(scenarioID uuid.UUID) error {
-	query := `DELETE FROM compliance_overrides WHERE scenario_id = $1`
-
-	_, err := s.db.Exec(query, scenarioID)
-	if err != nil {
-		return fmt.Errorf("failed to delete overrides by scenario: %w", err)
 	}
 
 	return nil

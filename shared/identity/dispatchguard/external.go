@@ -362,6 +362,10 @@ type ManualOptions struct {
 	// them a target outside the registered networks is refused whatever the
 	// flag says.
 	PersonInitiated bool
+	// PlatformExecutor is true when the in-cluster Platform Sensor will run the
+	// scan (as opposed to a tenant's own sensor). Only then are the cluster's
+	// own pod and Service CIDRs refused; see [TargetScope.ForPlatformSensor].
+	PlatformExecutor bool
 }
 
 // ExternalTarget is a confirmed target outside the registered networks, with

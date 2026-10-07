@@ -102,7 +102,7 @@ infrastructure:
 docker_images:
   # Standard Docker Hub images (default for all environments)
   go_builder: "golang:1.26-alpine"   # Multi-stage build stage for all Go services
-  runtime: "alpine:3.24.1"           # Final runtime stage for all Go services
+  runtime: "alpine:3.24.2"           # Final runtime stage for all Go services
   node: "node:24-alpine"             # Node.js services and frontend builds
 
   # Docker Hardened Images (dhi.io) — used when dhi.enabled=true in .dev-config.json
@@ -114,7 +114,7 @@ docker_images:
   dhi:
     go_builder: "dhi.io/golang:1.26-alpine3.24-dev"
     runtime: "dhi.io/alpine-base:3.24-dev"
-    node: "dhi.io/node:24-alpine3.22-dev"
+    node: "dhi.io/node:24-alpine3.24-dev"
 
 ui:
   # The tenant UI host is served by web-ui, built from the frontend-v2/ source
@@ -185,9 +185,9 @@ admin_plane:
     # go into public_exceptions, or it is dead on the tenant host.)
     - /auth-service/admin/
     - /auth-service/platform/
-    # sensor-manager — NOTE the narrow prefix. /sensor-manager/admin/settings
-    # and /admin/capture-defaults are TENANT-admin routes that must stay on the
-    # public host; only /admin/sensors is the cross-tenant fleet roll-up.
+    # sensor-manager — NOTE the narrow prefix. /sensor-manager/admin/capture-defaults
+    # is a TENANT-admin route that must stay on the public host; only
+    # /admin/sensors is the cross-tenant fleet roll-up.
     - /sensor-manager/admin/sensors
     - /sensor-manager/platform/
     # monitoring-service — platform metrics, SIEM log export, alerting,
@@ -300,6 +300,20 @@ admin_plane:
     - /admin-service/auth/
     # Staff SSO discovery + OAuth dance; callback host is the admin host.
     - /admin-service/admin/sso/
+
+  # Platform-gated route groups that host-based splitting cannot express. Each
+  # entry is a declared, knowing exposure on the public host, with the reason
+  # (scripts/audit-admin-plane.mjs fails on a gated group that is neither a
+  # prefix above nor listed here).
+  unsplittable:
+    /auth-service/tenant/ui-config: >-
+      PUT needs a platform identity holding platform.settings (router gates plus
+      the handler's own identity check; tenant tokens get 403 whatever their
+      role string says) but shares its path with the tenant-facing GET, so the
+      path cannot be denied on the tenant host. Nothing calls the PUT, and a
+      real platform token carries no tenant, so it answers 404; it is superseded
+      by PUT /auth-service/admin/tenants/:tenantId/ui-config, which IS on the
+      admin plane. Delete the route rather than split it.
 
 services:
   - key: auth-service

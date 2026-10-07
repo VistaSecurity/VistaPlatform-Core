@@ -18,6 +18,12 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 )
 
+// incidentWebhookClientTimeout bounds one incident webhook request.
+const incidentWebhookClientTimeout = 30 * time.Second
+
+// maxIncidentWebhookResponseBytes bounds how much of a receiver's answer is read.
+const maxIncidentWebhookResponseBytes = 64 << 10
+
 // IncidentWebhookService handles webhook delivery for security incidents
 type IncidentWebhookService struct {
 	db         *sql.DB
@@ -77,10 +83,12 @@ func NewIncidentWebhookService(db *sql.DB, encryptionMasterKey string) (*Inciden
 	}
 	return &IncidentWebhookService{
 		db: db,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		cipher: cipher,
+		// The URL is a stored, person-supplied value. network.ValidateWebhookURL
+		// below is only a pre-flight (it resolves once, and the name can change
+		// before the connect); this client's dialer judges the concrete address
+		// at connect time and re-judges every redirect hop.
+		httpClient: network.SafeHTTPClient(incidentWebhookClientTimeout),
+		cipher:     cipher,
 	}, nil
 }
 
@@ -256,7 +264,7 @@ func (s *IncidentWebhookService) sendWebhook(ctx context.Context, webhook Incide
 		defer func() { _ = resp.Body.Close() }()
 
 		statusCode := resp.StatusCode
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxIncidentWebhookResponseBytes))
 
 		// Record delivery
 		var responseBody *string

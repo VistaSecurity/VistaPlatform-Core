@@ -31,8 +31,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lib/pq"
+
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/handlers"
 )
 
 // entraTenantSegment is the directory the fake Entra endpoints are pinned to.
@@ -71,6 +74,8 @@ func newEntraFixture(t *testing.T) *entraFixture {
 	// Entra-shaped endpoints: /<authority>/oauth2/v2.0/{authorize,token} for
 	// any authority (so a provider re-pointed at /common/ still gets a token
 	// and the refusal is the gate's, not a 404), and a Graph-style userinfo.
+	// The fake IdP is on loopback, which the real staff SSO client refuses.
+	t.Cleanup(handlers.SetStaffSSOClientForTest(&http.Client{Timeout: 10 * time.Second}))
 	f.entra = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {

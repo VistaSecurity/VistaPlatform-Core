@@ -118,18 +118,28 @@ type RegistrationResponse struct {
 	Message              string          `json:"message"`
 }
 
-// AdminSettings represents admin configuration
-type AdminSettings struct {
-	KeyExpirationMinutes int  `json:"key_expiration_minutes"`
-	MaxPendingSensors    int  `json:"max_pending_sensors"`
-	RequireIPValidation  bool `json:"require_ip_validation"`
+// registrationLimits are the registration-key limits every tenant's key
+// creation and enrolment reads. They are fixed at build time on purpose: they
+// used to be a process-global struct that PUT /admin/settings overwrote, so one
+// tenant's settings.update permission changed the pending-key cap, the key
+// lifetime and the address-validation switch for every other tenant (and
+// replicas disagreed). Nothing called that route, so it was removed rather than
+// re-homed; per-tenant limits would need tenant-scoped storage and are a
+// separate feature.
+type registrationLimits struct {
+	KeyExpirationMinutes int
+	MaxPendingSensors    int
+	RequireIPValidation  bool
 }
 
-// AdminSettings represents admin configuration
-var adminSettings = AdminSettings{
-	KeyExpirationMinutes: 60,
-	MaxPendingSensors:    50,
-	RequireIPValidation:  false, // Default to disabled - IP validation is easily circumvented in modern networks
+// currentRegistrationLimits returns the fixed limits. A function returning a
+// fresh value (not a package variable) so nothing can mutate shared state.
+func currentRegistrationLimits() registrationLimits {
+	return registrationLimits{
+		KeyExpirationMinutes: 60,
+		MaxPendingSensors:    50,
+		RequireIPValidation:  false, // Default to disabled - IP validation is easily circumvented in modern networks
+	}
 }
 
 // CreatePendingSensor creates a new pending sensor registration
@@ -178,12 +188,13 @@ func (h *Handler) CreatePendingSensor(c *gin.Context) {
 	}
 
 	// Check if we've reached the maximum pending sensors
+	regLimits := currentRegistrationLimits()
 	count, err := h.sensorService.CountPendingSensors(tenantID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to check pending sensors count"})
 		return
 	}
-	if count >= adminSettings.MaxPendingSensors {
+	if count >= regLimits.MaxPendingSensors {
 		c.JSON(400, gin.H{"error": "Maximum pending sensors reached"})
 		return
 	}
@@ -208,7 +219,7 @@ func (h *Handler) CreatePendingSensor(c *gin.Context) {
 		Profile:           req.Profile,
 		NetworkInterfaces: req.NetworkInterfaces,
 		Description:       &req.Description,
-		ExpiresAt:         time.Now().Add(time.Duration(adminSettings.KeyExpirationMinutes) * time.Minute),
+		ExpiresAt:         time.Now().Add(time.Duration(regLimits.KeyExpirationMinutes) * time.Minute),
 		Status:            "pending",
 	}
 
@@ -335,15 +346,16 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 	// proxy or node address, never the sensor's. Its escape hatch was a stub
 	// (isIPInSameSubnet returned ip1 == ip2), so enabling enforcement rejected
 	// every registration in any Kubernetes install. Both are gone.
+	regLimits := currentRegistrationLimits()
 	if req.IPAddress != "" && pendingSensor.IPAddress != req.IPAddress {
 		h.log.WithFields(logrus.Fields{
 			"sensor_name": req.Name,
 			"expected_ip": pendingSensor.IPAddress,
 			"reported_ip": req.IPAddress,
-			"enforced":    adminSettings.RequireIPValidation,
+			"enforced":    regLimits.RequireIPValidation,
 		}).Warn("Enrolling sensor reports a different address than the operator expected")
 
-		if adminSettings.RequireIPValidation {
+		if regLimits.RequireIPValidation {
 			c.JSON(400, gin.H{"error": "IP address does not match the registered IP address"})
 			return
 		}
@@ -689,34 +701,6 @@ func (h *Handler) DeletePendingSensor(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"message": "Pending sensor deleted successfully"})
-}
-
-// GetAdminSettings returns current admin settings
-func (h *Handler) GetAdminSettings(c *gin.Context) {
-	c.JSON(200, adminSettings)
-}
-
-// UpdateAdminSettings updates admin settings
-func (h *Handler) UpdateAdminSettings(c *gin.Context) {
-	var newSettings AdminSettings
-	if err := c.ShouldBindJSON(&newSettings); err != nil {
-		c.JSON(400, gin.H{"error": "Invalid request"})
-		return
-	}
-
-	// Validate settings
-	if newSettings.KeyExpirationMinutes < 5 || newSettings.KeyExpirationMinutes > 1440 {
-		c.JSON(400, gin.H{"error": "Key expiration must be between 5 and 1440 minutes"})
-		return
-	}
-
-	if newSettings.MaxPendingSensors < 1 || newSettings.MaxPendingSensors > 1000 {
-		c.JSON(400, gin.H{"error": "Max pending sensors must be between 1 and 1000"})
-		return
-	}
-
-	adminSettings = newSettings
-	c.JSON(200, gin.H{"message": "Admin settings updated successfully"})
 }
 
 // Helper functions

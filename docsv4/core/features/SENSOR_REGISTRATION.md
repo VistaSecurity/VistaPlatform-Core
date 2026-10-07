@@ -73,7 +73,10 @@ row offers:
   enrollment steps;
 - **delete** — drops the pending registration if you no longer need it.
 
-The list hides itself entirely when there is nothing pending. While a
+The list hides itself entirely when there is nothing pending, and for anyone
+without `sensors.create`: a pending registration carries the registration code,
+which is all a sensor needs to enrol, so only people who can mint a code can see
+the outstanding ones. While a
 registration is open, its status reads as one of:
 
 | Status | Meaning |
@@ -371,7 +374,7 @@ Installing the internal CA into the host's own trust store has the same effect.
 
 | Action | Permission |
 |---|---|
-| Register a sensor or agent, delete a pending registration | `sensors.create` / `sensors.delete` |
+| Register a sensor or agent, see pending registrations, delete a pending registration | `sensors.create` / `sensors.create` / `sensors.delete` |
 | Change monitored interfaces, configuration, reporting interval | `sensors.update` |
 | Revoke or regenerate a certificate | `sensors.manage` |
 | Delete a sensor | `sensors.delete` |
@@ -443,7 +446,6 @@ Registration and management are available over the API for automation.
 | `GET` | `/api/v1/sensor-manager/sensors/{id}/certificates` | Certificate status |
 | `POST` | `/api/v1/sensor-manager/sensors/{id}/certificates/rotate` | Rotate, with a new signing request |
 | `POST` | `/api/v1/sensor-manager/sensors/{id}/certificates/revoke` | Revoke, with a reason |
-| `GET` / `PUT` | `/api/v1/sensor-manager/admin/settings` | Registration-code expiry, pending cap, address validation |
 
 The registration response returns the signed certificate and the platform CA.
 It never contains a private key — that stays on the sensor's host and is never

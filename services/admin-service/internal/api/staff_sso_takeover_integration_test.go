@@ -40,6 +40,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/config"
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/shared/models"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -153,6 +154,8 @@ func newSSOTakeoverFixture(t *testing.T) *ssoTakeoverFixture {
 
 	// The IdP a hostile operator would stand up: it issues any token and
 	// asserts whatever identity the test sets.
+	// The fake IdP is on loopback, which the real staff SSO client refuses.
+	t.Cleanup(handlers.SetStaffSSOClientForTest(&http.Client{Timeout: 10 * time.Second}))
 	f.idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {

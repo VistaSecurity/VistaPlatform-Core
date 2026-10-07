@@ -68,7 +68,7 @@ async function main() {
 
 function getBuildArgs(service, images = {}) {
   const goBuilder = images.go_builder || 'golang:1.26-alpine';
-  const runtime   = images.runtime    || 'alpine:3.24.1';
+  const runtime   = images.runtime    || 'alpine:3.24.2';
   const node      = images.node       || 'node:24-alpine';
   const python    = images.python     || 'python:3.11-slim';
 

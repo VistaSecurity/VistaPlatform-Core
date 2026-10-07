@@ -161,6 +161,20 @@ type TargetScope struct {
 	excluded        []netip.Prefix
 }
 
+// ForPlatformSensor returns the scope for a scan the in-cluster Platform Sensor
+// executes: the same scope with this cluster's own pod and Service CIDRs
+// (autoscan.ClusterInternalPrefixes) added to the exclusions, so no registered
+// segment and no private-address allowance can put them back.
+//
+// It is NOT applied to a scan a tenant's own sensor executes: to that sensor
+// the same numbers are the customer's address space (see
+// autoscan.ClusterInternalPrefixes). The caller says who executes; the scope
+// does not guess.
+func (s TargetScope) ForPlatformSensor() TargetScope {
+	s.excluded = append(append([]netip.Prefix{}, s.excluded...), autoscan.ClusterInternalPrefixes()...)
+	return s
+}
+
 // LoadTargetScope reads the tenant's registered network segments and its
 // exclusion policy inside the caller's transaction, and folds in the platform's
 // own self-protection ranges. Call it in the same transaction that queues or

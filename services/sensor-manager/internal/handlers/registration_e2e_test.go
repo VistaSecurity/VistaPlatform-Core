@@ -39,10 +39,6 @@ func TestSensorRegistrationE2E_APIEndpoints(t *testing.T) {
 		{
 			// Sensor registration (validation only)
 			sensorManager.POST("/sensors/register", handler.RegisterSensor)
-
-			// Admin settings (no service dependency)
-			sensorManager.GET("/admin/settings", handler.GetAdminSettings)
-			sensorManager.PUT("/admin/settings", handler.UpdateAdminSettings)
 		}
 	}
 
@@ -54,7 +50,7 @@ func TestSensorRegistrationE2E_APIEndpoints(t *testing.T) {
 			path   string
 			status int
 		}{
-			{"GetAdminSettings", "GET", "/api/v1/sensor-manager/admin/settings", 200}, // Works (no service dependency)
+			{"RegisterSensorRejectsMalformedBody", "POST", "/api/v1/sensor-manager/sensors/register", 400}, // Validation only, no service dependency
 		}
 
 		for _, endpoint := range endpoints {
@@ -142,86 +138,5 @@ func TestSensorRegistrationE2E_Validation(t *testing.T) {
 				}
 			})
 		}
-	})
-}
-
-func TestSensorRegistrationE2E_AdminSettings(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	handler := newTestHandler()
-	router := gin.New()
-
-	// Set up admin settings routes
-	api := router.Group("/api/v1")
-	sensorManager := api.Group("/sensor-manager")
-	{
-		sensorManager.GET("/admin/settings", handler.GetAdminSettings)
-		sensorManager.PUT("/admin/settings", handler.UpdateAdminSettings)
-	}
-
-	t.Run("AdminSettingsWorkflow", func(t *testing.T) {
-		// Test getting admin settings
-		t.Run("GetAdminSettings", func(t *testing.T) {
-			req := httptest.NewRequest("GET", "/api/v1/sensor-manager/admin/settings", nil)
-			w := httptest.NewRecorder()
-
-			router.ServeHTTP(w, req)
-
-			assert.Equal(t, 200, w.Code)
-
-			var response map[string]interface{}
-			err := json.Unmarshal(w.Body.Bytes(), &response)
-			assert.NoError(t, err)
-
-			assert.Contains(t, response, "key_expiration_minutes")
-			assert.Contains(t, response, "max_pending_sensors")
-			assert.Contains(t, response, "require_ip_validation")
-		})
-
-		// Test updating admin settings
-		t.Run("UpdateAdminSettings", func(t *testing.T) {
-			payload := map[string]interface{}{
-				"key_expiration_minutes": 120,
-				"max_pending_sensors":    100,
-				"require_ip_validation":  true,
-			}
-
-			jsonBody, _ := json.Marshal(payload)
-			req := httptest.NewRequest("PUT", "/api/v1/sensor-manager/admin/settings", bytes.NewBuffer(jsonBody))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-
-			router.ServeHTTP(w, req)
-
-			assert.Equal(t, 200, w.Code)
-
-			var response map[string]interface{}
-			err := json.Unmarshal(w.Body.Bytes(), &response)
-			assert.NoError(t, err)
-			assert.Equal(t, "Admin settings updated successfully", response["message"])
-		})
-
-		// Test invalid admin settings
-		t.Run("InvalidAdminSettings", func(t *testing.T) {
-			payload := map[string]interface{}{
-				"key_expiration_minutes": 2, // Too short
-				"max_pending_sensors":    100,
-				"require_ip_validation":  true,
-			}
-
-			jsonBody, _ := json.Marshal(payload)
-			req := httptest.NewRequest("PUT", "/api/v1/sensor-manager/admin/settings", bytes.NewBuffer(jsonBody))
-			req.Header.Set("Content-Type", "application/json")
-			w := httptest.NewRecorder()
-
-			router.ServeHTTP(w, req)
-
-			assert.Equal(t, 400, w.Code)
-
-			var response map[string]interface{}
-			err := json.Unmarshal(w.Body.Bytes(), &response)
-			assert.NoError(t, err)
-			assert.Contains(t, response["error"], "Key expiration must be between 5 and 1440 minutes")
-		})
 	})
 }

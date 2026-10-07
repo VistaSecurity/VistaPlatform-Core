@@ -450,13 +450,27 @@ func dbInterrogateMySQL(ctx context.Context, connStr string) (*DatabaseEncryptio
 // given connection string. Exposed for callers (e.g. the experimental
 // connection tester) that already have a DSN rather than a device record.
 func InterrogatePostgreSQLConn(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
-	return dbInterrogatePostgreSQL(ctx, connStr)
+	return redactedFinding(dbInterrogatePostgres(ctx, connStr))
 }
 
 // InterrogateMySQLConn interrogates a MySQL instance reachable via the given
 // connection string.
 func InterrogateMySQLConn(ctx context.Context, connStr string) (*DatabaseEncryptionFinding, error) {
-	return dbInterrogateMySQL(ctx, connStr)
+	return redactedFinding(dbInterrogateMy(ctx, connStr))
+}
+
+// redactedFinding applies to a finding the scrub InterrogateDatabase applies to
+// its own: RawConfig is an engine's whole settings bag, and it must not reach
+// storage unredacted by whichever exported entry point produced it. The two
+// ...Conn entry points call the per-engine interrogations directly, below the
+// redaction in InterrogateDatabase, and one of them is wired to a tenant-
+// reachable endpoint that persists RawConfig as-is; routing both through here
+// is what makes "redacted before it is returned" true of every way in.
+func redactedFinding(finding *DatabaseEncryptionFinding, err error) (*DatabaseEncryptionFinding, error) {
+	if finding != nil {
+		finding.RawConfig = redact.Map(finding.RawConfig)
+	}
+	return finding, err
 }
 
 // CalculateDatabaseRiskScore computes the 0-100 risk score for a database

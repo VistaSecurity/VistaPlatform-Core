@@ -348,7 +348,10 @@ export interface paths {
          * List pending sensor registrations for the current tenant
          * @description Returns the tenant's pending registration keys. Expired-but-still-pending
          *     rows have their `status` reflected as `expired` in the response. On any
-         *     service error the handler returns 200 with an empty list.
+         *     service error the handler returns 200 with an empty list. Gated by the
+         *     `sensors.create` permission: a registration key is all a sensor needs to
+         *     enrol into the tenant, so listing them needs the same permission as
+         *     minting one (403 otherwise).
          */
         get: operations["listPendingSensors"];
         put?: never;
@@ -425,36 +428,6 @@ export interface paths {
          *     belongs to another tenant.
          */
         delete: operations["deletePendingSensor"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/settings": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get sensor-admin settings
-         * @description Returns the current sensor-registration admin settings — the
-         *     registration-key expiry, the maximum number of simultaneous pending
-         *     registrations, and the source-IP-validation toggle. Read by the Sensor
-         *     Configuration page.
-         */
-        get: operations["getAdminSettings"];
-        /**
-         * Update sensor-admin settings
-         * @description Updates the sensor-registration admin settings. Gated by the
-         *     `settings.update` permission. `key_expiration_minutes` must be 5–1440 and
-         *     `max_pending_sensors` must be 1–1000; an out-of-range or unparseable body
-         *     returns 400.
-         */
-        put: operations["updateAdminSettings"];
-        post?: never;
-        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1472,21 +1445,6 @@ export interface components {
         MessageResponse: {
             message: string;
         };
-        /**
-         * @description Sensor-registration admin settings (handlers.AdminSettings). Used as both
-         *     the GET /admin/settings response body and the PUT /admin/settings request
-         *     body. All three fields are present in the response; in a PUT each must be
-         *     in range (key expiry 5–1440, max pending 1–1000) or the update is
-         *     rejected with 400.
-         */
-        AdminSettings: {
-            /** @description Minutes a registration key stays valid (5–1440). */
-            key_expiration_minutes: number;
-            /** @description Maximum simultaneous pending registrations (1–1000). */
-            max_pending_sensors: number;
-            /** @description Whether registration enforces source-IP validation. */
-            require_ip_validation: boolean;
-        };
         /** @description Request body for PUT /admin/capture-defaults. */
         UpdateCaptureDefaultsRequest: {
             /** @description Observation rest period in minutes applied to all active sensors (1–1440). */
@@ -2238,6 +2196,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
         };
     };
     createPendingSensor: {
@@ -2313,53 +2272,6 @@ export interface operations {
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
-        };
-    };
-    getAdminSettings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Current admin settings. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AdminSettings"];
-                };
-            };
-            401: components["responses"]["LegacyUnauthorized"];
-        };
-    };
-    updateAdminSettings: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AdminSettings"];
-            };
-        };
-        responses: {
-            /** @description Settings updated. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MessageResponse"];
-                };
-            };
-            400: components["responses"]["LegacyBadRequest"];
-            401: components["responses"]["LegacyUnauthorized"];
         };
     };
     updateTenantCaptureDefaults: {

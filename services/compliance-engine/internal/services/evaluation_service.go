@@ -558,6 +558,10 @@ type MultiFrameworkEvaluationResult struct {
 	LastEvaluated string `json:"last_evaluated"`
 }
 
+// maxConcurrentFrameworkEvaluations bounds the fan-out of
+// EvaluateMultipleFrameworks.
+const maxConcurrentFrameworkEvaluations = 8
+
 // EvaluateMultipleFrameworks evaluates multiple frameworks in parallel
 func (s *EvaluationService) EvaluateMultipleFrameworks(
 	tenantID uuid.UUID,
@@ -572,11 +576,17 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Evaluate each framework in parallel
+	// Evaluate the frameworks in parallel, but never more than
+	// maxConcurrentFrameworkEvaluations at once. Each evaluation holds database
+	// connections, so one goroutine per requested framework let a single
+	// request starve the pool every other request in the service draws on.
+	sem := make(chan struct{}, maxConcurrentFrameworkEvaluations)
 	for _, frameworkID := range frameworkIDs {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(fwID uuid.UUID) {
 			defer wg.Done()
+			defer func() { <-sem }()
 
 			// Get version for this framework
 			version := frameworkVersions[fwID.String()]

@@ -16,6 +16,7 @@ import (
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
@@ -84,7 +85,12 @@ type AlertService struct {
 	occurrenceMu sync.Mutex
 	logger       *log.Logger
 	httpClient   *http.Client
-	natsClient   *events.NATSClient
+	// webhookClient carries the legacy "webhook" alert action. Its URL is typed
+	// by a person (an action's config), so it is the SSRF-guarded client and
+	// never httpClient, which holds this service's mTLS identity for calls to
+	// notification-service and would present it to whatever the URL names.
+	webhookClient *http.Client
+	natsClient    *events.NATSClient
 	// publishRaise publishes onto the stateful alert rail (alerts.raise). Nil
 	// until a NATS client is wired — a nil sink means "rail unavailable" and the
 	// caller falls back to the direct notification path. Overridable in tests.
@@ -155,6 +161,7 @@ func NewAlertServiceWithConfig(db *sql.DB, useMTLS bool, clientCertPath, clientK
 		logger:       log.New(log.Writer(), "[AlertService] ", log.LstdFlags),
 		httpClient:   httpClient,
 	}
+	s.webhookClient = network.SafeHTTPClient(webhookTimeout)
 	s.notify = s.sendToUnifiedNotificationService
 	return s
 }
@@ -448,6 +455,21 @@ func (s *AlertService) executeActions(ctx context.Context, alert Alert, actions 
 	}
 }
 
+// webhookTimeout bounds one alert webhook request.
+const webhookTimeout = 10 * time.Second
+
+// guardedWebhookClient is the client every alert webhook goes through: it
+// refuses loopback, link-local (the metadata endpoints), RFC 1918 and the
+// platform's own ranges at dial time, and re-judges every redirect hop. A
+// service built without one (a test literal) gets the guarded default, never
+// an unguarded one.
+func (s *AlertService) guardedWebhookClient() *http.Client {
+	if s.webhookClient != nil {
+		return s.webhookClient
+	}
+	return network.SafeHTTPClient(webhookTimeout)
+}
+
 // sendWebhook sends alert to a webhook endpoint
 func (s *AlertService) sendWebhook(ctx context.Context, alert Alert, config map[string]interface{}) {
 	url, ok := config["url"].(string)
@@ -479,7 +501,7 @@ func (s *AlertService) sendWebhook(ctx context.Context, alert Alert, config map[
 		req.Header.Set("Authorization", authHeader)
 	}
 
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.guardedWebhookClient().Do(req)
 	if err != nil {
 		s.logger.Printf("ERROR: Webhook request failed: %v", err)
 		return

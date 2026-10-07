@@ -107,3 +107,35 @@ func TestBatchAggregation_PartialCountsSumOverReportersOnly(t *testing.T) {
 		t.Fatalf("database queries = %d, want 10", *agg.DatabaseQueries)
 	}
 }
+
+// SECURITY: usage is attributed only to a tenant the AUTH middleware
+// established. A tenant id the caller merely typed -- X-Tenant-ID header or
+// ?tenant_id= query -- must never be metered against that tenant: the
+// middleware runs before auth and records after the handler, so an
+// unauthenticated request could otherwise inflate any victim's API-call and
+// network usage (usage monitoring, billing, entitlement enforcement).
+func TestExtractTenantID_IgnoresCallerChosenTenant(t *testing.T) {
+	tr := &Tracker{}
+	victim := uuid.New()
+
+	c := ctxFor("GET", "/api/v1/anything?tenant_id="+victim.String())
+	c.Request.Header.Set("X-Tenant-ID", victim.String())
+	if got := tr.extractTenantID(c); got != uuid.Nil {
+		t.Fatalf("an unauthenticated request naming tenant %s was attributed to %s; want no tenant", victim, got)
+	}
+
+	// The tenant the auth middleware set is honoured, as uuid or string, and
+	// wins over whatever the caller typed.
+	mine := uuid.New()
+	c = ctxFor("GET", "/api/v1/anything?tenant_id="+victim.String())
+	c.Request.Header.Set("X-Tenant-ID", victim.String())
+	c.Set("tenantID", mine)
+	if got := tr.extractTenantID(c); got != mine {
+		t.Fatalf("authenticated tenant %s attributed as %s", mine, got)
+	}
+	c = ctxFor("GET", "/api/v1/anything")
+	c.Set("tenantID", mine.String())
+	if got := tr.extractTenantID(c); got != mine {
+		t.Fatalf("string-typed tenant %s attributed as %s", mine, got)
+	}
+}

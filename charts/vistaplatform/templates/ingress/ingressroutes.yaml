@@ -25,6 +25,7 @@
 {{- if eq $tlsMode "existingSecret" -}}{{- $tlsSecret = .Values.tls.existingSecretName -}}{{- end -}}
 {{- if eq $tlsMode "none" -}}{{- $entryPoints = list "web" -}}{{- end -}}
 {{- $adminPlaneSplit := and $adminDnsName .Values.adminPlane.restrictToAdminHost -}}
+{{- $edgeRateLimit := .Values.edgeRateLimit | default dict -}}
 {{- $adminAllowList := "" -}}
 {{- if and $adminPlaneSplit .Values.adminPlane.ipAllowList.enabled -}}
 {{- if not .Values.adminPlane.ipAllowList.sourceRange -}}

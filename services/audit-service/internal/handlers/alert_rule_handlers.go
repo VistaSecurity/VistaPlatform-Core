@@ -58,6 +58,18 @@ func alertRuleInvalid(rule *models.AlertRule) string {
 	return ""
 }
 
+// tenantMayModifyAlertRule reports whether the caller may update or delete rule.
+// Platform users may (they manage platform and tenant rules alike); a tenant
+// user may only when the rule is owned by their own tenant. The read paths keep
+// the looser "own or global" rule -- seeing a platform rule is intended.
+func tenantMayModifyAlertRule(c *gin.Context, rule *models.AlertRule) bool {
+	if middleware.GetUserType(c) != middleware.UserTypeTenant {
+		return true
+	}
+	tenantID := middleware.GetTenantID(c)
+	return tenantID != nil && rule.TenantID != nil && *rule.TenantID == *tenantID
+}
+
 // CreateAlertRule handles POST /api/v1/audit-service/alert-rules
 func (h *AlertRuleHandler) CreateAlertRule(c *gin.Context) {
 	var rule models.AlertRule
@@ -216,14 +228,13 @@ func (h *AlertRuleHandler) UpdateAlertRule(c *gin.Context) {
 		return
 	}
 
-	// Check access
-	userType := middleware.GetUserType(c)
-	if userType == middleware.UserTypeTenant {
-		tenantID := middleware.GetTenantID(c)
-		if tenantID == nil || (existing.TenantID != nil && *existing.TenantID != *tenantID) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
-			return
-		}
+	// Check access. A tenant user may CHANGE only a rule their own tenant owns.
+	// A global rule (TenantID nil) is visible to every tenant but belongs to the
+	// platform: editing or deleting one rewrites what every other tenant sees,
+	// so it is refused here exactly like another tenant's rule.
+	if !tenantMayModifyAlertRule(c, existing) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
 	}
 
 	// Merge the (possibly partial) body onto the existing rule so an
@@ -285,14 +296,13 @@ func (h *AlertRuleHandler) DeleteAlertRule(c *gin.Context) {
 		return
 	}
 
-	// Check access
-	userType := middleware.GetUserType(c)
-	if userType == middleware.UserTypeTenant {
-		tenantID := middleware.GetTenantID(c)
-		if tenantID == nil || (existing.TenantID != nil && *existing.TenantID != *tenantID) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
-			return
-		}
+	// Check access. A tenant user may CHANGE only a rule their own tenant owns.
+	// A global rule (TenantID nil) is visible to every tenant but belongs to the
+	// platform: editing or deleting one rewrites what every other tenant sees,
+	// so it is refused here exactly like another tenant's rule.
+	if !tenantMayModifyAlertRule(c, existing) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		return
 	}
 
 	err = h.service.DeleteAlertRule(c.Request.Context(), id, scope)

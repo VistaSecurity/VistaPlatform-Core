@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
@@ -771,6 +772,32 @@ func (h *AuthHandlers) UpdateMe(c *gin.Context) {
 		return
 	}
 
+	// The sign-in email is the recovery channel: forgot-password mails a reset
+	// link to whatever address is on the row, verified or not. Letting a bare
+	// access token rewrite it (no current password, no confirmation sent to the
+	// new address) turns any briefly-held session -- an unattended browser, a
+	// proxied XSS request, a token minted for a narrower purpose -- into
+	// permanent account takeover. No client uses this path to change the email
+	// (My Profile -> Personal edits name and timezone only), so it is refused
+	// outright rather than half-protected; an address change belongs in a flow
+	// that re-authenticates and confirms the new mailbox.
+	if req.Email != nil && strings.TrimSpace(*req.Email) != "" {
+		current, lookupErr := h.authService.GetUserByID(userID)
+		if lookupErr != nil || current == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+		if !strings.EqualFold(strings.TrimSpace(*req.Email), current.Email) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "The sign-in email address cannot be changed here",
+				"code":  "email_change_not_supported",
+			})
+			return
+		}
+		// Unchanged: drop it so the update path never treats it as a change.
+		req.Email = nil
+	}
+
 	user, err := h.authService.UpdateUser(userID, &req)
 	if err != nil {
 		switch err {
@@ -1156,7 +1183,7 @@ func (h *AuthHandlers) ForgotPassword(c *gin.Context) {
 	if h.rateLimiter != nil {
 		allowed, _, err := h.rateLimiter.AllowByEmail(c.Request.Context(), req.Email)
 		if err != nil {
-			logrus.WithError(err).Warn("Per-email rate limiter unavailable on /auth/password/forgot — failing closed")
+			logrus.WithError(err).Warn("Per-email rate limiter unavailable on /auth/forgot-password — failing closed")
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": "Password reset is temporarily unavailable. Please try again shortly.",
 			})

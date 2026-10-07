@@ -196,6 +196,12 @@ type unitAuthorizer struct {
 	options map[string]interface{}
 	// otProbes is the job's OT opt-in, which an automatic scan may not have.
 	otProbes []string
+	// platformExecutor is true when the in-cluster Platform Sensor will scan
+	// these addresses itself (processPlanJob), and false when the units only
+	// record what a tenant's own sensor was handed (dispatchToSensor). Only the
+	// former refuses the cluster's own pod and Service CIDRs: to a tenant's
+	// on-premises sensor those numbers are the customer's address space.
+	platformExecutor bool
 
 	mu     sync.Mutex
 	scope  dispatchguard.TargetScope
@@ -211,6 +217,9 @@ func (a *unitAuthorizer) current() (dispatchguard.TargetScope, error) {
 	var scope dispatchguard.TargetScope
 	if err := a.jp.withTenantTxx(context.Background(), a.tenantID, func(tx *sqlx.Tx) error {
 		s, err := dispatchguard.LoadTargetScope(tx, a.tenantID)
+		if a.platformExecutor {
+			s = s.ForPlatformSensor()
+		}
 		scope = s
 		return err
 	}); err != nil {

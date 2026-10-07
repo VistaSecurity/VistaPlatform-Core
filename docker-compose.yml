@@ -96,7 +96,7 @@ services:
       dockerfile: ./services/auth-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-auth-service
     environment:
       - PORT=8080
@@ -151,7 +151,7 @@ services:
       dockerfile: ./services/inventory-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-inventory-service
     environment:
       - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
@@ -200,7 +200,7 @@ services:
       dockerfile: ./services/compliance-engine/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-compliance-engine
     environment:
       - PORT=8080
@@ -248,7 +248,7 @@ services:
       dockerfile: ./services/sensor-manager/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-sensor-manager
     environment:
       - PORT=8080
@@ -308,7 +308,7 @@ services:
       dockerfile: ./services/cbom-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-cbom-service
     environment:
       - PORT=8080
@@ -363,7 +363,7 @@ services:
       dockerfile: ./services/resource-tracker-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-resource-tracker-service
     environment:
       - PORT=8080
@@ -410,7 +410,7 @@ services:
       dockerfile: ./services/mcp-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-mcp-service
     environment:
       - PORT=8080
@@ -443,7 +443,7 @@ services:
       dockerfile: ./services/tenant-health-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-tenant-health-service
     environment:
       - PORT=8080
@@ -488,7 +488,7 @@ services:
       dockerfile: ./services/device-interrogation-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-device-interrogation-service
     environment:
       - PORT=8080
@@ -541,7 +541,7 @@ services:
       dockerfile: ./services/audit-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-audit-service
     environment:
       - PORT=8080
@@ -696,7 +696,7 @@ services:
       dockerfile: ./services/cluster-sensor-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-cluster-sensor-service
     environment:
       - PORT=8080
@@ -756,7 +756,7 @@ services:
       dockerfile: ./services/monitoring-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-monitoring-service
     environment:
       - PORT=8080
@@ -814,7 +814,7 @@ services:
       dockerfile: ./services/admin-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-admin-service
     environment:
       - PORT=8080
@@ -868,7 +868,7 @@ services:
       dockerfile: ./services/notification-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-notification-service
     environment:
       - PORT=8080
@@ -921,7 +921,7 @@ services:
       dockerfile: ./services/discovery-processor-service/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-discovery-processor-service
     environment:
       - PORT=8080
@@ -960,7 +960,7 @@ services:
       dockerfile: ./services/pcap-processor/Dockerfile.dev
       args:
         GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.1}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-pcap-processor
     environment:
       - PORT=8080

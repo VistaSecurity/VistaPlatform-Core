@@ -458,6 +458,11 @@ func (s *DiscoveryService) createJob(tenantID, userID string, req models.CreateD
 		// the preview (confirmation_required).
 		Confirmed:       req.ExternalTargetsConfirmed || dryRun,
 		PersonInitiated: personInitiated,
+		// The cluster's own pod and Service ranges are refused only when the
+		// Platform Sensor will run the scan: no sensor chosen means it runs
+		// in-cluster, and so does a job aimed at the platform's own sensor
+		// row. A tenant sensor's scan may legitimately cover those numbers.
+		PlatformExecutor: chosenSensor == nil || chosenSensor.system(),
 	}
 
 	// A scan-plan job always probes (its depth names the ports); the

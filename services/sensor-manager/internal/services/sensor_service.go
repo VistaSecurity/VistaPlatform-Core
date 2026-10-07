@@ -1059,6 +1059,16 @@ func (s *SensorService) DeletePendingSensor(registrationKey string) error {
 	return err
 }
 
+// maskRegistrationKey renders a registration key for a log line: its first four
+// characters and its length, never the whole value. A key of four characters or
+// fewer is shown as length only.
+func maskRegistrationKey(key string) string {
+	if len(key) <= 4 {
+		return fmt.Sprintf("(%d characters)", len(key))
+	}
+	return fmt.Sprintf("%s... (%d characters)", key[:4], len(key))
+}
+
 // RegisterSensor registers a new sensor
 //
 // RLS: cross-tenant — runs on the bypass role (Phase 4). Registration BOOTSTRAP:
@@ -1111,7 +1121,10 @@ func (s *SensorService) RegisterSensor(registration *models.SensorRegistration) 
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Log additional context for debugging
-			log.Printf("Registration key lookup failed: key=%s, error=no rows found", registration.RegistrationKey)
+			// The key is the enrolment credential, so the log carries only enough
+			// of it to correlate a report ("starts ab12, 32 characters") and a
+			// near-miss of a live key is not written down whole.
+			log.Printf("Registration key lookup failed: key=%s, error=no rows found", maskRegistrationKey(registration.RegistrationKey))
 			// Check if key exists without expiration/status filters for better error message
 			checkQuery := `SELECT registration_key, status, expires_at, NOW() as current_time, expires_at > NOW() as not_expired FROM pending_sensor_registrations WHERE registration_key = $1`
 			var checkKey, checkStatus string

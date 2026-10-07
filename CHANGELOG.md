@@ -7,6 +7,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.5.0-rc.1] - 2026-10-07
+
+**Version 4.5.0 is a security-hardening and dependency release.** The edge, sign-in and
+sessions, authorization and tenant isolation, outbound requests, request sizes and the
+chart's defaults were reviewed, and every confirmed, bounded finding is fixed: a signed-in session can no longer rewrite the
+account's sign-in email, a viewer can no longer read sensors' registration keys, sign-in
+no longer reveals which addresses are registered, and platform scans no longer reach the
+cluster's own network. The bundled NATS server moves off a release its project no longer
+patches, and Go, npm and container dependencies are current. Both product lines are cut
+from the same commit: `v4.5.0` (commercial) and `core-v4.5.0` (Core). Upgrade from 4.4.0.
+
+**Read Breaking / Upgrading first** — the bundled NATS upgrade has no clean rollback, scans
+run by the platform now need your cluster's real network ranges, and the edge's auth rate
+limit is lower.
+
+### Highlights
+
+- **Account takeover through the profile closed.** `PUT /auth/me` let any valid access
+  token change the account's sign-in email, and the forgot-password flow then delivered
+  to the new address. It now answers `403`.
+
+- **Sign-in tells an attacker nothing.** Before the password was checked, the sign-in
+  routes disclosed whether an address was unknown, deactivated, single-sign-on only or a
+  platform administrator, and answered unknown addresses faster. They no longer do.
+  Platform-admin sign-in is rate limited per address and per account, and the edge's
+  auth-tier limit is lower and configurable.
+
+- **Platform-administrator sessions end when they should.** Resetting a password,
+  deactivating or deleting a platform user ends that user's sessions, and signing out
+  revokes the access token it was given.
+
+- **Authorization tightened where it was loose.** Pending sensor registration keys need
+  `sensors.create`; tenant administrators cannot change platform-wide alert rules; the
+  admin console API refuses tenant tokens; the sensor registration settings no tenant
+  member should have been able to change are gone; usage metering ignores a caller-chosen
+  tenant. Row-level security is now tested against the application's database role.
+
+- **Outbound requests and scans stay out of the cluster.** Scans run by the Platform
+  Sensor refuse the cluster's own pod and Service ranges; webhooks and staff sign-in
+  refuse loopback, metadata and private addresses; and tenant single sign-on and the AI
+  assistant's private-endpoint setting (Enterprise) refuse loopback, metadata and cluster
+  addresses.
+
+- **Bounded requests and a stricter edge.** Anonymous sign-in routes, agent intakes and
+  bulk evaluation cap their request bodies; the edge Content-Security-Policy is
+  same-origin for connections; OAuth consent and the MSP dashboard socket reject
+  cross-site requests; sensor registration keys and OAuth codes are no longer logged;
+  packet-capture jobs open only the tenant's own upload directory.
+
+- **The bundled NATS server is 2.14,** replacing 2.10, which the NATS project no longer
+  patches.
+
+- **Dependencies are current.** The user-interface images' web server (Caddy 2.11.7) is
+  rebuilt and clears every finding the image scanner reported against 4.4.0. Go 1.26.8 and
+  alpine 3.24.2 are bug-fix patch releases and fix no security advisories; Go modules and
+  npm packages are refreshed, with no called Go vulnerability and one accepted,
+  build-time-only npm advisory.
+
+- **The asset timeline no longer grows with each sighting's own description,** the
+  remainder of what 4.4.0 began.
+
+### Breaking / Upgrading
+
+Back up your database (`pg_dump`) first, as always. Upgrade from 4.4.0; the upgrade
+changes no database schema.
+
+- **The bundled NATS server upgrades from 2.10 to 2.14, and rolling back is not clean.**
+  JetStream data is read in place. A later rollback to a release on NATS 2.10 rebuilds
+  the stream index on first start and logs `corrupt state file`; messages and consumer
+  state were intact in testing. **Snapshot the NATS volume (`nats-data-nats-0`) before
+  upgrading** if you need a clean rollback. A values file that pins
+  `datastores.nats.image.tag` keeps the old server until you remove the pin; use
+  `--reset-then-reuse-values`. An external NATS is unaffected. See the "Bundled NATS
+  server" note in [`docsv4/core/operate/releases.md`](docsv4/core/operate/releases.md).
+- **Set `networkPolicy.clusterInternalCIDRs` to your cluster's real pod and Service
+  ranges.** The Platform Sensor now refuses scan targets inside them, whatever networks a
+  tenant has registered. The default is RKE2's (`10.42.0.0/16`, `10.43.0.0/16`); on
+  another network plugin the default protects the wrong ranges and may block scans of
+  addresses that are the customer's own. Scans run by a tenant's own sensor are
+  unchanged.
+- **The edge's auth rate limit drops from 200 to 50 requests a second (burst 100) per
+  source address.** If a load balancer or proxy sits in front of Traefik, set
+  `edgeRateLimit.ipStrategy.depth` to the number of trusted proxies (`1` behind a single
+  ALB); otherwise every client shares one bucket and a busy office can throttle everyone.
+  A wrong non-zero depth, longer than the `X-Forwarded-For` list, makes Traefik answer
+  `500` on rate-limited routes, so check that two clients do not share a bucket.
+  `edgeRateLimit.api` and `edgeRateLimit.auth` set the ceilings.
+- **Platform-admin sign-in is rate limited:** five attempts a minute per account, twice
+  that per address (`ADMIN_LOGIN_RATE_LIMIT`). A throttled attempt answers `429` with
+  `Retry-After`.
+- **Sign-in answers differently.** A wrong password gets the same invalid-credentials
+  answer for an unknown, deactivated or single-sign-on-only account, and `POST
+  /auth/methods` no longer returns the organization's id except where single sign-on
+  needs it. Integrations that read those distinctions from a failed sign-in stop seeing
+  them.
+- **`PUT /auth/me` with a different `email` answers `403 email_change_not_supported`.**
+  No screen used it.
+- **Pending sensor registration keys need `sensors.create`.** `GET
+  /sensor-manager/sensors/pending` refuses viewers and any role without it.
+- **Tenant administrators can no longer edit or delete platform-wide alert rules,** the
+  admin console API (`/admin-service/admin/**`) refuses tenant tokens, and a tenant role
+  can no longer be named `platform_admin`.
+- **Tenant single sign-on endpoints must be `https://` when saved** (Enterprise). A
+  provider saved with an `http://` URL keeps working until its URL is edited; embedded
+  credentials in a URL are refused.
+- **`ai.allowPrivateEndpoints: true` no longer allows a model on the pod's own loopback**
+  (Enterprise), and `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` now also disables private AI
+  endpoints. Private-network and in-cluster addresses are unchanged.
+- **`GET` and `PUT /sensor-manager/admin/settings` are removed** and answer `404`. They
+  let a tenant member read, and a holder of `settings.update` overwrite, registration
+  limits shared by every tenant, and no screen or client used them. The limits are fixed
+  at their previous defaults (50 pending sensors, a 60-minute key lifetime, address
+  validation off).
+- **`PUT /tenant/ui-config` needs a platform identity and `platform.settings`.** A tenant
+  token gets `403` whatever its role is called; it used to trust the token's role string.
+  The admin console's per-tenant `ui-config` route is unchanged.
+- **The user list's and external connections' search treat `%` and `_` literally.**
+- **Request bodies are capped:** 1 MiB on anonymous sign-in routes and `evaluate/multiple`
+  (at most 100 frameworks), 32 MiB on agent submissions with at most 10,000 discoveries
+  per batch. A request over a limit is refused.
+- **The edge Content-Security-Policy is `connect-src 'self'` in production.** A
+  deployment whose user interface calls another origin is blocked from doing so.
+- **Platform-admin sessions:** resetting a password, deactivating or deleting a platform
+  user ends their refresh sessions; an access token already issued keeps working until it
+  expires (up to one hour). The OAuth consent decision and the MSP dashboard WebSocket
+  now reject cross-site requests, and the WebSocket requires an `Origin`.
+
+### Editions
+
+**Core** includes everything above except what is named below.
+
+**Enterprise** adds the single-sign-on guard (tenant sign-in refuses loopback, link-local
+and cluster addresses for the identity provider and requires `https://` endpoints;
+`CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` forbids private ones too), the stricter AI
+private-endpoint setting and the billing webhook's body limit. **MSP** adds the dashboard
+WebSocket origin check. The authoritative list of what each edition includes is generated,
+not asserted: [`docsv4/core/editions.md`](docsv4/core/editions.md).
+
+### Verify
+
+Core: there is no key to trust, because the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.5.0 \
+  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.5.0` for the image.
+Enterprise and MSP customers verify the commercial images and chart against the commercial
+release workflow's identity, exactly as for 4.4.0.
+
+The complete per-change list is in
+[Vista Platform 4.5.0 — full list of changes](docsv4/core/releases/4.5.0.md).
+
+<!-- release-notes-end -->
+
 ## [4.4.0] - 2026-10-05
 
 **Version 4.4.0 makes discovery and inventory trustworthy at the scale of a real estate.**

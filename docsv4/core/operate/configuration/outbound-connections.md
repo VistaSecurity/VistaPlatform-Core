@@ -20,10 +20,11 @@ that traffic:
 | Service | What it reaches |
 |---|---|
 | `notification-service` | Webhook, Slack, PagerDuty and SMTP delivery |
-| `monitoring-service`, `auth-service`, `admin-service` | SMTP; `admin-service` also fetches the catalogue feeds and delivers licence reports |
+| `monitoring-service`, `auth-service`, `admin-service` | SMTP; `admin-service` also fetches the catalogue feeds, delivers licence reports, reaches the Google or Microsoft identity provider for staff single sign-on and posts incident webhooks (public addresses only) |
 | `device-interrogation-service`, `sensor-manager`, `cluster-sensor-service` | Device management APIs and active probes on your networks |
-| `audit-service` | S3 archival of expired audit logs, when configured |
+| `audit-service` | S3 archival of expired audit logs, when configured, and the legacy webhook alert action (public addresses only) |
 | `compliance-engine`, `cbom-service` | Enterprise: the configured [model provider](ai-provider.md) — framework authoring and remediation drafts, and the CBOM comparison narrative. `inventory-service` and `admin-service`, the other two AI callers, reach it too. |
+
 
 
 This is the chart's `networkPolicy.externalEgressBackends` list. Every one of
@@ -141,6 +142,16 @@ That setting never opens:
   `extraEnv`. A malformed value makes those services refuse every outbound
   connection rather than ignore it. So set `clusterInternalCIDRs` to your
   cluster's real ranges even if you never enable the egress NetworkPolicy.
+
+The same ranges are kept out of **scans the Platform Sensor runs**: the
+Platform Sensor (`cluster-sensor-service`) also receives
+`networkPolicy.clusterInternalCIDRs`, and a tenant's Discover Assets or Active
+Scan run from the platform refuses any address inside them, whatever network
+segments the tenant has registered. A scan run by a tenant's own sensor is
+unaffected: to that sensor the same numbers are the customer's own address
+space. Private address space is otherwise the tenant's own, so the rest of
+RFC 1918 stays scannable. Set `clusterInternalCIDRs` to your cluster's real pod
+and Service ranges; the chart default (`10.42.0.0/16`, `10.43.0.0/16`) is RKE2's.
 
 An operator can forbid private targets for the whole deployment with
 `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` (via `extraEnv` on the services

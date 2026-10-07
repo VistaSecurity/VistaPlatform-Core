@@ -11,7 +11,7 @@
 # relative /api/* paths (see api/clients/typescript/client.ts), so the UI is
 # same-origin with the API behind Traefik in every environment — zero API config.
 ARG NODE_BUILDER=node:24-alpine
-ARG GO_BUILDER_IMAGE=golang:1.26.6-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26.8-alpine
 FROM ${NODE_BUILDER} AS builder
 WORKDIR /repo
 
@@ -34,25 +34,33 @@ COPY frontend-v2/ ./frontend-v2/
 RUN npm ci
 RUN npm run build -w frontend-v2
 
-# ---- caddy build: compile Caddy on Go 1.26.6 with patched dependencies ----
+# ---- caddy build: compile Caddy on Go 1.26.8 with patched dependencies ----
 # The stock caddy:2-alpine binary (even at 2.11.4) is compiled with Go stdlib
 # 1.26.3, which Trivy still flags (CVE-2026-27145/-42504/-42507). Rebuild the
-# Caddy binary ourselves on the repo's Go 1.26.6 toolchain so the runtime carries
-# stdlib 1.26.6 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.4
-# (its own CVE fix).
+# Caddy binary ourselves on the repo's Go 1.26.8 toolchain so the runtime carries
+# stdlib 1.26.8 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.7
+# (2026-10; v2.11.4 was the CVE fix for CVE-2026-52844/52845).
 #
 # Why a wrapper module rather than `go install caddy@<newer>` (added 2026-08):
-# v2.11.4 IS still the latest Caddy release, so there is no version to bump to —
-# but three of the module versions its go.mod selects have been CVE'd since it
-# was cut, and the nightly scan of the published images caught them:
-#   golang.org/x/net       v0.55.0 → 0.56.0  CVE-2026-46600
-#   golang.org/x/text      v0.37.0 → 0.39.0  CVE-2026-56852
-#   google.golang.org/grpc v1.81.0 → 1.82.1  GHSA-hrxh-6v49-42gf
 # `go install pkg@version` deliberately ignores any local go.mod, so it offers no
-# lever to raise a transitive dependency: the only way to upgrade one is to build
-# from a module we control. The three-line main package below is exactly what
-# xcaddy generates for a custom build — caddycmd.Main() plus a blank import of
-# modules/standard.
+# lever to raise a transitive dependency, and the module versions a Caddy release's
+# go.mod selects get CVE'd after it is cut — the nightly scan of the published
+# images caught three of them on v2.11.4 (x/net CVE-2026-46600, x/text
+# CVE-2026-56852, grpc GHSA-hrxh-6v49-42gf). The only way to upgrade a transitive
+# dependency is to build from a module we control. The three-line main package
+# below is exactly what xcaddy generates for a custom build — caddycmd.Main() plus
+# a blank import of modules/standard.
+#
+# 2026-10: Harbor's Trivy 0.70 scan of v4.4.0 flagged the v2.11.4 binary again —
+# cel-go v0.28.1 (GHSA-gcjh-h69q-9w9g), otlploggrpc / sdk/log v0.19.0
+# (CVE-2026-81871/-81872) and otel + otlptrace* v1.43-1.44 (CVE-2026-81870) — and
+# x/crypto v0.57.0 carries GO-2026-5932 (openpgp unmaintained; NO fixed version
+# exists, so it stays until x/crypto drops or replaces the package). Caddy
+# v2.11.5-v2.11.7 are newer builds of the same line and select all of those at
+# fixed versions on their own, so the bump to v2.11.7 does most of the work; the
+# otel / cel-go floors below make the fix independent of what a future Caddy
+# go.mod selects. Note cel-go now lives at cel.dev/cel-go (the github.com/google
+# path Trivy flagged is gone from the module graph).
 #
 # That blank import is LOAD-BEARING. It is what registers file_server,
 # reverse_proxy, encode, header, try_files and respond; a Caddy built without it
@@ -71,10 +79,16 @@ RUN npm run build -w frontend-v2
 # ratchet looked maintained and simply never reached the module. Add new floors
 # here as advisories land rather than assuming the existing lines cover them.
 #
-# NOT raised, deliberately: github.com/google/cel-go carries GO-2026-6094, fixed
-# in v0.30.0, but v0.30.0 changes the interpreter API and Caddy v2.11.4 does not
-# compile against it (celmatcher.go: []Interpretable vs []InterpretableV2).
-# cel-go is imported-but-not-called here; raise it when Caddy supports it.
+# cel-go (cel.dev/cel-go) was NOT raisable while this built Caddy v2.11.4: its
+# GO-2026-6094 fix (v0.30.0) changes the interpreter API and v2.11.4 did not compile
+# against it (celmatcher.go: []Interpretable vs []InterpretableV2). Caddy v2.11.7
+# supports it and selects v0.32.0, which is now floored below. If a future bump
+# fails to compile in celmatcher.go, that is this same API break.
+#
+# grpc is deliberately held at v1.83.2, NOT the newer v1.84.0: GO-2026-6443 (server
+# panic on a request lacking :authority/Host) is fixed in 1.82.2 and 1.83.2 but
+# the 1.84.x line is affected until a release carrying the 1.85.0-dev fix ships, and
+# govulncheck's binary scan reports it against v1.84.0. Re-check before raising it.
 #
 # GOTOOLCHAIN names the EXACT patch, for the same reason the service Dockerfiles
 # do — but note the reason is NOT go.work compatibility. This stage compiles an
@@ -86,10 +100,10 @@ RUN npm run build -w frontend-v2
 # 1.26.5 well after 1.26.6 shipped. That is exactly what happened: the published
 # web-ui/admin-ui images carried a Caddy binary on stdlib 1.26.5 with
 # CVE-2026-39821 and CVE-2026-46600, while every backend came out clean, because
-# the backends pin and this stage did not. An exact pin provisions 1.26.6
+# the backends pin and this stage did not. An exact pin provisions the exact go.work patch
 # regardless of which base CI substitutes, and still refuses 1.27.
 FROM ${GO_BUILDER_IMAGE} AS caddybuild
-ENV GOTOOLCHAIN=go1.26.6 CGO_ENABLED=0
+ENV GOTOOLCHAIN=go1.26.8 CGO_ENABLED=0
 WORKDIR /caddybuild
 RUN printf '%s\n' \
       'package main' \
@@ -108,31 +122,41 @@ RUN printf '%s\n' \
 # `go mod tidy` is required, not cosmetic: module-graph pruning leaves the
 # go.sum entries for Caddy's own optional-module imports unresolved after a
 # bare `go get`, and the build fails on ~10 "missing go.sum entry" errors.
-RUN go get github.com/caddyserver/caddy/v2@v2.11.4 \
+RUN go get github.com/caddyserver/caddy/v2@v2.11.7 \
  && go get golang.org/x/net@v0.59.0 \
            golang.org/x/text@v0.42.0 \
            golang.org/x/crypto@v0.57.0 \
            google.golang.org/grpc@v1.83.2 \
-           github.com/klauspost/compress@v1.18.7 \
-           github.com/go-chi/chi/v5@v5.3.0 \
+           github.com/klauspost/compress@v1.20.1 \
+           github.com/go-chi/chi/v5@v5.3.2 \
+           cel.dev/cel-go@v0.32.0 \
+           go.opentelemetry.io/otel@v1.47.0 \
+           go.opentelemetry.io/otel/sdk@v1.47.0 \
+           go.opentelemetry.io/otel/sdk/log@v1.47.0 \
+           go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc@v0.23.0 \
+           go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.47.0 \
+           go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.47.0 \
+           go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.47.0 \
  && go mod tidy
 RUN go build -o /go/bin/caddy .
 
 # ---- runtime: Caddy static server (mirrors web-ui/Dockerfile.prod) ----
 # Pinned by digest to defeat tag-mover attacks on docker.io/library/caddy.
-# caddy:2-alpine → Caddy v2.11.4 on Alpine 3.23.5. Bumped from the 2.11.3 pin to
-# clear the Trivy scan findings this base carried: Caddy CVE-2026-52844/52845
-# (fix 2.11.4), the bundled Go x/crypto/x/net/go-jose + stdlib CVEs, and the Alpine
-# OpenSSL CVE-2026-45447 (libssl3/libcrypto3 3.5.7-r0) + curl 8.19.0-r0. The
-# runtime Caddy binary is then replaced with the Go-1.26.6 build above to clear
-# the residual stdlib CVEs. See
+# caddy:2-alpine → Caddy v2.11.7 on Alpine 3.23 (2026-10 pin; the tag and
+# caddy:2.11.7-alpine resolve to this same index digest, created 2026-10-05). The
+# 2.11.4 pin before it cleared Caddy CVE-2026-52844/52845 (fix 2.11.4) and the
+# Alpine OpenSSL CVE-2026-45447 (libssl3/libcrypto3 3.5.7-r0). The runtime Caddy
+# binary is then replaced with the Go-1.26.8 build above, so the stock binary's own
+# dependencies never ship. See
 # docsv4/internal/developer/security/2026-07-frontend-caddy-cve-remediation.md.
 #
-# The digest is UNCHANGED at 2026-08 and that is deliberate: `caddy:2-alpine` has
-# not been rebuilt since 2026-06-24, so the tag still resolves to exactly this
-# digest and there is no newer one to bump to. The Alpine package CVEs it now
-# carries are cleared in the layer below instead.
-FROM caddy:2-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+# The digest was deliberately LEFT UNCHANGED in 2026-08 because `caddy:2-alpine`
+# had not been rebuilt since 2026-06-24, so there was no newer digest to bump to;
+# the Alpine package CVEs it carried were cleared in the layer below instead. That
+# reasoning no longer holds — upstream has rebuilt the tag (2.11.7, 2026-10-05) —
+# but the `apk upgrade` layer below stays, because the base is only as current as
+# its last upstream rebuild.
+FROM caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
 
 # Alpine package currency + surface removal.
 #
@@ -151,7 +175,7 @@ FROM caddy:2-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d
 # whole class instead of re-running the version race every quarter.
 RUN apk --no-cache upgrade && apk --no-cache del curl
 
-# Swap in the Go-1.26.6-compiled Caddy binary (stdlib 1.26.6, patched deps).
+# Swap in the Go-1.26.8-compiled Caddy binary (stdlib 1.26.8, patched deps).
 # Unlike the stock caddy:2-alpine binary, this one carries NO file capabilities,
 # so there is no cap_net_bind_service to strip (we bind 3001, never a privileged
 # port, and the chart's strict containerSecurityContext drops ALL caps anyway).

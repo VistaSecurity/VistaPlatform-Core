@@ -298,7 +298,7 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		form.Set("redirect_uri", adminCallbackRedirectURI(c, providerType))
 		form.Set("client_id", clientID)
 		form.Set("client_secret", decryptProviderSecret(secretEnc))
-		tokResp, err := http.PostForm(tokenURL, form)
+		tokResp, err := staffSSOHTTPClient.PostForm(tokenURL, form)
 		if err != nil {
 			c.Redirect(http.StatusFound, "/login?error=sso_exchange")
 			return
@@ -307,21 +307,25 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		var tok struct {
 			AccessToken string `json:"access_token"`
 		}
-		if json.NewDecoder(tokResp.Body).Decode(&tok) != nil || tok.AccessToken == "" {
+		if json.NewDecoder(io.LimitReader(tokResp.Body, maxStaffSSOResponseBytes)).Decode(&tok) != nil || tok.AccessToken == "" {
 			c.Redirect(http.StatusFound, "/login?error=sso_exchange")
 			return
 		}
 
 		// Fetch the verified identity.
-		req, _ := http.NewRequest(http.MethodGet, userinfoURL, nil)
+		req, err := http.NewRequest(http.MethodGet, userinfoURL, nil)
+		if err != nil {
+			c.Redirect(http.StatusFound, "/login?error=sso_userinfo")
+			return
+		}
 		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		uiResp, err := http.DefaultClient.Do(req)
+		uiResp, err := staffSSOHTTPClient.Do(req)
 		if err != nil {
 			c.Redirect(http.StatusFound, "/login?error=sso_userinfo")
 			return
 		}
 		defer func() { _ = uiResp.Body.Close() }()
-		bodyBytes, _ := io.ReadAll(uiResp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(uiResp.Body, maxStaffSSOResponseBytes))
 		var ui map[string]interface{}
 		_ = json.Unmarshal(bodyBytes, &ui)
 		email, _ := ui["email"].(string)

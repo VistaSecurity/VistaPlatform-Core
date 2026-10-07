@@ -207,9 +207,9 @@ func TestIntegration_PlatformUserMutations_409WhenPromotedAfterCheck(t *testing.
 			r := gin.New()
 			grp := r.Group("/users")
 			grp.Use(func(c *gin.Context) { c.Set("userID", f.caller.String()); c.Next() })
-			grp.PUT("/:id", updatePlatformUserWithStore(store))
-			grp.DELETE("/:id", deletePlatformUserWithStore(store))
-			grp.PUT("/:id/set-password", adminSetPasswordWithStore(store, stubPasswordHasher{}))
+			grp.PUT("/:id", updatePlatformUserWithStore(store, &recordingSessionRevoker{}))
+			grp.DELETE("/:id", deletePlatformUserWithStore(store, &recordingSessionRevoker{}))
+			grp.PUT("/:id/set-password", adminSetPasswordWithStore(store, stubPasswordHasher{}, &recordingSessionRevoker{}))
 			grp.POST("/:id/send-password-reset", adminSendPasswordResetWithDeps(store, emailSends(), stubBrandingProvider{}))
 
 			body := strings.ReplaceAll(tc.body, "__NARROW_ALT__", f.platform.String())
@@ -240,7 +240,7 @@ func TestIntegration_PlatformUserMutations_409WhenPromotedAfterCheck(t *testing.
 		target := f.user("target", &f.narrow)
 		store := &promotingStore{platformUserRepository: f.repo, db: f.db, target: target, super: f.super, pending: false}
 		r := gin.New()
-		r.PUT("/users/:id", func(c *gin.Context) { c.Set("userID", f.caller.String()); c.Next() }, updatePlatformUserWithStore(store))
+		r.PUT("/users/:id", func(c *gin.Context) { c.Set("userID", f.caller.String()); c.Next() }, updatePlatformUserWithStore(store, &recordingSessionRevoker{}))
 		req := httptest.NewRequest(http.MethodPut, "/users/"+target.String(), strings.NewReader(`{"is_active":false}`))
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()

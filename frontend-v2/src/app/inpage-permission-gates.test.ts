@@ -131,7 +131,10 @@ describe('Sensor detail drawer (config, interfaces, commands)', () => {
 
 describe('Register sensor or agent (Discovery → Sensors & Agents)', () => {
   it('gates on sensors.create — POST /sensors/pending', () => {
-    routeRequires('services/sensor-manager/cmd/main.go', '/sensors/pending"', 'PermissionSensorsCreate');
+    routeRequires('services/sensor-manager/cmd/pending_routes.go', 'g.POST("/sensors/pending"', 'PermissionSensorsCreate');
+    // Listing the pending keys needs the same permission as minting one: a
+    // registration key is all a sensor needs to enrol into the tenant.
+    routeRequires('services/sensor-manager/cmd/pending_routes.go', 'g.GET("/sensors/pending"', 'PermissionSensorsCreate');
     gateUses(`${FE}sections/discovery/sensors-page.tsx`, 'sensors.create', ['sensors.manage']);
     // The onboarding checklist deep-links this button; its gate must agree.
     expect(read(`${FE}sections/onboarding/step-meta.ts`)).toContain(

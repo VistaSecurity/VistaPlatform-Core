@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -208,80 +207,6 @@ func TestDeletePendingSensor_Validation(t *testing.T) {
 			req := httptest.NewRequest("DELETE", "/test/"+tt.registrationKey, nil)
 			w := httptest.NewRecorder()
 
-			router.ServeHTTP(w, req)
-
-			assert.Equal(t, tt.expectedStatus, w.Code)
-		})
-	}
-}
-
-func TestAdminSettings(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	handler := &Handler{}
-
-	tests := []struct {
-		name           string
-		method         string
-		requestBody    map[string]interface{}
-		expectedStatus int
-	}{
-		{
-			name:           "get admin settings",
-			method:         "GET",
-			expectedStatus: 200,
-		},
-		{
-			name:   "update admin settings - valid",
-			method: "PUT",
-			requestBody: map[string]interface{}{
-				"key_expiration_minutes": 120,
-				"max_pending_sensors":    100,
-				"require_ip_validation":  true,
-			},
-			expectedStatus: 200,
-		},
-		{
-			name:   "update admin settings - invalid expiration",
-			method: "PUT",
-			requestBody: map[string]interface{}{
-				"key_expiration_minutes": 2, // Too short
-				"max_pending_sensors":    100,
-				"require_ip_validation":  true,
-			},
-			expectedStatus: 400,
-		},
-		{
-			name:   "update admin settings - invalid max sensors",
-			method: "PUT",
-			requestBody: map[string]interface{}{
-				"key_expiration_minutes": 60,
-				"max_pending_sensors":    0, // Too low
-				"require_ip_validation":  true,
-			},
-			expectedStatus: 400,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			router := gin.New()
-			if tt.method == "GET" {
-				router.GET("/test", handler.GetAdminSettings)
-			} else {
-				router.PUT("/test", handler.UpdateAdminSettings)
-			}
-
-			var req *http.Request
-			if tt.requestBody != nil {
-				jsonBody, _ := json.Marshal(tt.requestBody)
-				req = httptest.NewRequest(tt.method, "/test", bytes.NewBuffer(jsonBody))
-				req.Header.Set("Content-Type", "application/json")
-			} else {
-				req = httptest.NewRequest(tt.method, "/test", nil)
-			}
-
-			w := httptest.NewRecorder()
 			router.ServeHTTP(w, req)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)

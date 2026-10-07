@@ -296,6 +296,12 @@ func TestCreateTenantRole_RejectsUnusableName(t *testing.T) {
 		{DisplayName: "!!!"},
 		{Name: "Has Spaces", DisplayName: "Whatever"},
 		{Name: "9leading", DisplayName: "Whatever"},
+		// The role name becomes the JWT `role` claim; the platform's own role
+		// names are never available to a tenant (2026-09 audit, tenancy-rbac Low).
+		{Name: "platform_admin", DisplayName: "Whatever"},
+		{Name: "Super_Admin", DisplayName: "Whatever"},
+		{DisplayName: "Support Agent"},
+		{DisplayName: "Platform Admin"},
 	} {
 		if _, err := svc.CreateTenantRole(uuid.New(), uuid.New(), req); !errors.Is(err, ErrInvalidRoleName) {
 			t.Fatalf("req %+v: got %v, want ErrInvalidRoleName", req, err)

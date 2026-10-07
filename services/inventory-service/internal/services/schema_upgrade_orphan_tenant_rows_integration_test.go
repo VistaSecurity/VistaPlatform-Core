@@ -140,11 +140,48 @@ func seedOrphanTenantRows(t *testing.T, db *sql.DB, live uuid.UUID) orphanFixtur
 		orphans += n
 	}
 	if orphans == 0 {
-		// Nothing to clean up means the upgrade would prove nothing.
-		t.Fatalf("the old release left no orphan rows after a purge — the fixture is not exercising the upgrade")
+		// A release that already cascades tenant purges (4.4.0 onward) cannot
+		// leave orphans, so there is nothing for this upgrade to clean up and
+		// assertOrphanTenantRowsRemoved still checks every FK survives. Only an
+		// old release WITHOUT the cascade FKs that still left no orphans means
+		// the fixture is broken.
+		if missing := missingCascadeFKs(t, db, f); len(missing) > 0 {
+			t.Fatalf("the old release left no orphan rows after a purge, yet lacks the cascade FK on %v — the fixture is not exercising the upgrade", missing)
+		}
+		t.Logf("old release already cascades tenant purges on every seeded table; no orphans to clean up")
+		return f
 	}
 	t.Logf("old release left %d orphan row(s) behind after the purge", orphans)
 	return f
+}
+
+// missingCascadeFKs lists the seeded tables whose ON DELETE CASCADE FK to
+// tenants is absent from the database as it stands (the OLD schema, when called
+// from seedOrphanTenantRows).
+func missingCascadeFKs(t *testing.T, db *sql.DB, f orphanFixture) []string {
+	t.Helper()
+	var missing []string
+	for table, ok := range f.seeded {
+		if !ok {
+			continue
+		}
+		// A table outside orphanCascadeFKs cascades through its parent row
+		// (alert_events through alerts), not through a tenant FK of its own.
+		fk, tenantFK := orphanCascadeFKs[table]
+		if !tenantFK {
+			continue
+		}
+		var present bool
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_constraint
+			WHERE conname = $1 AND conrelid = to_regclass('public.' || $2) AND confdeltype = 'c')`,
+			fk, table).Scan(&present); err != nil {
+			t.Fatalf("look up the cascade FK on %s: %v", table, err)
+		}
+		if !present {
+			missing = append(missing, table)
+		}
+	}
+	return missing
 }
 
 func assertOrphanTenantRowsRemoved(t *testing.T, db *sql.DB, live uuid.UUID, f orphanFixture, tag string) {

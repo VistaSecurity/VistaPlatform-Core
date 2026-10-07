@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 	"github.com/vistasecurity/vistaplatform/shared/storage"
 )
@@ -545,8 +546,9 @@ func UpdateTenantUIConfigByID(db *sql.DB) gin.HandlerFunc {
 }
 
 // UpdateTenantUIConfig handles PUT /tenant/ui-config - Update tenant UI configuration
-// Requires platform_admin role (platform admins set tenant design defaults)
-// This version uses tenant ID from JWT context (for web-ui use)
+// Requires a PLATFORM identity (platform admins set tenant design defaults); the
+// router also requires the platform.settings permission. This version uses
+// tenant ID from JWT context (for web-ui use)
 func UpdateTenantUIConfig(db *sql.DB) gin.HandlerFunc {
 	return UpdateTenantUIConfigWithStore(newTenantUIConfigRepo(db))
 }
@@ -555,10 +557,15 @@ func UpdateTenantUIConfig(db *sql.DB) gin.HandlerFunc {
 // UpdateTenantUIConfig, exercised directly by the contract test.
 func UpdateTenantUIConfigWithStore(store tenantUIConfigStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Check for platform_admin role
-		userRole, exists := c.Get("role")
-		if !exists || userRole != "platform_admin" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions. Platform admin role required."})
+		// Authorize on the token's IDENTITY, not its role string. The role claim
+		// is whatever name the user's tenant role carries (tenant roles are
+		// tenant-authored; "platform_admin" was never reserved), so comparing it
+		// let any tenant user holding a role of that name rewrite the UI config
+		// of their own tenant as if they were the platform. UserTypePlatform is
+		// stamped by RequireAuth from the token's nil tenant id, which only the
+		// platform login path issues.
+		if sharedmw.GetUserType(c) != sharedmw.UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions. Platform identity required."})
 			return
 		}
 

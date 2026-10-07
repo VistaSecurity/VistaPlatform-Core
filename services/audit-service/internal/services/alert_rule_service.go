@@ -173,14 +173,15 @@ func (s *AlertRuleService) UpdateAlertRule(ctx context.Context, id uuid.UUID, ru
 		rule.Severity, rule.Conditions, rule.Actions, rule.UpdatedAt, id,
 	}
 	if tenantID != nil { // #529 by-id IDOR
-		query += " AND (tenant_id = $10 OR tenant_id IS NULL)"
+		// Strictly the caller's own rows. The read paths union in global
+		// (tenant_id IS NULL) rules so a tenant can SEE the platform's; a write
+		// must not, or one tenant rewrites the rule every tenant is shown.
+		query += " AND tenant_id = $10"
 		args = append(args, *tenantID)
 	}
 
-	// RLS: cross-tenant — tenants may update global (tenant_id IS NULL) rules too,
-	// so the predicate unions their tenant with NULL. A tenant-scoped WithTenantTx
-	// would hide the NULL-tenant rows (and WITH CHECK would reject writing them),
-	// changing behavior; this runs on the bypass role (Phase 4).
+	// Runs on the bypass handle because platform callers (tenantID == nil) write
+	// by id alone; for a tenant caller the predicate above is the isolation.
 	result, err := s.bypassDB.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
@@ -202,13 +203,15 @@ func (s *AlertRuleService) DeleteAlertRule(ctx context.Context, id uuid.UUID, te
 	query := "DELETE FROM audit.alert_rules WHERE id = $1"
 	args := []interface{}{id}
 	if tenantID != nil { // #529 by-id IDOR
-		query += " AND (tenant_id = $2 OR tenant_id IS NULL)"
+		// Own rows only: a global (tenant_id IS NULL) rule is readable by every
+		// tenant but deletable only by the platform.
+		query += " AND tenant_id = $2"
 		args = append(args, *tenantID)
 	}
 
-	// RLS: cross-tenant — tenants may delete global (tenant_id IS NULL) rules too;
-	// a tenant-scoped WithTenantTx would hide those NULL-tenant rows. Runs on the
-	// bypass role (Phase 4); the OR-IS-NULL predicate is the isolation control.
+	// Runs on the bypass handle because platform callers (tenantID == nil)
+	// delete by id alone; for a tenant caller the predicate above is the
+	// isolation.
 	result, err := s.bypassDB.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err

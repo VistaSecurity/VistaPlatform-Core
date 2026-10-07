@@ -57,12 +57,12 @@ same way:
 
 **Build/runtime bases (all 16, `pcap-processor` noted separately):**
 
-- Compile stage: `golang:1.26.6-alpine` (`ARG GO_BUILDER_IMAGE`)
-- Runtime: `alpine:3.24.1` + a static Go binary (`ARG RUNTIME_IMAGE`)
+- Compile stage: `golang:1.26.8-alpine` (`ARG GO_BUILDER_IMAGE`)
+- Runtime: `alpine:3.24.2` + a static Go binary (`ARG RUNTIME_IMAGE`)
 - **`pcap-processor` is the one exception.** It needs CGO and libpcap (packet
   capture is not pure Go), so its build stage adds `gcc musl-dev libpcap-dev`
   and its runtime stage adds the `libpcap` runtime package on top of the same
-  `alpine:3.24.1` base. This is also why `pcap-processor` has no
+  `alpine:3.24.2` base. This is also why `pcap-processor` has no
   `Dockerfile.licensed`/`.dist` variant in the commercial pipeline — a
   CGO-linked binary can't be obfuscated the way the pure-Go services are.
 
@@ -73,7 +73,7 @@ same way:
 | web-ui | 3000 | `frontend-v2/Dockerfile.prod` |
 | admin-ui | 3006 | `admin-ui-v2/Dockerfile.prod` |
 
-- Build stage: `dhi.io/node:24-alpine3.22-dev` (Docker Hardened Images —
+- Build stage: `dhi.io/node:24-alpine3.24-dev` (Docker Hardened Images —
   free and open source; needs a Docker Hub account, not a paid plan)
 - Runtime: `caddy:2-alpine`, pinned by digest
 - **`admin-ui-v2` has no `Dockerfile.dev`.** Local development for the admin
@@ -136,7 +136,11 @@ answering a supply-chain question, the sets are not identical:
 | postgres | `postgres:17-alpine` | same |
 | redis | `redis:7-alpine` | dev compose runs `8-alpine` |
 | influxdb | `influxdb:2.8-alpine` | same |
-| nats | `nats:2.10-alpine` | dev compose runs `2.14-alpine` |
+| nats | `nats:2.14-alpine` | same |
+
+`helm test` additionally runs a short-lived pod from `curlimages/curl:8.22.0`
+(exact tag) that calls the auth-service and admin-service `/health` endpoints;
+it is not part of a running install.
 
 Any of the four in-cluster datastores can be swapped for a managed/external
 instance instead (`datastores.<name>.enabled: false` plus the corresponding

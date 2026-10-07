@@ -105,6 +105,9 @@ func AuthorizeAndClassifyManualTargets(tx Queryer, tenantID string, targets []Re
 	if err != nil {
 		return nil, nil, err
 	}
+	if opts.PlatformExecutor {
+		scope = scope.ForPlatformSensor()
+	}
 	external, err := scope.AuthorizeManual(targets, opts)
 	if err != nil {
 		return nil, nil, err

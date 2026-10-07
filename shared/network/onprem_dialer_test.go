@@ -27,6 +27,8 @@ func TestIsNeverReachable(t *testing.T) {
 		{"169.254.169.254", true, "AWS/GCP/Azure metadata"},
 		{"169.254.1.1", true, "link-local"},
 		{"fe80::1", true, "v6 link-local"},
+		{"fd00:ec2::254", true, "AWS metadata over IPv6 (a ULA, so only an explicit entry catches it)"},
+		{"::ffff:169.254.169.254", true, "v4-mapped metadata address"},
 		{"224.0.0.1", true, "multicast"},
 		{"10.0.0.5", false, "RFC1918 — negotiable, not never"},
 		{"192.168.1.10", false, "RFC1918"},

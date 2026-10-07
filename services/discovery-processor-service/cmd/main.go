@@ -155,9 +155,17 @@ func main() {
 		_, _ = fmt.Fprint(w, healthyJSON())
 	})
 
+	// Timeouts on every server: without them a client that opens a connection
+	// and sends nothing (or one byte a minute) holds it, and a goroutine, for
+	// good. Same values every other service sets; none of this service's
+	// handlers streams.
 	healthServer := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: healthMux,
+		Addr:              ":" + cfg.Port,
+		Handler:           healthMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// API server (HTTPS with mTLS, port 8443)
@@ -177,8 +185,12 @@ func main() {
 	} else {
 		// Fallback to HTTP if mTLS disabled
 		apiServer = &http.Server{
-			Addr:    ":" + cfg.Port,
-			Handler: mux,
+			Addr:              ":" + cfg.Port,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 	}
 

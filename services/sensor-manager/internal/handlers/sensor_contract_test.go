@@ -231,8 +231,6 @@ func newEngine(repo *stubSensorRepo) *gin.Engine {
 	grp.GET("/sensors/pending", h.GetPendingSensors)
 	grp.POST("/sensors/pending", h.CreatePendingSensor)
 	grp.DELETE("/sensors/pending/:key", h.DeletePendingSensor)
-	grp.GET("/admin/settings", h.GetAdminSettings)
-	grp.PUT("/admin/settings", h.UpdateAdminSettings)
 	grp.PUT("/admin/capture-defaults", h.UpdateTenantCaptureDefaults)
 	return r
 }
@@ -541,42 +539,7 @@ func TestContract_DeletePendingSensor_404(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
-// --- admin settings + capture defaults -------------------------------------
-
-func TestContract_GetAdminSettings_200(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newEngine(&stubSensorRepo{})
-	w := do(eng, http.MethodGet, base+"/admin/settings", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "AdminSettings", w.Body.Bytes())
-}
-
-func TestContract_UpdateAdminSettings_200(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newEngine(&stubSensorRepo{})
-	body := strings.NewReader(
-		`{"key_expiration_minutes":120,"max_pending_sensors":25,"require_ip_validation":true}`)
-	w := do(eng, http.MethodPut, base+"/admin/settings", body)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "MessageResponse", w.Body.Bytes())
-}
-
-// An out-of-range key_expiration_minutes (handler enforces 5–1440) -> 400.
-func TestContract_UpdateAdminSettings_400_outOfRange(t *testing.T) {
-	sv := loadSpec(t)
-	eng := newEngine(&stubSensorRepo{})
-	body := strings.NewReader(
-		`{"key_expiration_minutes":1,"max_pending_sensors":25,"require_ip_validation":false}`)
-	w := do(eng, http.MethodPut, base+"/admin/settings", body)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
-	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
-}
+// --- capture defaults -------------------------------------
 
 func TestContract_UpdateCaptureDefaults_200(t *testing.T) {
 	sv := loadSpec(t)

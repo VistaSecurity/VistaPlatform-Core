@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // EnvExcludeCIDRs names ranges the platform must never probe on its own
@@ -41,6 +43,30 @@ func PlatformExcludedPrefixes() []netip.Prefix {
 			if ipnet, ok := a.(*net.IPNet); ok {
 				raw = append(raw, ipnet.IP.String())
 			}
+		}
+	}
+	return ParsePrefixes(raw)
+}
+
+// ClusterInternalPrefixes are this cluster's own pod and Service CIDRs, from the
+// one list the chart hands every service that dials customer private networks
+// (networkPolicy.clusterInternalCIDRs, as VISTA_PLATFORM_INTERNAL_CIDRS). An
+// unset or empty variable yields none.
+//
+// They are deliberately NOT part of [PlatformExcludedPrefixes]. That list is
+// the platform protecting itself and applies to every scan whoever executes it.
+// These ranges mean something only to a scan the in-cluster Platform Sensor
+// executes: from inside the cluster 10.43.0.0/16 IS the Services (RFC 1918 space
+// counts as the tenant's own by address class, so without this a tenant's scan
+// of it was authorized and its results read back), while to a tenant's own
+// on-premises sensor the same numbers are customer address space it has every
+// right to scan. Callers apply them only where the executor is the Platform
+// Sensor.
+func ClusterInternalPrefixes() []netip.Prefix {
+	var raw []string
+	if v := os.Getenv(network.PlatformInternalCIDRsEnv); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			raw = append(raw, strings.TrimSpace(part))
 		}
 	}
 	return ParsePrefixes(raw)

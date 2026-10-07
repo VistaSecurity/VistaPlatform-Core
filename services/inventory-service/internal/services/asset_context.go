@@ -46,7 +46,18 @@ type assetContextField struct {
 // They are still stored (the merge below refreshes them, and the asset's
 // metadata is shown and edited as a whole); they just never earn a row on
 // their own.
-var metadataProvenanceKeys = []string{"batch_id", "sensor_id"}
+//
+// `host_observation_attributes` and `host_observation_sources` are the same
+// kind of entry: they describe the SIGHTING (the capture interface, which mDNS
+// service answered on which port, whether a reflector relayed it, which
+// collector heard it), not the asset. The merge replaces each wholesale, so a
+// host that announces two services, or is heard by both mDNS and ARP, flips
+// them on every observation; one asset wrote ~100 `updated` rows an hour that
+// way on a quiet install (840 of 861 in six hours were this alone).
+var metadataProvenanceKeys = []string{
+	"batch_id", "sensor_id",
+	"host_observation_attributes", "host_observation_sources",
+}
 
 // applyAssetContext writes the declared context of an asset — the fields a
 // person or a system of record supplies — and records what changed.

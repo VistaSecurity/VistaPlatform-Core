@@ -806,8 +806,8 @@ export interface paths {
          */
         get: operations["getTenantUIConfig"];
         /**
-         * Update the tenant's UI config (platform-admin only)
-         * @description Sets the tenant's design defaults. Requires the platform_admin role (checked in-handler -> 403 otherwise). Partial merge over the existing config.
+         * Update the tenant's UI config (platform identity only)
+         * @description Sets the tenant's design defaults. Requires a PLATFORM identity (a token with no tenant) holding the platform.settings permission -> 403 otherwise; the role string in the token is not consulted. Partial merge over the existing config.
          */
         put: operations["updateTenantUIConfig"];
         post?: never;
@@ -2552,7 +2552,10 @@ export interface components {
         UpdateMeRequest: {
             first_name?: string;
             last_name?: string;
-            /** Format: email */
+            /**
+             * Format: email
+             * @description Accepted only when it equals the current sign-in address (case-insensitively). Any other value is refused with 403 `email_change_not_supported`: the sign-in email is the recovery channel, so it cannot be rewritten by a bare access token.
+             */
             email?: string;
             avatar_url?: string | null;
             timezone?: string;

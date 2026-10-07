@@ -26,7 +26,7 @@ that workspace, not `go.mod` replace hacks. Module prefix:
 `github.com/vistasecurity/vistaplatform/`. After changing any `go.mod`, run:
 
 ```bash
-GOTOOLCHAIN=go1.26.6 go work sync   # the exact version go.work declares
+GOTOOLCHAIN=go1.26.8 go work sync   # the exact version go.work declares
 ```
 
 Pin the **exact** toolchain, not `local` (which cannot fetch the pinned patch

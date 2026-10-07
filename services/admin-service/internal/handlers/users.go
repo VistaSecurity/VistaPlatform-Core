@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/shared/api"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 
@@ -374,12 +375,36 @@ func invitePlatformUserWithDeps(store platformUserStore, hasher passwordHasher, 
 	}
 }
 
-// UpdatePlatformUser updates profile fields, role, status, and force_password_change flag.
-func UpdatePlatformUser(db *sql.DB) gin.HandlerFunc {
-	return updatePlatformUserWithStore(newPlatformUserRepository(db))
+// userSessionRevoker ends every refresh-token session of a platform user.
+// *auth.PlatformRefreshTokenService implements it.
+//
+// The handlers below that take a user out of service, or change the credential
+// that session was minted under, call it AFTER the write succeeds. Without it a
+// refresh token minted before the change keeps working (a pre-change refresh
+// token survived set-password; deactivate and delete relied on the refresh path
+// happening to re-check the account).
+type userSessionRevoker interface {
+	RevokeAllUserTokens(platformUserID uuid.UUID) error
 }
 
-func updatePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
+// endUserSessions revokes every refresh session of userID and reports whether it
+// succeeded; a failure is logged with the reason so it is findable. Callers
+// decide whether a failure is fatal to the request.
+func endUserSessions(sessions userSessionRevoker, userID uuid.UUID, why string) bool {
+	if err := sessions.RevokeAllUserTokens(userID); err != nil {
+		fmt.Printf("[ADMIN] ERROR: failed to revoke sessions of platform user %s after %s: %v\n", userID, why, err)
+		return false
+	}
+	return true
+}
+
+// UpdatePlatformUser updates profile fields, role, status, and force_password_change flag.
+// Deactivating a user (is_active=false) also ends all of their refresh sessions.
+func UpdatePlatformUser(db *sql.DB, sessions *auth.PlatformRefreshTokenService) gin.HandlerFunc {
+	return updatePlatformUserWithStore(newPlatformUserRepository(db), sessions)
+}
+
+func updatePlatformUserWithStore(store platformUserStore, sessions userSessionRevoker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userIDStr := c.Param("id")
 		userID, err := uuid.Parse(userIDStr)
@@ -483,6 +508,13 @@ func updatePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 			return
 		}
 
+		// A deactivated user must not keep a working session: end every refresh
+		// token they hold. (Refresh is also refused for inactive accounts; this
+		// removes the tokens rather than relying on that re-check.)
+		if req.IsActive != nil && !*req.IsActive {
+			endUserSessions(sessions, userID, "deactivation")
+		}
+
 		recordPlatformAudit(c, PlatformAuditEntry{
 			EventType:     "platform_user.updated",
 			Action:        "update",
@@ -524,11 +556,11 @@ func updatePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 // AdminSetPassword lets a platform admin directly set a new password for any user.
 // Optionally marks force_password_change so the user must change it on next login.
 // Route: PUT /api/v1/admin-service/admin/users/:id/set-password
-func AdminSetPassword(db *sql.DB) gin.HandlerFunc {
-	return adminSetPasswordWithStore(newPlatformUserRepository(db), platformPasswordService)
+func AdminSetPassword(db *sql.DB, sessions *auth.PlatformRefreshTokenService) gin.HandlerFunc {
+	return adminSetPasswordWithStore(newPlatformUserRepository(db), platformPasswordService, sessions)
 }
 
-func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) gin.HandlerFunc {
+func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher, sessions userSessionRevoker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userIDStr := c.Param("id")
 		targetID, err := uuid.Parse(userIDStr)
@@ -570,6 +602,15 @@ func adminSetPasswordWithStore(store platformUserStore, hasher passwordHasher) g
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to set password"})
+			return
+		}
+
+		// The credential changed, so every session minted under the old one ends
+		// (as ChangePassword and ResetPassword do). An administrator setting a
+		// password is often the recovery step after a suspected compromise, so a
+		// failure to revoke is NOT swallowed: say so, and the call can be retried.
+		if !endUserSessions(sessions, targetID, "admin password set") {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Password was changed but the user's existing sessions could not be ended. Retry to end them."})
 			return
 		}
 
@@ -670,11 +711,11 @@ func adminSendPasswordResetWithDeps(store platformUserStore, email emailProvider
 }
 
 // DeletePlatformUser soft-deletes a platform user.
-func DeletePlatformUser(db *sql.DB) gin.HandlerFunc {
-	return deletePlatformUserWithStore(newPlatformUserRepository(db))
+func DeletePlatformUser(db *sql.DB, sessions *auth.PlatformRefreshTokenService) gin.HandlerFunc {
+	return deletePlatformUserWithStore(newPlatformUserRepository(db), sessions)
 }
 
-func deletePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
+func deletePlatformUserWithStore(store platformUserStore, sessions userSessionRevoker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userIDStr := c.Param("id")
 		userID, err := uuid.Parse(userIDStr)
@@ -705,6 +746,10 @@ func deletePlatformUserWithStore(store platformUserStore) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete platform user"})
 			return
 		}
+
+		// Remove the deleted user's refresh tokens rather than leaving them to
+		// expire behind a soft-delete flag.
+		endUserSessions(sessions, userID, "deletion")
 
 		recordPlatformAudit(c, PlatformAuditEntry{
 			EventType:     "platform_user.deleted",

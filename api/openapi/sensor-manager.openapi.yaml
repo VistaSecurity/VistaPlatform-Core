@@ -27,8 +27,6 @@ info:
       - `GET    /sensors/pending`                   — list pending registrations
       - `POST   /sensors/pending`                   — create a pending registration (RBAC-gated)
       - `DELETE /sensors/pending/{key}`             — delete a pending registration (RBAC-gated)
-      - `GET    /admin/settings`                    — read sensor-admin settings
-      - `PUT    /admin/settings`                    — update sensor-admin settings (RBAC-gated)
       - `PUT    /admin/capture-defaults`            — apply tenant-wide capture defaults (RBAC-gated)
 
     Out of scope (this slice): the sensor-agent-facing outbound surface
@@ -577,7 +575,10 @@ paths:
       description: |
         Returns the tenant's pending registration keys. Expired-but-still-pending
         rows have their `status` reflected as `expired` in the response. On any
-        service error the handler returns 200 with an empty list.
+        service error the handler returns 200 with an empty list. Gated by the
+        `sensors.create` permission: a registration key is all a sensor needs to
+        enrol into the tenant, so listing them needs the same permission as
+        minting one (403 otherwise).
       responses:
         '200':
           description: The tenant's pending registrations.
@@ -589,6 +590,8 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
       x-quirks:
       - 'Service errors return 200 with `{"pending_sensors": []}`, not 500.'
     post:
@@ -689,55 +692,6 @@ paths:
           $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
-
-  /admin/settings:
-    get:
-      operationId: getAdminSettings
-      tags:
-      - admin-settings
-      summary: Get sensor-admin settings
-      description: |
-        Returns the current sensor-registration admin settings — the
-        registration-key expiry, the maximum number of simultaneous pending
-        registrations, and the source-IP-validation toggle. Read by the Sensor
-        Configuration page.
-      x-quirks: 'in-memory: settings are held in a single package-level variable in sensor-manager, not persisted per tenant. A PUT mutates the process-wide value and a restart resets it to defaults. Documented as-is; per-tenant persistence is a later change.'
-      responses:
-        '200':
-          description: Current admin settings.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AdminSettings'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
-    put:
-      operationId: updateAdminSettings
-      tags:
-      - admin-settings
-      summary: Update sensor-admin settings
-      description: |
-        Updates the sensor-registration admin settings. Gated by the
-        `settings.update` permission. `key_expiration_minutes` must be 5–1440 and
-        `max_pending_sensors` must be 1–1000; an out-of-range or unparseable body
-        returns 400.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AdminSettings'
-      responses:
-        '200':
-          description: Settings updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-        '400':
-          $ref: '#/components/responses/LegacyBadRequest'
-        '401':
-          $ref: '#/components/responses/LegacyUnauthorized'
 
   /admin/capture-defaults:
     put:
@@ -2547,29 +2501,6 @@ components:
       properties:
         message:
           type: string
-    AdminSettings:
-      type: object
-      additionalProperties: false
-      description: |
-        Sensor-registration admin settings (handlers.AdminSettings). Used as both
-        the GET /admin/settings response body and the PUT /admin/settings request
-        body. All three fields are present in the response; in a PUT each must be
-        in range (key expiry 5–1440, max pending 1–1000) or the update is
-        rejected with 400.
-      required:
-      - key_expiration_minutes
-      - max_pending_sensors
-      - require_ip_validation
-      properties:
-        key_expiration_minutes:
-          type: integer
-          description: Minutes a registration key stays valid (5–1440).
-        max_pending_sensors:
-          type: integer
-          description: Maximum simultaneous pending registrations (1–1000).
-        require_ip_validation:
-          type: boolean
-          description: Whether registration enforces source-IP validation.
     UpdateCaptureDefaultsRequest:
       type: object
       additionalProperties: false

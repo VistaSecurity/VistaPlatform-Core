@@ -30,8 +30,18 @@ const __dirname = path.dirname(__filename);
 // k8s deployments are always "production-like" — no dev port-forwarding via
 // the chart, no relaxed thresholds. Local development still uses Docker
 // Compose + scripts/generate-traefik-config.mjs DEPLOY_ENV=development.
+//
+// The edge limits are per SOURCE ADDRESS and are rendered from
+// `.Values.edgeRateLimit` (these constants are only the fallbacks for a values
+// file that predates the block, e.g. `helm upgrade --reuse-values`). The auth
+// tier is deliberately far below the API tier: it fronts every auth-service
+// route and the platform-admin login, and it used to allow 200 req/s. It is NOT
+// as low as a per-login limit would be (the application enforces that: 5/min per
+// IP and per account), because the same tier also carries the SPA's session
+// calls (/auth/me, permissions, features), which a shared office address
+// multiplies.
 const RATE_LIMIT_API = { average: 1000, burst: 2000 };
-const RATE_LIMIT_AUTH = { average: 200, burst: 400 };
+const RATE_LIMIT_AUTH = { average: 50, burst: 100 };
 const CIRCUIT_BREAKER = {
   expression: 'ResponseCodeRatio(500, 600, 0, 600) > 0.30',
   checkPeriod: '10s',
@@ -145,23 +155,35 @@ function buildMiddlewares(services) {
       headers: {
         frameDeny: true,
         contentTypeNosniff: true,
-        browserXssFilter: true,
+        // The legacy XSS auditor is off, as in the SPA's Caddyfile and the Go
+        // services' SecurityHeaders: "1; mode=block" can itself introduce
+        // cross-site leaks in old browsers, and the CSP below is the real defence.
+        browserXssFilter: false,
         referrerPolicy: 'strict-origin-when-cross-origin',
+        // The SPA's own Caddy CSP is `connect-src 'self'` with object-src, base-uri
+        // and form-action pinned. This header REPLACES that one at the edge, so it
+        // must not be looser than what the SPA needs: it used to allow `connect-src
+        // https:` (any HTTPS host — a ready exfiltration channel for any injected
+        // script) and omit object-src/base-uri, plus Google Fonts hosts neither UI
+        // loads. Neither UI makes a cross-origin fetch (API traffic is same-origin
+        // through this gateway). img-src keeps `https:` because a tenant's branding
+        // logo may legitimately be an external HTTPS URL. form-action is left
+        // unset on purpose: the OAuth consent page (auth-service) posts a form
+        // whose 302 lands on the client's redirect_uri, which form-action 'self'
+        // would block in Chromium.
         contentSecurityPolicy:
           "default-src 'self'; script-src 'self'; " +
-          // admin-UI and web-UI import Poppins + Inconsolata from Google Fonts
-          // at HTML-render time (link rel=stylesheet to fonts.googleapis.com,
-          // which in turn loads woff2 files from fonts.gstatic.com).
-          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-          "font-src 'self' data: https://fonts.gstatic.com; " +
+          "style-src 'self' 'unsafe-inline'; " +
+          "font-src 'self' data:; " +
           "img-src 'self' data: https:; " +
-          "connect-src 'self' https:; frame-ancestors 'none';",
+          "connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none';",
         // Permissions-Policy parity with the Gin service middleware
         // (shared/middleware/security_headers.go): API responses already carry
         // it, but UI static responses (nginx behind Traefik) only get what
         // this middleware sets.
         customResponseHeaders: {
           'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+          'X-XSS-Protection': '0',
         },
         '__HSTS__': '__HSTS__',
       },
@@ -190,14 +212,14 @@ function buildMiddlewares(services) {
   docs.push({
     apiVersion: 'traefik.io/v1alpha1',
     kind: 'Middleware',
-    metadata: { name: 'rate-limit-api' },
+    metadata: { name: 'rate-limit-api', annotations: { __RATE_LIMIT_TIER__: 'api' } },
     spec: { rateLimit: RATE_LIMIT_API },
   });
 
   docs.push({
     apiVersion: 'traefik.io/v1alpha1',
     kind: 'Middleware',
-    metadata: { name: 'rate-limit-auth' },
+    metadata: { name: 'rate-limit-auth', annotations: { __RATE_LIMIT_TIER__: 'auth' } },
     spec: { rateLimit: RATE_LIMIT_AUTH },
   });
 
@@ -920,6 +942,9 @@ const HEADER = [
   // $adminAllowList — the operator's IP allow-list, or empty when not
   // configured. Only meaningful alongside the split, since without it the same
   // API is reachable on the tenant host anyway.
+  // Edge rate limits (values.yaml `edgeRateLimit`). `default dict` so a values
+  // file without the block renders the built-in fallbacks.
+  '{{- $edgeRateLimit := .Values.edgeRateLimit | default dict -}}',
   '{{- $adminAllowList := "" -}}',
   '{{- if and $adminPlaneSplit .Values.adminPlane.ipAllowList.enabled -}}',
   '{{- if not .Values.adminPlane.ipAllowList.sourceRange -}}',
@@ -953,7 +978,40 @@ async function writeMiddlewares(services, outPath) {
     lines.push('  labels:');
     lines.push('    {{- include "vistaplatform.labels" . | nindent 4 }}');
     lines.push('spec:');
-    if (isAllowlist) {
+    const rateLimitTier = doc.metadata.annotations && doc.metadata.annotations.__RATE_LIMIT_TIER__;
+    if (rateLimitTier) {
+      // average/burst and the source criterion come from .Values.edgeRateLimit.
+      // `dig` + literal fallbacks rather than a bare `.Values.edgeRateLimit.x.y`
+      // so an older values file (no such block) still renders: --reuse-values
+      // carries forward the OLD values and never adds a new chart default.
+      const fallback = rateLimitTier === 'auth' ? RATE_LIMIT_AUTH : RATE_LIMIT_API;
+      lines.push('  rateLimit:');
+      lines.push(`    average: {{ dig "${rateLimitTier}" "average" ${fallback.average} $edgeRateLimit | int }}`);
+      lines.push(`    burst: {{ dig "${rateLimitTier}" "burst" ${fallback.burst} $edgeRateLimit | int }}`);
+      // sourceCriterion: WHICH address a request is counted against. Without
+      // it Traefik uses the connecting address, which behind a load balancer or
+      // a SNAT hop is the proxy itself, so every client shares ONE bucket (a
+      // trivial denial of service: one noisy client throttles everyone). depth /
+      // excludedIPs tell Traefik how many trusted proxies sit in front of it, as
+      // for adminPlane.ipAllowList.ipStrategy. Emitted only when set: depth 0 is
+      // Traefik's own default, and an empty `ipStrategy:` would be an explicit
+      // null in the CRD.
+      lines.push('  {{- with $edgeRateLimit.ipStrategy }}');
+      lines.push('  {{- if or .depth .excludedIPs }}');
+      lines.push('    sourceCriterion:');
+      lines.push('      ipStrategy:');
+      lines.push('        {{- if .depth }}');
+      lines.push('        depth: {{ .depth | int }}');
+      lines.push('        {{- end }}');
+      lines.push('        {{- with .excludedIPs }}');
+      lines.push('        excludedIPs:');
+      lines.push('          {{- range . }}');
+      lines.push('          - {{ . | quote }}');
+      lines.push('          {{- end }}');
+      lines.push('        {{- end }}');
+      lines.push('  {{- end }}');
+      lines.push('  {{- end }}');
+    } else if (isAllowlist) {
       // Rendered straight from values so the operator's CIDRs and ipStrategy
       // land verbatim; nothing here is baked in at generate time.
       lines.push('  ipAllowList:');

@@ -20,6 +20,7 @@ import {
 } from './catalog-queries';
 import { FeedStatusCard } from './feed-status-card';
 import { CatalogGapsTab, EolProposalsTab } from './eol-proposals';
+import { safeHttpUrl } from '../../lib/url';
 
 const KINDS: { value: ProductKind | ''; label: string }[] = [
   { value: '', label: 'All kinds' },
@@ -142,8 +143,8 @@ function CatalogueView() {
             {rows.map((e) => (
               <tr key={e.id}>
                 <td style={{ fontWeight: 500, color: 'var(--op-t1)' }}>
-                  {e.source_url
-                    ? <a href={e.source_url} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>{e.product}</a>
+                  {safeHttpUrl(e.source_url)
+                    ? <a href={safeHttpUrl(e.source_url)!} target="_blank" rel="noreferrer" style={{ color: 'inherit' }}>{e.product}</a>
                     : e.product}
                 </td>
                 <td><Tag color={KIND_COLOR[e.product_kind] ?? 'var(--op-t2)'}>{e.product_kind}</Tag></td>

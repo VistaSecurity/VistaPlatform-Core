@@ -77,3 +77,24 @@ func TestSourceRefreshRecordsTheTenantForAudit(t *testing.T) {
 		t.Fatalf("tenantID in the audit context = %v, want %s", seen, tenant)
 	}
 }
+
+// With INTERNAL_AUTH_SECRET unset the route must refuse everything, including a
+// request signed with the empty key (a MAC anyone can compute).
+func TestSourceRefreshFailsClosedWithoutASecret(t *testing.T) {
+	t.Setenv("INTERNAL_AUTH_SECRET", "")
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	(&DeviceHandlers{}).RegisterSourceRefresh(router, nil)
+
+	tenant := uuid.New()
+	body, _ := json.Marshal(services.SourceRefreshRequest{TenantID: tenant})
+	req := httptest.NewRequest(http.MethodPost, "/internal/enrichment/refresh", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Tenant-ID", tenant.String())
+	serviceauth.NewSigner("").SignRequest(req)
+	result := httptest.NewRecorder()
+	router.ServeHTTP(result, req)
+	if result.Code != http.StatusUnauthorized {
+		t.Fatalf("request signed with the empty key was admitted: %d", result.Code)
+	}
+}

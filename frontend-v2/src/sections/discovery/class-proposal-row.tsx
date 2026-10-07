@@ -18,6 +18,7 @@ import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon, probabilityConfidencePercent, MiniBar } from '../../components/ui';
 import { relTime } from './kit';
+import { safeHttpUrl } from '../../lib/url';
 import type {
   ClassModelReason, ClassOption, ClassificationRuleRef, ClassProposal,
 } from './class-proposal-queries';
@@ -236,9 +237,9 @@ export function ClassProposalRow({ proposal, busy, onAccept, onReject }: {
               <span style={{ color: 'var(--app-t2)' }}>{ruleKindLabel(r.kind)}</span>
               <span className="mono" style={{ fontSize: 11, color: 'var(--app-t2)' }}>{r.pattern}</span>
               {r.class && <span>&rarr; {r.class}</span>}
-              {r.source_url && (
+              {safeHttpUrl(r.source_url) && (
                 <a
-                  href={r.source_url}
+                  href={safeHttpUrl(r.source_url)!}
                   target="_blank"
                   rel="noreferrer noopener"
                   style={{ color: 'var(--accent)', textDecoration: 'none', fontSize: 11 }}

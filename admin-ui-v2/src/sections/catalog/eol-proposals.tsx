@@ -16,6 +16,7 @@ import { useState } from 'react';
 import toast from 'react-hot-toast';
 import { Check, Loader2, Search, Sparkles, X } from 'lucide-react';
 import { Tag, num } from '../../components/ui/primitives';
+import { safeHttpUrl } from '../../lib/url';
 import {
   useEolProposals, useCatalogMisses, useEnrichAvailability, useReviewProposal,
   useRunEnrichment, useEolLookup, unavailableReason, shortDate, errMsg, PAGE_SIZE,
@@ -84,9 +85,13 @@ function ProposalRow({ p, busy, onReview }: {
       <td>
         {/* The citation, as a link. It is the whole review: the reviewer opens
             the vendor's own page and checks the date before accepting. */}
-        <a href={p.source_url} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>
-          {p.source_url}
-        </a>
+        {safeHttpUrl(p.source_url)
+          ? (
+            <a href={safeHttpUrl(p.source_url)!} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>
+              {p.source_url}
+            </a>
+          )
+          : <span className="mono" style={{ fontSize: 11 }} title="Not an http(s) link, so it is shown but not clickable.">{p.source_url}</span>}
         <div className="t-muted mono" style={{ fontSize: 10.5 }}>{p.model_id}</div>
       </td>
       <td><Tag color={STATUS_COLOR[p.status] ?? 'var(--op-t2)'}>{p.status}</Tag></td>
@@ -285,7 +290,9 @@ function LookupBox() {
                       source_kind is indistinguishable from one somebody typed. */}
                   <Tag color="var(--op-t2)">{f.source_kind}</Tag>
                   {' '}
-                  <a href={f.source_url} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>source</a>
+                  {safeHttpUrl(f.source_url)
+                    ? <a href={safeHttpUrl(f.source_url)!} target="_blank" rel="noreferrer" style={{ fontSize: 11 }}>source</a>
+                    : <span style={{ fontSize: 11 }} title="Not an http(s) link, so it is not clickable.">source</span>}
                   <span className="t-muted mono" style={{ fontSize: 10.5, marginLeft: 6 }}>{f.source_ref}</span>
                 </li>
               ))}

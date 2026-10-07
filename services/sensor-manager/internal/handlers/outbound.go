@@ -7,6 +7,7 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/confighttp"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 )
 
 // Heartbeat handles sensor heartbeat and returns commands (outbound-only).
@@ -273,6 +275,15 @@ func (h *Handler) SubmitAirGappedExport(c *gin.Context) {
 	})
 }
 
+const (
+	// maxDiscoveryBatchBytes bounds one discovery submission, the same 32 MiB
+	// the agent host-inventory intake allows.
+	maxDiscoveryBatchBytes = 32 << 20
+	// maxDiscoveriesPerBatch bounds how many discoveries one submission may
+	// carry — a hundred times the sensor's default batch size.
+	maxDiscoveriesPerBatch = 10000
+)
+
 // SubmitDiscoveries handles submission of discovery batches from sensors
 func (h *Handler) SubmitDiscoveries(c *gin.Context) {
 	// The URL path sensor_id is the authoritative identifier.
@@ -286,9 +297,30 @@ func (h *Handler) SubmitDiscoveries(c *gin.Context) {
 		return
 	}
 
+	// Bound the batch BEFORE it is decoded: a declared length over the cap is
+	// refused unread, and MaxBytesReader stops a chunked or lying stream at the
+	// cap. A sensor sends BATCH_SIZE (default 100) discoveries per call; without
+	// a ceiling one call could carry millions, all decoded into memory and
+	// written inside one transaction.
+	if c.Request.ContentLength > maxDiscoveryBatchBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Discovery batch is larger than this platform accepts"})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxDiscoveryBatchBytes)
+
 	var batch models.DiscoveryBatch
 	if err := c.ShouldBindJSON(&batch); err != nil {
+		if sharedapi.RequestBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Discovery batch is larger than this platform accepts"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if len(batch.Discoveries) > maxDiscoveriesPerBatch {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error": fmt.Sprintf("A discovery batch may carry at most %d discoveries; send smaller batches", maxDiscoveriesPerBatch),
+		})
 		return
 	}
 

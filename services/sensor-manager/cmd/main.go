@@ -302,9 +302,7 @@ func main() {
 	// which pins SET and queries to the same pooled connection.
 	{
 		// Registration management. Reads are JWT-scoped to tenant.
-		sensorManager.POST("/sensors/pending", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsCreate), handler.CreatePendingSensor)
-		sensorManager.GET("/sensors/pending", handler.GetPendingSensors)
-		sensorManager.DELETE("/sensors/pending/:key", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsDelete), handler.DeletePendingSensor)
+		registerPendingSensorRoutes(sensorManager, db, handler.CreatePendingSensor, handler.GetPendingSensors, handler.DeletePendingSensor)
 
 		// Fingerprint of the CA behind this platform's edge certificate, shown
 		// beside a new registration key so the operator has a channel other
@@ -313,9 +311,12 @@ func main() {
 		// for every tenant, and carries nothing tenant-specific.
 		sensorManager.GET("/platform-ca", handler.GetPlatformCA)
 
-		// Admin settings (tenant-wide sensor admin defaults).
-		sensorManager.GET("/admin/settings", handler.GetAdminSettings)
-		sensorManager.PUT("/admin/settings", sharedrbac.RequireTenantPermission(db, rbac.PermissionSettingsUpdate), handler.UpdateAdminSettings)
+		// REMOVED: GET/PUT /admin/settings. The PUT overwrote a process-global
+		// struct (pending-key cap, key lifetime, address validation) that every
+		// tenant's registration reads, so any tenant holding settings.update
+		// reconfigured every other tenant; no client called either route. The
+		// limits are now fixed (handlers.currentRegistrationLimits). Do not
+		// re-add a write without tenant-scoped storage.
 
 		// REMOVED: POST /discovery/jobs and POST /discovery/jobs/:id/results.
 		//

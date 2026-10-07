@@ -129,15 +129,24 @@ func IsNeverReachable(ip net.IP) bool {
 		return true
 	}
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		// 169.254.0.0/16 and fe80::/10 — the cloud metadata endpoints
-		// (169.254.169.254, fd00:ec2::254) live in here.
+		// 169.254.0.0/16 and fe80::/10 — the IPv4 cloud metadata endpoint
+		// (169.254.169.254) lives in here. The IPv6 one does not; see below.
 		return true
 	}
 	if ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
 		return true
 	}
+	// The AWS metadata service's IPv6 endpoint is a unique-local address, not a
+	// link-local one, so the ranges above do not contain it — and ULA is the
+	// space a private-endpoint opt-in opens.
+	if ip.Equal(awsMetadataIPv6) {
+		return true
+	}
 	return false
 }
+
+// awsMetadataIPv6 is the EC2 instance metadata service's IPv6 endpoint.
+var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
 
 // isRFC1918OrULA reports whether an address is in a private unicast range:
 // 10/8, 172.16/12, 192.168/16, 100.64/10 (carrier NAT, which is private space

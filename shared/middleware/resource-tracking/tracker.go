@@ -197,32 +197,17 @@ func (t *Tracker) extractTenantID(c *gin.Context) uuid.UUID {
 		}
 	}
 
-	// Try to get from JWT claims
-	if claims, exists := c.Get("jwt_claims"); exists {
-		if claimsMap, ok := claims.(map[string]interface{}); ok {
-			if tenantIDStr, exists := claimsMap["tenant_id"]; exists {
-				if idStr, ok := tenantIDStr.(string); ok {
-					if id, err := uuid.Parse(idStr); err == nil {
-						return id
-					}
-				}
-			}
-		}
-	}
-
-	// Try to get from header
-	if tenantIDHeader := c.GetHeader("X-Tenant-ID"); tenantIDHeader != "" {
-		if id, err := uuid.Parse(tenantIDHeader); err == nil {
-			return id
-		}
-	}
-
-	// Try to get from query parameter
-	if tenantIDQuery := c.Query("tenant_id"); tenantIDQuery != "" {
-		if id, err := uuid.Parse(tenantIDQuery); err == nil {
-			return id
-		}
-	}
+	// Deliberately NOTHING else. This used to fall back to the X-Tenant-ID
+	// header and then the ?tenant_id= query parameter. Both are chosen by the
+	// caller: the middleware runs ahead of auth and records AFTER the handler, so
+	// an unauthenticated request (or a failed login, or any path auth skips) that
+	// carried a victim's tenant id was metered against the victim -- inflating
+	// their API-call and network usage, which feeds per-tenant usage monitoring,
+	// billing and entitlement enforcement. The only tenant this service may
+	// attribute a request to is one the auth middleware established: from the
+	// verified JWT, or from the X-Tenant-ID of an HMAC-verified internal call
+	// (which the auth middleware itself reads and sets above). The "jwt_claims"
+	// context key it also consulted was never set by anything.
 
 	// No tenant context found. Return uuid.Nil so the caller skips recording.
 	// NEVER fall back to a hardcoded tenant: it silently misattributes every

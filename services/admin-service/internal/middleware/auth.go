@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
@@ -45,4 +47,29 @@ func TenantAuthMiddleware(jwtSecret string) gin.HandlerFunc {
 // Place this middleware immediately after AuthMiddleware in the chain.
 func StringifyUserID() gin.HandlerFunc {
 	return sharedmw.StringifyContextIDs()
+}
+
+// RequirePlatformIdentity admits a PLATFORM session and nothing else: a token
+// carrying a tenant id (userType=tenant) is refused with 403 "Platform user
+// required", whatever its role claim says.
+//
+// AuthMiddleware proves the token is a valid access JWT; it does not say whose.
+// Both token families are signed by the same key set, and a Bearer header is
+// not restricted by StrictCookiePair (that only narrows the cookie fallback), so
+// a tenant user's token authenticates here. Every per-route gate layered on
+// protected asks "does this PLATFORM user hold permission X" and refuses a
+// tenant token itself -- but the handful of routes registered on the parent
+// group had nothing, and were safe only because each handler happens to look
+// the caller up in platform_users by id. This puts the identity decision in one
+// place, in front of everything, so a handler added to the group tomorrow does
+// not inherit "any valid JWT".
+func RequirePlatformIdentity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if sharedmw.GetUserType(c) != sharedmw.UserTypePlatform {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Platform user required"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }

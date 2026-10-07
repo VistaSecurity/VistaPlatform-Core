@@ -237,9 +237,9 @@ func platformUserEngine(store platformUserStore, hasher passwordHasher, currentU
 	grp.GET("", listPlatformUsersWithStore(store))
 	grp.POST("", createPlatformUserWithStore(store, hasher))
 	grp.GET("/:id", getPlatformUserWithStore(store))
-	grp.PUT("/:id", updatePlatformUserWithStore(store))
-	grp.DELETE("/:id", deletePlatformUserWithStore(store))
-	grp.PUT("/:id/set-password", adminSetPasswordWithStore(store, hasher))
+	grp.PUT("/:id", updatePlatformUserWithStore(store, &recordingSessionRevoker{}))
+	grp.DELETE("/:id", deletePlatformUserWithStore(store, &recordingSessionRevoker{}))
+	grp.PUT("/:id/set-password", adminSetPasswordWithStore(store, hasher, &recordingSessionRevoker{}))
 
 	// /auth/me sits outside the /admin/users group and reads userID from context.
 	auth := r.Group(apiBase)

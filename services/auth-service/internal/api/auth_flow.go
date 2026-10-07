@@ -28,6 +28,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
+	"github.com/vistasecurity/vistaplatform/auth-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
@@ -107,9 +108,15 @@ func AuthMethods(bypassDB *sql.DB, ssoMethods SSOMethodEnumerator) gin.HandlerFu
 		methods := []map[string]interface{}{}
 		// tenantID of the resolved user, surfaced so the shared login page can
 		// build the SSO authorize URL (/auth/sso/<provider_name>/authorize?
-		// tenant_id=...) without a second round-trip. Empty when the user is
-		// unknown — tenant ids are not secret (the authorize endpoint already
-		// takes tenant_id as a public query param).
+		// tenant_id=...) without a second round-trip.
+		//
+		// It is echoed ONLY when a tenant SSO method is on offer, because that is
+		// the one thing the page uses it for. Echoing it for every known email made
+		// this unauthenticated endpoint an account-existence oracle — a populated
+		// tenant_id for a registered address, "" for anything else — that also
+		// handed back the tenant UUID. A Core build offers no SSO, so it never
+		// echoes one. The residual signal (an SSO-configured tenant's users get an
+		// SSO button) is inherent to email-first SSO discovery.
 		var tenantIDStr string
 
 		// Check if user exists
@@ -124,12 +131,13 @@ func AuthMethods(bypassDB *sql.DB, ssoMethods SSOMethodEnumerator) gin.HandlerFu
 		methods = append(methods, passwordMethod())
 
 		if err == nil {
-			tenantIDStr = tenantID.String()
-
 			// Tenant-configured SSO providers. Always empty in Core, so a Core
 			// build answers password-only and never reads sso_providers here.
 			tenantSSO := ssoMethods.TenantMethods(c.Request.Context(), tenantID)
 			methods = append(methods, tenantSSO...)
+			if offersTenantSSO(tenantSSO) {
+				tenantIDStr = tenantID.String()
+			}
 
 			// Platform ("social signup") SSO is only a fallback for tenants that
 			// configured no SSO of their own. The enumerator additionally applies
@@ -148,8 +156,19 @@ func AuthMethods(bypassDB *sql.DB, ssoMethods SSOMethodEnumerator) gin.HandlerFu
 	}
 }
 
+// offersTenantSSO reports whether any of the methods is a tenant SSO entry —
+// the only kind whose login-page flow needs the tenant id.
+func offersTenantSSO(methods []map[string]interface{}) bool {
+	for _, m := range methods {
+		if t, _ := m["type"].(string); t == "sso" {
+			return true
+		}
+	}
+	return false
+}
+
 // AuthAuthenticate handles POST /auth/authenticate - Authenticate with selected method
-func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisClient *redis.Client, jwtService *auth.JWTService, ssoMethods SSOMethodEnumerator) gin.HandlerFunc {
+func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisClient *redis.Client, jwtService *auth.JWTService, ssoMethods SSOMethodEnumerator, rateLimiter *middleware.RateLimiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			SessionID   string                 `json:"session_id" binding:"required"`
@@ -195,6 +214,30 @@ func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisCli
 				return
 			}
 
+			// Per-account rate limit, the same one POST /auth/login applies. This
+			// route is a second way to submit a password for an email, and it
+			// used to skip the limiter: the IP-keyed middleware limit was all that
+			// stood between a distributed guesser and one account, which is the
+			// exact gap AllowByEmail exists to close. Fails closed on a limiter
+			// outage, as /auth/login does.
+			if rateLimiter != nil {
+				allowed, retryAfter, rlErr := rateLimiter.AllowByEmail(c.Request.Context(), email)
+				if rlErr != nil {
+					c.JSON(http.StatusServiceUnavailable, gin.H{
+						"error": "Authentication is temporarily unavailable. Please try again shortly.",
+					})
+					return
+				}
+				if !allowed {
+					c.Header("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
+					c.JSON(http.StatusTooManyRequests, gin.H{
+						"error":       "Too many sign-in attempts for this account. Try again later.",
+						"retry_after": retryAfter.Seconds(),
+					})
+					return
+				}
+			}
+
 			// Use existing login logic
 			authService := auth.NewAuthService(db, bypassDB, redisClient, jwtService)
 			loginReq := &models.LoginRequest{
@@ -206,6 +249,9 @@ func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisCli
 			authResponse, err := authService.Login(loginReq, clientIP, userAgent)
 
 			if err != nil {
+				if respondTenantBlocked(c, err) {
+					return
+				}
 				switch err {
 				case auth.ErrInvalidCredentials:
 					c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
@@ -213,6 +259,10 @@ func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisCli
 					c.JSON(http.StatusForbidden, gin.H{"error": "User account is inactive"})
 				case auth.ErrEmailNotVerified:
 					c.JSON(http.StatusForbidden, gin.H{"error": "Email not verified"})
+				case auth.ErrAccountLocked:
+					// Was unhandled and fell through to the 500 below, so a locked
+					// account was the one address that answered 500 here.
+					c.JSON(http.StatusTooManyRequests, gin.H{"error": "Account temporarily locked. Try again later."})
 				default:
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "Authentication failed"})
 				}

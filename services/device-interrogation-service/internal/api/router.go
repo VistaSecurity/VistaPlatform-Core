@@ -577,6 +577,10 @@ func getAgentJobsHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerF
 	}
 }
 
+// maxAgentResultBytes bounds one agent job-result submission: the same 32 MiB
+// the agent host-inventory intake allows.
+const maxAgentResultBytes = 32 << 20
+
 func submitAgentResultsHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerFunc {
 	agentService := services.NewAgentService(db, bypassDB, redis)
 	return func(c *gin.Context) {
@@ -587,8 +591,21 @@ func submitAgentResultsHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Ha
 			return
 		}
 
+		// Bound the report before it is decoded, as the host-inventory intake
+		// does: a declared length over the cap is refused unread, and
+		// MaxBytesReader stops a chunked or lying stream at the cap.
+		if c.Request.ContentLength > maxAgentResultBytes {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Job result is larger than this platform accepts"})
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxAgentResultBytes)
+
 		var result models.JobResult
 		if err := c.ShouldBindJSON(&result); err != nil {
+			if sharedapi.RequestBodyTooLarge(err) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "Job result is larger than this platform accepts"})
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 			return
 		}

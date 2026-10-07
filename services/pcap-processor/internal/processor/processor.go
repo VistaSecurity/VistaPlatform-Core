@@ -239,14 +239,27 @@ func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 		log.Printf("[PCAP] Warning: failed to update job %s status to processing: %v", job.JobID, err)
 	}
 
+	// Confine the path the message names to this tenant's upload directory
+	// BEFORE anything is opened or deleted. A refused path is neither opened
+	// nor removed: the file it names is not ours to delete.
+	filePath, pathErr := resolveUploadPath(p.cfg.TempDir, job.TenantID, job.FilePath)
+	if pathErr != nil {
+		log.Printf("[PCAP] Refusing job %s for tenant %s: %v", job.JobID, job.TenantID, pathErr)
+		if updateErr := p.updateJobFailed(ctx, job.TenantID, job.JobID, "capture file is not available"); updateErr != nil {
+			log.Printf("[PCAP] Warning: failed to update job %s status to failed: %v", job.JobID, updateErr)
+		}
+		p.logJobAudit(ctx, &job, nil, started, "path_rejected")
+		return events.Permanent(fmt.Errorf("pcap job %s: %w", job.JobID, pathErr))
+	}
+
 	// Process the pcap file
-	result, err := p.processPcapFile(ctx, job.FilePath, job.TenantID.String())
+	result, err := p.processPcapFile(ctx, filePath, job.TenantID.String())
 	if err != nil {
 		errMsg := err.Error()
 		if updateErr := p.updateJobFailed(ctx, job.TenantID, job.JobID, errMsg); updateErr != nil {
 			log.Printf("[PCAP] Warning: failed to update job %s status to failed: %v", job.JobID, updateErr)
 		}
-		p.cleanupFile(job.FilePath)
+		p.cleanupFile(filePath)
 		p.logJobAudit(ctx, &job, nil, started, "process_failed")
 
 		// The temp file has just been deleted, and the job row is already
@@ -280,7 +293,7 @@ func (p *Processor) HandlePcapJob(ctx context.Context, msg *nats.Msg) error {
 	}
 
 	// Clean up the temp file
-	p.cleanupFile(job.FilePath)
+	p.cleanupFile(filePath)
 
 	log.Printf("[PCAP] Job %s completed: %d discoveries, %d packets processed, protocols: %v",
 		job.JobID, result.DiscoveryCount, result.PacketsProcessed, result.ProtocolsFound)

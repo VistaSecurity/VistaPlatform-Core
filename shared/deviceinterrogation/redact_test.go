@@ -365,3 +365,43 @@ func TestDatabaseFindingRawConfigIsRedacted(t *testing.T) {
 		}
 	}
 }
+
+// TestDatabaseConnEntryPointsRedactRawConfig closes the sibling gap: the two
+// exported ...Conn entry points call the per-engine interrogations directly,
+// below the redaction in InterrogateDatabase, so a tenant-reachable caller that
+// used them (the experimental database-interrogation action) persisted the
+// engine's settings bag unredacted. Driven through the exported functions
+// themselves, via the same per-engine seams, not through redact.Map.
+func TestDatabaseConnEntryPointsRedactRawConfig(t *testing.T) {
+	bag := func() *DatabaseEncryptionFinding {
+		return &DatabaseEncryptionFinding{
+			RawConfig: map[string]interface{}{
+				"ssl_cipher":          "TLS_AES_256_GCM_SHA384", // posture: must survive
+				"master_ssl_password": "hunter2",                // secret: must not
+				"replication_secret":  "s3cr3t",
+			},
+		}
+	}
+	origPG, origMy := dbInterrogatePostgres, dbInterrogateMy
+	t.Cleanup(func() { dbInterrogatePostgres, dbInterrogateMy = origPG, origMy })
+	dbInterrogatePostgres = func(context.Context, string) (*DatabaseEncryptionFinding, error) { return bag(), nil }
+	dbInterrogateMy = func(context.Context, string) (*DatabaseEncryptionFinding, error) { return bag(), nil }
+
+	for name, call := range map[string]func(context.Context, string) (*DatabaseEncryptionFinding, error){
+		"InterrogatePostgreSQLConn": InterrogatePostgreSQLConn,
+		"InterrogateMySQLConn":      InterrogateMySQLConn,
+	} {
+		finding, err := call(context.Background(), "dsn")
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got, _ := finding.RawConfig["ssl_cipher"].(string); got != "TLS_AES_256_GCM_SHA384" {
+			t.Errorf("%s: ssl_cipher = %q; posture must survive redaction", name, got)
+		}
+		for _, drop := range []string{"master_ssl_password", "replication_secret"} {
+			if got, _ := finding.RawConfig[drop].(string); got != redact.Marker {
+				t.Errorf("%s: %s = %q, want it redacted", name, drop, got)
+			}
+		}
+	}
+}

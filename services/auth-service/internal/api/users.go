@@ -85,6 +85,17 @@ type ListUsersResponse struct {
 // passwordService is a shared password service instance
 var passwordService = passwordsvc.NewPasswordService()
 
+// userSearchClause is the WHERE fragment and bound pattern for the user-list
+// search box: a case-insensitive "contains" over e-mail and name, matched
+// literally. `%` and `_` in the term are escaped — an e-mail local-part such as
+// first_last@example.com is exactly what an operator types, and unescaped the
+// `_` matched any character and a lone `%` matched every user.
+func userSearchClause(argIndex int, search string) (clause, pattern string) {
+	esc := shareddatabase.LikeEscapeClause
+	clause = fmt.Sprintf("(u.email ILIKE $%[1]d%[2]s OR u.first_name ILIKE $%[1]d%[2]s OR u.last_name ILIKE $%[1]d%[2]s)", argIndex, esc)
+	return clause, shareddatabase.ContainsPattern(search)
+}
+
 // ListUsers handles GET /users - List users in current tenant
 func ListUsers(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -143,8 +154,8 @@ func ListUsers(db *sql.DB) gin.HandlerFunc {
 			argIndex++
 		}
 		if req.Search != "" {
-			baseWhere += fmt.Sprintf(" AND (u.email ILIKE $%d OR u.first_name ILIKE $%d OR u.last_name ILIKE $%d)", argIndex, argIndex, argIndex)
-			searchPattern := "%" + req.Search + "%"
+			clause, searchPattern := userSearchClause(argIndex, req.Search)
+			baseWhere += " AND " + clause
 			args = append(args, searchPattern)
 			argIndex++
 		}

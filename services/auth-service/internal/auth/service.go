@@ -20,6 +20,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
@@ -655,6 +656,11 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 			// Check if this is a platform user
 			platformUser, passwordHash, platformRoleName, forcePasswordChange, platformErr := a.getPlatformUserByEmail(req.Email)
 			if platformErr != nil {
+				// An unknown address must cost what a known one costs: without
+				// this, "no such user" answers in a millisecond while a real
+				// account spends an Argon2id verification, so response time
+				// alone enumerates accounts.
+				a.burnPasswordHash(req.Password)
 				return nil, ErrInvalidCredentials
 			}
 
@@ -673,8 +679,11 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 				return nil, ErrAccountLocked
 			}
 
-			// Verify password for platform user
-			valid, err := a.password.VerifyPassword(req.Password, passwordHash)
+			// Verify password for platform user. A platform account with no
+			// password (SSO-only) is an invalid-credentials answer like any
+			// other wrong password — not an internal error, which would tell the
+			// caller the account exists.
+			valid, err := a.verifyLoginPassword(req.Password, passwordHash)
 			if err != nil {
 				return nil, err
 			}
@@ -743,11 +752,6 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 		return nil, err
 	}
 
-	// Check if user is active
-	if !user.IsActive {
-		return nil, ErrUserInactive
-	}
-
 	// Check if account is locked due to too many failed attempts
 	locked, err := a.checkAccountLocked(user.ID)
 	if err != nil {
@@ -756,14 +760,22 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 		return nil, ErrAccountLocked
 	}
 
-	// Verify password
-	valid, err := a.password.VerifyPassword(req.Password, user.PasswordHash)
+	// Verify password. An account with no password (SSO-only) answers as a
+	// wrong password rather than an internal error — see verifyLoginPassword.
+	valid, err := a.verifyLoginPassword(req.Password, user.PasswordHash)
 	if err != nil {
 		return nil, err
 	}
 	if !valid {
 		a.recordFailedLogin(user.ID)
 		return nil, ErrInvalidCredentials
+	}
+
+	// Only a caller who proved the password may learn the account is deactivated.
+	// This check used to run BEFORE the password, so anyone could ask "is this
+	// address a deactivated account?" with no credential at all.
+	if !user.IsActive {
+		return nil, ErrUserInactive
 	}
 
 	// Reset failed login attempts on successful authentication
@@ -817,6 +829,45 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 		ExpiresIn:        int64(a.jwt.GetAccessExpiry().Seconds()),
 		RefreshExpiresIn: int64(sessionTTL.Seconds()),
 	}, nil
+}
+
+// dummyPasswordHash is an Argon2id hash (same parameters as real ones) of a
+// throwaway value. Verifying against it costs what verifying a real password
+// costs, which is its only purpose.
+var (
+	dummyPasswordHashOnce sync.Once
+	dummyPasswordHash     string
+)
+
+// burnPasswordHash spends one password verification's worth of CPU against a
+// dummy hash so the "no such account" and "wrong password" paths of Login are
+// not distinguishable by response time. The result is discarded.
+func (a *AuthService) burnPasswordHash(password string) {
+	dummyPasswordHashOnce.Do(func() {
+		h, err := a.password.HashPassword("login-timing-equalizer-not-a-credential")
+		if err != nil {
+			logrus.WithError(err).Warn("could not build the login timing-equalizer hash")
+			return
+		}
+		dummyPasswordHash = h
+	})
+	if dummyPasswordHash != "" {
+		_, _ = a.password.VerifyPassword(password, dummyPasswordHash)
+	}
+}
+
+// verifyLoginPassword verifies password against a stored hash, treating an
+// account that has no password (NULL hash — SSO-only users) as a plain
+// mismatch. VerifyPassword returns ErrInvalidPassword for an empty hash, which
+// Login used to propagate: the handler turned it into a 500, so SSO-only
+// addresses were distinguishable from unknown ones by status code, and returned
+// instantly where a real verification takes ~100 ms.
+func (a *AuthService) verifyLoginPassword(password, storedHash string) (bool, error) {
+	if storedHash == "" {
+		a.burnPasswordHash(password)
+		return false, nil
+	}
+	return a.password.VerifyPassword(password, storedHash)
 }
 
 // RefreshToken generates new tokens using a refresh token with rotation and reuse detection

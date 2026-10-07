@@ -120,8 +120,13 @@ func isLoginEndpoint(endpoint string) bool {
 		"/auth/login",
 		"/auth/authenticate",
 		"/auth/register",
-		"/auth/password/reset",
-		"/auth/password/forgot",
+		// The registered routes are /auth/forgot-password and /auth/reset-password.
+		// This list used to name "/auth/password/reset" and "/auth/password/forgot",
+		// which no route has: neither endpoint was ever classified as a login
+		// endpoint, so both got the default limit and — worse — skipped the
+		// fail-closed branch in RateLimiting when Redis errors.
+		"/auth/forgot-password",
+		"/auth/reset-password",
 	}
 
 	for _, loginPath := range loginEndpoints {

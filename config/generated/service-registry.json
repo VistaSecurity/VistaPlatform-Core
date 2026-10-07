@@ -82,12 +82,12 @@
   },
   "docker_images": {
     "go_builder": "golang:1.26-alpine",
-    "runtime": "alpine:3.24.1",
+    "runtime": "alpine:3.24.2",
     "node": "node:24-alpine",
     "dhi": {
       "go_builder": "dhi.io/golang:1.26-alpine3.24-dev",
       "runtime": "dhi.io/alpine-base:3.24-dev",
-      "node": "dhi.io/node:24-alpine3.22-dev"
+      "node": "dhi.io/node:24-alpine3.24-dev"
     }
   },
   "ui": {
@@ -147,7 +147,10 @@
     "admin_host_public": [
       "/admin-service/auth/",
       "/admin-service/admin/sso/"
-    ]
+    ],
+    "unsplittable": {
+      "/auth-service/tenant/ui-config": "PUT needs a platform identity holding platform.settings (router gates plus the handler's own identity check; tenant tokens get 403 whatever their role string says) but shares its path with the tenant-facing GET, so the path cannot be denied on the tenant host. Nothing calls the PUT, and a real platform token carries no tenant, so it answers 404; it is superseded by PUT /auth-service/admin/tenants/:tenantId/ui-config, which IS on the admin plane. Delete the route rather than split it."
+    }
   },
   "services": [
     {

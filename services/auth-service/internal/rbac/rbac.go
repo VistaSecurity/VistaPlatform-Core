@@ -90,6 +90,24 @@ func (e *ErrRoleInUse) Error() string {
 // tenant_roles.name varchar(50).
 var roleNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{1,49}$`)
 
+// reservedRoleNames are slugs a tenant-authored role may never take. The role
+// NAME is copied verbatim into the JWT `role` claim at sign-in, and a few
+// handlers (ui_config.go) still authorize on that string alone, so a tenant
+// admin who could mint a role called platform_admin would be handed a token
+// whose claim says so. The names are the platform's own role vocabulary
+// (including ones that were never seeded, which is exactly why a legacy check
+// may still name them) plus the generic "this is the operator" words.
+var reservedRoleNames = map[string]bool{
+	"platform_admin": true,
+	"super_admin":    true,
+	"support_admin":  true,
+	"support_agent":  true,
+	"platform":       true,
+	"system":         true,
+	"root":           true,
+	"superuser":      true,
+}
+
 // roleMetaRow is the identity of a role, used by every role-scoped operation to
 // establish tenant ownership and system-role status in one read.
 type roleMetaRow struct {
@@ -473,7 +491,7 @@ func (s *RBACService) CreateTenantRole(tenantID, actorID uuid.UUID, req CreateRo
 		name = slugifyRoleName(req.DisplayName)
 	}
 	name = strings.ToLower(name)
-	if !roleNamePattern.MatchString(name) {
+	if !roleNamePattern.MatchString(name) || reservedRoleNames[name] {
 		return nil, ErrInvalidRoleName
 	}
 

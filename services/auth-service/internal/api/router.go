@@ -21,6 +21,7 @@ import (
 	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
+	"github.com/vistasecurity/vistaplatform/shared/security/originguard"
 	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
@@ -103,9 +104,16 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 	}
 
 	// Middleware
-	router.Use(gin.Logger())
+	// Path only: the SSO callbacks carry the OAuth code and state in the query.
+	router.Use(sharedmw.AccessLog())
 	router.Use(gin.Recovery())
 	router.Use(sharedmw.SecurityHeaders())
+	// Request-body ceiling, ahead of everything that reads or counts a body.
+	// This service hosts the anonymous surface (login, register, password reset,
+	// OAuth token, invitation accept); without a ceiling each of those
+	// buffered whatever the edge let through (100 MiB) into a pod limited to a
+	// few hundred. See bodyCeiling.
+	router.Use(bodyCeiling())
 	router.Use(middleware.RequestID())
 	router.Use(middleware.Logging())
 
@@ -216,7 +224,10 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		oauthGroup := authServiceGroup.Group("/oauth")
 		{
 			oauthGroup.GET("/authorize", oauthHandler.AuthorizeGET)
-			oauthGroup.POST("/authorize", oauthHandler.AuthorizePOST)
+			// The consent decision is authenticated by the session cookie alone, so
+			// it is also refused when the browser says the request is cross-site
+			// (Sec-Fetch-Site / Origin): SameSite=Strict is one layer, not the only one.
+			oauthGroup.POST("/authorize", originguard.RequireSameOrigin(), oauthHandler.AuthorizePOST)
 			oauthGroup.POST("/token", oauthHandler.Token)
 		}
 
@@ -307,7 +318,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// WithTenantTx. See invitations.go.
 			auth.GET("/invitations/lookup", LookupInvitation(db, bypassDB))
 			auth.POST("/invitations/accept", AcceptInvitation(cfg, db, bypassDB, jwtService))
-			auth.POST("/authenticate", AuthAuthenticate(cfg, db, bypassDB, redis, jwtService, ssoMethods))
+			auth.POST("/authenticate", AuthAuthenticate(cfg, db, bypassDB, redis, jwtService, ssoMethods, rateLimiter))
 			auth.POST("/complete", AuthComplete(cfg, db, bypassDB, redis, jwtService))
 		}
 
@@ -394,8 +405,11 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			tenant.GET("/billing", middleware.RequirePermission(rbacService, "billing.read"), GetTenantBilling(db, cfg))
 			tenant.GET("/ui-config", GetTenantUIConfig(db))
 			tenant.GET("/branding", GetTenantBranding(db))
-			// UI config updates require platform_admin role (platform admins set tenant design defaults)
-			tenant.PUT("/ui-config", UpdateTenantUIConfig(db)) // Role check inside handler
+			// UI config updates need a PLATFORM identity holding platform.settings
+			// (platform admins set tenant design defaults) — the same pair as
+			// PUT /admin/tenants/:tenantId/ui-config. The handler re-checks the
+			// identity; neither looks at the role string in the token.
+			tenant.PUT("/ui-config", middleware.RequirePlatformIdentity(), middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), UpdateTenantUIConfig(db))
 			// Branding updates are tenant settings.
 			tenant.PUT("/branding", middleware.RequirePermission(rbacService, "settings.update"), UpdateTenantBranding(db))
 			// Branding asset upload

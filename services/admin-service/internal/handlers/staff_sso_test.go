@@ -71,6 +71,7 @@ func TestStaffSsoCallback_UsesConfiguredSessionTTLForRefreshSession(t *testing.T
 		enforceSecureCookies = previousSecureCookies
 		platformSigner = previousSigner
 	})
+	useLoopbackStaffIdP(t)
 
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -232,6 +233,7 @@ func TestPlatformIdentityProviderWrites_401WithoutCaller(t *testing.T) {
 func staffCallbackHarness(t *testing.T, userinfoJSON string, expect func(mock sqlmock.Sqlmock, tokenURL, userinfoURL string)) (string, sqlmock.Sqlmock) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
+	useLoopbackStaffIdP(t)
 	idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {

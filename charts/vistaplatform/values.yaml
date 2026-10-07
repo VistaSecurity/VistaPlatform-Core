@@ -358,7 +358,7 @@ datastores:
     enabled: true
     image:
       repository: nats
-      tag: "2.10-alpine"
+      tag: "2.14-alpine"
     # NATS mTLS ( Phase 4). When enabled, NATS requires + verifies a
     # platform-CA-signed client cert (verify: true) and the shared NATS_TOKEN is
     # retired; backends connect with their per-service <svc>-mtls cert (the Go
@@ -445,7 +445,8 @@ ai:
   baseUrl: ""
   # -- Model id. Optional for anthropic, REQUIRED for openai_compat.
   model: ""
-  # -- Permit a loopback or RFC1918 endpoint. Set true when baseUrl is your own
+  # -- Permit a private (RFC1918) endpoint; loopback and link-local addresses
+  # stay refused. Set true when baseUrl is your own
   # self-hosted model beside the platform — that is the legitimate case here, and
   # it is the one place the platform's outbound SSRF guard has to be an explicit
   # operator decision rather than a rule.
@@ -492,6 +493,15 @@ backends:
     needs: {postgres: true, redis: true, nats: false}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
         true, redisUrl: true}
+    # privateNetworkDialer: tenant single sign-on (Enterprise) calls the
+    # identity provider a tenant admin configured — token exchange, OIDC
+    # discovery, JWKS, userinfo — and a self-hosted IdP on the customer's own
+    # network is the normal case, so private (RFC1918) addresses stay
+    # reachable. The pod therefore gets VISTA_PLATFORM_INTERNAL_CIDRS from
+    # networkPolicy.clusterInternalCIDRs, and its dial guard refuses the
+    # cluster's own pod and Service ranges, loopback and the cloud metadata
+    # endpoint — the same guard device interrogation gets. Do not turn it off.
+    privateNetworkDialer: true
     resources:
       requests: {cpu: 150m, memory: 192Mi}
       limits: {cpu: 400m, memory: 384Mi}
@@ -543,11 +553,11 @@ backends:
       # is also the window a burst of new hosts coalesces into.
       - {name: DISCOVERY_AUTO_SCAN_TRIGGER_INTERVAL, value: "60s"}
       # Ranges the platform must never probe on its own initiative, comma
-      # separated. The worker already excludes its own pod's addresses, but it
-      # cannot discover the cluster's pod/service CIDRs from inside a pod — name
-      # them here if they overlap ranges a tenant has registered as theirs.
-      # Empty is the right default: a cluster on its own RFC 1918 range that no
-      # tenant has claimed is already out of scope.
+      # separated, IN ADDITION to the cluster's own pod and Service CIDRs, which
+      # scan authorization takes from networkPolicy.clusterInternalCIDRs
+      # (VISTA_PLATFORM_INTERNAL_CIDRS) on the services that scan. The worker
+      # already excludes its own pod's addresses. Empty is the right default:
+      # list here only further ranges nobody should scan.
       - {name: DISCOVERY_AUTO_SCAN_EXCLUDE_CIDRS, value: ""}
       # Same-device rule merges: when the identification rules are sure two
       # existing records are one device, a worker merges them every 30s through
@@ -675,6 +685,16 @@ backends:
     needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey:
         true, redisUrl: true}
+    # privateNetworkDialer: this is the Platform Sensor — it scans the
+    # customer's private networks on a tenant's behalf, and a cluster's own pod
+    # and Service ranges are private (RFC 1918) addresses too. The pod therefore
+    # gets VISTA_PLATFORM_INTERNAL_CIDRS from networkPolicy.clusterInternalCIDRs,
+    # and the authorization of scans THE PLATFORM SENSOR RUNS (job creation and
+    # each work unit, shared/identity/dispatchguard) refuses those ranges
+    # whatever a tenant types or registers. A scan run by a tenant's own sensor
+    # is not affected: to it those numbers are the customer's address space.
+    # Set clusterInternalCIDRs to YOUR cluster's real ranges. Do not turn this off.
+    privateNetworkDialer: true
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {cpu: 300m, memory: 256Mi}
@@ -1042,6 +1062,45 @@ adminPlane:
       # -- Addresses to ignore when walking X-Forwarded-For right-to-left.
       # An alternative to depth when the proxy count varies.
       excludedIPs: []
+
+# Edge rate limits (Traefik `rateLimit` middlewares, per source address).
+#
+# These are flood ceilings, not per-account controls: brute-force protection is
+# enforced by the services themselves (per-IP and per-account limiters on tenant
+# and platform-admin login, plus account lockout).
+#
+# `ipStrategy` says WHICH address a request is counted against, and it is
+# topology-specific, exactly like adminPlane.ipAllowList.ipStrategy above. Traefik
+# counts the address it sees on the connection by default; behind a load balancer
+# or a SNAT hop that is the PROXY, so every client shares one bucket and a single
+# noisy client throttles everyone. Set `depth` to the number of trusted proxies
+# in front of Traefik so the client address is read from X-Forwarded-For:
+#
+#   RKE2 + MetalLB, externalTrafficPolicy: Local  -> depth: 0 (real client IP)
+#   AWS ALB in front of Traefik (ingress.alb)     -> depth: 1
+#   ALB behind CloudFront / another proxy         -> depth: 2
+#
+# The default is 0 because a depth larger than the X-Forwarded-For list makes
+# Traefik unable to determine a source and it answers 500, so a wrong non-zero
+# default would break every rate-limited route on installs without a proxy.
+# Verify after setting: two clients must not share a bucket.
+edgeRateLimit:
+  ipStrategy:
+    # -- Number of trusted proxies in front of Traefik. 0 = the connecting address.
+    depth: 0
+    # -- Addresses to skip when walking X-Forwarded-For right-to-left (an
+    # alternative to depth when the proxy count varies).
+    excludedIPs: []
+  # -- General API routes: requests per second (average) and short-burst allowance.
+  api:
+    average: 1000
+    burst: 2000
+  # -- auth-service routes and the platform-admin /auth routes. This tier also
+  # carries the SPA's session calls (/auth/me, permissions, features), so it is
+  # sized for a shared office address, not for a single login form.
+  auth:
+    average: 50
+    burst: 100
 
 # monitoring-service-specific operator config.
 #

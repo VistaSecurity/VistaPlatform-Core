@@ -202,14 +202,15 @@ func TestProjectListeners_BoundLocalIsWrittenEvenWhenFalse(t *testing.T) {
 	}
 }
 
-// A DISK fixture proves the boundary, not a hand-built struct: the bundle under
-// testdata/ genuinely contains a PEM private key appended to a certificate,
-// which is what a misplaced server.key in a trust directory looks like.
+// A real PEM bundle proves the boundary, not a hand-built struct: the bundle from
+// trustBundleFixture genuinely contains a PEM private key appended to a
+// certificate, which is what a misplaced server.key in a trust directory looks
+// like. It is generated in memory at test time, so no key bytes are committed.
 //
 // To mutation-test: relax the `block.Type != "CERTIFICATE"` guard in
 // ParseCertificatePEM and this fails on the key-fragment assertion.
 func TestCertStore_APrivateKeyOnDiskNeverReachesTheReport(t *testing.T) {
-	bundle := fixture(t, "linux", "ca-certificates.crt")
+	bundle := trustBundleFixture(t)
 	if !strings.Contains(bundle, "BEGIN PRIVATE KEY") {
 		t.Fatal("the fixture no longer contains a private key, so this test proves nothing")
 	}

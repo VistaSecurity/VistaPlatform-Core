@@ -86,8 +86,21 @@ async function main() {
   // (auth-service Redis-based middleware). Keep dev values moderate for local testing.
   const apiRateAverage = environment === 'development' ? 100 : 1000;
   const apiRateBurst = environment === 'development' ? 200 : 2000;
-  const authRateAverage = environment === 'development' ? 20 : 200;
-  const authRateBurst = environment === 'development' ? 50 : 400;
+  // The auth tier (auth-service + platform-admin /auth) was 200/400 in
+  // production: effectively no limit on a credential endpoint. 50/100 matches
+  // the chart (`edgeRateLimit.auth`); the services' own per-IP and per-account
+  // limiters do the real brute-force work.
+  const authRateAverage = environment === 'development' ? 20 : 50;
+  const authRateBurst = environment === 'development' ? 50 : 100;
+
+  // Which address a request is counted against. Traefik's default is the
+  // connecting address, which behind a load balancer / SNAT hop is the proxy
+  // itself, so every client shares ONE bucket. RATE_LIMIT_IP_DEPTH is the
+  // number of trusted proxies in front of Traefik (read from X-Forwarded-For).
+  // Unset/0 emits nothing (Traefik's default): a depth larger than the header's
+  // list leaves Traefik with no source and it answers 500.
+  const rateLimitIpDepth = Number.parseInt(process.env.RATE_LIMIT_IP_DEPTH || '0', 10);
+  const sourceCriterion = rateLimitIpDepth > 0 ? { sourceCriterion: { ipStrategy: { depth: rateLimitIpDepth } } } : {};
 
   // Environment-specific CORS origins
   let corsOrigins = (isProd || isEc2Smoke)
@@ -256,13 +269,17 @@ async function main() {
   const securityHeaders = {
     frameDeny: true,
     contentTypeNosniff: true,
-    browserXssFilter: true,
+    // The legacy XSS auditor is off, as in the SPA's Caddyfile and the Go services'
+    // SecurityHeaders: "1; mode=block" can itself introduce cross-site leaks in old
+    // browsers, and the CSP below is the real defence.
+    browserXssFilter: false,
     referrerPolicy: 'strict-origin-when-cross-origin',
-    contentSecurityPolicy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'${isProd ? '' : ' http:'} https:; frame-ancestors 'none';`,
+    contentSecurityPolicy: `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'${isProd ? '' : ' http: https:'}; object-src 'none'; base-uri 'self'; frame-ancestors 'none';`,
     // Permissions-Policy parity with the Gin service middleware — UI responses
     // routed through the gateway only get what this middleware sets.
     customResponseHeaders: {
       'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+      'X-XSS-Protection': '0',
     },
   };
   if (isProd || isEc2Smoke) {
@@ -289,6 +306,7 @@ async function main() {
     rateLimit: {
       average: apiRateAverage,
       burst: apiRateBurst,
+      ...sourceCriterion,
     },
   };
 
@@ -297,6 +315,7 @@ async function main() {
     rateLimit: {
       average: authRateAverage,
       burst: authRateBurst,
+      ...sourceCriterion,
     },
   };
 

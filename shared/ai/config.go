@@ -68,8 +68,10 @@ type ProviderConfig struct {
 	// means the kind's conventional variable (see [DefaultAPIKeyEnv]).
 	APIKeyEnv string `json:"api_key_env,omitempty"`
 
-	// AllowPrivateEndpoints permits an endpoint on a loopback, private, or
-	// link-local address.
+	// AllowPrivateEndpoints permits an endpoint on a private (RFC 1918, ULA,
+	// CGNAT) address, including an in-cluster model Service. It does NOT open
+	// loopback or link-local addresses (the cloud metadata endpoints): those
+	// are refused whatever it says.
 	//
 	// Default false, and the default is the important half. Every other
 	// outbound call in this codebase goes through the SSRF-guarded dialer

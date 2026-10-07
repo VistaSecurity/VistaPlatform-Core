@@ -123,6 +123,20 @@ describe('Catalog ▸ Classification rules', () => {
     expect(html).not.toContain('network_device');
   });
 
+  // source_url is data, and this page renders it as a link a platform admin
+  // clicks from inside the operator console. Only http(s) may become one: a
+  // stored javascript: or data: value is shown as a plain "source" label.
+  it('does not turn a non-http(s) source_url into a link', () => {
+    for (const hostile of ['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'vbscript:msgbox(1)']) {
+      queryState.rules.data = page([rule({ source_url: hostile })]);
+      const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
+      expect(html).not.toContain(`href="${hostile}"`);
+      expect(html.toLowerCase()).not.toMatch(/href="(javascript|data|vbscript):/);
+    }
+    queryState.rules.data = page([rule({ source_url: 'https://standards-oui.ieee.org/' })]);
+    expect(renderToStaticMarkup(createElement(ClassificationRulesPage))).toContain('href="https://standards-oui.ieee.org/"');
+  });
+
   it('marks a rule that cites nothing', () => {
     queryState.rules.data = page([rule({ source_url: null })]);
     const html = renderToStaticMarkup(createElement(ClassificationRulesPage));

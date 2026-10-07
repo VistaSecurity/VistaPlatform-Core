@@ -56,6 +56,8 @@ func newTestProcessor(t *testing.T, sink AuditSink) *Processor {
 	cfg := &config.Config{
 		MaxConcurrentJobs: 1,
 		SensorManagerURL:  "http://127.0.0.1:1",
+		// The upload root every job's file must live under (per tenant).
+		TempDir: t.TempDir(),
 	}
 	return New(db, cfg, nil, sink)
 }
@@ -69,11 +71,20 @@ func jobMsg(t *testing.T, job *events.PcapJobEvent) *nats.Msg {
 	return &nats.Msg{Subject: events.SubjectPcapJobsProcess, Data: data}
 }
 
+// uploadPathFor is where sensor-manager would have written a tenant's upload.
+func uploadPathFor(p *Processor, tenantID uuid.UUID, name string) string {
+	return filepath.Join(p.cfg.TempDir, tenantID.String(), name)
+}
+
 // writeEmptyPcap writes a valid libpcap file with a global header and zero
-// packets, which processPcapFile opens successfully and walks in no time.
-func writeEmptyPcap(t *testing.T) string {
+// packets into the tenant's upload directory, which processPcapFile opens
+// successfully and walks in no time.
+func writeEmptyPcap(t *testing.T, p *Processor, tenantID uuid.UUID) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "empty.pcap")
+	path := uploadPathFor(p, tenantID, "empty.pcap")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatalf("mkdir upload dir: %v", err)
+	}
 	hdr := make([]byte, 24)
 	binary.LittleEndian.PutUint32(hdr[0:], 0xa1b2c3d4) // magic
 	binary.LittleEndian.PutUint16(hdr[4:], 2)          // version major
@@ -96,7 +107,7 @@ func TestHandlePcapJob_AuditsSuccessfulJob(t *testing.T) {
 
 	tenantID := uuid.New()
 	jobID := uuid.New()
-	job := events.NewPcapJobEvent(tenantID, jobID, writeEmptyPcap(t), "capture.pcap", 24)
+	job := events.NewPcapJobEvent(tenantID, jobID, writeEmptyPcap(t, p, tenantID), "capture.pcap", 24)
 
 	if err := p.HandlePcapJob(context.Background(), jobMsg(t, job)); err != nil {
 		t.Fatalf("HandlePcapJob returned error: %v", err)
@@ -135,7 +146,7 @@ func TestHandlePcapJob_AuditsFailedJob(t *testing.T) {
 
 	tenantID := uuid.New()
 	jobID := uuid.New()
-	job := events.NewPcapJobEvent(tenantID, jobID, filepath.Join(t.TempDir(), "missing.pcap"), "missing.pcap", 0)
+	job := events.NewPcapJobEvent(tenantID, jobID, uploadPathFor(p, tenantID, "missing.pcap"), "missing.pcap", 0)
 
 	if err := p.HandlePcapJob(context.Background(), jobMsg(t, job)); err == nil {
 		t.Fatal("expected HandlePcapJob to fail on a missing capture")
@@ -159,7 +170,8 @@ func TestHandlePcapJob_AuditCarriesNoCaptureContent(t *testing.T) {
 	sink := &recordingSink{}
 	p := newTestProcessor(t, sink)
 
-	job := events.NewPcapJobEvent(uuid.New(), uuid.New(), writeEmptyPcap(t), "secrets-in-the-name.pcap", 24)
+	tenantID := uuid.New()
+	job := events.NewPcapJobEvent(tenantID, uuid.New(), writeEmptyPcap(t, p, tenantID), "secrets-in-the-name.pcap", 24)
 	if err := p.HandlePcapJob(context.Background(), jobMsg(t, job)); err != nil {
 		t.Fatalf("HandlePcapJob returned error: %v", err)
 	}
@@ -173,7 +185,8 @@ func TestHandlePcapJob_AuditCarriesNoCaptureContent(t *testing.T) {
 // A processor built without an audit sink must still process jobs.
 func TestHandlePcapJob_NilAuditSinkIsSafe(t *testing.T) {
 	p := newTestProcessor(t, nil)
-	job := events.NewPcapJobEvent(uuid.New(), uuid.New(), writeEmptyPcap(t), "capture.pcap", 24)
+	tenantID := uuid.New()
+	job := events.NewPcapJobEvent(tenantID, uuid.New(), writeEmptyPcap(t, p, tenantID), "capture.pcap", 24)
 	if err := p.HandlePcapJob(context.Background(), jobMsg(t, job)); err != nil {
 		t.Fatalf("HandlePcapJob returned error with no audit sink: %v", err)
 	}

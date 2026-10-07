@@ -7,6 +7,7 @@ import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskC
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
 import { SCANNING_POLL_MS, isScanning } from '../discovery/active-scan-row-state';
 import { serviceConfidence, keyCustodyLabel } from './lens-helpers';
+import { safeHttpUrl } from '../../lib/url';
 import { assetIdentity, classDeclares, classLabel, handshakeRefusal, operatingSystem, primaryAddressPort, primaryEndpoint, stripMask, type EndpointLike } from './asset-shape';
 import {
   PROVENANCE_LABEL,
@@ -327,8 +328,8 @@ function RemediationGuidanceBlock({ g, defaultOpen }: { g: RemediationGuidanceVi
         )}
         {g.resources.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {g.resources.map((r, i) => r.href
-              ? <a key={i} href={r.href} target="_blank" rel="noopener noreferrer" className="mono" style={{ fontSize: 10.5, color: 'var(--info)', wordBreak: 'break-all' }}>{r.text}</a>
+            {g.resources.map((r, i) => safeHttpUrl(r.href)
+              ? <a key={i} href={safeHttpUrl(r.href)!} target="_blank" rel="noopener noreferrer" className="mono" style={{ fontSize: 10.5, color: 'var(--info)', wordBreak: 'break-all' }}>{r.text}</a>
               : <span key={i} className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', wordBreak: 'break-all' }}>{r.text}</span>)}
           </div>
         )}
