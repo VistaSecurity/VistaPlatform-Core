@@ -9,10 +9,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 
@@ -104,6 +106,12 @@ func TestIntegration_ActiveScan_ExternalAssetsAskFirst(t *testing.T) {
 	}
 	if n := len(cluster.calls()); n != 0 {
 		t.Fatalf("%d dispatch(es) before the person answered", n)
+	}
+	// Nothing ran, so the confirmed resend must carry the WHOLE request: the
+	// internal asset is still waiting, and a client that resent only the held
+	// asset would never scan it.
+	if got := idSet(needs.Pending); len(got) != 2 || !got[external] || !got[internal] {
+		t.Fatalf("pending = %v, want exactly the external and the internal asset", needs.Pending)
 	}
 	if s := status(external); s != "pending_approval" {
 		t.Fatalf("external asset was changed to %q before confirmation", s)
@@ -202,5 +210,67 @@ func TestRecordTargetVerdict_MapsTheAnswerBackToAssets(t *testing.T) {
 	}
 	if svc.recordTargetVerdict(&r, batch, &DownstreamError{Status: 409, Message: "sensor offline"}) {
 		t.Fatal("a non-verdict error was treated as a verdict")
+	}
+}
+
+func idSet(ids []uuid.UUID) map[uuid.UUID]bool {
+	out := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out
+}
+
+// A verdict that arrives AFTER another batch was dispatched (the preflight
+// could not judge the asset; cluster-sensor-service did) leaves only the held
+// asset pending: the dispatched one is done, and resending it would scan it
+// twice. This is the C.4 case; the usual one is asserted above.
+func TestIntegration_ActiveScan_LateVerdictLeavesOnlyTheHeldAssetPending(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	user := uuid.New()
+
+	// Two internal-looking assets on different ports, so they plan into
+	// separate jobs; the cluster service later calls the second one external.
+	insert := func(hostname, address string, port int) uuid.UUID {
+		id := uuid.New()
+		if _, err := raw.Exec(`INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status) VALUES($1,$2,$3,$4,'server','hardware.computer.server','monitoring')`, id, tenant, hostname, address); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Exec(`INSERT INTO asset_endpoints(tenant_id,asset_id,address,port,transport) VALUES($1,$2,$3,$4,'tcp')`, tenant, id, address, port); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	done := insert("intranet-web", "10.20.0.5", 443)
+	held := insert("odd-box", "10.20.0.9", 8443)
+
+	cluster := &fakeClusterSensor{answer: func(body map[string]interface{}) (int, string) {
+		if body["external_targets_confirmed"] != true && strings.Contains(fmt.Sprint(body["targets"]), "10.20.0.9") {
+			return http.StatusUnprocessableEntity, `{"error":"external_targets_unconfirmed","message":"confirm","external_targets":[{"target":"10.20.0.9","addresses":["10.20.0.9"]}]}`
+		}
+		return http.StatusAccepted, `{"job":{"id":"` + uuid.NewString() + `","status":"queued"}}`
+	}}
+	srv := httptest.NewServer(cluster)
+	t.Cleanup(srv.Close)
+	t.Setenv("CLUSTER_SENSOR_SERVICE_URL", srv.URL)
+	ds, err := NewDiscoveryService(&config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &RevalidationService{db: db, discoveryService: ds}
+
+	_, err = svc.CreateActiveScanJob(tenant, user, []uuid.UUID{done, held}, "", RunFrom{Mode: RunFromPlatform}, false)
+	var needs *ExternalConfirmationError
+	if !errors.As(err, &needs) {
+		t.Fatalf("err = %v, want ExternalConfirmationError", err)
+	}
+	if len(needs.Partial.Jobs) != 1 || needs.Partial.Scanned != 1 {
+		t.Fatalf("partial = %+v, want the first asset dispatched in one job", needs.Partial)
+	}
+	if got := idSet(needs.Pending); len(got) != 1 || !got[held] {
+		t.Fatalf("pending = %v, want only the held asset %s (the dispatched one must not be resent)", needs.Pending, held)
 	}
 }

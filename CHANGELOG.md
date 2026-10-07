@@ -7,20 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.1] - 2026-10-07
+## [4.5.0-rc.2] - 2026-10-07
 
 **Version 4.5.0 is a security-hardening and dependency release.** The edge, sign-in and
 sessions, authorization and tenant isolation, outbound requests, request sizes and the
-chart's defaults were reviewed, and every confirmed, bounded finding is fixed: a signed-in session can no longer rewrite the
-account's sign-in email, a viewer can no longer read sensors' registration keys, sign-in
-no longer reveals which addresses are registered, and platform scans no longer reach the
-cluster's own network. The bundled NATS server moves off a release its project no longer
+chart's defaults were reviewed, and every confirmed, bounded finding is fixed: a signed-in
+session can no longer rewrite the account's sign-in email, a viewer can no longer read
+sensors' registration keys, sign-in no longer reveals which addresses are registered,
+platform scans no longer reach the cluster's own network, and a second round closes the
+agent port, the edge's service-to-service routes and the legacy token window, enforces
+row-level security under Docker Compose, and refuses to start in production on weak
+platform secrets. The bundled NATS server moves off a release its project no longer
 patches, and Go, npm and container dependencies are current. Both product lines are cut
 from the same commit: `v4.5.0` (commercial) and `core-v4.5.0` (Core). Upgrade from 4.4.0.
 
-**Read Breaking / Upgrading first** — the bundled NATS upgrade has no clean rollback, scans
-run by the platform now need your cluster's real network ranges, and the edge's auth rate
-limit is lower.
+**Read Breaking / Upgrading first** — in production a service now refuses to start on a
+missing or short platform secret, the bundled NATS upgrade has no clean rollback, scans run
+by the platform now need your cluster's real network ranges, the edge's auth rate limit is
+lower, and the legacy HS256 session secret is now removed from verifiers by default.
 
 ### Highlights
 
@@ -56,6 +60,32 @@ limit is lower.
   cross-site requests; sensor registration keys and OAuth codes are no longer logged;
   packet-capture jobs open only the tenant's own upload directory.
 
+- **Weak platform secrets stop a production install, and legacy tokens stop on their
+  own.** In production every service refuses to start when `INTERNAL_AUTH_SECRET` or
+  `ENCRYPTION_MASTER_KEY` is missing or under 32 bytes, and credential encryption can no
+  longer be silently off. `jwtSigning.acceptLegacyHmac` defaults to `auto`, so the chart
+  removes the legacy HS256 shared secret from token-verifying services by itself.
+
+- **Row-level security reaches Docker Compose, score history and audit partitions.**
+  Compose services connect as the application role instead of the table owner, and the
+  compliance score history and the audit-log partitions are tenant-isolated.
+
+- **The agent port and the edge expose less.** The sensor and device-agent mTLS port
+  serves only agent routes, and seven service-to-service routes are no longer published at
+  the edge.
+
+- **Single sign-on is bound to the browser and uses PKCE.** Staff sign-in to the admin
+  console, and tenant and platform sign-in (Enterprise), close a login-CSRF path.
+
+- **Verification commands are anchored.** The documented `cosign verify` identity regexps
+  accept only the release workflow run from a release tag (the commercial line also from
+  `main`).
+
+- **Operational fixes.** Passive QUIC is reported once per flow
+  instead of about sixteen times; **Scan anyway** scans the whole selection; a device
+  interrogation that uses its full time limit completes with its results; the bundled NATS
+  server's probes no longer log a TLS error every ten seconds.
+
 - **The bundled NATS server is 2.14,** replacing 2.10, which the NATS project no longer
   patches.
 
@@ -70,8 +100,38 @@ limit is lower.
 
 ### Breaking / Upgrading
 
-Back up your database (`pg_dump`) first, as always. Upgrade from 4.4.0; the upgrade
-changes no database schema.
+Back up your database (`pg_dump`) first, as always. Upgrade from 4.4.0. The schema upgrade
+is additive: it turns on row-level security for the compliance score history table and every
+audit-log partition. As in earlier releases, pass a `helm upgrade --timeout` that covers the
+migration plus the rollout.
+
+- **In production a service refuses to start on a missing or weak platform secret.** With
+  `ENV=production` (the chart default), `INTERNAL_AUTH_SECRET` and `ENCRYPTION_MASTER_KEY`
+  must be present and at least 32 bytes, and `JWT_SECRET`, if set, at least 32 bytes (a
+  token-verifying service may omit it once ES256 verification keys are configured). Secrets
+  the chart generates, and `openssl rand -hex 32`, pass. **If your platform Secret holds a
+  short custom value, replace it before upgrading:** the new pods exit naming the variable,
+  and a rolling upgrade stalls with the old pods still serving. Changing
+  `ENCRYPTION_MASTER_KEY` has no in-place re-key, so stored credentials (integrations,
+  devices, connectors) must be entered again afterwards. The Compose production files set
+  `ENV=production` and follow the same rule. See
+  [`docsv4/core/operate/security/secrets-management.md`](docsv4/core/operate/security/secrets-management.md).
+- **`jwtSigning.acceptLegacyHmac` now defaults to `auto`.** A fresh install never accepts
+  legacy HS256 tokens; an upgrade stops injecting `JWT_SECRET` into every service except
+  `auth-service` and `admin-service` once the signing Secret is older than
+  `jwtSigning.legacyHmacWindowHours` (192). Set `true` to keep the old behaviour. With
+  `--reuse-values` the old default (`true`) is carried forward; use
+  `--reset-then-reuse-values` to take `auto`. `helm template` and Argo CD cannot read the
+  cluster and keep the secret until you pin `acceptLegacyHmac: false`. The notes `helm
+  upgrade` prints say which mode was chosen.
+- **Docker Compose installs now connect as `crypto_app`,** with `crypto_bypass` for the
+  cross-tenant paths, through a one-shot `db-roles` service. Run `docker compose up -d`
+  (with `--build` as usual); no new secret is needed. If `db-roles` exits non-zero because
+  the volume's schema predates the roles, re-apply the schema as its log describes (the
+  command is in the full list of changes).
+- **Single-sign-on sign-ins in progress during the upgrade must be started again once,** for
+  staff sign-in to the admin console and, on Enterprise, tenant and platform sign-in. An
+  external Redis must be 6.2 or later.
 
 - **The bundled NATS server upgrades from 2.10 to 2.14, and rolling back is not clean.**
   JetStream data is read in place. A later rollback to a release on NATS 2.10 rebuilds
@@ -79,7 +139,8 @@ changes no database schema.
   state were intact in testing. **Snapshot the NATS volume (`nats-data-nats-0`) before
   upgrading** if you need a clean rollback. A values file that pins
   `datastores.nats.image.tag` keeps the old server until you remove the pin; use
-  `--reset-then-reuse-values`. An external NATS is unaffected. See the "Bundled NATS
+  `--reset-then-reuse-values`. An external NATS is unaffected. The NATS pod also restarts
+  once for its new health probes. See the "Bundled NATS
   server" note in [`docsv4/core/operate/releases.md`](docsv4/core/operate/releases.md).
 - **Set `networkPolicy.clusterInternalCIDRs` to your cluster's real pod and Service
   ranges.** The Platform Sensor now refuses scan targets inside them, whatever networks a
@@ -141,7 +202,9 @@ changes no database schema.
 **Enterprise** adds the single-sign-on guard (tenant sign-in refuses loopback, link-local
 and cluster addresses for the identity provider and requires `https://` endpoints;
 `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` forbids private ones too), the stricter AI
-private-endpoint setting and the billing webhook's body limit. **MSP** adds the dashboard
+private-endpoint setting, the browser binding and PKCE of tenant and platform sign-in, and
+the billing webhook's body limit. Staff single sign-on to the admin console is in every
+edition. **MSP** adds the dashboard
 WebSocket origin check. The authoritative list of what each edition includes is generated,
 not asserted: [`docsv4/core/editions.md`](docsv4/core/editions.md).
 
@@ -151,13 +214,17 @@ Core: there is no key to trust, because the signing identity *is* the workflow t
 
 ```bash
 cosign verify ghcr.io/vistasecurity/auth-service:v4.5.0 \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.5.0` for the image.
-Enterprise and MSP customers verify the commercial images and chart against the commercial
-release workflow's identity, exactly as for 4.4.0.
+The identity is now anchored: it accepts the release workflow only when it ran from a release
+tag, where the commands in earlier releases' notes accepted any ref. Those commands still
+verify the earlier releases. Enterprise and MSP customers verify the commercial images and
+chart against the commercial release workflow's identity; the command `helm install` prints
+carries the exact regexp, which accepts a release tag or `main` (the 4.4.0 commercial release
+was run from `main`).
 
 The complete per-change list is in
 [Vista Platform 4.5.0 — full list of changes](docsv4/core/releases/4.5.0.md).

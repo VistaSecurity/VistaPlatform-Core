@@ -55,7 +55,7 @@ For Core, that command is:
 
 ```bash
 cosign verify ghcr.io/vistasecurity/vistaplatform:<chart-version> \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

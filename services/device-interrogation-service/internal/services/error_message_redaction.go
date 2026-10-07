@@ -32,6 +32,6 @@ func redactedErrorMessage(msg *string) *string {
 	if msg == nil {
 		return nil
 	}
-	cleaned := redactErrorMessage(*msg)
+	cleaned := storedErrorMessage(*msg)
 	return &cleaned
 }

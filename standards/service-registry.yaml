@@ -263,6 +263,42 @@ admin_plane:
     # gate. cmd/sighting_edge_deny_test.go pins the generated deny.
     - /inventory-service/internal/
 
+  # Internal ROUTES: service-to-service endpoints that do not live under an
+  # `/internal/` prefix, so a prefix deny would swallow tenant-facing siblings
+  # on the same path. Each entry is one method + one exact path (`:param`
+  # matches one path segment), denied on every host exactly like
+  # internal_prefixes, in both API versions and with or without a trailing
+  # slash. Prefer a new route under an internal_prefixes entry; this list exists
+  # for routes that cannot move without breaking callers mid-upgrade.
+  #
+  # audit-service ingestion: every service's audit middleware and job logger
+  # POST here with an HMAC signature (RequireInternalAuth). The same
+  # /activity-logs path also serves the tenant's GET list and POST /query, which
+  # is why this is method-scoped and not a prefix. Callers reach audit-service
+  # through the in-cluster Service URL, never the edge.
+  internal_routes:
+    - method: POST
+      path: /audit-service/activity-logs
+    - method: POST
+      path: /audit-service/job-execution-logs/start
+    - method: POST
+      path: /audit-service/job-execution-logs/:id/progress
+    - method: POST
+      path: /audit-service/job-execution-logs/:id/complete
+    # inventory-service: HMAC-only by HANDLER, not by middleware. These three
+    # sit in the JWT-or-HMAC group and refuse everything but a signed service
+    # call themselves (`if !IsInternalCall(c) { …; return }`), so the route
+    # table, not the handler, is what a browser can reach. Callers:
+    # device-interrogation-service (agent-host approval, cloud keys) and
+    # discovery-processor-service (findings import), all through the
+    # in-cluster peer URL.
+    - method: POST
+      path: /inventory-service/assets/auto-approve/agent-host
+    - method: POST
+      path: /inventory-service/keys/cloud
+    - method: POST
+      path: /inventory-service/discovery/jobs/:id/import
+
   # Prefixes whose first URL segment does not name the Service that answers
   # them. /admin-service/status/** is historically routed to monitoring-service.
   service_overrides:

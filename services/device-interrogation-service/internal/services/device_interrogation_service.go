@@ -63,6 +63,11 @@ func NewDeviceInterrogationService(db, bypassDB *sql.DB, masterKey string) *Devi
 // it does mean the row keeps whatever status it had (typically "running"), so
 // it is logged rather than discarded.
 func markJobFailed(ctx context.Context, integration *DiscoveryIntegrationService, jobID uuid.UUID, reason string) {
+	// The failure is very often the job's own deadline or cancellation running
+	// out; stamping it on that same context would fail for the same reason and
+	// leave the row "running".
+	ctx, cancel := finalizeContext(ctx, failureStampBudget)
+	defer cancel()
 	if err := integration.UpdateJobStatus(ctx, jobID, "failed", &reason); err != nil {
 		log.Printf("device-interrogation: failed to mark job %s failed (%q) — the job row may stay in its previous status: %v", jobID, reason, err)
 	}
@@ -205,6 +210,12 @@ func (s *DeviceInterrogationService) interrogateDevice(
 		return uuid.Nil, 0, fmt.Errorf("device interrogation failed: %w", err)
 	}
 
+	// The device has answered. Everything from here is persistence and
+	// bookkeeping, and it must not be starved by a deadline the collection
+	// spent: see finalizeContext.
+	ctx, cancel := finalizeContext(ctx, finalizeBudget)
+	defer cancel()
+
 	// First contact: store the key we were shown so the NEXT interrogation has
 	// something to compare against. Without this write the comparison above has
 	// nothing to read and trust-on-first-use is a check that cannot fail — which
@@ -252,7 +263,7 @@ func (s *DeviceInterrogationService) interrogateDevice(
 
 	s.updateDeviceInterrogationTime(ctx, tenantID, deviceID)
 	if err := s.discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
-		return uuid.Nil, 0, fmt.Errorf("failed to mark job completed: %w", err)
+		return uuid.Nil, 0, fmt.Errorf("failed to mark job completed: %w", withCause(err))
 	}
 	return jobID, materialized, nil
 }
@@ -814,8 +825,10 @@ func (s *DeviceInterrogationService) interrogateDatabase(
 		fmt.Printf("Warning: failed to create database discovery finding: %v\n", err)
 	}
 
-	s.updateDeviceInterrogationTime(ctx, tenantID, device.ID)
-	if err := s.discoveryIntegration.MarkJobCompleted(ctx, jobID); err != nil {
+	finalCtx, cancelFinal := finalizeContext(ctx, finalizeBudget)
+	defer cancelFinal()
+	s.updateDeviceInterrogationTime(finalCtx, tenantID, device.ID)
+	if err := s.discoveryIntegration.MarkJobCompleted(finalCtx, jobID); err != nil {
 		log.Printf("device-interrogation: failed to mark job %s completed — the job row may stay 'running': %v", jobID, err)
 	}
 	// One database finding per interrogation.

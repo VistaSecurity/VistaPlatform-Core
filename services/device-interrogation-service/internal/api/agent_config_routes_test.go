@@ -32,7 +32,7 @@ func TestAgentRoutesAreRegisteredAndPlatformAutoRegistrationIsRetired(t *testing
 	}
 	defer func() { _ = db.Close() }()
 
-	router := SetupRouter(&config.Config{}, db, db, nil)
+	router, _ := SetupRouter(&config.Config{}, db, db, nil)
 
 	want := map[string]string{
 		"POST /api/v1/device-interrogation-service/agents/register":                "operator-enrolled agent bootstrap",

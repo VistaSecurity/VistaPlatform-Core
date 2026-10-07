@@ -36,6 +36,13 @@ operator can reopen it under admin console → **Settings → Access & Sign-up**
 The first run builds ~18 images and applies the database schema, so give it a
 few minutes. `docker compose ps` will show 28 containers when it's ready.
 
+Services connect to PostgreSQL as two non-owner roles, `crypto_app` and
+`crypto_bypass`, so its row-level security actually separates organizations (a
+table owner is exempt from it). A short-lived `db-roles` container gives them a
+login on every `docker compose up` and exits — `docker compose ps -a` lists it
+as `Exited (0)`, which is its normal state. If it exits non-zero, its log
+(`docker compose logs db-roles`) says why and what to run.
+
 mTLS between services is enabled by default in `docker-compose.yml` for
 production parity, but `docker-compose.override.yml` — which `docker compose`
 loads automatically alongside it, no flags needed — turns it back off for this
@@ -324,12 +331,12 @@ workflow:
 ```bash
 # any service image
 cosign verify ghcr.io/vistasecurity/auth-service:<version> \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # and the chart itself
 cosign verify ghcr.io/vistasecurity/vistaplatform:<chart-version> \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
@@ -394,7 +401,7 @@ cosign (keyless OIDC — no key to trust, same as the images above):
 ```bash
 cosign verify-blob SHA256SUMS \
   --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 sha256sum -c SHA256SUMS
 ```

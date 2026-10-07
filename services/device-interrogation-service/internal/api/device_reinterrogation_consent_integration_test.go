@@ -78,7 +78,7 @@ func TestIntegration_DeviceReinterrogationConsent_RealRouter(t *testing.T) {
 	t.Setenv("AUDIT_LOGGING_ENABLED", "false")
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
-	router := SetupRouter(&config.Config{JWTSecret: consentGateSecret}, db, db, nil)
+	router, _ := SetupRouter(&config.Config{JWTSecret: consentGateSecret}, db, db, nil)
 
 	tenant := testdb.NewTenant(t, db)
 	foreign := testdb.NewTenant(t, db)

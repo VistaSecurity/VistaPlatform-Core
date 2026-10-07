@@ -370,6 +370,12 @@ func newRouter(
 	// Internal service-to-service ingestion endpoints (HMAC auth required)
 	// These are called by the shared audit middleware from other services within the Docker network.
 	// Access is verified via HMAC-SHA256 signature using INTERNAL_AUTH_SECRET.
+	//
+	// Not reachable from the edge: the four ingestion routes below share their
+	// paths with tenant-facing ones (GET /activity-logs, GET /job-execution-logs),
+	// so they are denied by method + exact path in the registry's
+	// admin_plane.internal_routes, not by prefix. Add a route here without
+	// declaring it there and `make audit` (scripts/audit-admin-plane.mjs) fails.
 	internal := router.Group("/api/v1")
 	internal.Use(middleware.RequireInternalAuth(cfg.InternalAuthSecret))
 	{

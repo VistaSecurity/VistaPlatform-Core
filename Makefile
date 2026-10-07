@@ -863,6 +863,13 @@ db-migrate: ## No-op: schema is fully consolidated in schema.sql, applied automa
 	@echo "   On a fresh deploy, Postgres auto-applies it as 01-schema.sql."
 	@echo "   No separate migration step is needed."
 
+# Services connect as crypto_app / crypto_bypass, never as the table owner, so
+# row-level security applies (an owner bypasses it). The one-shot db-roles
+# container grants those roles LOGIN and runs on every `docker compose up`;
+# this re-runs it by hand (it is idempotent).
+db-roles: ## Grant LOGIN to the RLS roles (crypto_app, crypto_bypass) in the compose database
+	$(DOCKER_COMPOSE) run --rm db-roles
+
 db-seed: ## Seed database with built-in seed data (02-seed.sql)
 	$(DOCKER_COMPOSE) exec postgres psql -U crypto_user -d crypto_inventory -f /docker-entrypoint-initdb.d/02-seed.sql
 

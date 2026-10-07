@@ -135,6 +135,36 @@
       "/audit-service/internal/",
       "/inventory-service/internal/"
     ],
+    "internal_routes": [
+      {
+        "method": "POST",
+        "path": "/audit-service/activity-logs"
+      },
+      {
+        "method": "POST",
+        "path": "/audit-service/job-execution-logs/start"
+      },
+      {
+        "method": "POST",
+        "path": "/audit-service/job-execution-logs/:id/progress"
+      },
+      {
+        "method": "POST",
+        "path": "/audit-service/job-execution-logs/:id/complete"
+      },
+      {
+        "method": "POST",
+        "path": "/inventory-service/assets/auto-approve/agent-host"
+      },
+      {
+        "method": "POST",
+        "path": "/inventory-service/keys/cloud"
+      },
+      {
+        "method": "POST",
+        "path": "/inventory-service/discovery/jobs/:id/import"
+      }
+    ],
     "service_overrides": {
       "/admin-service/status/": "monitoring-service"
     },

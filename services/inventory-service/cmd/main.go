@@ -34,6 +34,7 @@ import (
 	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	trial_lock "github.com/vistasecurity/vistaplatform/shared/middleware/trial_lock"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-contrib/cors"
@@ -476,6 +477,15 @@ func main() {
 		// silently strip that role's ability to configure integrations. Owner
 		// decision; the asymmetry is the intended state, not drift.
 		//
+		// RE-AFFIRMED (owner decision, authz review finding D6:
+		// "a security_admin can repoint a CMDB base_url"): WON'T FIX.
+		// security_admin configures integrations, deliberately, and the finding
+		// is accepted as a documented risk. Do not move these writes to
+		// settings.update. Revisit only by adding a dedicated
+		// integrations.manage permission and granting it on purpose in
+		// standards/permissions.yaml. Applies to all three registrations of
+		// this CRUD (v1 prefixed here, v1 direct and v2 below).
+		//
 		// The LIST read is gated on settings.read, not assets.read: the UI
 		// surface is Settings → Integrations (frontend-v2 gates that nav item on
 		// TENANT_PERMISSIONS.settings.read), and the row carries third-party
@@ -557,7 +567,8 @@ func main() {
 		api.POST("/crypto/:id/attach-library", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), cryptoAssetsHandler.AttachLibrary)
 		api.POST("/crypto/:id/attach-key", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), cryptoAssetsHandler.AttachKey)
 		api.POST("/libraries", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), cryptoAssetsHandler.CreateLibrary)
-		// Direct integrations
+		// Direct integrations — write gates are an owner decision,
+		// D6 won't fix); see the note above the v1 prefixed block.
 		api.GET("/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), integrationsHandler.List)
 		api.POST("/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		api.PUT("/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
@@ -785,7 +796,8 @@ func main() {
 		apiv2.POST("/inventory-service/crypto/:id/attach-key", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), cryptoAssetsHandler.AttachKey)
 		apiv2.POST("/inventory-service/libraries", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), cryptoAssetsHandler.CreateLibrary)
 
-		// Tenant integrations — see note above the v1 block.
+		// Tenant integrations — see note above the v1 block (write gates are an
+		// owner decision,: D6 won't fix).
 		apiv2.GET("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsRead), integrationsHandler.List)
 		apiv2.POST("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		apiv2.PUT("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
@@ -877,9 +889,10 @@ func main() {
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "inventory-service",
-			"version": version.Get(),
+			"status":                "healthy",
+			"service":               "inventory-service",
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 

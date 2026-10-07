@@ -118,7 +118,7 @@ describe('Alert-rule enable/disable toggle (Settings → Alert Rules) is gone', 
 
 describe('Sensor detail drawer (config, interfaces, commands)', () => {
   it('gates on sensors.update — sensors.manage guards only certificate operations', () => {
-    const go = 'services/sensor-manager/cmd/main.go';
+    const go = 'services/sensor-manager/cmd/router.go';
     routeRequires(go, '/sensors/:sensor_id/config"', 'PermissionSensorsUpdate');
     routeRequires(go, '/sensors/:sensor_id/commands"', 'PermissionSensorsUpdate');
     routeRequires(go, '/sensors/:sensor_id/certificates/revoke"', 'PermissionSensorsManage');

@@ -21,6 +21,11 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'yaml';
+import {
+  internalRouteMatcher,
+  internalRouteService,
+  validateInternalRoute,
+} from './lib/internal-route-matcher.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -739,6 +744,22 @@ function buildInternalPlaneRoutes(adminPlane) {
         // Never reached — deny-internal-plane rejects before a service is
         // selected — but IngressRoute requires one, so name the real backend
         // rather than inventing a fictional Service.
+        services: [{ name: backend, port: 8080 }],
+        middlewares: [{ name: 'deny-internal-plane' }],
+      });
+    }
+  }
+  // Internal ROUTES: one method + one exact path each, for service-to-service
+  // endpoints that share a path with a tenant-facing route and so cannot be
+  // denied as a prefix (see admin_plane.internal_routes in the registry).
+  for (const entry of adminPlane.internal_routes || []) {
+    validateInternalRoute(entry);
+    const backend = internalRouteService(entry);
+    for (const version of ['v1', 'v2']) {
+      routes.push({
+        match: `${API_HOST_TOKEN} && ${internalRouteMatcher(version, entry)}`,
+        kind: 'Rule',
+        priority: PRIORITY_ADMIN_PLANE,
         services: [{ name: backend, port: 8080 }],
         middlewares: [{ name: 'deny-internal-plane' }],
       });

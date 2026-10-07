@@ -329,6 +329,12 @@ func (h *AssetLifecycleHandler) ScanAssets(c *gin.Context) {
 		for _, t := range needs.Targets {
 			targets = append(targets, gin.H{"target": t.Target, "addresses": t.Addresses, "asset_id": t.AssetID.String(), "asset_name": t.AssetName})
 		}
+		// What the confirmation must resend (see ExternalConfirmationError.Pending).
+		pending := make([]string, 0, len(needs.Pending))
+		for _, id := range needs.Pending {
+			pending = append(pending, id.String())
+		}
+		body["pending_asset_ids"] = pending
 		body["error"] = "external_targets_unconfirmed"
 		body["details"] = needs.Error()
 		body["external_targets"] = targets

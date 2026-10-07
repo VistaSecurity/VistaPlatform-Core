@@ -16,6 +16,12 @@ import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'yaml';
+import {
+  internalRouteMatcher,
+  internalRouteService,
+  internalRouteSlug,
+  validateInternalRoute,
+} from './lib/internal-route-matcher.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -835,6 +841,22 @@ async function main() {
     for (const version of ['v1', 'v2']) {
       routers[`deny_internal_${version}_${prefix.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')}`] = {
         rule: internalHostRule(pathMatcher(`/api/${version}${prefix}`)),
+        entryPoints: routerEntryPoints,
+        service: backendKey,
+        middlewares: ['deny-internal-plane'],
+        priority: adminPlanePriority,
+      };
+    }
+  }
+  // Internal ROUTES (method + exact path), for service-to-service endpoints
+  // that share a path with a tenant-facing route and so cannot be denied as a
+  // prefix. See admin_plane.internal_routes in the registry.
+  for (const entry of adminPlane.internal_routes || []) {
+    validateInternalRoute(entry);
+    const backendKey = internalRouteService(entry).replace(/-/g, '_');
+    for (const version of ['v1', 'v2']) {
+      routers[`deny_internal_route_${version}_${internalRouteSlug(entry)}`] = {
+        rule: internalHostRule(internalRouteMatcher(version, entry)),
         entryPoints: routerEntryPoints,
         service: backendKey,
         middlewares: ['deny-internal-plane'],

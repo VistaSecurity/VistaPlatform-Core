@@ -74,11 +74,14 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("FATAL: ENCRYPTION_MASTER_KEY is required (encrypts tenant device credentials) — set a strong secret")
 	}
 
-	// Reject well-known dev defaults in production (shared guard across services).
-	sharedconfig.RejectInsecureDefaults(config.Environment, map[string]string{
-		"JWT_SECRET":            config.JWTSecret,
-		"ENCRYPTION_MASTER_KEY": config.EncryptionMasterKey,
-	})
+	// Production refuses to start with a missing or weak platform secret and
+	// rejects the well-known dev literals (shared guard across services).
+	if err := sharedconfig.EnforceProductionSecretsErr(config.Environment, sharedconfig.SecretSpec{
+		Required:    []string{"INTERNAL_AUTH_SECRET", "ENCRYPTION_MASTER_KEY"},
+		VerifiesJWT: true,
+	}); err != nil {
+		return nil, fmt.Errorf("FATAL: %w", err)
+	}
 
 	return config, nil
 }

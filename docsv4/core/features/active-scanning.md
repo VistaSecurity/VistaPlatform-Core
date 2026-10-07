@@ -235,8 +235,10 @@ you to confirm.
 - **Scan** on assets already in your inventory (Inventory's bulk bar, or
   **Active Scan** on one asset) whose address is outside your registered
   networks. Choosing to scan an asset is the same explicit choice, so the dialog
-  lists those assets and asks rather than refuses. **Scan anyway** sends only
-  the assets it asked about.
+  lists those assets and asks rather than refuses. Nothing in the selection
+  runs until you answer, so **Scan anyway** scans the whole selection: the
+  assets outside your networks and the ones that needed no confirmation, none
+  of them twice.
   Confirming needs **`discovery.create`** as well as the **`assets.update`**
   that scanning an asset always needs.
 

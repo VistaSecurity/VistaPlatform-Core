@@ -124,7 +124,7 @@ alongside the binaries, signed with cosign (keyless — there is no key to trust
 ```bash
 cosign verify-blob SHA256SUMS \
   --signature SHA256SUMS.sig --certificate SHA256SUMS.pem \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 sha256sum -c SHA256SUMS
 ```

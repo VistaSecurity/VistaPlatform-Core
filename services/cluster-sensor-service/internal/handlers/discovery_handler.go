@@ -13,6 +13,7 @@ import (
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
@@ -104,9 +105,10 @@ func (h *DiscoveryHandler) publishSubmittedToNATS(tenantID string, job *models.D
 
 func (h *DiscoveryHandler) Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"service": "cluster-sensor-service",
-		"status":  "healthy",
-		"version": version.Get(),
+		"service":               "cluster-sensor-service",
+		"status":                "healthy",
+		"version":               version.Get(),
+		credentials.HealthField: credentials.EncryptionStatus(),
 	})
 }
 

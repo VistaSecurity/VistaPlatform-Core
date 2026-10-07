@@ -232,7 +232,7 @@ func (s *DiscoveryIntegrationService) UpdateJobStatus(
 	// Same rule as device_jobs.error_message — see redactedErrorMessage.
 	var errMsg interface{}
 	if errorMessage != nil {
-		errMsg = redactErrorMessage(*errorMessage)
+		errMsg = storedErrorMessage(*errorMessage)
 	}
 
 	var query string

@@ -94,9 +94,10 @@ RUN npm run build -w frontend-v2
 # do — but note the reason is NOT go.work compatibility. This stage compiles an
 # unrelated module, so go.work's floor never applies and the build cannot fail
 # here; it just silently produces a binary on whatever patch the base ships.
-# release-core.yml overrides GO_BUILDER_IMAGE with a FLOATING tag
+# release-core.yml used to override GO_BUILDER_IMAGE with a FLOATING tag
 # (dhi.io/golang:1.26-alpine3.24-dev, or golang:1.26-alpine without Docker Hub
-# creds), so `local` meant "whatever that tag serves today" — which was still
+# creds; both now name go.work's patch), so `local` meant "whatever that tag
+# served that day" — which was still
 # 1.26.5 well after 1.26.6 shipped. That is exactly what happened: the published
 # web-ui/admin-ui images carried a Caddy binary on stdlib 1.26.5 with
 # CVE-2026-39821 and CVE-2026-46600, while every backend came out clean, because

@@ -48,7 +48,7 @@ func newDIAdminGateRouter(t *testing.T) (*gin.Engine, *sql.DB, func(uuid.UUID, s
 	t.Setenv("AUDIT_LOGGING_ENABLED", "false")
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
-	r := SetupRouter(&config.Config{JWTSecret: diAdminGateSecret}, db, db, nil)
+	r, _ := SetupRouter(&config.Config{JWTSecret: diAdminGateSecret}, db, db, nil)
 	return r, db, func(u uuid.UUID, role string) string { return testdb.SignPlatformToken(t, diAdminGateSecret, u, role) }
 }
 

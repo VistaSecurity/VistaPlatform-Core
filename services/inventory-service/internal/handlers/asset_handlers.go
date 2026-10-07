@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
@@ -656,9 +657,10 @@ func (h *AssetHandler) Health(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":  "healthy",
-		"service": "inventory-service",
-		"version": version.Get(),
+		"status":                "healthy",
+		"service":               "inventory-service",
+		"version":               version.Get(),
+		credentials.HealthField: credentials.EncryptionStatus(),
 	})
 }
 

@@ -8,8 +8,13 @@ package handlers
 // normal platform session (platform_access_token) and lands the admin in the UI.
 //
 // OIDC is done manually (no oauth2 dep in admin-service): code→token POST, then a
-// userinfo GET. State is carried in a short-lived Lax cookie so it survives the
-// IdP's top-level redirect back to the callback.
+// userinfo GET. The attempt is held by shared/security/ssostate (the same
+// mechanism as tenant SSO and social sign-in): a single-use server-side record
+// (Redis; in-process when the service runs without one) carrying the PKCE
+// code_verifier and the hash of a browser-binding value, which rides in a
+// short-lived HttpOnly SameSite=Lax cookie scoped to the callback path — Lax so
+// it survives the IdP's top-level redirect back. The callback refuses a browser
+// that does not present the binding, before the code is exchanged.
 //
 // Two further gates sit between the userinfo response and the session:
 //
@@ -42,9 +47,7 @@ package handlers
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,6 +63,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 	"github.com/vistasecurity/vistaplatform/shared/security/ssoclaims"
+	"github.com/vistasecurity/vistaplatform/shared/security/ssostate"
 )
 
 // staffSSOSuperAdminRole is the seeded platform role that holds every platform
@@ -176,10 +180,20 @@ func staffSSOEmailVerification(claim interface{}, providerType, email, authURL, 
 	return staffEmailVerifiedByDomain, ""
 }
 
-func staffStateToken() string {
-	b := make([]byte, 24)
-	_, _ = rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
+// staffStateKeyPrefix keys staff SSO attempts in the state store.
+const staffStateKeyPrefix = "admin:sso:state:"
+
+// staffBindingCookieName is the browser-binding cookie of a staff SSO attempt.
+const staffBindingCookieName = "admin_sso_binding"
+
+// staffBindingCookie is scoped to the provider's callback path on the host the
+// request arrived on (host-only: the callback is built from the same host).
+func staffBindingCookie(c *gin.Context, provider string) ssostate.Cookie {
+	return ssostate.Cookie{
+		Name:   staffBindingCookieName,
+		Path:   ssostate.CallbackPath(adminCallbackRedirectURI(c, provider)),
+		Secure: requestIsHTTPS(c),
+	}
 }
 
 func requestIsHTTPS(c *gin.Context) bool {
@@ -235,7 +249,7 @@ func ListStaffSsoProviders(db *sql.DB) gin.HandlerFunc {
 }
 
 // StaffSsoAuthorize handles GET /admin/sso/:provider/authorize (public).
-func StaffSsoAuthorize(db *sql.DB) gin.HandlerFunc {
+func StaffSsoAuthorize(db *sql.DB, store ssostate.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		providerType := c.Param("provider")
 		var clientID, authURL, scopes string
@@ -247,33 +261,50 @@ func StaffSsoAuthorize(db *sql.DB) gin.HandlerFunc {
 			c.Redirect(http.StatusFound, "/login?error=sso_unavailable")
 			return
 		}
-		state := staffStateToken()
-		http.SetCookie(c.Writer, &http.Cookie{
-			Name: "admin_sso_state", Value: state, Path: "/", MaxAge: 600,
-			HttpOnly: true, Secure: requestIsHTTPS(c), SameSite: http.SameSiteLaxMode,
-		})
+		attempt, err := ssostate.Begin(c.Request.Context(), store, staffStateKeyPrefix,
+			ssostate.Record{Data: map[string]string{"provider_type": providerType}})
+		if err != nil {
+			c.Redirect(http.StatusFound, "/login?error=sso_unavailable")
+			return
+		}
+		staffBindingCookie(c, providerType).Set(c.Writer, attempt.Binding)
 		q := url.Values{}
 		q.Set("client_id", clientID)
 		q.Set("redirect_uri", adminCallbackRedirectURI(c, providerType))
 		q.Set("response_type", "code")
 		q.Set("scope", scopes)
-		q.Set("state", state)
+		q.Set("state", attempt.State)
+		q.Set("code_challenge", attempt.CodeChallenge)
+		q.Set("code_challenge_method", ssostate.CodeChallengeMethod)
 		c.Redirect(http.StatusFound, authURL+"?"+q.Encode())
 	}
 }
 
 // StaffSsoCallback handles GET /admin/sso/:provider/callback (public).
-func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.PlatformRefreshTokenService) gin.HandlerFunc {
+func StaffSsoCallback(db *sql.DB, store ssostate.Store, jwtSecret string, refreshTokenService *auth.PlatformRefreshTokenService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		providerType := c.Param("provider")
 
-		// CSRF: the state query param must match the cookie set at authorize.
-		stateCookie, _ := c.Cookie("admin_sso_state")
-		if stateCookie == "" || c.Query("state") != stateCookie {
+		// Login CSRF: the state must name a live, unused attempt (consumed
+		// here) started in THIS browser — the binding cookie set at authorize.
+		// Checked before anything else, in particular before the code is
+		// exchanged. The cookie is expired whatever the outcome.
+		cookie := staffBindingCookie(c, providerType)
+		binding := cookie.Read(c.Request)
+		cookie.Clear(c.Writer)
+		rec, err := ssostate.Finish(c.Request.Context(), store, staffStateKeyPrefix, c.Query("state"), binding)
+		if err != nil {
+			if ssostate.IsRefusal(err) {
+				c.Redirect(http.StatusFound, "/login?error=sso_state")
+			} else {
+				c.Redirect(http.StatusFound, "/login?error=sso_unavailable")
+			}
+			return
+		}
+		if rec.Data["provider_type"] != providerType {
 			c.Redirect(http.StatusFound, "/login?error=sso_state")
 			return
 		}
-		http.SetCookie(c.Writer, &http.Cookie{Name: "admin_sso_state", Value: "", Path: "/", MaxAge: -1})
 		code := c.Query("code")
 		if code == "" {
 			c.Redirect(http.StatusFound, "/login?error=sso_no_code")
@@ -298,6 +329,7 @@ func StaffSsoCallback(db *sql.DB, jwtSecret string, refreshTokenService *auth.Pl
 		form.Set("redirect_uri", adminCallbackRedirectURI(c, providerType))
 		form.Set("client_id", clientID)
 		form.Set("client_secret", decryptProviderSecret(secretEnc))
+		form.Set("code_verifier", rec.CodeVerifier)
 		tokResp, err := staffSSOHTTPClient.PostForm(tokenURL, form)
 		if err != nil {
 			c.Redirect(http.StatusFound, "/login?error=sso_exchange")

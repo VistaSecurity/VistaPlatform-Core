@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 // The Active Scan dialog — what Discovery → Active Scan did, now for a
 // selection: Run from reaches the request, the outside-your-networks question
-// is asked, and "Scan anyway" resends ONLY the assets it asked about. The
-// retired page resent every asset, including ones a partial first pass had
-// already dispatched (C.4).
+// is asked, and "Scan anyway" resends exactly what the answer says is still to
+// be done. The retired page resent every asset, including ones a partial first
+// pass had already dispatched (C.4); the first fix then resent only the held
+// asset, which silently dropped the rest of a request the server had asked
+// about BEFORE running any of it.
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -26,12 +28,25 @@ import type { AssetSelection } from './asset-selection';
 import type { ActiveScanResponse } from '../discovery/active-scan-run-from';
 
 const STARTED = { data: { message: 'Active scan started', job_id: 'job-1', count: 1, jobs: [{ job_id: 'job-1', executor: 'platform', count: 1 }], skipped: [] }, response: { ok: true, status: 200 } };
-// Two of three assets dispatched before the third was asked about.
+const EXTERNAL = { target: '93.184.216.34', addresses: ['93.184.216.34'], asset_id: 'asset-ext', asset_name: 'partner-portal' };
+const DETAILS = '1 asset(s) are outside your registered networks (partner-portal); confirm to scan them';
+// The usual question: asked BEFORE anything ran, so nothing was dispatched and
+// every asset of the request is still pending — the two that need no
+// confirmation as well as the one that does.
+const ASK_BEFORE_ANYTHING = {
+  error: {
+    error: 'external_targets_unconfirmed', details: DETAILS, external_targets: [EXTERNAL],
+    pending_asset_ids: ['asset-1', 'asset-2', 'asset-ext'],
+    job_id: '', count: 0, jobs: [], skipped: [],
+  },
+  response: { ok: false, status: 422 },
+};
+// The late question: two of three assets were dispatched before the third was
+// asked about, so only the held one is still pending.
 const ASK_AFTER_PARTIAL = {
   error: {
-    error: 'external_targets_unconfirmed',
-    details: '1 asset(s) are outside your registered networks (partner-portal); confirm to scan them',
-    external_targets: [{ target: '93.184.216.34', addresses: ['93.184.216.34'], asset_id: 'asset-ext', asset_name: 'partner-portal' }],
+    error: 'external_targets_unconfirmed', details: DETAILS, external_targets: [EXTERNAL],
+    pending_asset_ids: ['asset-ext'],
     job_id: 'job-0', count: 2, jobs: [{ job_id: 'job-0', executor: 'platform', count: 2 }], skipped: [],
   },
   response: { ok: false, status: 422 },
@@ -77,7 +92,23 @@ it('sends a query selection with its confirmed count and the executor', async ()
   expect(onClose).toHaveBeenCalled();
 });
 
-it('asks about the external asset, keeps the jobs that did start, and resends ONLY the asked-about asset', async () => {
+it('asked before anything ran: "Scan anyway" resends the WHOLE request, so the assets that need no confirmation are not dropped', async () => {
+  mocks.post.mockResolvedValueOnce(ASK_BEFORE_ANYTHING).mockResolvedValueOnce(STARTED);
+  await render({ kind: 'ids', ids: new Set(['asset-1', 'asset-2', 'asset-ext']) });
+  await click(/^Scan 3 assets$/);
+  await vi.waitFor(() => expect(host.querySelector('[role="alertdialog"]')).not.toBeNull());
+  // The two waiting assets are named to the person, not sent in silence.
+  expect(host.textContent).toContain('2 assets from your selection have not been scanned yet');
+  expect(onStarted).not.toHaveBeenCalled();
+
+  await click(/^Scan anyway$/);
+  await vi.waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(2));
+  const second = sent(1) as { asset_ids: string[]; external_targets_confirmed: boolean };
+  expect([...second.asset_ids].sort()).toEqual(['asset-1', 'asset-2', 'asset-ext']);
+  expect(second.external_targets_confirmed).toBe(true);
+});
+
+it('asks about the external asset, keeps the jobs that did start, and resends ONLY what is still pending', async () => {
   mocks.post.mockResolvedValueOnce(ASK_AFTER_PARTIAL).mockResolvedValueOnce(STARTED);
   await render({ kind: 'ids', ids: new Set(['asset-1', 'asset-2', 'asset-ext']) });
   await click(/^Scan 3 assets$/);
@@ -146,6 +177,10 @@ it('offers Auto and the tenant sensors once they load, and sends the named senso
 
 it('builds bodies and confirmation selections from the parts', () => {
   expect(scanBody({ kind: 'ids', ids: new Set(['a']) }, 'auto', false)).toEqual({ asset_ids: ['a'], run_from: 'auto' });
-  expect(confirmSelection([{ target: 't', addresses: [], asset_id: 'x' }, { target: 'u', addresses: [] }])).toEqual({ kind: 'ids', ids: new Set(['x']) });
-  expect(confirmSelection([{ target: 'u', addresses: [] }])).toEqual({ kind: 'none' });
+  const targets = [{ target: 't', addresses: [], asset_id: 'x' }, { target: 'u', addresses: [] }];
+  // What the server says is pending wins over the held assets...
+  expect(confirmSelection({ targets, pending: ['x', 'y'] })).toEqual({ kind: 'ids', ids: new Set(['x', 'y']) });
+  // ...and an answer that names none (an older server) falls back to the held ones.
+  expect(confirmSelection({ targets })).toEqual({ kind: 'ids', ids: new Set(['x']) });
+  expect(confirmSelection({ targets: [{ target: 'u', addresses: [] }] })).toEqual({ kind: 'none' });
 });

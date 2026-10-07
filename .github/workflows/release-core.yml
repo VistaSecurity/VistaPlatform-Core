@@ -53,7 +53,8 @@ jobs:
   # private working tree it is exported from. Building Core there would publish
   # a second, confusing image line under the wrong owner. Rather than hard-code
   # a repository name (which breaks the day anything is renamed), detect what
-  # kind of tree this is: Core is precisely the tree with no services/*/ee.
+  # kind of tree this is: Core is precisely the tree with no services/*/ee and
+  # no shared/*/ee (the same two roots the exporter strips ee/ from).
   guard:
     runs-on: ubuntu-latest
     # Reads the tree and nothing else. Without this it inherits the workflow's
@@ -70,22 +71,29 @@ jobs:
           ref: ${{ env.RELEASE_REF }}
       - id: check
         run: |
-          if compgen -G "services/*/ee" > /dev/null; then
-            echo "This tree contains services/*/ee — it is not the Core tree. Skipping."
+          if compgen -G "services/*/ee" > /dev/null || compgen -G "shared/*/ee" > /dev/null; then
+            echo "This tree contains services/*/ee or shared/*/ee — it is not the Core tree. Skipping."
             echo "is_core=false" >> "$GITHUB_OUTPUT"
           else
             echo "is_core=true" >> "$GITHUB_OUTPUT"
           fi
           VERSION="${RELEASE_REF}"
-          case "$VERSION" in
-            v*.*.*) ;;
-            *) echo "::error::'$VERSION' is not a vX.Y.Z tag"; exit 1 ;;
-          esac
+          # A regex, not the `v*.*.*` glob it replaces: git refnames may carry
+          # `$ ( ) ; |` and backticks, so `v1.0.0$(id)` satisfied the glob, and
+          # this value feeds every downstream job (checkout refs, make, gh). It
+          # is validated once, here, and still only ever reaches a script
+          # through env:. The optional suffix admits release candidates.
+          TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
+          if [[ ! "$VERSION" =~ $TAG_RE ]]; then
+            echo "::error::'${VERSION}' is not a vX.Y.Z or vX.Y.Z-<suffix> tag"
+            exit 1
+          fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
           # RELEASE CANDIDATES. A prerelease is any version carrying a `-`
-          # suffix — v1.0.0-rc.1. The tag glob above already matches it
-          # (`v*.*.*` is anchored and `*` spans the suffix), which is why an RC
+          # suffix — v1.0.0-rc.1. The trigger glob already matches it
+          # (`v*.*.*` is anchored and `*` spans the suffix), and TAG_RE above
+          # admits the suffix, which is why an RC
           # needs no new trigger; what it needs is for everything downstream to
           # stop treating it as final. Three consequences, all handled below and
           # all pinned by scripts/test-release-tag-split.mjs:
@@ -120,6 +128,10 @@ jobs:
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Repository variable. Set to `true` only to knowingly publish the
+      # official images on public library bases (no DHI) — see "Choose base
+      # images".
+      ALLOW_PUBLIC_BASES: ${{ vars.ALLOW_PUBLIC_BASES }}
     strategy:
       fail-fast: false
       matrix:
@@ -167,19 +179,51 @@ jobs:
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         run: echo "$DOCKERHUB_TOKEN" | docker login dhi.io -u "$DOCKERHUB_USERNAME" --password-stdin
 
+      #
+      # The Go builder is the EXACT go.work patch on both paths (Critical Rule
+      # 1), derived through scripts/lib/go-toolchain.sh — the same derivation
+      # the Makefile and the Dockerfiles' GOTOOLCHAIN pin follow — not a
+      # hand-copied version. A floating `1.26` tag served whatever patch the
+      # registry had that day (it lagged a security release once).
+      #
+      # Fail-closed in the official repository: without credentials the
+      # fallback used to switch silently to stock bases, so a missing secret
+      # would have published the official images on a different base line
+      # than the one we describe. Elsewhere (a fork rebuilding from source)
+      # the fallback stays, but says so in the run summary.
       - name: Choose base images
         id: bases
+        env:
+          IMAGE_NAME: ${{ matrix.image.name }}
         run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source scripts/lib/go-toolchain.sh
+          GO_PIN="$(go_toolchain_pin .)"
+          GO_PATCH="${GO_PIN#go}"
+          if [[ ! "$GO_PATCH" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::cannot derive the exact Go patch from go.work (got '${GO_PIN}')"
+            exit 1
+          fi
           if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
-            echo "go=dhi.io/golang:1.26-alpine3.24-dev"    >> "$GITHUB_OUTPUT"
-            echo "runtime=dhi.io/alpine-base:3.24-dev"     >> "$GITHUB_OUTPUT"
-            echo "node=dhi.io/node:24-alpine3.24-dev"      >> "$GITHUB_OUTPUT"
-            echo "Building from Docker Hardened Images (dhi.io)"
+            {
+              echo "go=dhi.io/golang:${GO_PATCH}-alpine3.24-dev"
+              echo "runtime=dhi.io/alpine-base:3.24-dev"
+              echo "node=dhi.io/node:24-alpine3.24-dev"
+            } >> "$GITHUB_OUTPUT"
+            echo "Building from Docker Hardened Images (dhi.io), Go ${GO_PATCH}"
           else
-            echo "go=golang:1.26-alpine"                   >> "$GITHUB_OUTPUT"
-            echo "runtime=alpine:3.24.2"                   >> "$GITHUB_OUTPUT"
-            echo "node=node:24-alpine"                     >> "$GITHUB_OUTPUT"
-            echo "No Docker Hub credentials — building from public library images"
+            if [ "${GITHUB_REPOSITORY,,}" = "vistasecurity/vistaplatform-core" ] && [ "${ALLOW_PUBLIC_BASES:-}" != "true" ]; then
+              echo "::error::No Docker Hub credentials: refusing to publish the official images on public library bases instead of Docker Hardened Images. Restore DOCKERHUB_USERNAME/DOCKERHUB_TOKEN, or set the repository variable ALLOW_PUBLIC_BASES=true to publish on public bases knowingly."
+              exit 1
+            fi
+            {
+              echo "go=golang:${GO_PATCH}-alpine"
+              echo "runtime=alpine:3.24.2"
+              echo "node=node:24-alpine"
+            } >> "$GITHUB_OUTPUT"
+            echo "::warning::No Docker Hub credentials — building from public library images (not DHI), Go ${GO_PATCH}"
+            echo "### ⚠️ ${IMAGE_NAME}: built on public library base images (not Docker Hardened Images)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       # The version tag always; `:latest` only for a real release.
@@ -298,11 +342,13 @@ jobs:
         run: scripts/stage-chart-sql.sh
 
       - name: Stamp the version from the tag
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
         run: |
-          V="${{ needs.guard.outputs.version }}"; V="${V#v}"
+          V="${VERSION#v}"
           helm show chart charts/vistaplatform >/dev/null
           sed -i "s/^version:.*/version: ${V}/"    charts/vistaplatform/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${{ needs.guard.outputs.version }}\"/" charts/vistaplatform/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/vistaplatform/Chart.yaml
 
       - name: Package and push
         id: push
@@ -396,7 +442,10 @@ jobs:
       # AGENT_VERSION stamps main.Version via -ldflags so a shipped binary
       # reports the release tag instead of the unstamped default "dev".
       - name: Build
-        run: make ${{ matrix.target }} AGENT_VERSION=${{ needs.guard.outputs.version }}
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: make "$TARGET" AGENT_VERSION="$VERSION"
 
       # Unquoted on purpose: the device-agent entry is a glob covering all five
       # of its platforms from one job.
@@ -469,9 +518,11 @@ jobs:
       # single naming choke point: SHA256SUMS is generated after it, so the
       # sums, the signature, and the release all carry the versioned names.
       - name: Checksums
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
         run: |
           set -euo pipefail
-          V="${{ needs.guard.outputs.version }}"
+          V="${VERSION}"
           mkdir -p dist
           find staged -type f | while read -r f; do
             b=$(basename "$f")
@@ -528,9 +579,12 @@ jobs:
       # working against a tree whose CHANGELOG was written by hand, instead of
       # silently degrading a release candidate's notes to a bare pointer.
       - name: Release notes
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          PRERELEASE: ${{ needs.guard.outputs.prerelease }}
         run: |
           set -euo pipefail
-          V="${{ needs.guard.outputs.version }}"; V="${V#v}"
+          V="${VERSION#v}"
           BASE="${V%%-*}"
           section() {
             awk -v v="$1" '$0 ~ "^## \\[" v "\\]" {f=1;next} f && /^## \[/ {exit} f' CHANGELOG.md
@@ -602,7 +656,7 @@ jobs:
             echo "::warning::the CHANGELOG section exceeded ${LIMIT} bytes; the release notes were truncated"
           fi
 
-          if [ "${{ needs.guard.outputs.prerelease }}" = 'true' ]; then
+          if [ "$PRERELEASE" = 'true' ]; then
             # Prepended, not appended: a reader who lands here from a search
             # result needs to know what this is before reading the notes.
             { printf '> **Release candidate.** Published through the real pipeline for\n'
@@ -636,7 +690,14 @@ jobs:
             # printf renders \\ as one backslash and \n as the newline. The
             # previous \\\n reached printf as \\ + n — a literal "\n" in the
             # release body, which broke the command when pasted.
-            printf "  --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-core.yml@.*' \\\\\n"
+            # The identity is printed through %s, never as part of the format:
+            # it is full of backslashes (an anchored, escaped regexp), which a
+            # printf FORMAT would interpret. Anchored so it accepts only this
+            # repository's release-core.yml run from a release tag — the
+            # unanchored `…@.*` accepted any ref, branches included.
+            REPO_RE=$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/[.]/\\./g')
+            IDENTITY_RE="^https://github\\.com/${REPO_RE}/\\.github/workflows/release-core\\.yml@refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[A-Za-z0-9.]+)?\$"
+            printf "  --certificate-identity-regexp '%s' \\\\\n" "$IDENTITY_RE"
             printf "  --certificate-oidc-issuer https://token.actions.githubusercontent.com\n"
             printf 'sha256sum -c SHA256SUMS\n```\n'
           } >> notes.md
@@ -645,9 +706,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRERELEASE: ${{ needs.guard.outputs.prerelease }}
+          VERSION: ${{ needs.guard.outputs.version }}
         run: |
           set -euo pipefail
-          TAG="${{ needs.guard.outputs.version }}"
+          TAG="${VERSION}"
           FLAGS=()
           if [ "$PRERELEASE" = 'true' ]; then
             # --prerelease marks it; --latest=false is the belt-and-braces half.

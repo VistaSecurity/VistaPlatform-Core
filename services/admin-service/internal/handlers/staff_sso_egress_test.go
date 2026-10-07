@@ -45,10 +45,11 @@ func runStaffCallback(t *testing.T, tokenURL, userinfoURL string, afterProvider 
 		afterProvider(mock)
 	}
 
+	store, state, binding := staffAttempt(t, "google")
 	r := gin.New()
-	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, "staff-sso-egress-test-secret", adminauth.NewPlatformRefreshTokenService(db)))
-	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state=s&code=c", nil)
-	req.AddCookie(&http.Cookie{Name: "admin_sso_state", Value: "s"})
+	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, store, "staff-sso-egress-test-secret", adminauth.NewPlatformRefreshTokenService(db)))
+	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state="+state+"&code=c", nil)
+	req.AddCookie(binding)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {

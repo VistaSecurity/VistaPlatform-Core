@@ -70,7 +70,8 @@ func discoveryRouter(t *testing.T, db *sql.DB) *gin.Engine {
 	// shared JWT middleware would look these random tenants up and refuse them
 	// before the permission gate.
 	t.Setenv("DATABASE_URL", "")
-	return SetupRouter(&config.Config{JWTSecret: discoveryRoutesSecret}, db, db, nil)
+	router, _ := SetupRouter(&config.Config{JWTSecret: discoveryRoutesSecret}, db, db, nil)
+	return router
 }
 
 // routeRequest sends one request through the real router with a sqlmock DB

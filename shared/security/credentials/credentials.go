@@ -37,26 +37,59 @@
 // Encryption is idempotent: an already-prefixed value is passed through, so a
 // read-modify-write cycle that never decrypted a field cannot double-encrypt it.
 //
-// # Dev fallback
+// # Dev fallback, and why production has none
 //
-// NewCipher("") returns a working, *disabled* Cipher (Enabled() == false) that
-// passes values through untouched, and logs once. That matches house style for
-// local development, where no master key is set. It is not a production
-// weakening: every service that uses this package passes ENCRYPTION_MASTER_KEY
-// through shared/config.RejectInsecureDefaults, which log.Fatals in production
-// on a well-known dev default, and the deployment plumbing (registry
-// required_secrets → compose ${VAR:?} → chart secrets) makes the variable
-// mandatory there.
+// Outside production NewCipher("") returns a working, *disabled* Cipher
+// (Enabled() == false) that passes values through untouched and logs a warning.
+// That matches house style for local development, where no master key is set;
+// EncryptionStatus() reports it as "disabled" so a service's /health payload
+// shows it.
+//
+// In production an empty key is an error, not a mode. Two independent layers
+// enforce it: every service that stores credentials passes ENCRYPTION_MASTER_KEY
+// through shared/config.EnforceProductionSecrets at startup (missing, shorter
+// than 32 bytes, or a well-known dev literal all stop the process), and
+// NewCipher itself refuses to hand back a pass-through Cipher when ENV is
+// production, so a store constructed lazily or outside a config loader cannot
+// quietly write plaintext either.
 package credentials
 
 import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
+	"github.com/vistasecurity/vistaplatform/shared/config"
 	"github.com/vistasecurity/vistaplatform/shared/security/encryption"
 )
+
+// MasterKeyEnv is the environment variable holding the credential-encryption
+// master key.
+const MasterKeyEnv = "ENCRYPTION_MASTER_KEY"
+
+// Values EncryptionStatus reports. They are the contract of the
+// `credential_encryption` field in service /health payloads.
+const (
+	EncryptionEnabled  = "enabled"
+	EncryptionDisabled = "disabled"
+)
+
+// HealthField is the /health payload key under which a service reports whether
+// the credentials it stores are encrypted.
+const HealthField = "credential_encryption"
+
+// EncryptionStatus reports whether this process has a credential-encryption
+// master key: EncryptionEnabled, or EncryptionDisabled when stored credentials
+// would be written as plaintext. It reads the environment on every call, so it
+// is correct for services that build their Ciphers lazily.
+func EncryptionStatus() string {
+	if os.Getenv(MasterKeyEnv) == "" {
+		return EncryptionDisabled
+	}
+	return EncryptionEnabled
+}
 
 // Prefix marks a stored value as ciphertext produced by this package. The
 // version is the *envelope* version (how the value is framed), independent of
@@ -125,16 +158,20 @@ type Cipher struct {
 // label names the store in log lines and error messages ("notification
 // channel", "integrations.auth_config"); it is operator-facing only.
 //
-// An empty masterKey yields a disabled passthrough Cipher and a warning — see
-// the package doc. A non-empty but unusable masterKey is an error, because that
-// is a misconfiguration rather than a deliberate local-dev choice.
+// An empty masterKey yields a disabled passthrough Cipher and a warning outside
+// production, and an error in production — see the package doc. A non-empty but
+// unusable masterKey is an error in every environment, because that is a
+// misconfiguration rather than a deliberate local-dev choice.
 func NewCipher(label, masterKey string, policy Policy, opts ...Option) (*Cipher, error) {
 	c := &Cipher{policy: policy, label: label}
 	for _, opt := range opts {
 		opt(c)
 	}
 	if masterKey == "" {
-		log.Printf("[credentials] WARNING: ENCRYPTION_MASTER_KEY not set — %s credentials will be stored unencrypted", label)
+		if config.IsProduction(config.GetEnv("ENV", "development")) {
+			return nil, fmt.Errorf("credentials: %s: %s is not set; refusing to store credentials unencrypted in production", label, MasterKeyEnv)
+		}
+		log.Printf("[credentials] WARNING: %s not set — CREDENTIAL ENCRYPTION IS DISABLED: %s credentials will be stored unencrypted (development only; production refuses to start this way)", MasterKeyEnv, label)
 		return c, nil
 	}
 	enc, err := encryption.NewService(masterKey)

@@ -133,7 +133,6 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     `PORT=${service.internal_port}`,
     'ENV=development',
     'GIN_MODE=release',
-    'DATABASE_URL=postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=disable',
     // Indirection, not a literal: .env holds the rotated value, and a literal
     // here would silently override it with the published placeholder for every
     // service in the generated compose file. `:?` matches docker-compose.yml's
@@ -148,6 +147,19 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     'CHART_VERSION=${CHART_VERSION:-dev}',
     'CHART_APP_VERSION=${CHART_APP_VERSION:-dev}'
   ];
+
+  // Postgres as the RLS roles, never the table owner (an owner bypasses every
+  // row-level-security policy): crypto_app for the normal request path,
+  // crypto_bypass for the annotated cross-tenant paths. The one-shot db-roles
+  // service grants them LOGIN, so services wait for it. Same split as the Helm
+  // chart's serviceRls; scripts/audit-compose-secrets.mjs holds the compose
+  // files to it.
+  if (dependencies.has('postgres')) {
+    baseEnv.push(
+      'DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable',
+      'BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable'
+    );
+  }
 
   // Services that sign OR verify HMAC service-to-service requests
   // (shared/serviceauth) need the shared secret. Registry-driven: every service
@@ -245,9 +257,14 @@ function generateDependencies(service) {
   }
   
   // Convert to depends_on format with health conditions
-  return deps.map(dep => ({
+  const out = deps.map(dep => ({
     [dep]: { condition: 'service_healthy' }
   }));
+  // db-roles is a one-shot: wait for it to finish, not to be healthy.
+  if (declared.has('postgres')) {
+    out.push({ 'db-roles': { condition: 'service_completed_successfully' } });
+  }
+  return out;
 }
 
 function getEnvVarName(serviceName) {

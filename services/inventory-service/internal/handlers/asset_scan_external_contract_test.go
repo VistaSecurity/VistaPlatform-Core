@@ -65,11 +65,15 @@ func postScan(t *testing.T, e *gin.Engine, body string) (int, []byte) {
 
 func TestContract_ScanAssets_AsksAboutAssetsOutsideTheRegisteredNetworks(t *testing.T) {
 	sv := loadSpec(t)
-	asset := uuid.New()
-	rv := &countingRevalidation{needs: &services.ExternalConfirmationError{Targets: []services.ActiveScanExternalTarget{
-		{AssetID: asset, AssetName: "partner-portal", Target: "93.184.216.34", Addresses: []string{"93.184.216.34"}},
-	}}}
-	body := `{"asset_ids":["` + asset.String() + `"],"run_from":"platform"}`
+	asset, other := uuid.New(), uuid.New()
+	// Nothing ran, so the whole request is pending, not just the held asset.
+	rv := &countingRevalidation{needs: &services.ExternalConfirmationError{
+		Targets: []services.ActiveScanExternalTarget{
+			{AssetID: asset, AssetName: "partner-portal", Target: "93.184.216.34", Addresses: []string{"93.184.216.34"}},
+		},
+		Pending: []uuid.UUID{other, asset},
+	}}
+	body := `{"asset_ids":["` + asset.String() + `","` + other.String() + `"],"run_from":"platform"}`
 	sv.assertConforms(t, "ActiveScanRequest", []byte(body))
 	code, out := postScan(t, scanEngine(rv, &stubPermissions{allow: true}), body)
 	if code != http.StatusUnprocessableEntity {
@@ -82,10 +86,16 @@ func TestContract_ScanAssets_AsksAboutAssetsOutsideTheRegisteredNetworks(t *test
 			AssetID   string `json:"asset_id"`
 			AssetName string `json:"asset_name"`
 		} `json:"external_targets"`
+		Pending []string `json:"pending_asset_ids"`
 	}
 	_ = json.Unmarshal(out, &parsed)
 	if parsed.Error != "external_targets_unconfirmed" || len(parsed.Targets) != 1 || parsed.Targets[0].AssetID != asset.String() || parsed.Targets[0].AssetName != "partner-portal" {
 		t.Fatalf("422 body does not name the asset: %s", out)
+	}
+	// What the confirmation must resend: without it a client can only guess,
+	// and guessing "the held assets" drops everything else in the request.
+	if len(parsed.Pending) != 2 || parsed.Pending[0] != other.String() || parsed.Pending[1] != asset.String() {
+		t.Fatalf("pending_asset_ids = %v, want [%s %s]; body=%s", parsed.Pending, other, asset, out)
 	}
 }
 

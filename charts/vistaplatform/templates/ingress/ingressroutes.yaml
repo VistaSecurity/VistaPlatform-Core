@@ -1837,6 +1837,202 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/audit-service/activity-logs`) || Path(`/api/v1/audit-service/activity-logs/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/audit-service/activity-logs`) || Path(`/api/v2/audit-service/activity-logs/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/audit-service/job-execution-logs/start`) || Path(`/api/v1/audit-service/job-execution-logs/start/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/audit-service/job-execution-logs/start`) || Path(`/api/v2/audit-service/job-execution-logs/start/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v1/audit-service/job-execution-logs/[^/]+/progress/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v2/audit-service/job-execution-logs/[^/]+/progress/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v1/audit-service/job-execution-logs/[^/]+/complete/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v2/audit-service/job-execution-logs/[^/]+/complete/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: audit-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/inventory-service/assets/auto-approve/agent-host`) || Path(`/api/v1/inventory-service/assets/auto-approve/agent-host/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/inventory-service/assets/auto-approve/agent-host`) || Path(`/api/v2/inventory-service/assets/auto-approve/agent-host/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/inventory-service/keys/cloud`) || Path(`/api/v1/inventory-service/keys/cloud/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/inventory-service/keys/cloud`) || Path(`/api/v2/inventory-service/keys/cloud/`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v1/inventory-service/discovery/jobs/[^/]+/import/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v2/inventory-service/discovery/jobs/[^/]+/import/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
   {{- if $tlsSecret }}
   tls:
     secretName: {{ $tlsSecret }}

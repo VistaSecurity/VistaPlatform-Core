@@ -19,6 +19,7 @@ import (
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
 	rbac "github.com/vistasecurity/vistaplatform/shared/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -167,9 +168,10 @@ func (s *Server) SetupRouter() *gin.Engine {
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "notification-service",
-			"version": version.Get(),
+			"status":                "healthy",
+			"service":               "notification-service",
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 
@@ -304,9 +306,10 @@ func (s *Server) Start(addr string) error {
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "notification-service",
-			"version": version.Get(),
+			"status":                "healthy",
+			"service":               "notification-service",
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 

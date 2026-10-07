@@ -31,6 +31,7 @@ import (
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 )
@@ -39,12 +40,26 @@ import (
 // (crypto_app) connection; bypassDB is the BYPASSRLS (crypto_bypass) connection
 // used by the agent bootstrap/auth, agent-outbound, cross-tenant admin, and
 // background-worker paths. Pre-flip both handles resolve to the same connection.
-func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) *gin.Engine {
+//
+// The second result is the route surface of the agent-mTLS passthrough
+// listener: exactly the AgentAuth routes a device agent calls once it holds
+// its client certificate. Everything else on the engine (registration, the
+// tenant API, the platform-admin routes, the HMAC /internal/ routes, /health
+// and /ready) answers 404 on that listener. TCP passthrough skips every edge
+// deny, so this list is the only thing standing between a self-signed client
+// certificate and those routes (pentest-readiness D2).
+func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) (*gin.Engine, *sharedhttp.AgentRoutes) {
 	router := gin.New()
+	agentRoutes := sharedhttp.NewAgentRoutes()
 
 	// Middleware
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
+	// Before any route: confines the agent-mTLS listener to agentRoutes (a
+	// no-op on the mesh/HTTP listener). gin copies global middleware into a
+	// route when the route is registered, so a route added above this line
+	// would be unguarded.
+	router.Use(sharedhttp.AgentListenerGuard)
 
 	// Health check endpoint
 	router.GET("/health", healthCheck)
@@ -135,14 +150,14 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		// Registered on the SAME group as the rest of the outbound surface, so
 		// it cannot be added ungated by mistake, and BEFORE the `/:id/...`
 		// routes so the static segment is matched as a static segment.
-		agentOutbound.POST("/host-inventory", handlers.NewHostInventoryHandler(db, bypassDB, newAgentHostApprover(cfg)).Submit)
+		agentRoutes.POST(agentOutbound, "/host-inventory", handlers.NewHostInventoryHandler(db, bypassDB, newAgentHostApprover(cfg)).Submit)
 
-		agentOutbound.GET("/:id/jobs", getAgentJobsHandler(db, bypassDB, redis))
-		agentOutbound.POST("/:id/results", submitAgentResultsHandler(db, bypassDB, redis))
-		agentOutbound.POST("/:id/heartbeat", agentHeartbeatHandler(db, bypassDB, redis))
+		agentRoutes.GET(agentOutbound, "/:id/jobs", getAgentJobsHandler(db, bypassDB, redis))
+		agentRoutes.POST(agentOutbound, "/:id/results", submitAgentResultsHandler(db, bypassDB, redis))
+		agentRoutes.POST(agentOutbound, "/:id/heartbeat", agentHeartbeatHandler(db, bypassDB, redis))
 		// Autonomous pre-expiry cert renewal. Under AgentAuth like the
 		// rest of the outbound surface — mirrors sensor-manager's rotate route.
-		agentOutbound.POST("/:id/certificates/rotate", rotateAgentCertificateHandler(db, bypassDB))
+		agentRoutes.POST(agentOutbound, "/:id/certificates/rotate", rotateAgentCertificateHandler(db, bypassDB))
 	}
 
 	// Apply authentication middleware to all other device interrogation routes.
@@ -319,16 +334,17 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		}
 	}
 
-	return router
+	return router, agentRoutes
 }
 
 // healthCheck returns a simple health status
 func healthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"service":   "device-interrogation-service",
-		"timestamp": gin.H{},
-		"version":   version.Get(),
+		"status":                "healthy",
+		"service":               "device-interrogation-service",
+		"timestamp":             gin.H{},
+		"version":               version.Get(),
+		credentials.HealthField: credentials.EncryptionStatus(),
 	})
 }
 

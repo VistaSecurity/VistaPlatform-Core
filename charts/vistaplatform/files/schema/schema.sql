@@ -188,6 +188,14 @@ BEGIN
             end_date
         );
         EXECUTE create_stmt;
+        -- Every partition gets RLS ENABLED with NO policy of its own (default-
+        -- deny). The parent's activity_logs_tenant_isolation policy covers every
+        -- query that names audit.activity_logs; a query that names a partition
+        -- directly consults only the partition's own policies, and without this
+        -- the blanket `GRANT ... ON ALL TABLES IN SCHEMA audit TO crypto_app`
+        -- served every tenant's rows through it. Existing partitions are
+        -- brought in line by the loop after ensure_future_partitions() below.
+        EXECUTE format('ALTER TABLE audit.%I ENABLE ROW LEVEL SECURITY', partition_name);
         RETURN partition_name;
     END IF;
 
@@ -17589,8 +17597,15 @@ CREATE POLICY tenant_alert_settings_tenant_isolation ON public.tenant_alert_sett
 -- Detector-internal score history for the compliance_score_drop alert.
 -- tenant_framework_scores keeps only the current score; this lightweight trail
 -- lets the compliance-engine score-drop scan job compare against the value
--- ~24h ago. Written and pruned only by that job (no tenant-facing API, no RLS
--- policy — every query filters by tenant_id explicitly).
+-- ~24h ago. Written, read and pruned only by that job (no tenant-facing API),
+-- inside a tenant-scoped transaction on the RLS-subject app pool.
+--
+-- Tenant-isolated like every other tenant table. It used to carry no RLS on the
+-- grounds that every query filtered by tenant_id explicitly, which left the
+-- blanket `GRANT ... ON ALL TABLES IN SCHEMA public TO crypto_app` serving every
+-- tenant's score history to any crypto_app session. Rows always belong to a
+-- real tenant (the tenants FK below), never to the platform-alert sentinel, so
+-- the plain tenant policy is the whole story.
 CREATE TABLE IF NOT EXISTS public.alert_framework_score_snapshots (
     tenant_id uuid NOT NULL,
     platform_framework_id uuid NOT NULL,
@@ -17599,6 +17614,12 @@ CREATE TABLE IF NOT EXISTS public.alert_framework_score_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_alert_framework_score_snapshots_lookup
     ON public.alert_framework_score_snapshots (tenant_id, platform_framework_id, captured_at);
+
+ALTER TABLE public.alert_framework_score_snapshots ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS alert_framework_score_snapshots_tenant_isolation ON public.alert_framework_score_snapshots;
+CREATE POLICY alert_framework_score_snapshots_tenant_isolation ON public.alert_framework_score_snapshots
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 
 
 -- Digest/batched notification delivery. Rules with frequency 'digest_*'
@@ -20804,6 +20825,42 @@ DROP FUNCTION IF EXISTS public.update_tenant_usage CASCADE;
 -- in pg_class — and it must stay ABOVE the ROLE GRANTS block so the partitions
 -- it creates are covered by the blanket `ON ALL TABLES IN SCHEMA audit` grant.
 SELECT * FROM audit.ensure_future_partitions(3);
+
+-- Partition-direct access on audit.activity_logs.
+--
+-- The same hole the assets / sensor_discoveries / crypto_implementations
+-- partitions had, closed the same way: RLS ENABLED on every partition with NO
+-- policy, which is default-deny when a partition is named directly
+-- (`SELECT ... FROM audit.activity_logs_y2026m10`). Queries that name the parent
+-- are unaffected — Postgres applies the parent's activity_logs_tenant_isolation
+-- policy to them and never consults the partition's. Measured on PG17 before
+-- this block: as crypto_app with app.tenant_id = A, 1 row through the parent
+-- and 2 (tenant B's included) through the partition. Nothing in Go names a
+-- partition for row access; audit-service's PartitionManager only runs DDL and
+-- catalog introspection (pg_class, audit.partition_info), which RLS does not
+-- touch.
+--
+-- A loop rather than a statement per partition: the dumped partitions above are
+-- a fixed set, but ensure_future_partitions() and audit-service's
+-- PartitionManager create more at run time, so an installed database carries
+-- partitions this file never names. New partitions get RLS inside
+-- create_activity_logs_partition() itself. `NOT relrowsecurity` keeps a re-apply
+-- from taking ACCESS EXCLUSIVE on every partition just to change nothing.
+DO $$
+DECLARE r record;
+BEGIN
+  IF to_regclass('audit.activity_logs') IS NOT NULL THEN
+    FOR r IN
+      SELECT i.inhrelid::regclass AS part
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+       WHERE i.inhparent = to_regclass('audit.activity_logs')
+         AND NOT c.relrowsecurity
+    LOOP
+      EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', r.part);
+    END LOOP;
+  END IF;
+END $$;
 
 
 

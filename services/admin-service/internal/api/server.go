@@ -33,11 +33,13 @@ import (
 	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	"github.com/vistasecurity/vistaplatform/shared/security/jwtkeys"
 	"github.com/vistasecurity/vistaplatform/shared/security/loginthrottle"
+	"github.com/vistasecurity/vistaplatform/shared/security/ssostate"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 )
 
 // maxAnonymousBodyBytes is the request-body ceiling on the anonymous
@@ -278,10 +280,11 @@ func (s *Server) setupRouter() {
 	// Used by load balancers and monitoring systems to check service health
 	s.router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"service":   "admin-service",
-			"status":    "healthy",
-			"timestamp": gin.H{},
-			"version":   version.Get(),
+			"service":               "admin-service",
+			"status":                "healthy",
+			"timestamp":             gin.H{},
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 
@@ -329,6 +332,17 @@ func (s *Server) setupRouter() {
 	// Sign-in throttle (Redis-backed when the cache client is up, in-process
 	// otherwise). Built here, not per request, so the in-process counters persist.
 	loginThrottle := loginthrottle.NewFromCache(s.cache, s.config.LoginRateLimit, loginthrottle.DefaultWindow)
+	// Staff SSO attempts (state, PKCE verifier, browser-binding hash) live in
+	// Redis, so any replica can finish an attempt another started. Without
+	// Redis they are held in process: correct on one replica, and on several
+	// an attempt finished elsewhere is refused (fails closed), never accepted.
+	var staffSSOStore ssostate.Store
+	if s.cache != nil {
+		staffSSOStore = ssostate.NewRedisStore(s.cache.Redis())
+	} else {
+		log.Printf("Warning: no Redis; staff SSO sign-in attempts are held in process (single replica only)")
+		staffSSOStore = ssostate.NewMemoryStore()
+	}
 	{
 		// Authentication routes - Handle platform admin login and token refresh
 		// These endpoints use platform user tables with same security features as tenant users
@@ -357,8 +371,8 @@ func (s *Server) setupRouter() {
 		staffSSO := adminGroup.Group("/admin/sso")
 		{
 			staffSSO.GET("/providers", handlers.ListStaffSsoProviders(s.db))
-			staffSSO.GET("/:provider/authorize", loginThrottle.Middleware(false), handlers.StaffSsoAuthorize(s.db))
-			staffSSO.GET("/:provider/callback", handlers.StaffSsoCallback(s.db, s.config.JWTSecret, s.refreshTokenService))
+			staffSSO.GET("/:provider/authorize", loginThrottle.Middleware(false), handlers.StaffSsoAuthorize(s.db, staffSSOStore))
+			staffSSO.GET("/:provider/callback", handlers.StaffSsoCallback(s.db, staffSSOStore, s.config.JWTSecret, s.refreshTokenService))
 		}
 
 		// Authenticated logout — revokes refresh tokens server-side and clears cookies.
@@ -875,10 +889,11 @@ func (s *Server) Start() error {
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"service":   "admin-service",
-			"status":    "healthy",
-			"timestamp": gin.H{},
-			"version":   version.Get(),
+			"service":               "admin-service",
+			"status":                "healthy",
+			"timestamp":             gin.H{},
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 

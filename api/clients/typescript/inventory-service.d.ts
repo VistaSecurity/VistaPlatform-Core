@@ -6272,12 +6272,14 @@ export interface components {
             asset_id: string;
             asset_name: string;
         };
-        /** @description 422 from POST /infrastructure-assets/scan: some assets are outside the tenant's registered networks ( W5.13b). Nothing was stamped or dispatched for them; resend with `external_targets_confirmed: true` to scan them. `jobs`/`skipped` report any other assets in the request that were already dispatched or skipped (normally empty — the question is asked before anything runs). */
+        /** @description 422 from POST /infrastructure-assets/scan: some assets are outside the tenant's registered networks ( W5.13b). Nothing was stamped or dispatched for them; resend with `external_targets_confirmed: true` to scan them. `jobs`/`skipped` report any other assets in the request that were already dispatched or skipped (normally empty — the question is asked before anything runs). `pending_asset_ids` is what the confirmation must resend: every asset of the request that was neither dispatched nor skipped. Normally that is the WHOLE request, since nothing ran — the assets that need no confirmation are still waiting, and resending only `external_targets` would drop them. After a late partial dispatch it is only the held assets, and resending the whole request would scan the dispatched ones twice. */
         ActiveScanExternalTargetsError: {
             /** @enum {string} */
             error: "external_targets_unconfirmed";
             details: string;
             external_targets: components["schemas"]["ActiveScanExternalTarget"][];
+            /** @description The assets a confirmed resend must carry. */
+            pending_asset_ids: string[];
             job_id: string;
             count: number;
             jobs: components["schemas"]["ActiveScanJob"][];

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 // NewAgentMTLSServer creates an HTTP server for the device-agent / sensor
@@ -29,7 +31,17 @@ import (
 // against the per-tenant CA returned at registration (ServerCACert); see the
 // deployment notes / PR for the server-trust follow-up needed before agents
 // will trust this listener's cert end-to-end.
-func NewAgentMTLSServer(serverCertPath, serverKeyPath string, handler http.Handler) (*http.Server, error) {
+//
+// The listener serves ONLY routes: the engine must carry AgentListenerGuard
+// (installed before any route), and every other route on the engine answers
+// 404 here. TCP passthrough skips every edge deny, so this listener must not
+// expose the admin plane, the internal routes or the tenant API (see
+// agent_listener.go).
+func NewAgentMTLSServer(serverCertPath, serverKeyPath string, engine *gin.Engine, routes *AgentRoutes) (*http.Server, error) {
+	handler, err := AgentListenerHandler(engine, routes)
+	if err != nil {
+		return nil, err
+	}
 	serverCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load agent-mTLS server certificate: %w", err)

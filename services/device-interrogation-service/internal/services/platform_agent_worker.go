@@ -557,7 +557,11 @@ func (w *PlatformAgentWorker) executeDeviceInterrogation(ctx context.Context, jo
 	// Hand that discovery job forward. Without this the result processor cannot
 	// tell that the results are already materialized and creates a second,
 	// never-executed discovery job — see RecordDiscoveryJob.
-	if err := w.jobQueue.RecordDiscoveryJob(ctx, job.ID, discoveryJobID); err != nil {
+	// On its own budget: a run that spent the job's deadline collecting has
+	// still written its rows, and losing this stamp strands them (see above).
+	stampCtx, cancelStamp := finalizeContext(ctx, finalizeBudget)
+	defer cancelStamp()
+	if err := w.jobQueue.RecordDiscoveryJob(stampCtx, job.ID, discoveryJobID); err != nil {
 		if _, refresh := job.Parameters["identity_refresh_request_id"]; refresh {
 			return nil, err
 		}

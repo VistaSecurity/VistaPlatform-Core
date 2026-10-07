@@ -231,6 +231,7 @@ func TestLegacyUnprefixedCiphertext(t *testing.T) {
 }
 
 func TestDisabledCipherIsPassthrough(t *testing.T) {
+	t.Setenv("ENV", "development")
 	c, err := NewCipher("dev", "", NotificationChannelPolicy)
 	if err != nil {
 		t.Fatalf("NewCipher with empty key must not error: %v", err)
@@ -367,5 +368,42 @@ func TestPoliciesCoverKnownCredentialNames(t *testing.T) {
 		if !nh[k] {
 			t.Errorf("NotificationChannelPolicy is missing %q", k)
 		}
+	}
+}
+
+// Production has no pass-through mode: an empty master key must be an error so a
+// store built lazily, outside any config loader, cannot write plaintext.
+func TestNewCipherRefusesEmptyKeyInProduction(t *testing.T) {
+	t.Setenv("ENV", "production")
+	c, err := NewCipher("device credentials", "", NotificationChannelPolicy)
+	if err == nil {
+		t.Fatalf("NewCipher with no key in production must fail, got cipher enabled=%v", c.Enabled())
+	}
+	if c != nil {
+		t.Fatalf("a failed NewCipher must not return a usable cipher: %+v", c)
+	}
+	for _, want := range []string{"ENCRYPTION_MASTER_KEY", "device credentials", "production"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q should mention %q", err, want)
+		}
+	}
+	// A real key still works in production.
+	if _, err := NewCipher("device credentials", testKey, NotificationChannelPolicy); err != nil {
+		t.Fatalf("NewCipher with a key in production: %v", err)
+	}
+}
+
+// EncryptionStatus feeds the credential_encryption field of /health.
+func TestEncryptionStatus(t *testing.T) {
+	t.Setenv(MasterKeyEnv, "")
+	if got := EncryptionStatus(); got != "disabled" {
+		t.Fatalf("no key: EncryptionStatus() = %q, want disabled", got)
+	}
+	t.Setenv(MasterKeyEnv, testKey)
+	if got := EncryptionStatus(); got != "enabled" {
+		t.Fatalf("with key: EncryptionStatus() = %q, want enabled", got)
+	}
+	if HealthField != "credential_encryption" {
+		t.Fatalf("HealthField = %q; the /health payload contract is credential_encryption", HealthField)
 	}
 }

@@ -59,15 +59,16 @@ type Config struct {
 }
 
 func Load() *Config {
-	// Reject well-known dev defaults in production (shared guard across services).
+	// Production refuses to start with a missing or weak platform secret and
+	// rejects the well-known dev literals (shared guard across services).
 	// Environment is keyed off ENV — the var the Helm chart sets (configmap-app.yaml)
 	// and the one the other backend services read. admin-service previously read
 	// ENVIRONMENT, which the chart never emits, so every chart deployment silently
 	// ran as "development" and these production guards never fired.
-	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET":            sharedconfig.GetEnv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
-		"INTERNAL_AUTH_SECRET":  sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", "dev-internal-auth-secret-change-in-production"),
-		"ENCRYPTION_MASTER_KEY": sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", "change-this-master-key-in-production"),
+	// admin-service is a token ISSUER (platform tokens): the chart keeps JWT_SECRET
+	// in this pod after the ES256 cutover, so it is required here.
+	sharedconfig.EnforceProductionSecrets(sharedconfig.GetEnv("ENV", "development"), sharedconfig.SecretSpec{
+		Required: []string{"INTERNAL_AUTH_SECRET", "ENCRYPTION_MASTER_KEY", "JWT_SECRET"},
 	})
 
 	return &Config{

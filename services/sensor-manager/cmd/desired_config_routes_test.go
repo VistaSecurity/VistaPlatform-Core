@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// The desired-state routes are registered inside main(), which cannot be called
-// from a test, so this reads the source — the same technique frontend-v2 uses
+// The desired-state routes are registered in setupRouter (router.go); this
+// reads the source — the same technique frontend-v2 uses
 // for reachability. It is a weaker check than driving a router, and it is here
 // because the alternative is no check at all: a handler nothing routes to
 // passes every test it has and answers no request.
@@ -18,9 +18,9 @@ import (
 // of this test failed against correctly-registered routes for that reason —
 // a guard that cries wolf gets deleted as fast as one that never fires.
 func TestDesiredConfigRoutesAreRegistered(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	src, err := os.ReadFile("router.go")
 	if err != nil {
-		t.Fatalf("reading main.go: %v", err)
+		t.Fatalf("reading router.go: %v", err)
 	}
 	main := string(src)
 

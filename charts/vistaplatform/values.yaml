@@ -38,7 +38,7 @@ verification:
   #   Commercial — stamped at package time by release-customer.yml
   # Defaulting to the Core identity keeps the private org name out of the
   # public tree; the export's leak gate enforces that it stays out.
-  certificateIdentityRegexp: "https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*"
+  certificateIdentityRegexp: '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
 
 # Customer-supplied secrets. Either provide values inline (NOT recommended for
 # production), or pre-apply a Secret matching platform.existingSecretName and
@@ -959,8 +959,8 @@ jwtSigning:
   # secret.
   #
   # Safe to enable on a running release: tokens minted before the switch keep
-  # verifying for their full TTL, because verifiers accept BOTH generations for
-  # as long as platform.jwtSecret is still set. Nobody is logged out.
+  # verifying for their full TTL, because verifiers accept BOTH generations
+  # until acceptLegacyHmac (below) closes the window. Nobody is logged out.
   enabled: true
 
   # -- URL the verifying services poll for the issuer's public keys.
@@ -990,15 +990,41 @@ jwtSigning:
   # log everyone out.
   existingPrivateKeyPEM: ""
 
-  # -- Keep accepting HS256 tokens signed with the legacy shared secret.
+  # -- Keep accepting HS256 tokens signed with the legacy shared secret:
+  # auto (default), true or false.
   #
-  # Required during the migration: sessions minted before the switch are HS256
-  # and must keep working until they expire. Set to false one max-token-TTL
-  # after enabling (the refresh-token lifetime, 7 days by default) — THAT is the
-  # step that finally makes a leaked platform.jwtSecret worthless. Until then
-  # the shared secret is still a forgery key, and this change has only reduced
-  # the number of pods holding it from ~17 to 2.
-  acceptLegacyHmac: true
+  # While this is on, JWT_SECRET is injected into every service that verifies
+  # tokens, so any one of them can forge a session for any user and tenant.
+  # Turning it off removes the secret from all but the two issuers (auth-service
+  # and admin-service) — THAT is what finally makes a leaked platform.jwtSecret
+  # worthless. It only has to stay on while a token signed before ES256 was
+  # enabled could still be valid.
+  #
+  # auto works that out from the signing Secret (<fullname>-jwt-signing)
+  # on every install and upgrade:
+  #   - fresh install: OFF from the start; no HS256 token ever exists.
+  #   - the upgrade that first enables signing: ON.
+  #   - later upgrades: ON until the Secret is legacyHmacWindowHours old, then
+  #     OFF. The window closes on the first helm upgrade after that — nothing
+  #     happens between upgrades.
+  #   - jwtSigning.enabled=false: always ON (HS256 is the only scheme).
+  # helm install/upgrade NOTES print which way it went and why.
+  #
+  # GitOps / `helm template`: auto needs `lookup`, which returns nothing when no
+  # cluster is attached (helm template, client-side --dry-run, Argo CD). auto
+  # then keeps acceptance ON rather than guess. Pin this value instead: true
+  # while ES256 is younger than legacyHmacWindowHours, false after.
+  #
+  # Re-enabling signing after running with jwtSigning.enabled=false for a while:
+  # the old Secret is kept and already "old", so pin true for one window.
+  acceptLegacyHmac: auto
+
+  # -- How long after ES256 signing is switched on (in hours) auto keeps
+  # accepting HS256. The default is the 7-day refresh-token lifetime plus a
+  # day's margin: no token signed before the switch outlives it. Verifier
+  # services only ever see short-lived access tokens; refresh tokens go back to
+  # the two issuers, which keep the legacy secret regardless.
+  legacyHmacWindowHours: 192
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Admin plane — the platform-admin console and the cross-tenant API behind it.

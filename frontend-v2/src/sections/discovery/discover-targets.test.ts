@@ -87,10 +87,11 @@ describe('confirmation wording', () => {
 
 describe('reachability', () => {
   const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-  it('Active Scan sends the confirmation only from its "Scan anyway", and only for the assets it asked about', () => {
+  it('Active Scan sends the confirmation only from its "Scan anyway", and only for the assets still pending', () => {
     // The scan dialog builds every body through scanBody; `true` is
-    // passed from exactly one place, the confirmation, with the asked-about
-    // assets rather than the whole selection (the retired page's C.4).
+    // passed from exactly one place, the confirmation, with what the server
+    // says is still pending rather than the whole selection (the retired
+    // page's C.4) or only the held assets (which dropped the rest).
     const dialog = read('../inventory/scan-dialog.tsx');
     expect(dialog.match(/confirmed: true \}\)/g)).toHaveLength(1);
     expect(dialog).toMatch(/sel: confirmSelection\(confirm\), confirmed: true/);

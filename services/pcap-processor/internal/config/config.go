@@ -34,9 +34,10 @@ type Config struct {
 
 // Load reads configuration from environment variables.
 func Load() *Config {
-	// Reject well-known dev defaults in production (shared guard across services).
-	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"INTERNAL_AUTH_SECRET": sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", ""),
+	// Production refuses to start with a missing or weak platform secret and
+	// rejects the well-known dev literals (shared guard across services).
+	sharedconfig.EnforceProductionSecrets(sharedconfig.GetEnv("ENV", "development"), sharedconfig.SecretSpec{
+		Required: []string{"INTERNAL_AUTH_SECRET"},
 	})
 
 	return &Config{

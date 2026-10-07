@@ -163,6 +163,93 @@ export function dynamicMatrixWiringErrors(file, rootDir = root) {
   return errors;
 }
 
+// ── Enterprise edition (-tags ee) coverage ───────────────────────────────────
+// CI compiled and tested no `-tags ee` build at all until the passes below were
+// added: the ee/ packages are plain packages, so they were built, but the glue
+// that links them in and every *_ee_test.go exist only under the tag. A change
+// to the AI provider's egress guard broke seven tests across two services and
+// merged green, because the only thing that ran them was a person typing
+// `go test -tags ee`.
+//
+// Which legs get the passes is decided once, by scripts/go-module-has-ee.sh (the
+// PR gate through ci-backend-matrix.mjs's `ee` flag, the nightly by calling the
+// script). This audit holds the WORKFLOWS to that: a step that is still there
+// but no longer gated on `matrix.ee`, or no longer passes `-tags ee`, runs
+// nothing and looks exactly like a step that runs everything.
+//
+// Mutation-test any change: drop `-tags ee` from a step (must FAIL), drop the
+// `matrix.ee` gate (must FAIL), remove the nightly's call to the detector (must
+// FAIL), clean tree (must PASS).
+const EE_DETECTOR = 'go-module-has-ee.sh';
+
+function jobSteps(doc, jobName) {
+  const steps = doc && doc.jobs && doc.jobs[jobName] && doc.jobs[jobName].steps;
+  return Array.isArray(steps) ? steps : [];
+}
+
+/** Errors if the PR gate or the nightly stopped running the Enterprise-edition passes. */
+export function eeEditionWiringErrors({ rootDir = root } = {}) {
+  const errors = [];
+  const load = (file) => {
+    const abs = path.join(rootDir, file);
+    if (!fs.existsSync(abs)) {
+      errors.push(`${file} not found — the -tags ee wiring cannot be audited.`);
+      return null;
+    }
+    try {
+      return YAML.parse(fs.readFileSync(abs, 'utf8'));
+    } catch (e) {
+      errors.push(`${file}: could not be parsed (${e.message}).`);
+      return null;
+    }
+  };
+
+  const ci = load('.github/workflows/ci.yml');
+  if (ci) {
+    const steps = jobSteps(ci, 'backend-check');
+    const gatedOnEE = (st) => /\bmatrix\.ee\s*==\s*true\b/.test(String(st?.if ?? ''));
+    const runs = (st) => String(st?.run ?? '');
+    const need = [
+      ['go vet -tags ee', (r) => /\bgo vet\b[^\n]*-tags[ =]ee\b/.test(r)],
+      ['go build -tags ee', (r) => /\bgo build\b[^\n]*-tags[ =]ee\b/.test(r)],
+      ['go test -tags ee', (r) => /\bgo test\b[^\n]*-tags[ =]ee\b/.test(r)],
+      // The Core polarity: the tag selects different files, so -tags ee does not run *_core_test.go.
+      ['go test (Core edition, no tag)', (r) => /\bgo test\b/.test(r) && !/-tags/.test(r)],
+    ];
+    for (const [label, matches] of need) {
+      const hits = steps.filter((st) => matches(runs(st)) && gatedOnEE(st));
+      if (hits.length === 0) {
+        errors.push(
+          `.github/workflows/ci.yml: backend-check has no step running \`${label}\` gated on \`matrix.ee == true\` — ` +
+            `modules with an Enterprise build get no ${label} pass, and the tag-only files (cmd/edition_ee.go, *_ee_test.go) ` +
+            `can break with every check green.`
+        );
+      }
+    }
+    // A -tags ee step that is NOT gated on matrix.ee runs for every leg, including
+    // modules with no ee build (a pass that proves nothing, at a runner-hour's cost).
+    for (const st of steps) {
+      if (/\bgo (vet|build|test)\b[^\n]*-tags[ =]ee\b/.test(runs(st)) && !gatedOnEE(st)) {
+        errors.push(`.github/workflows/ci.yml: step "${st.name ?? runs(st).trim().slice(0, 40)}" runs under -tags ee but is not gated on \`matrix.ee == true\`.`);
+      }
+    }
+  }
+
+  const nightly = load('.github/workflows/nightly.yml');
+  if (nightly) {
+    const hit = jobSteps(nightly, 'test-backend').find(
+      (st) => String(st?.run ?? '').includes(EE_DETECTOR) && /\bgo test\b[^\n]*-tags[ =]ee\b/.test(String(st?.run ?? ''))
+    );
+    if (!hit) {
+      errors.push(
+        `.github/workflows/nightly.yml: test-backend has no step that asks scripts/${EE_DETECTOR} and then runs \`go test -tags ee\` — ` +
+          `the DB-backed Enterprise tests run nowhere.`
+      );
+    }
+  }
+  return errors;
+}
+
 // Matrix names that are NOT services/<name> directories. These are resolved by
 // the `case` in each workflow's "Resolve path" step; keep in step with it.
 export const NON_SERVICE_ENTRIES = new Map([
@@ -484,7 +571,8 @@ export function main(argv = process.argv) {
   const go = auditCiMatrixCoverage();
   const js = auditJsPackageCoverage();
   const fork = auditForkGate();
-  const errors = [...go.errors, ...js.errors, ...fork.errors];
+  const ee = eeEditionWiringErrors();
+  const errors = [...go.errors, ...js.errors, ...fork.errors, ...ee];
   const notes = [...go.notes, ...js.notes, ...fork.notes];
 
   console.log('CI matrix coverage audit (every shipping Go module and buildable JS package must be in CI, behind the fork gate)');
@@ -498,7 +586,7 @@ export function main(argv = process.argv) {
     process.exit(strict ? 1 : 0);
   }
 
-  console.log('✅ ci-matrix coverage: every shipping module and buildable JS package is built before release, and every PR-gate job sits behind the fork gate.');
+  console.log('✅ ci-matrix coverage: every shipping module and buildable JS package is built before release, every PR-gate job sits behind the fork gate, and the -tags ee passes are wired.');
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {

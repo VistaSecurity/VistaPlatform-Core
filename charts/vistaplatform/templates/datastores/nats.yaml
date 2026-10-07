@@ -1,9 +1,10 @@
 {{- if .Values.datastores.nats.enabled }}
 {{/*
 NATS server configuration. Authorization token enabled by default; clients
-connect with nats://:<token>@nats:4222. Monitoring port (8222) is exposed via
-the headless Service for liveness probes only — it is NOT included in the
-client Service so it cannot be reached from outside the StatefulSet's pods.
+connect with nats://:<token>@nats:4222. Monitoring port (8222) serves the
+kubelet's HTTP /healthz probes and monitoring-service (via the headless
+Service) — it is NOT included in the client Service, and the NetworkPolicy
+admits only monitoring-service to it.
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -95,10 +96,36 @@ spec:
               mountPath: /etc/nats-tls
               readOnly: true
             {{- end }}
+          # Probes use the HTTP monitoring endpoint, never a tcpSocket on the
+          # client port: with TLS on, a bare TCP connect-and-close is a failed
+          # TLS handshake and NATS logs "[ERR] <node-ip> - TLS handshake error:
+          # EOF" on every probe. /healthz is plain HTTP regardless of the
+          # client-port TLS settings. The kubelet reaches it on the pod IP
+          # (http_port binds all interfaces); no Service or NetworkPolicy
+          # change is needed for it.
+          #
+          # startup: holds liveness/readiness off while JetStream recovers its
+          # store (up to ~10 min), so a large store is not restarted mid-recovery.
+          startupProbe:
+            httpGet: { path: "/healthz?js-enabled-only=true", port: monitor }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 120
+          # readiness: server up and JetStream enabled. Does not wait on
+          # per-stream/consumer health (js-enabled-only).
+          readinessProbe:
+            httpGet: { path: "/healthz?js-enabled-only=true", port: monitor }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # liveness: server health only (js-server-only). Deliberately blind to
+          # stream/consumer asset state so a bad stream never restart-loops the
+          # pod.
           livenessProbe:
-            tcpSocket: { port: 4222 }
-            initialDelaySeconds: 10
+            httpGet: { path: "/healthz?js-server-only=true", port: monitor }
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
       volumes:
         - name: nats-config
           configMap:

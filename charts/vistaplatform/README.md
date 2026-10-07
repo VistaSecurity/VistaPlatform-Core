@@ -134,12 +134,12 @@ The Core form:
 ```bash
 # Verify the Helm chart itself
 cosign verify ghcr.io/vistasecurity/vistaplatform:<version> \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # Verify an individual service image (same identity, different repo)
 cosign verify ghcr.io/vistasecurity/auth-service:<version> \
-  --certificate-identity-regexp 'https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*' \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 

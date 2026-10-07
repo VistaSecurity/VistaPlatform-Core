@@ -27,10 +27,13 @@ package api
 // touches are restored exactly.
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +64,11 @@ type ssoTakeoverFixture struct {
 	idp      *httptest.Server
 	idpMu    sync.Mutex
 	userinfo string // JSON the fake IdP's userinfo endpoint returns
+	// challenges are the PKCE challenges the fake IdP issued codes under; its
+	// token endpoint refuses a code_verifier that does not hash to the code's.
+	challenges   map[string]string
+	tokenHits    int
+	pkceVerified int
 
 	secMgrRole    uuid.UUID
 	outrankerRole uuid.UUID // holds one permission the security manager lacks
@@ -78,7 +86,7 @@ func newSSOTakeoverFixture(t *testing.T) *ssoTakeoverFixture {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 
-	f := &ssoTakeoverFixture{t: t, db: db}
+	f := &ssoTakeoverFixture{t: t, db: db, challenges: map[string]string{}}
 	f.suffix = strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
 
 	// Premises: the seed shape the attack and the fix are about.
@@ -159,7 +167,46 @@ func newSSOTakeoverFixture(t *testing.T) *ssoTakeoverFixture {
 	f.idp = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/authorize":
+			// Reached by the browser from StaffSsoAuthorize's redirect. A
+			// PKCE-enforcing IdP refuses a request without an S256 challenge.
+			q := r.URL.Query()
+			if q.Get("code_challenge_method") != "S256" || len(q.Get("code_challenge")) != 43 {
+				http.Error(w, "invalid_request: PKCE S256 code_challenge required", http.StatusBadRequest)
+				return
+			}
+			code := "code-" + uuid.NewString()
+			f.idpMu.Lock()
+			f.challenges[code] = q.Get("code_challenge")
+			f.idpMu.Unlock()
+			back, err := url.Parse(q.Get("redirect_uri"))
+			if err != nil {
+				http.Error(w, "bad redirect_uri", http.StatusBadRequest)
+				return
+			}
+			bq := back.Query()
+			bq.Set("code", code)
+			bq.Set("state", q.Get("state"))
+			back.RawQuery = bq.Encode()
+			http.Redirect(w, r, back.String(), http.StatusFound)
 		case "/token":
+			_ = r.ParseForm()
+			verifier := r.PostForm.Get("code_verifier")
+			sum := sha256.Sum256([]byte(verifier))
+			f.idpMu.Lock()
+			f.tokenHits++
+			challenge, known := f.challenges[r.PostForm.Get("code")]
+			delete(f.challenges, r.PostForm.Get("code"))
+			ok := known && verifier != "" && base64.RawURLEncoding.EncodeToString(sum[:]) == challenge
+			if ok {
+				f.pkceVerified++
+			}
+			f.idpMu.Unlock()
+			if !ok {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"access_token":"fake-idp-access-token"}`))
 		case "/userinfo":
 			f.idpMu.Lock()
@@ -190,8 +237,10 @@ func newSSOTakeoverFixture(t *testing.T) *ssoTakeoverFixture {
 	t.Setenv("AUDIT_LOGGING_ENABLED", "true")
 	t.Setenv("ENCRYPTION_MASTER_KEY", "")
 
+	// LoginRateLimit: every callback here starts at the throttled authorize
+	// route, and these tests are not about the throttle.
 	f.srv = NewServerWithConnections(
-		&config.Config{Environment: "test", JWTSecret: ssoTakeoverJWTSecret},
+		&config.Config{Environment: "test", JWTSecret: ssoTakeoverJWTSecret, LoginRateLimit: 1000},
 		db, db, EditionHooks{},
 	)
 	return f
@@ -309,10 +358,11 @@ func (f *ssoTakeoverFixture) callback(userinfo string) (string, bool) {
 	f.idpMu.Lock()
 	f.userinfo = userinfo
 	f.idpMu.Unlock()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin-service/admin/sso/google/callback?state=st&code=cd", nil)
-	req.AddCookie(&http.Cookie{Name: "admin_sso_state", Value: "st"})
-	w := httptest.NewRecorder()
-	f.srv.Router().ServeHTTP(w, req)
+	// A browser's round trip: authorize on the real router, the fake IdP's
+	// authorize endpoint, back to the callback with the binding cookie.
+	idpURL, binding := staffSSOAuthorize(f.t, f.srv.Router(), "google")
+	back := followStaffIdP(f.t, idpURL)
+	w := staffSSOCallback(f.srv.Router(), back.RequestURI(), binding)
 	if w.Code != http.StatusFound {
 		f.t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
 	}

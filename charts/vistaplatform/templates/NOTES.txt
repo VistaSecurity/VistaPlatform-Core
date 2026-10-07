@@ -153,6 +153,24 @@ AGENT + SENSOR AUTHENTICATION IS ON (agentMtls.enabled=true — now the DEFAULT)
   docsv4/core/operate/security/service-mesh-mtls.md.
 {{- end }}
 
+{{- $jwtLegacy := fromJson (include "vistaplatform.jwtLegacyHmac" .) }}
+
+SESSION TOKENS
+{{- if not $jwtLegacy.accept }}
+
+  Legacy HS256 tokens are REJECTED. Only auth-service and admin-service hold
+  platform.jwtSecret; every other service verifies ES256 against the issuer's
+  public keys, so a leak from any of them cannot forge a session.
+  Why: {{ $jwtLegacy.reason }}.
+{{- else }}
+
+  Legacy HS256 tokens are still ACCEPTED, so platform.jwtSecret is injected
+  into every service that verifies tokens — any one of them could forge a
+  session.
+  Why: {{ $jwtLegacy.reason }}.
+{{- end }}
+  Setting: jwtSigning.acceptLegacyHmac (auto, true or false) — see values.yaml.
+
 Verify chart authenticity (run on a machine with cosign installed):
 {{/*
   Read through `default dict`, not directly. `helm upgrade --reuse-values`
@@ -163,7 +181,7 @@ Verify chart authenticity (run on a machine with cosign installed):
   the default in values.yaml.
 */}}
 {{- $verify := .Values.verification | default dict }}
-{{- $identity := $verify.certificateIdentityRegexp | default "https://github.com/VistaSecurity/VistaPlatform-Core/.github/workflows/release-core.yml@.*" }}
+{{- $identity := $verify.certificateIdentityRegexp | default `^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$` }}
 
   cosign verify {{ .Values.image.registry }}/{{ .Values.image.repoPrefix }}/vistaplatform:{{ .Chart.Version }} \
     --certificate-identity-regexp '{{ $identity }}' \

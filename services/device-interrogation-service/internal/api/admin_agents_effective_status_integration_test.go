@@ -77,7 +77,7 @@ func TestIntegration_AdminAgents_EffectiveStatusFromHeartbeat(t *testing.T) {
 	t.Setenv("ENCRYPTION_MASTER_KEY", "test-key-for-route-registration-only")
 	t.Setenv("NATS_URL", "")
 	t.Setenv("AUDIT_LOGGING_ENABLED", "false")
-	router := SetupRouter(&config.Config{JWTSecret: fleetSigningPhrase}, db, db, nil)
+	router, _ := SetupRouter(&config.Config{JWTSecret: fleetSigningPhrase}, db, db, nil)
 
 	// The /admin reads are gated on the platform.health PERMISSION, resolved
 	// from platform_users by platform_user_has_permission() — the role

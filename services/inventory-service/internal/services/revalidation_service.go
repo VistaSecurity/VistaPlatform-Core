@@ -253,7 +253,8 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 			return result, err
 		}
 		if len(need) > 0 {
-			return result, &ExternalConfirmationError{Targets: need}
+			// Nothing has run: the resend carries the whole request.
+			return result, &ExternalConfirmationError{Targets: need, Pending: pendingAssetIDs(assets)}
 		}
 	}
 
@@ -347,7 +348,8 @@ func (s *RevalidationService) CreateActiveScanJob(tenantID uuid.UUID, userID uui
 	}
 
 	if len(result.NeedsConfirmation) > 0 {
-		return result, &ExternalConfirmationError{Targets: result.NeedsConfirmation, Partial: result}
+		// Everything else was dispatched or skipped: only the held assets remain.
+		return result, &ExternalConfirmationError{Targets: result.NeedsConfirmation, Partial: result, Pending: heldAssetIDs(result.NeedsConfirmation)}
 	}
 	if len(result.Jobs) == 0 {
 		if lastErr != nil {

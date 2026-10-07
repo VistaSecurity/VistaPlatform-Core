@@ -7,9 +7,14 @@
 //     segment, else the platform) · Platform sensor · one named tenant sensor.
 // • The outside-your-registered-networks question ( W5.13b): the API
 //     answers 422 naming those assets BEFORE anything is stamped or
-//     dispatched for them, and "Scan anyway" resends ONLY those assets with
-//     the confirmation. The old page resent every asset it was asked about,
-//     including ones a partial first pass had already dispatched (C.4).
+//     dispatched for them. "Scan anyway" resends exactly what the answer says
+//     is still to be done (`pending_asset_ids`): normally the whole request —
+//     the question is asked before anything runs, so the assets that need no
+//     confirmation are still waiting — but after a late partial dispatch only
+//     the held assets. The old page resent every asset it was asked about,
+//     including ones a partial first pass had already dispatched (C.4); the
+//     first fix over-corrected and resent only the held ones, dropping the
+//     rest of the request without a word.
 //   • The selection refusals (409 count changed, 413 over the cap).
 //
 // The permission follows the action, not the executor: assets.update for all
@@ -37,13 +42,22 @@ export function scanBody(sel: AssetSelection, runFrom: string, confirmed: boolea
   };
 }
 
+/** The question the API asked: the assets held for confirmation, and what a confirmed resend carries. */
+type ConfirmAsk = { targets: ExternalAssetTarget[]; pending?: string[] };
+
 /**
- * The selection "Scan anyway" sends: only the assets the API asked about.
- * Everything else in the first request was either dispatched already or
- * reported as not scanned — sending it again would scan it twice.
+ * The selection "Scan anyway" sends: what the API says is still to be done.
+ * Assets it already dispatched are left out — sending them again would scan
+ * them twice — and so are the ones it reported as not scanned. Those are not
+ * everything BUT the held assets: when nothing ran, the assets that need no
+ * confirmation are still waiting, and leaving them out would drop them.
+ *
+ * An answer without `pending_asset_ids` (an older server) falls back to the
+ * held assets alone, which is the whole answer it can give.
  */
-export function confirmSelection(targets: readonly ExternalAssetTarget[]): AssetSelection {
-  const ids = new Set(targets.map((t) => t.asset_id).filter((id): id is string => !!id));
+export function confirmSelection({ targets, pending }: ConfirmAsk): AssetSelection {
+  const held = targets.map((t) => t.asset_id).filter((id): id is string => !!id);
+  const ids = new Set(pending ?? held);
   return ids.size ? { kind: 'ids', ids } : { kind: 'none' };
 }
 
@@ -64,7 +78,7 @@ export function ScanDialog({ open, selection, onClose, onStarted }: {
   // What the person picked while it is still on offer; otherwise the fleet's
   // default. Derived, so the select and the request never disagree.
   const choice = picked !== null && runFrom.options.some((o) => o.value === picked) ? picked : runFrom.defaultValue;
-  const [confirm, setConfirm] = useState<ExternalAssetTarget[] | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmAsk | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
   const n = selectedCount(selection);
@@ -102,7 +116,7 @@ export function ScanDialog({ open, selection, onClose, onStarted }: {
     onError: (e: ScanError) => {
       if (e.partial) onStarted?.(e.partial);
       if (e instanceof TargetVerdictError && e.verdict.kind === 'unconfirmed') {
-        setConfirm(e.verdict.targets);
+        setConfirm({ targets: e.verdict.targets, pending: e.verdict.pending });
         return;
       }
       setFailure(e.message);
@@ -115,6 +129,9 @@ export function ScanDialog({ open, selection, onClose, onStarted }: {
   });
 
   if (confirm) {
+    // Assets of the selection that need no confirmation but have not run yet.
+    const held = new Set(confirm.targets.map((t) => t.asset_id).filter((id): id is string => !!id));
+    const waiting = (confirm.pending ?? []).filter((id) => !held.has(id)).length;
     return (
       <Modal
         open={open}
@@ -135,13 +152,14 @@ export function ScanDialog({ open, selection, onClose, onStarted }: {
       >
         <div role="alertdialog" aria-labelledby="scan-external-title">
           <div id="scan-external-title" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--app-t1)', marginBottom: 10 }}>
-            {externalConfirmTitle(confirm.length)}
+            {externalConfirmTitle(confirm.targets.length)}
           </div>
           <ul className="mono" style={{ margin: '0 0 10px', paddingLeft: 18, fontSize: 12, color: 'var(--app-t2)', maxHeight: 220, overflowY: 'auto' }}>
-            {confirm.map((t) => <li key={t.asset_id ?? t.target}>{describeExternalAsset(t)}</li>)}
+            {confirm.targets.map((t) => <li key={t.asset_id ?? t.target}>{describeExternalAsset(t)}</li>)}
           </ul>
           <div style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
-            Only these assets are sent again. Nothing outside your registered networks is ever scanned automatically — only when you confirm it here.
+            {waiting > 0 && <>{assetsLabel(waiting)} from your selection {waiting === 1 ? 'has' : 'have'} not been scanned yet and will be scanned with {waiting === 1 ? 'it' : 'these'}. </>}
+            Assets already scanned are not sent again. Nothing outside your registered networks is ever scanned automatically — only when you confirm it here.
             Scanning these also needs the discovery permission, and is recorded in your organization&apos;s audit log.
           </div>
         </div>

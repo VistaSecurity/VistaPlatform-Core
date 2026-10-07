@@ -47,6 +47,12 @@ type ServerConfig struct {
 }
 
 func Load() *Config {
+	// Production refuses to start with a missing or weak platform secret and
+	// rejects the well-known dev literals (shared guard across services).
+	sharedconfig.EnforceProductionSecrets(sharedconfig.GetEnv("ENV", "development"), sharedconfig.SecretSpec{
+		Required: []string{"INTERNAL_AUTH_SECRET"},
+	})
+
 	return &Config{
 		Server: ServerConfig{
 			Host: sharedconfig.GetEnv("SERVER_HOST", "0.0.0.0"),

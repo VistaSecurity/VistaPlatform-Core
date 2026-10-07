@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"database/sql/driver"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	adminauth "github.com/vistasecurity/vistaplatform/admin-service/internal/auth"
+	"github.com/vistasecurity/vistaplatform/shared/security/ssostate"
 )
 
 func TestAdminCallbackRedirectURI(t *testing.T) {
@@ -35,14 +37,18 @@ func TestAdminCallbackRedirectURI(t *testing.T) {
 	}
 }
 
-func TestStaffStateToken(t *testing.T) {
-	a, b := staffStateToken(), staffStateToken()
-	if a == "" || a == b {
-		t.Fatal("expected non-empty, unique state tokens")
+// staffAttempt records a staff SSO attempt for provider exactly as
+// StaffSsoAuthorize does, and returns the store, the state for the callback
+// URL and the binding cookie the browser would present.
+func staffAttempt(t *testing.T, provider string) (ssostate.Store, string, *http.Cookie) {
+	t.Helper()
+	store := ssostate.NewMemoryStore()
+	a, err := ssostate.Begin(context.Background(), store, staffStateKeyPrefix,
+		ssostate.Record{Data: map[string]string{"provider_type": provider}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.ContainsAny(a, "+/=") {
-		t.Fatalf("state token must be URL-safe: %q", a)
-	}
+	return store, a.State, &http.Cookie{Name: staffBindingCookieName, Value: a.Binding}
 }
 
 type expiryWithin struct {
@@ -132,12 +138,13 @@ func TestStaffSsoCallback_UsesConfiguredSessionTTLForRefreshSession(t *testing.T
 		WithArgs(userID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
+	store, state, binding := staffAttempt(t, "google")
 	r := gin.New()
-	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, jwtSecret, adminauth.NewPlatformRefreshTokenService(db)))
+	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, store, jwtSecret, adminauth.NewPlatformRefreshTokenService(db)))
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state=sso-state&code=auth-code", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state="+state+"&code=auth-code", nil)
 	req.Host = "admin.example.com"
-	req.AddCookie(&http.Cookie{Name: "admin_sso_state", Value: "sso-state"})
+	req.AddCookie(binding)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -254,10 +261,11 @@ func staffCallbackHarness(t *testing.T, userinfoJSON string, expect func(mock sq
 	t.Cleanup(func() { _ = db.Close() })
 	expect(mock, idp.URL+"/token", idp.URL+"/userinfo")
 
+	store, state, binding := staffAttempt(t, "google")
 	r := gin.New()
-	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, "staff-sso-gate-test-secret", adminauth.NewPlatformRefreshTokenService(db)))
-	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state=s&code=c", nil)
-	req.AddCookie(&http.Cookie{Name: "admin_sso_state", Value: "s"})
+	r.GET("/admin/sso/:provider/callback", StaffSsoCallback(db, store, "staff-sso-gate-test-secret", adminauth.NewPlatformRefreshTokenService(db)))
+	req := httptest.NewRequest(http.MethodGet, "/admin/sso/google/callback?state="+state+"&code=c", nil)
+	req.AddCookie(binding)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusFound {

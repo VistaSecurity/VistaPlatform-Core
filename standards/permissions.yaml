@@ -288,6 +288,7 @@ roles:
       access in the migration.
     grant:
       any_of:
+        # `assets` also lets security_admin create/update/delete inventory-service /integrations — owner decision (authz D6, won't fix); revisit only via a dedicated integrations.manage permission.
         - resources: [assets, sensors, reports, compliance, pcap, discovery, alerts]
         - names: [users.read, settings.read, audit.read]
 

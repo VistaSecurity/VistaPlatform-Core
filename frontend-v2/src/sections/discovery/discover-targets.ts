@@ -29,13 +29,17 @@ type VerdictBody = {
   error?: unknown;
   details?: unknown;
   external_targets?: ExternalTarget[];
+  pending_asset_ids?: unknown;
   refused_targets?: RefusedTarget[];
   oversize_targets?: OversizeTarget[];
   largest_target?: BudgetLargestTarget;
 };
 
 export type TargetVerdict =
-  | { kind: 'unconfirmed'; targets: ExternalTarget[]; message: string }
+  // `pending` is an Active Scan's answer to "what must the confirmation
+  // resend": every asset of the request still to be done (see ActiveScanExternalTargetsError).
+  // Absent for a discovery job, which is refused whole, and from an older server.
+  | { kind: 'unconfirmed'; targets: ExternalTarget[]; message: string; pending?: string[] }
   | { kind: 'disabled'; targets: ExternalTarget[]; message: string }
   | { kind: 'refused'; refused: RefusedTarget[]; message: string }
   // `oversize` is empty when only the job's total is over the limit.
@@ -51,7 +55,8 @@ export function targetVerdict(status: number, body: unknown): TargetVerdict {
   const b = (body ?? {}) as VerdictBody;
   const details = typeof b.details === 'string' ? b.details : '';
   if (b.error === 'external_targets_unconfirmed' && Array.isArray(b.external_targets)) {
-    return { kind: 'unconfirmed', targets: b.external_targets, message: details };
+    const pending = Array.isArray(b.pending_asset_ids) ? b.pending_asset_ids.filter((id): id is string => typeof id === 'string') : undefined;
+    return { kind: 'unconfirmed', targets: b.external_targets, message: details, ...(pending ? { pending } : {}) };
   }
   if (b.error === 'external_targets_disabled') {
     return { kind: 'disabled', targets: Array.isArray(b.external_targets) ? b.external_targets : [], message: details };

@@ -19,7 +19,7 @@ import (
 // service could fetch a key.
 func TestProductionStartsWithoutLegacyHMACAndVerifiesJWKS(t *testing.T) {
 	t.Setenv("ENV", "production")
-	t.Setenv("INTERNAL_AUTH_SECRET", "strong-internal-auth-secret")
+	t.Setenv("INTERNAL_AUTH_SECRET", "strong-internal-auth-secret-0123456789")
 	t.Setenv("JWT_SECRET", "")
 	if err := os.Unsetenv("JWT_SECRET"); err != nil {
 		t.Fatal(err)
@@ -37,6 +37,10 @@ func TestProductionStartsWithoutLegacyHMACAndVerifiesJWKS(t *testing.T) {
 		jwtkeys.ServeJWKS(w, signer)
 	}))
 	defer server.Close()
+
+	// ES256 verification is configured the way the chart configures it; with an
+	// absent JWT_SECRET that is what lets the production guard accept startup.
+	t.Setenv("JWT_JWKS_URL", server.URL)
 
 	cfg := Load()
 	if cfg.JWT.Secret != "" {

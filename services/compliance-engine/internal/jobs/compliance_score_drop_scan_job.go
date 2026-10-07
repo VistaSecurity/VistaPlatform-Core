@@ -71,7 +71,8 @@ func isSignificantDrop(reference, current, threshold int) bool {
 // raises a fixed medium alert when a framework's score fell by more than 10
 // points versus ~24h ago, auto-resolving when it recovers. Because the
 // platform persists no score history, the job keeps its own lightweight
-// per-(tenant,framework) snapshot trail in alert_framework_score_snapshots.
+// per-(tenant,framework) snapshot trail in alert_framework_score_snapshots,
+// read and written in tenant-scoped transactions (the table is under RLS).
 //
 // Consequence: drop detection is only meaningful once the job has been running
 // for at least the lookback window (before then there is no 24h-old reference
@@ -243,22 +244,9 @@ func (j *ComplianceScoreDropScanJob) scanTenant(ctx context.Context, tenantID uu
 			continue
 		}
 		// Record the current score, then compare against the ~24h-old reference.
-		if _, err := j.bypassDB.ExecContext(ctx, `
-			INSERT INTO alert_framework_score_snapshots (tenant_id, platform_framework_id, score)
-			VALUES ($1, $2, $3)
-		`, tenantID, fs.frameworkID, fs.score); err != nil {
-			log.Printf("[ScoreDropScan] snapshot insert failed (tenant=%s fw=%s): %v", tenantID, fs.frameworkID, err)
-			continue
-		}
-
-		var reference sql.NullInt64
-		if err := j.bypassDB.QueryRowContext(ctx, `
-			SELECT score FROM alert_framework_score_snapshots
-			WHERE tenant_id = $1 AND platform_framework_id = $2
-			  AND captured_at <= NOW() - INTERVAL '`+scoreDropLookback+`'
-			ORDER BY captured_at DESC LIMIT 1
-		`, tenantID, fs.frameworkID).Scan(&reference); err != nil && err != sql.ErrNoRows {
-			log.Printf("[ScoreDropScan] reference lookup failed (tenant=%s fw=%s): %v", tenantID, fs.frameworkID, err)
+		reference, err := j.recordAndReadReference(ctx, tenantID, fs)
+		if err != nil {
+			log.Printf("[ScoreDropScan] snapshot record/reference failed (tenant=%s fw=%s): %v", tenantID, fs.frameworkID, err)
 			continue
 		}
 		if !reference.Valid {
@@ -314,13 +302,49 @@ func (j *ComplianceScoreDropScanJob) scanTenant(ctx context.Context, tenantID uu
 	}
 
 	// Trim the snapshot trail past the lookback window.
-	if _, err := j.bypassDB.ExecContext(ctx, `
-		DELETE FROM alert_framework_score_snapshots
-		WHERE tenant_id = $1 AND captured_at < NOW() - INTERVAL '`+scoreDropSnapshotPrune+`'
-	`, tenantID); err != nil {
+	if err := shareddatabase.WithTenantTx(ctx, j.db.DB, tenantID, func(tx *sql.Tx) error {
+		_, pErr := tx.ExecContext(ctx, `
+			DELETE FROM alert_framework_score_snapshots
+			WHERE tenant_id = $1 AND captured_at < NOW() - INTERVAL '`+scoreDropSnapshotPrune+`'
+		`, tenantID)
+		return pErr
+	}); err != nil {
 		log.Printf("[ScoreDropScan] snapshot prune failed (tenant=%s): %v", tenantID, err)
 	}
 	return nil
+}
+
+// recordAndReadReference appends the framework's current score to the snapshot
+// trail and returns the newest snapshot at least scoreDropLookback old (NULL
+// when the trail is younger than that).
+//
+// alert_framework_score_snapshots is tenant-isolated by RLS, so this runs in a
+// tenant-scoped transaction on the RLS-subject app pool (j.db), like the score
+// read above — NOT on bypassDB, which is for the cross-tenant enumeration in
+// tenants() only. On j.db without app.tenant_id the INSERT fails WITH CHECK and
+// the reference read returns nothing, so the detector would never fire; the
+// tenant tx is load-bearing, and the integration tests run j.db as crypto_app
+// to prove it.
+func (j *ComplianceScoreDropScanJob) recordAndReadReference(ctx context.Context, tenantID uuid.UUID, fs frameworkScore) (sql.NullInt64, error) {
+	var reference sql.NullInt64
+	err := shareddatabase.WithTenantTx(ctx, j.db.DB, tenantID, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO alert_framework_score_snapshots (tenant_id, platform_framework_id, score)
+			VALUES ($1, $2, $3)
+		`, tenantID, fs.frameworkID, fs.score); err != nil {
+			return fmt.Errorf("snapshot insert: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx, `
+			SELECT score FROM alert_framework_score_snapshots
+			WHERE tenant_id = $1 AND platform_framework_id = $2
+			  AND captured_at <= NOW() - INTERVAL '`+scoreDropLookback+`'
+			ORDER BY captured_at DESC LIMIT 1
+		`, tenantID, fs.frameworkID).Scan(&reference); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("reference lookup: %w", err)
+		}
+		return nil
+	})
+	return reference, err
 }
 
 func (j *ComplianceScoreDropScanJob) raise(ctx context.Context, tenantID uuid.UUID, fs frameworkScore, reference int) {

@@ -26,6 +26,33 @@ services:
       - crypto-network
     restart: unless-stopped
 
+  # Row-level security needs services to connect as a role that is NOT the
+  # table owner (an owner bypasses RLS). schema.sql creates two such roles,
+  # NOLOGIN: crypto_app (DATABASE_URL, RLS enforced) and crypto_bypass
+  # (BYPASS_DATABASE_URL, the annotated cross-tenant paths). This one-shot
+  # container grants them LOGIN with POSTGRES_PASSWORD and exits; every service
+  # that talks to Postgres waits for it. It runs on every `up`, so an existing
+  # database volume is upgraded in place. Re-run by hand: `make db-roles`.
+  # The compose counterpart of the Helm chart's rls-roles Job.
+  db-roles:
+    image: postgres:17-alpine
+    container_name: crypto-db-roles
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-crypto_user}
+      PGDATABASE: ${POSTGRES_DB:-crypto_inventory}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./scripts/database/rls-roles.sh:/usr/local/bin/rls-roles.sh:ro
+    entrypoint: [ "sh", "/usr/local/bin/rls-roles.sh" ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crypto-network
+    restart: "no"
+
   influxdb:
     image: influxdb:2.8-alpine
     container_name: crypto-influxdb
@@ -101,7 +128,8 @@ services:
     environment:
       - PORT=8080
       - ENV=development
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
@@ -134,6 +162,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     volumes:
@@ -154,7 +184,8 @@ services:
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-inventory-service
     environment:
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -180,6 +211,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       influxdb:
@@ -206,7 +239,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - DEV_TENANT_ID=c092c348-9d22-4259-b6e3-8fccbce66c7b
@@ -230,6 +264,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       nats:
@@ -254,7 +290,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - INFLUXDB_URL=http://influxdb:8086
       - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
@@ -286,6 +323,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       influxdb:
@@ -315,7 +354,8 @@ services:
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
       - FEATURE_REPORTS_DEV_ENABLE=true
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - INFLUXDB_URL=http://influxdb:8086
       - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
@@ -342,6 +382,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       influxdb:
@@ -369,7 +411,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
@@ -390,6 +433,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
         required: true
       redis:
         condition: service_healthy
@@ -449,7 +494,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -469,6 +515,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
         required: true
       redis:
         condition: service_healthy
@@ -494,7 +542,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -518,6 +567,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
         required: true
       redis:
         condition: service_healthy
@@ -547,7 +598,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -567,6 +619,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       nats:
@@ -702,7 +756,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
@@ -733,6 +788,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       redis:
@@ -762,7 +819,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - INFLUXDB_URL=http://influxdb:8086
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
@@ -790,6 +848,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       influxdb:
@@ -820,7 +880,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -849,6 +910,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       nats:
@@ -874,7 +937,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -905,6 +969,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       nats:
@@ -927,7 +993,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
       - LICENSE_TOKEN=${LICENSE_TOKEN:-}
@@ -946,6 +1013,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     volumes:
@@ -966,7 +1035,8 @@ services:
       - PORT=8080
       - ENV=development
       - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://${POSTGRES_USER:-crypto_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
       - LICENSE_TOKEN=${LICENSE_TOKEN:-}
@@ -977,6 +1047,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     volumes:

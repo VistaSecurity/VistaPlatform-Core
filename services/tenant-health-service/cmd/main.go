@@ -40,6 +40,10 @@ func main() {
 	}
 	logrus.SetLevel(logLevel)
 
+	if err := enforceStartupSecrets(); err != nil {
+		logrus.Fatalf("FATAL: %v", err)
+	}
+
 	// Database connection
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {

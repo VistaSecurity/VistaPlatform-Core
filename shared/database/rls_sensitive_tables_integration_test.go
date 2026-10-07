@@ -52,6 +52,7 @@ var sensitiveTables = []string{
 	"public.sensors",
 	"public.billing_subscriptions",
 	"audit.activity_logs",
+	"public.alert_framework_score_snapshots",
 }
 
 // textOverrides gives a column a value its CHECK constraint accepts where the
@@ -372,10 +373,8 @@ func seedWithoutFKs(t *testing.T, owner *sql.DB, table string, tA, tB uuid.UUID,
 // Entries marked OPEN are known gaps recorded rather than hidden; closing one
 // means deleting its line here AND fixing schema.sql in the same change.
 var rlsCoverageExemptions = map[string]string{
-	"public.alert_framework_score_snapshots": "OPEN (audit 2026-09, tenancy-rbac Medium): no RLS; only compliance-engine's score-drop scan touches it, with its own tenant_id predicate",
-	"public.license_usage_daily":             "platform-owned licence usage ledger; written and read by operator-side code (admin-service licensing/billing), no tenant-facing reader",
-	"public.license_usage_events":            "platform-owned licence usage ledger; written and read by operator-side code (admin-service licensing/billing), no tenant-facing reader",
-	"partitions-of:audit.activity_logs":      "OPEN (audit 2026-09, tenancy-rbac Low): partitions lack partition-direct RLS; the parent is protected and nothing names a partition directly",
+	"public.license_usage_daily":  "platform-owned licence usage ledger; written and read by operator-side code (admin-service licensing/billing), no tenant-facing reader",
+	"public.license_usage_events": "platform-owned licence usage ledger; written and read by operator-side code (admin-service licensing/billing), no tenant-facing reader",
 }
 
 // defaultDenyParents are partitioned tables whose partitions deliberately have
@@ -386,6 +385,10 @@ var defaultDenyParents = map[string]bool{
 	"public.asset_endpoints":                    true,
 	"public.crypto_implementations_partitioned": true,
 	"public.sensor_discoveries_partitioned":     true,
+	// Partitions are created at run time too (create_activity_logs_partition,
+	// which enables RLS on each one it makes); TestIntegration_RLS_ActivityLogPartitionsDenyDirectAccess
+	// drives a freshly created one.
+	"audit.activity_logs": true,
 }
 
 // TestIntegration_RLS_EveryTenantTableIsProtected fails when a table carrying a

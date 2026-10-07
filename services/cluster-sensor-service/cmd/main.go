@@ -25,6 +25,7 @@ import (
 	sharedrbac "github.com/vistasecurity/vistaplatform/shared/middleware/rbac"
 	trial_lock "github.com/vistasecurity/vistaplatform/shared/middleware/trial_lock"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -115,9 +116,10 @@ func main() {
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "cluster-sensor-service",
-			"version": version.Get(),
+			"status":                "healthy",
+			"service":               "cluster-sensor-service",
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 

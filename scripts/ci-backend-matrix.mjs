@@ -33,14 +33,22 @@
 //       - its directory HAS a go.mod that go.work does not list → ERROR. That
 //         is a module outside the workspace: it would arm nothing and pass.
 //
+// Each emitted leg also carries `ee`: whether the module has an Enterprise
+// (-tags ee) build (scripts/go-module-has-ee.sh, the same definition nightly.yml
+// asks). backend-check runs its vet/build/test passes under `-tags ee` for
+// exactly those legs. Before this, CI compiled and tested NO -tags ee build, so
+// the linked Enterprise binaries and their *_ee_test.go suites could break with
+// every check green.
+//
 // Usage (CI):   EVENT_NAME=… SERVICES=a,b SHARED=<n> node scripts/ci-backend-matrix.mjs >> "$GITHUB_OUTPUT"
-//   prints:     backend_matrix={"include":[{"service":"…","path":"…"},…]}
+//   prints:     backend_matrix={"include":[{"service":"…","path":"…","ee":false},…]}
 //               backend_count=<n>
 // Usage (list): node scripts/ci-backend-matrix.mjs --list   → every leg, one "name path" per line
 //
 // Regression test: scripts/test-ci-backend-matrix.mjs (`make ci-backend-matrix-test`).
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +109,26 @@ export function allLegs(rootDir = ROOT) {
   return legs;
 }
 
+/**
+ * Does this module have an -tags ee build? Asks scripts/go-module-has-ee.sh
+ * (exit 0 yes, 1 no); a missing directory is `false` here because the leg's own
+ * "Resolve module path" step reports it with a better message. Any other exit is
+ * an error: guessing `false` would switch the Enterprise passes off silently.
+ */
+export function moduleHasEE(dir, rootDir = ROOT) {
+  const abs = path.join(rootDir, dir);
+  if (!fs.existsSync(abs)) return false;
+  const r = spawnSync('bash', [path.join(ROOT, 'scripts/go-module-has-ee.sh'), abs], { encoding: 'utf8' });
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new Error(`scripts/go-module-has-ee.sh ${dir} failed (exit ${r.status}): ${(r.stderr || r.error || '').toString().trim()}`);
+}
+
+/** Legs with their `ee` flag (see moduleHasEE). */
+export function withEE(legs, rootDir = ROOT, has = moduleHasEE) {
+  return legs.map((l) => ({ ...l, ee: has(l.path, rootDir) }));
+}
+
 /** Default probe: does the directory detect-changed-files.sh names still hold a Go module? */
 export function namedModuleExists(name, rootDir = ROOT) {
   const dir = [...NON_SERVICE_LEGS].find(([, leg]) => leg === name)?.[0] ?? `services/${name}`;
@@ -137,11 +165,11 @@ export function main(argv = process.argv, env = process.env) {
     return;
   }
   const ignored = [];
-  const chosen = selectLegs({ legs, eventName: env.EVENT_NAME, services: env.SERVICES, shared: env.SHARED, ignored });
+  const chosen = withEE(selectLegs({ legs, eventName: env.EVENT_NAME, services: env.SERVICES, shared: env.SHARED, ignored }));
   for (const n of ignored) console.error(`::notice::ci-backend-matrix: "${n}" changed but has no go.mod any more (deleted module) — no leg to run`);
   console.log(`backend_matrix=${JSON.stringify({ include: chosen })}`);
   console.log(`backend_count=${chosen.length}`);
-  console.error(`backend-check: ${chosen.length} of ${legs.length} leg(s): ${chosen.map((l) => l.service).join(', ') || '(none)'}`);
+  console.error(`backend-check: ${chosen.length} of ${legs.length} leg(s): ${chosen.map((l) => l.service + (l.ee ? ' (+ee)' : '')).join(', ') || '(none)'}`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {

@@ -15,6 +15,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -107,15 +108,16 @@ func main() {
 	}
 
 	// Initialize router
-	router := api.SetupRouter(cfg, db, bypassDB, redis)
+	router, agentRoutes := api.SetupRouter(cfg, db, bypassDB, redis)
 
 	// Health check server (HTTP, port 8080)
 	healthRouter := gin.New()
 	healthRouter.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "device-interrogation-service",
-			"version": version.Get(),
+			"status":                "healthy",
+			"service":               "device-interrogation-service",
+			"version":               version.Get(),
+			credentials.HealthField: credentials.EncryptionStatus(),
 		})
 	})
 
@@ -159,18 +161,19 @@ func main() {
 
 	// Agent-mTLS passthrough listener (port 8444). When AgentMTLSRequired,
 	// device agents reach /agents/:id/{jobs,results,heartbeat} via edge TLS
-	// passthrough so their per-tenant client cert terminates here. This
+	// passthrough so their per-tenant client cert terminates here. It serves
+	// agentRoutes ONLY (api.SetupRouter): passthrough skips every edge deny, so
+	// the rest of the router answers 404 on this port. This
 	// listener requires a client cert (RequireAnyClientCert); AgentAuth
 	// verifies it against the agent's tenant CA. Kept separate from the 8443
 	// mesh listener, which verifies against the Platform CA and would reject
 	// per-tenant agent certs at the handshake.
 	var agentServer *http.Server
 	if cfg.AgentMTLSRequired {
-		agentServer, err = sharedhttp.NewAgentMTLSServer(cfg.ServiceCertPath, cfg.ServiceKeyPath, router)
+		agentServer, err = newAgentMTLSServer(cfg, router, agentRoutes)
 		if err != nil {
 			log.Fatalf("Failed to create agent-mTLS server: %v", err)
 		}
-		agentServer.Addr = ":" + cfg.AgentTLSPort
 	}
 
 	// Start health check server (only when mTLS is enabled - API server on different port)
@@ -239,4 +242,16 @@ func main() {
 	}
 
 	log.Println("Device interrogation service stopped")
+}
+
+// newAgentMTLSServer builds the agent-mTLS passthrough listener: router
+// confined to agentRoutes, behind a handshake that requires a client
+// certificate (AgentAuth verifies it).
+func newAgentMTLSServer(cfg *config.Config, router *gin.Engine, agentRoutes *sharedhttp.AgentRoutes) (*http.Server, error) {
+	srv, err := sharedhttp.NewAgentMTLSServer(cfg.ServiceCertPath, cfg.ServiceKeyPath, router, agentRoutes)
+	if err != nil {
+		return nil, err
+	}
+	srv.Addr = ":" + cfg.AgentTLSPort
+	return srv, nil
 }

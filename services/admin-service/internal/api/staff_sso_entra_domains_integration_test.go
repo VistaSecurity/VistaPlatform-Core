@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -135,10 +136,11 @@ func (f *entraFixture) callback(userinfo string) (string, bool) {
 	f.mu.Lock()
 	f.userinfo = userinfo
 	f.mu.Unlock()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin-service/admin/sso/microsoft/callback?state=st&code=cd", nil)
-	req.AddCookie(&http.Cookie{Name: "admin_sso_state", Value: "st"})
-	w := httptest.NewRecorder()
-	f.srv.Router().ServeHTTP(w, req)
+	// Start the attempt on the real router as a browser would; this fake
+	// Entra does not model the authorize leg, so the code is made up.
+	idpURL, binding := staffSSOAuthorize(f.t, f.srv.Router(), "microsoft")
+	w := staffSSOCallback(f.srv.Router(),
+		"/api/v1/admin-service/admin/sso/microsoft/callback?code=cd&state="+url.QueryEscape(idpURL.Query().Get("state")), binding)
 	if w.Code != http.StatusFound {
 		f.t.Fatalf("callback status = %d, want 302; body=%s", w.Code, w.Body.String())
 	}

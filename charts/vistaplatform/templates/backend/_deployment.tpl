@@ -1,12 +1,16 @@
 {{/*
 Named template that emits a Deployment + Service + PodDisruptionBudget for one
 backend entry. Inputs (dict): ctx (root context), name (service name), svc
-(value entry from .Values.backends).
+(value entry from .Values.backends), legacyHmac (bool: whether verifiers still
+accept HS256 — the decision from vistaplatform.jwtLegacyHmac, made once per
+render by deployments.yaml).
 */}}
 {{- define "vistaplatform.backend" -}}
 {{- $ctx := .ctx -}}
 {{- $name := .name -}}
 {{- $svc := .svc -}}
+{{- /* Absent means a caller that predates the decision: keep the secret. */ -}}
+{{- $legacyHmac := ternary .legacyHmac true (hasKey . "legacyHmac") -}}
 {{- $needs := default (dict) $svc.needs -}}
 {{- $secrets := default (dict) $svc.secrets -}}
 {{- $replicas := default $ctx.Values.defaultReplicas $svc.replicas -}}
@@ -430,16 +434,19 @@ spec:
             {{- if $ctx.Values.jwtSigning.enabled }}
             {{/*
               #584. JWT_SECRET is now the LEGACY shared secret, injected only
-              while jwtSigning.acceptLegacyHmac is on so that sessions minted
-              before the cutover keep verifying. Turning that off removes the
-              variable from every pod but the two issuers, which is the point at
-              which a leak of it forges nothing.
+              while verifiers must still accept HS256 so that sessions minted
+              before the cutover keep verifying. That is decided by
+              vistaplatform.jwtLegacyHmac (_jwt-signing.tpl) from
+              jwtSigning.acceptLegacyHmac — by default "auto", which closes the
+              window on its own once no HS256 token can still be valid. Closed,
+              the variable is gone from every pod but the two issuers, which is
+              the point at which a leak of it forges nothing.
 
               The issuers keep it unconditionally: they need it to verify their
               own pre-cutover refresh tokens, and they fall back to HS256
               minting if no signing key is mounted.
             */}}
-            {{- if or $ctx.Values.jwtSigning.acceptLegacyHmac (has $name (list "auth-service" "admin-service")) }}
+            {{- if or $legacyHmac (has $name (list "auth-service" "admin-service")) }}
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

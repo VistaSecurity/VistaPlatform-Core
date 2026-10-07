@@ -34,9 +34,11 @@ type DatabaseConfig struct {
 
 // Load loads configuration from environment variables
 func Load() *Config {
-	// Reject well-known dev defaults in production (shared guard across services).
-	sharedconfig.RejectInsecureDefaults(sharedconfig.GetEnv("ENV", "development"), map[string]string{
-		"JWT_SECRET": sharedconfig.JWTSecret(),
+	// Production refuses to start with a missing or weak platform secret and
+	// rejects the well-known dev literals (shared guard across services).
+	sharedconfig.EnforceProductionSecrets(sharedconfig.GetEnv("ENV", "development"), sharedconfig.SecretSpec{
+		Required:    []string{"INTERNAL_AUTH_SECRET", "ENCRYPTION_MASTER_KEY"},
+		VerifiesJWT: true,
 	})
 
 	// Primary configuration uses DATABASE_URL for consistency

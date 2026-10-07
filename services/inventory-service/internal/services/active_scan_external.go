@@ -41,6 +41,16 @@ type ActiveScanExternalTarget struct {
 type ExternalConfirmationError struct {
 	Targets []ActiveScanExternalTarget
 	Partial ActiveScanResult
+	// Pending is every asset of the request that is still to be done: not
+	// dispatched, not skipped. It is what the person's confirmation must
+	// resend. The question is normally asked BEFORE anything runs, so then it
+	// is the WHOLE request — the assets that need no confirmation as well as
+	// the ones that do, none of which has been touched; a caller that resent
+	// only the held assets would silently drop the rest. When a late verdict
+	// from cluster-sensor-service comes after other batches were dispatched,
+	// it is only the held assets, and resending the request would scan the
+	// dispatched ones twice.
+	Pending []uuid.UUID
 }
 
 func (e *ExternalConfirmationError) Error() string {
@@ -162,4 +172,30 @@ func (s *RevalidationService) recordTargetVerdict(result *ActiveScanResult, batc
 		return false
 	}
 	return true
+}
+
+// pendingAssetIDs lists the distinct ids of assets, in request order.
+func pendingAssetIDs(assets []activeScanAsset) []uuid.UUID {
+	seen := make(map[uuid.UUID]bool, len(assets))
+	out := make([]uuid.UUID, 0, len(assets))
+	for _, a := range assets {
+		if !seen[a.id] {
+			seen[a.id] = true
+			out = append(out, a.id)
+		}
+	}
+	return out
+}
+
+// heldAssetIDs lists the distinct ids of the assets awaiting confirmation.
+func heldAssetIDs(targets []ActiveScanExternalTarget) []uuid.UUID {
+	seen := make(map[uuid.UUID]bool, len(targets))
+	out := make([]uuid.UUID, 0, len(targets))
+	for _, t := range targets {
+		if !seen[t.AssetID] {
+			seen[t.AssetID] = true
+			out = append(out, t.AssetID)
+		}
+	}
+	return out
 }

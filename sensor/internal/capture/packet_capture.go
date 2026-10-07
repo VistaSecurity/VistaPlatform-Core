@@ -671,13 +671,44 @@ func (pc *PacketCapture) runWorker() {
 // undeduplicated busy tunnel would push real findings out. The check runs
 // after a successful decode so unrelated bytes on the port use up nothing.
 func (pc *PacketCapture) dedupVPNDiscovery(d *models.CryptoDiscovery, protocol string) *models.CryptoDiscovery {
+	return pc.dedupUDPDiscovery(d, protocol)
+}
+
+// dedupUDPDiscovery keeps one discovery per (destination, port, key) per dedup
+// TTL, through the same ConnectionCache the TLS and VPN paths use, so a
+// long-lived flow is re-reported at the same cadence on every path. The key is
+// the protocol label plus whatever distinguishes one observation of that
+// protocol from another. Nil passes through, so callers can wrap a decoder's
+// result directly and a failed decode uses up nothing in the cache.
+func (pc *PacketCapture) dedupUDPDiscovery(d *models.CryptoDiscovery, key string) *models.CryptoDiscovery {
 	if d == nil {
 		return nil
 	}
-	if shouldReport, _ := pc.cache.ShouldReport(d.DestIP, d.Port, protocol); !shouldReport {
+	if shouldReport, _ := pc.cache.ShouldReport(d.DestIP, d.Port, key); !shouldReport {
 		return nil
 	}
 	return d
+}
+
+// quicDedupKey identifies one QUIC observation for dedup. A client opens a
+// connection with a burst of Initial packets (retransmits, a ClientHello split
+// across datagrams, coalesced probes), and every one of them decodes to the
+// same discovery, so the key is what makes two discoveries genuinely differ:
+// the client host, the QUIC version (and the TLS version when the ClientHello
+// was decrypted), and the SNI and ALPN, because one CDN address serves many
+// names. The client's ephemeral source port is deliberately left out; it
+// changes per connection and would defeat the dedup. An Initial whose
+// ClientHello could not be decrypted carries no SNI and so keys separately
+// from one that could, which allows at most one extra report per TTL for such
+// a flow rather than one per packet.
+func quicDedupKey(d *models.CryptoDiscovery) string {
+	var sni string
+	var alpn []string
+	if d.RawMetadata != nil {
+		sni, _ = d.RawMetadata["sni_server_name"].(string)
+		alpn, _ = d.RawMetadata["alpn_protocols"].([]string)
+	}
+	return "QUIC|" + d.SourceIP + "|" + d.Version + "|" + strings.ToLower(sni) + "|" + strings.Join(alpn, ",")
 }
 
 // analyzePacket analyzes a captured packet for crypto information
@@ -762,7 +793,11 @@ func (pc *PacketCapture) analyzePacket(packet gopacket.Packet, iface string) {
 					var discovery *models.CryptoDiscovery
 					switch udpProto {
 					case "QUIC":
-						discovery = parseQUICInitial(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface, pc.config.Capture.EnableQUICDecrypt)
+						// Dedup after a successful decode, as the VPN decoders do:
+						// one discovery per flow per TTL, not one per Initial.
+						if d := parseQUICInitial(payload, srcIP, dstIP, getPortNumber(srcPort), getPortNumber(dstPort), pc.config.SensorID, iface, pc.config.Capture.EnableQUICDecrypt); d != nil {
+							discovery = pc.dedupUDPDiscovery(d, quicDedupKey(d))
+						}
 					case "IKE":
 						// IKE may be on NAT-T (port 4500) with 4-byte non-ESP marker
 						ikePkt := payload

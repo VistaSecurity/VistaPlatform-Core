@@ -794,6 +794,108 @@ http:
       middlewares:
         - deny-internal-plane
       priority: 900
+    deny_internal_route_v1_post_audit_service_activity_logs:
+      rule: Method(`POST`) && (Path(`/api/v1/audit-service/activity-logs`) || Path(`/api/v1/audit-service/activity-logs/`))
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_audit_service_activity_logs:
+      rule: Method(`POST`) && (Path(`/api/v2/audit-service/activity-logs`) || Path(`/api/v2/audit-service/activity-logs/`))
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v1_post_audit_service_job_execution_logs_start:
+      rule: Method(`POST`) && (Path(`/api/v1/audit-service/job-execution-logs/start`) ||
+        Path(`/api/v1/audit-service/job-execution-logs/start/`))
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_audit_service_job_execution_logs_start:
+      rule: Method(`POST`) && (Path(`/api/v2/audit-service/job-execution-logs/start`) ||
+        Path(`/api/v2/audit-service/job-execution-logs/start/`))
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v1_post_audit_service_job_execution_logs_id_progress:
+      rule: Method(`POST`) && PathRegexp(`^/api/v1/audit-service/job-execution-logs/[^/]+/progress/?$`)
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_audit_service_job_execution_logs_id_progress:
+      rule: Method(`POST`) && PathRegexp(`^/api/v2/audit-service/job-execution-logs/[^/]+/progress/?$`)
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v1_post_audit_service_job_execution_logs_id_complete:
+      rule: Method(`POST`) && PathRegexp(`^/api/v1/audit-service/job-execution-logs/[^/]+/complete/?$`)
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_audit_service_job_execution_logs_id_complete:
+      rule: Method(`POST`) && PathRegexp(`^/api/v2/audit-service/job-execution-logs/[^/]+/complete/?$`)
+      entryPoints: *a1
+      service: audit_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v1_post_inventory_service_assets_auto_approve_agent_host:
+      rule: Method(`POST`) && (Path(`/api/v1/inventory-service/assets/auto-approve/agent-host`) ||
+        Path(`/api/v1/inventory-service/assets/auto-approve/agent-host/`))
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_inventory_service_assets_auto_approve_agent_host:
+      rule: Method(`POST`) && (Path(`/api/v2/inventory-service/assets/auto-approve/agent-host`) ||
+        Path(`/api/v2/inventory-service/assets/auto-approve/agent-host/`))
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v1_post_inventory_service_keys_cloud:
+      rule: Method(`POST`) && (Path(`/api/v1/inventory-service/keys/cloud`) || Path(`/api/v1/inventory-service/keys/cloud/`))
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_inventory_service_keys_cloud:
+      rule: Method(`POST`) && (Path(`/api/v2/inventory-service/keys/cloud`) || Path(`/api/v2/inventory-service/keys/cloud/`))
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v1_post_inventory_service_discovery_jobs_id_import:
+      rule: Method(`POST`) && PathRegexp(`^/api/v1/inventory-service/discovery/jobs/[^/]+/import/?$`)
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_post_inventory_service_discovery_jobs_id_import:
+      rule: Method(`POST`) && PathRegexp(`^/api/v2/inventory-service/discovery/jobs/[^/]+/import/?$`)
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
   services:
     auth_service:
       loadBalancer:

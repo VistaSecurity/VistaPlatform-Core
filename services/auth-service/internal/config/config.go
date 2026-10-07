@@ -96,10 +96,13 @@ func Load() (*Config, error) {
 	config.ClientKeyPath = sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem")
 	config.PlatformCACertPath = sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem")
 
-	// Reject well-known dev defaults in production (shared guard across services).
-	sharedconfig.RejectInsecureDefaults(config.Environment, map[string]string{
-		"JWT_SECRET":           config.JWTSecret,
-		"INTERNAL_AUTH_SECRET": sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", "dev-internal-auth-secret-change-in-production"),
+	// Production refuses to start with a missing or weak platform secret and
+	// rejects the well-known dev literals (shared guard across services).
+	// auth-service is a token ISSUER: the chart keeps JWT_SECRET in this pod after
+	// the ES256 cutover (pre-cutover refresh tokens, HS256 fallback), so it is
+	// required here rather than optional as it is for pure verifiers.
+	sharedconfig.EnforceProductionSecrets(config.Environment, sharedconfig.SecretSpec{
+		Required: []string{"INTERNAL_AUTH_SECRET", "ENCRYPTION_MASTER_KEY", "JWT_SECRET"},
 	})
 
 	return config, nil
